@@ -17,3 +17,13 @@ reportlab==4.4.3
 PyYAML==6.0.2
 pytest>=8.0
 pytest-django>=4.8
+
+# The failsafe control plane verifies operator command signatures with the
+# SAME definition the engine uses, so the two never disagree. It imports
+# mythos_core.failsafe (which brings cryptography transitively) at URLconf
+# load, so the light CI set needs it too -- leaving it out took the whole URL
+# conf down. cryptography is named directly because signing.py imports it
+# directly. mythos-core is a private git pin; CI clones it with a
+# MYTHOS_CORE_TOKEN secret (see the workflow's auth step), as on the engines.
+cryptography>=41.0
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@cda9f89
