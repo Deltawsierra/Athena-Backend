@@ -1,3 +1,4 @@
+import json
 import os
 import secrets
 
@@ -87,6 +88,7 @@ INSTALLED_APPS = [
     "audit",
     "detection",
     "pentest",
+    "failsafe",
 ]
 
 # -------------------------------------------------------------------
@@ -286,6 +288,28 @@ CYBERENGINE_OPERATOR_KEY = os.environ.get("CYBERENGINE_OPERATOR_KEY")
 # verdict is logged and the scan proceeds, so the record shows what would
 # have been refused before anyone relies on it refusing.
 CYBERENGINE_ASSURANCE_MODE = os.environ.get("CYBERENGINE_ASSURANCE_MODE", "observe")
+
+# -------------------------------------------------------------------
+# FAILSAFE CONTROL PLANE (operator-held pause / stand down / terminate)
+# -------------------------------------------------------------------
+# Enrolled operator PUBLIC keys, key_id -> hex ed25519, as a JSON object in the
+# env. These MUST match the keys the engine is configured with, or a command
+# this plane calls "ready" would be refused by the engine. This plane holds no
+# private key -- operators sign out of band with the mythos-failsafe CLI.
+FAILSAFE_OPERATOR_KEYS = json.loads(os.environ.get("FAILSAFE_OPERATOR_KEYS", "{}"))
+
+# Optional per-action signature-count overrides, action -> int. Unset actions
+# use the library defaults (pause/resume 1; stand_down/release/terminate 2 --
+# the two-person rule).
+FAILSAFE_THRESHOLDS = json.loads(os.environ.get("FAILSAFE_THRESHOLDS", "{}"))
+
+# How long a drafted command stays signable / servable before it expires. Short
+# by design: a command is an emergency instruction, not a standing grant.
+FAILSAFE_COMMAND_TTL_SECONDS = int(os.environ.get("FAILSAFE_COMMAND_TTL_SECONDS", "600"))
+
+# Shared token the engine presents when polling /api/failsafe/pending. The
+# engine is not an operator, so it authenticates with this rather than a JWT.
+FAILSAFE_POLL_TOKEN = os.environ.get("FAILSAFE_POLL_TOKEN")
 
 # -------------------------------------------------------------------
 # AI DEFENDER (SAFE MODE) NOT AI LOGIC JUST A SAFETY SWITCH
