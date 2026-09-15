@@ -106,3 +106,11 @@ wrapt==1.17.3
 xxhash==3.5.0
 yarl==1.20.1
 zopfli==0.2.3.post1
+
+# The shared Mythos foundation. The failsafe control plane uses
+# mythos_core.failsafe to verify operator command signatures with the SAME
+# definition the engine uses, so the two never disagree. Pinned to a commit
+# while mythos-core is pre-release and off any index; repoint to a version tag
+# once it releases (CI needs a MYTHOS_CORE_TOKEN secret to install the private
+# dependency, as on the engine repos).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@cda9f89

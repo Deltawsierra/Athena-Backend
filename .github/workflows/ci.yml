@@ -16,6 +16,26 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # mythos-core is a private sibling repo, so pip's git clone of it needs a
+      # credential the default GITHUB_TOKEN does not carry across repositories.
+      # Provide a MYTHOS_CORE_TOKEN secret -- a fine-grained PAT (or deploy key)
+      # with read access to Deltawsierra/Mythos-Core -- and this rewrites the
+      # clone URL to use it. Until that secret exists the step fails here with a
+      # clear message: that is the one remaining setup task, not a code defect.
+      # (Alternatives if you'd rather not manage a token: publish mythos-core to
+      # an index and pin a version instead of a git URL, or vendor it as a
+      # submodule -- both are follow-ups, this keeps the dependency a git pin.)
+      - name: Authenticate the private mythos-core dependency
+        env:
+          MYTHOS_CORE_TOKEN: ${{ secrets.MYTHOS_CORE_TOKEN }}
+        run: |
+          if [ -n "$MYTHOS_CORE_TOKEN" ]; then
+            git config --global url."https://x-access-token:${MYTHOS_CORE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          else
+            echo "::error::MYTHOS_CORE_TOKEN secret is not set; the private mythos-core git dependency cannot be cloned. Add it under Settings -> Secrets and variables -> Actions (a fine-grained PAT with read access to Deltawsierra/Mythos-Core)."
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
