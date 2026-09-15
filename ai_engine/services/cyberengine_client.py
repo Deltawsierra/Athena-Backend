@@ -262,6 +262,14 @@ class CyberEngineClient:
         """Whether every loaded extension is the one that was approved."""
         return self._get("/api/extensions")
 
+    def failsafe_state(self) -> dict:
+        """The engine's live failsafe (governor) state, read from the engine
+        itself: {enabled, engine_id, state}, where state is running / paused /
+        stood_down / terminated, or null when the failsafe is disabled there.
+        The control plane surfaces this so the operator console shows what the
+        engine is actually doing rather than what was last commanded."""
+        return self._get("/api/failsafe/state")
+
     def unattributed_effects(self, limit: int = 100) -> dict:
         """Effects the engine caused with no authority in force.
 

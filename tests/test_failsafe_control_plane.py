@@ -135,3 +135,49 @@ def test_pending_requires_the_poll_token_and_serves_ready_commands():
     ring = {"alice": Ed25519PublicKey.from_public_bytes(bytes.fromhex(ALICE_PUB))}
     assert verify_command(Command.from_dict(cmds[0]), keyring=ring,
                           engine_id="athena-1", nonces=NonceLedger())
+
+
+def test_state_surfaces_the_engine_live_governor_state(monkeypatch):
+    from ai_engine.services import cyberengine_client
+
+    class _Stub:
+        def failsafe_state(self):
+            return {"enabled": True, "engine_id": "athena-1", "state": "paused"}
+
+    monkeypatch.setattr(cyberengine_client.CyberEngineClient, "from_settings",
+                        classmethod(lambda cls: _Stub()))
+    analyst = _client(_user(User.Roles.ANALYST))
+    r = analyst.get("/api/failsafe/state/")
+    assert r.status_code == 200
+    assert r.data["engine_state"] == "paused"
+    assert r.data["engine_state_available"] is True
+
+
+def test_state_reports_not_available_when_the_engine_cannot_be_reached(monkeypatch):
+    from ai_engine.services import cyberengine_client
+
+    def _boom(cls):
+        raise cyberengine_client.EngineError("engine unreachable")
+
+    monkeypatch.setattr(cyberengine_client.CyberEngineClient, "from_settings", classmethod(_boom))
+    analyst = _client(_user(User.Roles.ANALYST))
+    r = analyst.get("/api/failsafe/state/")
+    # The engine being down must not 500 the control plane's own view.
+    assert r.status_code == 200
+    assert r.data["engine_state"] is None
+    assert r.data["engine_state_available"] is False
+
+
+def test_state_treats_a_disabled_engine_failsafe_as_not_reported(monkeypatch):
+    from ai_engine.services import cyberengine_client
+
+    class _Stub:
+        def failsafe_state(self):
+            return {"enabled": False, "engine_id": None, "state": None}
+
+    monkeypatch.setattr(cyberengine_client.CyberEngineClient, "from_settings",
+                        classmethod(lambda cls: _Stub()))
+    analyst = _client(_user(User.Roles.ANALYST))
+    r = analyst.get("/api/failsafe/state/")
+    assert r.data["engine_state"] is None
+    assert r.data["engine_state_available"] is False

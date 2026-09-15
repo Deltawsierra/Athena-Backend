@@ -190,13 +190,34 @@ def cancel_command(request, cmd_uuid):
     return Response(FailsafeCommandSerializer(command).data)
 
 
+def _engine_live_state():
+    """The engine's own governor state, proxied from the engine itself.
+
+    Any failure -- no engine configured, unreachable, an error, or a failsafe
+    that is disabled there -- is reported as "not available" rather than
+    guessed. The console must show the truth (a state, or "not reported"), never
+    a green light nobody checked, and the engine being down must not turn the
+    control plane's own state view into a 500. Returns (state, available)."""
+    try:
+        from ai_engine.services.cyberengine_client import CyberEngineClient
+        payload = CyberEngineClient.from_settings().failsafe_state()
+    except Exception:
+        return None, False
+    if not isinstance(payload, dict) or not payload.get("enabled"):
+        # enabled=false means the engine has no failsafe -- "not reported",
+        # which a caller must not read as "running".
+        return None, False
+    value = payload.get("state")
+    return (value, True) if isinstance(value, str) else (None, False)
+
+
 @api_view(["GET"])
 @permission_classes([IsAdminOrAnalyst])
 def state(request):
     """A control-plane view of failsafe activity for an engine: commands in
-    flight and the last ready/consumed one. The engine's live governor state
-    (running/paused/stood-down/terminated) is added here once the engine exposes
-    it and this proxies it -- see the engine-wiring follow-up."""
+    flight, the last ready/consumed one, and the engine's live governor state
+    proxied from the engine itself (running/paused/stood-down/terminated), or
+    "not reported" when the engine cannot be reached."""
     engine_id = request.query_params.get("engine_id")
     qs = FailsafeCommand.objects.all()
     if engine_id:
@@ -206,10 +227,11 @@ def state(request):
     qs = qs.filter(engine_id=engine_id) if engine_id else FailsafeCommand.objects.all()
     awaiting = qs.filter(status=FailsafeCommand.STATUS_AWAITING)
     ready = qs.filter(status=FailsafeCommand.STATUS_READY)
+    engine_state, engine_state_available = _engine_live_state()
     return Response({
         "engine_id": engine_id,
-        "engine_state": None,  # filled by the engine-state proxy (follow-up)
-        "engine_state_available": False,
+        "engine_state": engine_state,
+        "engine_state_available": engine_state_available,
         "awaiting_signatures": FailsafeCommandSerializer(awaiting[:20], many=True).data,
         "ready": FailsafeCommandSerializer(ready[:20], many=True).data,
         "recent": FailsafeCommandSerializer(qs[:10], many=True).data,
