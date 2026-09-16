@@ -16,12 +16,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .decision import recompute_decision
-from .models import Asset, Deployment, Finding, Provider
+from .models import Asset, Deployment, Finding, Provider, Unknown
 from .serializers import (
     AssetSerializer,
     DeploymentSerializer,
     FindingSerializer,
     ProviderSerializer,
+    UnknownSerializer,
 )
 
 
@@ -109,3 +110,34 @@ class ProviderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "uuid"
     queryset = Provider.objects.all()
+
+
+class UnknownViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,  # PATCH: disposition fields only (status/owner/notes/review_by/impact)
+    viewsets.GenericViewSet,
+):
+    serializer_class = UnknownSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = "uuid"
+    http_method_names = ["get", "patch", "head", "options"]
+
+    def get_queryset(self):
+        qs = Unknown.objects.all().select_related("deployment", "finding")
+        user = self.request.user
+        if not _is_privileged(user):
+            # Unknowns on a deployment the user owns, or derived from a finding on
+            # a scan they launched. Mirrors the finding scoping.
+            qs = qs.filter(deployment__owner=user) | qs.filter(finding__scan__user=user)
+            qs = qs.distinct()
+        status_q = self.request.query_params.get("status")
+        if status_q:
+            qs = qs.filter(status=status_q)
+        impact = self.request.query_params.get("impact")
+        if impact:
+            qs = qs.filter(deployment_impact=impact)
+        deployment = self.request.query_params.get("deployment")
+        if deployment:
+            qs = qs.filter(deployment__uuid=deployment)
+        return qs

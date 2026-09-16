@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from .models import Asset, Deployment, Evidence, Finding, Provider
+from .models import Asset, Deployment, Evidence, Finding, Provider, Unknown
 
 
 class EvidenceSerializer(serializers.ModelSerializer):
@@ -92,6 +92,43 @@ class ProviderSerializer(serializers.ModelSerializer):
         model = Provider
         fields = ["uuid", "name", "kind", "region", "notes", "evidence_class"]
         read_only_fields = fields
+
+
+class UnknownSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    impact_label = serializers.CharField(
+        source="get_deployment_impact_display", read_only=True
+    )
+    deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    finding_uuid = serializers.UUIDField(source="finding.uuid", read_only=True, allow_null=True)
+
+    class Meta:
+        model = Unknown
+        fields = [
+            "uuid",
+            "deployment_uuid",
+            "finding_uuid",
+            "question",
+            "why_it_matters",
+            "evidence_needed",
+            "deployment_impact",
+            "impact_label",
+            "status",
+            "status_label",
+            "source",
+            "owner",
+            "notes",
+            "review_by",
+            "first_seen",
+            "last_seen",
+        ]
+        # A derived Unknown's substance is machine-owned and refreshed on
+        # re-derive; a human works only the disposition fields.
+        read_only_fields = [
+            f
+            for f in fields
+            if f not in ("status", "owner", "notes", "review_by", "deployment_impact")
+        ]
 
 
 class DeploymentSerializer(serializers.ModelSerializer):

@@ -416,3 +416,109 @@ class Evidence(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_classification_display()} for finding {self.finding_id}"
+
+
+# ---------------------------------------------------------------------------
+# Unknown — a named gap in what we can verify (the Unknowns Register)
+# ---------------------------------------------------------------------------
+
+
+class Unknown(models.Model):
+    """A thing we could not verify, tracked as a first-class managed object.
+
+    Roadmap Phase 0.4. The discipline that keeps Mythos honest is refusing to
+    turn "we couldn't confirm this" into either a clean bill or a finding. An
+    Unknown is the third state: a specific question about a deployment that the
+    evidence does not answer yet — *why it matters*, *what evidence would close
+    it*, and *how much it moves the deployment decision*. It carries an owner and
+    a review date so a gap is worked, not forgotten.
+
+    Unknowns are derived idempotently from findings whose honest evidence class
+    is unverified (see ``assurance.unknowns``), and can also be raised by hand.
+    Like a finding, an Unknown is keyed within its deployment by a fingerprint so
+    a re-derive updates the row rather than duplicating it, and human-set state
+    (status, owner, review date, notes) survives a re-derive."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        INVESTIGATING = "investigating", "Investigating"
+        RESOLVED = "resolved", "Resolved"
+        ACCEPTED = "accepted", "Accepted as residual risk"
+
+    class Impact(models.TextChoices):
+        LOW = "low", "Low"
+        MEDIUM = "medium", "Medium"
+        HIGH = "high", "High"
+
+    class Source(models.TextChoices):
+        DERIVED = "derived", "Derived from a finding"
+        MANUAL = "manual", "Raised manually"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="unknowns"
+    )
+    # The finding this gap was derived from, when it was. SET_NULL so resolving or
+    # trimming the finding never deletes a gap a human is still working.
+    finding = models.ForeignKey(
+        Finding,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="unknowns",
+    )
+
+    # Stable dedup key within a deployment (hash of deployment + subject).
+    fingerprint = models.CharField(max_length=64, db_index=True)
+
+    # The three questions an Unknown must answer to be worth tracking.
+    question = models.TextField()
+    why_it_matters = models.TextField(blank=True)
+    evidence_needed = models.TextField(blank=True)
+
+    deployment_impact = models.CharField(
+        max_length=16, choices=Impact.choices, default=Impact.MEDIUM
+    )
+    status = models.CharField(
+        max_length=24, choices=Status.choices, default=Status.OPEN, db_index=True
+    )
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.DERIVED
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="owned_unknowns",
+    )
+    # A human note that a re-derive must never clobber.
+    notes = models.TextField(blank=True)
+    # When this gap should be revisited if still open.
+    review_by = models.DateField(null=True, blank=True)
+
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "fingerprint"], name="uq_unknown_deployment_fingerprint"
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deployment", "status"]),
+            models.Index(fields=["deployment_impact"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.question[:60]} [{self.get_status_display()}]"
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in (self.Status.OPEN, self.Status.INVESTIGATING)

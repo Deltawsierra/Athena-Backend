@@ -205,6 +205,13 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
         )
         results.append(finding)
 
+    # Turn every "we couldn't verify this" into a managed gap before we score the
+    # deployment, so the Unknowns Register is current alongside the findings
+    # (Phase 0.4).
+    from .unknowns import derive_unknowns
+
+    derive_unknowns(deployment)
+
     # A scan culminates in a decision, not just a finding list: refresh the
     # deployment's six-state decision from its now-current findings (Phase 0.5).
     from .decision import recompute_decision
