@@ -139,6 +139,79 @@ class Provider(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# ProviderAssertion — a graded fact in a provider's assurance profile
+# ---------------------------------------------------------------------------
+
+
+class ProviderAssertion(models.Model):
+    """One graded fact about a provider's assurance posture — the Provider
+    Assurance Profile (Phase 1.5).
+
+    A provider's posture is **declared, not measured**: nothing scans a vendor's
+    data handling, so each fact (where it processes data, how long it retains it,
+    what it logs, whether it trains on customer data) is a *claim* until evidence
+    backs it. Every assertion therefore carries its own
+    :class:`EvidenceClass` — ``vendor_asserted`` by default (they told us),
+    upgraded to ``document_supported`` or ``contractually_stated`` when a report
+    or DPA is on file. This is the evidence taxonomy applied *per field*, so a
+    profile never reads as fact what is only a claim, and the weakest link is
+    visible rather than averaged away."""
+
+    class Field(models.TextChoices):
+        REGION = "region", "Data region"
+        DATA_RETENTION = "data_retention", "Data retention"
+        LOGGING = "logging", "Logging"
+        TRAINS_ON_DATA = "trains_on_data", "Trains on customer data"
+        SUBPROCESSORS = "subprocessors", "Subprocessors"
+        CERTIFICATIONS = "certifications", "Certifications"
+        DPA = "dpa", "Data-processing agreement"
+
+    class Source(models.TextChoices):
+        VENDOR_DOC = "vendor_doc", "Vendor documentation"
+        CONTRACT = "contract", "Contract / DPA"
+        SELF_DECLARED = "self_declared", "Self-declared"
+        MEASURED = "measured", "Independently measured"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    provider = models.ForeignKey(
+        Provider, on_delete=models.CASCADE, related_name="assertions"
+    )
+    field = models.CharField(max_length=32, choices=Field.choices)
+    # The asserted value, in the vendor's own words: "us-east-1", "30 days",
+    # "No — zero-retention endpoint", "SOC 2 Type II".
+    value = models.TextField(blank=True)
+    # How strongly this particular fact is known. Defaults to a vendor assertion.
+    evidence_class = models.CharField(
+        max_length=32, choices=EvidenceClass.choices, default=EvidenceClass.VENDOR_ASSERTED
+    )
+    source = models.CharField(
+        max_length=32, choices=Source.choices, default=Source.SELF_DECLARED, blank=True
+    )
+    notes = models.TextField(blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_assertions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "field"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "field"], name="uq_provider_assertion_provider_field"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.provider.name}: {self.get_field_display()} = {self.value[:40]}"
+
+
+# ---------------------------------------------------------------------------
 # Deployment — the AI system under assurance (the sellable unit)
 # ---------------------------------------------------------------------------
 

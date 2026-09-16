@@ -1,6 +1,14 @@
 from django.contrib import admin
 
-from .models import Asset, Deployment, Evidence, Finding, Provider, Unknown
+from .models import (
+    Asset,
+    Deployment,
+    Evidence,
+    Finding,
+    Provider,
+    ProviderAssertion,
+    Unknown,
+)
 
 
 class EvidenceInline(admin.TabularInline):
@@ -31,11 +39,24 @@ class AssetAdmin(admin.ModelAdmin):
     search_fields = ("name", "identifier")
 
 
+class ProviderAssertionInline(admin.TabularInline):
+    model = ProviderAssertion
+    extra = 0
+
+
 @admin.register(Provider)
 class ProviderAdmin(admin.ModelAdmin):
     list_display = ("name", "kind", "region", "evidence_class")
     list_filter = ("kind", "evidence_class")
     search_fields = ("name",)
+    inlines = [ProviderAssertionInline]
+
+
+@admin.register(ProviderAssertion)
+class ProviderAssertionAdmin(admin.ModelAdmin):
+    list_display = ("provider", "field", "value", "evidence_class", "source", "updated_at")
+    list_filter = ("field", "evidence_class", "source")
+    search_fields = ("provider__name", "value")
 
 
 @admin.register(Unknown)

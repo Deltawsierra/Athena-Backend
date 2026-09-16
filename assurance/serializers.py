@@ -11,7 +11,16 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Asset, Deployment, Evidence, Finding, Provider, Unknown
+from .models import (
+    Asset,
+    Deployment,
+    Evidence,
+    Finding,
+    Provider,
+    ProviderAssertion,
+    Unknown,
+    evidence_strength,
+)
 
 User = get_user_model()
 
@@ -121,11 +130,109 @@ class AssetSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ProviderAssertionSerializer(serializers.ModelSerializer):
+    field_label = serializers.CharField(source="get_field_display", read_only=True)
+    evidence_class_label = serializers.CharField(
+        source="get_evidence_class_display", read_only=True
+    )
+    source_label = serializers.CharField(source="get_source_display", read_only=True)
+    provider = serializers.SlugRelatedField(
+        slug_field="uuid", queryset=Provider.objects.all()
+    )
+    provider_name = serializers.CharField(source="provider.name", read_only=True)
+    updated_by = serializers.CharField(source="updated_by.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = ProviderAssertion
+        fields = [
+            "uuid",
+            "provider",
+            "provider_name",
+            "field",
+            "field_label",
+            "value",
+            "evidence_class",
+            "evidence_class_label",
+            "source",
+            "source_label",
+            "notes",
+            "updated_by",
+            "updated_at",
+        ]
+        read_only_fields = ["uuid", "provider_name", "updated_by", "updated_at"]
+
+    def validate(self, attrs):
+        """One assertion per field per provider — the profile holds a single
+        value for each fact, updated in place rather than duplicated."""
+        provider = attrs.get("provider") or getattr(self.instance, "provider", None)
+        field = attrs.get("field") or getattr(self.instance, "field", None)
+        if provider is not None and field is not None:
+            qs = ProviderAssertion.objects.filter(provider=provider, field=field)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {"field": f"This provider already has a '{field}' assertion; edit it instead."}
+                )
+        return attrs
+
+
+class ProviderProfileAssertionSerializer(serializers.ModelSerializer):
+    """The read-only view of an assertion as it appears *inside* a provider's
+    profile (its provider is implied by the parent)."""
+
+    field_label = serializers.CharField(source="get_field_display", read_only=True)
+    evidence_class_label = serializers.CharField(
+        source="get_evidence_class_display", read_only=True
+    )
+    source_label = serializers.CharField(source="get_source_display", read_only=True)
+
+    class Meta:
+        model = ProviderAssertion
+        fields = [
+            "uuid",
+            "field",
+            "field_label",
+            "value",
+            "evidence_class",
+            "evidence_class_label",
+            "source",
+            "source_label",
+            "notes",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class ProviderSerializer(serializers.ModelSerializer):
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    assertions = ProviderProfileAssertionSerializer(many=True, read_only=True)
+    # The honest headline for the whole profile: how many facts are recorded and
+    # the *weakest* evidence among them, so a profile is never read as stronger
+    # than its softest claim.
+    profile = serializers.SerializerMethodField()
+
     class Meta:
         model = Provider
-        fields = ["uuid", "name", "kind", "region", "notes", "evidence_class"]
-        read_only_fields = fields
+        fields = [
+            "uuid",
+            "name",
+            "kind",
+            "kind_label",
+            "region",
+            "notes",
+            "evidence_class",
+            "assertions",
+            "profile",
+        ]
+        # Identity and the declared fields are admin-writable (enforced in the
+        # view); uuid and the derived views are read-only.
+        read_only_fields = ["uuid", "kind_label", "assertions", "profile"]
+
+    def get_profile(self, obj) -> dict:
+        classes = [a.evidence_class for a in obj.assertions.all()]
+        weakest = max(classes, key=evidence_strength) if classes else None
+        return {"declared_fields": len(classes), "weakest_evidence": weakest}
 
 
 class UnknownSerializer(serializers.ModelSerializer):
