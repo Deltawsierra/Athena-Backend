@@ -89,6 +89,7 @@ INSTALLED_APPS = [
     "detection",
     "pentest",
     "failsafe",
+    "assurance",
 ]
 
 # -------------------------------------------------------------------
