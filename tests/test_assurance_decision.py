@@ -47,7 +47,7 @@ def _finding(dep, severity, *, status=Finding.Status.OPEN, evidence_class=None, 
 def test_decision_precedence_by_worst_active_severity():
     user = _user()
     dep = _deployment(user)
-    assert compute_decision(dep) == Deployment.Decision.READY  # nothing active
+    assert compute_decision(dep) is None  # never assessed (no findings) → no decision
 
     _finding(dep, "low", n="lo")
     assert compute_decision(dep) == Deployment.Decision.READY_RESTRICTED
@@ -109,8 +109,8 @@ def test_ingesting_a_scan_sets_the_deployment_decision():
         status=PentestScan.STATUS_COMPLETED,
         engine_response={
             "findings": [
-                {"type": "sql_injection", "report_severity": "critical", "confidence": 0.9,
-                 "tier": "confirmed", "exploit_like": True, "evidence": {"endpoint": "/s"}},
+                {"type": "sql_injection", "signature_id": "S1", "report_severity": "critical",
+                 "confidence": 0.9, "signature_description": "SQLi"},
             ]
         },
     )
@@ -120,14 +120,15 @@ def test_ingesting_a_scan_sets_the_deployment_decision():
 
 
 def test_recompute_api_action():
-    user = _user()
-    dep = _deployment(user)
+    # Recompute mutates the record, so it is admin-only.
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = _deployment(admin)
     _finding(dep, "medium", n="me")
 
     factory = APIRequestFactory()
     view = DeploymentViewSet.as_view({"post": "recompute"})
     request = factory.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json")
-    force_authenticate(request, user=user)
+    force_authenticate(request, user=admin)
     resp = view(request, uuid=str(dep.uuid))
     assert resp.status_code == 200
     assert resp.data["decision"] == Deployment.Decision.READY_RESTRICTED
@@ -136,6 +137,20 @@ def test_recompute_api_action():
     request2 = factory.post(
         f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json"
     )
-    force_authenticate(request2, user=user)
+    force_authenticate(request2, user=admin)
     resp2 = view(request2, uuid=str(dep.uuid))
     assert resp2.data["decision"] == Deployment.Decision.PAUSED
+
+
+def test_recompute_denied_to_non_admin():
+    """A non-admin can read the graph but may not mutate the decision."""
+    analyst = _user("ana", role=User.Roles.ANALYST)
+    dep = _deployment(analyst)
+    _finding(dep, "medium", n="me")
+
+    factory = APIRequestFactory()
+    view = DeploymentViewSet.as_view({"post": "recompute"})
+    request = factory.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json")
+    force_authenticate(request, user=analyst)
+    resp = view(request, uuid=str(dep.uuid))
+    assert resp.status_code == 403

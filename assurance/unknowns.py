@@ -124,7 +124,15 @@ def derive_unknowns(deployment: Deployment) -> list[Unknown]:
             # Refresh the machine-owned fields; never touch status/owner/review/notes.
             for key, value in machine_fields.items():
                 setattr(unknown, key, value)
-            unknown.save(update_fields=[*machine_fields.keys(), "updated_at"])
+            fields = [*machine_fields.keys(), "updated_at"]
+            # A gap the *machine* auto-resolved has come back (the finding is
+            # unverified again): re-open it. A gap a *human* resolved or accepted
+            # is left exactly as they set it.
+            if unknown.status == Unknown.Status.RESOLVED and unknown.auto_resolved:
+                unknown.status = Unknown.Status.OPEN
+                unknown.auto_resolved = False
+                fields += ["status", "auto_resolved"]
+            unknown.save(update_fields=fields)
         if unknown.is_open:
             open_unknowns.append(unknown)
 
@@ -136,7 +144,10 @@ def derive_unknowns(deployment: Deployment) -> list[Unknown]:
     ).exclude(fingerprint__in=live_fingerprints)
     for unknown in stale:
         unknown.status = Unknown.Status.RESOLVED
+        # Mark this a *machine* resolution so a later re-derive can re-open it if
+        # the gap comes back, without ever disturbing a human's disposition.
+        unknown.auto_resolved = True
         unknown.last_seen = now
-        unknown.save(update_fields=["status", "last_seen", "updated_at"])
+        unknown.save(update_fields=["status", "auto_resolved", "last_seen", "updated_at"])
 
     return open_unknowns

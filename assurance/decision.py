@@ -28,18 +28,32 @@ _RESOLVED_STATUSES = frozenset(
     {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
 )
 
-# Evidence classes that mean "we could not verify this" — they drive
-# "Requires additional evidence" rather than a clean pass.
+# Evidence classes that mean "we genuinely do not know this" — they drive
+# "Requires additional evidence" rather than a clean pass. This is deliberately
+# NARROWER than the Unknowns Register's unverified set (which also includes
+# ``partially_verified``): a partially-verified finding carries a severity that
+# already places the deployment (READY_RESTRICTED and up), so it does not also
+# need this info-severity fallback state — whereas the register still tracks it
+# as a gap to confirm. The two serve different axes (how bad vs. how sure) and
+# only truly-unknown evidence, with no severity to place it, lands here.
 _UNVERIFIED = frozenset({EvidenceClass.UNKNOWN, EvidenceClass.NOT_DOCUMENTED})
 
 
-def compute_decision(deployment: Deployment, *, paused: bool = False) -> str:
+def compute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
     """The six-state decision implied by a deployment's active findings.
 
-    ``paused`` (the operator failsafe state, passed by the caller) overrides
-    everything: a paused engine is not deploying regardless of findings."""
+    Returns ``None`` — *no decision* — for a deployment that has never been
+    assessed (no findings at all); an absent decision is never READY. ``paused``
+    (the operator failsafe state, passed by the caller) overrides everything: a
+    paused engine is not deploying regardless of findings."""
     if paused:
         return Deployment.Decision.PAUSED
+
+    # A deployment with no findings of any status has not been assessed. That is
+    # not the same as a deployment whose findings are all resolved (genuinely
+    # READY) — so guard on the total, not the active set.
+    if not deployment.findings.exists():
+        return None
 
     active = list(
         deployment.findings.exclude(status__in=_RESOLVED_STATUSES).prefetch_related("evidence")
@@ -69,8 +83,9 @@ def compute_decision(deployment: Deployment, *, paused: bool = False) -> str:
     return Deployment.Decision.READY
 
 
-def recompute_decision(deployment: Deployment, *, paused: bool = False) -> str:
-    """Compute and persist the deployment's decision. Returns the new decision."""
+def recompute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
+    """Compute and persist the deployment's decision. Returns the new decision
+    (``None`` for a deployment with no findings to assess)."""
     decision = compute_decision(deployment, paused=paused)
     if deployment.decision != decision:
         deployment.decision = decision

@@ -49,28 +49,27 @@ def _scan(user, engagement=None, findings=None):
     )
 
 
-# A realistic engine response: one confirmed exploit, one informational note,
+# A realistic engine response in the engine's OWN vocabulary (the same keys the
+# PDF renderer reads): a substantive signature finding, an informational note,
 # and one internal (adapter-error) entry that must be ignored.
 ENGINE_FINDINGS = [
     {
         "type": "sql_injection",
+        "signature_id": "SQLI-001",
         "report_severity": "critical",
         "confidence": 0.95,
         "cvss_score": 9.8,
         "cvss_vector": "AV:N/AC:L",
-        "tier": "confirmed",
-        "exploit_like": True,
-        "recommendation": "Use parameterised queries.",
-        "mitre": ["T1190"],
-        "evidence": {"endpoint": "/search", "attack_id": "sqli-1"},
+        "signature_description": "SQL injection in the search parameter",
+        "signature_recommendation": "Use parameterised queries.",
+        "explanation": "An attacker can read or modify the backing database.",
     },
     {
         "type": "missing_security_header",
+        "signature_id": "HDR-014",
         "severity": "info",
         "confidence": 0.6,
-        "tier": "info",
-        "exploit_like": False,
-        "evidence": {"endpoint": "/"},
+        "signature_description": "Missing Content-Security-Policy header",
     },
     {"type": "adapter_error", "severity": "high", "internal": True},
 ]
@@ -90,12 +89,16 @@ def test_ingest_creates_structured_findings_and_graded_evidence():
     sqli = dep.findings.get(finding_type="sql_injection")
     assert sqli.severity == "critical"
     assert sqli.cvss_score == 9.8
-    assert sqli.control_mapping.get("mitre") == ["T1190"]
-    assert sqli.location == "/search"
+    # Title, recommendation, and impact come from the engine's real fields.
+    assert sqli.title == "SQL injection in the search parameter"
+    assert sqli.recommendation == "Use parameterised queries."
+    assert sqli.impact == "An attacker can read or modify the backing database."
     assert sqli.retest_required is True  # critical must be proven fixed
-    # A confirmed, exploit-like finding is technically verified.
-    assert sqli.evidence_class == EvidenceClass.TECHNICALLY_VERIFIED
+    # A passive signature scan observes, it does not prove an exploit, so a
+    # substantive finding is partially verified — never technically verified.
+    assert sqli.evidence_class == EvidenceClass.PARTIALLY_VERIFIED
     assert sqli.evidence.get().source == "engine_scan"
+    assert sqli.evidence.get().raw.get("signature_id") == "SQLI-001"
 
     note = dep.findings.get(finding_type="missing_security_header")
     assert note.severity == "info"
@@ -129,12 +132,98 @@ def test_ingest_is_idempotent_and_preserves_human_state():
     assert sqli.evidence.filter(source="engine_scan").count() == 1
 
 
-def test_same_engagement_maps_to_one_deployment():
+def _scan_at(user, target_url, engagement=None, findings=None):
+    return PentestScan.objects.create(
+        user=user,
+        target_url=target_url,
+        consent=True,
+        status=PentestScan.STATUS_COMPLETED,
+        engagement=engagement,
+        engine_response={"findings": findings} if findings is not None else None,
+    )
+
+
+def test_same_engagement_and_host_maps_to_one_deployment():
     user = _user()
     eng = Engagement.objects.create(name="Acme AI", created_by=user, scope_hosts=["client.example"])
-    ingest.ingest_scan(_scan(user, engagement=eng, findings=ENGINE_FINDINGS))
-    ingest.ingest_scan(_scan(user, engagement=eng, findings=ENGINE_FINDINGS))
+    url = "https://app.client.example/login"
+    ingest.ingest_scan(_scan_at(user, url, engagement=eng, findings=ENGINE_FINDINGS))
+    ingest.ingest_scan(_scan_at(user, url, engagement=eng, findings=ENGINE_FINDINGS))
+    # Same engagement AND same host → one deployment, re-scan updates it.
     assert Deployment.objects.filter(engagement=eng).count() == 1
+
+
+def test_distinct_hosts_in_one_engagement_are_distinct_deployments():
+    """A multi-host engagement must not blend two systems into one Deployment."""
+    user = _user()
+    eng = Engagement.objects.create(
+        name="Acme AI", created_by=user, scope_hosts=["api.client.example", "admin.client.example"]
+    )
+    ingest.ingest_scan(_scan_at(user, "https://api.client.example/", engagement=eng, findings=ENGINE_FINDINGS))
+    ingest.ingest_scan(_scan_at(user, "https://admin.client.example/", engagement=eng, findings=ENGINE_FINDINGS))
+    assert Deployment.objects.filter(engagement=eng).count() == 2
+
+
+def test_non_numeric_cvss_does_not_abort_ingestion():
+    """A bad cvss_score on one finding must not raise and drop the whole scan."""
+    user = _user()
+    findings = [
+        {"type": "sql_injection", "signature_id": "S1", "report_severity": "critical",
+         "cvss_score": "N/A", "signature_description": "SQLi"},
+        {"type": "xss", "signature_id": "S2", "report_severity": "high",
+         "cvss_score": 7.5, "signature_description": "XSS"},
+    ]
+    created = ingest.ingest_scan(_scan(user, findings=findings))
+    assert len(created) == 2  # both persisted; the bad cvss became absent, not an abort
+    dep = Deployment.objects.get()
+    assert dep.findings.get(finding_type="sql_injection").cvss_score is None
+    assert dep.findings.get(finding_type="xss").cvss_score == 7.5
+    assert dep.decision == Deployment.Decision.NOT_RECOMMENDED  # decision still computed
+
+
+def test_locationless_findings_of_same_type_do_not_collide():
+    """Two distinct findings of one type must not overwrite each other on the key."""
+    user = _user()
+    findings = [
+        {"type": "misconfiguration", "report_severity": "high",
+         "signature_description": "Weak TLS on the gateway"},
+        {"type": "misconfiguration", "report_severity": "critical",
+         "signature_description": "Debug endpoint exposed"},
+    ]
+    created = ingest.ingest_scan(_scan(user, findings=findings))
+    assert len(created) == 2
+    assert Deployment.objects.get().findings.count() == 2  # not collapsed to one
+
+
+def test_same_signature_id_dedupes_across_rescans():
+    user = _user()
+    f = [{"type": "sql_injection", "signature_id": "SQLI-9", "report_severity": "high",
+          "signature_description": "SQLi"}]
+    ingest.ingest_scan(_scan(user, findings=f))
+    ingest.ingest_scan(_scan(user, findings=f))
+    assert Finding.objects.filter(finding_type="sql_injection").count() == 1
+
+
+def test_unrecognised_severity_is_normalised_not_stored_verbatim():
+    user = _user()
+    findings = [{"type": "note", "report_severity": "informational", "signature_id": "N1",
+                 "signature_description": "note"}]
+    ingest.ingest_scan(_scan(user, findings=findings))
+    assert Finding.objects.get().severity == "info"  # normalised into SEVERITY_ORDER
+
+
+def test_paused_decision_survives_reingest():
+    """An operator's failsafe pause is not silently cleared by an automated re-ingest."""
+    user = _user()
+    scan = _scan(user, findings=ENGINE_FINDINGS)
+    ingest.ingest_scan(scan)
+    dep = Deployment.objects.get()
+    dep.decision = Deployment.Decision.PAUSED
+    dep.save(update_fields=["decision"])
+
+    ingest.ingest_scan(scan)  # a re-scan lands
+    dep.refresh_from_db()
+    assert dep.decision == Deployment.Decision.PAUSED  # still paused
 
 
 def test_ingest_no_findings_returns_empty_and_creates_nothing():
@@ -188,8 +277,9 @@ def test_deployment_supports_all_six_decision_states():
 
 # ---------------------------------------------------------------- API
 def test_finding_api_patch_updates_status_but_not_engine_fields():
-    user = _user()
-    scan = _scan(user, findings=ENGINE_FINDINGS)
+    # A finding PATCH mutates the record, so it is admin-only.
+    admin = _user("boss", role=User.Roles.ADMIN)
+    scan = _scan(admin, findings=ENGINE_FINDINGS)
     ingest.ingest_scan(scan)
     sqli = Finding.objects.get(finding_type="sql_injection")
 
@@ -201,13 +291,67 @@ def test_finding_api_patch_updates_status_but_not_engine_fields():
         {"status": "remediating", "severity": "low"},
         format="json",
     )
-    force_authenticate(request, user=user)
+    force_authenticate(request, user=admin)
     resp = view(request, uuid=str(sqli.uuid))
     assert resp.status_code == 200
 
     sqli.refresh_from_db()
     assert sqli.status == Finding.Status.REMEDIATING  # workflow field changed
     assert sqli.severity == "critical"  # engine field unchanged (read-only)
+
+
+def test_finding_api_patch_denied_to_non_admin():
+    """A non-admin may read findings but not mutate them (open reads, admin writes)."""
+    analyst = _user("ana", role=User.Roles.ANALYST)
+    scan = _scan(analyst, findings=ENGINE_FINDINGS)
+    ingest.ingest_scan(scan)
+    sqli = Finding.objects.get(finding_type="sql_injection")
+
+    factory = APIRequestFactory()
+    view = FindingViewSet.as_view({"patch": "partial_update"})
+    request = factory.patch(
+        f"/api/assurance/findings/{sqli.uuid}/", {"status": "remediating"}, format="json"
+    )
+    force_authenticate(request, user=analyst)
+    resp = view(request, uuid=str(sqli.uuid))
+    assert resp.status_code == 403
+    sqli.refresh_from_db()
+    assert sqli.status == Finding.Status.OPEN  # unchanged
+
+
+def test_finding_owner_serialized_as_username_not_id():
+    """The owner column is a username, not a raw user id (meaningless to a reader)."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    scan = _scan(admin, findings=ENGINE_FINDINGS)
+    ingest.ingest_scan(scan)
+    sqli = Finding.objects.get(finding_type="sql_injection")
+
+    factory = APIRequestFactory()
+    detail = FindingViewSet.as_view({"get": "retrieve", "patch": "partial_update"})
+    # Assign an owner by username, then read it back as a username.
+    request = factory.patch(
+        f"/api/assurance/findings/{sqli.uuid}/", {"owner": "boss"}, format="json"
+    )
+    force_authenticate(request, user=admin)
+    resp = detail(request, uuid=str(sqli.uuid))
+    assert resp.status_code == 200
+    assert resp.data["owner"] == "boss"  # username, not the integer pk
+
+
+def test_finding_api_malformed_deployment_filter_is_not_a_500():
+    """A bad ?deployment= uuid must yield an empty result, not an uncaught 500."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    scan = _scan(admin, findings=ENGINE_FINDINGS)
+    ingest.ingest_scan(scan)
+
+    factory = APIRequestFactory()
+    view = FindingViewSet.as_view({"get": "list"})
+    request = factory.get("/api/assurance/findings/?deployment=not-a-uuid")
+    force_authenticate(request, user=admin)
+    resp = view(request)
+    assert resp.status_code == 200
+    count = resp.data["count"] if isinstance(resp.data, dict) else len(resp.data)
+    assert count == 0
 
 
 def test_finding_api_scopes_to_visible_findings():
