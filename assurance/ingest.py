@@ -205,4 +205,10 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
         )
         results.append(finding)
 
+    # A scan culminates in a decision, not just a finding list: refresh the
+    # deployment's six-state decision from its now-current findings (Phase 0.5).
+    from .decision import recompute_decision
+
+    recompute_decision(deployment)
+
     return results
