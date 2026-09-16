@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Asset, Deployment, Evidence, Finding, Provider
+from .models import Asset, Deployment, Evidence, Finding, Provider, Unknown
 
 
 class EvidenceInline(admin.TabularInline):
@@ -36,3 +36,10 @@ class ProviderAdmin(admin.ModelAdmin):
     list_display = ("name", "kind", "region", "evidence_class")
     list_filter = ("kind", "evidence_class")
     search_fields = ("name",)
+
+
+@admin.register(Unknown)
+class UnknownAdmin(admin.ModelAdmin):
+    list_display = ("question", "deployment", "deployment_impact", "status", "source", "review_by")
+    list_filter = ("status", "deployment_impact", "source")
+    search_fields = ("question", "why_it_matters")
