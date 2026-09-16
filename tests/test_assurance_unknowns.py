@@ -142,6 +142,39 @@ def test_manual_unknown_is_never_touched():
     assert manual.status == Unknown.Status.OPEN  # a manual gap is not auto-resolved
 
 
+def test_auto_resolved_gap_reopens_when_finding_flaps_back():
+    """A gap the machine auto-resolved must re-open if the finding is unverified again."""
+    deployment = _deployment()
+    finding = _finding(deployment, evidence_class=EvidenceClass.UNKNOWN)
+    derive_unknowns(deployment)
+    assert Unknown.objects.get().status == Unknown.Status.OPEN
+
+    finding.evidence.update(classification=EvidenceClass.TECHNICALLY_VERIFIED)
+    derive_unknowns(deployment)
+    assert Unknown.objects.get().status == Unknown.Status.RESOLVED  # machine-resolved
+
+    # Evidence downgrades again → the gap is live once more → re-opened.
+    finding.evidence.update(classification=EvidenceClass.UNKNOWN)
+    derive_unknowns(deployment)
+    reopened = Unknown.objects.get()
+    assert reopened.status == Unknown.Status.OPEN
+    assert reopened.auto_resolved is False
+
+
+def test_human_resolved_gap_is_never_reopened():
+    """A gap a *human* resolved is left as they set it, even if the finding is still live."""
+    deployment = _deployment()
+    _finding(deployment, evidence_class=EvidenceClass.UNKNOWN)
+    derive_unknowns(deployment)
+    unknown = Unknown.objects.get()
+    unknown.status = Unknown.Status.RESOLVED  # a human resolves it (auto_resolved stays False)
+    unknown.save()
+
+    derive_unknowns(deployment)  # the finding is still unverified/live
+    unknown.refresh_from_db()
+    assert unknown.status == Unknown.Status.RESOLVED  # human decision preserved
+
+
 def test_completing_a_scan_populates_the_register(django_capture_on_commit_callbacks):
     user = _user()
     scan = PentestScan.objects.create(

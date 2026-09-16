@@ -498,6 +498,10 @@ class Unknown(models.Model):
     notes = models.TextField(blank=True)
     # When this gap should be revisited if still open.
     review_by = models.DateField(null=True, blank=True)
+    # True when the deriver (not a human) set this to RESOLVED because the gap
+    # closed. Lets a re-derive re-open a machine-resolved gap that has come back,
+    # while never touching one a human resolved or accepted.
+    auto_resolved = models.BooleanField(default=False)
 
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)

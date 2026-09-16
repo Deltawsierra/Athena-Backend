@@ -8,9 +8,24 @@ responses, and the API surfaces structured columns, not raw target material.
 
 from __future__ import annotations
 
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import Asset, Deployment, Evidence, Finding, Provider, Unknown
+
+User = get_user_model()
+
+
+def _owner_field() -> serializers.SlugRelatedField:
+    """Owner as a **username**, read and write, rather than the raw user id a
+    ModelSerializer would emit — a bare integer in the owner column is
+    meaningless to a reader and to the dashboard."""
+    return serializers.SlugRelatedField(
+        slug_field="username",
+        queryset=User.objects.all(),
+        allow_null=True,
+        required=False,
+    )
 
 
 class EvidenceSerializer(serializers.ModelSerializer):
@@ -36,6 +51,7 @@ class FindingSerializer(serializers.ModelSerializer):
     evidence = EvidenceSerializer(many=True, read_only=True)
     evidence_class = serializers.CharField(read_only=True)
     deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    owner = _owner_field()
 
     class Meta:
         model = Finding
@@ -101,6 +117,7 @@ class UnknownSerializer(serializers.ModelSerializer):
     )
     deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
     finding_uuid = serializers.UUIDField(source="finding.uuid", read_only=True, allow_null=True)
+    owner = _owner_field()
 
     class Meta:
         model = Unknown

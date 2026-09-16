@@ -10,9 +10,12 @@ matching how ``pentest`` already scopes visibility.
 
 from __future__ import annotations
 
+import uuid as uuidlib
+
 from django.db.models import Count
 from rest_framework import mixins, permissions, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from .decision import recompute_decision
@@ -27,13 +30,38 @@ from .serializers import (
 
 
 def _is_privileged(user) -> bool:
-    """Admins/analysts see everything; other authenticated users see only their
-    own. Mirrors pentest.views.scans_visible_to rather than inventing a rule."""
+    """Who may *read* the whole assurance graph: admins and analysts. Other
+    authenticated users see only their own (the read model is intentionally
+    broad; writes are separately restricted to admins by ``_require_admin``)."""
     return bool(
         getattr(user, "is_superuser", False)
         or getattr(user, "is_admin", False)
         or getattr(user, "is_analyst", False)
     )
+
+
+def _is_admin(user) -> bool:
+    """Who may *write* to the assurance system of record. ``is_admin`` already
+    includes superusers; analysts and below may read but not mutate."""
+    return bool(getattr(user, "is_superuser", False) or getattr(user, "is_admin", False))
+
+
+def _require_admin(request) -> None:
+    """Gate a mutating action to admins. A write changes the shared system of
+    record (a decision, a disposition), so it is admin-only even though reads are
+    open — a non-admin gets a clean 403, not a silent success."""
+    if not _is_admin(request.user):
+        raise PermissionDenied("Changing the assurance record requires an admin role.")
+
+
+def _valid_uuid(value: str) -> str | None:
+    """A well-formed UUID string, or None. A malformed ``?deployment=`` filter
+    must not reach the ORM as a raw string — that raises a Django ValidationError
+    DRF does not catch, surfacing as a 500 instead of an empty result set."""
+    try:
+        return str(uuidlib.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -53,7 +81,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     def recompute(self, request, uuid=None):
         """Recompute the deployment's six-state decision from its live findings.
         Accepts an optional ``paused`` flag (the operator failsafe state), which
-        overrides to "Deployment paused"."""
+        overrides to "Deployment paused". Admin-only: it mutates the record."""
+        _require_admin(request)
         deployment = self.get_object()
         paused = bool(request.data.get("paused", False))
         decision = recompute_decision(deployment, paused=paused)
@@ -70,6 +99,11 @@ class FindingViewSet(
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "uuid"
     http_method_names = ["get", "patch", "head", "options"]
+
+    def update(self, request, *args, **kwargs):
+        # PATCH (status/owner/business_impact) mutates the record → admin-only.
+        _require_admin(request)
+        return super().update(request, *args, **kwargs)
 
     def get_queryset(self):
         qs = Finding.objects.all().select_related("deployment").prefetch_related("evidence")
@@ -88,7 +122,9 @@ class FindingViewSet(
             qs = qs.filter(status=status_q)
         deployment = self.request.query_params.get("deployment")
         if deployment:
-            qs = qs.filter(deployment__uuid=deployment)
+            # A malformed uuid matches nothing, rather than raising a 500.
+            valid = _valid_uuid(deployment)
+            qs = qs.filter(deployment__uuid=valid) if valid else qs.none()
         return qs
 
 
@@ -123,6 +159,11 @@ class UnknownViewSet(
     lookup_field = "uuid"
     http_method_names = ["get", "patch", "head", "options"]
 
+    def update(self, request, *args, **kwargs):
+        # PATCH (disposition fields) mutates the record → admin-only.
+        _require_admin(request)
+        return super().update(request, *args, **kwargs)
+
     def get_queryset(self):
         qs = Unknown.objects.all().select_related("deployment", "finding")
         user = self.request.user
@@ -139,5 +180,7 @@ class UnknownViewSet(
             qs = qs.filter(deployment_impact=impact)
         deployment = self.request.query_params.get("deployment")
         if deployment:
-            qs = qs.filter(deployment__uuid=deployment)
+            # A malformed uuid matches nothing, rather than raising a 500.
+            valid = _valid_uuid(deployment)
+            qs = qs.filter(deployment__uuid=valid) if valid else qs.none()
         return qs
