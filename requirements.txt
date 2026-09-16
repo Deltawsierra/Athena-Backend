@@ -109,8 +109,8 @@ zopfli==0.2.3.post1
 
 # The shared Mythos foundation. The failsafe control plane uses
 # mythos_core.failsafe to verify operator command signatures with the SAME
-# definition the engine uses, so the two never disagree. Pinned to a commit
-# while mythos-core is pre-release and off any index; repoint to a version tag
-# once it releases (CI needs a MYTHOS_CORE_TOKEN secret to install the private
-# dependency, as on the engine repos).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@cda9f89
+# definition the engine uses, so the two never disagree. Pinned to the v0.1.0
+# release tag now that mythos-core has cut a release (CI needs a
+# MYTHOS_CORE_TOKEN secret to install the private dependency, as on the engine
+# repos).
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@v0.1.0
