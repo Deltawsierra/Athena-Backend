@@ -51,6 +51,9 @@ class FindingSerializer(serializers.ModelSerializer):
     evidence = EvidenceSerializer(many=True, read_only=True)
     evidence_class = serializers.CharField(read_only=True)
     deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    # The asset this finding concerns, once discovery has attached it (Phase 1.1).
+    asset_uuid = serializers.UUIDField(source="asset.uuid", read_only=True, allow_null=True)
+    asset_name = serializers.CharField(source="asset.name", read_only=True, allow_null=True)
     owner = _owner_field()
 
     class Meta:
@@ -74,6 +77,8 @@ class FindingSerializer(serializers.ModelSerializer):
             "retest_required",
             "evidence_class",
             "evidence",
+            "asset_uuid",
+            "asset_name",
             "first_seen",
             "last_seen",
         ]
@@ -87,15 +92,28 @@ class FindingSerializer(serializers.ModelSerializer):
 
 
 class AssetSerializer(serializers.ModelSerializer):
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    classification_label = serializers.CharField(
+        source="get_classification_display", read_only=True
+    )
+    deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    provider_name = serializers.CharField(source="provider.name", read_only=True, allow_null=True)
+    finding_count = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Asset
         fields = [
             "uuid",
+            "deployment_uuid",
             "kind",
+            "kind_label",
             "name",
             "identifier",
             "classification",
+            "classification_label",
             "provider",
+            "provider_name",
+            "finding_count",
             "metadata",
             "first_seen",
             "last_seen",

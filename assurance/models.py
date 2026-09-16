@@ -262,6 +262,12 @@ class Asset(models.Model):
 
     class Meta:
         ordering = ["deployment", "kind", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "kind", "identifier"],
+                name="uq_asset_deployment_kind_identifier",
+            ),
+        ]
         indexes = [models.Index(fields=["deployment", "kind"])]
 
     def __str__(self) -> str:
