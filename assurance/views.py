@@ -12,7 +12,10 @@ from __future__ import annotations
 
 from django.db.models import Count
 from rest_framework import mixins, permissions, viewsets
+from rest_framework.decorators import action
+from rest_framework.response import Response
 
+from .decision import recompute_decision
 from .models import Asset, Deployment, Finding, Provider
 from .serializers import (
     AssetSerializer,
@@ -44,6 +47,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             return qs
         # Own deployments, or deployments whose findings came from the user's scans.
         return qs.filter(owner=user).distinct()
+
+    @action(detail=True, methods=["post"])
+    def recompute(self, request, uuid=None):
+        """Recompute the deployment's six-state decision from its live findings.
+        Accepts an optional ``paused`` flag (the operator failsafe state), which
+        overrides to "Deployment paused"."""
+        deployment = self.get_object()
+        paused = bool(request.data.get("paused", False))
+        decision = recompute_decision(deployment, paused=paused)
+        return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
 
 
 class FindingViewSet(
