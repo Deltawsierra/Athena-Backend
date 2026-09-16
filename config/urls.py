@@ -23,6 +23,7 @@ urlpatterns = [
     path("api/detection/", include("detection.urls")),
     path("api/pentest/", include("pentest.urls")),
     path("api/failsafe/", include("failsafe.urls")),
+    path("api/assurance/", include("assurance.urls")),
 ]
 
 
