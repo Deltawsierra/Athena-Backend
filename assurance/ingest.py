@@ -312,6 +312,13 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
         )
         results.append(finding)
 
+    # Populate the assurance graph's nodes — the deployment's assets — from what
+    # the scan honestly knows (host, scope, declared LLM target), and attach each
+    # finding to the asset it concerns (Phase 1.1).
+    from .assets import derive_assets
+
+    derive_assets(deployment, scan)
+
     # Turn every "we couldn't verify this" into a managed gap before we score the
     # deployment, so the Unknowns Register is current alongside the findings
     # (Phase 0.4).

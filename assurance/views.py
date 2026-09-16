@@ -134,11 +134,26 @@ class AssetViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
     lookup_field = "uuid"
 
     def get_queryset(self):
-        qs = Asset.objects.select_related("deployment", "provider").all()
+        qs = (
+            Asset.objects.select_related("deployment", "provider")
+            .annotate(finding_count=Count("findings"))
+            .order_by("deployment_id", "kind", "name")
+        )
         user = self.request.user
-        if _is_privileged(user):
-            return qs
-        return qs.filter(deployment__owner=user).distinct()
+        if not _is_privileged(user):
+            qs = qs.filter(deployment__owner=user).distinct()
+        kind = self.request.query_params.get("kind")
+        if kind:
+            qs = qs.filter(kind=kind)
+        classification = self.request.query_params.get("classification")
+        if classification:
+            qs = qs.filter(classification=classification)
+        deployment = self.request.query_params.get("deployment")
+        if deployment:
+            # A malformed uuid matches nothing, rather than raising a 500.
+            valid = _valid_uuid(deployment)
+            qs = qs.filter(deployment__uuid=valid) if valid else qs.none()
+        return qs
 
 
 class ProviderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
