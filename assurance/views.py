@@ -20,6 +20,7 @@ from rest_framework.response import Response
 
 from .decision import recompute_decision
 from .models import Asset, Deployment, Finding, Provider, ProviderAssertion, Unknown
+from .receipt import deployment_receipt
 from .serializers import (
     AssetSerializer,
     DeploymentSerializer,
@@ -88,6 +89,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         paused = bool(request.data.get("paused", False))
         decision = recompute_decision(deployment, paused=paused)
         return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
+
+    @action(detail=True, methods=["get"])
+    def receipt(self, request, uuid=None):
+        """The deployment's assurance receipt (spine, EXPOSE): a single
+        recomputable digest over its findings' evidence hashes. A read — open to
+        any authenticated operator, like the rest of the assurance reads — that
+        lets an auditor verify the evidence is unaltered without trusting this
+        server. It attests integrity, not that the conclusions are true."""
+        deployment = Deployment.objects.prefetch_related("findings__evidence").get(pk=self.get_object().pk)
+        return Response(deployment_receipt(deployment))
 
 
 class FindingViewSet(
