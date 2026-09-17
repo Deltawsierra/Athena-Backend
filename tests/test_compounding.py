@@ -9,7 +9,6 @@ the failure mode that produced the kill-switch and pagination regressions.
 """
 
 import threading
-import uuid
 from datetime import timedelta
 from unittest import mock
 
