@@ -374,6 +374,25 @@ class Finding(models.Model):
         ACCEPTED = "accepted", "Accepted risk"
         FALSE_POSITIVE = "false_positive", "False positive"
 
+    class RemediationState(models.TextChoices):
+        """Where the *fix* is in the human remediation workflow (Phase 2.3).
+
+        This is a **separate axis** from ``Status`` above. ``Status`` is the
+        security disposition — is the risk still live? ``RemediationState`` is
+        the ticket-like process of getting a human to fix it. The two must never
+        be conflated: a finding is only *securely* resolved via ``Status``
+        (CLOSED / ACCEPTED / FALSE_POSITIVE); reaching ``RESOLVED`` here is a
+        process claim ("someone says the work is done"), not proof the risk is
+        gone. Legal moves between these states are enforced in
+        ``assurance.remediation``; illegal jumps are rejected, not coerced."""
+
+        NEW = "new", "New"
+        TRIAGED = "triaged", "Triaged"
+        IN_PROGRESS = "in_progress", "In progress"
+        IN_REVIEW = "in_review", "In review"
+        RESOLVED = "resolved", "Resolved"
+        WONT_FIX = "wont_fix", "Won't fix"
+
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
 
@@ -412,6 +431,29 @@ class Finding(models.Model):
         null=True,
         blank=True,
         related_name="owned_findings",
+    )
+
+    # --- Remediation workflow (Phase 2.3) — the *human process* of getting this
+    # finding fixed, tracked ORTHOGONALLY to ``status`` above. ``status`` is the
+    # security disposition (is the risk still live?); ``remediation_state`` is
+    # where the fix sits in the human workflow, and ``assignee`` is who is doing
+    # that work. ``owner`` stays the person accountable for the disposition (who
+    # moves ``status``); ``assignee`` is the distinct person doing the fix — the
+    # two axes are kept separate on purpose. Every change here is attributed via
+    # ``RemediationEvent`` and gated through ``assurance.remediation``; none of it
+    # ever touches ``status`` or the deployment decision.
+    assignee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_findings",
+    )
+    remediation_state = models.CharField(
+        max_length=24,
+        choices=RemediationState.choices,
+        default=RemediationState.NEW,
+        db_index=True,
     )
 
     # Technical consequence, business consequence, and the fix — the narrative a
@@ -496,6 +538,56 @@ class Evidence(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_classification_display()} for finding {self.finding_id}"
+
+
+# ---------------------------------------------------------------------------
+# RemediationEvent — one attributed step in a finding's remediation workflow
+# ---------------------------------------------------------------------------
+
+
+class RemediationEvent(models.Model):
+    """One attributed step in a finding's remediation workflow (Phase 2.3).
+
+    Every assignment and every workflow-state change on a finding writes one of
+    these, so the human remediation *process* is a durable, attributed audit
+    trail — who moved it, from where to where, and why. It reuses the actor +
+    note + ordered-timestamp attribution pattern the failsafe control plane
+    already established (:class:`failsafe.models.FailsafeAuditEvent`) rather than
+    inventing a second attribution mechanism.
+
+    This log is about the process, never the security disposition: a ``to_state``
+    of RESOLVED records that a human called the remediation work done, not that
+    the finding is securely closed (that remains ``Finding.status``). An event
+    where ``from_state == to_state`` marks an assignment or a note that did not
+    move the workflow. ``from_state`` is blank only for a synthetic seed event."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    finding = models.ForeignKey(
+        Finding, on_delete=models.CASCADE, related_name="remediation_events"
+    )
+    from_state = models.CharField(
+        max_length=24, choices=Finding.RemediationState.choices, blank=True
+    )
+    to_state = models.CharField(max_length=24, choices=Finding.RemediationState.choices)
+    # Who made the change. SET_NULL so removing a user never deletes the trail; a
+    # null actor reads as "no longer attributable", never as "no one did it".
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="remediation_events",
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["finding", "created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.from_state or '∅'} → {self.to_state} on finding {self.finding_id}"
 
 
 # ---------------------------------------------------------------------------

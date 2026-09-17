@@ -8,6 +8,7 @@ from .models import (
     Finding,
     Provider,
     ProviderAssertion,
+    RemediationEvent,
     Unknown,
 )
 
@@ -25,6 +26,16 @@ class EvidenceInline(admin.TabularInline):
     readonly_fields = ("classification", "source", "content_hash", "created_at")
 
 
+class RemediationEventInline(admin.TabularInline):
+    model = RemediationEvent
+    extra = 0
+    # The trail is written only through assurance.remediation, never hand-edited.
+    readonly_fields = ("from_state", "to_state", "actor", "note", "created_at")
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(Deployment)
 class DeploymentAdmin(admin.ModelAdmin):
     list_display = ("name", "environment", "decision", "updated_at")
@@ -34,10 +45,27 @@ class DeploymentAdmin(admin.ModelAdmin):
 
 @admin.register(Finding)
 class FindingAdmin(admin.ModelAdmin):
-    list_display = ("title", "severity", "status", "deployment", "retest_required", "last_seen")
-    list_filter = ("severity", "status", "retest_required")
+    list_display = (
+        "title",
+        "severity",
+        "status",
+        "remediation_state",
+        "assignee",
+        "deployment",
+        "retest_required",
+        "last_seen",
+    )
+    list_filter = ("severity", "status", "remediation_state", "retest_required")
     search_fields = ("title", "finding_type", "location")
-    inlines = [EvidenceInline]
+    inlines = [EvidenceInline, RemediationEventInline]
+
+
+@admin.register(RemediationEvent)
+class RemediationEventAdmin(admin.ModelAdmin):
+    list_display = ("finding", "from_state", "to_state", "actor", "created_at")
+    list_filter = ("to_state", "from_state")
+    search_fields = ("finding__title", "note")
+    readonly_fields = ("finding", "from_state", "to_state", "actor", "note", "created_at")
 
 
 @admin.register(Asset)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid as uuidlib
 
+from django.contrib.auth import get_user_model
 from django.db.models import Count
 from rest_framework import mixins, permissions, viewsets
 from rest_framework.decorators import action
@@ -27,6 +28,7 @@ from .decision import recompute_decision
 from .route import build_route_map
 from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .receipt import deployment_receipt
+from .remediation import IllegalTransition, apply_transition, assign
 from .serializers import (
     AssetSerializer,
     DataBoundarySerializer,
@@ -34,8 +36,11 @@ from .serializers import (
     FindingSerializer,
     ProviderAssertionSerializer,
     ProviderSerializer,
+    RemediationEventSerializer,
     UnknownSerializer,
 )
+
+User = get_user_model()
 
 
 def _is_privileged(user) -> bool:
@@ -205,12 +210,99 @@ class FindingViewSet(
     serializer_class = FindingSerializer
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "uuid"
-    http_method_names = ["get", "patch", "head", "options"]
+    # POST is enabled only for the remediation @actions below; without a
+    # CreateModelMixin there is no create route, so the collection still 405s.
+    http_method_names = ["get", "post", "patch", "head", "options"]
 
     def update(self, request, *args, **kwargs):
         # PATCH (status/owner/business_impact) mutates the record → admin-only.
+        # The remediation workflow (remediation_state / assignee) is NOT patchable
+        # here: it moves only through the attributed, state-machine-checked actions
+        # below, so an illegal jump or an unattributed change can never slip in via
+        # a raw field write.
         _require_admin(request)
         return super().update(request, *args, **kwargs)
+
+    @action(detail=True, methods=["get"], url_path="remediation")
+    def remediation(self, request, uuid=None):
+        """The finding's remediation workflow (Phase 2.3): its current process
+        state, who the work is assigned to, and the full attributed history of
+        moves. A read — open to any operator who can see the finding, like the
+        rest of the assurance reads.
+
+        The workflow is the *human process* of getting the finding fixed; it is
+        NOT the security disposition (``status``), which alone says whether the
+        risk is still live. ``remediation_state=resolved`` here means a human
+        called the work done, never that the finding is securely closed."""
+        finding = self.get_object()
+        events = finding.remediation_events.select_related("actor").all()
+        return Response(
+            {
+                "remediation_state": finding.remediation_state,
+                "remediation_state_label": finding.get_remediation_state_display(),
+                "assignee": finding.assignee.username if finding.assignee_id else None,
+                "events": RemediationEventSerializer(events, many=True).data,
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="remediation/transition")
+    def remediation_transition(self, request, uuid=None):
+        """Move the finding along its remediation workflow. Admin-only — it
+        mutates the shared record — and every move is attributed to the caller.
+
+        Body: ``{"to_state": <state>, "note": <optional>}``. An unknown state or
+        an illegal jump is rejected with a clean 400, never silently coerced. The
+        move writes a ``RemediationEvent`` and changes only ``remediation_state``;
+        it never touches the security ``status`` or the deployment decision — a
+        finding is closed in the security sense only through ``status``."""
+        _require_admin(request)
+        finding = self.get_object()
+        to_state = request.data.get("to_state")
+        if to_state not in Finding.RemediationState.values:
+            return Response(
+                {"detail": f"Unknown remediation state: {to_state!r}."}, status=400
+            )
+        try:
+            event = apply_transition(
+                finding, to_state, actor=request.user, note=request.data.get("note", "")
+            )
+        except IllegalTransition as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(
+            {
+                "remediation_state": finding.remediation_state,
+                "remediation_state_label": finding.get_remediation_state_display(),
+                "event": RemediationEventSerializer(event).data,
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="remediation/assign")
+    def remediation_assign(self, request, uuid=None):
+        """Assign (or unassign, with ``assignee=null``) the remediation work on a
+        finding. Admin-only and attributed.
+
+        Body: ``{"assignee": <username|null>, "note": <optional>}``. ``assignee``
+        is who does the remediation *work* — distinct from ``owner``, who is
+        accountable for the security disposition. Writes an attributed
+        ``RemediationEvent``; it does not move the workflow state or the security
+        ``status``."""
+        _require_admin(request)
+        finding = self.get_object()
+        username = request.data.get("assignee")
+        assignee = None
+        if username not in (None, ""):
+            assignee = User.objects.filter(username=username).first()
+            if assignee is None:
+                return Response({"detail": f"No such user: {username!r}."}, status=400)
+        event = assign(
+            finding, assignee, actor=request.user, note=request.data.get("note", "")
+        )
+        return Response(
+            {
+                "assignee": assignee.username if assignee else None,
+                "event": RemediationEventSerializer(event).data,
+            }
+        )
 
     def _scoped_findings(self):
         """Every finding the caller may see, BEFORE the severity/status/deployment
@@ -241,7 +333,7 @@ class FindingViewSet(
         # select_related them so the list is a fixed number of queries, not O(n).
         qs = (
             self._scoped_findings()
-            .select_related("deployment", "asset", "owner")
+            .select_related("deployment", "asset", "owner", "assignee")
             .prefetch_related("evidence")
         )
         severity = self.request.query_params.get("severity")
