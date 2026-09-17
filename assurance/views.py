@@ -293,6 +293,71 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ).get(pk=self.get_object().pk)
         return Response(assess_ripple(assessed))
 
+    @action(detail=True, methods=["get"], url_path="posture")
+    def posture(self, request, uuid=None):
+        """The credential-gated posture catalog (Phase 3.2–3.4): the three posture
+        domains and whether each is configured. A read — open to any authenticated
+        operator, like the rest of the assurance reads — that lets an operator see
+        which posture assessments exist and which are inert for lack of
+        credentials, without triggering anything. Mirrors the ``connectors`` list."""
+        from .posture import available_domains, build_assessment
+
+        self.get_object()  # scope/permission check on the deployment
+        return Response(
+            {
+                "domains": [
+                    {
+                        "name": name,
+                        "label": build_assessment(name).label,
+                        "configured": build_assessment(name).configured,
+                    }
+                    for name in available_domains()
+                ]
+            }
+        )
+
+    @action(detail=True, methods=["get"], url_path="cloud-posture")
+    def cloud_posture(self, request, uuid=None):
+        """3.2 Cloud Assurance posture (credential-gated): public exposure, IAM
+        over-permissioning, storage exposure, network reachability, and drift as
+        paths into the deployment. A read — open to any authenticated operator,
+        computed, never stored. Inert by default: with no cloud credentials
+        configured the domain makes no fetch and returns ``{"connected": false,
+        ...}`` with the catalog of checks it would run (the house verdict idiom —
+        200, read ``connected``). Live wiring is the deferred follow-up."""
+        return Response(self._assess_posture("cloud"))
+
+    @action(detail=True, methods=["get"], url_path="secrets-posture")
+    def secrets_posture(self, request, uuid=None):
+        """3.3 Secrets / Crypto posture (credential-gated): TLS/cert validity,
+        KMS/key rotation, secret-store hygiene, committed-secret indicators, and
+        encryption at rest. A read — open to any authenticated operator, computed,
+        never stored. Inert by default (``connected: false`` with no credentials).
+        No secret VALUE is ever emitted — only presence/hygiene facts. Live wiring
+        is the deferred follow-up."""
+        return Response(self._assess_posture("secrets"))
+
+    @action(detail=True, methods=["get"], url_path="repo-posture")
+    def repo_posture(self, request, uuid=None):
+        """3.4 Repository / SDLC posture (credential-gated): branch protection,
+        CI/CD runner exposure, dependency risk, IaC misconfig, embedded secrets,
+        and pipeline drift. A read — open to any authenticated operator, computed,
+        never stored. Inert by default (``connected: false`` with no credentials).
+        Live wiring is the deferred follow-up."""
+        return Response(self._assess_posture("repo"))
+
+    def _assess_posture(self, domain: str) -> dict:
+        """Build the posture domain from settings/env and assess it. A real
+        :class:`RequestsFetcher` is passed exactly as the connector push passes a
+        real transport — but an unconfigured domain short-circuits before the
+        fetcher is ever touched, so nothing is read. In this repo no domain is
+        configured (live wiring deferred), so every posture read is inert."""
+        from .posture import RequestsFetcher, build_assessment
+
+        self.get_object()  # scope/permission check on the deployment
+        assessment = build_assessment(domain)
+        return assessment.assess(fetcher=RequestsFetcher())
+
     @action(detail=True, methods=["get"], url_path="ai-bom")
     def ai_bom(self, request, uuid=None):
         """AI-BOM (Phase 1.7): the AI supply-chain bill of materials — every
