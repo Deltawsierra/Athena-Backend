@@ -977,3 +977,113 @@ class ClaimEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.from_status or '∅'} → {self.to_status} on claim {self.claim_id}"
+
+
+# ---------------------------------------------------------------------------
+# RetestRequirement — a claim invalidated by a change owes a retest (SPINE)
+# ---------------------------------------------------------------------------
+
+
+class RetestRequirement(models.Model):
+    """An open obligation to re-test a claim because the system it was true *of*
+    has changed — the SPINE Phase 2 temporal / INVALIDATES backbone.
+
+    A :class:`AssuranceClaim` is true of a system state (``system_fingerprint``).
+    When a change moves that state, the claim's evidence no longer reflects what is
+    running: a retest is due before the claim may be read as current. Rather than
+    silently flip a status — and never a fabricated "still passes" — that obligation
+    is recorded here as a **durable, attributed fact**: which claim was invalidated,
+    why (``reason``), when it opened, who opened it (``actor``, null = the machine),
+    and — once a fresh derivation rebinds the claim to the new state — the new claim
+    version that satisfied it (``resolving_claim``) and when (``resolved_at``).
+
+    It mirrors :class:`RemediationEvent` / :class:`ClaimEvent`'s attribution pattern
+    (actor + note + ordered timestamps) rather than inventing a second mechanism,
+    and it is honest by construction:
+
+    - Opening a requirement never itself reads as a pass; the invalidated claim is
+      moved *away* from a pass (marked STALE — "a retest is due") through the
+      existing Phase 1 seam, never to a new "invalid but passing" state.
+    - Only ONE requirement is open per claim identity at a time (the partial unique
+      constraint below plus the engine's idempotence guard), so re-running the
+      invalidation engine never opens a duplicate obligation.
+    - A requirement is resolved only when a fresh :func:`assurance.claims.derive_claims`
+      produces a new current version bound to the changed state — a machine no
+      longer flagging drift is not proof of a retest; a re-derivation that rebinds
+      is. ``resolving_claim`` records exactly which version answered it.
+
+    The ``claim`` FK points at the *version that was invalidated* (a durable record
+    of what drifted); ``resolving_claim`` is SET_NULL so trimming a newer version
+    never deletes the obligation's history."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # The owning deployment — CASCADE, so the obligation lives and dies with the
+    # system under assurance, and reads scope on it exactly like the other rows.
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="retest_requirements"
+    )
+    # The claim version that was invalidated. CASCADE, mirroring ClaimEvent's
+    # owning relationship to its claim: the obligation is *about* this claim.
+    claim = models.ForeignKey(
+        AssuranceClaim, on_delete=models.CASCADE, related_name="retest_requirements"
+    )
+    # The new current version that satisfied the retest, once a fresh derivation
+    # rebound the claim to the changed state. SET_NULL so trimming that newer
+    # version never deletes this durable obligation; null while still open.
+    resolving_claim = models.ForeignKey(
+        AssuranceClaim,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="resolves_retests",
+    )
+    # Why the retest is owed, in honest, non-sensitive words (e.g. "System
+    # fingerprint changed"). Never raw payloads, secrets, or target material.
+    reason = models.TextField(blank=True)
+    # The system fingerprint that TRIGGERED the retest — the changed state the
+    # claim must be re-evaluated against. Provenance, binding the obligation to the
+    # state drift that opened it, the way a claim binds to its system_fingerprint.
+    triggering_system_fingerprint = models.CharField(max_length=64, blank=True)
+    # Who opened it. SET_NULL so removing a user never deletes the trail; null
+    # reads as "the machine opened this", never as "no one did it".
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="opened_retest_requirements",
+    )
+    opened_at = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-opened_at"]
+        constraints = [
+            # At most ONE OPEN retest requirement per invalidated claim version, so
+            # re-running the invalidation engine never opens a duplicate obligation
+            # for the same open drift. Resolved rows (resolved_at set) are exempt,
+            # keeping full history — and the engine's identity-level idempotence
+            # guard (assurance.invalidation) covers the same claim across versions.
+            models.UniqueConstraint(
+                fields=["claim"],
+                condition=Q(resolved_at__isnull=True),
+                name="uq_open_retest_per_claim",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deployment", "resolved_at"]),
+            models.Index(fields=["claim", "resolved_at"]),
+        ]
+
+    def __str__(self) -> str:
+        state = "open" if self.resolved_at is None else "resolved"
+        return f"Retest [{state}] for claim {self.claim_id}"
+
+    @property
+    def is_open(self) -> bool:
+        """Whether the obligation is still outstanding — no fresh derivation has
+        yet rebound the claim to the changed state and satisfied it."""
+        return self.resolved_at is None

@@ -24,6 +24,7 @@ from .models import (
     Provider,
     ProviderAssertion,
     RemediationEvent,
+    RetestRequirement,
     Unknown,
     evidence_strength,
 )
@@ -396,6 +397,47 @@ class ClaimEventSerializer(serializers.ModelSerializer):
             "actor",
             "note",
             "created_at",
+        ]
+        read_only_fields = fields
+
+
+class RetestRequirementSerializer(serializers.ModelSerializer):
+    """An open/closed retest obligation on a claim (SPINE Phase 2), read-only —
+    obligations are written only through ``assurance.invalidation`` (a change opens
+    one) and ``assurance.claims.derive_claims`` (a rebinding re-derivation resolves
+    one), so every one is machine-attributed and never hand-edited into a dishonest
+    state. Exposes uuids (never pks), the actor's username (null = the machine), and
+    the timestamps — mirroring ``ClaimEventSerializer``."""
+
+    deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    claim_uuid = serializers.UUIDField(source="claim.uuid", read_only=True)
+    claim_type = serializers.CharField(source="claim.claim_type", read_only=True)
+    claim_type_label = serializers.CharField(
+        source="claim.get_claim_type_display", read_only=True
+    )
+    resolving_claim_uuid = serializers.UUIDField(
+        source="resolving_claim.uuid", read_only=True, allow_null=True
+    )
+    actor = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+    is_open = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = RetestRequirement
+        fields = [
+            "uuid",
+            "deployment_uuid",
+            "claim_uuid",
+            "claim_type",
+            "claim_type_label",
+            "resolving_claim_uuid",
+            "reason",
+            "triggering_system_fingerprint",
+            "actor",
+            "is_open",
+            "opened_at",
+            "resolved_at",
+            "created_at",
+            "updated_at",
         ]
         read_only_fields = fields
 

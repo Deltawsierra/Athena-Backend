@@ -24,6 +24,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .boundary import assess_boundary
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
+from .invalidation import check_invalidations as run_invalidation_check
 from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
@@ -46,6 +47,7 @@ from .models import (
     Finding,
     Provider,
     ProviderAssertion,
+    RetestRequirement,
     Unknown,
 )
 from .receipt import build_assurance_receipt, deployment_receipt
@@ -62,6 +64,7 @@ from .serializers import (
     ProviderAssertionSerializer,
     ProviderSerializer,
     RemediationEventSerializer,
+    RetestRequirementSerializer,
     UnknownSerializer,
 )
 
@@ -646,6 +649,44 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         counts = derive_claims(deployment)
         return Response(counts)
 
+    @action(detail=True, methods=["get"], url_path="retest-requirements")
+    def retest_requirements(self, request, uuid=None):
+        """The deployment's retest requirements (SPINE Phase 2): the durable,
+        attributed obligations to re-test a claim whose bound system state has
+        changed. A read — open to any authenticated operator, like the rest of the
+        assurance reads. Only OPEN obligations by default; ``?all=true`` includes
+        the resolved history.
+
+        Query-light: read in one scoped query with the invalidated claim, the
+        resolving claim and the actor joined, so the list is a fixed number of
+        queries."""
+        deployment = self.get_object()
+        qs = (
+            RetestRequirement.objects.filter(deployment=deployment)
+            .select_related("deployment", "claim", "resolving_claim", "actor")
+            .order_by("-opened_at")
+        )
+        if request.query_params.get("all") not in ("true", "1", "yes", "on"):
+            qs = qs.filter(resolved_at__isnull=True)
+        return Response(RetestRequirementSerializer(qs, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="check-invalidations")
+    def check_invalidations(self, request, uuid=None):
+        """Run the invalidation engine over the deployment (SPINE Phase 2).
+        Admin-only: it mutates the shared record (opens/resolves obligations, marks
+        drifted claims stale). Idempotent and transactional — a re-run opens no
+        duplicate obligation.
+
+        For each current claim whose bound system state has drifted it opens a
+        retest obligation (attributed) and moves the claim away from a pass to
+        stale, and it resolves any obligation a prior rebinding re-derivation has
+        already satisfied — never inventing an "invalid but passing" state. Returns
+        the counts ``{invalidated, retests_opened, retests_resolved}``."""
+        _require_admin(request)
+        deployment = self.get_object()
+        counts = run_invalidation_check(deployment, actor=request.user)
+        return Response(counts)
+
 
 class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """Read access to the assurance claims system of record, scoped like findings:
@@ -738,6 +779,52 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
                 "event": ClaimEventSerializer(event).data,
             }
         )
+
+
+class RetestRequirementViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Read access to the retest-obligation system of record (SPINE Phase 2),
+    scoped like claims: a privileged operator sees every obligation; another
+    authenticated user sees only obligations on a deployment they own.
+
+    Obligations are never hand-created or hand-edited here — they are opened by the
+    invalidation engine and resolved by a rebinding re-derivation, so a dishonest
+    or unattributed state can never slip in via a raw write. Reads default to the
+    OPEN obligations; ``?all=true`` includes resolved history, and ``?status=`` can
+    ask for ``open`` / ``resolved`` explicitly."""
+
+    serializer_class = RetestRequirementSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = "uuid"
+
+    def get_queryset(self):
+        # The serializer reads deployment.uuid, claim.uuid/claim_type,
+        # resolving_claim.uuid and actor.username; select_related them so the list
+        # is a fixed number of queries, not O(n).
+        qs = RetestRequirement.objects.select_related(
+            "deployment", "claim", "resolving_claim", "actor"
+        ).all()
+        user = self.request.user
+        if not _is_privileged(user):
+            qs = qs.filter(deployment__owner=user)
+        deployment = self.request.query_params.get("deployment")
+        if deployment:
+            valid = _valid_uuid(deployment)
+            qs = qs.filter(deployment__uuid=valid) if valid else qs.none()
+        claim = self.request.query_params.get("claim")
+        if claim:
+            valid = _valid_uuid(claim)
+            qs = qs.filter(claim__uuid=valid) if valid else qs.none()
+        status_q = self.request.query_params.get("status")
+        if status_q == "open":
+            qs = qs.filter(resolved_at__isnull=True)
+        elif status_q == "resolved":
+            qs = qs.filter(resolved_at__isnull=False)
+        # Default to the OPEN obligations; ?all=true includes resolved history.
+        elif self.request.query_params.get("all") not in ("true", "1", "yes", "on"):
+            qs = qs.filter(resolved_at__isnull=True)
+        return qs
 
 
 class FindingViewSet(
