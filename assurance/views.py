@@ -29,7 +29,8 @@ from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
-from .decision import recompute_decision
+from .decision import decision_support, recompute_decision
+from .revalidation import plan_revalidation
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
 from .operational import assess_operational
@@ -669,6 +670,36 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         if request.query_params.get("all") not in ("true", "1", "yes", "on"):
             qs = qs.filter(resolved_at__isnull=True)
         return Response(RetestRequirementSerializer(qs, many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="decision-support")
+    def decision_support(self, request, uuid=None):
+        """The deployment's six-state decision WITH why (SPINE Stage 1C): the final
+        decision, the finding-based signal and the claim cap that combined into it,
+        and exactly which current claims support or undermine it. This is how a READY
+        decision is shown to stand only while its supporting claims stay current — a
+        contradicted claim holds it at 'needs remediation', a stale/unknown claim or
+        an open retest obligation at 'needs more evidence'. A read, open to any
+        authenticated operator like the rest of the assurance reads; it computes,
+        it does not persist."""
+        deployment = self.get_object()
+        paused = deployment.decision == Deployment.Decision.PAUSED
+        return Response(decision_support(deployment, paused=paused))
+
+    @action(detail=True, methods=["get"], url_path="revalidation-plan")
+    def revalidation_plan(self, request, uuid=None):
+        """The minimal revalidation plan (SPINE Stage 1D): for each current claim
+        that a change invalidated (an open retest obligation), that expired (STALE),
+        or that the state contradicts, the exact Athena reassessment and Achilles
+        capability areas to re-run — and everything that stays current and need not
+        be re-run. This is 'what must re-run because of this change', not 'run the
+        whole assessment again'. A read, open to any authenticated operator; pure
+        and deterministic."""
+        deployment = (
+            Deployment.objects.prefetch_related("assets__provider__assertions")
+            .select_related("data_boundary")
+            .get(pk=self.get_object().pk)
+        )
+        return Response(plan_revalidation(deployment))
 
     @action(detail=True, methods=["post"], url_path="check-invalidations")
     def check_invalidations(self, request, uuid=None):
