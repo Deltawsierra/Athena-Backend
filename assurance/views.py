@@ -14,6 +14,7 @@ import uuid as uuidlib
 
 from django.contrib.auth import get_user_model
 from django.db.models import Count
+from django.shortcuts import get_object_or_404
 from rest_framework import mixins, permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -22,6 +23,7 @@ from rest_framework.response import Response
 from .access import assess_effective_access
 from .bom import build_ai_bom
 from .boundary import assess_boundary
+from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
@@ -36,13 +38,24 @@ from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
 from .roi import build_executive_summary
 from .route import build_route_map
-from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
+from .models import (
+    Asset,
+    AssuranceClaim,
+    DataBoundary,
+    Deployment,
+    Finding,
+    Provider,
+    ProviderAssertion,
+    Unknown,
+)
 from .receipt import build_assurance_receipt, deployment_receipt
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
 from .vendor import assess_vendors
 from .serializers import (
     AssetSerializer,
+    AssuranceClaimSerializer,
+    ClaimEventSerializer,
     DataBoundarySerializer,
     DeploymentSerializer,
     FindingSerializer,
@@ -599,6 +612,132 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             return Response(apply_pack(assessed, pack))
         except UnknownPack as exc:
             return Response({"detail": str(exc)}, status=400)
+
+    @action(detail=True, methods=["get"], url_path="assurance-claims")
+    def assurance_claims(self, request, uuid=None):
+        """The deployment's CURRENT assurance claims (SPINE Phase 1): the
+        version-bound, falsifiable statements derived from the assessments, each at
+        its honest status and weakest-evidence strength. A read — open to any
+        authenticated operator, like the rest of the assurance reads. Only the
+        current version of each claim (``valid_to`` null) is returned; superseded
+        history is reached through a claim's lifecycle events.
+
+        Query-light: the claims are read in one scoped query with their subject
+        asset and human owner joined, so the list is a fixed number of queries."""
+        deployment = self.get_object()
+        claims = (
+            AssuranceClaim.objects.filter(deployment=deployment, valid_to__isnull=True)
+            .select_related("deployment", "asset", "human_owner", "superseded_by")
+            .order_by("claim_type", "-updated_at")
+        )
+        return Response(AssuranceClaimSerializer(claims, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="recompute-claims")
+    def recompute_claims(self, request, uuid=None):
+        """Re-derive the deployment's assurance claims from its current state
+        (SPINE Phase 1). Admin-only: it mutates the shared record. Idempotent and
+        transactional — it creates missing claims, refreshes machine fields in
+        place when the system state is unchanged, supersedes a version when the
+        system fingerprint has changed, and marks expired claims stale, never
+        overwriting a human REVOKED claim. Returns the reconciliation counts
+        ``{created, updated, superseded, stale}``."""
+        _require_admin(request)
+        deployment = self.get_object()
+        counts = derive_claims(deployment)
+        return Response(counts)
+
+
+class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """Read access to the assurance claims system of record, scoped like findings:
+    a privileged operator sees every claim; another authenticated user sees only
+    claims on a deployment they own. Claims are never hand-created or hand-edited
+    here — they are machine-derived and moved only through the attributed,
+    evidence-gated transition action below, so an illegal or dishonest state can
+    never slip in via a raw write."""
+
+    serializer_class = AssuranceClaimSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = "uuid"
+    http_method_names = ["get", "post", "head", "options"]
+
+    def _scoped_claims(self):
+        qs = AssuranceClaim.objects.all()
+        user = self.request.user
+        if not _is_privileged(user):
+            qs = qs.filter(deployment__owner=user)
+        return qs
+
+    def get_object(self):
+        """Look a claim up by uuid within the caller's scope, across ALL versions —
+        a detail read or a lifecycle event of a superseded version is still
+        reachable, unlike the list which defaults to current versions only."""
+        qs = self._scoped_claims().select_related(
+            "deployment", "asset", "human_owner", "superseded_by"
+        )
+        obj = get_object_or_404(qs, uuid=self.kwargs["uuid"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+    def get_queryset(self):
+        # The serializer reads deployment.uuid, asset.uuid/name, owner.username and
+        # superseded_by.uuid; select_related them so the list is a fixed number of
+        # queries, not O(n).
+        qs = self._scoped_claims().select_related(
+            "deployment", "asset", "human_owner", "superseded_by"
+        )
+        deployment = self.request.query_params.get("deployment")
+        if deployment:
+            valid = _valid_uuid(deployment)
+            qs = qs.filter(deployment__uuid=valid) if valid else qs.none()
+        claim_type = self.request.query_params.get("claim_type")
+        if claim_type:
+            qs = qs.filter(claim_type=claim_type)
+        status_q = self.request.query_params.get("status")
+        if status_q:
+            qs = qs.filter(status=status_q)
+        # Default to the current version of each claim; ?all=true includes history.
+        if self.request.query_params.get("all") not in ("true", "1", "yes", "on"):
+            qs = qs.filter(valid_to__isnull=True)
+        return qs
+
+    @action(detail=True, methods=["get"], url_path="events")
+    def events(self, request, uuid=None):
+        """The claim's attributed lifecycle history (SPINE): every status change,
+        who made it, from where to where, and why. A read — open to any operator
+        who can see the claim."""
+        claim = self.get_object()
+        events = claim.events.select_related("actor").all()
+        return Response(ClaimEventSerializer(events, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="transition")
+    def transition(self, request, uuid=None):
+        """Move the claim along its lifecycle. Admin-only — it mutates the shared
+        record — and every move is attributed to the caller.
+
+        Body: ``{"to_status": <status>, "note": <optional>}``. An unknown status, an
+        illegal jump, a machine-only target (stale/superseded), or an attempt to
+        verify a claim whose evidence is not configuration/technically verified (or
+        that rests on vendor assertions) is rejected with a clean 400, never
+        silently coerced. The move writes a ``ClaimEvent`` and changes only
+        ``status`` (and ``verified_at`` on a move to verified)."""
+        _require_admin(request)
+        claim = self.get_object()
+        to_status = request.data.get("to_status")
+        if to_status not in AssuranceClaim.ClaimStatus.values:
+            return Response({"detail": f"Unknown claim status: {to_status!r}."}, status=400)
+        try:
+            event = apply_claim_transition(
+                claim, to_status, actor=request.user, note=request.data.get("note", "")
+            )
+        except IllegalClaimTransition as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(
+            {
+                "status": claim.status,
+                "status_label": claim.get_status_display(),
+                "event": ClaimEventSerializer(event).data,
+            }
+        )
 
 
 class FindingViewSet(

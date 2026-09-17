@@ -6,6 +6,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     AssetViewSet,
+    ClaimViewSet,
     DeploymentViewSet,
     FindingViewSet,
     ProviderAssertionViewSet,
@@ -20,5 +21,6 @@ router.register(r"assets", AssetViewSet, basename="asset")
 router.register(r"providers", ProviderViewSet, basename="provider")
 router.register(r"provider-assertions", ProviderAssertionViewSet, basename="provider-assertion")
 router.register(r"unknowns", UnknownViewSet, basename="unknown")
+router.register(r"claims", ClaimViewSet, basename="claim")
 
 urlpatterns = router.urls

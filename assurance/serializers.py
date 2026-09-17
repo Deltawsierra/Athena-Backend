@@ -15,6 +15,8 @@ from .change import CHANGE_LABELS, age_days, change_status, is_stale
 from .receipt import finding_receipt
 from .models import (
     Asset,
+    AssuranceClaim,
+    ClaimEvent,
     DataBoundary,
     Deployment,
     Evidence,
@@ -372,6 +374,102 @@ class DataBoundarySerializer(serializers.ModelSerializer):
             if v and v not in seen:
                 seen.append(v)
         return seen
+
+
+class ClaimEventSerializer(serializers.ModelSerializer):
+    """One attributed step in an assurance claim's lifecycle (SPINE), read-only —
+    events are written only through ``assurance.claims`` (a derive or an attributed
+    transition), so every move is validated and attributed."""
+
+    from_status_label = serializers.CharField(source="get_from_status_display", read_only=True)
+    to_status_label = serializers.CharField(source="get_to_status_display", read_only=True)
+    actor = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = ClaimEvent
+        fields = [
+            "uuid",
+            "from_status",
+            "from_status_label",
+            "to_status",
+            "to_status_label",
+            "actor",
+            "note",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class AssuranceClaimSerializer(serializers.ModelSerializer):
+    """A version-bound, falsifiable assurance claim (SPINE), read-only. Every field
+    is machine-derived or moved through the attributed transition action; the API
+    never lets a claim be hand-edited into a dishonest state. Human-readable labels
+    ride alongside the raw enums, and ``is_stale`` is surfaced so a consumer sees an
+    expired claim as expired."""
+
+    claim_type_label = serializers.CharField(source="get_claim_type_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    evidence_class_label = serializers.CharField(
+        source="get_evidence_class_display", read_only=True
+    )
+    assessment_label = serializers.SerializerMethodField()
+    environment_label = serializers.CharField(source="get_environment_display", read_only=True)
+    deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    asset_uuid = serializers.UUIDField(source="asset.uuid", read_only=True, allow_null=True)
+    asset_name = serializers.CharField(source="asset.name", read_only=True, allow_null=True)
+    human_owner = serializers.CharField(
+        source="human_owner.username", read_only=True, allow_null=True
+    )
+    superseded_by = serializers.UUIDField(
+        source="superseded_by.uuid", read_only=True, allow_null=True
+    )
+    is_stale = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = AssuranceClaim
+        fields = [
+            "uuid",
+            "deployment_uuid",
+            "asset_uuid",
+            "asset_name",
+            "claim_type",
+            "claim_type_label",
+            "statement",
+            "fingerprint",
+            "system_fingerprint",
+            "policy_version",
+            "environment",
+            "environment_label",
+            "status",
+            "status_label",
+            "evidence_class",
+            "evidence_class_label",
+            "confidence",
+            "vendor_asserted",
+            "assessment",
+            "assessment_label",
+            "supporting_summary",
+            "contradicting_summary",
+            "invalidation_conditions",
+            "superseded_by",
+            "human_owner",
+            "receipt_digest",
+            "is_stale",
+            "valid_from",
+            "valid_to",
+            "verified_at",
+            "expiration",
+            "first_seen",
+            "last_seen",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_assessment_label(self, obj) -> str | None:
+        # None-safe: an unassessed deployment has no decision, and an absent
+        # decision is never read as "ready".
+        return obj.get_assessment_display() if obj.assessment else None
 
 
 class DeploymentSerializer(serializers.ModelSerializer):

@@ -1,0 +1,631 @@
+"""The Assurance Claims Engine — deriving, versioning, and moving claims (SPINE).
+
+An :class:`~assurance.models.AssuranceClaim` is a positive, falsifiable statement
+bound to a system state. This module is where those statements are *produced* from
+the assessments the rest of the package already computes, *versioned* honestly when
+the system state changes, and *moved* through their lifecycle under attribution.
+
+Three parts:
+
+- **Derivers** — one pure function per :class:`ClaimType`, each reading a shipped
+  assessment (:func:`assurance.boundary.assess_boundary`,
+  :func:`assurance.access.assess_effective_access`,
+  :func:`assurance.bom.build_ai_bom`) and reducing it to a claim's honest fields.
+  Every deriver keeps the six honesty invariants: it NEVER returns VERIFIED unless
+  the evidence is configuration/technically verified AND there is no
+  contradiction/unknown; a declared fact that breaks a declared rule is
+  CONTRADICTED; an undeclared/unassessed input is UNKNOWN; ``confidence`` is
+  ``None`` for UNKNOWN (never ``0``); ``evidence_class`` is the weakest supporting
+  class; and a claim resting on vendor assertions caps at SUPPORTED.
+
+- **:func:`derive_claims`** — the idempotent, transactional reconciler. For each
+  deriver it computes the stable identity fingerprint and the current system
+  fingerprint, finds the current version, and: creates it if none exists; refreshes
+  the machine fields in place when the system state is unchanged (preserving human
+  fields and never overwriting a human REVOKED); or SUPERSEDES the old version and
+  opens a new one when the system state has changed. It also marks a current,
+  non-contradicted claim STALE once its evidence expires — never toward a pass.
+
+- **:func:`apply_claim_transition`** — the attributed lifecycle state machine,
+  mirroring :mod:`assurance.remediation`. It refuses illegal jumps, refuses to let
+  STALE/SUPERSEDED be a human target, and HARD-refuses any move into VERIFIED that
+  is not backed by configuration/technically-verified, non-vendor evidence.
+
+The temporal INVALIDATES backbone that fires contradiction across dependent claims
+is a SEPARATE follow-up; the only cross-version mechanism here is the
+system_fingerprint-change → supersede seam.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import timedelta
+
+from django.db import transaction
+from django.utils import timezone
+
+from .access import assess_effective_access
+from .bom import build_ai_bom
+from .boundary import assess_boundary
+from .capability import RISK_HIGH
+from .change import EVIDENCE_TTL_DAYS, age_days
+from .fingerprint import compute_system_fingerprint, policy_version
+from .models import AssuranceClaim, ClaimEvent, Deployment, EvidenceClass, evidence_strength
+from .receipt import build_assurance_receipt
+
+Status = AssuranceClaim.ClaimStatus
+ClaimType = AssuranceClaim.ClaimType
+
+# The evidence grades strong enough to back a VERIFIED claim (invariant 3/4). A
+# claim whose weakest supporting evidence is not one of these can never read
+# VERIFIED, whether the machine derived it or a human tried to hand-verify it.
+_VERIFIED_GRADE = frozenset(
+    {EvidenceClass.TECHNICALLY_VERIFIED.value, EvidenceClass.CONFIGURATION_VERIFIED.value}
+)
+
+# The access-gap types whose HIGH-risk presence contradicts a least-privilege
+# claim (as opposed to merely capping it at SUPPORTED).
+_CONTRADICTING_ACCESS_GAPS = frozenset({"privileged_access", "over_broad", "ungoverned_reach"})
+
+
+# ---------------------------------------------------------------------------
+# Shared honesty helpers
+# ---------------------------------------------------------------------------
+
+
+def _grade_pool(classes: list[str]) -> tuple[str, str | None, bool]:
+    """Reduce a pool of evidence classes to ``(weakest, strongest, vendor_asserted)``.
+
+    ``weakest`` is the honest confidence floor (invariant 5). ``vendor_asserted`` is
+    True when even the *strongest* supporting evidence is vendor-asserted-or-weaker
+    (invariant 4) — including the empty pool, where nothing verified backs the
+    claim. An empty pool reads as UNKNOWN with no strongest evidence."""
+    if not classes:
+        return EvidenceClass.UNKNOWN.value, None, True
+    weakest = max(classes, key=evidence_strength)
+    strongest = min(classes, key=evidence_strength)
+    vendor = evidence_strength(strongest) >= evidence_strength(EvidenceClass.VENDOR_ASSERTED.value)
+    return weakest, strongest, vendor
+
+
+def _confidence(status: str, evidence_class: str) -> float | None:
+    """Confidence in the positive claim, derived from how strongly it is supported.
+
+    ``None`` whenever the claim is not standing on supporting evidence — for
+    UNKNOWN (invariant 2: never ``0`` as a pass) and for CONTRADICTED (a false
+    statement has no supporting confidence). Otherwise a value in (0, 1] that falls
+    as the weakest supporting evidence weakens — never zero."""
+    if status not in (Status.SUPPORTED, Status.VERIFIED, Status.PARTIALLY_VERIFIED):
+        return None
+    return round(max(0.1, 1.0 - 0.12 * evidence_strength(evidence_class)), 2)
+
+
+def _clip(text: str, limit: int = 500) -> str:
+    """Bound a summary's length so a claim carries an honest, readable digest, never
+    an unbounded dump. (Inputs here are already non-sensitive config facts.)"""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+# ---------------------------------------------------------------------------
+# Derivers — one pure function per ClaimType
+# ---------------------------------------------------------------------------
+
+
+def _derive_data_boundary(deployment) -> dict:
+    """DATA_BOUNDARY claim from :func:`assurance.boundary.assess_boundary`.
+
+    Violations ⇒ CONTRADICTED; any undeclared posture / no declared boundary / no
+    assessable flow ⇒ UNKNOWN; all flows approved ⇒ SUPPORTED, promoted to VERIFIED
+    only when the weakest supporting evidence is configuration/technically verified
+    and the boundary does not rest on vendor assertions (invariant 4)."""
+    result = assess_boundary(deployment)
+    flows = result["flows"]
+    summary = result["summary"]
+    declared = result["declared"]
+
+    # The weakest pool folds in a synthetic UNKNOWN for every undeclared posture (a
+    # gap is unknown evidence); the declared pool holds only real assertions, and is
+    # what the vendor-asserted / strongest read is taken over.
+    weak_pool: list[str] = []
+    declared_pool: list[str] = []
+    for flow in flows:
+        if flow["status"] == "unknown":
+            weak_pool.append(EvidenceClass.UNKNOWN.value)
+        for key in ("region", "training", "sharing"):
+            cell = flow.get(key)
+            if cell and cell.get("evidence_class"):
+                weak_pool.append(cell["evidence_class"])
+                declared_pool.append(cell["evidence_class"])
+    weakest, _strongest, vendor_asserted = _grade_pool(declared_pool)
+    # Weakest across everything, undeclared postures included.
+    weakest = max(weak_pool, key=evidence_strength) if weak_pool else EvidenceClass.UNKNOWN.value
+
+    has_unknown = (not declared) or summary["unknowns"] > 0 or any(f["status"] == "unknown" for f in flows)
+    if summary["violations"] > 0:
+        status = Status.CONTRADICTED
+    elif not flows or has_unknown:
+        status = Status.UNKNOWN
+    elif weakest in _VERIFIED_GRADE and not vendor_asserted:
+        status = Status.VERIFIED
+    else:
+        status = Status.SUPPORTED
+
+    evidence_class = weakest if status != Status.UNKNOWN else EvidenceClass.UNKNOWN.value
+
+    supporting = f"{summary['approved']} of {len(flows)} data flow(s) reconciled within the approved boundary."
+    contradicting_bits: list[str] = []
+    if summary["violations"] > 0:
+        reasons = [r for f in flows for r in f.get("violations", [])]
+        contradicting_bits.append(
+            f"{summary['violations']} flow(s) outside the boundary: " + "; ".join(reasons[:3])
+        )
+    if summary["unknowns"] > 0:
+        contradicting_bits.append(f"{summary['unknowns']} flow(s) with an undeclared posture.")
+    if summary["shadow_destinations"] > 0:
+        contradicting_bits.append(f"{summary['shadow_destinations']} shadow (unmanaged) destination(s).")
+
+    return {
+        "claim_type": ClaimType.DATA_BOUNDARY.value,
+        "subject": None,
+        "statement": f"Every data destination for deployment '{deployment.name}' is within its approved data boundary.",
+        "status": status.value,
+        "evidence_class": evidence_class,
+        "vendor_asserted": vendor_asserted,
+        "confidence": _confidence(status, evidence_class),
+        "assessment": deployment.decision,
+        "supporting_summary": _clip(supporting),
+        "contradicting_summary": _clip(" ".join(contradicting_bits)),
+        "invalidation_conditions": [
+            "A data destination declares a region outside the approved boundary.",
+            "A provider declares it trains on customer data while the boundary forbids it.",
+            "A provider declares third-party sharing while the boundary forbids it.",
+            "A new unmanaged (shadow) data destination appears.",
+            "The approved data boundary is changed.",
+        ],
+    }
+
+
+def _derive_effective_access(deployment) -> dict:
+    """EFFECTIVE_ACCESS claim from :func:`assurance.access.assess_effective_access`.
+
+    Any principal carrying a HIGH-risk privileged / over-broad / ungoverned-reach
+    gap ⇒ CONTRADICTED; nothing to assess (no principals) ⇒ UNKNOWN; otherwise
+    SUPPORTED, promoted to VERIFIED only when the reach is configuration-verified
+    and no high-risk gap of any kind remains. The reach is read from declared
+    configuration, so its evidence class is ``configuration_verified``."""
+    result = assess_effective_access(deployment)
+    principals = result["principals"]
+
+    if not principals:
+        status = Status.UNKNOWN
+        evidence_class = EvidenceClass.UNKNOWN.value
+        vendor_asserted = True
+    else:
+        gaps = [g for p in principals for g in p["gaps"]]
+        contradicting = [
+            g for g in gaps if g["type"] in _CONTRADICTING_ACCESS_GAPS and g["risk"] == RISK_HIGH
+        ]
+        any_high_risk_gap = any(g["risk"] == RISK_HIGH for g in gaps)
+        evidence_class = EvidenceClass.CONFIGURATION_VERIFIED.value
+        vendor_asserted = False
+        if contradicting:
+            status = Status.CONTRADICTED
+        elif not any_high_risk_gap:
+            status = Status.VERIFIED
+        else:
+            status = Status.SUPPORTED
+
+    summary = result["summary"]
+    supporting = (
+        f"{summary['principals']} principal(s) assessed; "
+        f"{summary['privileged']} privileged, {summary['shadow']} shadow, {summary['over_broad']} over-broad."
+    )
+    contradicting_bits: list[str] = []
+    if principals:
+        offenders = sorted(
+            {
+                p["name"]
+                for p in principals
+                for g in p["gaps"]
+                if g["type"] in _CONTRADICTING_ACCESS_GAPS and g["risk"] == RISK_HIGH
+            }
+        )
+        if offenders:
+            contradicting_bits.append(
+                "High-risk privileged/over-broad/ungoverned reach on: " + ", ".join(offenders)
+            )
+
+    return {
+        "claim_type": ClaimType.EFFECTIVE_ACCESS.value,
+        "subject": None,
+        "statement": f"The effective access of every principal in deployment '{deployment.name}' is least-privilege.",
+        "status": status.value,
+        "evidence_class": evidence_class,
+        "vendor_asserted": vendor_asserted,
+        "confidence": _confidence(status, evidence_class),
+        "assessment": deployment.decision,
+        "supporting_summary": _clip(supporting),
+        "contradicting_summary": _clip(" ".join(contradicting_bits)),
+        "invalidation_conditions": [
+            "A principal gains privileged reach (code execution, money movement, or privileged control).",
+            "A principal's effective reach spans data, execution and network (over-broad).",
+            "A principal reaches an unmanaged / shadow target.",
+            "A new shadow identity appears.",
+        ],
+    }
+
+
+def _derive_ai_bom(deployment) -> dict:
+    """AI_BOM claim from :func:`assurance.bom.build_ai_bom`.
+
+    No providers ⇒ UNKNOWN; otherwise SUPPORTED, capped by the BOM's weakest
+    evidence. Drift detection (which could contradict a BOM) is a later connector
+    phase, so this deriver never reaches VERIFIED or CONTRADICTED here."""
+    result = build_ai_bom(deployment)
+    providers = result["providers"]
+    summary = result["summary"]
+
+    fact_classes = [
+        f["evidence_class"] for p in providers for f in p["declared_facts"] if f.get("evidence_class")
+    ]
+    weakest, _strongest, vendor_asserted = _grade_pool(fact_classes)
+
+    if summary["provider_count"] == 0:
+        status = Status.UNKNOWN
+        evidence_class = EvidenceClass.UNKNOWN.value
+        vendor_asserted = True
+    else:
+        status = Status.SUPPORTED
+        evidence_class = summary["weakest_evidence"] or weakest
+
+    supporting = (
+        f"{summary['component_count']} component(s) across {summary['provider_count']} provider(s); "
+        f"{summary['shadow_components']} shadow component(s)."
+    )
+    contradicting_bits: list[str] = []
+    if summary["shadow_components"] > 0:
+        contradicting_bits.append(
+            f"{summary['shadow_components']} unmanaged (shadow) component(s) in the supply chain."
+        )
+
+    return {
+        "claim_type": ClaimType.AI_BOM.value,
+        "subject": None,
+        "statement": f"The AI bill of materials for deployment '{deployment.name}' enumerates its full supply chain.",
+        "status": status.value,
+        "evidence_class": evidence_class,
+        "vendor_asserted": vendor_asserted,
+        "confidence": _confidence(status, evidence_class),
+        "assessment": deployment.decision,
+        "supporting_summary": _clip(supporting),
+        "contradicting_summary": _clip(" ".join(contradicting_bits)),
+        "invalidation_conditions": [
+            "A new AI component or provider appears in the supply chain.",
+            "A provider's declared posture changes.",
+            "A component becomes unmanaged (shadow).",
+        ],
+    }
+
+
+# The registry of derivers — one per ClaimType, extensible.
+_DERIVERS = (
+    _derive_data_boundary,
+    _derive_effective_access,
+    _derive_ai_bom,
+)
+
+
+# ---------------------------------------------------------------------------
+# Identity + version reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _identity_fingerprint(deployment, claim_type: str, subject_key: str) -> str:
+    """The STABLE claim-identity key, the same across every version of the claim:
+    sha256(deployment.uuid | claim_type | subject_key)."""
+    raw = f"{deployment.uuid}|{claim_type}|{subject_key}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _prefetched(deployment) -> Deployment:
+    """The deployment re-fetched with everything the derivers, the fingerprint, and
+    the receipt read — so a derive is a fixed number of queries, never O(assets)."""
+    return (
+        Deployment.objects.prefetch_related(
+            "assets__provider__assertions", "findings__evidence"
+        )
+        .select_related("data_boundary")
+        .get(pk=deployment.pk)
+    )
+
+
+def _make_claim(deployment, *, identity_fp, system_fp, pol_version, receipt_digest, derived, now, human_owner=None) -> AssuranceClaim:
+    """Create a new CURRENT claim version from a deriver's output, and seed its
+    lifecycle with a ``∅ → status`` :class:`ClaimEvent`."""
+    status = derived["status"]
+    claim = AssuranceClaim.objects.create(
+        deployment=deployment,
+        asset=derived["subject"],
+        claim_type=derived["claim_type"],
+        statement=derived["statement"],
+        fingerprint=identity_fp,
+        system_fingerprint=system_fp,
+        policy_version=pol_version,
+        environment=deployment.environment,
+        status=status,
+        evidence_class=derived["evidence_class"],
+        confidence=derived["confidence"],
+        vendor_asserted=derived["vendor_asserted"],
+        assessment=derived["assessment"],
+        supporting_summary=derived["supporting_summary"],
+        contradicting_summary=derived["contradicting_summary"],
+        invalidation_conditions=derived["invalidation_conditions"],
+        receipt_digest=receipt_digest,
+        human_owner=human_owner,
+        valid_from=now,
+        first_seen=now,
+        last_seen=now,
+        verified_at=now if status == Status.VERIFIED else None,
+        expiration=now + timedelta(days=EVIDENCE_TTL_DAYS),
+    )
+    ClaimEvent.objects.create(
+        claim=claim, from_status="", to_status=status, actor=None, note="Derived"
+    )
+    return claim
+
+
+def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now) -> bool:
+    """Refresh a current claim's MACHINE fields in place (system state unchanged),
+    preserving every human field. Writes a :class:`ClaimEvent` only on an actual
+    status change. Returns whether the row was updated."""
+    old_status = claim.status
+    new_status = derived["status"]
+
+    claim.statement = derived["statement"]
+    claim.evidence_class = derived["evidence_class"]
+    claim.vendor_asserted = derived["vendor_asserted"]
+    claim.confidence = derived["confidence"]
+    claim.assessment = derived["assessment"]
+    claim.supporting_summary = derived["supporting_summary"]
+    claim.contradicting_summary = derived["contradicting_summary"]
+    claim.invalidation_conditions = derived["invalidation_conditions"]
+    claim.receipt_digest = receipt_digest
+    claim.last_seen = now
+    claim.expiration = now + timedelta(days=EVIDENCE_TTL_DAYS)
+
+    status_changed = new_status != old_status
+    if status_changed:
+        claim.status = new_status
+        if new_status == Status.VERIFIED:
+            claim.verified_at = now
+    claim.save()
+
+    if status_changed:
+        ClaimEvent.objects.create(
+            claim=claim, from_status=old_status, to_status=new_status, actor=None, note="Re-derived"
+        )
+    return True
+
+
+def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, pol_version, receipt_digest, derived, now) -> None:
+    """Close the current version (``valid_to`` set, status SUPERSEDED, its own
+    ClaimEvent), open a new current version bound to the new system state, and link
+    ``old.superseded_by = new``. The old version is closed BEFORE the new one is
+    created so the partial unique constraint (one current version per identity) is
+    never momentarily violated."""
+    old_status = current.status
+    current.valid_to = now
+    current.status = Status.SUPERSEDED
+    current.save(update_fields=["valid_to", "status", "updated_at"])
+    ClaimEvent.objects.create(
+        claim=current,
+        from_status=old_status,
+        to_status=Status.SUPERSEDED,
+        actor=None,
+        note="System fingerprint changed; version superseded.",
+    )
+    new_claim = _make_claim(
+        deployment,
+        identity_fp=identity_fp,
+        system_fp=system_fp,
+        pol_version=pol_version,
+        receipt_digest=receipt_digest,
+        derived=derived,
+        now=now,
+        human_owner=current.human_owner,
+    )
+    current.superseded_by = new_claim
+    current.save(update_fields=["superseded_by", "updated_at"])
+
+
+def _mark_stale(deployment, now) -> int:
+    """Mark every CURRENT claim whose evidence has expired STALE — unless it is
+    already contradicted (a live contradiction is not softened to "stale"),
+    revoked (a human withdrawal is terminal), or itself already stale/superseded.
+    Staleness moves a claim away from a pass, never toward one."""
+    count = 0
+    skip = (Status.CONTRADICTED, Status.REVOKED, Status.STALE, Status.SUPERSEDED)
+    currents = AssuranceClaim.objects.filter(deployment=deployment, valid_to__isnull=True)
+    for claim in currents:
+        if claim.status in skip:
+            continue
+        days = age_days(claim, now)
+        if days is not None and days >= EVIDENCE_TTL_DAYS:
+            old_status = claim.status
+            claim.status = Status.STALE
+            claim.save(update_fields=["status", "updated_at"])
+            ClaimEvent.objects.create(
+                claim=claim,
+                from_status=old_status,
+                to_status=Status.STALE,
+                actor=None,
+                note="Evidence expired; claim is stale.",
+            )
+            count += 1
+    return count
+
+
+@transaction.atomic
+def derive_claims(deployment, *, now=None) -> dict:
+    """Reconcile a deployment's assurance claims with its current state.
+
+    Idempotent and transactional. For each deriver: computes the stable identity
+    fingerprint and the current system fingerprint; finds the current version
+    (``valid_to`` null); then creates it, refreshes it in place (system state
+    unchanged), or supersedes it (system state changed). A human REVOKED claim is
+    left untouched. Finally marks current, non-contradicted claims STALE once their
+    evidence expires. Returns ``{created, updated, superseded, stale}``.
+
+    Query-light: it re-fetches the deployment once with the prefetches every
+    assessment, the fingerprint and the receipt need."""
+    now = now or timezone.now()
+    dep = _prefetched(deployment)
+
+    system_fp = compute_system_fingerprint(dep)
+    pol_version = policy_version(dep)
+    receipt_digest = build_assurance_receipt(dep)["digest"]
+
+    counts = {"created": 0, "updated": 0, "superseded": 0, "stale": 0}
+
+    for deriver in _DERIVERS:
+        derived = deriver(dep)
+        subject = derived["subject"]
+        subject_key = str(subject.uuid) if subject is not None else ""
+        identity_fp = _identity_fingerprint(dep, derived["claim_type"], subject_key)
+
+        current = AssuranceClaim.objects.filter(
+            deployment=dep, fingerprint=identity_fp, valid_to__isnull=True
+        ).first()
+
+        if current is None:
+            _make_claim(
+                dep,
+                identity_fp=identity_fp,
+                system_fp=system_fp,
+                pol_version=pol_version,
+                receipt_digest=receipt_digest,
+                derived=derived,
+                now=now,
+            )
+            counts["created"] += 1
+            continue
+
+        # A human REVOKED claim is a withdrawal; a re-derive never touches it — not
+        # its status, not its last_seen, not a supersede.
+        if current.status == Status.REVOKED:
+            continue
+
+        if current.system_fingerprint == system_fp:
+            if _refresh_machine_fields(current, derived, receipt_digest, now):
+                counts["updated"] += 1
+        else:
+            _supersede(
+                current,
+                dep,
+                identity_fp=identity_fp,
+                system_fp=system_fp,
+                pol_version=pol_version,
+                receipt_digest=receipt_digest,
+                derived=derived,
+                now=now,
+            )
+            counts["superseded"] += 1
+
+    counts["stale"] = _mark_stale(dep, now)
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle transitions — attributed, mirroring assurance.remediation
+# ---------------------------------------------------------------------------
+
+# The legal human transitions, keyed by the status the claim is in. STALE and
+# SUPERSEDED never appear as a *target* (they are machine-only outcomes), and
+# SUPERSEDED / REVOKED have no outgoing human moves (terminal). REVOKED is
+# reachable from every live state — a human may always withdraw a claim.
+_ALLOWED: dict[str, frozenset[str]] = {
+    Status.DRAFT: frozenset(
+        {Status.SUPPORTED, Status.PARTIALLY_VERIFIED, Status.VERIFIED, Status.CONTRADICTED, Status.UNKNOWN, Status.REVOKED}
+    ),
+    Status.SUPPORTED: frozenset(
+        {Status.VERIFIED, Status.PARTIALLY_VERIFIED, Status.CONTRADICTED, Status.UNKNOWN, Status.REVOKED}
+    ),
+    Status.PARTIALLY_VERIFIED: frozenset(
+        {Status.VERIFIED, Status.SUPPORTED, Status.CONTRADICTED, Status.UNKNOWN, Status.REVOKED}
+    ),
+    Status.VERIFIED: frozenset(
+        {Status.SUPPORTED, Status.PARTIALLY_VERIFIED, Status.CONTRADICTED, Status.UNKNOWN, Status.REVOKED}
+    ),
+    Status.CONTRADICTED: frozenset(
+        {Status.SUPPORTED, Status.PARTIALLY_VERIFIED, Status.UNKNOWN, Status.REVOKED}
+    ),
+    Status.UNKNOWN: frozenset(
+        {Status.SUPPORTED, Status.PARTIALLY_VERIFIED, Status.VERIFIED, Status.CONTRADICTED, Status.REVOKED}
+    ),
+    Status.STALE: frozenset(
+        {Status.SUPPORTED, Status.PARTIALLY_VERIFIED, Status.VERIFIED, Status.CONTRADICTED, Status.UNKNOWN, Status.REVOKED}
+    ),
+}
+
+# Never a legal human target — these are only ever set by the machine.
+_MACHINE_ONLY_TARGETS = frozenset({Status.STALE, Status.SUPERSEDED})
+
+
+class IllegalClaimTransition(ValueError):
+    """A claim lifecycle move the state machine forbids. A caller turns this into a
+    clean 400 rather than letting an illegal jump be silently coerced."""
+
+
+def _can_verify(claim: AssuranceClaim) -> bool:
+    """Whether a claim MAY read VERIFIED: its (weakest) evidence is
+    configuration/technically verified AND it does not rest on vendor assertions
+    (invariants 3 & 4). A human cannot hand-verify an unknown, contradicted, or
+    vendor claim."""
+    return claim.evidence_class in _VERIFIED_GRADE and not claim.vendor_asserted
+
+
+def can_transition(from_status: str, to_status: str) -> bool:
+    """Whether ``from_status → to_status`` is a legal claim lifecycle move,
+    ignoring the separate evidence gate on VERIFIED (checked in
+    :func:`apply_claim_transition`)."""
+    return to_status in _ALLOWED.get(from_status, frozenset())
+
+
+@transaction.atomic
+def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note: str = "") -> ClaimEvent:
+    """Move ``claim`` to ``to_status`` and record who did it.
+
+    Rejects (with :class:`IllegalClaimTransition`) a machine-only target
+    (STALE/SUPERSEDED), an illegal jump, and — the HARD RULE — any move into
+    VERIFIED that is not backed by configuration/technically-verified, non-vendor
+    evidence. Updates only ``status`` (and ``verified_at`` on a move to VERIFIED)
+    and writes an attributed :class:`ClaimEvent`. Atomic so the change and its audit
+    record land together or not at all."""
+    to_status = Status(to_status)
+    from_status = claim.status
+
+    if to_status in _MACHINE_ONLY_TARGETS:
+        raise IllegalClaimTransition(
+            f"{to_status} is a machine-only status, not a valid human transition target."
+        )
+    if not can_transition(from_status, to_status):
+        raise IllegalClaimTransition(
+            f"{from_status} → {to_status} is not a legal claim transition."
+        )
+    if to_status == Status.VERIFIED and not _can_verify(claim):
+        raise IllegalClaimTransition(
+            "Cannot verify a claim whose evidence is not configuration/technically "
+            "verified, or that rests on vendor assertions."
+        )
+
+    claim.status = to_status
+    fields = ["status", "updated_at"]
+    if to_status == Status.VERIFIED:
+        claim.verified_at = timezone.now()
+        fields.append("verified_at")
+    claim.save(update_fields=fields)
+
+    return ClaimEvent.objects.create(
+        claim=claim, from_status=from_status, to_status=to_status, actor=actor, note=note or ""
+    )
