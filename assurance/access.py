@@ -176,15 +176,18 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> dict:
     return edges
 
 
-def _reach(first_hops: list, start_path: list, edges: dict, visited: set) -> list:
+def _reach(first_hops: list, start_path: list, start_keys: list, edges: dict, visited: set) -> list:
     """Breadth-first transitive closure over declared edges.
 
     ``first_hops`` seeds the frontier (the principal's own declared edges, or, for
     the base principal, the un-owned tools the app invokes). Returns
-    ``[(asset, via_names, capability_key), ...]`` for every asset reached, each
-    with the shortest declared path (``via_names``) that reaches it. ``visited``
-    is threaded so a principal never reaches itself and a shared graph is walked
-    once per principal."""
+    ``[(asset, via_names, via_keys, capability_key), ...]`` for every asset
+    reached, each with the shortest declared path that reaches it — ``via_names``
+    for display and ``via_keys`` (the uuid of every hop, in parallel) as the stable
+    per-node key, since asset names are not unique. ``start_path``/``start_keys``
+    seed the path with the origin node (its name and uuid). ``visited`` is threaded
+    so a principal never reaches itself and a shared graph is walked once per
+    principal."""
     out: list[tuple] = []
     queue: deque = deque()
     for target, _hop, cap in first_hops:
@@ -192,56 +195,72 @@ def _reach(first_hops: list, start_path: list, edges: dict, visited: set) -> lis
             continue
         visited.add(target.pk)
         path = start_path + [target.name]
-        out.append((target, path, cap))
-        queue.append((target, path))
+        keys = start_keys + [str(target.uuid)]
+        out.append((target, path, keys, cap))
+        queue.append((target, path, keys))
     while queue:
-        node, path = queue.popleft()
+        node, path, keys = queue.popleft()
         for target, _hop, cap in edges.get(node.pk, []):
             if target.pk in visited:
                 continue
             visited.add(target.pk)
             npath = path + [target.name]
-            out.append((target, npath, cap))
-            queue.append((target, npath))
+            nkeys = keys + [str(target.uuid)]
+            out.append((target, npath, nkeys, cap))
+            queue.append((target, npath, nkeys))
     return out
 
 
-def _reach_entry(target, via: list, cap_key: str) -> dict:
+def _reach_entry(target, via: list, via_keys: list, cap_key: str) -> dict:
     """One concrete-asset reach: a target the principal can touch, its declared
     via-path, the capability the last hop confers, and its risk (raised one band
     when the target itself is unmanaged — reaching an ungoverned component is
-    worse than reaching a governed one)."""
+    worse than reaching a governed one).
+
+    ``target``/``via`` carry the human-readable names for display; ``target_uuid``
+    and ``via_keys`` (parallel to ``via``) carry the stable per-node uuid keys so a
+    consumer that slices or indexes a path does so by a unique key, never a
+    non-unique name."""
     spec = _kind_cap(target.kind)
     base = spec["risk"]
     managed = _managed(target)
     risk = base if managed else _RISK_RAISED[base]
     return {
         "target": target.name,
+        "target_uuid": str(target.uuid),
         "target_kind": target.kind,
         "target_kind_label": target.get_kind_display(),
         "target_classification": target.classification,
         "target_managed": managed,
         "via": via,
+        "via_keys": via_keys,
         "capability": cap_key,
         "risk": risk,
     }
 
 
-def _power_entry(asset, via_to_asset: list, perm: str, spec: dict) -> dict:
+def _power_entry(asset, via_to_asset: list, via_keys_to_asset: list, perm: str, spec: dict) -> dict:
     """One capability-power reach: a sensitive power a principal can exercise via
     a declared permission on itself or a tool it reaches. Grounded in the declared
     permission string, never guessed; risk raised one band when the declaring
-    component is unmanaged."""
+    component is unmanaged.
+
+    The target is a capability, not an asset, so ``target_uuid`` is ``None``;
+    ``via_keys`` stays parallel to ``via`` (the declaring component's uuid path plus
+    the same permission marker) so a consumer can slice it by uuid."""
     base = spec["risk"]
     managed = _managed(asset)
     risk = base if managed else _RISK_RAISED[base]
+    perm_marker = f"permission '{perm}'"
     return {
         "target": spec["label"],
+        "target_uuid": None,
         "target_kind": "capability",
         "target_kind_label": "Capability",
         "target_classification": None,
         "target_managed": managed,
-        "via": via_to_asset + [f"permission '{perm}'"],
+        "via": via_to_asset + [perm_marker],
+        "via_keys": via_keys_to_asset + [perm_marker],
         "capability": spec["key"],
         "risk": risk,
     }
@@ -290,16 +309,17 @@ def _principal_dict(
     # The principal's own declared permissions (a service account may carry them
     # directly; an agent's own block usually does not, but is read the same way).
     if own_asset is not None:
+        own_keys = [str(own_asset.uuid)]
         for perm, spec in _asset_permission_specs(own_asset):
             hold(own_asset, perm, spec)
-            reach.append(_power_entry(own_asset, [name], perm, spec))
+            reach.append(_power_entry(own_asset, [name], own_keys, perm, spec))
 
     # Concrete reaches + the powers each reached tool declares.
-    for target, via, cap_key in reaches_raw:
-        reach.append(_reach_entry(target, via, cap_key))
+    for target, via, via_keys, cap_key in reaches_raw:
+        reach.append(_reach_entry(target, via, via_keys, cap_key))
         for perm, spec in _asset_permission_specs(target):
             hold(target, perm, spec)
-            reach.append(_power_entry(target, via, perm, spec))
+            reach.append(_power_entry(target, via, via_keys, perm, spec))
 
     capabilities = sorted(
         held.values(), key=lambda c: (_risk_index(c["risk"]), c["key"])
@@ -471,11 +491,17 @@ def assess_effective_access(deployment) -> dict:
 
     def reaches_of(start_asset) -> list:
         visited = {start_asset.pk}
-        return _reach(edges.get(start_asset.pk, []), [start_asset.name], edges, visited)
+        return _reach(
+            edges.get(start_asset.pk, []),
+            [start_asset.name],
+            [str(start_asset.uuid)],
+            edges,
+            visited,
+        )
 
     for agent in agents:
         reaches_raw = reaches_of(agent)
-        for target, _via, _cap in reaches_raw:
+        for target, _via, _keys, _cap in reaches_raw:
             if target.kind in _TOOL_KINDS:
                 owned_tool_pks.add(target.pk)
         principals.append(
@@ -519,7 +545,7 @@ def assess_effective_access(deployment) -> dict:
     unowned_tools = [t for t in tools if t.pk not in owned_tool_pks]
     if unowned_tools:
         first_hops = [(t, "invokes", _kind_cap(t.kind)["key"]) for t in unowned_tools]
-        base_reaches = _reach(first_hops, [deployment.name], edges, set())
+        base_reaches = _reach(first_hops, [deployment.name], [str(deployment.uuid)], edges, set())
         principals.append(
             _principal_dict(
                 key=f"deployment:{deployment.uuid}",

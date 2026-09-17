@@ -77,6 +77,20 @@ def test_finding_maps_to_expected_dimensions():
     assert result["summary"]["dimensions_touched"] == 3
 
 
+def test_mapped_finding_types_are_counted_case_insensitively():
+    """Regression: the crosswalk lookup is case-insensitive, but the distinct-type
+    count used to store the non-lowercased type. "SQL_Injection" and "sql_injection"
+    then double-counted as two mapped types though they map identically. They must
+    count as one."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    _finding(dep, "SQL_Injection", "high", n="upper")
+    _finding(dep, "sql_injection", "high", n="lower")
+
+    result = build_business_impact(dep)
+    # Both are the same crosswalk type — one distinct mapped finding type, not two.
+    assert result["summary"]["mapped_finding_types"] == 1
+
+
 def test_hinted_crosswalk_entries():
     # The crosswalk entries the roadmap named explicitly.
     dep = Deployment.objects.create(name="d", owner=_user())

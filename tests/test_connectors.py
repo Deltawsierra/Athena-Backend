@@ -120,6 +120,31 @@ def finding():
 # ---------------------------------------------------------------------------
 
 
+def test_finding_body_handles_scalar_control_mapping_value():
+    """Regression: a control_mapping value is normally a list, but a scalar string
+    must not be iterated char-by-char. The old ``', '.join(str(v) for v in values)``
+    turned a scalar "LLM01" into "L, L, M, 0, 1". A scalar must render whole, while a
+    list still joins its items."""
+    from assurance.connectors.base import finding_body
+
+    summary = {
+        "severity": "high",
+        "finding_type": "prompt_injection",
+        "location": "/x",
+        "description": "d",
+        "recommendation": "r",
+        "uuid": "u-1",
+        "deployment": {"name": "dep", "environment": "production"},
+        "control_mapping": {"owasp-llm": "LLM01", "mitre": ["T1059", "T1203"]},
+    }
+    body = finding_body(summary)
+    # The scalar renders whole, never split into characters.
+    assert "owasp-llm: LLM01" in body
+    assert "L, L, M" not in body
+    # A list value still joins its items.
+    assert "mitre: T1059, T1203" in body
+
+
 def test_registry_maps_names_to_classes():
     assert get_connector_class("jira") is JiraConnector
     assert get_connector_class("servicenow") is ServiceNowConnector

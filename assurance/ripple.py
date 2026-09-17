@@ -176,33 +176,39 @@ def _phrase(entry: dict, category: str) -> str:
     return f"Could move laterally to {target}"
 
 
-def _downstream_from(node_name: str, principals: list) -> list:
+def _downstream_from(node_key: str, principals: list) -> list:
     """The evidenced downstream reach of a node, read off the effective-access
-    graph. Every principal reach path is sliced at ``node_name``; only the portion
-    *beyond* the node is downstream. A reach is included only when the node is not
-    the last element of the path — a node reaching *itself* is not a consequence.
+    graph. Every principal reach path is sliced at ``node_key`` — the node's stable
+    uuid, matched against the path's ``via_keys`` (never its non-unique name); only
+    the portion *beyond* the node is downstream. A reach is included only when the
+    node is not the last element of the path — a node reaching *itself* is not a
+    consequence.
 
     Returns reach-entry dicts (as :func:`assurance.access.assess_effective_access`
-    shapes them) with ``via`` rewritten to the sliced sub-path. Deduplicated by
-    (target, sub-path, capability) so paths shared by several principals collapse to
-    one, keeping the strongest risk. No hop is added — this only slices paths the
-    access assessment already attested, inheriting its no-invented-reach guarantee.
+    shapes them) with ``via``/``via_keys`` rewritten to the sliced sub-path.
+    Deduplicated by (target uuid, sub-path uuids, capability) so paths shared by
+    several principals collapse to one, keeping the strongest risk. No hop is added —
+    this only slices paths the access assessment already attested, inheriting its
+    no-invented-reach guarantee.
     """
     best: dict[tuple, dict] = {}
     for principal in principals:
         for reach in principal["effective_reach"]:
             via = reach["via"]
-            if node_name not in via:
+            via_keys = reach["via_keys"]
+            if node_key is None or node_key not in via_keys:
                 continue
-            idx = via.index(node_name)
+            idx = via_keys.index(node_key)
             # The node must have something beyond it in the path to be a downstream
             # consequence; a path that ends at the node reaches nothing further.
-            if idx >= len(via) - 1:
+            if idx >= len(via_keys) - 1:
                 continue
             subpath = via[idx:]
+            subkeys = via_keys[idx:]
             entry = dict(reach)
             entry["via"] = subpath
-            key = (entry["target"], tuple(subpath), entry["capability"])
+            entry["via_keys"] = subkeys
+            key = (entry["target_uuid"], tuple(subkeys), entry["capability"])
             existing = best.get(key)
             if existing is None or _risk_index(entry["risk"]) < _risk_index(existing["risk"]):
                 best[key] = entry
@@ -296,6 +302,7 @@ def assess_ripple(deployment) -> dict:
             origin = {
                 "key": f"node:{name}",
                 "origin": name,
+                "origin_uuid": None,
                 "origin_types": [],
                 "reasons": [],
                 "risk": RISK_BASELINE,
@@ -312,6 +319,9 @@ def assess_ripple(deployment) -> dict:
         if "principal" not in origin["origin_types"]:
             origin["origin_types"].append("principal")
         origin["key"] = principal["key"]
+        # The principal's node uuid, the stable key downstream slicing uses. The
+        # key is "asset:<uuid>" or "deployment:<uuid>".
+        origin["origin_uuid"] = principal["key"].split(":", 1)[1]
         origin["principal_kind"] = principal["kind"]
         origin["principal_kind_label"] = principal["kind_label"]
         origin["privilege_level"] = principal["privilege_level"]
@@ -330,6 +340,10 @@ def assess_ripple(deployment) -> dict:
             continue
         name = finding.asset.name
         origin = ensure(name)
+        # A finding-only origin keys off its asset's uuid; a principal origin (built
+        # first) already set origin_uuid, so keep that.
+        if origin["origin_uuid"] is None:
+            origin["origin_uuid"] = str(finding.asset.uuid)
         if "finding" not in origin["origin_types"]:
             origin["origin_types"].append("finding")
         origin["risk"] = _max_risk(origin["risk"], RISK_HIGH)
@@ -349,7 +363,7 @@ def assess_ripple(deployment) -> dict:
     evidenced_total = 0
 
     for origin in origins.values():
-        downstream = _downstream_from(origin["origin"], principals)
+        downstream = _downstream_from(origin["origin_uuid"], principals)
         origin["evidenced_reach"] = bool(downstream)
         origin["consequence_count"] = len(downstream)
         origin["findings"].sort(key=lambda f: (f["finding_type"], f["title"], f["uuid"]))
