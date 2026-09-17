@@ -11,6 +11,7 @@ from .views import (
     FindingViewSet,
     ProviderAssertionViewSet,
     ProviderViewSet,
+    RetestRequirementViewSet,
     UnknownViewSet,
 )
 
@@ -22,5 +23,6 @@ router.register(r"providers", ProviderViewSet, basename="provider")
 router.register(r"provider-assertions", ProviderAssertionViewSet, basename="provider-assertion")
 router.register(r"unknowns", UnknownViewSet, basename="unknown")
 router.register(r"claims", ClaimViewSet, basename="claim")
+router.register(r"retest-requirements", RetestRequirementViewSet, basename="retest-requirement")
 
 urlpatterns = router.urls

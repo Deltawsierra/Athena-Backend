@@ -31,9 +31,13 @@ Three parts:
   STALE/SUPERSEDED be a human target, and HARD-refuses any move into VERIFIED that
   is not backed by configuration/technically-verified, non-vendor evidence.
 
-The temporal INVALIDATES backbone that fires contradiction across dependent claims
-is a SEPARATE follow-up; the only cross-version mechanism here is the
-system_fingerprint-change → supersede seam.
+The system_fingerprint-change → supersede seam is the cross-version mechanism
+here; the temporal INVALIDATES backbone that turns a state change into an
+attributed, durable *retest obligation* on the affected claims lives in
+:mod:`assurance.invalidation` (SPINE Phase 2), which extends this module. Its one
+tie-back into :func:`derive_claims` is at the end of the reconciler: once a
+re-derivation has rebound a claim to the changed state, any open retest obligation
+that rebinding satisfies is resolved (:func:`assurance.invalidation.resolve_satisfied_requirements`).
 """
 
 from __future__ import annotations
@@ -533,6 +537,17 @@ def derive_claims(deployment, *, now=None) -> dict:
             counts["superseded"] += 1
 
     counts["stale"] = _mark_stale(dep, now)
+
+    # The temporal backbone tie-back (SPINE Phase 2): now that this reconcile has
+    # rebound each claim to the current system state, resolve any open retest
+    # obligation that rebinding satisfies. A retest is earned by a re-derivation
+    # that rebinds, never by a machine merely no longer flagging drift. Imported
+    # lazily because assurance.invalidation imports from this module. This never
+    # changes the returned counts — resolution is a side effect on the obligations,
+    # and the check-invalidations endpoint reports the resolved count itself.
+    from .invalidation import resolve_satisfied_requirements
+
+    resolve_satisfied_requirements(dep, system_fp=system_fp, now=now)
     return counts
 
 
