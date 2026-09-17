@@ -22,6 +22,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 # ---------------------------------------------------------------------------
@@ -748,3 +749,231 @@ class DataBoundary(models.Model):
 
     def __str__(self) -> str:
         return f"Data boundary for {self.deployment.name}"
+
+
+# ---------------------------------------------------------------------------
+# AssuranceClaim — a version-bound, falsifiable assurance statement (SPINE)
+# ---------------------------------------------------------------------------
+
+
+class AssuranceClaim(models.Model):
+    """A positive, falsifiable *statement* an auditor can carry, re-verify, and
+    watch expire — the SPINE Phase 1 gap the record did not fill.
+
+    A :class:`Finding` is a negative observation. An **AssuranceClaim** is the
+    other side: a positive claim ("this deployment's data destinations are all
+    within the approved EU boundary", "the agent's effective access is
+    least-privilege") bound to a specific system state (``system_fingerprint``),
+    the rule-set version it was evaluated under (``policy_version``), and an
+    ``environment``. It is honest by construction, and enforces the invariants the
+    rest of the assurance layer lives by:
+
+    1. **Version-bound.** A claim is true *of a system state*. A change in
+       ``system_fingerprint`` does not mutate the claim in place — it SUPERSEDES
+       the old version (``valid_to`` set, status ``SUPERSEDED``) and opens a new
+       current one, so history is bitemporal and never rewritten.
+    2. **Never a fabricated pass.** ``confidence`` is ``None`` when the claim is
+       UNKNOWN — never ``0.0`` read as a passing score.
+    3. **Unknown/contradicted/stale never coerced to verified.** The lifecycle
+       (see :mod:`assurance.claims`) refuses any transition into VERIFIED that is
+       not backed by verified evidence, and staleness moves a claim *away* from a
+       pass, never toward one.
+    4. **Vendor claims cannot read VERIFIED.** ``vendor_asserted`` is true when the
+       strongest supporting evidence is still vendor-asserted-or-weaker; such a
+       claim caps at SUPPORTED, and a human cannot hand-verify it.
+    5. **A claim is only as strong as its weakest evidence.** ``evidence_class`` is
+       the weakest supporting class behind the claim (the same weakest-link
+       discipline :attr:`Finding.evidence_class` uses).
+    6. **Attributed lifecycle.** Every status change is a :class:`ClaimEvent` with
+       an actor, so who moved a claim, from where to where, is durable and never
+       silently coerced.
+    """
+
+    class ClaimType(models.TextChoices):
+        DATA_BOUNDARY = "data_boundary", "Data boundary"
+        EFFECTIVE_ACCESS = "effective_access", "Effective access"
+        AI_BOM = "ai_bom", "AI bill of materials"
+
+    class ClaimStatus(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        SUPPORTED = "supported", "Supported"
+        VERIFIED = "verified", "Verified"
+        PARTIALLY_VERIFIED = "partially_verified", "Partially verified"
+        CONTRADICTED = "contradicted", "Contradicted"
+        UNKNOWN = "unknown", "Unknown"
+        STALE = "stale", "Stale"
+        SUPERSEDED = "superseded", "Superseded"
+        REVOKED = "revoked", "Revoked"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="assurance_claims"
+    )
+    # The optional subject of the claim: a specific component it is about. SET_NULL
+    # so retiring an asset never deletes the durable claim history.
+    asset = models.ForeignKey(
+        Asset,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assurance_claims",
+    )
+
+    claim_type = models.CharField(max_length=32, choices=ClaimType.choices)
+    statement = models.TextField()
+
+    # The STABLE claim-identity key: sha256(deployment.uuid | claim_type |
+    # subject_key). The same across every version of the same claim, so a
+    # re-derive finds the current version rather than duplicating it.
+    fingerprint = models.CharField(max_length=64, db_index=True)
+    # The system state this claim was observed true of. A CHANGE here versions the
+    # claim (supersede + new current version); it is never a dedup key on its own.
+    system_fingerprint = models.CharField(max_length=64)
+    # The rule-set / evaluator version the claim was assessed under (= the receipt
+    # standard version), so a consumer knows which policy produced this result.
+    policy_version = models.CharField(max_length=120)
+    # The environment, copied from the deployment at derivation so a claim carries
+    # the context it was made in even if the deployment is later re-homed.
+    environment = models.CharField(max_length=32, choices=Deployment.Environment.choices)
+
+    status = models.CharField(
+        max_length=32, choices=ClaimStatus.choices, default=ClaimStatus.DRAFT, db_index=True
+    )
+    # The WEAKEST supporting evidence class (invariant 5). Defaults to UNKNOWN so a
+    # claim with no assessed basis never reads as strongly evidenced.
+    evidence_class = models.CharField(
+        max_length=32, choices=EvidenceClass.choices, default=EvidenceClass.UNKNOWN
+    )
+    # None when unknown — NEVER 0.0 read as a passing score (invariant 2).
+    confidence = models.FloatField(null=True, blank=True)
+    # True when the strongest supporting evidence is still vendor-asserted-or-weaker
+    # — such a claim may not read VERIFIED (invariant 4).
+    vendor_asserted = models.BooleanField(default=False)
+
+    # The standing six-state decision echo, None-safe: an unassessed deployment has
+    # no decision, and an absent decision is never read as "ready".
+    assessment = models.CharField(
+        max_length=32, choices=Deployment.Decision.choices, null=True, blank=True
+    )
+
+    # Honest, non-sensitive narrative — NEVER raw payloads, secrets, or target
+    # material. What supports the claim, and what contradicts it.
+    supporting_summary = models.TextField(blank=True)
+    contradicting_summary = models.TextField(blank=True)
+    # The conditions that would falsify this claim (what to watch for), as a list
+    # of short strings. A falsifiable claim names how it could be proven wrong.
+    invalidation_conditions = models.JSONField(default=list, blank=True)
+
+    # The version that replaced this one, once superseded. SET_NULL so trimming a
+    # newer version never deletes the older row's identity.
+    superseded_by = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supersedes",
+    )
+    # The human accountable for this claim. A re-derive never clobbers it.
+    human_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="owned_claims",
+    )
+    # The deployment assurance-receipt digest at the time the claim was (last)
+    # derived — provenance binding the claim to the evidence state behind it.
+    receipt_digest = models.CharField(max_length=64, blank=True)
+
+    # Bitemporal validity: the window this version of the claim is the current
+    # truth. ``valid_to`` null means this is the current version.
+    valid_from = models.DateTimeField(default=timezone.now)
+    valid_to = models.DateTimeField(null=True, blank=True)
+
+    verified_at = models.DateTimeField(null=True, blank=True)
+    expiration = models.DateTimeField(null=True, blank=True)
+
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            # Only ONE current version (valid_to IS NULL) per claim identity, so a
+            # deployment never carries two live versions of the same claim. Older
+            # superseded versions (valid_to set) are exempt, keeping full history.
+            models.UniqueConstraint(
+                fields=["deployment", "fingerprint"],
+                condition=Q(valid_to__isnull=True),
+                name="uq_current_claim",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deployment", "status"]),
+            models.Index(fields=["deployment", "claim_type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_claim_type_display()}: {self.get_status_display()}"
+
+    @property
+    def is_stale(self) -> bool:
+        """Whether a CURRENT claim's evidence has expired — last observed longer
+        ago than :data:`assurance.change.EVIDENCE_TTL_DAYS`, so a re-verify is due
+        before it is read as current. A superseded version is history, not a live
+        claim, so it is never itself "stale"."""
+        from .change import EVIDENCE_TTL_DAYS, age_days
+
+        if self.valid_to is not None:
+            return False
+        days = age_days(self, timezone.now())
+        return days is not None and days >= EVIDENCE_TTL_DAYS
+
+
+# ---------------------------------------------------------------------------
+# ClaimEvent — one attributed step in an assurance claim's lifecycle (SPINE)
+# ---------------------------------------------------------------------------
+
+
+class ClaimEvent(models.Model):
+    """One attributed lifecycle step of an :class:`AssuranceClaim`.
+
+    Every status change on a claim — a machine derivation, a human transition, a
+    supersede, a revoke — writes one of these, so a claim's lifecycle is a durable,
+    attributed audit trail: who moved it, from where to where, and why. It mirrors
+    :class:`RemediationEvent` exactly rather than inventing a second attribution
+    mechanism. ``from_status`` is blank only for a synthetic seed event (a claim's
+    first appearance, ``∅ → status``); ``actor`` is null for a machine derivation,
+    which reads as "not human-attributed", never as "no one did it"."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    claim = models.ForeignKey(
+        AssuranceClaim, on_delete=models.CASCADE, related_name="events"
+    )
+    from_status = models.CharField(
+        max_length=32, choices=AssuranceClaim.ClaimStatus.choices, blank=True
+    )
+    to_status = models.CharField(
+        max_length=32, choices=AssuranceClaim.ClaimStatus.choices
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="claim_events",
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["claim", "created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.from_status or '∅'} → {self.to_status} on claim {self.claim_id}"
