@@ -1087,3 +1087,69 @@ class RetestRequirement(models.Model):
         """Whether the obligation is still outstanding — no fresh derivation has
         yet rebound the claim to the changed state and satisfied it."""
         return self.resolved_at is None
+
+
+# ---------------------------------------------------------------------------
+# DeclaredComponent — the customer's declared architecture (SPINE Stage 3)
+# ---------------------------------------------------------------------------
+
+
+class DeclaredComponent(models.Model):
+    """One component the customer *declares* their AI system is built from.
+
+    The AI-BOM (:func:`assurance.bom.build_ai_bom`) enumerates the **observed**
+    architecture — every component discovery actually found. A DeclaredComponent is
+    the other half: what the customer says *should* be there. Comparing the two
+    (:func:`assurance.bom_drift.assess_bom_drift`) is how SPINE surfaces drift —
+    "declared 3 tools / 1 provider / 1 MCP server, observed 5 tools / a fallback
+    provider / 3 MCP servers" — and turns an undeclared (shadow) component into a
+    finding and a contradiction of the "the BOM enumerates the full supply chain"
+    claim.
+
+    It mirrors :class:`Asset`'s taxonomy (same ``Kind``) and dedup key
+    (deployment + kind + identifier) so declared and observed match on the same
+    identity. The provider is named, not linked: a declaration is what the customer
+    asserts, which may reference a vendor no :class:`Provider` row exists for yet.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="declared_components"
+    )
+    # Same taxonomy as the observed Asset, so declared and observed compare on a
+    # shared vocabulary.
+    kind = models.CharField(max_length=32, choices=Asset.Kind.choices, default=Asset.Kind.OTHER)
+    name = models.CharField(max_length=255)
+    # The declared component's stable identity (endpoint, ARN, tool name, ...),
+    # matched against the observed asset's ``identifier``. Blank falls back to name.
+    identifier = models.CharField(max_length=1024, blank=True)
+    # The vendor the customer declares behind this component, by name — a
+    # declaration references what the customer asserts, not necessarily a Provider
+    # row that exists yet.
+    provider_name = models.CharField(max_length=255, blank=True)
+    note = models.TextField(blank=True)
+    # Who declared it, kept for provenance. SET_NULL so removing a user never
+    # deletes the declaration.
+    declared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="declared_components",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["deployment", "kind", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "kind", "identifier"],
+                name="uq_declared_deployment_kind_identifier",
+            ),
+        ]
+        indexes = [models.Index(fields=["deployment", "kind"])]
+
+    def __str__(self) -> str:
+        return f"declared {self.name} ({self.get_kind_display()})"

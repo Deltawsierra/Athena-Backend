@@ -50,6 +50,7 @@ from django.utils import timezone
 
 from .access import assess_effective_access
 from .bom import build_ai_bom
+from .bom_drift import assess_bom_drift
 from .boundary import assess_boundary
 from .capability import RISK_HIGH
 from .change import EVIDENCE_TTL_DAYS, age_days
@@ -261,21 +262,33 @@ def _derive_effective_access(deployment) -> dict:
 
 
 def _derive_ai_bom(deployment) -> dict:
-    """AI_BOM claim from :func:`assurance.bom.build_ai_bom`.
+    """AI_BOM claim from :func:`assurance.bom.build_ai_bom` and declared-vs-observed
+    drift (:func:`assurance.bom_drift.assess_bom_drift`, SPINE Stage 3).
 
     No providers ⇒ UNKNOWN; otherwise SUPPORTED, capped by the BOM's weakest
-    evidence. Drift detection (which could contradict a BOM) is a later connector
-    phase, so this deriver never reaches VERIFIED or CONTRADICTED here."""
+    evidence. **Drift is the deferred CONTRADICTED path**: when the customer has
+    declared an architecture and an undeclared (shadow) component or provider is
+    observed, the BOM does not enumerate the full supply chain, so the claim is
+    CONTRADICTED — the invalidation Stage 1C/1D then act on."""
     result = build_ai_bom(deployment)
     providers = result["providers"]
     summary = result["summary"]
+    drift = assess_bom_drift(deployment)
 
     fact_classes = [
         f["evidence_class"] for p in providers for f in p["declared_facts"] if f.get("evidence_class")
     ]
     weakest, _strongest, vendor_asserted = _grade_pool(fact_classes)
 
-    if summary["provider_count"] == 0:
+    if drift["drift_detected"]:
+        # A declared architecture with an undeclared component/provider observed:
+        # the BOM is demonstrably incomplete. Drift is a configuration-verified
+        # observation (we saw the component), so the contradiction is not vendor
+        # evidence — a false completeness claim carries no supporting confidence.
+        status = Status.CONTRADICTED
+        evidence_class = EvidenceClass.CONFIGURATION_VERIFIED.value
+        vendor_asserted = False
+    elif summary["provider_count"] == 0:
         status = Status.UNKNOWN
         evidence_class = EvidenceClass.UNKNOWN.value
         vendor_asserted = True
@@ -288,6 +301,18 @@ def _derive_ai_bom(deployment) -> dict:
         f"{summary['shadow_components']} shadow component(s)."
     )
     contradicting_bits: list[str] = []
+    if drift["drift_detected"]:
+        d = drift["summary"]
+        parts = []
+        if d["undeclared"]:
+            parts.append(f"{d['undeclared']} undeclared component(s)")
+        if d["undeclared_providers"]:
+            parts.append(f"{d['undeclared_providers']} undeclared provider(s)")
+        contradicting_bits.append(
+            "Observed architecture drifts from the declaration: "
+            + ", ".join(parts)
+            + " not in the declared bill of materials."
+        )
     if summary["shadow_components"] > 0:
         contradicting_bits.append(
             f"{summary['shadow_components']} unmanaged (shadow) component(s) in the supply chain."
@@ -337,7 +362,7 @@ def _prefetched(deployment) -> Deployment:
     the receipt read — so a derive is a fixed number of queries, never O(assets)."""
     return (
         Deployment.objects.prefetch_related(
-            "assets__provider__assertions", "findings__evidence"
+            "assets__provider__assertions", "findings__evidence", "declared_components"
         )
         .select_related("data_boundary")
         .get(pk=deployment.pk)
