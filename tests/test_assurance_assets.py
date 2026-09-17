@@ -189,6 +189,38 @@ def test_asset_api_lists_with_finding_count_and_scopes():
     assert count == 0
 
 
+def test_asset_api_exposes_provider_uuid_as_the_join_key():
+    """An asset resolving to a provider carries that provider's uuid — the stable
+    key the dashboard's assurance graph uses to draw the asset→provider edge and
+    reach the provider's profile. A host asset with no provider carries null."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = Deployment.objects.create(name="d", owner=admin)
+    scan = PentestScan.objects.create(
+        user=admin, target_url="https://api.llm.test/v1", consent=True,
+        target_config={"kind": "llm", "adapter": "openai_style",
+                       "base_url": "https://api.llm.test/v1", "model": "gpt-x"},
+    )
+    derive_assets(dep, scan)
+    model_asset = dep.assets.get(kind=Asset.Kind.MODEL)
+    host_asset = dep.assets.get(kind=Asset.Kind.API)
+
+    factory = APIRequestFactory()
+    view = AssetViewSet.as_view({"get": "list"})
+    request = factory.get("/api/assurance/assets/")
+    force_authenticate(request, user=admin)
+    resp = view(request)
+    assert resp.status_code == 200
+    rows = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+    by_uuid = {str(r["uuid"]): r for r in rows}
+
+    model_row = by_uuid[str(model_asset.uuid)]
+    assert str(model_row["provider_uuid"]) == str(model_asset.provider.uuid)
+    assert model_row["provider_name"] == model_asset.provider.name
+
+    host_row = by_uuid[str(host_asset.uuid)]
+    assert host_row["provider_uuid"] is None  # no provider → no edge
+
+
 def test_llm_scan_view_is_fixed_and_persists_its_declared_target():
     """The old view passed a `target=` kwarg the model has no field for (a 500);
     it now stores the base_url as target_url and the declared config."""

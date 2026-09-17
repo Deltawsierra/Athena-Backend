@@ -19,11 +19,12 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from .decision import recompute_decision
-from .models import Asset, Deployment, Finding, Provider, Unknown
+from .models import Asset, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .serializers import (
     AssetSerializer,
     DeploymentSerializer,
     FindingSerializer,
+    ProviderAssertionSerializer,
     ProviderSerializer,
     UnknownSerializer,
 )
@@ -156,11 +157,70 @@ class AssetViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         return qs
 
 
-class ProviderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class ProviderViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Providers are a global registry (an Asset points at one), so reads are
+    open to any authenticated operator. An admin may declare a provider and edit
+    its assurance profile; a non-admin may not (open reads, admin-only writes)."""
+
     serializer_class = ProviderSerializer
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "uuid"
-    queryset = Provider.objects.all()
+    http_method_names = ["get", "post", "patch", "head", "options"]
+    queryset = Provider.objects.all().prefetch_related("assertions")
+
+    def create(self, request, *args, **kwargs):
+        _require_admin(request)
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        _require_admin(request)
+        return super().update(request, *args, **kwargs)
+
+
+class ProviderAssertionViewSet(viewsets.ModelViewSet):
+    """The graded facts of a provider's assurance profile (Phase 1.5). Reads are
+    open; creating/editing/deleting an assertion is admin-only and records who
+    made the change."""
+
+    serializer_class = ProviderAssertionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = "uuid"
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        qs = ProviderAssertion.objects.select_related("provider", "updated_by").all()
+        provider = self.request.query_params.get("provider")
+        if provider:
+            valid = _valid_uuid(provider)
+            qs = qs.filter(provider__uuid=valid) if valid else qs.none()
+        field = self.request.query_params.get("field")
+        if field:
+            qs = qs.filter(field=field)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        _require_admin(request)
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        _require_admin(request)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        _require_admin(request)
+        return super().destroy(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        serializer.save(updated_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(updated_by=self.request.user)
 
 
 class UnknownViewSet(
