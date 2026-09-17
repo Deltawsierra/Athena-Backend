@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .change import CHANGE_LABELS, age_days, change_status, is_stale
+from .receipt import finding_receipt
 from .models import (
     Asset,
     Deployment,
@@ -72,6 +73,10 @@ class FindingSerializer(serializers.ModelSerializer):
     change_label = serializers.SerializerMethodField()
     age_days = serializers.SerializerMethodField()
     stale = serializers.SerializerMethodField()
+    # Assurance receipt (spine, EXPOSE): a recomputable digest binding this finding
+    # to its evidence hashes. Integrity/provenance, not proof the conclusion is
+    # true — the evidence class carries how strongly it is known.
+    receipt = serializers.SerializerMethodField()
 
     class Meta:
         model = Finding
@@ -100,6 +105,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "change_label",
             "age_days",
             "stale",
+            "receipt",
             "first_seen",
             "last_seen",
         ]
@@ -125,6 +131,9 @@ class FindingSerializer(serializers.ModelSerializer):
 
     def get_stale(self, obj) -> bool:
         return is_stale(obj, self.context.get("now"))
+
+    def get_receipt(self, obj) -> dict:
+        return finding_receipt(obj)
 
 
 class AssetSerializer(serializers.ModelSerializer):
