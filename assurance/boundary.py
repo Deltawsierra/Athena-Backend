@@ -27,6 +27,8 @@ is surfaced for a human to read rather than guessed.
 
 from __future__ import annotations
 
+import re
+
 from .models import Asset
 
 # The asset kinds that are data destinations — a place the deployment's data can
@@ -41,33 +43,75 @@ DATA_DESTINATION_KINDS = {
     Asset.Kind.DATA_STORE,
 }
 
-# Values, normalised, that read as "yes, it trains on / shares data". Conservative
-# on purpose: anything with a negation ("no", "opted out", "zero retention") is
-# NOT treated as affirmative, so a boundary check never invents a violation from
-# an ambiguous phrase.
-_NEGATIONS = ("no", "not", "never", "opt", "zero", "false", "disabled", "off")
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+# Whole-word negations. Matched as tokens (word boundaries), NEVER as substrings,
+# so "now" is not read as "no" and "opt-in" is not read as an "opt-out". These
+# suppress an affirmative reading so a boundary check never invents a violation
+# from an ambiguous phrase.
+_NEGATION_WORDS = frozenset({"no", "not", "never", "none", "zero", "false", "disabled", "off"})
+# Negations a single token cannot capture (hyphenated / two-word "opt out").
+_NEGATION_PHRASES = ("opt out", "opt-out", "opted out", "opted-out", "opts out")
+# Affirmative phrases that must win over the "opt" family ("opt-in" ≠ "opt-out").
+_AFFIRMATIVE_PHRASES = ("opt in", "opt-in", "opted in", "opted-in", "opts in")
+# Tokens that affirmatively say "yes, it trains on / shares data".
+_AFFIRMATIVE_WORDS = frozenset(
+    {"yes", "true", "train", "trains", "training", "trained", "share", "shares", "sharing", "shared"}
+)
 
 
-def _affirmative(value: str) -> bool:
+def _negated(value: str) -> bool:
+    """Whether a declared value carries a whole-word negation ("No", "opted out",
+    "zero retention", "disabled"). Word-boundary aware, so an incidental substring
+    ("now", "opt-in") never counts as a negation."""
     v = (value or "").strip().lower()
     if not v:
         return False
-    if any(neg in v for neg in _NEGATIONS):
+    # An explicit affirmative "opt in" beats the "opt out" family.
+    if any(p in v for p in _AFFIRMATIVE_PHRASES):
         return False
-    return v.startswith(("yes", "true", "1")) or "train" in v or "share" in v
+    if any(p in v for p in _NEGATION_PHRASES):
+        return True
+    return bool(set(_WORD_RE.findall(v)) & _NEGATION_WORDS)
+
+
+def _affirmative(value: str) -> bool:
+    """Does a declared value affirmatively say the provider trains on / shares
+    customer data? A whole-word negation suppresses it, but an incidental
+    substring ("now", "opt-in") does not — so a real training declaration is never
+    silently lost (the dangerous direction), and a real negation never invents a
+    violation."""
+    v = (value or "").strip().lower()
+    if not v or _negated(v):
+        return False
+    if any(p in v for p in _AFFIRMATIVE_PHRASES):
+        return True
+    return v.startswith(("yes", "true", "1")) or bool(set(_WORD_RE.findall(v)) & _AFFIRMATIVE_WORDS)
+
+
+def _shares_with_third_parties(value: str) -> bool:
+    """A provider's declared subprocessors posture read as a sharing signal: a
+    non-empty declaration that is not a negation ("none", "no subprocessors")
+    names third parties the data reaches. An empty value is a gap the caller
+    surfaces as an unknown, not sharing."""
+    v = (value or "").strip().lower()
+    return bool(v) and not _negated(v)
 
 
 def _region_allowed(declared: str, allowed_regions: list[str]) -> bool:
-    """A declared region is within boundary when it matches any approved region —
-    a case-insensitive two-way substring match, so ``eu`` approves ``eu-west-1``
-    and ``us-east-1`` approves the literal ``us-east-1``. A loose match by design:
-    it errs toward *not* flagging a plausibly-matching region."""
+    """A declared region is within boundary when it exactly matches an approved
+    region, or sits inside a coarser approved one as a delimited sub-region — so
+    ``eu`` approves ``eu-west-1`` and ``us-east-1`` approves the literal
+    ``us-east-1``, but ``us`` does NOT approve ``aus-east`` (no accidental
+    substring match). Case-insensitive."""
     d = (declared or "").strip().lower()
     if not d:
         return False
     for region in allowed_regions:
         r = str(region).strip().lower()
-        if r and (r in d or d in r):
+        if not r:
+            continue
+        if d == r or d.startswith(f"{r}-") or d.startswith(f"{r}_"):
             return True
     return False
 
@@ -90,6 +134,7 @@ def _assess_flow(provider, assets, policy) -> dict:
     assertions = _assertion_map(provider)
     region = assertions.get("region")
     training = assertions.get("trains_on_data")
+    sharing = assertions.get("subprocessors")
     violations: list[str] = []
     unknowns: list[str] = []
 
@@ -114,6 +159,17 @@ def _assess_flow(provider, assets, policy) -> dict:
                     f"provider declares it trains on customer data ('{training['value']}'), "
                     "which the approved boundary forbids"
                 )
+        # Third-party sharing: forbidden unless the boundary approves it. The
+        # provider's declared subprocessors are the sharing signal — named
+        # subprocessors are third parties the data reaches.
+        if not policy.third_party_sharing_allowed:
+            if not sharing:
+                unknowns.append("third-party sharing (subprocessor) posture not declared")
+            elif _shares_with_third_parties(sharing["value"]):
+                violations.append(
+                    f"provider declares third-party subprocessors ('{sharing['value']}'), "
+                    "which the approved boundary forbids"
+                )
 
     status = "violation" if violations else "unknown" if unknowns else "approved"
     return {
@@ -124,6 +180,7 @@ def _assess_flow(provider, assets, policy) -> dict:
         "assets": sorted({a.name for a in assets}),
         "region": region,
         "training": training,
+        "sharing": sharing,
         "status": status,
         "violations": violations,
         "unknowns": unknowns,

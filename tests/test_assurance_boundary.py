@@ -65,7 +65,9 @@ def test_region_within_the_boundary_is_approved():
     dep = Deployment.objects.create(name="d", owner=_user())
     p = _provider("EU Model Co", region="eu-west-1", trains_on_data="No")
     _asset(dep, provider=p, name="m")
-    _policy(dep, allowed_regions=["eu"])
+    # Allow sharing so this isolates the region check (undeclared sharing under a
+    # no-sharing boundary is its own unknown, covered separately).
+    _policy(dep, allowed_regions=["eu"], third_party_sharing_allowed=True)
 
     flow = boundary.assess_boundary(dep)["flows"][0]
     assert flow["status"] == "approved"
@@ -77,7 +79,7 @@ def test_training_when_forbidden_is_a_violation_but_a_negation_is_not():
     optedout = _provider("Clean", trains_on_data="No — opted out")
     _asset(dep, provider=trains, name="a")
     _asset(dep, provider=optedout, name="b")
-    _policy(dep, training_allowed=False)
+    _policy(dep, training_allowed=False, third_party_sharing_allowed=True)
 
     flows = {f["provider_name"]: f for f in boundary.assess_boundary(dep)["flows"]}
     assert flows["Trainer"]["status"] == "violation"
@@ -97,6 +99,77 @@ def test_undeclared_posture_is_an_unknown_not_a_violation():
     assert flow["violations"] == []
     assert any("region" in u for u in flow["unknowns"])
     assert any("training" in u for u in flow["unknowns"])
+
+
+def test_affirmative_training_is_not_lost_to_an_incidental_negation_substring():
+    """Regression: negations were substring-matched, so a real training
+    declaration containing 'opt' ('opt-in') or 'no' ('now') read as approved —
+    a false pass in the dangerous direction. It must now be a violation."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    optin = _provider("OptIn", trains_on_data="Yes, opt-in training is enabled")
+    now = _provider("Now", trains_on_data="trains on data for now")
+    _asset(dep, provider=optin, name="a")
+    _asset(dep, provider=now, name="b")
+    _policy(dep, training_allowed=False)
+
+    flows = {f["provider_name"]: f for f in boundary.assess_boundary(dep)["flows"]}
+    assert flows["OptIn"]["status"] == "violation"
+    assert flows["Now"]["status"] == "violation"
+
+
+def test_a_real_opt_out_is_still_not_a_violation():
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Clean", trains_on_data="No — opted out of all training")
+    _asset(dep, provider=p, name="m")
+    _policy(dep, training_allowed=False, third_party_sharing_allowed=True)
+    assert boundary.assess_boundary(dep)["flows"][0]["status"] == "approved"
+
+
+def test_region_is_not_approved_by_an_accidental_substring():
+    """Regression: two-way substring approved 'aus-east' under an ['us'] boundary
+    because 'us' is a substring. A region must match exactly or as a delimited
+    sub-region, so this is now a violation."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Elsewhere", region="aus-east-1", trains_on_data="No")
+    _asset(dep, provider=p, name="m")
+    _policy(dep, allowed_regions=["us"])
+    assert boundary.assess_boundary(dep)["flows"][0]["status"] == "violation"
+
+
+def test_a_delimited_subregion_is_still_within_boundary():
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("EU", region="eu-west-1", trains_on_data="No")
+    _asset(dep, provider=p, name="m")
+    _policy(dep, allowed_regions=["eu"], third_party_sharing_allowed=True)
+    assert boundary.assess_boundary(dep)["flows"][0]["status"] == "approved"
+
+
+def test_third_party_sharing_forbidden_but_declared_subprocessors_is_a_violation():
+    """Regression: third_party_sharing_allowed was surfaced but never enforced. A
+    provider declaring subprocessors under a no-sharing boundary must violate."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    shares = _provider("Shares", subprocessors="AWS, Cloudflare, Datadog")
+    clean = _provider("NoShare", subprocessors="None — no subprocessors")
+    _asset(dep, provider=shares, name="a")
+    _asset(dep, provider=clean, name="b")
+    # Allow training so only the sharing branch is exercised; forbid sharing.
+    _policy(dep, training_allowed=True, third_party_sharing_allowed=False)
+
+    flows = {f["provider_name"]: f for f in boundary.assess_boundary(dep)["flows"]}
+    assert flows["Shares"]["status"] == "violation"
+    assert any("subprocessor" in v for v in flows["Shares"]["violations"])
+    # A declared "no subprocessors" is not a sharing violation.
+    assert flows["NoShare"]["status"] == "approved"
+
+
+def test_undeclared_sharing_posture_is_an_unknown_not_a_pass():
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Silent")  # no subprocessors assertion
+    _asset(dep, provider=p, name="m")
+    _policy(dep, training_allowed=True, third_party_sharing_allowed=False)
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "unknown"
+    assert any("sharing" in u or "subprocessor" in u for u in flow["unknowns"])
 
 
 def test_no_declared_boundary_never_reads_as_permission():
