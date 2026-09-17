@@ -150,6 +150,36 @@ def test_personal_data_reach_is_not_invented_without_a_declared_edge():
     assert store["reachable_by"] == []  # no path fabricated
 
 
+def test_personal_context_readers_keyed_by_uuid_not_colliding_name():
+    """Regression (M2): asset names are not unique. A ``tool`` and a personal-data
+    ``data_store`` both named "store" must not cross-contaminate — the readers of
+    the tool "store" (an agent that reaches it) must NOT be reported as readers of
+    the unrelated data_store "store". The old name-keyed reach index over-reported
+    who could reach the personal-data store; keying on the target uuid fixes it."""
+    dep = _dep()
+    # Agent reaches a TOOL named "store", which connects to data_store "warehouse".
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"tools": ["tool-store"]})
+    _asset(dep, kind=Asset.Kind.TOOL, name="store", identifier="tool-store",
+           metadata={"server": "warehouse"})
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="warehouse",
+           metadata={"data_classification": "customer pii"})
+    # A SEPARATE personal data_store, also named "store", reached by nobody.
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="store", identifier="ds-store",
+           metadata={"data_classification": "customer pii"})
+
+    result = assess_personal_context(dep)
+    ds_store = next(s for s in result["stores"] if s["identifier"] == "ds-store")
+    warehouse = next(s for s in result["stores"] if s["identifier"] == "warehouse")
+
+    # The unrelated data_store "store" is reachable by nobody — the agent reaches the
+    # tool "store", not this store. No cross-contamination.
+    assert ds_store["reader_count"] == 0
+    assert ds_store["reachable_by"] == []
+    # The normal (non-colliding) reach is unchanged: the agent reaches warehouse.
+    assert any(r["principal"] == "assistant" for r in warehouse["reachable_by"])
+
+
 def test_personal_data_crossing_boundary_is_a_gap():
     dep = _dep()
     # An unmanaged personal-data store is a shadow destination outside any boundary.
@@ -253,6 +283,31 @@ def test_retention_window_alone_does_not_evidence_deletion():
     # "kept for 90 days" retains but names no erasure — deletion must not be claimed.
     assert deleted["evidenced"] is False
     assert deleted["gap"] is True
+
+
+def test_negated_no_deletion_retention_does_not_evidence_deletion():
+    """Regression (H2): a retention posture of "Indefinite; no deletion offered"
+    names a deletion word only to deny it. The old ``names_deletion`` matched the
+    "deletion" token and evidenced the DELETED stage. A negated value must leave
+    DELETED a gap, while an affirmative erasure ("deleted after 30 days") stays
+    evidenced."""
+    dep = _dep()
+    p = _provider("Forever Co", kind=Provider.Kind.CLOUD)
+    _assert(p, ProviderAssertion.Field.DATA_RETENTION, "Indefinite; no deletion offered",
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED)
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="s", provider=p)
+    deleted = _stages(assess_data_lifecycle(dep))[STAGE_DELETED]
+    assert deleted["evidenced"] is False
+    assert deleted["gap"] is True
+
+    # An affirmative erasure declaration still evidences deletion (no regression).
+    dep2 = _dep()
+    p2 = _provider("Erase Co", kind=Provider.Kind.CLOUD)
+    _assert(p2, ProviderAssertion.Field.DATA_RETENTION, "deleted after 30 days",
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED)
+    _asset(dep2, kind=Asset.Kind.DATA_STORE, name="s", provider=p2)
+    deleted2 = _stages(assess_data_lifecycle(dep2))[STAGE_DELETED]
+    assert deleted2["evidenced"] is True
 
 
 def test_flow_stage_not_evidenced_reads_not_evidenced():
@@ -429,6 +484,40 @@ def test_logging_without_control_is_a_gap():
     sink = assess_metadata_logging(dep)["sinks"][0]
     assert sink["control_evidenced"] is False
     assert any(g["type"] == "logged_without_control" for g in sink["gaps"])
+
+
+def test_negated_no_redaction_posture_is_not_credited_as_a_control():
+    """Regression (H1): a logging assertion of "Verbose logging, no redaction" names
+    a control word ("redaction") only to deny it. The old ``_CONTROL_TOKENS``
+    included negation words and matched "no", crediting a redaction control and
+    suppressing the ``logged_without_control`` gap. A provider that logs and
+    declares "no redaction" must yield ``control_evidenced=false`` and raise the
+    gap — while a genuine affirmative control still credits."""
+    dep = _dep()
+    # A model+provider sink carrying a logging assertion that is negated.
+    p = _provider("Loud Co", kind=Provider.Kind.MODEL_PROVIDER)
+    _assert(p, ProviderAssertion.Field.LOGGING, "Verbose logging, no redaction",
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED)
+    # The provider asset is the sink (declared via metadata log-sink flag) and it
+    # carries the negated logging posture; a model puts prompts in play.
+    _asset(dep, kind=Asset.Kind.API, name="sink", identifier="sink", provider=p,
+           metadata={"role": "logging"})
+    _asset(dep, kind=Asset.Kind.MODEL, name="m")
+    sink = next(s for s in assess_metadata_logging(dep)["sinks"] if s["asset_name"] == "sink")
+    assert sink["control_evidenced"] is False
+    assert any(g["type"] == "logged_without_control" for g in sink["gaps"])
+
+    # An affirmative redaction control still credits (no false negative).
+    dep2 = _dep()
+    p2 = _provider("Careful Co", kind=Provider.Kind.MODEL_PROVIDER)
+    _assert(p2, ProviderAssertion.Field.LOGGING, "prompts redacted before logging",
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED)
+    _asset(dep2, kind=Asset.Kind.API, name="sink", identifier="sink", provider=p2,
+           metadata={"role": "logging"})
+    _asset(dep2, kind=Asset.Kind.MODEL, name="m")
+    sink2 = next(s for s in assess_metadata_logging(dep2)["sinks"] if s["asset_name"] == "sink")
+    assert sink2["control_evidenced"] is True
+    assert not any(g["type"] == "logged_without_control" for g in sink2["gaps"])
 
 
 def test_shadow_log_sink_is_a_gap_and_no_values_leak():

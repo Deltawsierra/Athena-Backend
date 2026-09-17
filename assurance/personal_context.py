@@ -154,10 +154,12 @@ def _sensitivity(asset) -> tuple[str, list[str], str]:
 
 
 def _reach_index(access_result: dict) -> dict[str, list[dict]]:
-    """Index the evidenced effective-access reach graph by the *name* of the
-    concrete component reached: ``{target_name: [reader, ...]}``. A reader records
-    the principal that reaches the component and the reach's risk/via — read only
-    from what :func:`assurance.access.assess_effective_access` already attested."""
+    """Index the evidenced effective-access reach graph by the stable *uuid* of the
+    concrete component reached: ``{target_uuid: [reader, ...]}``. Keying on the uuid
+    (not the non-unique asset name) keeps two components sharing a name from
+    cross-contaminating each other's reader list. A reader records the principal
+    that reaches the component and the reach's risk/via — read only from what
+    :func:`assurance.access.assess_effective_access` already attested."""
     index: dict[str, list[dict]] = {}
     for principal in access_result["principals"]:
         for reach in principal["effective_reach"]:
@@ -165,7 +167,7 @@ def _reach_index(access_result: dict) -> dict[str, list[dict]]:
             # reach targets a power, not a store.
             if reach["target_kind"] == "capability":
                 continue
-            index.setdefault(reach["target"], []).append(
+            index.setdefault(reach["target_uuid"], []).append(
                 {
                     "principal": principal["name"],
                     "principal_kind": principal["kind"],
@@ -320,7 +322,7 @@ def assess_personal_context(deployment) -> dict:
         if asset.kind not in DATA_BEARING_KINDS:
             continue
         sensitivity, signals, evidence_class = _sensitivity(asset)
-        readers = reach_index.get(asset.name, [])
+        readers = reach_index.get(str(asset.uuid), [])
         stores.append(
             _store_dict(
                 asset,

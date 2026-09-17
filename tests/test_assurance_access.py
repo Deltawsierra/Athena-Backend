@@ -270,11 +270,23 @@ def test_deterministic_same_graph_same_output():
     first = assess_effective_access(build())
     second = assess_effective_access(build())
     # UUID-derived keys differ between builds; compare the structural content.
+    def _strip_reach(reach):
+        # target_uuid / via_keys are uuid-derived (added for stable per-node keying),
+        # so drop them the same way the principal's own key is dropped.
+        return [{k: v for k, v in r.items() if k not in ("target_uuid", "via_keys")} for r in reach]
+
     def strip_keys(r):
         return json.dumps(
             {
                 "summary": r["summary"],
-                "principals": [{k: v for k, v in p.items() if k != "key"} for p in r["principals"]],
+                "principals": [
+                    {
+                        k: (_strip_reach(v) if k == "effective_reach" else v)
+                        for k, v in p.items()
+                        if k != "key"
+                    }
+                    for p in r["principals"]
+                ],
             },
             sort_keys=True,
         )

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 
+from .boundary import _negated
 from .capability import (
     RISK_BASELINE,
     RISK_ELEVATED,
@@ -229,9 +230,14 @@ def assess_data_lifecycle(deployment) -> dict:
             # erasure/expiry (or zero retention). Otherwise deletion stays a gap —
             # "data is retained" is never read as "data is deleted".
             value = (retention_a.value or "").lower()
-            names_deletion = bool(set(_WORD_RE.findall(value)) & _DELETION_TOKENS) or any(
-                z in value for z in _ZERO_RETENTION
-            )
+            # Require an AFFIRMATIVE erasure/expiry declaration — a value that names
+            # a deletion word only to negate it ("no deletion offered", "deletion
+            # not supported", "retained forever") must leave DELETED a gap. The
+            # explicit zero-retention phrases are themselves affirmative ("nothing
+            # is kept"). Conservative under-crediting is the safe/honest direction.
+            names_deletion = (
+                bool(set(_WORD_RE.findall(value)) & _DELETION_TOKENS) and not _negated(value)
+            ) or any(z in value for z in _ZERO_RETENTION)
             if names_deletion:
                 rows[STAGE_DELETED]["components"].append(
                     _component(

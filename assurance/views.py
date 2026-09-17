@@ -16,7 +16,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Count
 from rest_framework import mixins, permissions, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from .access import assess_effective_access
@@ -78,6 +78,34 @@ def _require_admin(request) -> None:
         raise PermissionDenied("Changing the assurance record requires an admin role.")
 
 
+# Form-encoded bodies send booleans as strings, and ``bool("false")`` is ``True``.
+# These map a declared paused flag honestly so a request to LIFT a failsafe pause
+# is never misread as a request to hold it.
+_TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
+_FALSE_STRINGS = frozenset({"false", "0", "no", "off", ""})
+
+
+def _parse_paused(raw, default: bool) -> bool:
+    """Parse the failsafe ``paused`` flag from a request body. Absent → ``default``
+    (preserve current state). A real bool → itself. A string → mapped
+    case-insensitively (``true/1/yes/on`` → True, ``false/0/no/off/""`` → False).
+    Anything else raises ``ValidationError`` (HTTP 400) — a safety-relevant control
+    on the failsafe path must never be guessed."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _TRUE_STRINGS:
+            return True
+        if token in _FALSE_STRINGS:
+            return False
+    raise ValidationError(
+        {"paused": "Must be a boolean (true/false, 1/0, yes/no, on/off)."}
+    )
+
+
 def _valid_uuid(value: str) -> str | None:
     """A well-formed UUID string, or None. A malformed ``?deployment=`` filter
     must not reach the ORM as a raw string — that raises a Django ValidationError
@@ -115,7 +143,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         _require_admin(request)
         deployment = self.get_object()
         currently_paused = deployment.decision == Deployment.Decision.PAUSED
-        paused = bool(request.data.get("paused", currently_paused))
+        paused = _parse_paused(request.data.get("paused"), currently_paused)
         decision = recompute_decision(deployment, paused=paused)
         return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
 

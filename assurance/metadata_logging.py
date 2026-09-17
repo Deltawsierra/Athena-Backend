@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import re
 
+from .boundary import _negated
 from .capability import (
     RISK_BASELINE,
     RISK_ELEVATED,
@@ -77,12 +78,14 @@ _CATEGORY_ORDER = {
 }
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
-# Tokens in a logging assertion that name an actual leak-limiting control (so a
-# control is only credited when redaction/scrubbing is genuinely named).
+# Affirmative tokens in a logging assertion that name an actual leak-limiting
+# control (so a control is only credited when redaction/scrubbing is genuinely
+# named). Negation words are deliberately NOT here: a value like "no redaction"
+# names a control word only to say it is absent, and must never read as a control
+# — that negation is handled by boundary._negated in _logging_control.
 _CONTROL_TOKENS = frozenset(
     {"redact", "redacted", "redaction", "scrub", "scrubbed", "mask", "masked", "masking",
-     "anonymize", "anonymized", "anonymised", "filter", "filtered", "sanitize", "sanitized",
-     "no", "none", "disabled", "off", "zero"}
+     "anonymize", "anonymized", "anonymised", "filter", "filtered", "sanitize", "sanitized"}
 )
 
 
@@ -236,8 +239,14 @@ def _logging_control(asset) -> tuple[bool, str | None, str | None] | None:
     if assertion is None:
         return None
     value = (assertion.value or "").lower()
-    names_control = bool(set(_WORD_RE.findall(value)) & _CONTROL_TOKENS)
-    detail = "logging posture names a redaction / no-logging control" if names_control else "logging posture declared, no control named"
+    # Credit a redaction / scrubbing control only when an affirmative control verb
+    # is named AND the value is not negated. A negated value ("no redaction",
+    # "redaction disabled") names a control word only to deny it, so it must never
+    # read as a control — under-crediting is the safe/honest direction.
+    names_control = (
+        bool(set(_WORD_RE.findall(value)) & _CONTROL_TOKENS) and not _negated(value)
+    )
+    detail = "logging posture names a redaction / scrubbing control" if names_control else "logging posture declared, no control named"
     return names_control, assertion.evidence_class, detail
 
 

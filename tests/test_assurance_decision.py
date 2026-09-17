@@ -173,6 +173,59 @@ def test_recompute_preserves_an_operator_pause():
     assert resp2.data["decision"] == Deployment.Decision.READY_RESTRICTED
 
 
+def test_recompute_form_encoded_paused_false_lifts_pause():
+    """Regression (M1): a form-encoded ``paused=false`` sends the flag as the
+    string ``"false"``. The old ``bool(request.data.get("paused"))`` read
+    ``bool("false") == True`` and HELD the pause instead of lifting it — a
+    safety-relevant control on the failsafe path. It must now lift the pause, and a
+    bogus value must be a clean 400, never a silent hold."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = _deployment(admin)
+    _finding(dep, "medium", n="me")
+    dep.decision = Deployment.Decision.PAUSED
+    dep.save(update_fields=["decision"])
+
+    factory = APIRequestFactory()
+    view = DeploymentViewSet.as_view({"post": "recompute"})
+
+    # Form-encoded paused=false (a string) must LIFT the pause, not hold it.
+    lift = factory.post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": "false"}, format="multipart"
+    )
+    force_authenticate(lift, user=admin)
+    resp = view(lift, uuid=str(dep.uuid))
+    assert resp.status_code == 200
+    assert resp.data["decision"] == Deployment.Decision.READY_RESTRICTED
+    dep.refresh_from_db()
+    assert dep.decision == Deployment.Decision.READY_RESTRICTED
+
+    # A JSON boolean false lifts it too (parity with the form path).
+    dep.decision = Deployment.Decision.PAUSED
+    dep.save(update_fields=["decision"])
+    jlift = factory.post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": False}, format="json"
+    )
+    force_authenticate(jlift, user=admin)
+    jresp = view(jlift, uuid=str(dep.uuid))
+    assert jresp.data["decision"] == Deployment.Decision.READY_RESTRICTED
+
+    # Form-encoded paused=on / true HOLDS (sets) the pause.
+    hold = factory.post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": "on"}, format="multipart"
+    )
+    force_authenticate(hold, user=admin)
+    hresp = view(hold, uuid=str(dep.uuid))
+    assert hresp.data["decision"] == Deployment.Decision.PAUSED
+
+    # A bogus value is a clean 400, never a guessed hold or lift.
+    bogus = factory.post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": "maybe"}, format="multipart"
+    )
+    force_authenticate(bogus, user=admin)
+    bresp = view(bogus, uuid=str(dep.uuid))
+    assert bresp.status_code == 400
+
+
 def test_recompute_denied_to_non_admin():
     """A non-admin can read the graph but may not mutate the decision."""
     analyst = _user("ana", role=User.Roles.ANALYST)

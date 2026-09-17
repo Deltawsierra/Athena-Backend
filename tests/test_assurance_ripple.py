@@ -121,6 +121,40 @@ def test_no_consequence_for_a_hop_the_graph_lacks():
     assert not any(c["target"] == "warehouse" for c in result["consequences"])
 
 
+def test_downstream_sliced_by_uuid_not_colliding_name():
+    """Regression (M2): asset names are not unique. A ``tool`` and a ``data_store``
+    both named "store" must not cross-contaminate blast radius. The tool "store" is
+    a mid-path hop that reaches the "warehouse" downstream; the unrelated,
+    terminal data_store "store" (an origin via a high finding) reaches nothing.
+
+    The old name-based path slicing found "store" in the tool's path and wrongly
+    attributed the warehouse consequence to the data_store origin. Slicing on the
+    origin node's uuid attributes it to the correct node — the data_store origin
+    has no evidenced downstream reach."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"tools": ["tool-store"]})
+    # A TOOL named "store" reaches the warehouse (a real downstream hop).
+    _asset(dep, kind=Asset.Kind.TOOL, name="store", identifier="tool-store",
+           metadata={"permissions": ["db:read"], "server": "warehouse"})
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="warehouse")
+    # A SEPARATE terminal data_store, also named "store", is the origin (high finding).
+    ds_store = _asset(dep, kind=Asset.Kind.DATA_STORE, name="store", identifier="ds-store")
+    _finding(dep, asset=ds_store, severity="high", finding_type="data_exposure", title="exposed store")
+
+    result = assess_ripple(dep)
+    store_origin = _origins_by_name(result)["store"]
+    # The data_store "store" is terminal — no evidenced downstream reach. Under the
+    # name-slicing bug it wrongly inherited the tool "store"'s reach to warehouse.
+    assert store_origin["origin_uuid"] == str(ds_store.uuid)
+    assert store_origin["evidenced_reach"] is False
+    assert store_origin["consequence_count"] == 0
+    # No consequence is attributed to the data_store "store" origin.
+    assert not any(
+        c["origin"] == "store" and c["target"] == "warehouse" for c in result["consequences"]
+    )
+
+
 def test_consequences_are_ranked_and_bounded_to_a_few():
     dep = Deployment.objects.create(name="d", owner=_user())
     # One agent reaching many high-power tools — an exhaustive tree if unbounded.
@@ -210,7 +244,8 @@ def test_deterministic_same_graph_same_output():
         return dep
 
     def _strip_origin(o):
-        out = {k: v for k, v in o.items() if k != "key"}
+        # key and origin_uuid are uuid-derived (non-deterministic across builds).
+        out = {k: v for k, v in o.items() if k not in ("key", "origin_uuid")}
         # Finding UUIDs are non-deterministic by design; compare structural content.
         out["findings"] = [{k: v for k, v in f.items() if k != "uuid"} for f in o["findings"]]
         return out

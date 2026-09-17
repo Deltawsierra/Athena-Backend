@@ -426,7 +426,10 @@ def build_business_impact(deployment) -> dict:
 
         keys = _dimensions_for(finding.finding_type)
         if keys:
-            mapped_types.add(ftype)
+            # The crosswalk lookup is case-insensitive (_dimensions_for lowercases),
+            # so dedup the distinct-type count the same way — otherwise
+            # "SQL_Injection" and "sql_injection" double-count as two mapped types.
+            mapped_types.add(ftype.lower())
             for key in keys:
                 ensure(key).add(active=is_active, severity=finding.severity, finding_type=ftype)
         else:

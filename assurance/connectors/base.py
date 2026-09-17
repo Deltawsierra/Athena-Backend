@@ -278,8 +278,17 @@ def finding_body(summary: dict) -> str:
         lines.append("")
         lines.append(f"Recommendation: {summary['recommendation']}")
     if summary["control_mapping"]:
+        def _fmt(values) -> str:
+            # A control_mapping value is normally a list, but a scalar string must
+            # not be iterated char-by-char ("A1" -> "A, 1") — normalize it first.
+            if isinstance(values, (list, tuple, set)):
+                items = list(values)
+            else:
+                items = [values]
+            return ", ".join(str(v) for v in items)
+
         mappings = ", ".join(
-            f"{framework}: {', '.join(str(v) for v in values)}"
+            f"{framework}: {_fmt(values)}"
             for framework, values in sorted(summary["control_mapping"].items())
         )
         lines.append("")
