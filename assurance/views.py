@@ -25,7 +25,11 @@ from .boundary import assess_boundary
 from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
+from .data_lifecycle import assess_data_lifecycle
 from .decision import recompute_decision
+from .metadata_logging import assess_metadata_logging
+from .personal_context import assess_personal_context
+from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
 from .roi import build_executive_summary
 from .route import build_route_map
@@ -292,6 +296,74 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             "assets__provider__assertions", "findings__asset"
         ).get(pk=self.get_object().pk)
         return Response(assess_ripple(assessed))
+
+    @action(detail=True, methods=["get"], url_path="personal-context")
+    def personal_context(self, request, uuid=None):
+        """Personal Context Exposure (Phase 3.5): what personal / customer data the
+        deployment holds, in which data-bearing components, and which principals can
+        reach it. A read — open to any authenticated operator, like the rest of the
+        assurance reads — and computed, never stored.
+
+        It reuses the effective-access reach graph (Phase 3.1) for the
+        who-can-reach parts and the data boundary (Phase 1.4) for boundary
+        crossings, so it re-derives no reachability. An unclassified data store
+        reads as unknown (personal-data exposure cannot be ruled out), never "no
+        PII"; personal data reachable by a shadow / over-broad principal or crossing
+        the approved boundary is surfaced as a gap; and no data value is emitted."""
+        assessed = (
+            Deployment.objects.prefetch_related("assets__provider__assertions")
+            .select_related("data_boundary")
+            .get(pk=self.get_object().pk)
+        )
+        return Response(assess_personal_context(assessed))
+
+    @action(detail=True, methods=["get"], url_path="data-lifecycle")
+    def data_lifecycle(self, request, uuid=None):
+        """Data Lifecycle Review (Phase 3.5): the lifecycle stages evidenced in the
+        graph — collected, transmitted, processed, logged, retained, reused, deleted
+        — the components that evidence each (at their true evidence strength), and
+        the gaps where a stage has no evidenced control. A read — open to any
+        authenticated operator, computed, never stored.
+
+        An unevidenced stage reads "not evidenced", never "compliant"; a control
+        evidenced only weakly (vendor-asserted) is a weak control, still a gap; and
+        the assessment never asserts data is deleted or retained correctly without
+        evidence."""
+        assessed = Deployment.objects.prefetch_related("assets__provider__assertions").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_data_lifecycle(assessed))
+
+    @action(detail=True, methods=["get"], url_path="training-reuse")
+    def training_reuse(self, request, uuid=None):
+        """Training / Reuse Review (Phase 3.5): whether customer / internal data is
+        reused for training, sharing or retention — VERIFIED vs merely ASSERTED —
+        per provider, each posture carried at its true evidence class. A read — open
+        to any authenticated operator, computed, never stored.
+
+        A vendor_asserted "we don't train on your data" reads as vendor-asserted,
+        never verified; an unstated reuse policy is a gap (reuse cannot be ruled
+        out), never "safe"; and nothing upgrades a vendor claim."""
+        assessed = Deployment.objects.prefetch_related("assets__provider__assertions").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_training_reuse(assessed))
+
+    @action(detail=True, methods=["get"], url_path="metadata-logging")
+    def metadata_logging(self, request, uuid=None):
+        """Metadata & Logging Risk (Phase 3.5): where prompts / traces / embeddings
+        / metadata get logged, what sensitive categories could reach those sinks,
+        and the gaps where sensitive data is logged with no evidenced control. A
+        read — open to any authenticated operator, computed, never stored.
+
+        It reuses the personal-data reading from Phase 3.5's personal-context
+        assessment for the PII category, never re-deriving it. Only logging the
+        graph evidences is flagged; NO sensitive value is ever emitted (only the
+        presence of a category and its lineage); an unknown reads unknown."""
+        assessed = Deployment.objects.prefetch_related("assets__provider__assertions").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_metadata_logging(assessed))
 
     @action(detail=True, methods=["get"], url_path="posture")
     def posture(self, request, uuid=None):
