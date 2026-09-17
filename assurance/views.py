@@ -19,6 +19,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from .access import assess_effective_access
 from .bom import build_ai_bom
 from .boundary import assess_boundary
 from .business_impact import build_business_impact
@@ -248,6 +249,27 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         stored. It ties the asset, provider and capability views into one map."""
         assessed = Deployment.objects.prefetch_related("assets__provider").get(pk=self.get_object().pk)
         return Response(build_route_map(assessed))
+
+    @action(detail=True, methods=["get"], url_path="effective-access")
+    def effective_access(self, request, uuid=None):
+        """Identity Assurance & Effective Access (Phase 3.1): the honest inventory
+        of the deployment's principals (the identities that can act — service
+        accounts, agents, and the app/model itself) and what each can effectively
+        reach, by direct and transitive paths through the asset graph. A read —
+        open to any authenticated operator, like the rest of the assurance reads —
+        and computed, never stored. It is the input the blast-radius / Ripple
+        Effect assessment (Phase 2.5) consumes.
+
+        It never claims least privilege is satisfied or an identity is secure: it
+        reports powers, transitive reach, and gaps only. A shadow (unmanaged)
+        principal reads as shadow with its risk raised; a transitive path is
+        reported only where a declared edge evidences every hop, never invented;
+        and privileged, over-broad, orphaned and ungoverned-reach access are
+        surfaced, not smoothed."""
+        assessed = Deployment.objects.prefetch_related("assets__provider").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_effective_access(assessed))
 
     @action(detail=True, methods=["get"], url_path="ai-bom")
     def ai_bom(self, request, uuid=None):
