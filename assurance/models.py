@@ -304,6 +304,7 @@ class Asset(models.Model):
         SERVICE_ACCOUNT = "service_account", "Service account"
         DATA_STORE = "data_store", "Data store"
         MCP_SERVER = "mcp_server", "MCP server"
+        SKILL = "skill", "Agent skill"
         OTHER = "other", "Other"
 
     class Classification(models.TextChoices):

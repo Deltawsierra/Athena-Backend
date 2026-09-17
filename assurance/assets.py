@@ -13,13 +13,20 @@ that actually exist, and nothing it must invent:
   * a finding's **endpoint** becomes an ``api`` asset *when the finding carries a
     location* (sparse for today's signature engine, populated when present);
   * a **declared LLM target** (``scan.target_config``: adapter / base_url /
-    model) becomes a ``model`` asset under a model :class:`Provider` — the one
-    AI-component signal that exists today, and it is *declared*, not detected.
+    model) becomes a ``model`` asset under a model :class:`Provider` — declared,
+    not detected;
+  * a **declared agent and its tools / MCP servers / skills**
+    (``scan.target_config``: ``agent`` + ``tools[]``) become ``agent`` /
+    ``tool`` / ``mcp_server`` / ``skill`` assets, each carrying its permission
+    map and provenance, with the agent→tool edge recorded on the agent (roadmap
+    1.2 — MCP & Agent-Skill Assurance). Declared inventory, not detected.
 
 Every finding is attached to the asset it concerns (its endpoint if it has one,
-else the deployment's host). What the engine cannot see — the target's model
-providers, gateways, vector DBs, MCP servers — is deliberately not fabricated;
-that is declared-inventory work for a later slice.
+else the LLM model, else the agent, else the deployment's host). What the engine
+cannot see is deliberately not fabricated: a tool or MCP server that appears from
+a signal but is absent from the declared inventory is a *shadow* asset and would
+be classified ``unmanaged`` — the same observed-but-undeclared path the scanned
+host already takes — never invented here.
 
 It is **idempotent** and **non-destructive**: an asset is keyed within its
 deployment by ``(kind, identifier)``, so a re-scan refreshes ``last_seen`` and
@@ -124,6 +131,107 @@ def _llm_provider_and_asset(deployment: Deployment, cfg: dict, now) -> Asset | N
     )
 
 
+# Declared tool kinds → the graph's asset kinds. An unrecognised kind is still a
+# tool the agent can call, so it registers as a plain TOOL rather than vanishing.
+_TOOL_KINDS = {
+    "tool": Asset.Kind.TOOL,
+    "function": Asset.Kind.TOOL,
+    "mcp": Asset.Kind.MCP_SERVER,
+    "mcp_server": Asset.Kind.MCP_SERVER,
+    "skill": Asset.Kind.SKILL,
+}
+
+
+def _clean_str_list(value) -> list[str]:
+    """A list of non-empty strings from whatever a caller declared (a list, or a
+    single string), so a permission map is never a half-typed value."""
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+    return []
+
+
+def _agent_and_tools(deployment: Deployment, cfg: dict, now) -> tuple[Asset | None, list[Asset]]:
+    """Register a declared agent and the tools / MCP servers / skills it can call
+    (roadmap 1.2 — MCP & Agent-Skill Assurance).
+
+    These are **declared inventory**, not detected: the customer states what the
+    agent is wired to, exactly as ``target_config`` already declares the LLM
+    target. Each tool carries its own permission map and provenance, so the graph
+    can show *what the agent can reach and under what authority*. A declared tool
+    is ``approved`` when the caller says so, else ``known`` (we know it is there).
+    A tool observed from a signal but absent from this declared set would be
+    ``unmanaged`` — a shadow tool — which the endpoint/host path already handles;
+    nothing here fabricates one.
+    """
+    touched: list[Asset] = []
+
+    # The tools the agent is wired to — each a graph node with its permissions.
+    tool_identifiers: list[str] = []
+    raw_tools = cfg.get("tools")
+    if isinstance(raw_tools, list):
+        for entry in raw_tools:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            identifier = str(
+                entry.get("identifier") or entry.get("endpoint") or entry.get("server") or name
+            ).strip()
+            if not identifier:
+                continue
+            kind = _TOOL_KINDS.get(str(entry.get("kind") or "").strip().lower(), Asset.Kind.TOOL)
+            approved = bool(entry.get("approved"))
+            asset = _get_or_refresh(
+                deployment,
+                kind=kind,
+                identifier=identifier,
+                name=name or identifier,
+                classification=Asset.Classification.APPROVED if approved else Asset.Classification.KNOWN,
+                now=now,
+                metadata={
+                    "source": "declared_inventory",
+                    "declared": True,
+                    "permissions": _clean_str_list(entry.get("permissions")),
+                    "provenance": str(entry.get("provenance") or "").strip(),
+                    "server": str(entry.get("server") or "").strip(),
+                    "subkind": str(entry.get("kind") or "").strip(),
+                },
+            )
+            if asset:
+                touched.append(asset)
+                tool_identifiers.append(identifier)
+
+    # The agent identity itself — the node the tools hang off. It is declared
+    # explicitly (an ``agent`` block) or implied by a scan that declares tools.
+    raw_agent = cfg.get("agent")
+    agent_asset = None
+    agent_declared = isinstance(raw_agent, dict) or cfg.get("kind") == "agent"
+    if agent_declared or tool_identifiers:
+        agent = raw_agent if isinstance(raw_agent, dict) else {}
+        identifier = str(agent.get("identifier") or agent.get("name") or "agent").strip() or "agent"
+        name = str(agent.get("name") or identifier).strip()
+        agent_asset = _get_or_refresh(
+            deployment,
+            kind=Asset.Kind.AGENT,
+            identifier=identifier,
+            name=name,
+            classification=Asset.Classification.KNOWN,
+            now=now,
+            metadata={
+                "source": "declared_inventory",
+                "declared": True,
+                "identity": str(agent.get("identity") or "").strip(),
+                # The agent→tool edge: what this identity is authorised to call.
+                "tools": tool_identifiers,
+            },
+        )
+        if agent_asset:
+            touched.append(agent_asset)
+
+    return agent_asset, touched
+
+
 def derive_assets(deployment: Deployment, scan) -> list[Asset]:
     """Reconcile the deployment's assets from a scan, and attach its findings.
 
@@ -181,6 +289,16 @@ def derive_assets(deployment: Deployment, scan) -> list[Asset]:
         if llm_asset:
             touched.append(llm_asset)
 
+    # 3b. Declared agent + the tools / MCP servers / skills it can call (roadmap
+    #     1.2). Declared inventory, not detected — the same discipline as the LLM
+    #     target above.
+    agent_asset = None
+    if isinstance(cfg, dict):
+        agent_asset, inventory_assets = _agent_and_tools(deployment, cfg, now)
+        for a in inventory_assets:
+            if a not in touched:
+                touched.append(a)
+
     # 4. Endpoint assets from findings that carry a location, and attach every
     #    finding to the asset it concerns.
     for finding in deployment.findings.all():
@@ -198,9 +316,9 @@ def derive_assets(deployment: Deployment, scan) -> list[Asset]:
             )
             if target_asset and target_asset not in touched:
                 touched.append(target_asset)
-        # An LLM finding belongs to the model asset; a located finding to its
-        # endpoint; everything else to the deployment's host.
-        target_asset = target_asset or (llm_asset if cfg and isinstance(cfg, dict) and cfg.get("kind") == "llm" else None) or host_asset
+        # A located finding belongs to its endpoint; else an LLM finding to the
+        # model, an agent finding to the agent; everything else to the host.
+        target_asset = target_asset or llm_asset or agent_asset or host_asset
         if target_asset is not None and finding.asset_id != target_asset.pk:
             finding.asset = target_asset
             finding.save(update_fields=["asset"])
