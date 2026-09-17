@@ -20,7 +20,6 @@ from assurance.models import (
     Evidence,
     EvidenceClass,
     Finding,
-    Provider,
     evidence_strength,
 )
 from assurance.views import FindingViewSet
@@ -356,14 +355,13 @@ def test_finding_api_malformed_deployment_filter_is_not_a_500():
 
 def test_finding_api_scopes_to_visible_findings():
     owner = _user("owner")
-    stranger = _user("stranger")
     scan = _scan(owner, findings=ENGINE_FINDINGS)
     ingest.ingest_scan(scan)
 
     factory = APIRequestFactory()
     view = FindingViewSet.as_view({"get": "list"})
 
-    # The stranger (analyst) is privileged in this project's model and sees all;
+    # An analyst is privileged in this project's model and sees all findings;
     # a viewer sees only their own. Use a viewer to prove scoping.
     viewer = _user("viewer", role=User.Roles.VIEWER)
     request = factory.get("/api/assurance/findings/")

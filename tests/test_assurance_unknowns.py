@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 from django.contrib.auth import get_user_model
 
-from assurance.ingest import ingest_scan
 from assurance.models import (
     Deployment,
     Evidence,
