@@ -106,6 +106,11 @@ class AssetSerializer(serializers.ModelSerializer):
         source="get_classification_display", read_only=True
     )
     deployment_uuid = serializers.UUIDField(source="deployment.uuid", read_only=True)
+    # The provider this asset resolves to, by uuid — the stable join key the
+    # dashboard uses to link an asset to that provider's full assurance profile.
+    # `provider` (the raw pk) is meaningless across origins; the name is not a
+    # key. The uuid is how the asset graph draws its edge to the provider node.
+    provider_uuid = serializers.UUIDField(source="provider.uuid", read_only=True, allow_null=True)
     provider_name = serializers.CharField(source="provider.name", read_only=True, allow_null=True)
     finding_count = serializers.IntegerField(read_only=True)
 
@@ -121,6 +126,7 @@ class AssetSerializer(serializers.ModelSerializer):
             "classification",
             "classification_label",
             "provider",
+            "provider_uuid",
             "provider_name",
             "finding_count",
             "metadata",
