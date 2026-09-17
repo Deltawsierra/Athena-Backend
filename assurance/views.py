@@ -31,6 +31,7 @@ from .roi import build_executive_summary
 from .route import build_route_map
 from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .receipt import build_assurance_receipt, deployment_receipt
+from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
 from .vendor import assess_vendors
 from .serializers import (
@@ -270,6 +271,27 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             pk=self.get_object().pk
         )
         return Response(assess_effective_access(assessed))
+
+    @action(detail=True, methods=["get"], url_path="ripple-effect")
+    def ripple_effect(self, request, uuid=None):
+        """Ripple Effect / blast-radius (Phase 2.5): for each origin worth tracing
+        — an active high/critical finding tied to a component, or a privileged /
+        high-risk principal — a *few well-supported* downstream consequences a
+        compromise of it could have, each tied to the evidenced path that supports
+        it. A read — open to any authenticated operator, like the rest of the
+        assurance reads — and computed, never stored.
+
+        It reads only the effective-access reach graph (Phase 3.1) and the data
+        boundary (Phase 1.4), so it re-derives no reachability and inherits their
+        no-invented-reach guarantee. Every consequence is potential and
+        evidence-based, never a realized harm, a fabricated cascade, or a monetary
+        figure; the list is ranked and bounded to the well-supported core; and an
+        origin with no evidenced downstream reach reads honestly as such, never as
+        safe or contained."""
+        assessed = Deployment.objects.prefetch_related(
+            "assets__provider__assertions", "findings__asset"
+        ).get(pk=self.get_object().pk)
+        return Response(assess_ripple(assessed))
 
     @action(detail=True, methods=["get"], url_path="ai-bom")
     def ai_bom(self, request, uuid=None):
