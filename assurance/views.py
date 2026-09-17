@@ -27,7 +27,7 @@ from .compliance import build_compliance_map
 from .decision import recompute_decision
 from .route import build_route_map
 from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
-from .receipt import deployment_receipt
+from .receipt import build_assurance_receipt, deployment_receipt
 from .remediation import IllegalTransition, apply_transition, assign
 from .serializers import (
     AssetSerializer,
@@ -118,6 +118,32 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         server. It attests integrity, not that the conclusions are true."""
         deployment = Deployment.objects.prefetch_related("findings__evidence").get(pk=self.get_object().pk)
         return Response(deployment_receipt(deployment))
+
+    @action(detail=True, methods=["get"], url_path="assurance-receipt")
+    def assurance_receipt(self, request, uuid=None):
+        """The deployment's full, versioned **Assurance Receipt** (commercial
+        spine): the roadmap tuple — system, receipt version, policy, evidence
+        root, result, per-assessment digests — as one deterministic, portable,
+        signable payload (see :func:`assurance.receipt.build_assurance_receipt`
+        and its ``RECEIPT_SCHEMA``).
+
+        A read — open to any authenticated operator, like the rest of the
+        assurance reads — and computed, never stored. It is the standardised,
+        machine-readable superset of the bare ``receipt`` action, which stays as
+        it was for existing callers.
+
+        It attests integrity and provenance — that this is the assurance state
+        that was recorded, unaltered — never that the conclusions are true or the
+        system is secure. The dict is the canonical payload the engine signs; this
+        backend does not sign."""
+        deployment = (
+            Deployment.objects.prefetch_related(
+                "findings__evidence", "assets__provider__assertions"
+            )
+            .select_related("data_boundary")
+            .get(pk=self.get_object().pk)
+        )
+        return Response(build_assurance_receipt(deployment))
 
     @action(detail=True, methods=["get", "put"], url_path="data-boundary")
     def data_boundary(self, request, uuid=None):
