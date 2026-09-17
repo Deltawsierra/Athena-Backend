@@ -21,6 +21,7 @@ from rest_framework.response import Response
 from .boundary import assess_boundary
 from .capability import assess_capabilities
 from .decision import recompute_decision
+from .route import build_route_map
 from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .receipt import deployment_receipt
 from .serializers import (
@@ -136,6 +137,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         stored. The prerequisite for the boundary and access assessments."""
         assessed = Deployment.objects.prefetch_related("assets").get(pk=self.get_object().pk)
         return Response(assess_capabilities(assessed))
+
+    @action(detail=True, methods=["get"], url_path="route-map")
+    def route_map(self, request, uuid=None):
+        """System / Route Map (Phase 1.6): the layered data-flow graph
+        (app → gateway → model → data → tools → logs) reconstructed from the
+        asset graph and its declared edges. A read — open to any authenticated
+        operator, like the rest of the assurance reads — and computed, never
+        stored. It ties the asset, provider and capability views into one map."""
+        assessed = Deployment.objects.prefetch_related("assets__provider").get(pk=self.get_object().pk)
+        return Response(build_route_map(assessed))
 
 
 class FindingViewSet(
