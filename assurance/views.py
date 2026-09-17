@@ -21,6 +21,7 @@ from rest_framework.response import Response
 from .bom import build_ai_bom
 from .boundary import assess_boundary
 from .capability import assess_capabilities
+from .compliance import build_compliance_map
 from .decision import recompute_decision
 from .route import build_route_map
 from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
@@ -168,6 +169,17 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             pk=self.get_object().pk
         )
         return Response(build_ai_bom(assessed))
+
+    @action(detail=True, methods=["get"], url_path="compliance")
+    def compliance(self, request, uuid=None):
+        """Compliance mapping (Phase 2.1): where the deployment's findings land
+        against the control frameworks (NIST 800-53, OWASP Top 10, OWASP LLM Top
+        10, DoD Zero Trust). A read — open to any authenticated operator, like the
+        rest of the assurance reads — and computed, never stored. It is evidence of
+        *gaps* (a touched control has an open finding against it), never a
+        certificate that a control passes."""
+        assessed = Deployment.objects.prefetch_related("findings").get(pk=self.get_object().pk)
+        return Response(build_compliance_map(assessed))
 
 
 class FindingViewSet(
