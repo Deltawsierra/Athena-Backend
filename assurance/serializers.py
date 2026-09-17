@@ -21,6 +21,7 @@ from .models import (
     Finding,
     Provider,
     ProviderAssertion,
+    RemediationEvent,
     Unknown,
     evidence_strength,
 )
@@ -59,6 +60,30 @@ class EvidenceSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class RemediationEventSerializer(serializers.ModelSerializer):
+    """One attributed step in a finding's remediation workflow (Phase 2.3),
+    read-only — events are written only through ``assurance.remediation`` so every
+    move is validated and attributed."""
+
+    from_state_label = serializers.CharField(source="get_from_state_display", read_only=True)
+    to_state_label = serializers.CharField(source="get_to_state_display", read_only=True)
+    actor = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = RemediationEvent
+        fields = [
+            "uuid",
+            "from_state",
+            "from_state_label",
+            "to_state",
+            "to_state_label",
+            "actor",
+            "note",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
 class FindingSerializer(serializers.ModelSerializer):
     evidence = EvidenceSerializer(many=True, read_only=True)
     evidence_class = serializers.CharField(read_only=True)
@@ -67,6 +92,15 @@ class FindingSerializer(serializers.ModelSerializer):
     asset_uuid = serializers.UUIDField(source="asset.uuid", read_only=True, allow_null=True)
     asset_name = serializers.CharField(source="asset.name", read_only=True, allow_null=True)
     owner = _owner_field()
+    # Remediation workflow (Phase 2.3): the human process axis, read-only here.
+    # `remediation_state` moves only through the admin-gated, attributed transition
+    # action (never a raw PATCH), so the state machine is always enforced; likewise
+    # `assignee` is set through the assign action. Both are distinct from the
+    # security disposition (`status`), which alone says whether the risk is live.
+    remediation_state_label = serializers.CharField(
+        source="get_remediation_state_display", read_only=True
+    )
+    assignee = serializers.CharField(source="assignee.username", read_only=True, allow_null=True)
     # Change intelligence + evidence expiration (spine, EXPOSE). Derived from the
     # existing first_seen/last_seen against the deployment's latest scan, which the
     # viewset supplies via serializer context ("latest_seen" / "now") in one query.
@@ -92,6 +126,9 @@ class FindingSerializer(serializers.ModelSerializer):
             "cvss_vector",
             "status",
             "owner",
+            "assignee",
+            "remediation_state",
+            "remediation_state_label",
             "impact",
             "business_impact",
             "recommendation",
