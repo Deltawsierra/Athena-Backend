@@ -18,6 +18,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from .bom import build_ai_bom
 from .boundary import assess_boundary
 from .capability import assess_capabilities
 from .decision import recompute_decision
@@ -136,6 +137,19 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         stored. The prerequisite for the boundary and access assessments."""
         assessed = Deployment.objects.prefetch_related("assets").get(pk=self.get_object().pk)
         return Response(assess_capabilities(assessed))
+
+    @action(detail=True, methods=["get"], url_path="ai-bom")
+    def ai_bom(self, request, uuid=None):
+        """AI-BOM (Phase 1.7): the AI supply-chain bill of materials — every
+        component and the providers behind it, each provider fact evidence-graded,
+        with a tamper-evident digest. A read — open to any authenticated operator,
+        like the rest of the assurance reads — and computed, never stored. An
+        exportable artifact for procurement, audit, M&A and security
+        questionnaires."""
+        assessed = Deployment.objects.prefetch_related("assets__provider__assertions").get(
+            pk=self.get_object().pk
+        )
+        return Response(build_ai_bom(assessed))
 
 
 class FindingViewSet(
