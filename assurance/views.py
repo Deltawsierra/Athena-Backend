@@ -106,15 +106,32 @@ class FindingViewSet(
         _require_admin(request)
         return super().update(request, *args, **kwargs)
 
-    def get_queryset(self):
-        qs = Finding.objects.all().select_related("deployment").prefetch_related("evidence")
+    def _scoped_findings(self):
+        """Every finding the caller may see, BEFORE the severity/status/deployment
+        query filters. The change-intelligence boundary (a deployment's latest
+        scan) is a fact about the deployment, so it must be computed over the
+        unfiltered set — a ``?status=open`` view must not redefine "latest scan"."""
+        qs = Finding.objects.all()
         user = self.request.user
         if _is_privileged(user):
-            qs = qs
-        else:
-            # Findings on a scan the user launched, or a deployment they own.
-            qs = qs.filter(scan__user=user) | qs.filter(deployment__owner=user)
-            qs = qs.distinct()
+            return qs
+        return (qs.filter(scan__user=user) | qs.filter(deployment__owner=user)).distinct()
+
+    def get_serializer_context(self):
+        """Supply the change-intelligence inputs once per request: the latest-scan
+        boundary per deployment (one aggregate query) and a single ``now``, so the
+        serializer never issues a query per finding."""
+        from django.utils import timezone
+
+        from .change import latest_seen_by_deployment
+
+        ctx = super().get_serializer_context()
+        ctx["latest_seen"] = latest_seen_by_deployment(self._scoped_findings())
+        ctx["now"] = timezone.now()
+        return ctx
+
+    def get_queryset(self):
+        qs = self._scoped_findings().select_related("deployment").prefetch_related("evidence")
         severity = self.request.query_params.get("severity")
         if severity:
             qs = qs.filter(severity=severity)

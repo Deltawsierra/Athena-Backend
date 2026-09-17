@@ -11,6 +11,7 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from .change import CHANGE_LABELS, age_days, change_status, is_stale
 from .models import (
     Asset,
     Deployment,
@@ -64,6 +65,13 @@ class FindingSerializer(serializers.ModelSerializer):
     asset_uuid = serializers.UUIDField(source="asset.uuid", read_only=True, allow_null=True)
     asset_name = serializers.CharField(source="asset.name", read_only=True, allow_null=True)
     owner = _owner_field()
+    # Change intelligence + evidence expiration (spine, EXPOSE). Derived from the
+    # existing first_seen/last_seen against the deployment's latest scan, which the
+    # viewset supplies via serializer context ("latest_seen" / "now") in one query.
+    change_status = serializers.SerializerMethodField()
+    change_label = serializers.SerializerMethodField()
+    age_days = serializers.SerializerMethodField()
+    stale = serializers.SerializerMethodField()
 
     class Meta:
         model = Finding
@@ -88,6 +96,10 @@ class FindingSerializer(serializers.ModelSerializer):
             "evidence",
             "asset_uuid",
             "asset_name",
+            "change_status",
+            "change_label",
+            "age_days",
+            "stale",
             "first_seen",
             "last_seen",
         ]
@@ -98,6 +110,21 @@ class FindingSerializer(serializers.ModelSerializer):
             for f in fields
             if f not in ("status", "owner", "business_impact")
         ]
+
+    def _latest_seen(self, obj):
+        return (self.context.get("latest_seen") or {}).get(obj.deployment_id)
+
+    def get_change_status(self, obj) -> str:
+        return change_status(obj, self._latest_seen(obj))
+
+    def get_change_label(self, obj) -> str:
+        return CHANGE_LABELS.get(self.get_change_status(obj), "")
+
+    def get_age_days(self, obj):
+        return age_days(obj, self.context.get("now"))
+
+    def get_stale(self, obj) -> bool:
+        return is_stale(obj, self.context.get("now"))
 
 
 class AssetSerializer(serializers.ModelSerializer):
