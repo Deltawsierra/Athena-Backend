@@ -27,6 +27,7 @@ from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .decision import recompute_decision
+from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
 from .operational import assess_operational
 from .personal_context import assess_personal_context
@@ -616,6 +617,34 @@ class FindingViewSet(
                 "events": RemediationEventSerializer(events, many=True).data,
             }
         )
+
+    @action(detail=True, methods=["get"], url_path="incident-pack")
+    def incident_pack(self, request, uuid=None):
+        """The finding's **AI Incident Evidence Pack** (Phase 3.7): a portable,
+        verifiable pack that reconstructs the incident's identity, context, surface
+        (tools/assets/route), evidence, receipt, ripple/blast-radius, and decision
+        from the stored assurance graph, plus the reference to the engine's evidence
+        pack Achilles replays against (see
+        :func:`assurance.incident.assemble_incident_pack` and its
+        ``INCIDENT_PACK_SCHEMA``). A finding IS the incident in this data model.
+
+        A read — open to any operator who can see the finding, like the rest of the
+        assurance reads — and computed, never stored. The dict is the canonical
+        signable payload; this backend produces it, the engine signs it.
+
+        It attests integrity and provenance — that this is the incident evidence
+        that was recorded, unaltered — never that the incident conclusion is true or
+        the system is secure or fixed. ``vendor_asserted`` evidence stays
+        ``vendor_asserted``, and the runtime transcript (which lives in the engine's
+        pack, not this graph) is stated as an explicit gap, never fabricated."""
+        finding = (
+            Finding.objects.select_related(
+                "deployment", "deployment__owner", "asset__provider", "scan"
+            )
+            .prefetch_related("evidence")
+            .get(pk=self.get_object().pk)
+        )
+        return Response(assemble_incident_pack(finding))
 
     @action(detail=True, methods=["post"], url_path="remediation/transition")
     def remediation_transition(self, request, uuid=None):
