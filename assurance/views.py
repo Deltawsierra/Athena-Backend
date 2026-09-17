@@ -28,6 +28,7 @@ from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .decision import recompute_decision
 from .metadata_logging import assess_metadata_logging
+from .operational import assess_operational
 from .personal_context import assess_personal_context
 from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
@@ -499,6 +500,24 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             .get(pk=self.get_object().pk)
         )
         return Response(build_executive_summary(assessed))
+
+    @action(detail=True, methods=["get"], url_path="operational-assurance")
+    def operational_assurance(self, request, uuid=None):
+        """Operational / continuous-assurance roll-up: the continuous-assurance
+        signals tied into one operational-readiness view — evidence freshness vs.
+        staleness, the change/drift backlog needing reassessment, remediation
+        velocity, the standing six-state decision, and an ordinal readiness band. A
+        read — open to any authenticated operator, like the rest of the assurance
+        reads — and computed, never stored. It is a REUSE-ONLY roll-up: it reads the
+        existing change-intelligence and evidence-expiration signals rather than
+        re-deriving them. Every value is a real count, a true ratio of real counts
+        (None when there is no basis, never a fake 0%), or an ordinal band: there is
+        no dollar figure anywhere, and nothing reads "healthy"/"current"/"secure" as
+        an unearned fact — an unassessed or stale deployment reads honestly."""
+        assessed = Deployment.objects.prefetch_related(
+            "findings__evidence", "findings__remediation_events"
+        ).get(pk=self.get_object().pk)
+        return Response(assess_operational(assessed))
 
     @action(detail=True, methods=["get"], url_path="assurance-packs")
     def assurance_packs(self, request, uuid=None):
