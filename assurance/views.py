@@ -18,11 +18,13 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from .boundary import assess_boundary
 from .decision import recompute_decision
-from .models import Asset, Deployment, Finding, Provider, ProviderAssertion, Unknown
+from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .receipt import deployment_receipt
 from .serializers import (
     AssetSerializer,
+    DataBoundarySerializer,
     DeploymentSerializer,
     FindingSerializer,
     ProviderAssertionSerializer,
@@ -99,6 +101,30 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         server. It attests integrity, not that the conclusions are true."""
         deployment = Deployment.objects.prefetch_related("findings__evidence").get(pk=self.get_object().pk)
         return Response(deployment_receipt(deployment))
+
+    @action(detail=True, methods=["get", "put"], url_path="data-boundary")
+    def data_boundary(self, request, uuid=None):
+        """AI Data Boundary Assessment (Phase 1.4): reconcile the approved data
+        boundary against the deployment's actual data destinations.
+
+        GET returns the assessment (open read). PUT declares/updates the approved
+        boundary (admin-only — it mutates the record) and returns the fresh
+        assessment. The assessment itself is always computed, never stored."""
+        deployment = self.get_object()
+        if request.method == "PUT":
+            _require_admin(request)
+            serializer = DataBoundarySerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            DataBoundary.objects.update_or_create(
+                deployment=deployment,
+                defaults={**serializer.validated_data, "updated_by": request.user},
+            )
+        assessed = (
+            Deployment.objects.prefetch_related("assets__provider__assertions")
+            .select_related("data_boundary")
+            .get(pk=deployment.pk)
+        )
+        return Response(assess_boundary(assessed))
 
 
 class FindingViewSet(

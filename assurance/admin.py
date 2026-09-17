@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     Asset,
+    DataBoundary,
     Deployment,
     Evidence,
     Finding,
@@ -9,6 +10,13 @@ from .models import (
     ProviderAssertion,
     Unknown,
 )
+
+
+@admin.register(DataBoundary)
+class DataBoundaryAdmin(admin.ModelAdmin):
+    list_display = ("deployment", "training_allowed", "third_party_sharing_allowed", "updated_at")
+    list_filter = ("training_allowed", "third_party_sharing_allowed")
+    search_fields = ("deployment__name",)
 
 
 class EvidenceInline(admin.TabularInline):

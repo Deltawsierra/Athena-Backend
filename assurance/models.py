@@ -606,3 +606,53 @@ class Unknown(models.Model):
     @property
     def is_open(self) -> bool:
         return self.status in (self.Status.OPEN, self.Status.INVESTIGATING)
+
+
+# ---------------------------------------------------------------------------
+# DataBoundary — the approved data-flow boundary for a deployment (Phase 1.4)
+# ---------------------------------------------------------------------------
+
+
+class DataBoundary(models.Model):
+    """The data boundary a customer *approves* for a deployment — the other half
+    of the AI Data Boundary Assessment (Phase 1.4).
+
+    Assurance discovery already knows the deployment's **actual** data
+    destinations: the providers and components it depends on (assets → providers,
+    Phase 1.1/1.2/1.6) and each one's declared posture (region, retention,
+    training, subprocessors — the Provider Assurance Profile, Phase 1.5). What was
+    missing is the **approved** side: what the customer says the system *may* do
+    with data. This row holds that declaration, so ``assurance.boundary`` can
+    reconcile approved-vs-actual and surface where they disagree.
+
+    Defaults are the safe ones: training on customer data and third-party sharing
+    are **not** approved unless a human says so, so an undeclared boundary never
+    reads as permission. An empty ``allowed_regions`` means no region restriction
+    has been declared (any region is in-boundary), which the assessment reports as
+    *not assessed* rather than *approved*."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.OneToOneField(
+        Deployment, on_delete=models.CASCADE, related_name="data_boundary"
+    )
+    # The regions data is approved to be processed in (e.g. ["eu-west-1", "eu"]).
+    # Empty = no region restriction declared (not the same as "all approved").
+    allowed_regions = models.JSONField(default=list, blank=True)
+    # Whether the system is approved to have its data trained on, or shared with
+    # third parties / subprocessors. Off by default: silence is not consent.
+    training_allowed = models.BooleanField(default=False)
+    third_party_sharing_allowed = models.BooleanField(default=False)
+    notes = models.TextField(blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="data_boundaries",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"Data boundary for {self.deployment.name}"
