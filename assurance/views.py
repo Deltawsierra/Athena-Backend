@@ -18,6 +18,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from .capability import assess_capabilities
 from .decision import recompute_decision
 from .models import Asset, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .receipt import deployment_receipt
@@ -99,6 +100,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         server. It attests integrity, not that the conclusions are true."""
         deployment = Deployment.objects.prefetch_related("findings__evidence").get(pk=self.get_object().pk)
         return Response(deployment_receipt(deployment))
+
+    @action(detail=True, methods=["get"], url_path="capabilities")
+    def capabilities(self, request, uuid=None):
+        """AI System Capability Map (Phase 1.3): the ground-truth inventory of
+        what the deployment can *do*, derived from its asset graph and the
+        declared tool permission map. A read — open to any authenticated
+        operator, like the rest of the assurance reads — and computed, never
+        stored. The prerequisite for the boundary and access assessments."""
+        assessed = Deployment.objects.prefetch_related("assets").get(pk=self.get_object().pk)
+        return Response(assess_capabilities(assessed))
 
 
 class FindingViewSet(
