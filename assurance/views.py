@@ -145,6 +145,63 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         )
         return Response(build_assurance_receipt(deployment))
 
+    @action(detail=True, methods=["get"], url_path="connectors")
+    def connectors(self, request, uuid=None):
+        """List the outbound connectors and whether each is configured (commercial
+        spine). A read: an operator can see which integrations exist and which are
+        inert for lack of credentials, without triggering anything."""
+        from .connectors import available_connectors, build_connector
+
+        self.get_object()  # scope/permission check on the deployment
+        return Response(
+            {
+                "connectors": [
+                    {"name": name, "configured": build_connector(name).configured}
+                    for name in available_connectors()
+                ]
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path=r"connectors/(?P<connector>[\w-]+)/push")
+    def connector_push(self, request, uuid=None, connector=None):
+        """Push one of the deployment's findings OUT into an external system as a
+        ticket / issue / event (commercial spine). Admin-only: it is an outbound
+        action against a customer's live GRC / CI-CD / SIEM.
+
+        Body: ``{"finding": "<finding-uuid>"}``. The finding must belong to this
+        deployment. The result is the connector's :class:`ConnectorResult` as a
+        dict, always at HTTP 200 — read ``ok``, not the status code (the house
+        idiom; cf. ``assurance_check``). With no credentials configured the
+        connector is inert: it returns ``{"ok": false, "detail": "<name> not
+        configured"}`` and makes no network call. Live wiring — a real transport
+        bound to per-tenant credentials — is the deferred follow-up; until then a
+        push against an unconfigured connector simply reports not-configured."""
+        _require_admin(request)
+        from .connectors import RequestsTransport, UnknownConnector, build_connector
+
+        deployment = self.get_object()
+        finding_uuid = _valid_uuid(request.data.get("finding"))
+        if finding_uuid is None:
+            return Response(
+                {"detail": "A 'finding' UUID belonging to this deployment is required."},
+                status=400,
+            )
+        try:
+            finding = deployment.findings.get(uuid=finding_uuid)
+        except Finding.DoesNotExist:
+            return Response(
+                {"detail": f"No such finding {finding_uuid!r} in this deployment."},
+                status=404,
+            )
+        try:
+            conn = build_connector(connector)
+        except UnknownConnector as exc:
+            return Response({"detail": str(exc)}, status=400)
+        # RequestsTransport is only ever *touched* when the connector is
+        # configured; an inert connector short-circuits before any post.
+        result = conn.push_finding(finding, transport=RequestsTransport())
+        return Response(result.as_dict())
+
     @action(detail=True, methods=["get", "put"], url_path="data-boundary")
     def data_boundary(self, request, uuid=None):
         """AI Data Boundary Assessment (Phase 1.4): reconcile the approved data
