@@ -18,6 +18,7 @@ from .models import (
     AssuranceClaim,
     ClaimEvent,
     DataBoundary,
+    DeclaredComponent,
     Deployment,
     Evidence,
     Finding,
@@ -375,6 +376,25 @@ class DataBoundarySerializer(serializers.ModelSerializer):
             if v and v not in seen:
                 seen.append(v)
         return seen
+
+
+class DeclaredComponentSerializer(serializers.ModelSerializer):
+    """One component the customer declares their AI system is built from (SPINE
+    Stage 3). The write shape is the declaration; ``uuid`` and the kind label are
+    read-only for the dashboard."""
+
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+
+    class Meta:
+        model = DeclaredComponent
+        fields = ["uuid", "kind", "kind_label", "name", "identifier", "provider_name", "note"]
+        read_only_fields = ["uuid", "kind_label"]
+
+    def validate_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("A declared component needs a name.")
+        return value
 
 
 class ClaimEventSerializer(serializers.ModelSerializer):

@@ -20,8 +20,11 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from django.db import transaction
+
 from .access import assess_effective_access
 from .bom import build_ai_bom
+from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -44,6 +47,7 @@ from .models import (
     Asset,
     AssuranceClaim,
     DataBoundary,
+    DeclaredComponent,
     Deployment,
     Finding,
     Provider,
@@ -60,6 +64,7 @@ from .serializers import (
     AssuranceClaimSerializer,
     ClaimEventSerializer,
     DataBoundarySerializer,
+    DeclaredComponentSerializer,
     DeploymentSerializer,
     FindingSerializer,
     ProviderAssertionSerializer,
@@ -490,6 +495,68 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             pk=self.get_object().pk
         )
         return Response(build_ai_bom(assessed))
+
+    @action(detail=True, methods=["get", "put"], url_path="declared-architecture")
+    def declared_architecture(self, request, uuid=None):
+        """The customer's DECLARED AI architecture (SPINE Stage 3): the components
+        they assert the system is built from, and the live drift against what is
+        observed.
+
+        GET returns the declaration plus the drift assessment (open read). PUT
+        REPLACES the whole declared set from a list of components (admin-only — it
+        mutates the record) and returns the fresh declaration and drift. Declaring
+        an architecture is a separate axis from the running system, so it does not
+        move the system fingerprint."""
+        deployment = self.get_object()
+        if request.method == "PUT":
+            _require_admin(request)
+            payload = request.data if isinstance(request.data, list) else request.data.get("components", [])
+            serializer = DeclaredComponentSerializer(data=payload, many=True)
+            serializer.is_valid(raise_exception=True)
+            with transaction.atomic():
+                deployment.declared_components.all().delete()
+                DeclaredComponent.objects.bulk_create(
+                    DeclaredComponent(deployment=deployment, declared_by=request.user, **row)
+                    for row in serializer.validated_data
+                )
+        components = deployment.declared_components.all()
+        assessed = (
+            Deployment.objects.prefetch_related("assets__provider", "declared_components").get(
+                pk=deployment.pk
+            )
+        )
+        return Response(
+            {
+                "declared": DeclaredComponentSerializer(components, many=True).data,
+                "drift": assess_bom_drift(assessed),
+            }
+        )
+
+    @action(detail=True, methods=["get"], url_path="bom-drift")
+    def bom_drift(self, request, uuid=None):
+        """Declared-vs-observed AI-BOM drift (SPINE Stage 3): where the observed
+        supply chain diverges from the declared architecture — undeclared (shadow)
+        components and providers, and declared components no longer observed. A
+        read, open to any authenticated operator; computed, never stored. Without a
+        declared baseline there is no drift to compute, and that is surfaced rather
+        than read as a clean bill of materials."""
+        assessed = Deployment.objects.prefetch_related("assets__provider", "declared_components").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_bom_drift(assessed))
+
+    @action(detail=True, methods=["post"], url_path="record-bom-drift")
+    def record_bom_drift(self, request, uuid=None):
+        """Turn the deployment's current BOM drift into managed findings (SPINE
+        Stage 3). Admin-only: it mutates the shared record. Idempotent and
+        non-destructive — a re-record opens no duplicate finding, auto-closes a
+        finding whose drift has cleared, re-opens a machine-closed one whose drift
+        returned, and never overrides a human's disposition. An undeclared component
+        also contradicts the AI-BOM claim (recompute claims to reflect it). Returns
+        ``{created, updated, reopened, resolved, drift_detected}``."""
+        _require_admin(request)
+        deployment = self.get_object()
+        return Response(record_bom_drift_findings(deployment))
 
     @action(detail=True, methods=["get"], url_path="compliance")
     def compliance(self, request, uuid=None):
