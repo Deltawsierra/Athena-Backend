@@ -20,6 +20,7 @@ from rest_framework.response import Response
 
 from .bom import build_ai_bom
 from .boundary import assess_boundary
+from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .decision import recompute_decision
@@ -180,6 +181,19 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         certificate that a control passes."""
         assessed = Deployment.objects.prefetch_related("findings").get(pk=self.get_object().pk)
         return Response(build_compliance_map(assessed))
+
+    @action(detail=True, methods=["get"], url_path="business-impact")
+    def business_impact(self, request, uuid=None):
+        """Business-impact map (Phase 2.4): which business-impact *dimensions*
+        (financial, regulatory, customer-trust, operational, data-confidentiality,
+        safety) the deployment's findings implicate, and how heavily. A read — open
+        to any authenticated operator, like the rest of the assurance reads — and
+        computed, never stored. It is inferred *potential* exposure from finding
+        type and severity, never a realized loss, a dollar figure, or a claim the
+        business was harmed; it maps to dimensions only, since the record carries no
+        business-process or owner-of-process attribution."""
+        assessed = Deployment.objects.prefetch_related("findings").get(pk=self.get_object().pk)
+        return Response(build_business_impact(assessed))
 
 
 class FindingViewSet(
