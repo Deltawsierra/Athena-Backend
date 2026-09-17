@@ -30,6 +30,7 @@ from .decision import recompute_decision
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
 from .operational import assess_operational
+from .operational_risk import assess_operational_risk
 from .personal_context import assess_personal_context
 from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
@@ -547,6 +548,32 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             "findings__evidence", "findings__remediation_events"
         ).get(pk=self.get_object().pk)
         return Response(assess_operational(assessed))
+
+    @action(detail=True, methods=["get"], url_path="operational-risk")
+    def operational_risk(self, request, uuid=None):
+        """Operational-risk register (Phase 3.9): an honest read of four narrow
+        operational-risk classes — unbounded-loop/retry-storm, denial-of-wallet/
+        cost-runaway, token-storm, and provider-outage/no-fallback — each tied to a
+        safety / cost / deployment-trust concern (the roadmap's narrow scope: not a
+        generic metrics dashboard). A read — open to any authenticated operator, like
+        the rest of the assurance reads — and computed, never stored. It is a
+        REUSE-ONLY assessment: it reads the stored asset/provider graph and the
+        deployment's ingested findings, deriving no runtime telemetry.
+
+        It is an honest register, not a green dashboard. Provider-outage and
+        retry-storm derive an ordinal risk band from a real structural signal (the
+        model-provider dependency graph; the autonomous ``agent`` assets), and every
+        class escalates on a direct finding the engine ingested. Where the graph has
+        no basis — notably the budget/rate-limit/token-cap controls behind
+        denial-of-wallet and token-storm, which live in the engine's execution layer
+        — the class reads ``unmapped`` (``risk`` None, never a fabricated ``0``/
+        ``0%``), never "no risk"/"safe"/"secure". The overall roll-up is
+        weakest-honest: it reflects the worst observed risk and surfaces the unmapped
+        classes as open gaps, never as a clean pass."""
+        assessed = Deployment.objects.prefetch_related("assets__provider", "findings").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_operational_risk(assessed))
 
     @action(detail=True, methods=["get"], url_path="assurance-packs")
     def assurance_packs(self, request, uuid=None):
