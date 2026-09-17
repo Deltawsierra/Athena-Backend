@@ -15,6 +15,7 @@ from .change import CHANGE_LABELS, age_days, change_status, is_stale
 from .receipt import finding_receipt
 from .models import (
     Asset,
+    DataBoundary,
     Deployment,
     Evidence,
     Finding,
@@ -313,6 +314,27 @@ class UnknownSerializer(serializers.ModelSerializer):
             for f in fields
             if f not in ("status", "owner", "notes", "review_by", "deployment_impact")
         ]
+
+
+class DataBoundarySerializer(serializers.ModelSerializer):
+    """The approved data boundary a human declares (Phase 1.4). Write-only shape:
+    the assessment (approved-vs-actual) is computed and returned by the view, not
+    stored here."""
+
+    class Meta:
+        model = DataBoundary
+        fields = ["allowed_regions", "training_allowed", "third_party_sharing_allowed", "notes"]
+
+    def validate_allowed_regions(self, value):
+        if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+            raise serializers.ValidationError("allowed_regions must be a list of strings.")
+        # Drop blanks and dedupe while preserving order.
+        seen: list[str] = []
+        for v in value:
+            v = v.strip()
+            if v and v not in seen:
+                seen.append(v)
+        return seen
 
 
 class DeploymentSerializer(serializers.ModelSerializer):
