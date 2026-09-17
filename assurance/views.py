@@ -25,10 +25,13 @@ from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .decision import recompute_decision
+from .packs import UnknownPack, apply_pack, list_packs
+from .roi import build_executive_summary
 from .route import build_route_map
 from .models import Asset, DataBoundary, Deployment, Finding, Provider, ProviderAssertion, Unknown
 from .receipt import build_assurance_receipt, deployment_receipt
 from .remediation import IllegalTransition, apply_transition, assign
+from .vendor import assess_vendors
 from .serializers import (
     AssetSerializer,
     DataBoundarySerializer,
@@ -282,6 +285,64 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         business-process or owner-of-process attribution."""
         assessed = Deployment.objects.prefetch_related("findings").get(pk=self.get_object().pk)
         return Response(build_business_impact(assessed))
+
+    @action(detail=True, methods=["get"], url_path="vendor-assurance")
+    def vendor_assurance(self, request, uuid=None):
+        """Third-Party Vendor Assurance: the posture of the vendors the deployment
+        depends on — what each asserts, at what evidence strength, which components
+        depend on it, an honest gap list, and an ordinal posture band. A read — open
+        to any authenticated operator, like the rest of the assurance reads — and
+        computed, never stored. It never presents a vendor as secure or compliant: a
+        ``vendor_asserted`` claim reads as vendor-asserted, and the band is a concern
+        signal derived from the weakest evidence, not a grade."""
+        assessed = Deployment.objects.prefetch_related("assets__provider__assertions").get(
+            pk=self.get_object().pk
+        )
+        return Response(assess_vendors(assessed))
+
+    @action(detail=True, methods=["get"], url_path="executive-summary")
+    def executive_summary(self, request, uuid=None):
+        """Executive summary: the assurance graph rolled up for a leadership reader —
+        asset coverage, evidence-strength distribution, finding posture by severity,
+        remediation velocity, the standing six-state decision, an ordinal posture and
+        assurance-maturity band, and a headline from each sibling assessment. A read —
+        open to any authenticated operator, like the rest of the assurance reads — and
+        computed, never stored. Every value is a real count, a true ratio of real
+        counts, or an ordinal band: there is no dollar figure, ROI amount, or
+        realized-loss number anywhere, and nothing claims the system is secure."""
+        assessed = (
+            Deployment.objects.prefetch_related(
+                "findings__evidence", "findings__remediation_events", "assets__provider__assertions"
+            )
+            .select_related("data_boundary")
+            .get(pk=self.get_object().pk)
+        )
+        return Response(build_executive_summary(assessed))
+
+    @action(detail=True, methods=["get"], url_path="assurance-packs")
+    def assurance_packs(self, request, uuid=None):
+        """Vertical Assurance Packs (catalog): the code-only catalog of industry
+        packs — each naming the control frameworks it emphasizes (the identifiers the
+        compliance map already defines), the regulatory regimes it targets, and the
+        evidence a buyer in that vertical expects. A read — open to any authenticated
+        operator — and static; it does not read the deployment. Apply one to this
+        deployment via ``assurance-packs/<pack>``."""
+        return Response(list_packs())
+
+    @action(detail=True, methods=["get"], url_path="assurance-packs/(?P<pack>[\\w-]+)")
+    def assurance_pack(self, request, uuid=None, pack=None):
+        """Apply one vertical assurance pack to this deployment: its compliance
+        coverage read through the lens of that pack, by reusing the compliance map and
+        filtering to the pack's emphasized frameworks. A read — open to any
+        authenticated operator — and computed, never stored. Coverage is honest — a
+        touched control is an open gap, never "passed" or "compliant" — and the pack's
+        regulatory regimes are carried as context, not computed coverage. An unknown
+        pack key is a clean 400, never a guessed pack."""
+        assessed = Deployment.objects.prefetch_related("findings").get(pk=self.get_object().pk)
+        try:
+            return Response(apply_pack(assessed, pack))
+        except UnknownPack as exc:
+            return Response({"detail": str(exc)}, status=400)
 
 
 class FindingViewSet(
