@@ -142,6 +142,37 @@ def test_recompute_api_action():
     assert resp2.data["decision"] == Deployment.Decision.PAUSED
 
 
+def test_recompute_preserves_an_operator_pause():
+    """A routine recompute must not silently clear a failsafe pause. With the
+    deployment already 'Deployment paused', a recompute with no body keeps it
+    paused; only an explicit ``paused=false`` lifts it."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = _deployment(admin)
+    _finding(dep, "medium", n="me")
+    dep.decision = Deployment.Decision.PAUSED
+    dep.save(update_fields=["decision"])
+
+    factory = APIRequestFactory()
+    view = DeploymentViewSet.as_view({"post": "recompute"})
+
+    # No body: the pause is preserved, not recomputed away.
+    req = factory.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json")
+    force_authenticate(req, user=admin)
+    resp = view(req, uuid=str(dep.uuid))
+    assert resp.status_code == 200
+    assert resp.data["decision"] == Deployment.Decision.PAUSED
+    dep.refresh_from_db()
+    assert dep.decision == Deployment.Decision.PAUSED
+
+    # Explicit paused=false lifts it and recomputes from findings.
+    lift = factory.post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": False}, format="json"
+    )
+    force_authenticate(lift, user=admin)
+    resp2 = view(lift, uuid=str(dep.uuid))
+    assert resp2.data["decision"] == Deployment.Decision.READY_RESTRICTED
+
+
 def test_recompute_denied_to_non_admin():
     """A non-admin can read the graph but may not mutate the decision."""
     analyst = _user("ana", role=User.Roles.ANALYST)

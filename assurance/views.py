@@ -88,10 +88,17 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     def recompute(self, request, uuid=None):
         """Recompute the deployment's six-state decision from its live findings.
         Accepts an optional ``paused`` flag (the operator failsafe state), which
-        overrides to "Deployment paused". Admin-only: it mutates the record."""
+        overrides to "Deployment paused". Admin-only: it mutates the record.
+
+        A routine recompute must NOT silently clear an operator's failsafe pause:
+        ``paused`` defaults to the deployment's *current* paused state, so a
+        recompute preserves an existing "Deployment paused" unless the caller
+        explicitly passes ``paused=false`` to lift it. (The ingest path guards
+        this the same way; the manual path used to default to False and clear it.)"""
         _require_admin(request)
         deployment = self.get_object()
-        paused = bool(request.data.get("paused", False))
+        currently_paused = deployment.decision == Deployment.Decision.PAUSED
+        paused = bool(request.data.get("paused", currently_paused))
         decision = recompute_decision(deployment, paused=paused)
         return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
 
@@ -204,7 +211,13 @@ class FindingViewSet(
         return ctx
 
     def get_queryset(self):
-        qs = self._scoped_findings().select_related("deployment").prefetch_related("evidence")
+        # The serializer reads deployment.uuid, asset.uuid/name, and owner.username;
+        # select_related them so the list is a fixed number of queries, not O(n).
+        qs = (
+            self._scoped_findings()
+            .select_related("deployment", "asset", "owner")
+            .prefetch_related("evidence")
+        )
         severity = self.request.query_params.get("severity")
         if severity:
             qs = qs.filter(severity=severity)
@@ -330,7 +343,8 @@ class UnknownViewSet(
         return super().update(request, *args, **kwargs)
 
     def get_queryset(self):
-        qs = Unknown.objects.all().select_related("deployment", "finding")
+        # `owner` is read per row (owner.username), so select_related it too.
+        qs = Unknown.objects.all().select_related("deployment", "finding", "owner")
         user = self.request.user
         if not _is_privileged(user):
             # Unknowns on a deployment the user owns, or derived from a finding on
