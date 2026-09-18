@@ -545,7 +545,12 @@ def derive_claims(deployment, *, now=None) -> dict:
         if current.status == Status.REVOKED:
             continue
 
-        if current.system_fingerprint == system_fp:
+        # A claim is bound to BOTH the system state and the policy it was assessed
+        # under. It is refreshed in place only while both still hold; a change to
+        # either the system fingerprint OR the policy version supersedes it and opens
+        # a new current version bound to the change, so a policy change versions a
+        # claim exactly as a state change does.
+        if current.system_fingerprint == system_fp and current.policy_version == pol_version:
             if _refresh_machine_fields(current, derived, receipt_digest, now):
                 counts["updated"] += 1
         else:
@@ -572,7 +577,7 @@ def derive_claims(deployment, *, now=None) -> dict:
     # and the check-invalidations endpoint reports the resolved count itself.
     from .invalidation import resolve_satisfied_requirements
 
-    resolve_satisfied_requirements(dep, system_fp=system_fp, now=now)
+    resolve_satisfied_requirements(dep, system_fp=system_fp, policy_version=pol_version, now=now)
     return counts
 
 

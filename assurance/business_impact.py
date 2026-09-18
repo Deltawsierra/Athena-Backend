@@ -22,17 +22,21 @@ and never a currency. A reader who wants a number will not find one here, by
 design — turning a finding type into a dollar loss would be a fabrication, not an
 assessment.
 
-**Impact dimensions, not processes or owners.** The roadmap's full chain runs
-finding → business *process* → *owner* → impact. Athena's finding model carries no
-business-process attribution and no owner-*of-process* field (a finding has an
-``owner`` FK to a user who is *dispositioning* it, which is not the same as the
-owner of an affected business process). Inventing a per-process or per-owner
-mapping from data we do not hold would be dishonest, so this module maps to impact
-**dimensions only**. Per-process and per-owner attribution is a deliberate future
-extension: it requires *declared* business context (a process catalog, a
-process→owner map, a data-classification of what each process handles) that a
-customer supplies, not something this module may guess. Until that context is
-declared, the map stops honestly at the dimension.
+**Dimensions and owners — but not invented processes.** The roadmap's full chain
+runs finding → business *process* → *owner* → impact. This module maps to impact
+**dimensions** and attributes potential exposure to the **owner** accountable for
+each finding — the finding's ``owner`` FK, the person who dispositions it. That
+ownership is *declared data we hold*, so attributing "whose impact" to it is honest
+rather than a guess: a finding with no owner rolls up to an explicit
+``(unassigned)`` bucket, never onto a person, and an owner's band is the same
+ordinal exposure band the dimensions use. What is still NOT produced is per-
+*process* attribution: the finding model carries no business-process field and no
+process→owner map, so inventing one would be dishonest. That remains a deliberate
+future extension requiring *declared* business context (a process catalog, a
+data-classification of what each process handles) a customer supplies. Note the
+owner here is the finding's disposition owner, not the owner *of an affected
+business process* — the map is honest about attributing to the former, not the
+latter.
 
 It is honest in the same three ways the rest of the assurance layer is:
 
@@ -80,6 +84,23 @@ The return shape of :func:`build_business_impact`::
         },
         ...
       ],
+      "owners": [                          # whose impact — worst-attributed-first
+        {
+          "owner": {                       # the accountable disposition owner, or
+            "known": true,                 # {"known": false, ...} for the unassigned bucket
+            "id": 5,
+            "username": "alice",
+            "label": "alice",              # "(unassigned)" when unknown — never a guess
+          },
+          "active_finding_count": 2,
+          "resolved_finding_count": 0,
+          "worst_severity": "high",        # worst among this owner's ACTIVE findings; None if none
+          "exposure_band": "elevated",     # same ordinal band the dimensions use; None if none active
+          "dimensions": ["customer_trust", "data_confidentiality"],  # sorted keys implicated
+          "finding_types": ["sql_injection"],                        # sorted, distinct
+        },
+        ...
+      ],
       "summary": {
         "total_findings": 7,
         "active_findings": 5,
@@ -91,6 +112,9 @@ The return shape of :func:`build_business_impact`::
         "dimensions_with_active_exposure": 4,  # dimensions with >=1 active finding
         "worst_severity": "critical",          # worst active across every dimension; None if none
         "worst_exposure_band": "elevated",     # strongest band across dimensions; None if none active
+        "owners_attributed": 2,                # distinct KNOWN owners carrying any exposure
+        "owners_with_active_exposure": 2,      # known owners with >=1 active finding
+        "findings_without_owner": 1,           # findings with no owner (an attribution gap, not zero impact)
       },
     }
 """
@@ -347,6 +371,62 @@ class _Dimension:
         }
 
 
+class _Owner:
+    """One owner accountable for a set of findings, accumulating the *potential*
+    business exposure attributed to them — answering "whose impact". The owner is
+    the finding's ``owner`` FK (the person accountable for its disposition). An
+    unknown owner is an explicit ``(unassigned)`` bucket, never guessed onto a
+    person."""
+
+    def __init__(self, owner_id, *, username=None):
+        self.owner_id = owner_id
+        self.username = username
+        self.active = 0
+        self.resolved = 0
+        self._worst_active_rank = -1
+        self.dimensions: set[str] = set()
+        self.finding_types: set[str] = set()
+
+    @property
+    def known(self) -> bool:
+        return self.owner_id is not None
+
+    def add(self, *, active: bool, severity: str, finding_type: str, dimensions: tuple[str, ...]) -> None:
+        if active:
+            self.active += 1
+            rank = severity_rank(severity)
+            if rank > self._worst_active_rank:
+                self._worst_active_rank = rank
+        else:
+            self.resolved += 1
+        if finding_type:
+            self.finding_types.add(finding_type)
+        self.dimensions.update(dimensions)
+
+    @property
+    def worst_severity(self) -> str | None:
+        return SEVERITY_ORDER[self._worst_active_rank] if self._worst_active_rank >= 0 else None
+
+    def to_dict(self) -> dict:
+        return {
+            "owner": {
+                "known": self.known,
+                "id": self.owner_id,
+                # Honest label: the accountable person, or an explicit "unassigned"
+                # when no owner is set — never a guessed attribution.
+                "username": self.username if self.known else None,
+                "label": self.username if self.known else "(unassigned)",
+            },
+            "active_finding_count": self.active,
+            "resolved_finding_count": self.resolved,
+            "worst_severity": self.worst_severity,
+            "exposure_band": _exposure_band(self._worst_active_rank, self.active),
+            # The dimensions this owner's findings implicate (mapped only), sorted.
+            "dimensions": sorted(self.dimensions),
+            "finding_types": sorted(self.finding_types),
+        }
+
+
 class _Unmapped:
     """A finding_type that implies no curated dimension — a gap in the map itself,
     surfaced rather than dropped."""
@@ -392,20 +472,26 @@ def _worst(a: str | None, b: str | None) -> str | None:
 
 def build_business_impact(deployment) -> dict:
     """The business-impact map for a deployment: which business-impact *dimensions*
-    its findings implicate, how heavily (an ordinal band, never an amount), and
-    which finding types imply no dimension. Prefetch ``findings`` on the caller
-    side. Pure and side-effect-free, deterministic, no timestamp.
+    its findings implicate, how heavily (an ordinal band, never an amount), which
+    finding types imply no dimension, and — the "whose impact" view — the potential
+    exposure attributed to each accountable owner. Prefetch ``findings`` and
+    select_related ``owner`` on the caller side. Pure and side-effect-free,
+    deterministic, no timestamp.
 
     This is **inferred potential exposure from finding type and severity — never a
     realized loss, never a dollar figure, never a claim the business was harmed.**
-    It maps to impact dimensions only: the model carries no business-process or
-    owner-of-process attribution, so per-process and per-owner mapping is a future
-    extension requiring declared business context, not something inferred here. See
-    the module docstring for the full return shape and honesty discipline."""
+    Owner attribution is grounded in the finding's ``owner`` FK (the person
+    accountable for its disposition) — it is *real, declared ownership*, not a
+    guess; a finding with no owner rolls up to an explicit ``(unassigned)`` bucket,
+    never onto a person. Per-*process* attribution is still not produced: the model
+    carries no business-process field, so inventing one would be dishonest. See the
+    module docstring for the full return shape and honesty discipline."""
     dimensions: dict[str, _Dimension] = {}
     unmapped: dict[str, _Unmapped] = {}
+    owners: dict[object, _Owner] = {}
 
     total = active_total = resolved_total = 0
+    without_owner = 0
     mapped_types: set[str] = set()
 
     def ensure(key: str) -> _Dimension:
@@ -414,6 +500,14 @@ def build_business_impact(deployment) -> dict:
             dim = _Dimension(key)
             dimensions[key] = dim
         return dim
+
+    def ensure_owner(owner) -> _Owner:
+        owner_id = owner.pk if owner is not None else None
+        entry = owners.get(owner_id)
+        if entry is None:
+            entry = _Owner(owner_id, username=(owner.get_username() if owner is not None else None))
+            owners[owner_id] = entry
+        return entry
 
     for finding in deployment.findings.all():
         total += 1
@@ -442,6 +536,16 @@ def build_business_impact(deployment) -> dict:
                 unmapped[key] = entry
             entry.add(active=is_active, severity=finding.severity)
 
+        # Whose impact: attribute this finding to its accountable owner (the
+        # ``owner`` FK), or to the explicit "(unassigned)" bucket. The owner
+        # carries the same dimensions this finding implicates (mapped only).
+        owner = getattr(finding, "owner", None)
+        if owner is None:
+            without_owner += 1
+        ensure_owner(owner).add(
+            active=is_active, severity=finding.severity, finding_type=ftype, dimensions=keys
+        )
+
     dimension_list = [d.to_dict() for d in dimensions.values()]
     # Strongest potential exposure first: by exposure band, then worst active
     # severity, then most open findings, then the curated dimension order — a
@@ -466,6 +570,20 @@ def build_business_impact(deployment) -> dict:
         )
     )
 
+    owner_list = [o.to_dict() for o in owners.values()]
+    # Strongest attributed exposure first: by band, then worst active severity,
+    # then most open findings; a KNOWN owner sorts before the "(unassigned)" bucket
+    # at equal exposure, then by label — a deterministic, stable order.
+    owner_list.sort(
+        key=lambda o: (
+            _band_rank(o["exposure_band"]),
+            -severity_rank(o["worst_severity"]) if o["worst_severity"] else 1,
+            -o["active_finding_count"],
+            not o["owner"]["known"],
+            o["owner"]["label"],
+        )
+    )
+
     overall_worst = None
     overall_band_rank = len(_BAND_ORDER)
     with_active = 0
@@ -475,6 +593,11 @@ def build_business_impact(deployment) -> dict:
             overall_worst = _worst(overall_worst, dim["worst_severity"])
             overall_band_rank = min(overall_band_rank, _band_rank(dim["exposure_band"]))
     worst_band = _BAND_ORDER[overall_band_rank] if overall_band_rank < len(_BAND_ORDER) else None
+
+    owners_attributed = sum(1 for o in owner_list if o["owner"]["known"])
+    owners_with_active = sum(
+        1 for o in owner_list if o["owner"]["known"] and o["active_finding_count"] > 0
+    )
 
     summary = {
         "total_findings": total,
@@ -487,9 +610,16 @@ def build_business_impact(deployment) -> dict:
         "dimensions_with_active_exposure": with_active,
         "worst_severity": overall_worst,
         "worst_exposure_band": worst_band,
+        # Whose impact: how many distinct known owners carry attributed exposure,
+        # and how many findings have no owner (an honest attribution gap, not zero
+        # impact).
+        "owners_attributed": owners_attributed,
+        "owners_with_active_exposure": owners_with_active,
+        "findings_without_owner": without_owner,
     }
     return {
         "dimensions": dimension_list,
         "unmapped": unmapped_list,
+        "owners": owner_list,
         "summary": summary,
     }

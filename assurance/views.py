@@ -577,9 +577,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         to any authenticated operator, like the rest of the assurance reads — and
         computed, never stored. It is inferred *potential* exposure from finding
         type and severity, never a realized loss, a dollar figure, or a claim the
-        business was harmed; it maps to dimensions only, since the record carries no
-        business-process or owner-of-process attribution."""
-        assessed = Deployment.objects.prefetch_related("findings").get(pk=self.get_object().pk)
+        business was harmed. It also attributes exposure to the owner accountable
+        for each finding ("whose impact"), grounded in the real ``owner`` FK — a
+        finding with no owner rolls up to an explicit unassigned bucket, never a
+        guess. It does not attribute to a business *process*: the record carries no
+        business-process field."""
+        assessed = Deployment.objects.prefetch_related("findings__owner").get(pk=self.get_object().pk)
         return Response(build_business_impact(assessed))
 
     @action(detail=True, methods=["get"], url_path="vendor-assurance")
@@ -608,7 +611,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         realized-loss number anywhere, and nothing claims the system is secure."""
         assessed = (
             Deployment.objects.prefetch_related(
-                "findings__evidence", "findings__remediation_events", "assets__provider__assertions"
+                "findings__evidence",
+                "findings__remediation_events",
+                "findings__owner",
+                "assets__provider__assertions",
             )
             .select_related("data_boundary")
             .get(pk=self.get_object().pk)

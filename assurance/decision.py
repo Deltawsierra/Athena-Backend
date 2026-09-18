@@ -204,6 +204,10 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     current.
 
     A read-only computed view; it does not persist anything."""
+    # Lazy import: assurance.policy imports the decision rules from THIS module, so
+    # a top-level import here would be circular.
+    from .policy import policy_pin
+
     signal = claim_decision_signal(deployment)
     from_findings = None if paused else _decision_from_findings(deployment)
     decision = compute_decision(deployment, paused=paused)
@@ -230,6 +234,9 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
         "from_findings": from_findings,
         "claim_cap": signal["cap"],
         "paused": paused,
+        # The assurance policy this decision is made under — pinned so a later
+        # change to the rules can tell whether the policy still holds.
+        "policy_version": policy_pin(deployment),
         "claims": {
             "has_claims": signal["has_claims"],
             "retest_pending": signal["retest_pending"],

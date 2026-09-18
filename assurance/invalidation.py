@@ -51,6 +51,7 @@ from django.utils import timezone
 
 from .claims import Status
 from .fingerprint import compute_system_fingerprint
+from .fingerprint import policy_version as _current_policy_version
 from .models import AssuranceClaim, ClaimEvent, Deployment, RetestRequirement
 
 ClaimType = AssuranceClaim.ClaimType
@@ -160,17 +161,18 @@ def _mark_stale(claim, now) -> None:
     )
 
 
-def resolve_satisfied_requirements(deployment, *, system_fp=None, now=None) -> int:
+def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version=None, now=None) -> int:
     """Resolve every open retest obligation that a fresh derivation has satisfied.
 
     An obligation is satisfied when the claim's CURRENT version is bound to the
-    deployment's current system state (``system_fingerprint == system_fp``) and is
-    a *different* version than the one that was invalidated — i.e. a fresh
-    :func:`assurance.claims.derive_claims` has rebound the claim to the changed
-    state. A claim still bound to the old state (the version that drifted, whatever
-    its status) does not satisfy anything: a machine no longer flagging drift is not
-    a retest, a rebinding re-derivation is. Records ``resolving_claim`` and
-    ``resolved_at`` and returns how many it resolved.
+    deployment's current system state (``system_fingerprint == system_fp``) AND the
+    policy in force (``policy_version``) and is a *different* version than the one
+    that was invalidated — i.e. a fresh :func:`assurance.claims.derive_claims` has
+    rebound the claim to the changed state and policy. A claim still bound to the
+    old state or the old policy (the version that drifted, whatever its status) does
+    not satisfy anything: a machine no longer flagging drift is not a retest, a
+    rebinding re-derivation is. Records ``resolving_claim`` and ``resolved_at`` and
+    returns how many it resolved.
 
     Called by ``derive_claims`` after it reconciles (so a re-derive settles the
     obligations it answered) and by :func:`check_invalidations` (so a check reports
@@ -178,6 +180,8 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, now=None) -> i
     now = now or timezone.now()
     if system_fp is None:
         system_fp = compute_system_fingerprint(deployment)
+    if policy_version is None:
+        policy_version = _current_policy_version(deployment)
 
     resolved = 0
     open_reqs = RetestRequirement.objects.filter(
@@ -193,8 +197,9 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, now=None) -> i
             .exclude(pk=req.claim_id)
             .first()
         )
-        # Only a NEW current version bound to the current state answers the retest.
-        if current is None or current.system_fingerprint != system_fp:
+        # Only a NEW current version bound to the current state AND policy answers
+        # the retest — a rebinding that matches both, not just one.
+        if current is None or current.system_fingerprint != system_fp or current.policy_version != policy_version:
             continue
         req.resolving_claim = current
         req.resolved_at = now
@@ -218,19 +223,22 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
 
     For each CURRENT claim (``valid_to`` null) that is not a human REVOKED
     withdrawal: if its bound ``system_fingerprint`` no longer equals the
-    deployment's current fingerprint, the claim has drifted and is *invalidated* —
-    a retest obligation is opened (idempotently, once per claim identity), the
-    claim is moved away from a pass to STALE, and the fact is attributed on the
-    claim's lifecycle. It then resolves any open obligation a prior re-derivation
-    has already satisfied. Idempotent and transactional.
+    deployment's current fingerprint, OR its bound ``policy_version`` no longer
+    equals the policy in force, the claim has drifted and is *invalidated* — a
+    retest obligation is opened (idempotently, once per claim identity), the claim
+    is moved away from a pass to STALE, and the fact is attributed on the claim's
+    lifecycle. Binding a claim to the policy it was assessed under is what lets a
+    *policy* change (not just a system change) invalidate a decision. It then
+    resolves any open obligation a prior re-derivation has already satisfied.
+    Idempotent and transactional.
 
     Returns ``{invalidated, retests_opened, retests_resolved}``:
-      - ``invalidated`` — current, non-REVOKED claims whose bound state has drifted;
+      - ``invalidated`` — current, non-REVOKED claims whose bound state OR policy has drifted;
       - ``retests_opened`` — NEW obligations opened (0 on an idempotent re-run);
       - ``retests_resolved`` — obligations a rebinding re-derivation has satisfied.
 
-    Query-light: the current fingerprint is computed once over a prefetched
-    deployment, and the claims are read in one scoped query."""
+    Query-light: the current fingerprint and policy pin are computed once over a
+    prefetched deployment, and the claims are read in one scoped query."""
     now = now or timezone.now()
     dep = (
         Deployment.objects.prefetch_related("assets__provider__assertions")
@@ -238,6 +246,7 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
         .get(pk=deployment.pk)
     )
     system_fp = compute_system_fingerprint(dep)
+    policy_version = _current_policy_version(dep)
 
     invalidated = 0
     opened = 0
@@ -249,25 +258,36 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
         # given a retest obligation.
         if claim.status == Status.REVOKED:
             continue
-        # Drift is the only signal: the state the claim was true of no longer
-        # matches what is running. (See the module docstring on why this is the
-        # honest, fingerprint-grounded definition of "invalidated".)
-        if claim.system_fingerprint == system_fp:
+        # Drift is the signal: the state the claim was true of, or the policy it was
+        # judged under, no longer matches what is in force. (See the module
+        # docstring on why this is the honest, fingerprint-grounded definition of
+        # "invalidated".)
+        state_drift = claim.system_fingerprint != system_fp
+        policy_drift = claim.policy_version != policy_version
+        if not (state_drift or policy_drift):
             continue
         invalidated += 1
         if not _has_open_requirement(dep, claim):
+            if state_drift and policy_drift:
+                reason = "System fingerprint and assurance policy both changed; the state and the policy this claim was true of no longer match the deployment."
+            elif state_drift:
+                reason = "System fingerprint changed; the state this claim was true of no longer matches the deployment."
+            else:
+                reason = "Assurance policy changed; the policy this claim was assessed under is no longer the policy in force."
             _open_requirement(
                 dep,
                 claim,
                 system_fp=system_fp,
                 now=now,
                 actor=actor,
-                reason="System fingerprint changed; the state this claim was true of no longer matches the deployment.",
+                reason=reason,
             )
             opened += 1
         # Move the drifted claim away from a pass (STALE), never to an invented
         # "invalid but passing" state.
         _mark_stale(claim, now)
 
-    resolved = resolve_satisfied_requirements(dep, system_fp=system_fp, now=now)
+    resolved = resolve_satisfied_requirements(
+        dep, system_fp=system_fp, policy_version=policy_version, now=now
+    )
     return {"invalidated": invalidated, "retests_opened": opened, "retests_resolved": resolved}

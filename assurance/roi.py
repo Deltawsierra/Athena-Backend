@@ -253,6 +253,10 @@ def _assessment_headlines(deployment) -> dict:
         "business_impact": {
             "dimensions_with_active_exposure": impact["dimensions_with_active_exposure"],
             "worst_exposure_band": impact["worst_exposure_band"],
+            # Whose impact: how many accountable owners carry active exposure, and
+            # how many findings are unattributed (a gap, not zero impact).
+            "owners_with_active_exposure": impact["owners_with_active_exposure"],
+            "findings_without_owner": impact["findings_without_owner"],
         },
         "capabilities": {
             "high_risk": capabilities["high_risk"],
