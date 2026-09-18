@@ -54,8 +54,9 @@ def get_connector_class(name: str) -> type[Connector]:
 def build_connector(name: str, config: ConnectorConfig | None = None) -> Connector:
     """Build a configured connector by name.
 
-    When ``config`` is given it is used as-is (the seam a per-tenant config layer
-    plugs into later — the deferred live-wiring follow-up). When it is omitted the
+    When ``config`` is given it is used as-is (the seam the per-tenant
+    :class:`~assurance.models.ConnectorBinding` layer plugs into via
+    ``config_from_binding``). When it is omitted the
     connector reads its config from settings/env via ``config_from_settings``,
     which in an unconfigured environment yields a not-configured config: the
     connector is then inert and any push reports ``"<name> not configured"``.

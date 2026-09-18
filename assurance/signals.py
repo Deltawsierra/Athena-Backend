@@ -66,3 +66,24 @@ def ingest_completed_scan(sender, instance, created, update_fields=None, **kwarg
             logger.exception("assurance ingestion failed for scan %s", scan_pk)
 
     transaction.on_commit(_do_ingest)
+
+
+@receiver(post_save, sender="assurance.Finding", dispatch_uid="assurance_auto_dispatch_finding")
+def auto_dispatch_finding(sender, instance, created, update_fields=None, **kwargs):
+    """Auto-dispatch a finding to its deployment's connectors once it is recorded
+    (commercial spine, automated-dispatch policy).
+
+    Inert by default and gated at every layer: it only ever *schedules* the
+    dispatch (on commit, so it never lengthens the finding's transaction and is
+    discarded in the rolled-back test transactions), and the scheduled work is a
+    no-op unless the deployment has an admin-enabled
+    :class:`~assurance.models.DispatchPolicy` the finding qualifies for AND at least
+    one connector binding. With no policy — the default for every deployment —
+    nothing happens. The dispatch itself is idempotent (a finding is never pushed to
+    the same connector twice) and resilient (a connector error is recorded, never
+    raised). Disable entirely with ``ASSURANCE_AUTO_DISPATCH_ENABLED = False``."""
+    if not getattr(settings, "ASSURANCE_AUTO_DISPATCH_ENABLED", True):
+        return
+    from .dispatch import schedule_finding_dispatch
+
+    schedule_finding_dispatch(instance)

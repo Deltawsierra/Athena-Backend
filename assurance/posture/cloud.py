@@ -209,6 +209,8 @@ class CloudPosture(PostureAssessment):
     name = "cloud"
     label = "Cloud Assurance"
     config_class = CloudPostureConfig
+    secret_field = "token"
+    settings_fields = ("account", "base_url")
 
     CHECKS = (
         PostureCheck(

@@ -214,6 +214,8 @@ class SecretsPosture(PostureAssessment):
     name = "secrets"
     label = "Secrets / Crypto"
     config_class = SecretsPostureConfig
+    secret_field = "token"
+    settings_fields = ("base_url",)
 
     CHECKS = (
         PostureCheck(

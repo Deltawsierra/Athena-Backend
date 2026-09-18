@@ -1153,3 +1153,324 @@ class DeclaredComponent(models.Model):
 
     def __str__(self) -> str:
         return f"declared {self.name} ({self.get_kind_display()})"
+
+
+# ---------------------------------------------------------------------------
+# Commercial spine — per-tenant external-integration bindings
+# ---------------------------------------------------------------------------
+#
+# A Deployment is the tenant boundary in this system of record: it is the unit a
+# customer contract expands on, and every finding, asset and decision already
+# hangs off it. So a "per-tenant" connector / posture binding is a per-deployment
+# row — the deployment IS the tenant. The two bindings below carry the endpoint a
+# connector or posture domain points at, in the clear, and the credential that
+# reaches it, ENCRYPTED AT REST via :mod:`assurance.crypto`. The plaintext secret
+# never lives in a column, never appears in ``endpoint``, and is decrypted only in
+# memory at point of use. With no ``ASSURANCE_CREDENTIAL_KEY`` configured no secret
+# can be stored at all, so every binding stays inert — the honesty invariant that
+# an unconfigured environment behaves exactly as it does today.
+
+
+class _CredentialBinding(models.Model):
+    """Shared base for a per-deployment external-integration binding: the
+    non-secret endpoint config, plus one encrypted credential. Abstract — the
+    concrete bindings name their target (a connector, a posture domain) and how to
+    build the target's config from ``endpoint`` + the decrypted secret."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # Whether this binding is live. A disabled binding is inert (no push, no fetch)
+    # exactly like an unconfigured one — a reversible off switch that keeps the
+    # credential on file.
+    enabled = models.BooleanField(default=True)
+    # The non-secret endpoint / scoping fields (base URL, project key, table,
+    # owner/repo, account, organisation, ...). NEVER the credential — the secret
+    # rides only in ``secret_ciphertext`` and only ever encrypted.
+    endpoint = models.JSONField(default=dict, blank=True)
+    # The credential, Fernet-encrypted (see :mod:`assurance.crypto`). Blank means
+    # "no credential on file". A plaintext secret is never written here.
+    secret_ciphertext = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+    # -- secret handling (encrypted at rest, never in the clear) -----------
+
+    @property
+    def has_secret(self) -> bool:
+        """Whether a credential is on file — the only thing an API ever reveals
+        about the secret. Never the value itself."""
+        return bool(self.secret_ciphertext)
+
+    def set_secret(self, plaintext: str | None) -> None:
+        """Encrypt and store a credential (or clear it when ``plaintext`` is
+        falsy). Raises :class:`assurance.crypto.EncryptionUnavailable` when no key
+        is configured, so a secret is never silently persisted in the clear — the
+        caller checks :func:`assurance.crypto.encryption_available` first and keeps
+        the binding inert instead."""
+        from .crypto import encrypt_secret
+
+        if plaintext:
+            self.secret_ciphertext = encrypt_secret(plaintext)
+        else:
+            self.secret_ciphertext = ""
+
+    def get_secret(self) -> str | None:
+        """Decrypt the stored credential, in memory, at point of use. ``None`` when
+        there is none, no key is configured, or the ciphertext cannot be decrypted
+        (retired key / tampering) — every one of which leaves the binding inert."""
+        from .crypto import decrypt_secret
+
+        return decrypt_secret(self.secret_ciphertext or None)
+
+    def __str__(self) -> str:  # never includes the secret
+        target = getattr(self, self._target_field)
+        state = "enabled" if self.enabled else "disabled"
+        return f"{target} binding for {self.deployment_id} ({state})"
+
+
+class ConnectorBinding(_CredentialBinding):
+    """Per-deployment binding of one outbound connector to its endpoint + encrypted
+    credential. This is what makes a connector *live* for a tenant: with an
+    operational binding the manual push and the automated dispatch use it; with
+    none (the default) the connector is inert exactly as it is today."""
+
+    _target_field = "connector"
+
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="connector_bindings"
+    )
+    # The connector registry name (``"jira"``, ``"servicenow"``, ...). Validated in
+    # :meth:`clean` against the live registry rather than a frozen choices list, so
+    # the two can never drift.
+    connector = models.CharField(max_length=64)
+
+    class Meta:
+        ordering = ["deployment", "connector"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "connector"], name="uq_connector_binding_deployment"
+            )
+        ]
+        indexes = [models.Index(fields=["deployment", "connector"])]
+
+    def clean(self) -> None:
+        from django.core.exceptions import ValidationError
+
+        from .connectors import UnknownConnector, get_connector_class
+
+        try:
+            get_connector_class(self.connector)
+        except UnknownConnector as exc:
+            raise ValidationError({"connector": str(exc)}) from None
+
+    def connector_class(self):
+        from .connectors import get_connector_class
+
+        return get_connector_class(self.connector)
+
+    def build_config(self):
+        """The connector's frozen config from this binding: endpoint fields + the
+        decrypted secret. When no usable secret is available the config reports
+        not-configured, so the connector stays inert."""
+        return self.connector_class().config_from_binding(self.endpoint or {}, self.get_secret())
+
+    def build_connector(self):
+        from .connectors import build_connector
+
+        return build_connector(self.connector, self.build_config())
+
+    def is_operational(self) -> bool:
+        """Whether this binding yields a *configured* connector — enabled, a
+        decryptable credential on file, and every required endpoint field present.
+        This is the per-tenant ``configured`` state the API reports and the gate the
+        dispatcher checks before it ever touches a transport."""
+        if not self.enabled:
+            return False
+        try:
+            return bool(self.build_config().is_configured())
+        except Exception:  # noqa: BLE001 — an unbuildable config is simply inert
+            return False
+
+
+class PostureBinding(_CredentialBinding):
+    """Per-deployment binding of one posture domain (cloud / secrets / repo) to a
+    real resource URL + encrypted read-credential. With an operational binding the
+    posture read fetches and evaluates the live resource; with none (the default)
+    the domain is inert — ``connected: false`` and the catalog only, exactly as
+    today."""
+
+    _target_field = "domain"
+
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="posture_bindings"
+    )
+    # The posture-domain registry name (``"cloud"``, ``"secrets"``, ``"repo"``).
+    domain = models.CharField(max_length=64)
+
+    class Meta:
+        ordering = ["deployment", "domain"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "domain"], name="uq_posture_binding_deployment"
+            )
+        ]
+        indexes = [models.Index(fields=["deployment", "domain"])]
+
+    def clean(self) -> None:
+        from django.core.exceptions import ValidationError
+
+        from .posture import UnknownPostureDomain, get_assessment_class
+
+        try:
+            get_assessment_class(self.domain)
+        except UnknownPostureDomain as exc:
+            raise ValidationError({"domain": str(exc)}) from None
+
+    def domain_class(self):
+        from .posture import get_assessment_class
+
+        return get_assessment_class(self.domain)
+
+    def build_config(self):
+        return self.domain_class().config_from_binding(self.endpoint or {}, self.get_secret())
+
+    def build_assessment(self):
+        from .posture import build_assessment
+
+        return build_assessment(self.domain, self.build_config())
+
+    def is_operational(self) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            return bool(self.build_config().is_configured())
+        except Exception:  # noqa: BLE001
+            return False
+
+
+class DispatchPolicy(models.Model):
+    """The per-tenant automated-dispatch policy: when a qualifying finding appears
+    (or the deployment's decision enters a blocking state) its evidence is
+    auto-dispatched to the deployment's operational connectors.
+
+    OFF by default and per deployment: with no policy, or a policy left disabled,
+    nothing auto-dispatches — the manual admin push stays the only outbound path,
+    exactly as today. Turning it on is a deliberate per-tenant step."""
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.OneToOneField(
+        Deployment, on_delete=models.CASCADE, related_name="dispatch_policy"
+    )
+    # Off unless explicitly enabled — the honesty default (no surprise outbound).
+    enabled = models.BooleanField(default=False)
+    # A finding at or above this severity qualifies for dispatch.
+    min_severity = models.CharField(
+        max_length=16, choices=SEVERITY_CHOICES, default=SEVERITY_HIGH
+    )
+    # Also dispatch a deployment's qualifying findings when its decision enters a
+    # blocking state (needs remediation / not recommended / paused).
+    on_blocking_decision = models.BooleanField(default=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def finding_qualifies(self, finding) -> bool:
+        """Whether a finding meets the severity threshold. Info-severity findings
+        never qualify (they are not dispatched upstream)."""
+        return severity_rank(finding.severity) >= severity_rank(self.min_severity)
+
+    def __str__(self) -> str:
+        state = "enabled" if self.enabled else "disabled"
+        return f"dispatch policy for {self.deployment_id} ({state}, >= {self.min_severity})"
+
+
+class DispatchAttempt(models.Model):
+    """The auditable record of an automated (or manual) dispatch of one finding to
+    one connector. One row per ``(finding, connector)`` — the idempotency key: once
+    an attempt is :attr:`Outcome.SENT` it is terminal and the finding is never
+    pushed to that connector again. A not-yet-sent record (inert / disabled / no
+    key / failed) is retried on the next qualifying trigger and updated in place,
+    with ``attempts`` counting how many times it has been tried. The ``detail`` is
+    always a human-readable line and NEVER carries a secret."""
+
+    class Outcome(models.TextChoices):
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+        SKIPPED_INERT = "skipped_inert", "Skipped — connector not configured"
+        SKIPPED_NO_KEY = "skipped_no_key", "Skipped — no encryption key"
+        SKIPPED_DISABLED = "skipped_disabled", "Skipped — binding disabled"
+
+    class Trigger(models.TextChoices):
+        SEVERITY = "severity", "Finding severity threshold"
+        BLOCKING_DECISION = "blocking_decision", "Blocking decision transition"
+        MANUAL = "manual", "Manual dispatch"
+
+    #: Outcomes that mean the external system accepted the push — terminal.
+    TERMINAL_OUTCOMES = frozenset({Outcome.SENT})
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="dispatch_attempts"
+    )
+    finding = models.ForeignKey(
+        Finding, on_delete=models.CASCADE, related_name="dispatch_attempts"
+    )
+    connector = models.CharField(max_length=64)
+    # The binding this used, kept for provenance. SET_NULL so removing a binding
+    # never erases the audit trail of what it dispatched.
+    binding = models.ForeignKey(
+        ConnectorBinding,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attempts",
+    )
+    outcome = models.CharField(max_length=32, choices=Outcome.choices)
+    trigger = models.CharField(max_length=32, choices=Trigger.choices)
+    # Human-readable outcome line (the ConnectorResult detail, or why it was
+    # skipped). Never a credential.
+    detail = models.TextField(blank=True)
+    # The id the external system handed back (Jira key, ServiceNow sys_id, ...),
+    # for reconciliation. Blank when there is none.
+    external_ref = models.CharField(max_length=255, blank=True, default="")
+    attempts = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["finding", "connector"], name="uq_dispatch_attempt_finding_connector"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["deployment", "outcome"]),
+            models.Index(fields=["finding", "connector"]),
+        ]
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this attempt is done (accepted) — the idempotency guard: a
+        terminal attempt is never re-pushed."""
+        return self.outcome in self.TERMINAL_OUTCOMES
+
+    def __str__(self) -> str:
+        return f"{self.connector} <- finding {self.finding_id}: {self.outcome}"

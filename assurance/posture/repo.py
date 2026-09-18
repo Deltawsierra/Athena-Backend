@@ -208,6 +208,8 @@ class RepoPosture(PostureAssessment):
     name = "repo"
     label = "Repository / SDLC"
     config_class = RepoPostureConfig
+    secret_field = "token"
+    settings_fields = ("organization", "base_url")
 
     CHECKS = (
         PostureCheck(

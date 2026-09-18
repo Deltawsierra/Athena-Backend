@@ -51,8 +51,9 @@ def get_assessment_class(name: str) -> type[PostureAssessment]:
 def build_assessment(name: str, config: PostureConfig | None = None) -> PostureAssessment:
     """Build a configured posture assessment by name.
 
-    When ``config`` is given it is used as-is (the seam a per-tenant config layer
-    plugs into later — the deferred live-wiring follow-up). When it is omitted the
+    When ``config`` is given it is used as-is (the seam the per-tenant
+    :class:`~assurance.models.PostureBinding` layer plugs into via
+    ``config_from_binding``). When it is omitted the
     domain reads its config from settings/env via ``config_from_settings``, which
     in an unconfigured environment yields a not-configured config: the domain is
     then inert and any :meth:`~assurance.posture.base.PostureAssessment.assess`

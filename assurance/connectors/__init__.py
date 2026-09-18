@@ -5,8 +5,12 @@ customer already runs: Jira, ServiceNow, GitHub issues, Splunk (HEC), and a
 generic webhook. Built adapter-only behind a clean, transport-injected interface:
 production-quality formatting and parsing, exercised against a fake transport in
 tests. **Inert by default** — with no configured credentials a connector makes no
-network call and reports ``"<name> not configured"``. Live wiring (a real
-transport bound to per-tenant credentials) is a documented, deferred follow-up.
+network call and reports ``"<name> not configured"``. Live wiring is now in place:
+a per-tenant :class:`~assurance.models.ConnectorBinding` (endpoint + credential
+encrypted at rest via :mod:`assurance.crypto`) makes a connector operational for a
+deployment, and an admin-enabled :class:`~assurance.models.DispatchPolicy`
+auto-dispatches qualifying findings through :mod:`assurance.dispatch`. With no
+binding and no encryption key, the connector stays inert exactly as before.
 
 See :mod:`assurance.connectors.base` for the :class:`Connector` /
 :class:`Transport` / :class:`ConnectorResult` interface and the design contract.

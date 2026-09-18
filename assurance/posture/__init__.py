@@ -19,9 +19,12 @@ Built adapter-only behind a clean, **read-only** transport-injected interface
 against a recording fake fetcher in tests. **Inert by default** — with no
 configured credentials a domain makes no fetch and reports
 ``{"connected": false, ...}`` with the catalog of checks it *would* run. Live
-wiring (a real fetcher bound to per-tenant credentials) is a documented, deferred
-follow-up. See :mod:`assurance.posture.base` for the interface and the honesty
-contract.
+wiring is now in place: a per-tenant :class:`~assurance.models.PostureBinding`
+(resource URL + read-credential encrypted at rest via :mod:`assurance.crypto`)
+points a domain at a real resource for a deployment, and the read then fetches and
+evaluates against it. With no binding and no encryption key, the domain stays inert
+exactly as before. See :mod:`assurance.posture.base` for the interface and the
+honesty contract.
 """
 
 from __future__ import annotations

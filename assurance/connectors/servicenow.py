@@ -50,6 +50,8 @@ _IMPACT = {
 class ServiceNowConnector(Connector):
     name = "servicenow"
     config_class = ServiceNowConfig
+    secret_field = "token"
+    settings_fields = ("base_url", "table")
 
     @classmethod
     def config_from_settings(cls) -> ServiceNowConfig:

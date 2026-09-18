@@ -2,10 +2,14 @@ from django.contrib import admin
 
 from .models import (
     Asset,
+    ConnectorBinding,
     DataBoundary,
     Deployment,
+    DispatchAttempt,
+    DispatchPolicy,
     Evidence,
     Finding,
+    PostureBinding,
     Provider,
     ProviderAssertion,
     RemediationEvent,
@@ -100,3 +104,66 @@ class UnknownAdmin(admin.ModelAdmin):
     list_display = ("question", "deployment", "deployment_impact", "status", "source", "review_by")
     list_filter = ("status", "deployment_impact", "source")
     search_fields = ("question", "why_it_matters")
+
+
+# ---------------------------------------------------------------------------
+# Commercial spine — connector / posture bindings and dispatch
+# ---------------------------------------------------------------------------
+# The encrypted credential column is NEVER shown or editable in the admin: a
+# secret is set through the admin-gated API (write-only, encrypted at rest). The
+# admin shows only whether one is on file and whether the binding is operational.
+
+
+class _CredentialBindingAdmin(admin.ModelAdmin):
+    # The ciphertext column is deliberately excluded from the form so a plaintext
+    # secret can never be pasted into it here; credentials are set via the API.
+    exclude = ("secret_ciphertext",)
+    readonly_fields = ("uuid", "has_secret", "operational", "created_at", "updated_at")
+
+    @admin.display(boolean=True, description="Credential on file")
+    def has_secret(self, obj):
+        return obj.has_secret
+
+    @admin.display(boolean=True, description="Operational")
+    def operational(self, obj):
+        return obj.is_operational()
+
+
+@admin.register(ConnectorBinding)
+class ConnectorBindingAdmin(_CredentialBindingAdmin):
+    list_display = ("connector", "deployment", "enabled", "has_secret", "operational", "updated_at")
+    list_filter = ("connector", "enabled")
+    search_fields = ("deployment__name", "connector")
+
+
+@admin.register(PostureBinding)
+class PostureBindingAdmin(_CredentialBindingAdmin):
+    list_display = ("domain", "deployment", "enabled", "has_secret", "operational", "updated_at")
+    list_filter = ("domain", "enabled")
+    search_fields = ("deployment__name", "domain")
+
+
+@admin.register(DispatchPolicy)
+class DispatchPolicyAdmin(admin.ModelAdmin):
+    list_display = ("deployment", "enabled", "min_severity", "on_blocking_decision", "updated_at")
+    list_filter = ("enabled", "min_severity", "on_blocking_decision")
+    search_fields = ("deployment__name",)
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(DispatchAttempt)
+class DispatchAttemptAdmin(admin.ModelAdmin):
+    # An audit trail: written only by the dispatcher, never hand-edited.
+    list_display = ("connector", "finding", "deployment", "outcome", "trigger", "attempts", "updated_at")
+    list_filter = ("outcome", "trigger", "connector")
+    search_fields = ("deployment__name", "finding__title", "connector", "external_ref")
+    readonly_fields = (
+        "uuid", "deployment", "finding", "connector", "binding", "outcome",
+        "trigger", "detail", "external_ref", "attempts", "created_at", "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

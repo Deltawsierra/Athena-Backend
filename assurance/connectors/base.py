@@ -26,11 +26,11 @@ Two design rules, held throughout this package:
 Pushing a finding OUT is an outbound action that touches a customer's live GRC /
 CI-CD / identity system, so this package is deliberately built **adapter-only**:
 production-quality formatting and parsing behind a clean interface, exercised
-entirely against a fake transport in tests. **Live wiring — a real
-:class:`Transport` bound to per-tenant credentials, and the policy for when an
-automated push is allowed to fire — is a deferred follow-up**, documented here on
-purpose. Until that lands, an unconfigured connector is inert: it reports
-``not configured`` and does nothing.
+entirely against a fake transport in tests. **Live wiring is now in place**: a
+per-tenant :class:`~assurance.models.ConnectorBinding` binds a real transport to
+credentials encrypted at rest, and :mod:`assurance.dispatch` is the policy for when
+an automated push fires. An unconfigured connector (no binding, no key) stays
+inert: it reports ``not configured`` and does nothing.
 
 The :class:`ConnectorResult` is the honest report of what happened: ``ok`` says
 whether the external system accepted the push, ``external_ref`` is the id it
@@ -172,6 +172,14 @@ class Connector(ABC):
     #: The concrete config dataclass this connector reads.
     config_class: type[ConnectorConfig] = ConnectorConfig
 
+    #: The config field that carries the secret credential. A per-tenant binding
+    #: stores this one field encrypted at rest and every other field in the clear.
+    secret_field: str = "token"
+
+    #: The non-secret config fields a per-tenant binding stores in the clear (the
+    #: endpoint/scoping fields). The secret field is deliberately NOT listed here.
+    settings_fields: tuple[str, ...] = ()
+
     def __init__(self, config: ConnectorConfig) -> None:
         self.config = config
 
@@ -185,6 +193,25 @@ class Connector(ABC):
         override to read their own keys; the base returns a never-configured
         config so a connector with no override is inert rather than crashing."""
         return cls.config_class()
+
+    @classmethod
+    def config_from_binding(
+        cls, settings_values: dict, secret: str | None
+    ) -> ConnectorConfig:
+        """Build this connector's frozen config from a per-tenant binding: the
+        non-secret ``settings_values`` (endpoint/scoping) plus the decrypted
+        ``secret`` (or ``None`` when the binding has no usable credential — the
+        resulting config then reports not-configured, so the connector stays
+        inert). No secret ever appears in ``settings_values``; it arrives only
+        here, in memory, at build time."""
+        kwargs = {
+            field: settings_values.get(field)
+            for field in cls.settings_fields
+            if settings_values.get(field) not in (None, "")
+        }
+        if secret:
+            kwargs[cls.secret_field] = secret
+        return cls.config_class(**kwargs)
 
     def _not_configured(self) -> ConnectorResult:
         return ConnectorResult(
