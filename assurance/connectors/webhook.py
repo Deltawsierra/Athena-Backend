@@ -42,6 +42,8 @@ class WebhookConfig(ConnectorConfig):
 class WebhookConnector(Connector):
     name = "webhook"
     config_class = WebhookConfig
+    secret_field = "token"
+    settings_fields = ("url", "token_header")
 
     @classmethod
     def config_from_settings(cls) -> WebhookConfig:

@@ -43,6 +43,8 @@ class GitHubIssuesConfig(ConnectorConfig):
 class GitHubIssuesConnector(Connector):
     name = "github_issues"
     config_class = GitHubIssuesConfig
+    secret_field = "token"
+    settings_fields = ("base_url", "owner", "repo")
 
     @classmethod
     def config_from_settings(cls) -> GitHubIssuesConfig:

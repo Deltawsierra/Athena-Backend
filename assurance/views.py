@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid as uuidlib
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from rest_framework import mixins, permissions, viewsets
@@ -46,10 +47,14 @@ from .route import build_route_map
 from .models import (
     Asset,
     AssuranceClaim,
+    ConnectorBinding,
     DataBoundary,
     DeclaredComponent,
     Deployment,
+    DispatchAttempt,
+    DispatchPolicy,
     Finding,
+    PostureBinding,
     Provider,
     ProviderAssertion,
     RetestRequirement,
@@ -140,6 +145,125 @@ def _valid_uuid(value: str) -> str | None:
         return None
 
 
+# Keys that must never be accepted into a binding's plaintext ``endpoint`` — the
+# credential rides only in the encrypted column, set via the ``secret`` field.
+_SECRETISH_ENDPOINT_KEYS = frozenset(
+    {"token", "secret", "password", "secret_ciphertext", "credential", "api_key", "apikey"}
+)
+
+
+def _parse_bool_field(raw):
+    """Parse a boolean from JSON/form input; returns ``(ok, value)``."""
+    if isinstance(raw, bool):
+        return True, raw
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _TRUE_STRINGS:
+            return True, True
+        if token in _FALSE_STRINGS:
+            return True, False
+    return False, None
+
+
+def _apply_credential_binding_write(binding, data):
+    """Apply a per-tenant credential-binding write (connector or posture) from
+    request data onto ``binding``, in place. Returns an error string on bad input,
+    or ``None`` on success. The secret is WRITE-ONLY: it is accepted under
+    ``secret``, encrypted immediately, and refused outright when no encryption key
+    is configured (so a binding never silently persists an unusable/plaintext
+    credential). A secret is never accepted inside ``endpoint``."""
+    from .crypto import encryption_available
+
+    if "endpoint" in data:
+        endpoint = data.get("endpoint")
+        if endpoint in (None, ""):
+            endpoint = {}
+        if not isinstance(endpoint, dict):
+            return "endpoint must be an object of non-secret config fields."
+        leaked = _SECRETISH_ENDPOINT_KEYS.intersection(k.lower() for k in endpoint)
+        if leaked:
+            return (
+                "endpoint must not carry a credential "
+                f"({', '.join(sorted(leaked))}); send it as write-only 'secret'."
+            )
+        binding.endpoint = dict(endpoint)
+    if "enabled" in data:
+        ok, value = _parse_bool_field(data.get("enabled"))
+        if not ok:
+            return "enabled must be a boolean."
+        binding.enabled = value
+    if "secret" in data:
+        secret = data.get("secret")
+        if secret:
+            if not isinstance(secret, str):
+                return "secret must be a string."
+            if not encryption_available():
+                return (
+                    "No encryption key is configured (ASSURANCE_CREDENTIAL_KEY), so "
+                    "a credential cannot be stored and the binding would be inert. "
+                    "Configure a key before setting a secret."
+                )
+            binding.set_secret(secret)
+        else:
+            # An explicit empty secret clears the stored credential.
+            binding.set_secret(None)
+    return None
+
+
+def _credential_binding_state(binding) -> dict:
+    """The safe, JSON view of a credential binding — never the secret VALUE, only
+    whether one is on file (``has_secret``) and whether the binding is operational.
+    Used for both connector and posture bindings."""
+    target_field = binding._target_field
+    return {
+        target_field: getattr(binding, target_field),
+        "uuid": str(binding.uuid),
+        "bound": True,
+        "enabled": binding.enabled,
+        "endpoint": binding.endpoint or {},
+        "has_secret": binding.has_secret,
+        "operational": binding.is_operational(),
+        "updated_at": binding.updated_at.isoformat() if binding.updated_at else None,
+    }
+
+
+def _dispatch_policy_state(policy) -> dict:
+    """The JSON view of a deployment's dispatch policy. ``None`` → the honest
+    default: no policy, so auto-dispatch is off."""
+    if policy is None:
+        return {
+            "configured": False,
+            "enabled": False,
+            "min_severity": None,
+            "on_blocking_decision": False,
+            "detail": "no dispatch policy configured; auto-dispatch is off for this deployment",
+        }
+    return {
+        "configured": True,
+        "enabled": policy.enabled,
+        "min_severity": policy.min_severity,
+        "on_blocking_decision": policy.on_blocking_decision,
+        "updated_at": policy.updated_at.isoformat() if policy.updated_at else None,
+    }
+
+
+def _dispatch_attempt_state(attempt) -> dict:
+    """The JSON view of a dispatch attempt — the auditable record of what was and
+    was not sent. Carries no secret; ``detail`` is a human-readable line only."""
+    return {
+        "uuid": str(attempt.uuid),
+        "finding": str(attempt.finding.uuid),
+        "connector": attempt.connector,
+        "outcome": attempt.outcome,
+        "trigger": attempt.trigger,
+        "detail": attempt.detail,
+        "external_ref": attempt.external_ref or None,
+        "attempts": attempt.attempts,
+        "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+        "updated_at": attempt.updated_at.isoformat() if attempt.updated_at else None,
+    }
+
+
 class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     serializer_class = DeploymentSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -169,7 +293,33 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         currently_paused = deployment.decision == Deployment.Decision.PAUSED
         paused = _parse_paused(request.data.get("paused"), currently_paused)
         decision = recompute_decision(deployment, paused=paused)
+        # Commercial spine: if the decision has entered a blocking state and this
+        # deployment's policy opts into it, auto-dispatch its qualifying findings.
+        # Inert-by-default and never fatal — a dispatch error must not break a
+        # decision recompute — so it runs on commit and is wrapped.
+        self._maybe_dispatch_on_blocking_decision(deployment)
         return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
+
+    def _maybe_dispatch_on_blocking_decision(self, deployment) -> None:
+        """Schedule the blocking-decision dispatch on commit, wrapped so it can
+        never break the recompute. A no-op unless the deployment has an enabled
+        policy that opts into the decision trigger and the decision is blocking."""
+        deployment_pk = deployment.pk
+
+        def _run():
+            try:
+                from .dispatch import dispatch_for_blocking_decision
+
+                fresh = Deployment.objects.get(pk=deployment_pk)
+                dispatch_for_blocking_decision(fresh)
+            except Exception:  # noqa: BLE001 — dispatch must never break a recompute
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "blocking-decision dispatch failed for deployment %s", deployment_pk
+                )
+
+        transaction.on_commit(_run)
 
     @action(detail=True, methods=["get"])
     def receipt(self, request, uuid=None):
@@ -209,20 +359,38 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
 
     @action(detail=True, methods=["get"], url_path="connectors")
     def connectors(self, request, uuid=None):
-        """List the outbound connectors and whether each is configured (commercial
-        spine). A read: an operator can see which integrations exist and which are
-        inert for lack of credentials, without triggering anything."""
+        """List the outbound connectors and whether each is configured for THIS
+        deployment (commercial spine). A read: an operator can see which
+        integrations exist, which are live for this tenant (an operational
+        per-deployment binding), and which are inert, without triggering anything.
+
+        A connector counts as ``configured`` when this deployment has an
+        operational binding for it (enabled, a decryptable credential on file, and
+        every endpoint field present) OR a process-wide settings/env config exists.
+        With neither — the default in this repo — it is inert, exactly as before.
+        No credential value is ever returned, only whether one is on file."""
         from .connectors import available_connectors, build_connector
 
-        self.get_object()  # scope/permission check on the deployment
-        return Response(
-            {
-                "connectors": [
-                    {"name": name, "configured": build_connector(name).configured}
-                    for name in available_connectors()
-                ]
-            }
-        )
+        deployment = self.get_object()  # scope/permission check on the deployment
+        bindings = {
+            b.connector: b
+            for b in ConnectorBinding.objects.filter(deployment=deployment)
+        }
+        rows = []
+        for name in available_connectors():
+            binding = bindings.get(name)
+            settings_configured = build_connector(name).configured
+            operational = bool(binding and binding.is_operational())
+            rows.append(
+                {
+                    "name": name,
+                    "configured": operational or settings_configured,
+                    "bound": binding is not None,
+                    "binding_operational": operational,
+                    "has_secret": bool(binding and binding.has_secret),
+                }
+            )
+        return Response({"connectors": rows})
 
     @action(detail=True, methods=["post"], url_path=r"connectors/(?P<connector>[\w-]+)/push")
     def connector_push(self, request, uuid=None, connector=None):
@@ -256,13 +424,196 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 status=404,
             )
         try:
-            conn = build_connector(connector)
+            # Prefer this deployment's per-tenant binding when it is operational
+            # (its endpoint + decrypted credential); otherwise fall back to the
+            # process-wide settings/env config, which is inert in this repo.
+            binding = ConnectorBinding.objects.filter(
+                deployment=deployment, connector=connector
+            ).first()
+            if binding is not None and binding.is_operational():
+                conn = binding.build_connector()
+            else:
+                conn = build_connector(connector)
         except UnknownConnector as exc:
             return Response({"detail": str(exc)}, status=400)
         # RequestsTransport is only ever *touched* when the connector is
         # configured; an inert connector short-circuits before any post.
         result = conn.push_finding(finding, transport=RequestsTransport())
         return Response(result.as_dict())
+
+    @action(
+        detail=True,
+        methods=["get", "put", "delete"],
+        url_path=r"connectors/(?P<connector>[\w-]+)/config",
+    )
+    def connector_config(self, request, uuid=None, connector=None):
+        """Read or manage this deployment's per-tenant binding for one connector
+        (commercial spine, admin-gated writes).
+
+        GET (open read) returns the binding's non-secret state — endpoint config,
+        whether a credential is on file (``has_secret``), and whether it is
+        operational — or ``bound: false`` when there is none. The credential VALUE
+        is never returned.
+
+        PUT (admin) upserts the binding from ``{"enabled"?, "endpoint"?:{...},
+        "secret"?}``. ``secret`` is write-only and encrypted at rest; it is refused
+        with a clear 400 when no ``ASSURANCE_CREDENTIAL_KEY`` is configured, so a
+        binding never persists an unusable/plaintext credential. An empty
+        ``secret`` clears the stored one.
+
+        DELETE (admin) removes the binding (the connector reverts to inert)."""
+        from .connectors import UnknownConnector, get_connector_class
+
+        deployment = self.get_object()
+        try:
+            get_connector_class(connector)
+        except UnknownConnector as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        binding = ConnectorBinding.objects.filter(
+            deployment=deployment, connector=connector
+        ).first()
+
+        if request.method == "GET":
+            if binding is None:
+                return Response({"connector": connector, "bound": False})
+            return Response(_credential_binding_state(binding))
+
+        _require_admin(request)
+
+        if request.method == "DELETE":
+            if binding is not None:
+                binding.delete()
+            return Response(status=204)
+
+        # PUT — upsert.
+        creating = binding is None
+        if creating:
+            binding = ConnectorBinding(
+                deployment=deployment,
+                connector=connector,
+                created_by=request.user,
+            )
+        error = _apply_credential_binding_write(binding, request.data)
+        if error:
+            return Response({"detail": error}, status=400)
+        try:
+            binding.full_clean(exclude=["created_by"])
+        except DjangoValidationError as exc:
+            return Response(getattr(exc, "message_dict", {"detail": exc.messages}), status=400)
+        binding.save()
+        return Response(_credential_binding_state(binding), status=201 if creating else 200)
+
+    @action(
+        detail=True,
+        methods=["get", "put", "delete"],
+        url_path=r"posture/(?P<domain>[\w-]+)/config",
+    )
+    def posture_config(self, request, uuid=None, domain=None):
+        """Read or manage this deployment's per-tenant binding for one posture
+        domain (cloud / secrets / repo), admin-gated writes. Same discipline as
+        :meth:`connector_config`: a write-only, encrypted-at-rest ``secret`` refused
+        when no key is configured; the credential VALUE is never returned; DELETE
+        reverts the domain to inert (``connected: false``, catalog only)."""
+        from .posture import UnknownPostureDomain, get_assessment_class
+
+        deployment = self.get_object()
+        try:
+            get_assessment_class(domain)
+        except UnknownPostureDomain as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        binding = PostureBinding.objects.filter(
+            deployment=deployment, domain=domain
+        ).first()
+
+        if request.method == "GET":
+            if binding is None:
+                return Response({"domain": domain, "bound": False})
+            return Response(_credential_binding_state(binding))
+
+        _require_admin(request)
+
+        if request.method == "DELETE":
+            if binding is not None:
+                binding.delete()
+            return Response(status=204)
+
+        creating = binding is None
+        if creating:
+            binding = PostureBinding(
+                deployment=deployment,
+                domain=domain,
+                created_by=request.user,
+            )
+        error = _apply_credential_binding_write(binding, request.data)
+        if error:
+            return Response({"detail": error}, status=400)
+        try:
+            binding.full_clean(exclude=["created_by"])
+        except DjangoValidationError as exc:
+            return Response(getattr(exc, "message_dict", {"detail": exc.messages}), status=400)
+        binding.save()
+        return Response(_credential_binding_state(binding), status=201 if creating else 200)
+
+    @action(detail=True, methods=["get", "put"], url_path="dispatch-policy")
+    def dispatch_policy(self, request, uuid=None):
+        """Read or set this deployment's automated-dispatch policy (commercial
+        spine).
+
+        GET (open read) returns the policy, or the honest default (``configured:
+        false`` — no policy, so auto-dispatch is off). PUT (admin) upserts it from
+        ``{"enabled"?, "min_severity"?, "on_blocking_decision"?}``. A policy is OFF
+        by default and per deployment: with none, or one left disabled, nothing
+        auto-dispatches and the manual push stays the only outbound path."""
+        from .models import SEVERITY_CHOICES
+
+        deployment = self.get_object()
+        policy = DispatchPolicy.objects.filter(deployment=deployment).first()
+
+        if request.method == "GET":
+            return Response(_dispatch_policy_state(policy))
+
+        _require_admin(request)
+        if policy is None:
+            policy = DispatchPolicy(deployment=deployment, created_by=request.user)
+
+        data = request.data
+        if "enabled" in data:
+            ok, value = _parse_bool_field(data.get("enabled"))
+            if not ok:
+                return Response({"detail": "enabled must be a boolean."}, status=400)
+            policy.enabled = value
+        if "on_blocking_decision" in data:
+            ok, value = _parse_bool_field(data.get("on_blocking_decision"))
+            if not ok:
+                return Response(
+                    {"detail": "on_blocking_decision must be a boolean."}, status=400
+                )
+            policy.on_blocking_decision = value
+        if "min_severity" in data:
+            sev = str(data.get("min_severity")).strip().lower()
+            if sev not in {choice for choice, _ in SEVERITY_CHOICES}:
+                return Response(
+                    {"detail": "min_severity must be one of info/low/medium/high/critical."},
+                    status=400,
+                )
+            policy.min_severity = sev
+
+        policy.save()
+        return Response(_dispatch_policy_state(policy))
+
+    @action(detail=True, methods=["get"], url_path="dispatch-attempts")
+    def dispatch_attempts(self, request, uuid=None):
+        """The auditable record of every automated dispatch for this deployment —
+        what was sent, failed, or skipped (and why), per finding and connector. An
+        open read, so an operator can always see what did and did not leave the
+        record. No credential value is ever surfaced."""
+        deployment = self.get_object()
+        attempts = DispatchAttempt.objects.filter(deployment=deployment).select_related(
+            "finding"
+        )
+        return Response({"attempts": [_dispatch_attempt_state(a) for a in attempts]})
 
     @action(detail=True, methods=["get", "put"], url_path="data-boundary")
     def data_boundary(self, request, uuid=None):
@@ -423,23 +774,32 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         """The credential-gated posture catalog (Phase 3.2–3.4): the three posture
         domains and whether each is configured. A read — open to any authenticated
         operator, like the rest of the assurance reads — that lets an operator see
-        which posture assessments exist and which are inert for lack of
-        credentials, without triggering anything. Mirrors the ``connectors`` list."""
+        which posture assessments exist and which are configured for THIS
+        deployment (an operational per-tenant binding) versus inert, without
+        triggering anything. Mirrors the ``connectors`` list. No credential value
+        is ever returned, only whether one is on file."""
         from .posture import available_domains, build_assessment
 
-        self.get_object()  # scope/permission check on the deployment
-        return Response(
-            {
-                "domains": [
-                    {
-                        "name": name,
-                        "label": build_assessment(name).label,
-                        "configured": build_assessment(name).configured,
-                    }
-                    for name in available_domains()
-                ]
-            }
-        )
+        deployment = self.get_object()  # scope/permission check on the deployment
+        bindings = {
+            b.domain: b for b in PostureBinding.objects.filter(deployment=deployment)
+        }
+        rows = []
+        for name in available_domains():
+            binding = bindings.get(name)
+            settings_configured = build_assessment(name).configured
+            operational = bool(binding and binding.is_operational())
+            rows.append(
+                {
+                    "name": name,
+                    "label": build_assessment(name).label,
+                    "configured": operational or settings_configured,
+                    "bound": binding is not None,
+                    "binding_operational": operational,
+                    "has_secret": bool(binding and binding.has_secret),
+                }
+            )
+        return Response({"domains": rows})
 
     @action(detail=True, methods=["get"], url_path="cloud-posture")
     def cloud_posture(self, request, uuid=None):
@@ -472,16 +832,42 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         return Response(self._assess_posture("repo"))
 
     def _assess_posture(self, domain: str) -> dict:
-        """Build the posture domain from settings/env and assess it. A real
-        :class:`RequestsFetcher` is passed exactly as the connector push passes a
-        real transport — but an unconfigured domain short-circuits before the
-        fetcher is ever touched, so nothing is read. In this repo no domain is
-        configured (live wiring deferred), so every posture read is inert."""
+        """Build the posture domain for this deployment and assess it.
+
+        When the deployment has an operational per-tenant binding for the domain,
+        it is assessed against the live resource that binding points at, with a
+        real :class:`RequestsFetcher` (built from the binding's endpoint + decrypted
+        read-credential). Otherwise it falls back to the process-wide settings/env
+        config, which is inert in this repo. Either way the domain's own guard holds
+        the honesty invariant: an unconfigured domain short-circuits before the
+        fetcher is ever touched, so ``connected: false`` and no fetch is made — a
+        result that is never read as a pass."""
         from .posture import RequestsFetcher, build_assessment
 
-        self.get_object()  # scope/permission check on the deployment
-        assessment = build_assessment(domain)
-        return assessment.assess(fetcher=RequestsFetcher())
+        deployment = self.get_object()  # scope/permission check on the deployment
+        binding = PostureBinding.objects.filter(
+            deployment=deployment, domain=domain
+        ).first()
+        if binding is not None and binding.is_operational():
+            assessment = binding.build_assessment()
+            fetcher = self._posture_fetcher_for(binding)
+        else:
+            assessment = build_assessment(domain)
+            fetcher = RequestsFetcher()
+        return assessment.assess(fetcher=fetcher)
+
+    def _posture_fetcher_for(self, binding):
+        """The read-only fetcher a configured posture binding fetches through. Built
+        from the binding's endpoint base URL and decrypted read-credential (a Bearer
+        header). Isolated as a seam so a test can inject a fake fetcher for a
+        configured binding without any real network call ever being made."""
+        from .posture import RequestsFetcher
+
+        endpoint = binding.endpoint or {}
+        base_url = endpoint.get("base_url")
+        secret = binding.get_secret()
+        headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+        return RequestsFetcher(base_url=base_url, headers=headers)
 
     @action(detail=True, methods=["get"], url_path="ai-bom")
     def ai_bom(self, request, uuid=None):

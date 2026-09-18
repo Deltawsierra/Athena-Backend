@@ -44,6 +44,8 @@ class SplunkConfig(ConnectorConfig):
 class SplunkConnector(Connector):
     name = "splunk"
     config_class = SplunkConfig
+    secret_field = "token"
+    settings_fields = ("base_url", "index", "sourcetype")
 
     @classmethod
     def config_from_settings(cls) -> SplunkConfig:

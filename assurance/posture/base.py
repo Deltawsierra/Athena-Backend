@@ -40,10 +40,11 @@ The honesty discipline the assurance layer holds everywhere is enforced here:
 - **Inert when unconfigured.** No credentials → no fetch → ``connected: false`` and
   the catalog of checks it *would* run, never a fabricated "all clear".
 
-**Live wiring — a real :class:`Fetcher` bound to per-tenant credentials, and the
-policy for when a read against a customer's live cloud / secret store / SCM is
-allowed to fire — is a deferred follow-up**, documented here on purpose, mirroring
-the connector framework. Until it lands every domain is inert.
+**Live wiring is now in place**: a per-tenant
+:class:`~assurance.models.PostureBinding` binds a real read-only :class:`Fetcher`
+to a resource URL and a read-credential encrypted at rest, and a configured domain
+then fetches and evaluates against it. A domain with no binding and no key stays
+inert, exactly as before — ``connected: false`` and the catalog only.
 """
 
 from __future__ import annotations
@@ -112,9 +113,10 @@ class RequestsFetcher:
     worker, mirroring the connector transport. No base URL lives here: the URL is
     always the one a domain formats from its injected config.
 
-    Live wiring (binding this to per-tenant credentials and a real resource-URL
-    map) is the deferred follow-up; today no domain is configured, so this class is
-    never exercised against a live service.
+    A per-tenant :class:`~assurance.models.PostureBinding` supplies the base URL and
+    the read-credential (as an ``Authorization`` header) for a configured domain;
+    with no binding and no key, no domain is configured, so this class is never
+    exercised against a live service.
     """
 
     def __init__(self, base_url: str | None = None, headers: dict | None = None,
@@ -301,6 +303,14 @@ class PostureAssessment(ABC):
     #: The curated posture checks this domain runs. A subclass sets this.
     CHECKS: tuple[PostureCheck, ...] = ()
 
+    #: The config field that carries the secret read-credential. A per-tenant
+    #: binding stores this one field encrypted at rest, the rest in the clear.
+    secret_field: str = "token"
+
+    #: The non-secret config fields a per-tenant binding stores in the clear (the
+    #: account/URL/scoping fields). The secret field is deliberately NOT listed.
+    settings_fields: tuple[str, ...] = ()
+
     def __init__(self, config: PostureConfig) -> None:
         self.config = config
 
@@ -314,6 +324,25 @@ class PostureAssessment(ABC):
         to read their own keys; the base returns a never-configured config so a
         domain with no override is inert rather than crashing."""
         return cls.config_class()
+
+    @classmethod
+    def config_from_binding(
+        cls, settings_values: dict, secret: str | None
+    ) -> PostureConfig:
+        """Build this domain's frozen config from a per-tenant binding: the
+        non-secret ``settings_values`` (account/URL/scoping) plus the decrypted
+        ``secret`` (or ``None`` when the binding has no usable read-credential —
+        the config then reports not-configured, so the domain stays inert). No
+        secret ever appears in ``settings_values``; it arrives only here, in
+        memory, at build time."""
+        kwargs = {
+            field: settings_values.get(field)
+            for field in cls.settings_fields
+            if settings_values.get(field) not in (None, "")
+        }
+        if secret:
+            kwargs[cls.secret_field] = secret
+        return cls.config_class(**kwargs)
 
     # -- resources ---------------------------------------------------------
 
@@ -346,8 +375,9 @@ class PostureAssessment(ABC):
         if not self.configured:
             return self._not_connected_report()
         if fetcher is None:
-            # Only reached for a *configured* domain; today none is, so this is the
-            # deferred live-wiring seam, never exercised in this repo.
+            # Only reached for a *configured* domain when the caller passed no
+            # fetcher. The view always injects one (built from the per-tenant
+            # binding), so this default is the fallback path, not the norm.
             fetcher = RequestsFetcher()
         data = self._fetch_all(fetcher)
         return self._connected_report(data)

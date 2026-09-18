@@ -51,6 +51,8 @@ _PRIORITY = {
 class JiraConnector(Connector):
     name = "jira"
     config_class = JiraConfig
+    secret_field = "token"
+    settings_fields = ("base_url", "project_key", "issue_type")
 
     @classmethod
     def config_from_settings(cls) -> JiraConfig:

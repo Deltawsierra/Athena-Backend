@@ -291,6 +291,24 @@ CYBERENGINE_OPERATOR_KEY = os.environ.get("CYBERENGINE_OPERATOR_KEY")
 CYBERENGINE_ASSURANCE_MODE = os.environ.get("CYBERENGINE_ASSURANCE_MODE", "observe")
 
 # -------------------------------------------------------------------
+# ASSURANCE COMMERCIAL SPINE — connector / posture credential encryption
+# -------------------------------------------------------------------
+# The symmetric key that encrypts per-tenant connector and posture credentials at
+# rest (assurance.crypto). A Fernet key: URL-safe base64 of 32 random bytes; a
+# comma-separated list enables rotation (the first writes new ciphertext, all
+# decrypt old). ABSENT BY DEFAULT and deliberately so — with no key, no credential
+# can be stored, so every connector and posture binding stays inert and the system
+# behaves exactly as it does with no integration configured. A missing key never
+# falls back to plaintext. Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+ASSURANCE_CREDENTIAL_KEY = os.environ.get("ASSURANCE_CREDENTIAL_KEY", "")
+
+# Kill switch for the automated-dispatch signal. Even on (the default), dispatch is
+# a no-op unless a deployment has an admin-enabled DispatchPolicy and connector
+# bindings — this only lets an operator disable the whole path at once.
+ASSURANCE_AUTO_DISPATCH_ENABLED = _env_flag("ASSURANCE_AUTO_DISPATCH_ENABLED", default=True)
+
+# -------------------------------------------------------------------
 # FAILSAFE CONTROL PLANE (operator-held pause / stand down / terminate)
 # -------------------------------------------------------------------
 # Enrolled operator PUBLIC keys, key_id -> hex ed25519, as a JSON object in the
