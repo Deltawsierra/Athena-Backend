@@ -42,7 +42,7 @@ def _user(name="analyst", role=None):
     return User.objects.create_user(username=name, password="x", role=role or User.Roles.ANALYST)
 
 
-def _finding(dep, finding_type, severity="high", *, status=Finding.Status.OPEN, n="1"):
+def _finding(dep, finding_type, severity="high", *, status=Finding.Status.OPEN, n="1", owner=None):
     return Finding.objects.create(
         deployment=dep,
         fingerprint=f"fp-{finding_type}-{n}",
@@ -50,6 +50,7 @@ def _finding(dep, finding_type, severity="high", *, status=Finding.Status.OPEN, 
         title=finding_type.replace("_", " ").title(),
         severity=severity,
         status=status,
+        owner=owner,
     )
 
 
@@ -251,15 +252,75 @@ def test_map_reads_as_potential_exposure_never_a_dollar_amount():
     assert not isinstance(dim["exposure_band"], (int, float))
 
 
-def test_no_per_process_or_owner_attribution_is_invented():
-    # The model carries no business-process/owner-of-process field, so the map must
-    # not invent per-process or per-owner entries — dimensions only.
+def test_no_per_process_attribution_is_invented():
+    # The model carries no business-process field, so the map must not invent a
+    # per-process entry. Per-OWNER attribution IS produced (from the real owner FK)
+    # and lives in its own top-level "owners" section, never on a dimension.
     dep = Deployment.objects.create(name="d", owner=_user())
     _finding(dep, "sql_injection", "high")
     result = build_business_impact(dep)
-    assert set(result) == {"dimensions", "unmapped", "summary"}
+    assert set(result) == {"dimensions", "unmapped", "owners", "summary"}
     for dim in result["dimensions"]:
         assert not any(k in dim for k in ("process", "business_process", "owner", "owners"))
+
+
+def test_owner_attribution_is_grounded_in_the_real_owner_fk():
+    # "Whose impact": a finding's exposure is attributed to its accountable owner.
+    alice = _user("alice")
+    bob = _user("bob")
+    dep = Deployment.objects.create(name="d", owner=alice)
+    _finding(dep, "sql_injection", "critical", n="a", owner=alice)
+    _finding(dep, "xss", "medium", n="b", owner=bob)
+
+    result = build_business_impact(dep)
+    owners = {o["owner"]["label"]: o for o in result["owners"]}
+    assert set(owners) == {"alice", "bob"}
+    # Alice carries the critical SQLi; bob the medium XSS. Worst-attributed first.
+    assert result["owners"][0]["owner"]["label"] == "alice"
+    assert owners["alice"]["worst_severity"] == "critical"
+    assert owners["alice"]["owner"]["known"] is True
+    assert owners["alice"]["owner"]["id"] == alice.pk
+    assert DIMENSION_DATA_CONFIDENTIALITY in owners["alice"]["dimensions"]
+    assert result["summary"]["owners_attributed"] == 2
+    assert result["summary"]["findings_without_owner"] == 0
+
+
+def test_an_unknown_owner_is_an_explicit_unassigned_bucket_not_a_guess():
+    # A finding with no owner must not be attributed to a person — it rolls up to
+    # an explicit "(unassigned)" bucket, and the summary counts the gap honestly.
+    alice = _user("alice")
+    dep = Deployment.objects.create(name="d", owner=alice)
+    _finding(dep, "sql_injection", "high", n="a", owner=alice)
+    _finding(dep, "prompt_injection", "high", n="b", owner=None)
+
+    result = build_business_impact(dep)
+    owners = {o["owner"]["label"]: o for o in result["owners"]}
+    assert "(unassigned)" in owners
+    unassigned = owners["(unassigned)"]
+    assert unassigned["owner"]["known"] is False
+    assert unassigned["owner"]["id"] is None
+    assert unassigned["owner"]["username"] is None
+    assert unassigned["active_finding_count"] == 1
+    # Only alice is a KNOWN attributed owner; the unassigned bucket is a gap.
+    assert result["summary"]["owners_attributed"] == 1
+    assert result["summary"]["findings_without_owner"] == 1
+
+
+def test_a_resolved_finding_carries_no_active_band_for_its_owner():
+    # A resolved finding is history, not open exposure: it counts as resolved for
+    # its owner and contributes no active band — mirroring the dimension discipline.
+    alice = _user("alice")
+    dep = Deployment.objects.create(name="d", owner=alice)
+    _finding(dep, "sql_injection", "critical", n="a", owner=alice, status=Finding.Status.CLOSED)
+
+    result = build_business_impact(dep)
+    owner = result["owners"][0]
+    assert owner["owner"]["label"] == "alice"
+    assert owner["active_finding_count"] == 0
+    assert owner["resolved_finding_count"] == 1
+    assert owner["worst_severity"] is None
+    assert owner["exposure_band"] is None
+    assert result["summary"]["owners_with_active_exposure"] == 0
 
 
 def test_crosswalk_uses_only_curated_dimensions():

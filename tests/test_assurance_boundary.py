@@ -172,6 +172,64 @@ def test_undeclared_sharing_posture_is_an_unknown_not_a_pass():
     assert any("sharing" in u or "subprocessor" in u for u in flow["unknowns"])
 
 
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "Internal only",
+        "internal use only",
+        "in-house",
+        "In-House",
+        "first-party",
+        "first party",
+        "self-hosted",
+        "on-premise",
+        "on-premises",
+        "kept internal",
+        "company internal systems",
+        "our own infrastructure",
+        "internal",
+        "internally only",
+        "private",
+    ],
+)
+def test_internal_only_subprocessors_is_not_a_sharing_violation(declaration):
+    """Regression: a benign internal-only subprocessors declaration carries no
+    negation token, so it used to read as third-party sharing and produce a false
+    violation. An in-house declaration must now be approved, not flagged."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("InHouse", subprocessors=declaration)
+    _asset(dep, provider=p, name="m")
+    # Allow training so only the sharing branch is exercised; forbid sharing.
+    _policy(dep, training_allowed=True, third_party_sharing_allowed=False)
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "approved", flow["violations"]
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "AWS, OpenAI, Datadog",
+        "third party",
+        "third-party analytics vendors",
+        "shares with third parties",
+        "Stripe",
+        "internal team and Stripe",  # an internal claim that also names a vendor
+        "shared with external partners",
+    ],
+)
+def test_a_real_sharing_declaration_is_still_a_violation(declaration):
+    """The internal-only guard must never suppress a genuine sharing declaration:
+    a named vendor, an affirmative "shares with third parties", or an internal
+    claim that also names an external party still violates a no-sharing boundary."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Shares", subprocessors=declaration)
+    _asset(dep, provider=p, name="m")
+    _policy(dep, training_allowed=True, third_party_sharing_allowed=False)
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "violation", declaration
+    assert any("subprocessor" in v for v in flow["violations"])
+
+
 def test_no_declared_boundary_never_reads_as_permission():
     dep = Deployment.objects.create(name="d", owner=_user())
     p = _provider("OpenAI", region="us-east-1", trains_on_data="Yes")

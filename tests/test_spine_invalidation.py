@@ -206,6 +206,92 @@ def test_stale_claim_without_rebind_does_not_resolve():
 
 
 # ---------------------------------------------------------------------------
+# Per-deployment policy pinning — a policy change invalidates a decision
+# ---------------------------------------------------------------------------
+
+
+def _change_policy(monkeypatch):
+    """Force the assurance policy in force to a different pin, as a deliberate
+    rule-set change would. The pin is content-derived, so changing the policy
+    standard version moves it deterministically."""
+    import assurance.policy as policy
+
+    monkeypatch.setattr(policy, "POLICY_VERSION", "mythos.assurance.policy/test-changed")
+
+
+def test_claim_is_pinned_to_the_policy_it_was_assessed_under():
+    dep = _simple_deployment()
+    derive_claims(dep)
+    from assurance.fingerprint import policy_version
+
+    pin = policy_version(dep)
+    for claim in _claims_by_type(dep).values():
+        assert claim.policy_version == pin
+
+
+def test_policy_change_invalidates_current_claims_and_opens_retests(monkeypatch):
+    """A policy change (not a system change) must be able to invalidate a decision:
+    a claim bound to the old policy drifts, opens a retest, and is moved off a pass
+    to STALE — even though the system fingerprint is unchanged."""
+    dep = _simple_deployment()
+    derive_claims(dep)
+    fp_before = compute_system_fingerprint(dep)
+
+    _change_policy(monkeypatch)
+
+    counts = check_invalidations(dep)
+    # The system is unchanged; only the policy moved — yet the claims invalidate.
+    assert compute_system_fingerprint(dep) == fp_before
+    assert counts["invalidated"] == 3
+    assert counts["retests_opened"] == 3
+
+    req = RetestRequirement.objects.filter(deployment=dep).first()
+    assert "policy" in req.reason.lower()
+    for claim in _claims_by_type(dep).values():
+        assert claim.status not in _PASS_STATES
+
+
+def test_derive_after_policy_change_supersedes_and_rebinds(monkeypatch):
+    """Re-deriving under the new policy supersedes each claim (rebinding it to the
+    new policy version) and resolves the obligation the policy change opened."""
+    dep = _simple_deployment()
+    derive_claims(dep)
+    bom_before = _claims_by_type(dep)[ClaimType.AI_BOM]
+
+    _change_policy(monkeypatch)
+    check_invalidations(dep)
+    req = RetestRequirement.objects.get(claim=bom_before)
+    assert req.is_open
+
+    from assurance.fingerprint import policy_version
+
+    new_pin = policy_version(dep)
+    counts = derive_claims(dep)
+    # Every current claim was rebound to the new policy: superseded, not refreshed.
+    assert counts["superseded"] == 3
+    assert counts["updated"] == 0
+
+    for claim in _claims_by_type(dep).values():
+        assert claim.policy_version == new_pin
+        assert claim.system_fingerprint == compute_system_fingerprint(dep)
+
+    req.refresh_from_db()
+    assert req.resolved_at is not None
+    assert req.resolving_claim.policy_version == new_pin
+
+
+def test_decision_and_receipt_surface_the_pinned_policy(monkeypatch):
+    from assurance.decision import decision_support
+    from assurance.fingerprint import policy_version
+    from assurance.receipt import build_assurance_receipt
+
+    dep = _simple_deployment()
+    pin = policy_version(dep)
+    assert decision_support(dep)["policy_version"] == pin
+    assert build_assurance_receipt(dep)["policy_version"] == pin
+
+
+# ---------------------------------------------------------------------------
 # The human guard and honesty invariants
 # ---------------------------------------------------------------------------
 

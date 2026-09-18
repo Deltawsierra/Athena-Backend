@@ -81,8 +81,15 @@ def test_receipt_carries_the_full_versioned_tuple():
     r = receipt.build_assurance_receipt(dep)
 
     # Version — the standard is versioned and stamps which schema it is.
-    assert r["receipt_version"] == receipt.RECEIPT_VERSION == "mythos.assurance.receipt/1.0"
+    assert r["receipt_version"] == receipt.RECEIPT_VERSION == "mythos.assurance.receipt/1.1"
     assert receipt.RECEIPT_SCHEMA["$id"] == receipt.RECEIPT_VERSION
+
+    # The pinned assurance-policy version the decision was made under — the rule
+    # set, not just the declared boundary. Matches the policy module's pin.
+    from assurance.policy import policy_pin
+
+    assert r["policy_version"] == policy_pin(dep)
+    assert r["policy_version"].startswith("mythos.assurance.policy/")
 
     # System X.
     assert r["system"]["name"] == "checkout-assistant"

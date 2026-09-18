@@ -59,6 +59,78 @@ _AFFIRMATIVE_WORDS = frozenset(
     {"yes", "true", "train", "trains", "training", "trained", "share", "shares", "sharing", "shared"}
 )
 
+# Internal-only sharing declarations. A ``subprocessors`` value that positively
+# declares the data stays in-house ("internal only", "in-house", "first-party",
+# "self-hosted") is NOT third-party sharing, even though it carries no negation
+# token — so "internal only" must not read as a violation. Mirrors the training
+# path's whole-word / phrase discipline (word boundaries, never substrings), and
+# is deliberately CONSERVATIVE: an internal-only reading is accepted only when the
+# value BOTH carries an internal-only indicator AND is composed entirely of the
+# benign internal vocabulary below. Any token outside that vocabulary — a named
+# subprocessor (a vendor), or the word "third" — is not benign and keeps the
+# sharing reading, so a real sharing declaration is never suppressed (the
+# dangerous direction).
+_INTERNAL_ONLY_PHRASES = (
+    "internal only",
+    "internal-only",
+    "internal use only",
+    "internal use",
+    "in house",
+    "in-house",
+    "on prem",
+    "on-prem",
+    "on premise",
+    "on-premise",
+    "on premises",
+    "on-premises",
+    "first party",
+    "first-party",
+    "1st party",
+    "self hosted",
+    "self-hosted",
+    "kept internal",
+    "stays internal",
+    "our own",
+    "own infrastructure",
+    "company internal",
+)
+# Single tokens that on their own declare an internal-only posture.
+_INTERNAL_ONLY_WORDS = frozenset(
+    {"internal", "internally", "inhouse", "onprem", "onpremise", "onpremises", "selfhosted", "firstparty", "private"}
+)
+# The FULL vocabulary a value may be composed of and still read as internal-only.
+# Notably absent: any vendor / subprocessor name, and the token "third" — so
+# "third party" (tokens {third, party}) is never suppressed while "first party"
+# (tokens {first, party}, with the phrase indicator) is.
+_BENIGN_INTERNAL_TOKENS = _INTERNAL_ONLY_WORDS | frozenset(
+    {
+        "only", "use", "used", "in", "house", "on", "prem", "premise", "premises",
+        "self", "hosted", "host", "first", "1st", "party",
+        "no", "not", "never", "none", "zero",
+        "kept", "stays", "stay", "remains", "remain",
+        "our", "ours", "own", "owned",
+        "company", "corporate", "org", "organization", "organisation",
+        "team", "staff", "employee", "employees",
+        "data", "all", "and", "within",
+        "infrastructure", "systems", "system", "environment", "environments",
+    }
+)
+
+
+def _declares_internal_only(v: str) -> bool:
+    """Whether a (lower-cased, stripped) subprocessors value positively declares an
+    internal-only posture — the data stays in-house, no third party is named. True
+    only when the value BOTH carries an internal-only indicator (a phrase or a
+    token) AND is composed entirely of the benign internal vocabulary, so a value
+    that also names a vendor ("internal team and Stripe") or says "third party" is
+    never mistaken for internal-only."""
+    has_phrase = any(p in v for p in _INTERNAL_ONLY_PHRASES)
+    tokens = set(_WORD_RE.findall(v))
+    has_word = bool(tokens & _INTERNAL_ONLY_WORDS)
+    if not (has_phrase or has_word):
+        return False
+    return bool(tokens) and tokens <= _BENIGN_INTERNAL_TOKENS
+
 
 def _negated(value: str) -> bool:
     """Whether a declared value carries a whole-word negation ("No", "opted out",
@@ -91,11 +163,23 @@ def _affirmative(value: str) -> bool:
 
 def _shares_with_third_parties(value: str) -> bool:
     """A provider's declared subprocessors posture read as a sharing signal: a
-    non-empty declaration that is not a negation ("none", "no subprocessors")
-    names third parties the data reaches. An empty value is a gap the caller
-    surfaces as an unknown, not sharing."""
+    non-empty declaration that is neither a negation ("none", "no subprocessors")
+    nor a positive internal-only declaration ("internal only", "in-house",
+    "first-party") names third parties the data reaches. An empty value is a gap
+    the caller surfaces as an unknown, not sharing.
+
+    The internal-only guard mirrors the training path's whole-word discipline so a
+    benign in-house declaration that carries no negation token does not invent a
+    false sharing violation, while a real sharing declaration — a named vendor, an
+    affirmative "shares with third parties" — is never suppressed."""
     v = (value or "").strip().lower()
-    return bool(v) and not _negated(v)
+    if not v:
+        return False
+    if _negated(v):
+        return False
+    if _declares_internal_only(v):
+        return False
+    return True
 
 
 def _region_allowed(declared: str, allowed_regions: list[str]) -> bool:

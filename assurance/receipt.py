@@ -73,7 +73,10 @@ ALGORITHM = "sha256"
 # The version of the Assurance Receipt standard this module emits. A stable
 # string a consumer keys on to know which schema (below) it is reading; bump it
 # only when the stable, hashed shape of the receipt changes.
-RECEIPT_VERSION = "mythos.assurance.receipt/1.0"
+#   1.1 — added the pinned evaluator ``policy_version`` to the hashed content, so
+#         the receipt records not just the declared boundary ("policy Z") but the
+#         rule set the decision was actually made under.
+RECEIPT_VERSION = "mythos.assurance.receipt/1.1"
 
 
 def _digest(payload: dict) -> str:
@@ -161,6 +164,15 @@ RECEIPT_SCHEMA = {
             "const": RECEIPT_VERSION,
             "description": "The version of this receipt standard (see RECEIPT_VERSION).",
         },
+        "policy_version": {
+            "type": "string",
+            "description": (
+                "The pinned assurance-policy version the decision was made under — "
+                "the rule set (six-state thresholds, required-evidence rules, claim "
+                "caps) in force at assessment time (see assurance.policy). Lets a "
+                "consumer tell whether the policy behind this receipt still holds."
+            ),
+        },
         "system": {
             "type": "object",
             "description": "The AI system under assurance — 'system X' in the tuple.",
@@ -243,6 +255,7 @@ RECEIPT_SCHEMA = {
     },
     "required": [
         "receipt_version",
+        "policy_version",
         "system",
         "result",
         "policy",
@@ -253,6 +266,15 @@ RECEIPT_SCHEMA = {
         "computed_at",
     ],
 }
+
+
+def _pinned_policy_version(deployment) -> str:
+    """The pinned assurance-policy version the receipt is validated under. Imported
+    lazily: :mod:`assurance.policy` imports this module for the receipt standard
+    version, so a top-level import here would be circular."""
+    from .policy import policy_pin
+
+    return policy_pin(deployment)
 
 
 def _policy_reference(deployment) -> dict:
@@ -331,6 +353,10 @@ def build_assurance_receipt(deployment) -> dict:
 
     stable = {
         "receipt_version": RECEIPT_VERSION,
+        # The pinned rule set the decision was made under — "validated against
+        # policy Z". Imported lazily to avoid an import cycle (assurance.policy
+        # imports this module for the receipt standard version).
+        "policy_version": _pinned_policy_version(deployment),
         "system": {
             "name": deployment.name,
             "uuid": str(deployment.uuid),

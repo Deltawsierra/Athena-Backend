@@ -178,9 +178,16 @@ def test_time_passing_does_not_change_the_fingerprint():
     assert compute_system_fingerprint(dep) == before
 
 
-def test_policy_version_is_the_receipt_version():
+def test_policy_version_is_the_pinned_policy_standard():
     dep = Deployment.objects.create(name="d", owner=_user())
-    assert policy_version(dep) == RECEIPT_VERSION
+    from assurance.policy import POLICY_VERSION, policy_pin
+
+    pin = policy_version(dep)
+    # A deterministic, content-derived pin of the policy standard, not a bare
+    # constant. Same rules → same pin; it starts with the policy standard version.
+    assert pin == policy_pin(dep)
+    assert pin.startswith(POLICY_VERSION + "+")
+    assert policy_version(dep) == policy_version(dep)
 
 
 # ---------------------------------------------------------------------------

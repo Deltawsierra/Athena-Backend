@@ -26,7 +26,7 @@ migration. Prefetch ``assets__provider__assertions`` and select_related
 
 from __future__ import annotations
 
-from .receipt import RECEIPT_VERSION, _digest
+from .receipt import _digest
 
 # The Asset.metadata keys that identify a component's security-relevant
 # configuration — the facts whose change should force a claim to be re-verified.
@@ -154,8 +154,17 @@ def compute_system_fingerprint(deployment) -> str:
 
 
 def policy_version(deployment) -> str:
-    """The rule-set / evaluator version a claim is assessed under. It is the
-    Assurance Receipt standard version, so a claim's policy version and the
-    receipt that backs it never disagree. (``deployment`` is accepted for a stable
-    call signature and future per-deployment policy pinning.)"""
-    return RECEIPT_VERSION
+    """The pinned assurance-policy version a claim is assessed under — the rule set
+    (six-state thresholds, required-evidence rules, claim caps) bound to the
+    assessment at derivation time, so a later change to the *policy* (not the
+    system) can tell whether the policy a decision was made under still holds.
+
+    Delegates to :func:`assurance.policy.policy_pin`: a deterministic
+    ``mythos.assurance.policy/<v>+<hex>`` string derived from the governing rules,
+    which moves when any of them change. It embeds the Assurance Receipt standard
+    version, so a claim's policy and the receipt that backs it never disagree about
+    which evaluator ran. Imported lazily to keep the fingerprint module free of the
+    decision/policy layer at import time."""
+    from .policy import policy_pin
+
+    return policy_pin(deployment)
