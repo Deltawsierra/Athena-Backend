@@ -137,7 +137,10 @@ def test_derive_is_idempotent_and_preserves_human_classification():
     dep = Deployment.objects.create(name="d", owner=user)
     derive_assets(dep, _scan(user))
     tool = dep.assets.get(identifier="tool:web-search")
-    tool.classification = Asset.Classification.HIGH_RISK  # a human reclassifies
+    # A human reclassifies — recorded with HUMAN provenance, so a re-derive treats
+    # it as authoritative and never overwrites it.
+    tool.classification = Asset.Classification.HIGH_RISK
+    tool.classification_source = Asset.ClassificationSource.HUMAN
     tool.save()
 
     derive_assets(dep, _scan(user))  # re-scan

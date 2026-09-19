@@ -74,9 +74,17 @@ class RemediationEventAdmin(admin.ModelAdmin):
 
 @admin.register(Asset)
 class AssetAdmin(admin.ModelAdmin):
-    list_display = ("name", "kind", "classification", "deployment")
-    list_filter = ("kind", "classification")
+    list_display = ("name", "kind", "classification", "classification_source", "deployment")
+    list_filter = ("kind", "classification", "classification_source")
     search_fields = ("name", "identifier")
+
+    def save_model(self, request, obj, form, change):
+        # An operator editing the classification in the admin is a human decision:
+        # stamp its provenance so a later machine re-derive preserves it rather than
+        # overwriting it (see Asset.ClassificationSource / assets._get_or_refresh).
+        if change and "classification" in getattr(form, "changed_data", ()):
+            obj.classification_source = Asset.ClassificationSource.HUMAN
+        super().save_model(request, obj, form, change)
 
 
 class ProviderAssertionInline(admin.TabularInline):

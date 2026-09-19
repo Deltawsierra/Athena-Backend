@@ -1492,9 +1492,10 @@ class FindingViewSet(
 
     def _scoped_findings(self):
         """Every finding the caller may see, BEFORE the severity/status/deployment
-        query filters. The change-intelligence boundary (a deployment's latest
-        scan) is a fact about the deployment, so it must be computed over the
-        unfiltered set — a ``?status=open`` view must not redefine "latest scan"."""
+        query filters — this is *row visibility* only. The change-intelligence
+        boundary (a deployment's latest scan) is NOT computed from this set: it is a
+        fact about the deployment, independent of who is asking, so it is computed
+        privilege-independently in ``get_serializer_context`` (see L2)."""
         qs = Finding.objects.all()
         user = self.request.user
         if _is_privileged(user):
@@ -1504,13 +1505,21 @@ class FindingViewSet(
     def get_serializer_context(self):
         """Supply the change-intelligence inputs once per request: the latest-scan
         boundary per deployment (one aggregate query) and a single ``now``, so the
-        serializer never issues a query per finding."""
+        serializer never issues a query per finding.
+
+        The boundary is computed over **all** findings, not the caller's visible
+        subset: a deployment's "latest scan" is a fact about the deployment, and
+        computing it over only-visible findings would let a non-privileged user who
+        sees a subset trail the true latest and mislabel ``change_status`` (audit
+        L2). Row visibility stays scoped by ``_scoped_findings``/``get_queryset``;
+        the serializer only ever reads the boundary for a deployment whose findings
+        the caller can already see, so this leaks nothing."""
         from django.utils import timezone
 
         from .change import latest_seen_by_deployment
 
         ctx = super().get_serializer_context()
-        ctx["latest_seen"] = latest_seen_by_deployment(self._scoped_findings())
+        ctx["latest_seen"] = latest_seen_by_deployment(Finding.objects.all())
         ctx["now"] = timezone.now()
         return ctx
 
