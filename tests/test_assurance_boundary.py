@@ -288,3 +288,61 @@ def test_data_boundary_api_get_and_admin_put():
     # The us-east-1 provider now violates the eu-only boundary.
     assert resp.data["summary"]["violations"] == 1
     assert DataBoundary.objects.get(deployment=dep).allowed_regions == ["eu"]
+
+
+# --- O1: an ignorance marker is an unknown, never a pass or a violation ------
+
+
+def test_ignorance_marker_subprocessors_is_unknown_not_a_violation():
+    """O1: subprocessors declared "n/a" names no posture — an undeclared sharing
+    stance is an unknown, not a third-party-sharing violation."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Vendor", region="eu-west-1", trains_on_data="No", subprocessors="n/a")
+    _asset(dep, provider=p, name="m")
+    _policy(dep, allowed_regions=["eu-west-1"])  # sharing forbidden by default
+
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "unknown"
+    assert flow["violations"] == []
+    assert any("sharing" in u for u in flow["unknowns"])
+
+
+def test_ignorance_marker_training_is_unknown_not_silently_benign():
+    """O1: training declared "tbd" is an unknown, not a silent pass."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Vendor", region="eu-west-1", trains_on_data="tbd", subprocessors="none")
+    _asset(dep, provider=p, name="m")
+    _policy(dep, allowed_regions=["eu-west-1"])
+
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "unknown"
+    assert flow["violations"] == []
+    assert any("training" in u for u in flow["unknowns"])
+
+
+def test_ignorance_marker_region_is_unknown_not_a_violation():
+    """O1: region declared "unknown" is an unknown, not an out-of-boundary violation."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider("Vendor", region="unknown", trains_on_data="No", subprocessors="none")
+    _asset(dep, provider=p, name="m")
+    _policy(dep, allowed_regions=["eu-west-1"])
+
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "unknown"
+    assert flow["violations"] == []
+    assert any("region" in u for u in flow["unknowns"])
+
+
+def test_named_subprocessor_still_flags_after_the_ignorance_guard():
+    """The ignorance guard must not weaken a real sharing declaration: a named
+    vendor is still a third-party-sharing violation."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    p = _provider(
+        "Vendor", region="eu-west-1", trains_on_data="No", subprocessors="Stripe, Twilio"
+    )
+    _asset(dep, provider=p, name="m")
+    _policy(dep, allowed_regions=["eu-west-1"])
+
+    flow = boundary.assess_boundary(dep)["flows"][0]
+    assert flow["status"] == "violation"
+    assert any("subprocessor" in v for v in flow["violations"])

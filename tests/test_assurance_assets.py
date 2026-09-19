@@ -121,13 +121,77 @@ def test_derive_is_idempotent_and_preserves_human_classification():
     scan = PentestScan.objects.create(user=user, target_url="https://app.example/", consent=True)
     derive_assets(dep, scan)
     host = dep.assets.get(identifier="app.example")
-    host.classification = Asset.Classification.HIGH_RISK  # a human reclassifies
+    # A human reclassifies — recorded with HUMAN provenance (as the admin does), so a
+    # re-derive treats it as authoritative and never overwrites it.
+    host.classification = Asset.Classification.HIGH_RISK
+    host.classification_source = Asset.ClassificationSource.HUMAN
     host.save()
 
     derive_assets(dep, scan)  # re-scan
     assert dep.assets.filter(identifier="app.example").count() == 1  # no duplicate
     host.refresh_from_db()
     assert host.classification == Asset.Classification.HIGH_RISK  # human decision preserved
+
+
+def test_machine_classification_downgrades_when_a_host_leaves_scope():
+    """L1: a host first seen in scope (KNOWN) that later falls out of scope is
+    re-derived to UNMANAGED — a machine-set classification tracks the current truth,
+    so it surfaces as a shadow destination instead of staying "known" forever."""
+    user = _user()
+    dep = Deployment.objects.create(name="d", owner=user)
+    in_scope = Engagement.objects.create(
+        name="Acme", created_by=user, scope_hosts=["app.example"]
+    )
+    scan1 = PentestScan.objects.create(
+        user=user, target_url="https://app.example/", consent=True, engagement=in_scope
+    )
+    derive_assets(dep, scan1)
+    host = dep.assets.get(identifier="app.example")
+    assert host.classification == Asset.Classification.KNOWN
+    assert host.classification_source == Asset.ClassificationSource.MACHINE
+
+    # The engagement scope narrows so the same host is no longer authorised.
+    narrowed = Engagement.objects.create(
+        name="Acme2", created_by=user, scope_hosts=["other.example"]
+    )
+    scan2 = PentestScan.objects.create(
+        user=user, target_url="https://app.example/", consent=True, engagement=narrowed
+    )
+    derive_assets(dep, scan2)
+    host.refresh_from_db()
+    assert host.classification == Asset.Classification.UNMANAGED  # downgraded, now a shadow asset
+
+
+def test_human_classification_survives_a_scope_change():
+    """L1 counterpart: once a human has set the classification, a re-derive that
+    would compute UNMANAGED must NOT touch it."""
+    user = _user()
+    dep = Deployment.objects.create(name="d", owner=user)
+    in_scope = Engagement.objects.create(
+        name="Acme", created_by=user, scope_hosts=["app.example"]
+    )
+    derive_assets(
+        dep,
+        PentestScan.objects.create(
+            user=user, target_url="https://app.example/", consent=True, engagement=in_scope
+        ),
+    )
+    host = dep.assets.get(identifier="app.example")
+    host.classification = Asset.Classification.APPROVED
+    host.classification_source = Asset.ClassificationSource.HUMAN
+    host.save()
+
+    narrowed = Engagement.objects.create(
+        name="Acme2", created_by=user, scope_hosts=["other.example"]
+    )
+    derive_assets(
+        dep,
+        PentestScan.objects.create(
+            user=user, target_url="https://app.example/", consent=True, engagement=narrowed
+        ),
+    )
+    host.refresh_from_db()
+    assert host.classification == Asset.Classification.APPROVED  # human decision untouched
 
 
 def test_declared_llm_target_becomes_a_model_provider_and_asset():

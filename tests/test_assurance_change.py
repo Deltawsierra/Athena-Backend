@@ -19,6 +19,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from assurance import change
 from assurance.models import Deployment, Finding
 from assurance.views import FindingViewSet
+from pentest.models import PentestScan
 
 pytestmark = pytest.mark.django_db
 
@@ -134,3 +135,37 @@ def test_change_boundary_ignores_the_status_filter():
     assert len(rows) == 1
     assert rows[0]["title"] == "F old"
     assert rows[0]["change_status"] == "cleared"  # not "recurring"
+
+
+def test_latest_scan_boundary_is_privilege_independent():
+    """L2: for a non-privileged caller who can see only a subset of a deployment's
+    findings, the latest-scan boundary is still the deployment's *true* latest — so
+    a finding absent from the newest scan reads 'cleared', not mislabeled current.
+
+    Before the fix the boundary was computed over the caller's visible subset, so
+    the viewer below (who sees only their own older finding) would read it as
+    'recurring'; computing the boundary over all findings makes it 'cleared'."""
+    owner = _user("owner", role=User.Roles.ADMIN)
+    viewer = _user("viewer", role=User.Roles.VIEWER)  # non-privileged: sees only their own
+    dep = Deployment.objects.create(name="d", owner=owner)
+    now = timezone.now()
+    # The viewer's own older scan produced this finding (they can see it).
+    mine_scan = PentestScan.objects.create(user=viewer, target_url="https://a/", consent=True)
+    _finding(
+        dep, "mine", first_seen=now - timedelta(days=10),
+        last_seen=now - timedelta(days=10), scan=mine_scan,
+    )
+    # A newer scan by someone else on the same deployment — invisible to the viewer,
+    # but it defines the deployment's true latest boundary.
+    theirs_scan = PentestScan.objects.create(user=owner, target_url="https://a/", consent=True)
+    _finding(dep, "theirs", first_seen=now, last_seen=now, scan=theirs_scan)
+
+    factory = APIRequestFactory()
+    view = FindingViewSet.as_view({"get": "list"})
+    request = factory.get("/api/assurance/findings/")
+    force_authenticate(request, user=viewer)
+    resp = view(request)
+    assert resp.status_code == 200
+    rows = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+    assert {r["title"] for r in rows} == {"F mine"}  # viewer sees only their own finding
+    assert rows[0]["change_status"] == "cleared"  # judged against the true latest scan

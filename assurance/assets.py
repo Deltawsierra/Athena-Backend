@@ -73,14 +73,20 @@ def _get_or_refresh(
 ) -> Asset | None:
     """Create the asset, or refresh the machine-owned fields of an existing one.
 
-    Classification and name are set only on create — a human may reclassify or
-    rename an asset, and a re-derive must not undo that. ``last_seen``, provider
-    linkage, and metadata are refreshed as the current machine truth."""
+    ``name`` is set only on create — a human may rename an asset and a re-derive
+    must not undo that. ``classification`` follows its *provenance*: a
+    machine-derived classification is refreshed to the freshly computed value (so a
+    host that leaves engagement scope is downgraded ``known`` → ``unmanaged`` and
+    surfaces as a shadow destination, instead of staying "known" forever), while a
+    human-set classification is authoritative and left untouched. ``last_seen``,
+    provider linkage, and metadata are always refreshed as the current machine
+    truth."""
     if not identifier:
         return None
     defaults = {
         "name": name[:255] or identifier[:255],
         "classification": classification,
+        "classification_source": Asset.ClassificationSource.MACHINE,
         "provider": provider,
         "metadata": metadata or {},
         "first_seen": now,
@@ -90,13 +96,22 @@ def _get_or_refresh(
         deployment=deployment, kind=kind, identifier=identifier[:1024], defaults=defaults
     )
     if not created:
+        fields = ["last_seen", "provider", "metadata"]
         asset.last_seen = now
+        # A machine-derived classification tracks the current computed truth; a
+        # human-set one is never overwritten by a re-derive.
+        if (
+            asset.classification_source == Asset.ClassificationSource.MACHINE
+            and asset.classification != classification
+        ):
+            asset.classification = classification
+            fields.append("classification")
         if provider is not None and asset.provider_id != provider.pk:
             asset.provider = provider
         if metadata:
             merged = {**(asset.metadata or {}), **metadata}
             asset.metadata = merged
-        asset.save(update_fields=["last_seen", "provider", "metadata"])
+        asset.save(update_fields=fields)
     return asset
 
 

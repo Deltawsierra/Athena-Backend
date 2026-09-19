@@ -316,6 +316,15 @@ class Asset(models.Model):
         HIGH_RISK = "high_risk", "High risk"
         RETIRED = "retired", "Retired but reachable"
 
+    class ClassificationSource(models.TextChoices):
+        # Who set the current classification. A machine-derived classification may
+        # be moved by a later re-derive (so a host leaving scope is downgraded to
+        # UNMANAGED); a human-set one is authoritative and a re-derive never touches
+        # it. This is the provenance that lets discovery correct itself without
+        # clobbering an operator's deliberate reclassification.
+        MACHINE = "machine", "Machine-derived"
+        HUMAN = "human", "Human-set"
+
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
     deployment = models.ForeignKey(
@@ -330,6 +339,11 @@ class Asset(models.Model):
     )
     classification = models.CharField(
         max_length=32, choices=Classification.choices, default=Classification.KNOWN
+    )
+    classification_source = models.CharField(
+        max_length=16,
+        choices=ClassificationSource.choices,
+        default=ClassificationSource.MACHINE,
     )
     metadata = models.JSONField(default=dict, blank=True)
     first_seen = models.DateTimeField(default=timezone.now)

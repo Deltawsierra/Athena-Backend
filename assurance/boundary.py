@@ -132,6 +132,42 @@ def _declares_internal_only(v: str) -> bool:
     return bool(tokens) and tokens <= _BENIGN_INTERNAL_TOKENS
 
 
+# Values that express *ignorance* rather than a posture — a declaration that says
+# "we don't know" / "not filled in". These are treated as an undeclared posture (an
+# unknown), never read as a pass or coerced into a violation: an assurance answer of
+# "n/a" is the absence of an answer, not a clean bill and not a breach.
+_IGNORANCE_MARKERS = frozenset(
+    {
+        "n/a",
+        "na",
+        "n.a.",
+        "n/a.",
+        "tbd",
+        "tba",
+        "unknown",
+        "unspecified",
+        "undetermined",
+        "not specified",
+        "not declared",
+        "not provided",
+        "not applicable",
+        "pending",
+        "?",
+        "-",
+        "—",
+    }
+)
+
+
+def _declares_ignorance(value: str) -> bool:
+    """Whether a declared value is purely an ignorance marker ("n/a", "tbd",
+    "unknown", "?"): it names no posture at all and must be surfaced as an unknown,
+    never read as benign or turned into a violation. Matches the whole value only,
+    so a real declaration that merely contains the letters (e.g. a vendor named
+    "NA Corp") is not swallowed."""
+    return (value or "").strip().lower() in _IGNORANCE_MARKERS
+
+
 def _negated(value: str) -> bool:
     """Whether a declared value carries a whole-word negation ("No", "opted out",
     "zero retention", "disabled"). Word-boundary aware, so an incidental substring
@@ -227,7 +263,7 @@ def _assess_flow(provider, assets, policy) -> dict:
     else:
         # Region: only assessable when a region boundary is declared.
         if policy.allowed_regions:
-            if not region:
+            if not region or _declares_ignorance(region["value"]):
                 unknowns.append("data region not declared for this provider")
             elif not _region_allowed(region["value"], policy.allowed_regions):
                 violations.append(
@@ -236,7 +272,7 @@ def _assess_flow(provider, assets, policy) -> dict:
                 )
         # Training: forbidden unless the boundary approves it.
         if not policy.training_allowed:
-            if not training:
+            if not training or _declares_ignorance(training["value"]):
                 unknowns.append("training-on-data posture not declared")
             elif _affirmative(training["value"]):
                 violations.append(
@@ -247,7 +283,7 @@ def _assess_flow(provider, assets, policy) -> dict:
         # provider's declared subprocessors are the sharing signal — named
         # subprocessors are third parties the data reaches.
         if not policy.third_party_sharing_allowed:
-            if not sharing:
+            if not sharing or _declares_ignorance(sharing["value"]):
                 unknowns.append("third-party sharing (subprocessor) posture not declared")
             elif _shares_with_third_parties(sharing["value"]):
                 violations.append(
