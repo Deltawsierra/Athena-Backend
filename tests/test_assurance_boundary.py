@@ -290,6 +290,96 @@ def test_data_boundary_api_get_and_admin_put():
     assert DataBoundary.objects.get(deployment=dep).allowed_regions == ["eu"]
 
 
+# --- L3: PUT is a true replace, PATCH is the merge path ----------------------
+
+
+def test_put_is_a_true_replace_and_clears_omitted_fields():
+    """L3: PUT declares the whole boundary. A field left out of the body returns to
+    its model default — an earlier "training allowed / sharing allowed" is never
+    silently inherited when a later PUT omits it. Silence is not consent."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = Deployment.objects.create(name="d", owner=admin)
+    _policy(dep, allowed_regions=["us"], training_allowed=True,
+            third_party_sharing_allowed=True, notes="legacy")
+
+    factory = APIRequestFactory()
+    put_view = DeploymentViewSet.as_view({"put": "data_boundary"})
+    req = factory.put(
+        f"/api/assurance/deployments/{dep.uuid}/data-boundary/",
+        {"allowed_regions": ["eu"]}, format="json",
+    )
+    force_authenticate(req, user=admin)
+    assert put_view(req, uuid=str(dep.uuid)).status_code == 200
+
+    b = DataBoundary.objects.get(deployment=dep)
+    assert b.allowed_regions == ["eu"]              # the one field declared
+    assert b.training_allowed is False              # omitted -> reset to default
+    assert b.third_party_sharing_allowed is False   # omitted -> reset to default
+    assert b.notes == ""                            # omitted -> reset to default
+
+
+def test_put_with_an_empty_body_resets_to_the_safe_default():
+    """A PUT with no fields declares the empty boundary: no region restriction,
+    training and sharing denied — the most-restrictive posture, not a carry-over."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = Deployment.objects.create(name="d", owner=admin)
+    _policy(dep, allowed_regions=["us"], training_allowed=True,
+            third_party_sharing_allowed=True, notes="legacy")
+
+    factory = APIRequestFactory()
+    put_view = DeploymentViewSet.as_view({"put": "data_boundary"})
+    req = factory.put(f"/api/assurance/deployments/{dep.uuid}/data-boundary/", {}, format="json")
+    force_authenticate(req, user=admin)
+    assert put_view(req, uuid=str(dep.uuid)).status_code == 200
+
+    b = DataBoundary.objects.get(deployment=dep)
+    assert b.allowed_regions == []
+    assert b.training_allowed is False
+    assert b.third_party_sharing_allowed is False
+    assert b.notes == ""
+
+
+def test_patch_merges_and_leaves_omitted_fields_untouched():
+    """L3: PATCH is the merge path — only the supplied fields change, the rest of
+    the declared boundary stands."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = Deployment.objects.create(name="d", owner=admin)
+    _policy(dep, allowed_regions=["us"], training_allowed=True,
+            third_party_sharing_allowed=True, notes="keep me")
+
+    factory = APIRequestFactory()
+    patch_view = DeploymentViewSet.as_view({"patch": "data_boundary"})
+    req = factory.patch(
+        f"/api/assurance/deployments/{dep.uuid}/data-boundary/",
+        {"allowed_regions": ["eu"]}, format="json",
+    )
+    force_authenticate(req, user=admin)
+    assert patch_view(req, uuid=str(dep.uuid)).status_code == 200
+
+    b = DataBoundary.objects.get(deployment=dep)
+    assert b.allowed_regions == ["eu"]              # changed
+    assert b.training_allowed is True               # preserved
+    assert b.third_party_sharing_allowed is True    # preserved
+    assert b.notes == "keep me"                     # preserved
+
+
+def test_patch_boundary_is_admin_only():
+    """PATCH mutates the record, so it is gated exactly like PUT."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    analyst = _user("ana", role=User.Roles.ANALYST)
+    dep = Deployment.objects.create(name="d", owner=admin)
+
+    factory = APIRequestFactory()
+    patch_view = DeploymentViewSet.as_view({"patch": "data_boundary"})
+    req = factory.patch(
+        f"/api/assurance/deployments/{dep.uuid}/data-boundary/",
+        {"training_allowed": True}, format="json",
+    )
+    force_authenticate(req, user=analyst)
+    assert patch_view(req, uuid=str(dep.uuid)).status_code == 403
+    assert not DataBoundary.objects.filter(deployment=dep).exists()
+
+
 # --- O1: an ignorance marker is an unknown, never a pass or a violation ------
 
 

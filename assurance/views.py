@@ -615,22 +615,37 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         )
         return Response({"attempts": [_dispatch_attempt_state(a) for a in attempts]})
 
-    @action(detail=True, methods=["get", "put"], url_path="data-boundary")
+    @action(detail=True, methods=["get", "put", "patch"], url_path="data-boundary")
     def data_boundary(self, request, uuid=None):
         """AI Data Boundary Assessment (Phase 1.4): reconcile the approved data
         boundary against the deployment's actual data destinations.
 
-        GET returns the assessment (open read). PUT declares/updates the approved
-        boundary (admin-only — it mutates the record) and returns the fresh
-        assessment. The assessment itself is always computed, never stored."""
+        GET returns the assessment (open read). PUT and PATCH declare/update the
+        approved boundary (admin-only — they mutate the record) and return the
+        fresh assessment. The assessment itself is always computed, never stored.
+
+        PUT is a **true replace**: a field the body omits is reset to the model's
+        declared default (regions cleared, training/sharing denied, notes emptied),
+        so an unstated posture is never silently inherited from an earlier
+        declaration — silence is not consent. PATCH is the **merge** path: only the
+        fields supplied change, the rest stay as declared."""
         deployment = self.get_object()
-        if request.method == "PUT":
+        if request.method in ("PUT", "PATCH"):
             _require_admin(request)
-            serializer = DataBoundarySerializer(data=request.data)
+            partial = request.method == "PATCH"
+            serializer = DataBoundarySerializer(data=request.data, partial=partial)
             serializer.is_valid(raise_exception=True)
+            fields = dict(serializer.validated_data)
+            if not partial:
+                # True replace: every field the body left out returns to its model
+                # default rather than keeping whatever the previous PUT recorded.
+                fields = {
+                    name: DataBoundary._meta.get_field(name).get_default()
+                    for name in DataBoundarySerializer.Meta.fields
+                } | fields
             DataBoundary.objects.update_or_create(
                 deployment=deployment,
-                defaults={**serializer.validated_data, "updated_by": request.user},
+                defaults={**fields, "updated_by": request.user},
             )
         assessed = (
             Deployment.objects.prefetch_related("assets__provider__assertions")

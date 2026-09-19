@@ -360,7 +360,13 @@ class UnknownSerializer(serializers.ModelSerializer):
 class DataBoundarySerializer(serializers.ModelSerializer):
     """The approved data boundary a human declares (Phase 1.4). Write-only shape:
     the assessment (approved-vs-actual) is computed and returned by the view, not
-    stored here."""
+    stored here.
+
+    Every field is optional (each maps to a model field with a default), so the
+    view can drive both a true-replace PUT (it fills the fields the body omits from
+    the model defaults) and a merge PATCH (``partial=True`` skips the omitted
+    fields). The serializer only validates and shapes what is supplied; which
+    omitted-field semantics apply is the view's decision."""
 
     class Meta:
         model = DataBoundary
