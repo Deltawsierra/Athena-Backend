@@ -1429,22 +1429,64 @@ class FindingViewSet(
         is who does the remediation *work* — distinct from ``owner``, who is
         accountable for the security disposition. Writes an attributed
         ``RemediationEvent``; it does not move the workflow state or the security
-        ``status``."""
+        ``status``.
+
+        The assignable set is **active users only** (``is_active=True``). An
+        unknown username and an inactive-or-otherwise-not-assignable one get the
+        SAME uniform 400 — the response never distinguishes the two, so it leaks
+        nothing about which usernames exist. The username is stripped of
+        surrounding whitespace before lookup; it is NOT lowercased, because
+        Django usernames are case-sensitive. Re-assigning the current assignee
+        (or clearing an already-unassigned finding) is idempotent: it writes no
+        duplicate event (see :func:`assurance.remediation.assign`)."""
         _require_admin(request)
         finding = self.get_object()
         username = request.data.get("assignee")
+        if isinstance(username, str):
+            username = username.strip()
         assignee = None
         if username not in (None, ""):
-            assignee = User.objects.filter(username=username).first()
+            assignee = User.objects.filter(username=username, is_active=True).first()
             if assignee is None:
-                return Response({"detail": f"No such user: {username!r}."}, status=400)
+                return Response(
+                    {"detail": "assignee is not an assignable user"}, status=400
+                )
         event = assign(
             finding, assignee, actor=request.user, note=request.data.get("note", "")
         )
         return Response(
             {
                 "assignee": assignee.username if assignee else None,
-                "event": RemediationEventSerializer(event).data,
+                "event": (
+                    RemediationEventSerializer(event).data if event is not None else None
+                ),
+            }
+        )
+
+    @action(detail=True, methods=["get"], url_path="assignable")
+    def assignable(self, request, uuid=None):
+        """The users a remediation assignment may target, for a picker UI instead
+        of free-text entry. Admin-only — same guard as the assign action, since
+        it enumerates operator accounts.
+
+        Returns ``{"assignable": [{"username", "display"}], "current": <username|
+        null>}``: every **active** user (``is_active=True``), ordered by username,
+        with ``display`` the full name when set and the username otherwise, plus
+        the finding's current assignee. This is the honest boundary — the app has
+        no org/tenant model — and matches exactly the set the assign action will
+        accept, so a picked user can never be rejected. A fixed number of queries
+        (``get_object`` plus one user query); ``get_full_name`` touches no DB."""
+        _require_admin(request)
+        finding = self.get_object()
+        users = User.objects.filter(is_active=True).order_by("username")
+        assignable = [
+            {"username": u.username, "display": u.get_full_name() or u.username}
+            for u in users
+        ]
+        return Response(
+            {
+                "assignable": assignable,
+                "current": finding.assignee.username if finding.assignee_id else None,
             }
         )
 
