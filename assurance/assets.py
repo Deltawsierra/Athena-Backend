@@ -41,7 +41,7 @@ from urllib.parse import urlparse
 from django.utils import timezone
 
 from .ingest import _host
-from .models import Asset, Deployment, Provider
+from .models import Asset, Deployment, Finding, Provider
 
 
 def _endpoint_identifier(location: str) -> str:
@@ -315,27 +315,91 @@ def derive_assets(deployment: Deployment, scan) -> list[Asset]:
                 touched.append(a)
 
     # 4. Endpoint assets from findings that carry a location, and attach every
-    #    finding to the asset it concerns.
-    for finding in deployment.findings.all():
+    #    finding to the asset it concerns. Reconciled in bulk so ingest stays
+    #    O(1) queries in the number of findings rather than a get_or_create plus
+    #    a save per finding: one query loads the endpoints not already in hand,
+    #    one bulk_create adds the new ones, one bulk_update refreshes the rest,
+    #    and one bulk_update re-parents the findings. The per-endpoint semantics
+    #    are identical to ``_get_or_refresh`` — create-only name, machine-owned
+    #    classification refresh that never clobbers a human decision, last_seen
+    #    and metadata refreshed — just amortised across the whole scan.
+    findings = list(deployment.findings.all())
+
+    # Distinct endpoint identifiers, each with the display name from the first
+    # finding that introduces it (the create-time name of the per-finding path).
+    endpoint_name: dict[str, str] = {}
+    for finding in findings:
         endpoint_id = _endpoint_identifier(finding.location)
-        target_asset = None
-        if endpoint_id:
-            target_asset = _get_or_refresh(
-                deployment,
+        if not endpoint_id:
+            continue
+        ident = endpoint_id[:1024]
+        if ident not in endpoint_name:
+            endpoint_name[ident] = finding.location[:255] or ident[:255]
+
+    # API assets already reconciled this call (scanned host, declared scope
+    # hosts) are reused rather than re-created — an endpoint that coincides with
+    # one of them must not fork a second row.
+    api_by_identifier: dict[str, Asset] = {
+        a.identifier: a for a in touched if a.kind == Asset.Kind.API
+    }
+    to_load = [ident for ident in endpoint_name if ident not in api_by_identifier]
+    if to_load:
+        for asset in Asset.objects.filter(
+            deployment=deployment, kind=Asset.Kind.API, identifier__in=to_load
+        ):
+            api_by_identifier[asset.identifier] = asset
+
+    to_create: list[Asset] = []
+    to_refresh: list[Asset] = []
+    for ident, name in endpoint_name.items():
+        existing = api_by_identifier.get(ident)
+        if existing is None:
+            asset = Asset(
+                deployment=deployment,
                 kind=Asset.Kind.API,
-                identifier=endpoint_id,
-                name=finding.location[:255],
+                identifier=ident,
+                name=name,
                 classification=Asset.Classification.KNOWN,
-                now=now,
+                classification_source=Asset.ClassificationSource.MACHINE,
+                provider=None,
                 metadata={"source": "finding_endpoint"},
+                first_seen=now,
+                last_seen=now,
             )
-            if target_asset and target_asset not in touched:
-                touched.append(target_asset)
-        # A located finding belongs to its endpoint; else an LLM finding to the
-        # model, an agent finding to the agent; everything else to the host.
+            api_by_identifier[ident] = asset
+            to_create.append(asset)
+        elif existing not in touched:
+            # An endpoint the host/scope pass already refreshed keeps that
+            # reconciliation; only endpoints new to this pass are refreshed here.
+            existing.last_seen = now
+            if (
+                existing.classification_source == Asset.ClassificationSource.MACHINE
+                and existing.classification != Asset.Classification.KNOWN
+            ):
+                existing.classification = Asset.Classification.KNOWN
+            existing.metadata = {**(existing.metadata or {}), "source": "finding_endpoint"}
+            to_refresh.append(existing)
+
+    if to_create:
+        Asset.objects.bulk_create(to_create)
+    if to_refresh:
+        Asset.objects.bulk_update(to_refresh, ["last_seen", "classification", "metadata"])
+
+    for asset in to_create + to_refresh:
+        if asset not in touched:
+            touched.append(asset)
+
+    # A located finding belongs to its endpoint; else an LLM finding to the
+    # model, an agent finding to the agent; everything else to the host.
+    changed: list[Finding] = []
+    for finding in findings:
+        endpoint_id = _endpoint_identifier(finding.location)
+        target_asset = api_by_identifier.get(endpoint_id[:1024]) if endpoint_id else None
         target_asset = target_asset or llm_asset or agent_asset or host_asset
         if target_asset is not None and finding.asset_id != target_asset.pk:
             finding.asset = target_asset
-            finding.save(update_fields=["asset"])
+            changed.append(finding)
+    if changed:
+        Finding.objects.bulk_update(changed, ["asset"])
 
     return touched

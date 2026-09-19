@@ -102,6 +102,48 @@ def test_finding_with_location_becomes_an_endpoint_asset_and_is_attached():
     assert finding.asset_id == endpoint.pk
 
 
+def test_endpoint_reconciliation_is_bounded_in_queries(django_assert_max_num_queries):
+    """L4: findings are reconciled to endpoint assets in bulk — the endpoints are
+    loaded, created, refreshed, and re-parented in a handful of queries — so a scan
+    with many distinct-endpoint findings stays within a small, constant query budget
+    instead of the get_or_create + save per finding it used to do (O(findings)). A
+    regression to the per-finding path would blow well past this ceiling."""
+    user = _user()
+    dep = Deployment.objects.create(name="d", owner=user)
+    scan = PentestScan.objects.create(user=user, target_url="https://app.example/", consent=True)
+    for i in range(40):
+        Finding.objects.create(
+            deployment=dep, fingerprint=f"fp{i}", finding_type="xss", title=f"XSS {i}",
+            severity="high", location=f"https://app.example/path/{i}",
+        )
+    with django_assert_max_num_queries(12):
+        derive_assets(dep, scan)
+    # The work actually happened: the host plus one endpoint per distinct location,
+    # and every located finding re-parented onto its endpoint.
+    assert dep.assets.filter(kind=Asset.Kind.API).count() == 41  # host + 40 endpoints
+    assert dep.findings.exclude(asset=None).count() == 40
+    sample = dep.findings.get(fingerprint="fp7")
+    assert sample.asset.identifier == "app.example/path/7"
+
+
+def test_repeated_derive_does_not_duplicate_endpoint_assets():
+    """The bulk path stays idempotent: a re-scan reuses each endpoint row (loaded in
+    one query) rather than forking a duplicate, and re-parents nothing that already
+    points at the right asset."""
+    user = _user()
+    dep = Deployment.objects.create(name="d", owner=user)
+    scan = PentestScan.objects.create(user=user, target_url="https://app.example/", consent=True)
+    for i in range(5):
+        Finding.objects.create(
+            deployment=dep, fingerprint=f"fp{i}", finding_type="xss", title=f"XSS {i}",
+            severity="high", location=f"https://app.example/path/{i}",
+        )
+    derive_assets(dep, scan)
+    first = dep.assets.filter(kind=Asset.Kind.API).count()
+    derive_assets(dep, scan)  # re-scan
+    assert dep.assets.filter(kind=Asset.Kind.API).count() == first  # no duplicates
+
+
 def test_finding_without_location_attaches_to_the_host_asset():
     user = _user()
     dep = Deployment.objects.create(name="d", owner=user)
