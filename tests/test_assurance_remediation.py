@@ -24,6 +24,7 @@ from assurance.models import Deployment, Finding, RemediationEvent
 from assurance.remediation import (
     IllegalTransition,
     apply_transition,
+    assign,
     can_transition,
 )
 from assurance.views import FindingViewSet
@@ -58,6 +59,10 @@ def _transition_view():
 
 def _assign_view():
     return FindingViewSet.as_view({"post": "remediation_assign"})
+
+
+def _assignable_view():
+    return FindingViewSet.as_view({"get": "assignable"})
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +285,150 @@ def test_remediation_state_is_not_writable_via_patch():
     f.refresh_from_db()
     # PATCH silently ignores the read-only field; state stays NEW.
     assert f.remediation_state == State.NEW
+
+
+# ---------------------------------------------------------------------------
+# Assignee-mapping polish (Phase 2.3): active-user scoping, a uniform error that
+# leaks nothing, idempotent re-assign, and the scoped assignable-users picker.
+# ---------------------------------------------------------------------------
+
+UNIFORM_ASSIGN_ERROR = "assignee is not an assignable user"
+
+
+def test_assign_unknown_and_inactive_return_the_same_uniform_400():
+    """An unknown username and an inactive (real but not assignable) user must
+    return the SAME 400 message, so the response is not a user-enumeration
+    oracle — it never reveals which usernames exist."""
+    admin = _user("boss", role=User.Roles.ADMIN)
+    dep = Deployment.objects.create(name="d", owner=admin)
+    f = _finding(dep, fingerprint="ua")
+    inactive = _user("dormant")
+    inactive.is_active = False
+    inactive.save(update_fields=["is_active"])
+    factory = APIRequestFactory()
+    view = _assign_view()
+
+    unknown = factory.post("/x/", {"assignee": "ghost"}, format="json")
+    force_authenticate(unknown, user=admin)
+    r_unknown = view(unknown, uuid=str(f.uuid))
+
+    inactive_req = factory.post("/x/", {"assignee": "dormant"}, format="json")
+    force_authenticate(inactive_req, user=admin)
+    r_inactive = view(inactive_req, uuid=str(f.uuid))
+
+    assert r_unknown.status_code == 400
+    assert r_inactive.status_code == 400
+    # Same wording either way — nothing distinguishes "no such user" from
+    # "inactive", so nothing leaks.
+    assert r_unknown.data["detail"] == UNIFORM_ASSIGN_ERROR
+    assert r_inactive.data["detail"] == UNIFORM_ASSIGN_ERROR
+    # Neither attempt assigned anyone or recorded an event.
+    f.refresh_from_db()
+    assert f.assignee_id is None
+    assert RemediationEvent.objects.count() == 0
+
+
+def test_assign_active_user_writes_exactly_one_event():
+    admin = _user("boss", role=User.Roles.ADMIN)
+    worker = _user("worker")
+    dep = Deployment.objects.create(name="d", owner=admin)
+    f = _finding(dep, fingerprint="aa")
+    factory = APIRequestFactory()
+    view = _assign_view()
+
+    # Surrounding whitespace is stripped before lookup (usernames are NOT
+    # lowercased — Django usernames are case-sensitive).
+    req = factory.post("/x/", {"assignee": "  worker  "}, format="json")
+    force_authenticate(req, user=admin)
+    resp = view(req, uuid=str(f.uuid))
+    assert resp.status_code == 200
+    assert resp.data["assignee"] == "worker"
+    f.refresh_from_db()
+    assert f.assignee == worker
+    assert f.remediation_events.count() == 1
+
+
+def test_reassign_same_user_is_idempotent_no_duplicate_event():
+    admin = _user("boss", role=User.Roles.ADMIN)
+    worker = _user("worker")
+    dep = Deployment.objects.create(name="d", owner=admin)
+    f = _finding(dep, fingerprint="ai")
+    factory = APIRequestFactory()
+    view = _assign_view()
+
+    first = factory.post("/x/", {"assignee": "worker"}, format="json")
+    force_authenticate(first, user=admin)
+    assert view(first, uuid=str(f.uuid)).status_code == 200
+    assert f.remediation_events.count() == 1
+
+    # Re-assigning the same user is a no-op: still 200, but NO duplicate event.
+    again = factory.post("/x/", {"assignee": "worker"}, format="json")
+    force_authenticate(again, user=admin)
+    resp = view(again, uuid=str(f.uuid))
+    assert resp.status_code == 200
+    assert resp.data["assignee"] == "worker"
+    assert resp.data["event"] is None  # nothing new recorded
+    f.refresh_from_db()
+    assert f.assignee == worker
+    assert f.remediation_events.count() == 1  # unchanged
+
+
+def test_unassign_null_still_clears_and_records():
+    admin = _user("boss", role=User.Roles.ADMIN)
+    worker = _user("worker")
+    dep = Deployment.objects.create(name="d", owner=admin)
+    f = _finding(dep, fingerprint="an", assignee=worker)
+    factory = APIRequestFactory()
+    view = _assign_view()
+
+    req = factory.post("/x/", {"assignee": None}, format="json")
+    force_authenticate(req, user=admin)
+    resp = view(req, uuid=str(f.uuid))
+    assert resp.status_code == 200
+    assert resp.data["assignee"] is None
+    f.refresh_from_db()
+    assert f.assignee_id is None
+    # Clearing a real assignment is a change, so it records one event...
+    assert f.remediation_events.count() == 1
+
+    # ...but clearing an already-unassigned finding is idempotent (no event).
+    ev = assign(f, None, actor=admin)
+    assert ev is None
+    f.refresh_from_db()
+    assert f.remediation_events.count() == 1
+
+
+def test_assignable_endpoint_lists_active_excludes_inactive_and_is_admin_only():
+    admin = _user("boss", role=User.Roles.ADMIN)
+    worker = _user("worker")
+    worker.first_name = "Work"
+    worker.last_name = "Er"
+    worker.save(update_fields=["first_name", "last_name"])
+    inactive = _user("dormant")
+    inactive.is_active = False
+    inactive.save(update_fields=["is_active"])
+    dep = Deployment.objects.create(name="d", owner=admin)
+    f = _finding(dep, fingerprint="ap", assignee=worker)
+    factory = APIRequestFactory()
+    view = _assignable_view()
+
+    # Admin-only: a non-admin analyst is refused (same guard as assign).
+    analyst = _user("ana", role=User.Roles.ANALYST)
+    denied = factory.get(f"/api/assurance/findings/{f.uuid}/assignable/")
+    force_authenticate(denied, user=analyst)
+    assert view(denied, uuid=str(f.uuid)).status_code == 403
+
+    ok = factory.get(f"/api/assurance/findings/{f.uuid}/assignable/")
+    force_authenticate(ok, user=admin)
+    resp = view(ok, uuid=str(f.uuid))
+    assert resp.status_code == 200
+    usernames = [row["username"] for row in resp.data["assignable"]]
+    assert "worker" in usernames and "boss" in usernames and "ana" in usernames
+    assert "dormant" not in usernames  # inactive excluded
+    assert usernames == sorted(usernames)  # ordered by username
+    # display is the full name when set, the username otherwise.
+    by_name = {row["username"]: row["display"] for row in resp.data["assignable"]}
+    assert by_name["worker"] == "Work Er"
+    assert by_name["boss"] == "boss"
+    # The current assignee is reported.
+    assert resp.data["current"] == "worker"

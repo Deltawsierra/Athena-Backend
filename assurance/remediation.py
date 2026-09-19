@@ -83,14 +83,28 @@ def apply_transition(
 
 
 @transaction.atomic
-def assign(finding: Finding, assignee, *, actor, note: str = "") -> RemediationEvent:
+def assign(
+    finding: Finding, assignee, *, actor, note: str = ""
+) -> RemediationEvent | None:
     """Set (or clear, with ``assignee=None``) who does the remediation work.
 
-    An assignment does not move the workflow, so it records a
+    An assignment does not move the workflow, so a real change records a
     :class:`~assurance.models.RemediationEvent` at the current state
     (``from_state == to_state``) — the trail stays complete and attributed
     without pretending a state change happened. Touches ``assignee`` only; never
-    ``status``, ``owner``, or the decision."""
+    ``status``, ``owner``, or the decision.
+
+    **Idempotent.** If the finding is already assigned to exactly this user (or
+    already unassigned when clearing), nothing is written: no save, no duplicate
+    ``RemediationEvent``, and the call returns ``None``. This keeps attribution
+    honest — the trail records only assignments that actually happened, never a
+    no-op re-click. A real change behaves exactly as before and returns the new
+    event."""
+    current_id = finding.assignee_id
+    target_id = assignee.pk if assignee is not None else None
+    if current_id == target_id:
+        # Already in the requested state — no change, no duplicate event.
+        return None
     finding.assignee = assignee
     finding.save(update_fields=["assignee", "updated_at"])
     state = finding.remediation_state
