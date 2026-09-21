@@ -48,6 +48,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
 
+from . import observability as obs
 from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift
@@ -511,6 +512,17 @@ def derive_claims(deployment, *, now=None) -> dict:
     now = now or timezone.now()
     dep = _prefetched(deployment)
 
+    with obs.span(obs.PLAN, component="derive_claims", subject=str(deployment.pk)):
+        return _derive_claims(dep, now)
+
+
+def _derive_claims(dep, now) -> dict:
+    """The body of :func:`derive_claims`, lifted out so one span wraps it.
+
+    Extracted rather than re-indented: a re-indent would rewrite every line of the
+    claim deriver, and a reviewer could not tell the tracing change from a logic
+    change in that diff.
+    """
     system_fp = compute_system_fingerprint(dep)
     pol_version = policy_version(dep)
     receipt_digest = build_assurance_receipt(dep)["digest"]

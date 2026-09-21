@@ -49,6 +49,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
+from . import observability as obs
 from .claims import Status
 from .fingerprint import compute_system_fingerprint
 from .fingerprint import policy_version as _current_policy_version
@@ -239,55 +240,56 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
 
     Query-light: the current fingerprint and policy pin are computed once over a
     prefetched deployment, and the claims are read in one scoped query."""
-    now = now or timezone.now()
-    dep = (
-        Deployment.objects.prefetch_related("assets__provider__assertions")
-        .select_related("data_boundary")
-        .get(pk=deployment.pk)
-    )
-    system_fp = compute_system_fingerprint(dep)
-    policy_version = _current_policy_version(dep)
+    with obs.span(obs.PLAN, component="check_invalidations", subject=str(deployment.pk)):
+        now = now or timezone.now()
+        dep = (
+            Deployment.objects.prefetch_related("assets__provider__assertions")
+            .select_related("data_boundary")
+            .get(pk=deployment.pk)
+        )
+        system_fp = compute_system_fingerprint(dep)
+        policy_version = _current_policy_version(dep)
 
-    invalidated = 0
-    opened = 0
-    currents = list(
-        AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True)
-    )
-    for claim in currents:
-        # A human REVOKED claim is a withdrawal — never invalidated, marked, or
-        # given a retest obligation.
-        if claim.status == Status.REVOKED:
-            continue
-        # Drift is the signal: the state the claim was true of, or the policy it was
-        # judged under, no longer matches what is in force. (See the module
-        # docstring on why this is the honest, fingerprint-grounded definition of
-        # "invalidated".)
-        state_drift = claim.system_fingerprint != system_fp
-        policy_drift = claim.policy_version != policy_version
-        if not (state_drift or policy_drift):
-            continue
-        invalidated += 1
-        if not _has_open_requirement(dep, claim):
-            if state_drift and policy_drift:
-                reason = "System fingerprint and assurance policy both changed; the state and the policy this claim was true of no longer match the deployment."
-            elif state_drift:
-                reason = "System fingerprint changed; the state this claim was true of no longer matches the deployment."
-            else:
-                reason = "Assurance policy changed; the policy this claim was assessed under is no longer the policy in force."
-            _open_requirement(
-                dep,
-                claim,
-                system_fp=system_fp,
-                now=now,
-                actor=actor,
-                reason=reason,
-            )
-            opened += 1
-        # Move the drifted claim away from a pass (STALE), never to an invented
-        # "invalid but passing" state.
-        _mark_stale(claim, now)
+        invalidated = 0
+        opened = 0
+        currents = list(
+            AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True)
+        )
+        for claim in currents:
+            # A human REVOKED claim is a withdrawal — never invalidated, marked, or
+            # given a retest obligation.
+            if claim.status == Status.REVOKED:
+                continue
+            # Drift is the signal: the state the claim was true of, or the policy it was
+            # judged under, no longer matches what is in force. (See the module
+            # docstring on why this is the honest, fingerprint-grounded definition of
+            # "invalidated".)
+            state_drift = claim.system_fingerprint != system_fp
+            policy_drift = claim.policy_version != policy_version
+            if not (state_drift or policy_drift):
+                continue
+            invalidated += 1
+            if not _has_open_requirement(dep, claim):
+                if state_drift and policy_drift:
+                    reason = "System fingerprint and assurance policy both changed; the state and the policy this claim was true of no longer match the deployment."
+                elif state_drift:
+                    reason = "System fingerprint changed; the state this claim was true of no longer matches the deployment."
+                else:
+                    reason = "Assurance policy changed; the policy this claim was assessed under is no longer the policy in force."
+                _open_requirement(
+                    dep,
+                    claim,
+                    system_fp=system_fp,
+                    now=now,
+                    actor=actor,
+                    reason=reason,
+                )
+                opened += 1
+            # Move the drifted claim away from a pass (STALE), never to an invented
+            # "invalid but passing" state.
+            _mark_stale(claim, now)
 
-    resolved = resolve_satisfied_requirements(
-        dep, system_fp=system_fp, policy_version=policy_version, now=now
-    )
-    return {"invalidated": invalidated, "retests_opened": opened, "retests_resolved": resolved}
+        resolved = resolve_satisfied_requirements(
+            dep, system_fp=system_fp, policy_version=policy_version, now=now
+        )
+        return {"invalidated": invalidated, "retests_opened": opened, "retests_resolved": resolved}

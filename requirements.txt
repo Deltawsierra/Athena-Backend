@@ -109,8 +109,12 @@ zopfli==0.2.3.post1
 
 # The shared Mythos foundation. The failsafe control plane uses
 # mythos_core.failsafe to verify operator command signatures with the SAME
-# definition the engine uses, so the two never disagree. Pinned to the v0.1.0
-# release tag now that mythos-core has cut a release (CI needs a
-# MYTHOS_CORE_TOKEN secret to install the private dependency, as on the engine
-# repos).
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@v0.1.0
+# definition the engine uses, so the two never disagree, and mythos_core.tracing
+# for the shared span vocabulary assurance/observability.py binds.
+#
+# Pinned to the v0.2.1 release COMMIT rather than "@v0.2.1": the tag could not be
+# pushed from the session that cut the release (Mythos-Core#10 records the 403 and
+# what a person still needs to do). A commit pin is immutable and resolves the
+# same tree. CI needs a MYTHOS_CORE_TOKEN secret to install the private
+# dependency, as on the engine repos.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@f566592a8f856c105c2e85ce81cf2bf59f7f1c95

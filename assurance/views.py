@@ -27,6 +27,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
+from . import observability
 from .bundle import assurance_bundle
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -314,6 +315,45 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 raise ValidationError({"deployments": "must be a list of deployment names"})
             queryset = queryset.filter(name__in=names)
         return Response(assurance_bundle(queryset))
+
+    @action(detail=False, methods=["get"], url_path="latency")
+    def latency(self, request):
+        """The p50/p95 latency table this worker process has accumulated.
+
+        The rule is to measure before optimising, and the measurement has to be
+        reachable: the recorder lives in this process, while the thing that drives
+        a realistic workload -- a Minotaur campaign against the live stack -- is on
+        the other side of HTTP. Without this route the only baseline available
+        would be one taken from a test, which measures fixtures.
+
+        Admin-only. The component names are the internal derivation steps in the
+        order they run -- a map of the assessment pipeline -- which is the same
+        reason the other structural reads are privileged. No deployment, no
+        finding, no claim, no verdict: only step names and durations.
+
+        The table is **per worker process**, and the response says so. Under a
+        multi-worker WSGI server two consecutive requests can land on different
+        workers and report different tables; that is the honest answer, because a
+        p95 averaged across workers would hide a single slow one. A reader taking a
+        baseline should hold the worker count in mind, which they cannot do if the
+        response implies a single global table.
+
+        ``samples`` travels with every row: a p95 over three observations is not a
+        p95, and a reader has to be able to see that rather than be told it. An
+        unmeasured table is an empty list, never zeroes -- a zero in a latency
+        column reads as "instant" when it means "never measured".
+        """
+        _require_admin(request)
+        rows = observability.latency_table()
+        return Response(
+            {
+                "engine": observability.ENGINE,
+                "tracing": observability.status(),
+                "components": rows,
+                "measured": bool(rows),
+                "scope": "worker_process",
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def recompute(self, request, uuid=None):
