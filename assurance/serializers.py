@@ -334,6 +334,7 @@ class UnknownSerializer(serializers.ModelSerializer):
             "uuid",
             "deployment_uuid",
             "finding_uuid",
+            "subject",
             "question",
             "why_it_matters",
             "evidence_needed",

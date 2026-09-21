@@ -43,7 +43,7 @@ import hashlib
 
 from django.utils import timezone
 
-from .models import Asset, Deployment, Finding
+from .models import RESOLVED_FINDING_STATUSES, Asset, Deployment, Finding
 
 # The severity an UNDECLARED (shadow) observed component carries, by kind. A
 # component the customer never declared is real supply chain nobody approved; the
@@ -77,10 +77,6 @@ _UNDECLARED_COMPONENT = "bom_drift.undeclared_component"
 _UNDECLARED_PROVIDER = "bom_drift.undeclared_provider"
 _DECLARED_NOT_OBSERVED = "bom_drift.declared_not_observed"
 
-# A drift finding a human has dispositioned is no longer the machine's to move.
-_RESOLVED_FINDING_STATUSES = frozenset(
-    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
-)
 
 
 def _norm(value: str) -> str:
@@ -352,7 +348,7 @@ def record_bom_drift_findings(deployment) -> dict:
     stale = (
         dep.findings.filter(finding_type__startswith=_FINDING_PREFIX)
         .exclude(fingerprint__in=live)
-        .exclude(status__in=_RESOLVED_FINDING_STATUSES)
+        .exclude(status__in=RESOLVED_FINDING_STATUSES)
     )
     for finding in stale:
         finding.status = Finding.Status.CLOSED
