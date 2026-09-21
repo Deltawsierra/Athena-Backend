@@ -27,6 +27,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
+from .bundle import assurance_bundle
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
 from .business_impact import build_business_impact
@@ -276,6 +277,43 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             return qs
         # Own deployments, or deployments whose findings came from the user's scans.
         return qs.filter(owner=user).distinct()
+
+    @action(detail=False, methods=["post"], url_path="check")
+    def check(self, request):
+        """Every assurance stream, across every deployment the caller can see.
+
+        The per-deployment routes are the right shape for a dashboard, which asks
+        one question at a time. They are the wrong shape for anything assessing
+        the engine as a whole — a benchmark scoring recall across a portfolio, an
+        export, an auditor's snapshot — which needs the verdicts Athena currently
+        stands behind, consistently, in one read. Assembling that from the
+        separate routes is not just slow: an ingest between two of them yields a
+        bundle where a claim has been invalidated by drift the drift stream does
+        not carry, and the inconsistency is indistinguishable from an engine that
+        failed to invalidate.
+
+        Read-only and computed: it creates nothing, recomputes nothing, and
+        reports only what the owning modules already decided. Scoped exactly like
+        the deployment list, so it can never widen what a caller may see.
+
+        An optional ``deployments`` list of names narrows the portfolio; a name
+        the caller cannot see is simply absent from the result rather than
+        refused, because the request says nothing about whether such a deployment
+        exists. ``deployments_assessed`` names what was actually read, so an
+        empty portfolio is distinguishable from a portfolio of clean deployments
+        — five empty streams otherwise read as "nothing failed".
+
+        Any other key in the body is ignored. Callers driving this from a harness
+        send their own bookkeeping (a scenario profile, a run id); that is theirs
+        to track and nothing Athena should pretend to interpret.
+        """
+        queryset = self.get_queryset()
+        names = request.data.get("deployments") if isinstance(request.data, dict) else None
+        if names is not None:
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                raise ValidationError({"deployments": "must be a list of deployment names"})
+            queryset = queryset.filter(name__in=names)
+        return Response(assurance_bundle(queryset))
 
     @action(detail=True, methods=["post"])
     def recompute(self, request, uuid=None):

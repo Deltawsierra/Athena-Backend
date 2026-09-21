@@ -524,6 +524,16 @@ class Finding(models.Model):
 # ---------------------------------------------------------------------------
 
 
+# A finding a human has dispositioned is no longer the machine's to move: the
+# derivers that create, refresh and auto-resolve machine-owned rows all stop at
+# this boundary. Defined once here, beside the statuses themselves, because three
+# modules asked the same question and two of them had their own copy of the
+# answer — which is how the derivers drift apart without anyone noticing.
+RESOLVED_FINDING_STATUSES = frozenset(
+    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
+)
+
+
 class Evidence(models.Model):
     """A piece of proof behind a finding, graded by how strongly it is known.
 
@@ -620,8 +630,12 @@ class Unknown(models.Model):
     it*, and *how much it moves the deployment decision*. It carries an owner and
     a review date so a gap is worked, not forgotten.
 
-    Unknowns are derived idempotently from findings whose honest evidence class
-    is unverified (see ``assurance.unknowns``), and can also be raised by hand.
+    Unknowns are derived idempotently from two sources (see
+    ``assurance.unknowns``) — findings whose honest evidence class is unverified,
+    and provider postures the data-boundary assessment could not assess because
+    nobody declared them — and can also be raised by hand. The second source
+    matters because a gap with no finding behind it is exactly the one a
+    findings-only register reports as zero.
     Like a finding, an Unknown is keyed within its deployment by a fingerprint so
     a re-derive updates the row rather than duplicating it, and human-set state
     (status, owner, review date, notes) survives a re-derive."""
@@ -639,6 +653,7 @@ class Unknown(models.Model):
 
     class Source(models.TextChoices):
         DERIVED = "derived", "Derived from a finding"
+        POSTURE = "posture", "Derived from an undeclared provider posture"
         MANUAL = "manual", "Raised manually"
 
     id = models.BigAutoField(primary_key=True)
@@ -657,7 +672,15 @@ class Unknown(models.Model):
         related_name="unknowns",
     )
 
-    # Stable dedup key within a deployment (hash of deployment + subject).
+    # What this gap is *about*, as a slug: ``prompt-injection`` for an unconfirmed
+    # prompt-injection finding, ``training-posture`` for an undeclared provider
+    # posture. A label, not a key — the fingerprint is the dedup key, and two gaps
+    # of the same kind legitimately share a subject. It exists so a consumer
+    # outside this database (a report, an export, a benchmark answer key) can name
+    # a kind of gap without carrying a hash or an auto-increment id around.
+    subject = models.CharField(max_length=200, blank=True, db_index=True)
+
+    # Stable dedup key within a deployment (hash of the namespaced subject).
     fingerprint = models.CharField(max_length=64, db_index=True)
 
     # The three questions an Unknown must answer to be worth tracking.

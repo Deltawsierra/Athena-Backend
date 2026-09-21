@@ -43,6 +43,20 @@ DATA_DESTINATION_KINDS = {
     Asset.Kind.DATA_STORE,
 }
 
+# The undeclared-posture gaps this assessment can reach, as stable codes.
+#
+# ``_assess_flow`` has always reported these in prose, which is right for a human
+# reading the assessment and useless for anything that has to *act* on them. The
+# codes are the machine-readable half: ``assurance.unknowns`` derives a managed
+# Unknown per code, so a posture nobody declared becomes an owned, dated question
+# instead of a sentence that disappears the next time the page is rendered. The
+# prose is unchanged and still authoritative for display; a code is emitted
+# alongside it, never instead of it.
+BOUNDARY_UNDECLARED = "boundary_undeclared"
+REGION_UNDECLARED = "region_undeclared"
+TRAINING_UNDECLARED = "training_undeclared"
+SHARING_UNDECLARED = "sharing_undeclared"
+
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 # Whole-word negations. Matched as tokens (word boundaries), NEVER as substrings,
@@ -257,14 +271,19 @@ def _assess_flow(provider, assets, policy) -> dict:
     sharing = assertions.get("subprocessors")
     violations: list[str] = []
     unknowns: list[str] = []
+    # The same gaps as ``unknowns``, as codes a deriver can key on. Kept in step
+    # with it below: every append to one appends to the other.
+    unknown_codes: list[str] = []
 
     if policy is None:
         unknowns.append("no data boundary has been approved for this deployment")
+        unknown_codes.append(BOUNDARY_UNDECLARED)
     else:
         # Region: only assessable when a region boundary is declared.
         if policy.allowed_regions:
             if not region or _declares_ignorance(region["value"]):
                 unknowns.append("data region not declared for this provider")
+                unknown_codes.append(REGION_UNDECLARED)
             elif not _region_allowed(region["value"], policy.allowed_regions):
                 violations.append(
                     f"declared region '{region['value']}' is not within the approved "
@@ -274,6 +293,7 @@ def _assess_flow(provider, assets, policy) -> dict:
         if not policy.training_allowed:
             if not training or _declares_ignorance(training["value"]):
                 unknowns.append("training-on-data posture not declared")
+                unknown_codes.append(TRAINING_UNDECLARED)
             elif _affirmative(training["value"]):
                 violations.append(
                     f"provider declares it trains on customer data ('{training['value']}'), "
@@ -285,6 +305,7 @@ def _assess_flow(provider, assets, policy) -> dict:
         if not policy.third_party_sharing_allowed:
             if not sharing or _declares_ignorance(sharing["value"]):
                 unknowns.append("third-party sharing (subprocessor) posture not declared")
+                unknown_codes.append(SHARING_UNDECLARED)
             elif _shares_with_third_parties(sharing["value"]):
                 violations.append(
                     f"provider declares third-party subprocessors ('{sharing['value']}'), "
@@ -304,6 +325,7 @@ def _assess_flow(provider, assets, policy) -> dict:
         "status": status,
         "violations": violations,
         "unknowns": unknowns,
+        "unknown_codes": unknown_codes,
     }
 
 
