@@ -392,7 +392,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
 
                 fresh = Deployment.objects.get(pk=deployment_pk)
                 dispatch_for_blocking_decision(fresh)
-            except Exception:  # noqa: BLE001 — dispatch must never break a recompute
+            except Exception:  # dispatch must never break a recompute
                 import logging
 
                 logging.getLogger(__name__).exception(

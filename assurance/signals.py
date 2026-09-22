@@ -62,7 +62,7 @@ def ingest_completed_scan(sender, instance, created, update_fields=None, **kwarg
 
         try:
             ingest_scan(instance)
-        except Exception:  # noqa: BLE001 - recording findings must never break completion
+        except Exception:  # recording findings must never break completion
             logger.exception("assurance ingestion failed for scan %s", scan_pk)
 
     transaction.on_commit(_do_ingest)

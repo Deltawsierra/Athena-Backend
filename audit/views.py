@@ -6,7 +6,7 @@ from django.template.loader import render_to_string
 try:
     from weasyprint import HTML
     WEASYPRINT_AVAILABLE = True
-except Exception:
+except Exception:  # noqa: BLE001 - a missing wheel and a broken native library both mean "no weasyprint", and the flag below says so
     HTML = None
     WEASYPRINT_AVAILABLE = False
 
