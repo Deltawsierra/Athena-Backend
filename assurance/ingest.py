@@ -33,6 +33,8 @@ from urllib.parse import urlparse
 
 from django.utils import timezone
 
+from . import observability as obs
+
 from .models import (
     SEVERITY_INFO,
     SEVERITY_ORDER,
@@ -254,6 +256,27 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
         return []
 
     deployment = deployment or deployment_for_scan(scan)
+
+    # The parent of every span below, so an ingest reads as one tree rather than a
+    # pile of timings. Entered after the empty-findings return above, so a no-op
+    # ingest is not recorded as work: a near-zero sample would drag the p50 down
+    # and make the pipeline look faster than it is.
+    with obs.span(
+        obs.INVOKE_WORKFLOW,
+        component="ingest_scan",
+        subject=str(deployment.pk),
+        attributes={"mythos.raw_findings": len(raw_findings)},
+    ):
+        return _ingest_findings(scan, deployment, raw_findings)
+
+
+def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
+    """The body of :func:`ingest_scan`, lifted out so the workflow span wraps it.
+
+    Extracted rather than re-indented in place: a re-indent would have rewritten
+    every line of a function that ingests customer findings, and a reviewer could
+    not have told the tracing change from a logic change in that diff.
+    """
     now = timezone.now()
     results: list[Finding] = []
 
@@ -317,14 +340,21 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
     # finding to the asset it concerns (Phase 1.1).
     from .assets import derive_assets
 
-    derive_assets(deployment, scan)
+    with obs.span(
+        obs.RETRIEVAL,
+        component="derive_assets",
+        subject=str(deployment.pk),
+        attributes={obs.GEN_AI_TOOL_NAME: "derive_assets"},
+    ):
+        derive_assets(deployment, scan)
 
     # Turn every "we couldn't verify this" into a managed gap before we score the
     # deployment, so the Unknowns Register is current alongside the findings
     # (Phase 0.4).
     from .unknowns import derive_unknowns
 
-    derive_unknowns(deployment)
+    with obs.span(obs.PLAN, component="derive_unknowns", subject=str(deployment.pk)):
+        derive_unknowns(deployment)
 
     # A scan culminates in a decision, not just a finding list: refresh the
     # deployment's six-state decision from its now-current findings (Phase 0.5).
@@ -333,6 +363,11 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
     if deployment.decision != Deployment.Decision.PAUSED:
         from .decision import recompute_decision
 
-        recompute_decision(deployment)
+        with obs.span(
+            obs.PLAN, component="recompute_decision", subject=str(deployment.pk)
+        ) as active:
+            recompute_decision(deployment)
+            if active is not None:
+                active.set_attribute(obs.MYTHOS_VERDICT, str(deployment.decision))
 
     return results

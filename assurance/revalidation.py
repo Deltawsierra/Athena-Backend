@@ -31,6 +31,7 @@ layer keeps — not a general inference engine.
 
 from __future__ import annotations
 
+from . import observability as obs
 from .fingerprint import compute_system_fingerprint
 from .models import AssuranceClaim, RetestRequirement
 
@@ -107,74 +108,75 @@ def plan_revalidation(deployment) -> dict:
     of queries, pass a deployment the caller has prefetched
     (``assets__provider__assertions``, ``data_boundary``).
     """
-    current = list(
-        deployment.assurance_claims.filter(valid_to__isnull=True).exclude(status=Status.REVOKED)
-    )
+    with obs.span(obs.PLAN, component="plan_revalidation", subject=str(deployment.pk)):
+        current = list(
+            deployment.assurance_claims.filter(valid_to__isnull=True).exclude(status=Status.REVOKED)
+        )
 
-    # Map each OPEN retest obligation to the claim identity it is about. A retest is
-    # opened against the version that drifted; its identity fingerprint matches the
-    # current version, so a re-derivation that rebinds resolves it (Phase 2).
-    open_reqs: dict[str, RetestRequirement] = {}
-    for req in (
-        RetestRequirement.objects.filter(deployment=deployment, resolved_at__isnull=True)
-        .select_related("claim")
-        .order_by("opened_at")
-    ):
-        open_reqs.setdefault(req.claim.fingerprint, req)
+        # Map each OPEN retest obligation to the claim identity it is about. A retest is
+        # opened against the version that drifted; its identity fingerprint matches the
+        # current version, so a re-derivation that rebinds resolves it (Phase 2).
+        open_reqs: dict[str, RetestRequirement] = {}
+        for req in (
+            RetestRequirement.objects.filter(deployment=deployment, resolved_at__isnull=True)
+            .select_related("claim")
+            .order_by("opened_at")
+        ):
+            open_reqs.setdefault(req.claim.fingerprint, req)
 
-    required: list[dict] = []
-    outstanding_unknowns: list[dict] = []
-    still_current: list[dict] = []
+        required: list[dict] = []
+        outstanding_unknowns: list[dict] = []
+        still_current: list[dict] = []
 
-    for claim in current:
-        requirement = open_reqs.get(claim.fingerprint)
-        drifted = requirement is not None or claim.status in (Status.CONTRADICTED, Status.STALE)
-        if drifted:
-            required.append(_claim_work(claim, requirement))
-        elif claim.status == Status.UNKNOWN:
-            outstanding_unknowns.append(
-                {
-                    "claim_uuid": str(claim.uuid),
-                    "claim_type": claim.claim_type,
-                    "statement": claim.statement,
-                    "status": claim.status,
-                }
+        for claim in current:
+            requirement = open_reqs.get(claim.fingerprint)
+            drifted = requirement is not None or claim.status in (Status.CONTRADICTED, Status.STALE)
+            if drifted:
+                required.append(_claim_work(claim, requirement))
+            elif claim.status == Status.UNKNOWN:
+                outstanding_unknowns.append(
+                    {
+                        "claim_uuid": str(claim.uuid),
+                        "claim_type": claim.claim_type,
+                        "statement": claim.statement,
+                        "status": claim.status,
+                    }
+                )
+            else:
+                still_current.append(
+                    {
+                        "claim_uuid": str(claim.uuid),
+                        "claim_type": claim.claim_type,
+                        "status": claim.status,
+                    }
+                )
+
+        required.sort(key=lambda w: (w["claim_type"], w["claim_uuid"]))
+
+        if required:
+            note = (
+                f"{len(required)} claim(s) need revalidation because of a change, an expiry, or a "
+                f"contradiction; {len(still_current)} remain current and need not be re-run. Re-run "
+                "only the named Athena reassessment(s) and Achilles capability area(s), then recompute "
+                "claims to rebind the deployment to its current state."
             )
         else:
-            still_current.append(
-                {
-                    "claim_uuid": str(claim.uuid),
-                    "claim_type": claim.claim_type,
-                    "status": claim.status,
-                }
+            note = (
+                "No claim needs revalidation: every current claim is supported or verified with no open "
+                "retest obligation. Nothing needs to be re-run."
             )
 
-    required.sort(key=lambda w: (w["claim_type"], w["claim_uuid"]))
-
-    if required:
-        note = (
-            f"{len(required)} claim(s) need revalidation because of a change, an expiry, or a "
-            f"contradiction; {len(still_current)} remain current and need not be re-run. Re-run "
-            "only the named Athena reassessment(s) and Achilles capability area(s), then recompute "
-            "claims to rebind the deployment to its current state."
-        )
-    else:
-        note = (
-            "No claim needs revalidation: every current claim is supported or verified with no open "
-            "retest obligation. Nothing needs to be re-run."
-        )
-
-    return {
-        "deployment_uuid": str(deployment.uuid),
-        "system_fingerprint": compute_system_fingerprint(deployment),
-        "summary": {
-            "required": len(required),
-            "still_current": len(still_current),
-            "outstanding_unknowns": len(outstanding_unknowns),
-        },
-        "recompute_action": "POST deployments/{uuid}/recompute-claims to re-derive after the named retests run.",
-        "required": required,
-        "outstanding_unknowns": outstanding_unknowns,
-        "still_current": still_current,
-        "note": note,
-    }
+        return {
+            "deployment_uuid": str(deployment.uuid),
+            "system_fingerprint": compute_system_fingerprint(deployment),
+            "summary": {
+                "required": len(required),
+                "still_current": len(still_current),
+                "outstanding_unknowns": len(outstanding_unknowns),
+            },
+            "recompute_action": "POST deployments/{uuid}/recompute-claims to re-derive after the named retests run.",
+            "required": required,
+            "outstanding_unknowns": outstanding_unknowns,
+            "still_current": still_current,
+            "note": note,
+        }

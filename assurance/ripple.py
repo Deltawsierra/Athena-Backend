@@ -54,6 +54,7 @@ the network.
 
 from __future__ import annotations
 
+from . import observability as obs
 from .access import assess_effective_access
 from .boundary import assess_boundary
 from .capability import (
@@ -272,144 +273,153 @@ def assess_ripple(deployment) -> dict:
     ``assets__provider__assertions`` and ``findings__asset`` on the caller side.
     Pure and side-effect-free, deterministic, no timestamp. See the module
     docstring for the honesty discipline."""
-    access = assess_effective_access(deployment)
-    principals = access["principals"]
-    boundary = assess_boundary(deployment)
+    # `retrieval`, not `plan`: this walks the assurance graph and derives no
+    # verdict of its own -- it reads effective access and the boundary
+    # assessment and traces downstream from them.
+    with obs.span(
+        obs.RETRIEVAL,
+        component="assess_ripple",
+        subject=str(deployment.pk),
+        attributes={obs.GEN_AI_TOOL_NAME: "ripple_traversal"},
+    ):
+        access = assess_effective_access(deployment)
+        principals = access["principals"]
+        boundary = assess_boundary(deployment)
 
-    # Boundary destinations that cross the approved boundary — used to enrich a
-    # consequence whose target is one of them, giving the boundary assessment a
-    # concrete role in the basis.
-    shadow_dests = {d["asset_name"] for d in boundary["shadow_destinations"]}
-    flow_violation: set[str] = set()
-    for flow in boundary["flows"]:
-        if flow["status"] == "violation":
-            flow_violation.update(flow["assets"])
+        # Boundary destinations that cross the approved boundary — used to enrich a
+        # consequence whose target is one of them, giving the boundary assessment a
+        # concrete role in the basis.
+        shadow_dests = {d["asset_name"] for d in boundary["shadow_destinations"]}
+        flow_violation: set[str] = set()
+        for flow in boundary["flows"]:
+            if flow["status"] == "violation":
+                flow_violation.update(flow["assets"])
 
-    def boundary_note(target_name: str) -> str | None:
-        if target_name in shadow_dests:
-            return "target is an unmanaged data destination outside the approved boundary"
-        if target_name in flow_violation:
-            return "target's data flow is a declared boundary violation"
-        return None
+        def boundary_note(target_name: str) -> str | None:
+            if target_name in shadow_dests:
+                return "target is an unmanaged data destination outside the approved boundary"
+            if target_name in flow_violation:
+                return "target's data flow is a declared boundary violation"
+            return None
 
-    # --- Origins worth tracing, keyed by the graph node so a node that is both a
-    # finding site and a principal is one origin with both reasons, never two. ---
-    origins: dict[str, dict] = {}
+        # --- Origins worth tracing, keyed by the graph node so a node that is both a
+        # finding site and a principal is one origin with both reasons, never two. ---
+        origins: dict[str, dict] = {}
 
-    def ensure(name: str) -> dict:
-        origin = origins.get(name)
-        if origin is None:
-            origin = {
-                "key": f"node:{name}",
-                "origin": name,
-                "origin_uuid": None,
-                "origin_types": [],
-                "reasons": [],
-                "risk": RISK_BASELINE,
-                "findings": [],
-            }
-            origins[name] = origin
-        return origin
+        def ensure(name: str) -> dict:
+            origin = origins.get(name)
+            if origin is None:
+                origin = {
+                    "key": f"node:{name}",
+                    "origin": name,
+                    "origin_uuid": None,
+                    "origin_types": [],
+                    "reasons": [],
+                    "risk": RISK_BASELINE,
+                    "findings": [],
+                }
+                origins[name] = origin
+            return origin
 
-    # Principal origins: a privileged identity, or one that reads at risk high.
-    for principal in principals:
-        if not (principal["privileged"] or principal["risk"] == RISK_HIGH):
-            continue
-        origin = ensure(principal["name"])
-        if "principal" not in origin["origin_types"]:
-            origin["origin_types"].append("principal")
-        origin["key"] = principal["key"]
-        # The principal's node uuid, the stable key downstream slicing uses. The
-        # key is "asset:<uuid>" or "deployment:<uuid>".
-        origin["origin_uuid"] = principal["key"].split(":", 1)[1]
-        origin["principal_kind"] = principal["kind"]
-        origin["principal_kind_label"] = principal["kind_label"]
-        origin["privilege_level"] = principal["privilege_level"]
-        origin["risk"] = _max_risk(origin["risk"], principal["risk"])
-        why = "privileged principal" if principal["privileged"] else "high-risk principal"
-        origin["reasons"].append(why)
+        # Principal origins: a privileged identity, or one that reads at risk high.
+        for principal in principals:
+            if not (principal["privileged"] or principal["risk"] == RISK_HIGH):
+                continue
+            origin = ensure(principal["name"])
+            if "principal" not in origin["origin_types"]:
+                origin["origin_types"].append("principal")
+            origin["key"] = principal["key"]
+            # The principal's node uuid, the stable key downstream slicing uses. The
+            # key is "asset:<uuid>" or "deployment:<uuid>".
+            origin["origin_uuid"] = principal["key"].split(":", 1)[1]
+            origin["principal_kind"] = principal["kind"]
+            origin["principal_kind_label"] = principal["kind_label"]
+            origin["privilege_level"] = principal["privilege_level"]
+            origin["risk"] = _max_risk(origin["risk"], principal["risk"])
+            why = "privileged principal" if principal["privileged"] else "high-risk principal"
+            origin["reasons"].append(why)
 
-    # Finding origins: an active high/critical finding tied to a component.
-    high_rank = severity_rank(SEVERITY_HIGH)
-    for finding in deployment.findings.all():
-        if finding.status in _RESOLVED_STATUSES:
-            continue
-        if severity_rank(finding.severity) < high_rank:
-            continue
-        if finding.asset_id is None:
-            continue
-        name = finding.asset.name
-        origin = ensure(name)
-        # A finding-only origin keys off its asset's uuid; a principal origin (built
-        # first) already set origin_uuid, so keep that.
-        if origin["origin_uuid"] is None:
-            origin["origin_uuid"] = str(finding.asset.uuid)
-        if "finding" not in origin["origin_types"]:
-            origin["origin_types"].append("finding")
-        origin["risk"] = _max_risk(origin["risk"], RISK_HIGH)
-        origin["findings"].append(
-            {
-                "uuid": str(finding.uuid),
-                "finding_type": finding.finding_type,
-                "severity": finding.severity,
-                "title": finding.title,
-            }
-        )
-        origin["reasons"].append(f"active {finding.severity} finding: {finding.title}")
+        # Finding origins: an active high/critical finding tied to a component.
+        high_rank = severity_rank(SEVERITY_HIGH)
+        for finding in deployment.findings.all():
+            if finding.status in _RESOLVED_STATUSES:
+                continue
+            if severity_rank(finding.severity) < high_rank:
+                continue
+            if finding.asset_id is None:
+                continue
+            name = finding.asset.name
+            origin = ensure(name)
+            # A finding-only origin keys off its asset's uuid; a principal origin (built
+            # first) already set origin_uuid, so keep that.
+            if origin["origin_uuid"] is None:
+                origin["origin_uuid"] = str(finding.asset.uuid)
+            if "finding" not in origin["origin_types"]:
+                origin["origin_types"].append("finding")
+            origin["risk"] = _max_risk(origin["risk"], RISK_HIGH)
+            origin["findings"].append(
+                {
+                    "uuid": str(finding.uuid),
+                    "finding_type": finding.finding_type,
+                    "severity": finding.severity,
+                    "title": finding.title,
+                }
+            )
+            origin["reasons"].append(f"active {finding.severity} finding: {finding.title}")
 
-    # --- Blast radius per origin: the evidenced downstream reach, made into ranked,
-    # bounded consequences. ---
-    all_consequences: list[dict] = []
-    evidenced_total = 0
+        # --- Blast radius per origin: the evidenced downstream reach, made into ranked,
+        # bounded consequences. ---
+        all_consequences: list[dict] = []
+        evidenced_total = 0
 
-    for origin in origins.values():
-        downstream = _downstream_from(origin["origin_uuid"], principals)
-        origin["evidenced_reach"] = bool(downstream)
-        origin["consequence_count"] = len(downstream)
-        origin["findings"].sort(key=lambda f: (f["finding_type"], f["title"], f["uuid"]))
-        origin["reasons"] = sorted(set(origin["reasons"]))
-        origin["origin_types"].sort()
-        if not downstream:
-            # Honest: no evidenced downstream reach is not "safe" or "contained".
-            origin["note"] = "No evidenced downstream reach — no path the asset graph attests."
-            continue
-        evidenced_total += len(downstream)
-        rows = [_consequence(origin, entry, boundary_note(entry["target"])) for entry in downstream]
-        rows.sort(key=_consequence_sort_key)
-        # "A few well-supported": keep the strongest per origin.
-        all_consequences.extend(rows[:MAX_CONSEQUENCES_PER_ORIGIN])
+        for origin in origins.values():
+            downstream = _downstream_from(origin["origin_uuid"], principals)
+            origin["evidenced_reach"] = bool(downstream)
+            origin["consequence_count"] = len(downstream)
+            origin["findings"].sort(key=lambda f: (f["finding_type"], f["title"], f["uuid"]))
+            origin["reasons"] = sorted(set(origin["reasons"]))
+            origin["origin_types"].sort()
+            if not downstream:
+                # Honest: no evidenced downstream reach is not "safe" or "contained".
+                origin["note"] = "No evidenced downstream reach — no path the asset graph attests."
+                continue
+            evidenced_total += len(downstream)
+            rows = [_consequence(origin, entry, boundary_note(entry["target"])) for entry in downstream]
+            rows.sort(key=_consequence_sort_key)
+            # "A few well-supported": keep the strongest per origin.
+            all_consequences.extend(rows[:MAX_CONSEQUENCES_PER_ORIGIN])
 
-    # Rank across origins and bound overall.
-    all_consequences.sort(key=_consequence_sort_key)
-    consequences = all_consequences[:MAX_CONSEQUENCES_TOTAL]
+        # Rank across origins and bound overall.
+        all_consequences.sort(key=_consequence_sort_key)
+        consequences = all_consequences[:MAX_CONSEQUENCES_TOTAL]
 
-    origin_list = list(origins.values())
-    origin_list.sort(key=lambda o: (_risk_index(o["risk"]), o["origin"]))
+        origin_list = list(origins.values())
+        origin_list.sort(key=lambda o: (_risk_index(o["risk"]), o["origin"]))
 
-    by_category: dict[str, int] = {}
-    for c in consequences:
-        by_category[c["category"]] = by_category.get(c["category"], 0) + 1
+        by_category: dict[str, int] = {}
+        for c in consequences:
+            by_category[c["category"]] = by_category.get(c["category"], 0) + 1
 
-    worst_risk = None
-    for c in consequences:
-        worst_risk = c["risk"] if worst_risk is None else _max_risk(worst_risk, c["risk"])
+        worst_risk = None
+        for c in consequences:
+            worst_risk = c["risk"] if worst_risk is None else _max_risk(worst_risk, c["risk"])
 
-    origins_with_reach = sum(1 for o in origin_list if o["evidenced_reach"])
+        origins_with_reach = sum(1 for o in origin_list if o["evidenced_reach"])
 
-    summary = {
-        "origins": len(origin_list),
-        "origins_with_reach": origins_with_reach,
-        "consequences": len(consequences),
-        # The full evidenced count before bounding — the bounding is visible, not
-        # hidden. ``consequences`` shows only the well-supported core.
-        "evidenced_consequences": evidenced_total,
-        "bounded": evidenced_total > len(consequences),
-        "by_category": dict(sorted(by_category.items())),
-        "worst_risk": worst_risk,
-    }
+        summary = {
+            "origins": len(origin_list),
+            "origins_with_reach": origins_with_reach,
+            "consequences": len(consequences),
+            # The full evidenced count before bounding — the bounding is visible, not
+            # hidden. ``consequences`` shows only the well-supported core.
+            "evidenced_consequences": evidenced_total,
+            "bounded": evidenced_total > len(consequences),
+            "by_category": dict(sorted(by_category.items())),
+            "worst_risk": worst_risk,
+        }
 
-    return {
-        "origins": origin_list,
-        "consequences": consequences,
-        "summary": summary,
-    }
+        return {
+            "origins": origin_list,
+            "consequences": consequences,
+            "summary": summary,
+        }

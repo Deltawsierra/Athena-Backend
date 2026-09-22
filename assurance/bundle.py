@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from django.utils.text import slugify
 
+from . import observability as obs
 from .boundary import assess_boundary
 from .models import RESOLVED_FINDING_STATUSES, Unknown
 
@@ -183,31 +184,32 @@ def assurance_bundle(deployments) -> dict:
     empty lists reads as "nothing failed", and it must be possible to see whether
     anything was actually assessed.
     """
-    scoped = deployments.select_related("data_boundary").prefetch_related(
-        "assets__provider__assertions", "findings", "assurance_claims__asset", "unknowns"
-    )
+    with obs.span(obs.INVOKE_WORKFLOW, component="assurance_bundle"):
+        scoped = deployments.select_related("data_boundary").prefetch_related(
+            "assets__provider__assertions", "findings", "assurance_claims__asset", "unknowns"
+        )
 
-    boundary_flows: list[dict] = []
-    findings: list[dict] = []
-    claims: list[dict] = []
-    unknowns: list[dict] = []
-    decisions: list[dict] = []
-    assessed: list[str] = []
+        boundary_flows: list[dict] = []
+        findings: list[dict] = []
+        claims: list[dict] = []
+        unknowns: list[dict] = []
+        decisions: list[dict] = []
+        assessed: list[str] = []
 
-    for deployment in scoped:
-        assessed.append(deployment.name)
-        boundary_flows += _boundary_rows(deployment)
-        findings += _finding_rows(deployment)
-        claims += _claim_rows(deployment)
-        unknowns += _unknown_rows(deployment)
-        decisions.append(_decision_row(deployment))
+        for deployment in scoped:
+            assessed.append(deployment.name)
+            boundary_flows += _boundary_rows(deployment)
+            findings += _finding_rows(deployment)
+            claims += _claim_rows(deployment)
+            unknowns += _unknown_rows(deployment)
+            decisions.append(_decision_row(deployment))
 
-    return {
-        "system": "athena-assurance",
-        "boundary_flows": boundary_flows,
-        "findings": findings,
-        "claims": claims,
-        "unknowns": unknowns,
-        "decisions": decisions,
-        "deployments_assessed": assessed,
-    }
+        return {
+            "system": "athena-assurance",
+            "boundary_flows": boundary_flows,
+            "findings": findings,
+            "claims": claims,
+            "unknowns": unknowns,
+            "decisions": decisions,
+            "deployments_assessed": assessed,
+        }

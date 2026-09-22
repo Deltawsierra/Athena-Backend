@@ -25,6 +25,7 @@ pytest-django>=4.8
 # conf down. cryptography is named directly because signing.py imports it
 # directly. mythos-core is a private git pin; CI clones it with a
 # MYTHOS_CORE_TOKEN secret (see the workflow's auth step), as on the engines.
-# Pinned to the v0.1.0 release tag now that mythos-core has cut a release.
+# Pinned to the v0.2.1 release commit (the tag could not be pushed -- see
+# Mythos-Core#10); it also carries mythos_core.tracing.
 cryptography>=41.0
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@v0.1.0
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@f566592a8f856c105c2e85ce81cf2bf59f7f1c95
