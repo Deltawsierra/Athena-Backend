@@ -216,6 +216,48 @@ def _findings_payload(engine_response: Any) -> tuple[list[dict], bool]:
     return [f for f in findings if isinstance(f, dict) and not f.get("internal")], True
 
 
+def _reported_coverage(engine_response: Any) -> tuple[list[dict], str]:
+    """The components an engine says it assessed, and what it calls itself.
+
+    Read from ``coverage: {assessed: [...], engine: "..."}`` on the engine
+    response. Absent or malformed means nothing was reported -- never "everything
+    was assessed", which is the reading that would make the whole manifest
+    decorative.
+    """
+    if not isinstance(engine_response, dict):
+        return [], ""
+    coverage = engine_response.get("coverage")
+    if not isinstance(coverage, dict):
+        return [], ""
+    assessed = coverage.get("assessed")
+    if not isinstance(assessed, list):
+        return [], ""
+    engine = str(coverage.get("engine") or "").strip()
+    return [row for row in assessed if isinstance(row, dict)], engine
+
+
+def _record_reported_coverage(scan, deployment) -> int:
+    """Stamp the deployment's assets that this scan reported assessing."""
+    from .coverage import _component_key, record_assessment
+
+    reported, engine = _reported_coverage(scan.engine_response)
+    if not reported:
+        return 0
+    wanted = {
+        _component_key(row.get("kind", ""), row.get("name", ""), row.get("identifier", ""))
+        for row in reported
+    }
+    matched = [
+        asset
+        for asset in deployment.assets.all()
+        if _component_key(asset.kind, asset.name, asset.identifier) in wanted
+    ]
+    # An engine that does not name itself still assessed something, and recording
+    # the coverage without the assessor is better than dropping it -- but the
+    # placeholder says plainly that the assessor is unknown rather than guessing one.
+    return record_assessment(matched, assessed_by=engine or "unnamed engine")
+
+
 def _scan_was_incomplete(scan) -> bool:
     """Did the engine stop this scan before it finished?
 
@@ -391,6 +433,14 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
         attributes={obs.GEN_AI_TOOL_NAME: "derive_assets"},
     ):
         derive_assets(deployment, scan)
+
+    # Record what this scan actually ASSESSED, from the engine's own report of it.
+    # Only from that report: nothing here infers assessment from an asset existing,
+    # from a scan having run, or from the absence of a finding, because each of
+    # those would put a component in the Assessed column that nothing tested. An
+    # engine that reports no coverage leaves every asset unassessed, which is the
+    # honest reading and is what the Coverage Manifest then says out loud.
+    _record_reported_coverage(scan, deployment)
 
     # Turn every "we couldn't verify this" into a managed gap before we score the
     # deployment, so the Unknowns Register is current alongside the findings
