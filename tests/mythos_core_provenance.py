@@ -1,0 +1,215 @@
+"""What mythos-core is actually imported, versus what this repo pins.
+
+`test_mythos_core_pin.py` checks that the two requirements files agree with each
+other. Nothing checked that the module Python actually imports is the one they
+name, and the gap is not theoretical: a developer checkout installed with
+``pip install -e`` shadows the pin permanently and silently. A run in that state
+produced 174 failures whose real cause was one keyword argument that the pinned
+commit has and the shadowing checkout did not -- 174 tracebacks pointing at
+everything except the thing that was wrong.
+
+The hazard is the one this codebase keeps naming: a local verification run that
+disagrees with CI *and does not say so*. Green here then means nothing about
+green there, and the direction of the error is the bad one -- the drifted core
+can be missing a guard the pinned one has, and every test of that guard passes
+vacuously because the code under test never loads.
+
+So this reports three outcomes and never folds the third into the first:
+
+- **match** -- the imported distribution resolves to the pinned commit.
+- **drift** -- it resolves to something else, named in full.
+- **unreadable** -- provenance could not be established at all, which is NOT a
+  match. This repo installs mythos-core from a git pin in every environment it
+  supports, so "I cannot tell what this is" is itself the finding.
+
+Everything here is a pure function over injected inputs so it can be tested
+without a drifted checkout to hand; `conftest.py` wires it to the session.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import subprocess
+from dataclasses import dataclass
+
+#: Opt out for deliberate local mythos-core development. It announces itself on
+#: every run rather than passing quietly: a guard you can silence invisibly is a
+#: guard that is off, and nobody would know which runs it covered.
+OPT_OUT_ENV = "ATHENA_MYTHOS_CORE_PIN_GUARD"
+
+_PIN = re.compile(
+    r"^\s*mythos-core\s*@\s*git\+(?P<url>[^@\s]+)@(?P<ref>\S+)\s*$",
+    re.MULTILINE,
+)
+
+
+@dataclass(frozen=True)
+class Provenance:
+    """Where the imported mythos-core came from, as far as it can be established.
+
+    ``commit`` is None whenever it could not be resolved, and ``why`` then says
+    what stopped it. A caller must not read ``commit is None`` as agreement.
+    """
+
+    kind: str  # "vcs" | "local" | "unknown"
+    commit: str | None = None
+    location: str = ""
+    dirty: bool = False
+    why: str = ""
+
+
+def declared_pin(text: str) -> str | None:
+    """The commit a requirements file pins mythos-core at, or None."""
+    match = _PIN.search(text)
+    return match.group("ref") if match else None
+
+
+def _git(repo: pathlib.Path, *args: str) -> str | None:
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def provenance_from_direct_url(raw: str | None, *, git=_git) -> Provenance:
+    """Read pip's ``direct_url.json`` for the installed distribution.
+
+    pip writes this for anything installed from a URL or a path (PEP 610). A git
+    install carries ``vcs_info.commit_id``, which is the resolved commit and
+    exactly what we want. A path install -- the editable developer checkout --
+    carries only a directory, so the commit has to come from the checkout's own
+    git HEAD, and an uncommitted edit there means the imported code is not any
+    commit at all.
+    """
+    if raw is None:
+        return Provenance(
+            kind="unknown",
+            why=(
+                "the installed mythos-core has no direct_url.json, so pip did not "
+                "record where it came from (it was not installed from the git pin)"
+            ),
+        )
+    try:
+        info = json.loads(raw)
+    except (ValueError, TypeError):
+        return Provenance(
+            kind="unknown",
+            why="the installed mythos-core has an unreadable direct_url.json",
+        )
+    if not isinstance(info, dict):
+        return Provenance(
+            kind="unknown",
+            why="the installed mythos-core has an unreadable direct_url.json",
+        )
+
+    url = info.get("url") or ""
+    vcs = info.get("vcs_info")
+    if isinstance(vcs, dict):
+        commit = vcs.get("commit_id")
+        if isinstance(commit, str) and commit:
+            return Provenance(kind="vcs", commit=commit, location=url)
+        return Provenance(
+            kind="unknown",
+            location=url,
+            why="installed from version control, but pip recorded no commit_id",
+        )
+
+    if isinstance(info.get("dir_info"), dict) or url.startswith("file://"):
+        path = (
+            pathlib.Path(url[len("file://") :]) if url.startswith("file://") else None
+        )
+        if path is None:
+            return Provenance(
+                kind="unknown",
+                location=url,
+                why="installed from a local path that could not be resolved",
+            )
+        head = git(path, "rev-parse", "HEAD")
+        if head is None:
+            return Provenance(
+                kind="local",
+                location=str(path),
+                why=f"{path} is not a readable git checkout, so its commit is unknown",
+            )
+        status = git(path, "status", "--porcelain")
+        return Provenance(
+            kind="local",
+            commit=head,
+            location=str(path),
+            dirty=bool(status),
+        )
+
+    return Provenance(
+        kind="unknown",
+        location=url,
+        why="the installed mythos-core came from somewhere this guard does not recognise",
+    )
+
+
+def complaint(pin: str | None, found: Provenance) -> str | None:
+    """The reason this run cannot be trusted against the pin, or None.
+
+    None means the imported distribution *is* the pinned commit. Every other
+    state returns text, including the states where nothing could be established:
+    an unreadable provenance is not a passing one.
+    """
+    if pin is None:
+        return (
+            "requirements.txt does not pin mythos-core to a git commit, so there "
+            "is nothing to check the imported package against"
+        )
+
+    if found.commit is None:
+        return (
+            f"the imported mythos-core cannot be traced to a commit, so this run "
+            f"proves nothing about the pinned one ({pin[:12]}). "
+            f"{found.why or 'no reason was recorded'}."
+        )
+
+    if found.commit != pin:
+        where = found.location or "an unrecorded location"
+        editable = (
+            f"\n  It is an editable/local install from {where}, which shadows the "
+            "pin permanently: pip will not replace it on a later install."
+            if found.kind == "local"
+            else f"\n  It was installed from {where}."
+        )
+        return (
+            f"the imported mythos-core is commit {found.commit[:12]}, but this repo "
+            f"pins {pin[:12]}.{editable}"
+        )
+
+    if found.dirty:
+        return (
+            f"the imported mythos-core is at the pinned commit {pin[:12]} but its "
+            f"checkout at {found.location} has uncommitted changes, so the code "
+            "being imported is not that commit."
+        )
+
+    return None
+
+
+def remedy(found: Provenance) -> str:
+    """What to actually do about it. A guard that only says no gets switched off."""
+    if found.kind == "local" and found.location:
+        return (
+            f"Either point the checkout back at the pin "
+            f"(git -C {found.location} checkout <pinned sha>), or reinstall from it "
+            f"(pip install --force-reinstall -r requirements-dev.txt). "
+            f"To run anyway while working on mythos-core itself, set "
+            f"{OPT_OUT_ENV}=off -- the opt-out announces itself on every run."
+        )
+    return (
+        "Reinstall from the pin (pip install --force-reinstall -r requirements-dev.txt). "
+        f"To run anyway, set {OPT_OUT_ENV}=off -- the opt-out announces itself on "
+        "every run."
+    )
