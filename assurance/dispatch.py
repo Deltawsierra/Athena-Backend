@@ -34,10 +34,12 @@ The shape mirrors the ingest signal (:mod:`assurance.signals`), on purpose:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from .models import (
     RESOLVED_FINDING_STATUSES,
@@ -78,6 +80,75 @@ def _default_transport_factory():
     return RequestsTransport()
 
 
+# Domain tag for the operation identity, so an id from this scheme can never be
+# mistaken for one from another.
+_OPERATION_DOMAIN = "athena.dispatch_operation/1"
+
+
+def operation_id(finding, connector: str) -> str:
+    """The durable identity of "push THIS finding to THIS connector".
+
+    Deterministic, so the same operation retried is the same operation and the
+    provider can deduplicate it; distinct per (finding, connector), so one
+    operation is never mistaken for another. Derived from the finding's UUID rather
+    than its primary key, because the UUID is the identity that survives export and
+    re-import.
+    """
+    raw = f"{_OPERATION_DOMAIN}\x1f{finding.uuid}\x1f{connector}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def policy_epoch(deployment) -> str:
+    """The authority this dispatch is made under, as a short stable string.
+
+    Today the deployment's standing decision is the whole of it: a dispatch
+    authorized while a deployment was NOT_RECOMMENDED was authorized under a
+    different posture than one authorized while it was READY, and a retry that
+    crosses that boundary is executing an old decision. Recorded rather than
+    enforced here -- naming it is the prerequisite for enforcing it.
+    """
+    return str(getattr(deployment, "decision", "") or "unassessed")
+
+
+def reconcile_attempt(attempt, *, readback=None) -> DispatchAttempt:
+    """Resolve an uncertain attempt against the provider. Returns the attempt.
+
+    ``readback`` is called with the attempt's ``operation_id`` and must return
+    ``True`` (the provider has it), ``False`` (it does not), or ``None`` (it cannot
+    say). Only the first two resolve the attempt; ``None`` -- and no readback at
+    all -- leaves it UNKNOWN, because a reconciliation that cannot reach the
+    provider has learned nothing, and writing an answer anyway is the failure this
+    whole state exists to prevent.
+
+    An attempt that is not uncertain is returned untouched: reconciliation is not a
+    way to move a SENT or FAILED attempt.
+    """
+    if not attempt.is_uncertain:
+        return attempt
+    if readback is None:
+        return attempt
+    try:
+        answer = readback(attempt.operation_id)
+    except Exception as exc:  # noqa: BLE001 - a failed readback resolves nothing
+        logger.warning("readback failed for operation %s: %s", attempt.operation_id, exc)
+        return attempt
+    if answer is None:
+        return attempt
+
+    attempt.outcome = (
+        DispatchAttempt.Outcome.SENT if answer else DispatchAttempt.Outcome.FAILED
+    )
+    attempt.reconciled_at = timezone.now()
+    attempt.reconciled_detail = (
+        f"reconciled against the provider by operation id: "
+        f"{'the provider has it' if answer else 'the provider does not have it'}"
+    )
+    attempt.save(
+        update_fields=["outcome", "reconciled_at", "reconciled_detail", "updated_at"]
+    )
+    return attempt
+
+
 def _record(finding, binding, *, trigger, outcome, detail, external_ref=None):
     """Create or update the single ``(finding, connector)`` attempt record. The
     detail is human-readable and never a secret; ``attempts`` counts retries of a
@@ -93,6 +164,8 @@ def _record(finding, binding, *, trigger, outcome, detail, external_ref=None):
             "trigger": trigger,
             "detail": detail,
             "external_ref": ref,
+            "operation_id": operation_id(finding, binding.connector),
+            "policy_epoch": policy_epoch(finding.deployment),
         },
     )
     if not created:
@@ -103,6 +176,14 @@ def _record(finding, binding, *, trigger, outcome, detail, external_ref=None):
         obj.detail = detail
         obj.external_ref = ref
         obj.attempts = (obj.attempts or 0) + 1
+        # The operation id is the durable identity of this operation and never
+        # changes -- that is the whole point of it. Backfilled if the row predates
+        # it, so an old attempt can still be reconciled.
+        if not obj.operation_id:
+            obj.operation_id = operation_id(finding, binding.connector)
+        # The epoch DOES move: a retry happens under whatever authority holds now,
+        # and recording the old one would misstate what this attempt was made under.
+        obj.policy_epoch = policy_epoch(finding.deployment)
         obj.save(
             update_fields=[
                 "deployment",
@@ -111,6 +192,8 @@ def _record(finding, binding, *, trigger, outcome, detail, external_ref=None):
                 "trigger",
                 "detail",
                 "external_ref",
+                "operation_id",
+                "policy_epoch",
                 "attempts",
                 "updated_at",
             ]
@@ -126,9 +209,12 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
     existing = DispatchAttempt.objects.filter(
         finding=finding, connector=binding.connector
     ).first()
-    if existing is not None and existing.is_terminal:
-        # Already accepted by the external system — never push the same finding to
-        # the same connector twice.
+    if existing is not None and existing.blocks_retry:
+        # Either already accepted (never push the same finding to the same
+        # connector twice) or in an UNRESOLVED uncertain state, where the provider
+        # may have committed it and a retry would create a second ticket nobody
+        # asked for. The second case used to be retried on every qualifying
+        # trigger, because "not accepted" and "safe to retry" were the same test.
         return existing
 
     if not binding.enabled:
@@ -165,9 +251,16 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
     transport = factory()
     connector = binding.build_connector()
     result = connector.push_finding(finding, transport=transport)
-    outcome = (
-        DispatchAttempt.Outcome.SENT if result.ok else DispatchAttempt.Outcome.FAILED
-    )
+    if result.ok:
+        outcome = DispatchAttempt.Outcome.SENT
+    elif result.uncertain:
+        # The request may have been received and committed before the answer was
+        # lost. Calling this FAILED would license a retry that double-executes on
+        # the customer's system; calling it SENT would claim a ticket that may not
+        # exist. It is neither, and it says so until somebody reconciles it.
+        outcome = DispatchAttempt.Outcome.UNKNOWN
+    else:
+        outcome = DispatchAttempt.Outcome.FAILED
     return _record(
         finding,
         binding,
