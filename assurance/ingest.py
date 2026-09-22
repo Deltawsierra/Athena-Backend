@@ -188,14 +188,45 @@ def _classify_evidence(f: dict) -> str:
 
 
 def _findings_list(engine_response: Any) -> list[dict]:
+    """The customer-facing findings in an engine response (internal rows dropped)."""
+    return _findings_payload(engine_response)[0]
+
+
+def _findings_payload(engine_response: Any) -> tuple[list[dict], bool]:
+    """The findings, and whether the engine REPORTED a findings list at all.
+
+    Two situations both arrive as an empty list and mean opposite things:
+
+    - the engine reported ``findings: []`` -- it looked and found nothing, which
+      is a real result and the best one a customer can get;
+    - there is no response, or no findings list in it -- nothing was reported, so
+      there is nothing to ingest and no basis to re-score anything.
+
+    Collapsing them is how a clean scan and a missing scan became the same event.
+    The flag is what lets the caller tell them apart; the same distinction
+    ``PentestScan.derive_verdict`` already draws for the scan's own verdict.
+    """
     if not isinstance(engine_response, dict):
-        return []
+        return [], False
     findings = engine_response.get("findings")
     if findings is None:
         findings = engine_response.get("results")
     if not isinstance(findings, list):
-        return []
-    return [f for f in findings if isinstance(f, dict) and not f.get("internal")]
+        return [], False
+    return [f for f in findings if isinstance(f, dict) and not f.get("internal")], True
+
+
+def _scan_was_incomplete(scan) -> bool:
+    """Did the engine stop this scan before it finished?
+
+    Asks the scan model, which owns the marker's spelling, so the ingest and the
+    scan's own verdict can never disagree about whether a run finished. A scan
+    object without the classmethod (a stub in a caller's test) reads as complete,
+    which is the pre-existing behaviour and never worse than it."""
+    checker = getattr(type(scan), "scan_was_incomplete", None)
+    if checker is None:
+        return False
+    return bool(checker(scan.engine_response))
 
 
 def _host(target_url: str) -> str:
@@ -248,19 +279,24 @@ def deployment_for_scan(scan) -> Deployment:
 def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
     """Ingest a completed scan into structured Finding + Evidence rows.
 
-    Returns the findings created or updated. A scan with no dict response or no
-    findings list yields an empty list (and never fabricates a clean bill). Safe
-    to call more than once for the same scan."""
-    raw_findings = _findings_list(scan.engine_response)
-    if not raw_findings:
+    Returns the findings created or updated. A scan with no dict response and no
+    findings list yields an empty list and changes nothing (it never fabricates a
+    clean bill). A scan that REPORTED zero findings is a real result and is
+    ingested in full -- assets, unknowns and the decision are all refreshed --
+    because a clean scan that leaves the register and the decision untouched is
+    indistinguishable from a scan that never arrived. Safe to call more than once
+    for the same scan."""
+    raw_findings, reported = _findings_payload(scan.engine_response)
+    if not reported:
         return []
 
     deployment = deployment or deployment_for_scan(scan)
 
     # The parent of every span below, so an ingest reads as one tree rather than a
-    # pile of timings. Entered after the empty-findings return above, so a no-op
-    # ingest is not recorded as work: a near-zero sample would drag the p50 down
-    # and make the pipeline look faster than it is.
+    # pile of timings. Entered after the nothing-reported return above, so an
+    # ingest of a response that carried no result is not recorded as work: a
+    # near-zero sample would drag the p50 down and make the pipeline look faster
+    # than it is. A reported-zero scan DOES do the work below, and is timed.
     with obs.span(
         obs.INVOKE_WORKFLOW,
         component="ingest_scan",
@@ -355,6 +391,28 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
 
     with obs.span(obs.PLAN, component="derive_unknowns", subject=str(deployment.pk)):
         derive_unknowns(deployment)
+
+    # Whether the evidence this decision will rest on is complete. The engine
+    # marks a run it stopped early with an internal `scan_incomplete` row, and
+    # every consumer here filters internal rows out -- so without this, a scan the
+    # operator stopped and a scan that found nothing produce the same READY.
+    # Recorded on the deployment (not passed to the call below) so a recompute
+    # from anywhere else cannot quietly restore the clean answer, and cleared by
+    # the first scan that runs to completion.
+    incomplete = _scan_was_incomplete(scan)
+    changed = []
+    if deployment.evidence_incomplete != incomplete:
+        deployment.evidence_incomplete = incomplete
+        changed.append("evidence_incomplete")
+    if not incomplete:
+        # A scan that ran to completion is an assessment even with nothing to
+        # report, and this is the fact that says so. Without it a deployment
+        # scanned clean has no findings and therefore no decision -- the same
+        # answer as a deployment nobody has scanned at all.
+        deployment.last_complete_scan_at = now
+        changed.append("last_complete_scan_at")
+    if changed:
+        deployment.save(update_fields=[*changed, "updated_at"])
 
     # A scan culminates in a decision, not just a finding list: refresh the
     # deployment's six-state decision from its now-current findings (Phase 0.5).

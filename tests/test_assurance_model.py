@@ -225,13 +225,76 @@ def test_paused_decision_survives_reingest():
     assert dep.decision == Deployment.Decision.PAUSED  # still paused
 
 
-def test_ingest_no_findings_returns_empty_and_creates_nothing():
+def test_ingest_with_nothing_reported_creates_nothing():
+    """No response and no findings list mean *nothing was reported*.
+
+    There is nothing to ingest and no basis to score anything, so no Deployment
+    is fabricated: absence of a result is never a clean bill.
+    """
     user = _user()
     assert ingest.ingest_scan(_scan(user, findings=None)) == []
-    assert ingest.ingest_scan(_scan(user, findings=[])) == []
     assert Finding.objects.count() == 0
-    # Absence of findings is never a clean bill: no Deployment is fabricated.
     assert Deployment.objects.count() == 0
+
+
+def test_ingest_of_a_reported_zero_is_a_real_clean_result():
+    """`findings: []` is the engine saying it looked and found nothing.
+
+    That is a result -- the best one a customer can get -- and it used to be
+    dropped on the same line as "no response at all": the deployment was never
+    created, the register never refreshed, the decision never computed. A clean
+    scan was indistinguishable from a scan that never arrived.
+    """
+    user = _user()
+    assert ingest.ingest_scan(_scan(user, findings=[])) == []
+    assert Finding.objects.count() == 0, "a clean scan invents no findings"
+
+    deployment = Deployment.objects.get()
+    assert deployment.decision == Deployment.Decision.READY
+    assert deployment.evidence_incomplete is False
+
+
+def test_a_scan_the_engine_stopped_early_is_not_ready():
+    """The engine marks a stopped run with an internal `scan_incomplete` row.
+
+    Internal rows are exactly what the ingest filters out, so a scan the operator
+    stopped arrived here as a findings list of length zero and scored READY. The
+    scanners that did not run are the ones that would have found the rest.
+    """
+    user = _user()
+    stopped = _scan(
+        user,
+        findings=[{
+            "type": "scan_incomplete",
+            "message": "Scan stopped before it finished",
+            "severity": "info",
+            "internal": True,
+        }],
+    )
+    assert PentestScan.scan_was_incomplete(stopped.engine_response) is True
+    assert PentestScan.derive_verdict(stopped.engine_response) is None, (
+        "a stopped run has no verdict; null is not READY"
+    )
+
+    assert ingest.ingest_scan(stopped) == []
+    deployment = Deployment.objects.get()
+    assert deployment.evidence_incomplete is True
+    assert deployment.decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_a_later_complete_scan_clears_the_incomplete_evidence_cap():
+    """The cap is a statement about the latest evidence, not a permanent mark."""
+    user = _user()
+    ingest.ingest_scan(
+        _scan(user, findings=[{"type": "scan_incomplete", "severity": "info", "internal": True}])
+    )
+    deployment = Deployment.objects.get()
+    assert deployment.evidence_incomplete is True
+
+    ingest.ingest_scan(_scan(user, findings=[]), deployment=deployment)
+    deployment.refresh_from_db()
+    assert deployment.evidence_incomplete is False
+    assert deployment.decision == Deployment.Decision.READY
 
 
 def test_evidence_class_is_the_weakest_link():

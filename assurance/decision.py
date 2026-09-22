@@ -166,23 +166,55 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     }
 
 
-def compute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
-    """The six-state decision implied by a deployment's active findings and its
-    current assurance claims (Stage 1C).
+def _completed_scan_signal(deployment: Deployment) -> str | None:
+    """READY once a scan has run to completion against this deployment, else ``None``.
 
-    The decision is the *worse* of the finding-based signal and the claim-based cap.
-    ``paused`` (the operator failsafe, passed by the caller) overrides everything.
-    Returns ``None`` — no decision — only when neither findings nor claims have
-    assessed the deployment; an absent decision is never READY."""
+    Folded into the finding signal with :func:`_worse`, so it is a floor and not a
+    cap: it lifts an unassessed deployment to READY and cannot make any real state
+    look better. The distinction it carries is the one the finding count cannot --
+    "a scan finished and found nothing" versus "nothing has ever been scanned"."""
+    if deployment.last_complete_scan_at is None:
+        return None
+    return Deployment.Decision.READY
+
+
+def incomplete_evidence_cap(deployment: Deployment) -> str | None:
+    """The cap a deployment's *unfinished* latest scan imposes, or ``None``.
+
+    A scan the engine stopped early (the operator hit the failsafe, a ceiling
+    tripped) leaves the deployment assessed by a fraction of the work, and the
+    scanners that did not run are the ones that would have found the rest. So
+    partial evidence caps at NEEDS_MORE_EVIDENCE: it can hold a decision back,
+    never improve one. Nothing about it is a finding, which is why the finding
+    signal alone could read a stopped scan as READY."""
+    if deployment.evidence_incomplete:
+        return Deployment.Decision.NEEDS_MORE_EVIDENCE
+    return None
+
+
+def compute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
+    """The six-state decision implied by a deployment's active findings, its
+    current assurance claims (Stage 1C), and whether its latest scan finished.
+
+    The decision is the *worse* of the finding-based signal, the claim-based cap
+    and the incomplete-evidence cap. ``paused`` (the operator failsafe, passed by
+    the caller) overrides everything. Returns ``None`` — no decision — only when
+    nothing has assessed the deployment; an absent decision is never READY."""
     if paused:
         return Deployment.Decision.PAUSED
 
-    base = _decision_from_findings(deployment)
+    # A completed scan is an assessment even when it found nothing, so it enters
+    # as READY and `_worse` does the rest: it can only turn "nothing has assessed
+    # this" into READY, never improve a real finding-based state. Without it a
+    # deployment scanned clean read as "not yet assessed", which is the same
+    # answer as a deployment nobody ever scanned.
+    base = _worse(_decision_from_findings(deployment), _completed_scan_signal(deployment))
     cap = claim_decision_signal(deployment)["cap"]
-    if base is None and cap is None:
-        # Assessed by neither findings nor claims: genuinely no decision.
+    scan_cap = incomplete_evidence_cap(deployment)
+    if base is None and cap is None and scan_cap is None:
+        # Assessed by nothing at all: genuinely no decision.
         return None
-    return _worse(base, cap)
+    return _worse(_worse(base, cap), scan_cap)
 
 
 def _claim_brief(claim: AssuranceClaim) -> dict:
@@ -210,10 +242,17 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
 
     signal = claim_decision_signal(deployment)
     from_findings = None if paused else _decision_from_findings(deployment)
+    scan_cap = None if paused else incomplete_evidence_cap(deployment)
     decision = compute_decision(deployment, paused=paused)
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
+    elif scan_cap is not None and _worse(from_findings, signal["cap"]) != decision:
+        note = (
+            "Held at 'needs more evidence' because the latest scan stopped before "
+            "it finished; the scanners that did not run are not accounted for, so "
+            "this is not a clean result."
+        )
     elif signal["cap"] and _worse(from_findings, signal["cap"]) == signal["cap"] and from_findings != signal["cap"]:
         held = ", ".join(sorted({c.claim_type for c in signal["contradicted"] + signal["stale"] + signal["unknown"]}))
         if signal["contradicted"]:

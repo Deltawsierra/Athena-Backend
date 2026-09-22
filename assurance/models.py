@@ -271,6 +271,29 @@ class Deployment(models.Model):
     decision = models.CharField(
         max_length=32, choices=Decision.choices, null=True, blank=True, db_index=True
     )
+    # Did the scan this decision rests on stop before it finished? Set by the
+    # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
+    # `assurance.decision`: a deployment whose latest evidence is partial cannot
+    # be READY, because the scanners that did not run are the ones that would
+    # have found the rest. Persisted rather than passed, so a later recompute
+    # from anywhere else cannot quietly restore the clean answer. Cleared by the
+    # first scan that runs to completion.
+    evidence_incomplete = models.BooleanField(
+        default=False,
+        help_text="The latest ingested scan stopped before it finished, so this "
+                  "deployment's decision rests on partial evidence.",
+    )
+    # When a scan last ran to completion against this deployment. Null means no
+    # scan has finished, which is what "not yet assessed" actually means. With it
+    # set, a deployment with nothing open is genuinely READY rather than
+    # unassessed -- a clean scan is a result, and the best one a customer gets.
+    # Distinct from `evidence_incomplete`: a later stopped scan caps the decision
+    # without erasing the fact that an earlier one finished.
+    last_complete_scan_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When a scan last ran to completion against this deployment.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
