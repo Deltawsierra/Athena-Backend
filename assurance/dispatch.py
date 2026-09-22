@@ -295,7 +295,7 @@ def dispatch_finding(finding, *, trigger, transport_factory=None):
                     transport_factory=transport_factory,
                 )
             )
-        except Exception as exc:  # noqa: BLE001 — a binding error is recorded, never raised
+        except Exception as exc:  # a binding error is recorded, never raised
             logger.exception(
                 "connector dispatch failed for finding %s -> %s",
                 getattr(finding, "pk", "?"),
@@ -311,7 +311,7 @@ def dispatch_finding(finding, *, trigger, transport_factory=None):
                         detail=f"{binding.connector} dispatch error: {exc}",
                     )
                 )
-            except Exception:  # noqa: BLE001 — even recording must not raise out
+            except Exception:  # even recording must not raise out
                 logger.exception("failed to record a failed dispatch attempt")
     return attempts
 
@@ -381,7 +381,7 @@ def schedule_finding_dispatch(finding):
             maybe_dispatch_finding(fresh)
         except Finding.DoesNotExist:
             return
-        except Exception:  # noqa: BLE001 — dispatch must never break finding writes
+        except Exception:  # dispatch must never break finding writes
             logger.exception("auto-dispatch failed for finding %s", finding_pk)
 
     transaction.on_commit(_run)

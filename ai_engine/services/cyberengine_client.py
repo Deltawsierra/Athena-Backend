@@ -107,7 +107,7 @@ class CyberEngineClient:
     # ENGINE ENDPOINTS
     # --------------------------------------------------
 
-    def run_scan(self, target: str, engagement_ref: str = None) -> dict:
+    def run_scan(self, target: str, engagement_ref: str | None = None) -> dict:
         """
         Run a scan and return its findings.
 
@@ -227,7 +227,7 @@ class CyberEngineClient:
     # --------------------------------------------------
 
     def assurance_check(self, deployment_id: str, components: dict,
-                        tenant_id: str = None) -> dict:
+                        tenant_id: str | None = None) -> dict:
         """Is the engine that is running still the one that was approved?
 
         Answers 200 with a verdict rather than a status code, so read
@@ -242,8 +242,8 @@ class CyberEngineClient:
         return self._post("/api/assurance/check", payload)
 
     def assurance_approve(self, deployment_id: str, components: dict,
-                          approved_by: str = None, note: str = None,
-                          tenant_id: str = None) -> dict:
+                          approved_by: str | None = None, note: str | None = None,
+                          tenant_id: str | None = None) -> dict:
         """Record what this deployment looks like at the moment it is approved."""
         payload = {"deployment_id": deployment_id, "components": components}
         if approved_by:
@@ -278,7 +278,7 @@ class CyberEngineClient:
         """
         return self._get(f"/api/authority/unattributed?limit={limit}")
 
-    def attestation_check(self, name: str, url: str, tenant_id: str = None) -> dict:
+    def attestation_check(self, name: str, url: str, tenant_id: str | None = None) -> dict:
         """Measure a route now and compare it against its baseline."""
         payload = {"name": name, "url": url}
         if tenant_id:
@@ -286,7 +286,7 @@ class CyberEngineClient:
         return self._post("/api/attestation/check", payload)
 
     def retest_finding(self, twin_id: int, engagement_ref: str,
-                       scope: list = None, tenant_id: str = None) -> dict:
+                       scope: list | None = None, tenant_id: str | None = None) -> dict:
         """Is a finding still there?
 
         `engagement_ref` is required by the engine: a retest reaches the
@@ -300,10 +300,10 @@ class CyberEngineClient:
             payload["tenant_id"] = tenant_id
         return self._post("/api/remediation/retest", payload)
 
-    def evidence_pack(self, reason: str, since: str = None, until: str = None,
-                      run_id: str = None, engagement_ref: str = None,
-                      target: str = None, tenant_id: str = None,
-                      only_run: str = None) -> dict:
+    def evidence_pack(self, reason: str, since: str | None = None, until: str | None = None,
+                      run_id: str | None = None, engagement_ref: str | None = None,
+                      target: str | None = None, tenant_id: str | None = None,
+                      only_run: str | None = None) -> dict:
         """Assemble a signed incident evidence pack.
 
         `since` and `until` must be ISO 8601 instants. The engine refuses a

@@ -201,7 +201,7 @@ def _engine_live_state():
     try:
         from ai_engine.services.cyberengine_client import CyberEngineClient
         payload = CyberEngineClient.from_settings().failsafe_state()
-    except Exception:
+    except Exception:  # noqa: BLE001 - any failure to reach the engine is "not reported", which the caller must not read as "running"
         return None, False
     if not isinstance(payload, dict) or not payload.get("enabled"):
         # enabled=false means the engine has no failsafe -- "not reported",

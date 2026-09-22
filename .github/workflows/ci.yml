@@ -70,6 +70,26 @@ jobs:
       - name: Lint (silently swallowed exceptions)
         run: ruff check --select S110,S112,TRY203,B012,PIE790 .
 
+      # BLE001 joins the gate now that every `except Exception` in this repo is
+      # either narrowed to the exceptions that can actually occur, or carries a
+      # written reason for staying broad. That second form is the point: a blind
+      # catch is sometimes right -- the audit trail must not crash the request it
+      # records, a failed email must not fail the scan -- and the difference
+      # between "right" and "nobody looked" is whether anyone wrote down which.
+      #
+      # RUF013 joins it because an implicit Optional annotation says a parameter
+      # is required while the default says otherwise, so the documented way to
+      # call the function is the unchecked path.
+      #
+      # NOT here: RUF100. Six `noqa` directives in this repo name rules the gate
+      # does not enable (E402, F401, F403, F405, SLF001), and RUF100 reports each
+      # as unused. They are not residue -- they are suppressions waiting for a
+      # gate, with reasons attached. Enforcing RUF100 would demand deleting them,
+      # which would throw away deliberate annotations to satisfy a checker. It
+      # becomes enforceable when every rule they name is enabled, and not before.
+      - name: Lint (exception handling and optional parameters)
+        run: ruff check --select BLE001,RUF013 .
+
       - name: Django checks
         run: python manage.py check
         env:

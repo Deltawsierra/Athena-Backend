@@ -376,7 +376,7 @@ class DefenderMiddleware:
             # is still never copied into another service.
             try:
                 fields = list(request.POST.items())
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # noqa: BLE001 - the audit trail must never crash the request it is recording
                 return "", f"multipart body could not be inspected: {exc.__class__.__name__}"
             if not fields:
                 return "", None
@@ -391,7 +391,7 @@ class DefenderMiddleware:
             raw = request.body
         except (RequestDataTooBig, UnreadablePostError) as exc:
             return "", f"request body could not be inspected: {exc.__class__.__name__}"
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # noqa: BLE001 - the known cases are narrowed above; this is the last resort, and it reports rather than hides
             return "", f"request body could not be read: {exc.__class__.__name__}"
 
         if not raw:
