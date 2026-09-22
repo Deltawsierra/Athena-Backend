@@ -939,6 +939,139 @@ class DataBoundary(models.Model):
 # ---------------------------------------------------------------------------
 
 
+class LegalObligation(models.Model):
+    """A legal or regulatory obligation a deployment is subject to (Phase 2 item 6).
+
+    Kept as a record of its own, deliberately separate from technical claims. The
+    two drift for different reasons and on different clocks: a system changes when
+    someone edits it, a rule changes when a legislature or regulator moves, and
+    folding the second into the system fingerprint would make a statute's
+    commencement look like a configuration edit.
+
+    ``authority_tier`` is not decoration. An advisory note and a statute both
+    "changed", and treating them as the same event is how a review queue fills
+    with noise until nobody reads it. The tier travels so a reviewer can triage
+    before opening anything.
+
+    ``operative_date`` is when the rule BITES, which is not when it was published
+    and not when we recorded it. A claim assessed before a rule was published and
+    a claim assessed after publication but before commencement are in different
+    positions, and only the operative date tells them apart.
+    """
+
+    class AuthorityTier(models.TextChoices):
+        # Ordered strongest to weakest. A reviewer triaging a queue needs to know
+        # whether they are looking at binding law or somebody's view of it.
+        STATUTE = "statute", "Statute"
+        REGULATION = "regulation", "Regulation"
+        BINDING_GUIDANCE = "binding_guidance", "Binding guidance"
+        CASE_LAW = "case_law", "Case law"
+        ADVISORY = "advisory", "Advisory guidance"
+
+    class ReviewStatus(models.TextChoices):
+        # The registry's own review state -- whether a lawyer has read THIS
+        # record. Distinct from whether any claim has been judged against it.
+        UNREVIEWED = "unreviewed", "Not reviewed"
+        UNDER_REVIEW = "under_review", "Under review"
+        REVIEWED = "reviewed", "Reviewed"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
+    jurisdiction = models.CharField(max_length=64, db_index=True)
+    authority_tier = models.CharField(max_length=32, choices=AuthorityTier.choices)
+    source = models.CharField(max_length=255)
+    # The version of the source instrument. A rule that is amended is a new
+    # version of the same obligation, not a new obligation -- which is what makes
+    # "this claim was assessed under v2 and we are now on v3" expressible.
+    source_version = models.CharField(max_length=64)
+    # When the rule takes effect. NOT when it was published and not when it was
+    # recorded here; see the class docstring.
+    operative_date = models.DateField()
+    # Quantitative triggers and carve-outs, as recorded. Free-form because the
+    # shape differs per instrument and inventing a schema would force every
+    # obligation into whichever one we happened to see first.
+    thresholds = models.JSONField(default=dict, blank=True)
+    exemptions = models.JSONField(default=list, blank=True)
+
+    legal_review_status = models.CharField(
+        max_length=32, choices=ReviewStatus.choices, default=ReviewStatus.UNREVIEWED
+    )
+
+    # The deployments this obligation binds. EXPLICIT, never inferred from a
+    # region code or a boundary policy: guessing that an EU data boundary implies
+    # a given regulation is a legal judgment, and this layer does not make those.
+    deployments = models.ManyToManyField(
+        "Deployment", related_name="legal_obligations", blank=True
+    )
+
+    superseded_by = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="supersedes"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["jurisdiction", "source", "-operative_date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["jurisdiction", "source", "source_version"],
+                name="uq_legal_obligation_version",
+            ),
+        ]
+        indexes = [models.Index(fields=["jurisdiction", "operative_date"])]
+
+    def __str__(self) -> str:
+        return f"{self.jurisdiction} {self.source} v{self.source_version}"
+
+
+class MaterialityDecision(models.Model):
+    """A human's recorded judgment that an obligation does, or does not, make a
+    claim legally stale.
+
+    The gate. Nothing else may move a claim's legal status to STALE or back to
+    CURRENT, because the judgment "this change matters legally" is not one a hash
+    comparison can make. The roadmap is explicit that inferring it either way is
+    dishonest: treating every config edit as automatically material floods the
+    queue, and treating none as material means the axis never fires.
+
+    ``decided_by`` and ``rationale`` are both required. A decision with no person
+    behind it is not a human decision, and one with no reasoning cannot be
+    reviewed later by the person who has to defend it.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
+    claim = models.ForeignKey(
+        "AssuranceClaim", on_delete=models.CASCADE, related_name="materiality_decisions"
+    )
+    obligation = models.ForeignKey(
+        LegalObligation, on_delete=models.CASCADE, related_name="materiality_decisions"
+    )
+    # PROTECT, not SET_NULL: a decision whose decider has been deleted is an
+    # unattributed legal judgment, and the record must not be able to become one.
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="materiality_decisions"
+    )
+    # True: this obligation makes the claim legally stale. False: it does not.
+    # There is no third value here -- the "nobody has judged yet" state lives on
+    # the claim as REVIEW_PENDING, because it is the absence of a decision rather
+    # than a kind of decision.
+    material = models.BooleanField()
+    rationale = models.TextField()
+    decided_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-decided_at"]
+        indexes = [models.Index(fields=["claim", "obligation"])]
+
+    def __str__(self) -> str:
+        verdict = "material" if self.material else "not material"
+        return f"{self.claim_id} x {self.obligation_id}: {verdict}"
+
+
 class DecisionTransition(models.Model):
     """One accepted change of a deployment's decision — the outbox row.
 
@@ -990,6 +1123,39 @@ class DecisionTransition(models.Model):
             f"{self.deployment_id} r{self.revision}: "
             f"{self.from_decision or '∅'} -> {self.to_decision or '∅'}"
         )
+
+
+class LegalStatus(models.TextChoices):
+    """A claim's standing against the law it was assessed under.
+
+    Four values, and the third is the one that carries the design. NOT_ASSESSED
+    is not CURRENT: a claim nobody has ever reviewed legally is not legally sound,
+    it is unexamined, and reading the two as the same is how an unreviewed
+    deployment ships looking compliant. REVIEW_PENDING is not STALE: an obligation
+    moved and a human has not yet judged whether it matters here, which is a fact
+    about our queue rather than about the claim.
+
+    Only :func:`assurance.legal.record_materiality_decision` may set CURRENT or
+    STALE, because both are legal judgments.
+
+    Every value is prefixed so that no legal value is ever also a valid
+    ``ClaimStatus`` value. Both enums want to say "stale", and a bare ``"stale"``
+    on both would make ``filter(status=LegalStatus.STALE)`` return the
+    technically-stale claims without error — the wrong rows, quietly. Disjoint
+    values turn that cross-wiring into a validation error on write and an empty,
+    obviously-wrong result on read.
+    """
+
+    # Nobody has assessed this claim against any obligation. The honest default,
+    # and deliberately not CURRENT.
+    NOT_ASSESSED = "legally_not_assessed", "Not legally assessed"
+    # A human judged the bound obligations non-material for this claim.
+    CURRENT = "legally_current", "Legally current"
+    # An obligation moved; no human has judged whether it matters here yet.
+    REVIEW_PENDING = "legal_review_pending", "Materiality review pending"
+    # A human judged an obligation material: the claim needs re-assessing on
+    # legal grounds, whatever the system is doing.
+    STALE = "legally_stale", "Legally stale"
 
 
 class AssuranceClaimQuerySet(models.QuerySet):
@@ -1126,6 +1292,18 @@ class AssuranceClaim(models.Model):
 
     status = models.CharField(
         max_length=32, choices=ClaimStatus.choices, default=ClaimStatus.DRAFT, db_index=True
+    )
+    # The SECOND, independent invalidation axis (Phase 2 item 6). `status` above
+    # tracks system-state drift; this tracks legal drift, and the two must be able
+    # to disagree in both directions: a claim can be technically STALE while the
+    # law it was assessed under is unchanged, and technically current while the
+    # rule beneath it has moved. Folding legal staleness into `status` would make
+    # each of those four combinations collapse into two.
+    legal_status = models.CharField(
+        max_length=32,
+        choices=LegalStatus.choices,
+        default=LegalStatus.NOT_ASSESSED,
+        db_index=True,
     )
     # The WEAKEST supporting evidence class (invariant 5). Defaults to UNKNOWN so a
     # claim with no assessed basis never reads as strongly evidenced.
