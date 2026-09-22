@@ -53,6 +53,23 @@ jobs:
       - name: Lint (typing modernization)
         run: ruff check --select UP006,UP045,UP035 .
 
+      # The second named gate, on the same principle. Every rule here describes
+      # an exception that goes nowhere: caught and passed over, caught and
+      # re-raised unchanged, a bare `pass` standing in for a body someone meant
+      # to write. That is how a control ends up reporting nothing and looking
+      # like it reported "fine" -- the report renderer fell back to the plainer
+      # document on every scan in any environment without weasyprint, and said
+      # so only when DEBUG was on, which is when nobody is watching.
+      #
+      # This repo is at zero on all five as of that fix, so the gate holds a line
+      # that is already held rather than declaring a wish.
+      #
+      # Deliberately NOT here: BLE001 (blind-except), which still has 12
+      # findings nobody has worked through. A gate that fails on the day it
+      # lands is a gate that gets deleted the day after.
+      - name: Lint (silently swallowed exceptions)
+        run: ruff check --select S110,S112,TRY302,B012,PIE790 .
+
       - name: Django checks
         run: python manage.py check
         env:
