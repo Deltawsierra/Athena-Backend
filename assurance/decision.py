@@ -164,7 +164,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     """
     Status = AssuranceClaim.ClaimStatus
     current = list(
-        deployment.assurance_claims.filter(valid_to__isnull=True).exclude(status=Status.REVOKED)
+        deployment.assurance_claims.current().exclude(status=Status.REVOKED)
     )
     retest_pending = RetestRequirement.objects.filter(
         deployment=deployment, resolved_at__isnull=True
@@ -341,9 +341,17 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
 
 def recompute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
-    (``None`` for a deployment neither findings nor claims have assessed)."""
+    (``None`` for a deployment neither findings nor claims have assessed).
+
+    The write goes through :func:`assurance.revision.accept_transition` rather
+    than a bare save, so the decision, its monotonic revision and the transition
+    recording the move all commit together. Before that, the decision moved on its
+    own: a consumer reading it alongside the claims behind it could catch the two
+    from different moments, and the result was an ordinary-looking answer
+    assembled from a state that never existed.
+    """
+    from .revision import accept_transition
+
     decision = compute_decision(deployment, paused=paused)
-    if deployment.decision != decision:
-        deployment.decision = decision
-        deployment.save(update_fields=["decision", "updated_at"])
+    accept_transition(deployment, to_decision=decision)
     return decision

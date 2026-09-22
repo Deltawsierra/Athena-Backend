@@ -438,6 +438,93 @@ def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now)
     return True
 
 
+def record_retroactive_claim(
+    deployment,
+    *,
+    claim_type,
+    statement,
+    effective_from,
+    effective_to,
+    system_fingerprint,
+    status,
+    evidence_class,
+    subject=None,
+    confidence=None,
+    vendor_asserted=False,
+    supporting_summary="",
+    contradicting_summary="",
+    now=None,
+) -> AssuranceClaim:
+    """Record something learned NOW about a window that has already closed.
+
+    The case the single temporal axis could not express: an audit log arrives
+    late, a provider discloses a configuration that was in force last week, a
+    retest establishes that a boundary was already breached on Tuesday. Under one
+    axis the only ways to record that were to overwrite today's current claim --
+    asserting a fact about last week as though it were about now -- or to drop the
+    observation. Both lose something, and the first loses it silently.
+
+    So this writes a version whose EFFECTIVE window is closed
+    (``effective_to`` set) while its RECORDED window is open (``valid_to`` null):
+    Mythos believes it, and believes it about the past. It is therefore not
+    ``current()`` and cannot collide with today's claim on the partial unique
+    constraint, while ``believed_now()`` and ``effective_at(when)`` both find it.
+
+    ``effective_to`` is required and must be in the past relative to
+    ``effective_from``'s successor -- a retroactive claim with an open effective
+    window is not retroactive, it is a claim about now, and it belongs in
+    :func:`derive_claims` where it will contend for the current slot properly.
+    Refused rather than accepted, because accepting it would put a second row in
+    the current slot's blind spot.
+    """
+    now = now or timezone.now()
+    if effective_to is None:
+        raise ValueError(
+            "a retroactive claim must close its effective window: a claim with an "
+            "open effective window is a claim about now, and belongs in derive_claims"
+        )
+    if effective_to <= effective_from:
+        raise ValueError("effective_to must be after effective_from")
+
+    subject_key = str(subject.uuid) if subject is not None else ""
+    identity_fp = _identity_fingerprint(deployment, claim_type, subject_key)
+
+    claim = AssuranceClaim.objects.create(
+        deployment=deployment,
+        asset=subject,
+        claim_type=claim_type,
+        statement=statement,
+        fingerprint=identity_fp,
+        system_fingerprint=system_fingerprint,
+        policy_version=policy_version(deployment),
+        environment=deployment.environment,
+        status=status,
+        evidence_class=evidence_class,
+        confidence=confidence,
+        vendor_asserted=vendor_asserted,
+        supporting_summary=supporting_summary,
+        contradicting_summary=contradicting_summary,
+        # Recorded now, effective then. The two axes carry different dates, which
+        # is the whole point of there being two.
+        valid_from=now,
+        effective_from=effective_from,
+        effective_to=effective_to,
+        first_seen=now,
+        last_seen=now,
+    )
+    ClaimEvent.objects.create(
+        claim=claim,
+        from_status="",
+        to_status=status,
+        actor=None,
+        note=(
+            f"Recorded {now.isoformat()} about the window "
+            f"{effective_from.isoformat()} to {effective_to.isoformat()}."
+        ),
+    )
+    return claim
+
+
 def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, pol_version, receipt_digest, derived, now) -> None:
     """Close the current version (``valid_to`` set, status SUPERSEDED, its own
     ClaimEvent), open a new current version bound to the new system state, and link
@@ -476,7 +563,7 @@ def _mark_stale(deployment, now) -> int:
     Staleness moves a claim away from a pass, never toward one."""
     count = 0
     skip = (Status.CONTRADICTED, Status.REVOKED, Status.STALE, Status.SUPERSEDED)
-    currents = AssuranceClaim.objects.filter(deployment=deployment, valid_to__isnull=True)
+    currents = AssuranceClaim.objects.filter(deployment=deployment).current()
     for claim in currents:
         if claim.status in skip:
             continue
@@ -535,9 +622,11 @@ def _derive_claims(dep, now) -> dict:
         subject_key = str(subject.uuid) if subject is not None else ""
         identity_fp = _identity_fingerprint(dep, derived["claim_type"], subject_key)
 
-        current = AssuranceClaim.objects.filter(
-            deployment=dep, fingerprint=identity_fp, valid_to__isnull=True
-        ).first()
+        current = (
+            AssuranceClaim.objects.filter(deployment=dep, fingerprint=identity_fp)
+            .current()
+            .first()
+        )
 
         if current is None:
             _make_claim(

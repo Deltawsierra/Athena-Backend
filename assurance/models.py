@@ -322,6 +322,18 @@ class Deployment(models.Model):
     decision = models.CharField(
         max_length=32, choices=Decision.choices, null=True, blank=True, db_index=True
     )
+    # The monotonic revision of the decision above (Phase 2 item 5). It advances
+    # by one on every ACCEPTED transition and never otherwise, so a consumer can
+    # fence its reads: "I acted on revision 7" is checkable, "I acted on
+    # not_recommended" is not, because the same value can be reached, left and
+    # reached again.
+    #
+    # It exists because the decision and the claims behind it are separate rows.
+    # A reader that takes them in two queries can catch the decision from after a
+    # transition and the claims from before it -- a torn read that looks like a
+    # perfectly ordinary answer. The revision is what makes the seam visible; see
+    # `assurance.revision`.
+    decision_revision = models.PositiveBigIntegerField(default=0, db_index=True)
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
     # `assurance.decision`: a deployment whose latest evidence is partial cannot
@@ -927,6 +939,97 @@ class DataBoundary(models.Model):
 # ---------------------------------------------------------------------------
 
 
+class DecisionTransition(models.Model):
+    """One accepted change of a deployment's decision — the outbox row.
+
+    Written in the same transaction as the decision it records (see
+    :func:`assurance.revision.accept_transition`), so the pair cannot come apart:
+    a decision whose transition is missing, or a transition whose decision never
+    landed, cannot both exist and be observed.
+
+    It is also the only durable answer to "how did we get here". The deployment
+    carries one decision; a deployment that went READY → NOT_RECOMMENDED → READY
+    looks identical to one that was always READY, and the difference is the whole
+    story. ``basis_digest`` carries what the decision was computed from, so two
+    agreeing decisions can still be told apart by the evidence behind them.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(
+        "Deployment", on_delete=models.CASCADE, related_name="decision_transitions"
+    )
+    # Monotonic per deployment, matching `Deployment.decision_revision` after this
+    # transition committed. Unique per deployment, which is what makes a duplicate
+    # or a skipped revision a database error rather than a silent inconsistency.
+    revision = models.PositiveBigIntegerField()
+    # Empty string, not null, for "there was no decision before this" — an
+    # unassessed deployment has no decision, and that is a real starting state
+    # rather than missing data.
+    from_decision = models.CharField(max_length=32, blank=True)
+    to_decision = models.CharField(max_length=32, blank=True)
+    # What the decision was computed from (a receipt digest, a claim-state
+    # digest). Blank when the caller did not supply one — recorded as absent
+    # rather than as a digest of nothing.
+    basis_digest = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    # When a downstream consumer confirmed it had processed this transition. Null
+    # means not yet, which is never read as "delivered and uneventful".
+    delivered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["deployment_id", "revision"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "revision"], name="uq_decision_transition_revision"
+            ),
+        ]
+        indexes = [models.Index(fields=["deployment", "revision"])]
+
+    def __str__(self) -> str:
+        return (
+            f"{self.deployment_id} r{self.revision}: "
+            f"{self.from_decision or '∅'} -> {self.to_decision or '∅'}"
+        )
+
+
+class AssuranceClaimQuerySet(models.QuerySet):
+    """Where "current" is defined, once.
+
+    Eight call sites used to spell ``valid_to__isnull=True`` by hand to mean
+    current. That was correct while the model had one temporal axis and becomes a
+    silent defect with two: a retroactive claim is still *believed* (``valid_to``
+    null) while describing a window that has closed, so a hand-rolled filter would
+    return it as the deployment's live claim and a decision would be computed from
+    a fact about last week.
+
+    So the definition lives here and the call sites ask for it. A test greps
+    ``assurance/`` for hand-rolled currency filters, because the failure mode of
+    one site being missed is invisible: the query still runs and still returns
+    rows.
+    """
+
+    def current(self):
+        """The live version of each claim identity: believed now AND effective now."""
+        return self.filter(valid_to__isnull=True, effective_to__isnull=True)
+
+    def believed_now(self):
+        """Everything Mythos currently holds, retroactive claims included.
+
+        Distinct from :meth:`current` and rarely what a decision wants. It is what
+        an auditor asking "what does Mythos believe today, about any period" needs,
+        and naming it separately is what stops that question being answered with
+        the current-claims query or the other way round.
+        """
+        return self.filter(valid_to__isnull=True)
+
+    def effective_at(self, when):
+        """Every version whose EFFECTIVE window contains ``when`` -- what was true
+        of the world at that moment, whenever we happened to learn it."""
+        return self.filter(effective_from__lte=when).filter(
+            Q(effective_to__isnull=True) | Q(effective_to__gt=when)
+        )
+
+
 class AssuranceClaim(models.Model):
     """A positive, falsifiable *statement* an auditor can carry, re-verify, and
     watch expire — the SPINE Phase 1 gap the record did not fill.
@@ -942,7 +1045,17 @@ class AssuranceClaim(models.Model):
     1. **Version-bound.** A claim is true *of a system state*. A change in
        ``system_fingerprint`` does not mutate the claim in place — it SUPERSEDES
        the old version (``valid_to`` set, status ``SUPERSEDED``) and opens a new
-       current one, so history is bitemporal and never rewritten.
+       current one, so history is append-only and never rewritten.
+    1b. **Bitemporal.** Two independent axes, because "when this was true" and
+       "when Mythos learned it" are different facts and a single axis silently
+       conflates them. ``valid_from``/``valid_to`` are the **recorded** axis: the
+       window during which this version was Mythos's current belief.
+       ``effective_from``/``effective_to`` are the **effective** axis: the window
+       during which the state it describes actually held. A claim is CURRENT only
+       when it is both currently believed and currently effective, so a
+       late-arriving observation about a window that has already closed is
+       recorded as history rather than overwriting today's claim. See
+       :meth:`AssuranceClaimQuerySet.current`.
     2. **Never a fabricated pass.** ``confidence`` is ``None`` when the claim is
        UNKNOWN — never ``0.0`` read as a passing score.
     3. **Unknown/contradicted/stale never coerced to verified.** The lifecycle
@@ -975,6 +1088,8 @@ class AssuranceClaim(models.Model):
         STALE = "stale", "Stale"
         SUPERSEDED = "superseded", "Superseded"
         REVOKED = "revoked", "Revoked"
+
+    objects = AssuranceClaimQuerySet.as_manager()
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -1058,10 +1173,23 @@ class AssuranceClaim(models.Model):
     # derived — provenance binding the claim to the evidence state behind it.
     receipt_digest = models.CharField(max_length=64, blank=True)
 
-    # Bitemporal validity: the window this version of the claim is the current
-    # truth. ``valid_to`` null means this is the current version.
+    # The RECORDED axis: the window during which this version was Mythos's
+    # current belief. `valid_to` null means Mythos still believes it. It is set at
+    # derivation and closed at supersession, so it tracks knowledge, not the world
+    # -- which is why the pair below exists rather than these two being read as
+    # both. (They were commented "Bitemporal validity" while being a single axis;
+    # that is the conflation this pair removes.)
     valid_from = models.DateTimeField(default=timezone.now)
     valid_to = models.DateTimeField(null=True, blank=True)
+
+    # The EFFECTIVE axis: the window during which the state this claim describes
+    # actually held. Defaults to "began when we recorded it, still holding", which
+    # is the honest reading for an ordinary derive: we observed it now and have no
+    # evidence about earlier. A retroactive observation -- something learned today
+    # about a window that closed yesterday -- sets `effective_to`, which is exactly
+    # what keeps it out of the current slot.
+    effective_from = models.DateTimeField(default=timezone.now)
+    effective_to = models.DateTimeField(null=True, blank=True)
 
     verified_at = models.DateTimeField(null=True, blank=True)
     expiration = models.DateTimeField(null=True, blank=True)
@@ -1074,12 +1202,19 @@ class AssuranceClaim(models.Model):
     class Meta:
         ordering = ["-updated_at"]
         constraints = [
-            # Only ONE current version (valid_to IS NULL) per claim identity, so a
-            # deployment never carries two live versions of the same claim. Older
-            # superseded versions (valid_to set) are exempt, keeping full history.
+            # Only ONE CURRENT version per claim identity -- current meaning
+            # currently believed AND currently effective. Superseded versions
+            # (valid_to set) and retroactive ones (effective_to set) are both
+            # exempt, keeping full history on both axes.
+            #
+            # The effective half is what lets a late-arriving observation be
+            # recorded at all: without it, a claim learned today about a window
+            # that closed yesterday would collide with today's claim on this
+            # constraint, and the only ways out would be to overwrite today's
+            # claim or to drop the observation. Both lose a fact.
             models.UniqueConstraint(
                 fields=["deployment", "fingerprint"],
-                condition=Q(valid_to__isnull=True),
+                condition=Q(valid_to__isnull=True) & Q(effective_to__isnull=True),
                 name="uq_current_claim",
             ),
         ]
