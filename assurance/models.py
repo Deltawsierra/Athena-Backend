@@ -1468,6 +1468,166 @@ class ClaimEvent(models.Model):
 # ---------------------------------------------------------------------------
 
 
+class LatentCondition(models.Model):
+    """A specific, named future change that would falsify a claim that is safe today
+    (Phase 2 item 9).
+
+    :mod:`assurance.invalidation` answers "has something changed?" by comparing
+    fingerprints. That is reactive and coarse: it tells you the state moved, after
+    it moved, without naming which of the claim's stated preconditions gave way.
+    ``AssuranceClaim.invalidation_conditions`` already names those preconditions --
+    in prose, which nothing evaluates.
+
+    This makes one of them checkable. A claim is often safe *because* a specific
+    precondition does not hold ("the exfiltration path is contained by the absence
+    of an external-write permission"). Naming that precondition as a row lets the
+    platform watch for exactly it and invalidate the moment it becomes true --
+    ahead of a release, rather than discovered afterwards by generic drift.
+
+    Three properties keep it honest:
+
+    **It predicts nothing.** A condition is a declared precondition with a closed
+    ``kind`` something can actually observe. It is not a forecast, a risk score, or
+    a guess about an unnamed future attack. If nobody declared it, this mechanism
+    says nothing about it -- generic drift detection remains the net for everything
+    else, and the two are deliberately separate.
+
+    **A condition that already holds is not latent.** Declaring one requires that
+    it does NOT hold at declaration time, and the observed baseline is recorded.
+    A "latent" condition that was already true would fire instantly and read as a
+    prediction come true, when it was a present fact nobody checked.
+
+    **Unobservable is not safe.** If the subject cannot be seen -- the principal
+    was deleted, the boundary row is gone -- the condition goes UNOBSERVABLE, never
+    "still does not hold". A precondition we have lost sight of is a hole in
+    coverage, and the posture reports it as one. This is the silent zero the rest
+    of this codebase keeps finding: an absent reading that passes for a safe one.
+    """
+
+    class Kind(models.TextChoices):
+        # A CLOSED vocabulary, on purpose. Every member is a question the stored
+        # state can actually answer; free text would let an operator declare a
+        # condition nothing can ever evaluate, which is worse than no condition at
+        # all because it reads as covered.
+        PRINCIPAL_GAINS_CAPABILITY = (
+            "principal_gains_capability",
+            "A named principal gains a named capability",
+        )
+        PRINCIPAL_BECOMES_PRIVILEGED = (
+            "principal_becomes_privileged",
+            "A named principal becomes privileged",
+        )
+        ASSET_APPEARS = "asset_appears", "An asset with a given name appears"
+        ASSET_BECOMES_UNMANAGED = (
+            "asset_becomes_unmanaged",
+            "A named asset becomes unmanaged or unknown",
+        )
+        BOUNDARY_ALLOWS = (
+            "boundary_allows",
+            "The data boundary starts permitting a named practice",
+        )
+        BOUNDARY_REGION_ADDED = (
+            "boundary_region_added",
+            "A named region is added to the approved boundary",
+        )
+        PROVIDER_POSTURE_CHANGES = (
+            "provider_posture_changes",
+            "A named provider's assertion for a named field changes",
+        )
+        POLICY_VERSION_CHANGES = (
+            "policy_version_changes",
+            "The assurance policy in force changes",
+        )
+
+    class State(models.TextChoices):
+        # PENDING means "declared, observed not to hold as of last_evaluated_at".
+        # It does NOT mean "will not happen" and it does not mean "safe" -- it
+        # means this one named thing has not happened yet.
+        PENDING = "pending", "Declared, not yet true"
+        FIRED = "fired", "Became true; claim invalidated"
+        # We can no longer see the subject. Not safe, not fired: uncovered.
+        UNOBSERVABLE = "unobservable", "Subject can no longer be observed"
+        # Withdrawn by a person -- kept rather than deleted so the record shows
+        # that somebody decided to stop watching, and who.
+        WITHDRAWN = "withdrawn", "Withdrawn"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="latent_conditions"
+    )
+    # The claim this condition would falsify. CASCADE, mirroring ClaimEvent and
+    # RetestRequirement: the condition is *about* this claim.
+    claim = models.ForeignKey(
+        "AssuranceClaim", on_delete=models.CASCADE, related_name="latent_conditions"
+    )
+
+    kind = models.CharField(max_length=40, choices=Kind.choices)
+    # What the condition is about: a principal name, an asset name, a provider
+    # name, a boundary practice. Required -- a condition with no subject is not a
+    # named precondition, it is a worry.
+    subject = models.CharField(max_length=255)
+    # The value that would make it true: a capability key, a region code, a
+    # provider field. Blank where the kind needs none (POLICY_VERSION_CHANGES).
+    expected = models.CharField(max_length=255, blank=True)
+    # Prose for a human, REQUIRED: the exact future change, in the words of
+    # whoever knows why this claim is safe today. The row is what the machine
+    # checks; this is what an operator reads at 3am.
+    description = models.TextField()
+
+    # What was observed at declaration time, proving the condition did not hold
+    # then. Both the flag and the reading are kept: a baseline of "false" with no
+    # reading behind it is an assertion, not an observation.
+    baseline_observation = models.TextField(blank=True)
+
+    state = models.CharField(
+        max_length=20, choices=State.choices, default=State.PENDING, db_index=True
+    )
+    # When this condition was last actually evaluated. A PENDING condition that
+    # has not been evaluated recently is not evidence of anything, and the posture
+    # read surfaces this rather than implying continuous watch.
+    last_evaluated_at = models.DateTimeField(null=True, blank=True)
+    # What the evaluator saw the moment it fired, and when. Kept verbatim so the
+    # retest can be defended without re-deriving the world.
+    fired_at = models.DateTimeField(null=True, blank=True)
+    fired_observation = models.TextField(blank=True)
+    # The retest this firing opened. SET_NULL so trimming an obligation never
+    # deletes the record that a declared precondition came true.
+    fired_requirement = models.ForeignKey(
+        "RetestRequirement",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="fired_by_conditions",
+    )
+
+    declared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="latent_conditions",
+    )
+    declared_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-declared_at"]
+        indexes = [models.Index(fields=["deployment", "state"])]
+        constraints = [
+            # One live declaration per (claim, kind, subject, expected). A second
+            # identical declaration is not a second risk.
+            models.UniqueConstraint(
+                fields=["claim", "kind", "subject", "expected"],
+                name="uq_latent_condition_declaration",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()}: {self.subject} ({self.state})"
+
+
 class RetestRequirement(models.Model):
     """An open obligation to re-test a claim because the system it was true *of*
     has changed — the SPINE Phase 2 temporal / INVALIDATES backbone.
