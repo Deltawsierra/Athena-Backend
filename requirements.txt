@@ -112,9 +112,17 @@ zopfli==0.2.3.post1
 # definition the engine uses, so the two never disagree, and mythos_core.tracing
 # for the shared span vocabulary assurance/observability.py binds.
 #
-# Pinned to the v0.2.1 release COMMIT rather than "@v0.2.1": the tag could not be
-# pushed from the session that cut the release (Mythos-Core#10 records the 403 and
-# what a person still needs to do). A commit pin is immutable and resolves the
-# same tree. CI needs a MYTHOS_CORE_TOKEN secret to install the private
-# dependency, as on the engine repos.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@f566592a8f856c105c2e85ce81cf2bf59f7f1c95
+# Pinned to the v0.2.2 release COMMIT rather than "@v0.2.2": tag refs cannot be
+# pushed from these sessions -- the remote answers 403 to a receive-pack for
+# refs/tags/* while branch pushes succeed (Mythos-Core#10 records the same denial
+# for v0.2.0 and what a person still needs to do). A commit pin is immutable and
+# resolves the same tree. CI needs a MYTHOS_CORE_TOKEN secret to install the
+# private dependency, as on the engine repos.
+#
+# v0.2.2 fixes the OTLP exporter being handed a base URL -- every batch POSTed to
+# / and the collector answered 404 while tracing_status() reported "spans are
+# created and exported". This service binds that tracing, so before the bump its
+# telemetry was configured and gone with nothing saying so. The release also
+# redacts userinfo out of the endpoint that status block publishes, and bounds
+# Timings so the measuring apparatus stops changing the latency it measures.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@5bb35e266a436e99430aff3cce9e3b5e1f90a749
