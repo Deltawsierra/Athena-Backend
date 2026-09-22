@@ -11,8 +11,10 @@ What goes into the descriptor is exactly the configuration whose *change* should
 force a claim to be re-verified: the asset graph (each component's kind,
 identifier, classification, the provider it resolves to, and the salient config
 in its metadata — model id, region, permissions, prompt/generation config, the
-edges it declares), each provider's declared assurance assertions, and the
-approved data boundary. What is deliberately EXCLUDED is anything that varies
+edges it declares), each provider's declared assurance assertions, the approved
+data boundary, and the **served-route fingerprint** — what actually ran, field by
+field, with every unobserved field carried explicitly as ``unknown`` rather than
+omitted (see :mod:`assurance.served_route`). What is deliberately EXCLUDED is anything that varies
 without the security posture changing — every timestamp (``first_seen`` /
 ``last_seen`` / ``created_at`` / ``updated_at``), every row uuid, and any counter
 — exactly the "free of any timestamp" discipline the finding fingerprint and the
@@ -27,6 +29,7 @@ migration. Prefetch ``assets__provider__assertions`` and select_related
 from __future__ import annotations
 
 from .receipt import _digest
+from .served_route import served_route_fingerprint
 
 # The Asset.metadata keys that identify a component's security-relevant
 # configuration — the facts whose change should force a claim to be re-verified.
@@ -149,6 +152,18 @@ def compute_system_fingerprint(deployment) -> str:
         "assets": assets,
         "providers": providers,
         "data_boundary": _boundary_descriptor(deployment),
+        # What actually served (Phase 2 item 2). Folded in as its own fingerprint
+        # rather than expanded here, for two reasons. It is computed from the same
+        # assets, so inlining it would hash the same facts twice and make the
+        # descriptor read as though the route were independent evidence. And the
+        # route carries every field it did NOT observe -- `_salient_metadata`
+        # above carries only what it did -- so a route field moving from
+        # `unknown` to a value moves this fingerprint even though no metadata key
+        # the asset descriptor watches has changed. That is the point: a claim
+        # bound to a system whose quantization was unknown was bound to the
+        # not-knowing, and learning it is a state change that should re-open the
+        # claim.
+        "served_route": served_route_fingerprint(deployment),
     }
     return _digest(descriptor)
 

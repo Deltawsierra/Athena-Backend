@@ -81,7 +81,11 @@ def test_receipt_carries_the_full_versioned_tuple():
     r = receipt.build_assurance_receipt(dep)
 
     # Version — the standard is versioned and stamps which schema it is.
-    assert r["receipt_version"] == receipt.RECEIPT_VERSION == "mythos.assurance.receipt/1.1"
+    # 2.0 since the receipt began carrying the served route and the coverage
+    # manifest: both are new HASHED content, so every 1.1 digest differs from the
+    # 2.0 digest of the same state. A minor bump would have told a consumer the
+    # shapes were compatible when the digests are not.
+    assert r["receipt_version"] == receipt.RECEIPT_VERSION == "mythos.assurance.receipt/2.0"
     assert receipt.RECEIPT_SCHEMA["$id"] == receipt.RECEIPT_VERSION
 
     # The pinned assurance-policy version the decision was made under — the rule
