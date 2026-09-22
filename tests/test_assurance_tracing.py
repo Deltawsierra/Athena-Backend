@@ -92,9 +92,11 @@ def _scan(findings):
 
     A stub would have to satisfy the ORM's relation check, and a fake that gets
     far enough to do that is no longer proving anything about the real path.
+    ``findings=None`` builds a scan whose response reports no findings list at
+    all -- nothing reported, as distinct from a reported zero.
     """
     user = User.objects.create_user(
-        username=f"scanner-{len(findings)}-{Deployment.objects.count()}",
+        username=f"scanner-{len(findings or [])}-{Deployment.objects.count()}",
         password="x",
         role=User.Roles.ANALYST,
     )
@@ -103,7 +105,7 @@ def _scan(findings):
         target_url="https://app.client.example/login",
         consent=True,
         status=PentestScan.STATUS_COMPLETED,
-        engine_response={"findings": findings},
+        engine_response=None if findings is None else {"findings": findings},
     )
 
 
@@ -161,15 +163,30 @@ def test_an_ingest_is_one_workflow_with_the_steps_inside_it(timings):
         assert row["max_ms"] <= ingest_ms + 1e-6, f"{name} outlasted the ingest containing it"
 
 
-def test_an_ingest_with_no_findings_records_nothing(timings):
+def test_an_ingest_of_a_response_with_no_result_records_nothing(timings):
     """A no-op ingest is not work, and a near-zero sample would drag the p50 down.
 
-    The empty-findings return is above the span on purpose; this pins that.
+    The nothing-reported return is above the span on purpose; this pins that.
+    """
+    deployment = _deployment()
+
+    assert ingest_scan(_scan(None), deployment=deployment) == []
+    assert obs.latency_table() == []
+
+
+def test_an_ingest_of_a_reported_zero_is_timed(timings):
+    """`findings: []` is a real result, and ingesting it is real work.
+
+    It refreshes the assets, the register and the decision, so it belongs in the
+    table. This test's companion above used to pass a reported zero and assert an
+    empty table, which is how a clean scan came to be treated as a no-op.
     """
     deployment = _deployment()
 
     assert ingest_scan(_scan([]), deployment=deployment) == []
-    assert obs.latency_table() == []
+    rows = {row["component"] for row in obs.latency_table()}
+    assert "athena-backend.ingest_scan" in rows, sorted(rows)
+    assert "athena-backend.recompute_decision" in rows, sorted(rows)
 
 
 def test_each_derivation_step_gets_its_own_row(timings):
