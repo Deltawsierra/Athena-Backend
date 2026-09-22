@@ -36,6 +36,7 @@ everything.
 
 from __future__ import annotations
 
+from .coverage import complete_audit_signal, coverage_decision_cap, coverage_manifest
 from .models import (
     UNTRUSTED_SEVERITY_STATUSES,
     RESOLVED_FINDING_STATUSES,
@@ -72,6 +73,12 @@ _READINESS_ORDER = (
     Deployment.Decision.READY,
     Deployment.Decision.READY_RESTRICTED,
     Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # Worse than NEEDS_MORE_EVIDENCE and better than NEEDS_REMEDIATION. Both of the
+    # first two are "we do not know", and a coverage gap is the wider of them: weak
+    # evidence at least has a subject, whereas an unassessed component could hold
+    # anything. But "we found something bad" still outranks "we did not look
+    # everywhere" -- a critical finding is a fact, not a gap.
+    Deployment.Decision.AUDIT_INCOMPLETE,
     Deployment.Decision.NEEDS_REMEDIATION,
     Deployment.Decision.NOT_RECOMMENDED,
     Deployment.Decision.PAUSED,
@@ -232,13 +239,24 @@ def compute_decision(deployment: Deployment, *, paused: bool = False) -> str | N
     # this" into READY, never improve a real finding-based state. Without it a
     # deployment scanned clean read as "not yet assessed", which is the same
     # answer as a deployment nobody ever scanned.
-    base = _worse(_decision_from_findings(deployment), _completed_scan_signal(deployment))
+    base = _worse(
+        _worse(_decision_from_findings(deployment), _completed_scan_signal(deployment)),
+        # A complete audit that found nothing is an assessment too, and the reason
+        # coverage is recorded rather than only reported: without it, a deployment
+        # whose every declared component was assessed clean has no findings and so
+        # reads as unassessed -- indistinguishable from one nobody has looked at.
+        complete_audit_signal(deployment),
+    )
     cap = claim_decision_signal(deployment)["cap"]
     scan_cap = incomplete_evidence_cap(deployment)
-    if base is None and cap is None and scan_cap is None:
+    # Coverage of the system, not strength of the evidence: something the customer
+    # declared, or something flagged high risk, was never assessed at all. Every
+    # fact gathered can be genuine and the audit still be incomplete.
+    coverage_cap = coverage_decision_cap(deployment)
+    if base is None and cap is None and scan_cap is None and coverage_cap is None:
         # Assessed by nothing at all: genuinely no decision.
         return None
-    return _worse(_worse(base, cap), scan_cap)
+    return _worse(_worse(_worse(base, cap), scan_cap), coverage_cap)
 
 
 def _claim_brief(claim: AssuranceClaim) -> dict:
@@ -267,10 +285,18 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     signal = claim_decision_signal(deployment)
     from_findings = None if paused else _decision_from_findings(deployment)
     scan_cap = None if paused else incomplete_evidence_cap(deployment)
+    coverage_cap = None if paused else coverage_decision_cap(deployment)
     decision = compute_decision(deployment, paused=paused)
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
+    elif coverage_cap is not None and decision == Deployment.Decision.AUDIT_INCOMPLETE:
+        manifest = coverage_manifest(deployment)
+        note = (
+            f"Held at 'audit incomplete': {manifest['summary']}. Parts of the system "
+            "were never assessed, so every fact gathered here can be genuine and the "
+            "assessment still be short."
+        )
     elif scan_cap is not None and _worse(from_findings, signal["cap"]) != decision:
         note = (
             "Held at 'needs more evidence' because the latest scan stopped before "
@@ -296,6 +322,7 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
         "decision_label": Deployment.Decision(decision).label if decision else None,
         "from_findings": from_findings,
         "claim_cap": signal["cap"],
+        "coverage_cap": coverage_cap,
         "paused": paused,
         # The assurance policy this decision is made under — pinned so a later
         # change to the rules can tell whether the policy still holds.

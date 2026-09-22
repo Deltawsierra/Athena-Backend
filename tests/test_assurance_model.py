@@ -322,15 +322,23 @@ def test_evidence_class_defaults_unknown_with_no_evidence():
     assert f.status == Finding.Status.OPEN  # default lifecycle state
 
 
-def test_deployment_supports_all_six_decision_states():
+def test_deployment_supports_every_decision_state():
+    """Seven now: AUDIT_INCOMPLETE joined them (Phase 2 item 1).
+
+    It is a coverage-of-system state, not a strength-of-evidence one -- parts of
+    the deployment were never assessed at all, as distinct from the assessed parts
+    being thinly known. Pinned as an exact set so a state cannot be added or
+    renamed without a reader deciding which of the two axes it belongs to.
+    """
     user = _user()
     for state in Deployment.Decision.values:
         Deployment.objects.create(name=f"d-{state}", owner=user, decision=state)
-    assert Deployment.objects.count() == 6
+    assert Deployment.objects.count() == 7
     assert set(Deployment.Decision.values) == {
         "ready",
         "ready_restricted",
         "needs_more_evidence",
+        "audit_incomplete",
         "needs_remediation",
         "not_recommended",
         "paused",

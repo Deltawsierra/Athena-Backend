@@ -283,6 +283,13 @@ class Deployment(models.Model):
         READY = "ready", "Ready"
         READY_RESTRICTED = "ready_restricted", "Ready with restrictions"
         NEEDS_MORE_EVIDENCE = "needs_more_evidence", "Requires additional evidence"
+        # Coverage of the SYSTEM, not strength of the evidence: parts of the
+        # deployment were never assessed at all, so every fact gathered can be
+        # genuine and the assessment still be incomplete. Distinct from
+        # NEEDS_MORE_EVIDENCE, which is about how well the assessed parts are
+        # known -- there the subject is known and the evidence is thin; here the
+        # subject was never examined, which is the wider gap of the two.
+        AUDIT_INCOMPLETE = "audit_incomplete", "Audit incomplete"
         NEEDS_REMEDIATION = "needs_remediation", "Requires remediation"
         NOT_RECOMMENDED = "not_recommended", "Not recommended"
         PAUSED = "paused", "Deployment paused"
@@ -398,6 +405,22 @@ class Asset(models.Model):
         Deployment, on_delete=models.CASCADE, related_name="assets"
     )
     kind = models.CharField(max_length=32, choices=Kind.choices, default=Kind.OTHER)
+    # When something actually TESTED this asset, and what did. Observing an asset
+    # is not assessing it: discovery finds that an MCP server exists, which says
+    # nothing about whether anything probed it. A clean test leaves no finding, so
+    # coverage cannot be read off the findings -- absence of a finding is exactly
+    # the ambiguity this field removes. Null means "nothing has recorded assessing
+    # this", which is never read as "assessed and clean".
+    assessed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When something last assessed this asset (not merely observed it).",
+    )
+    assessed_by = models.CharField(
+        max_length=128,
+        blank=True,
+        help_text="What assessed it, as the assessing engine reported itself.",
+    )
     name = models.CharField(max_length=255)
     # A stable identifier for the component: an endpoint URL, ARN, tool name, etc.
     identifier = models.CharField(max_length=1024, blank=True)

@@ -35,6 +35,7 @@ from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
+from .coverage import coverage_manifest
 from .decision import decision_support, recompute_decision
 from .revalidation import plan_revalidation
 from .incident import assemble_incident_pack
@@ -1236,6 +1237,23 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         deployment = self.get_object()
         paused = deployment.decision == Deployment.Decision.PAUSED
         return Response(decision_support(deployment, paused=paused))
+
+    @action(detail=True, methods=["get"], url_path="coverage-manifest")
+    def coverage_manifest_view(self, request, uuid=None):
+        """What was assessed, and what was not (Phase 2 item 1).
+
+        Three tallies -- Expected (declared) / Observed (discovered) / Assessed
+        (actually tested) -- with the specific entities behind each gap named. The
+        question a finding count cannot answer: every fact gathered can be genuine
+        and the assessment still be short, and a decision computed only from what
+        was inspected reads READY because everything inspected looked good.
+
+        Three verdicts, not two: COMPLETE, INCOMPLETE, and UNDECLARED for a
+        deployment with no declared baseline -- there is nothing to be short of, and
+        calling that complete would turn a missing declaration into a clean bill.
+
+        A read, like the other assurance reads; it computes and persists nothing."""
+        return Response(coverage_manifest(self.get_object()))
 
     @action(detail=True, methods=["get"], url_path="revalidation-plan")
     def revalidation_plan(self, request, uuid=None):
