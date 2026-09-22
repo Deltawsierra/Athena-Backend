@@ -181,3 +181,109 @@ def test_state_treats_a_disabled_engine_failsafe_as_not_reported(monkeypatch):
     r = analyst.get("/api/failsafe/state/")
     assert r.data["engine_state"] is None
     assert r.data["engine_state_available"] is False
+
+
+# ---------------------------------------------------------------------------
+# One key is one person, whatever it is enrolled as
+# ---------------------------------------------------------------------------
+
+def test_one_key_enrolled_twice_is_still_one_person(settings):
+    """The console and the engine must count the same thing.
+
+    The engine (`mythos_core.failsafe.commands.verify_command`) counts distinct
+    public key *material*. The console counted distinct `key_id`. So one private
+    key enrolled under two ids -- which is what happens when an operator's
+    hardware token is re-enrolled, or when one line of FAILSAFE_OPERATOR_KEYS is
+    copy-pasted -- satisfied the console's threshold of two and was refused by
+    the engine.
+
+    The engine fails safe, so nothing was ever wrongly stood down. What this
+    test is really about is the silence: the console published the command as
+    READY, the engine rejected it, the rejection lived only in the governor's
+    in-memory history which no route exposes, and an operator read "stand-down
+    ready" beside a scan that never stopped.
+    """
+    settings.FAILSAFE_OPERATOR_KEYS = {
+        "alice": ALICE_PUB,
+        "alice-yubikey": ALICE_PUB,  # the same key, a second id
+        "bob": BOB_PUB,
+    }
+    admin = _client(_user(User.Roles.ADMIN))
+    r = admin.post("/api/failsafe/commands/",
+                   {"action": "stand_down", "engine_id": "athena-1"}, format="json")
+    uuid, fields = r.data["uuid"], _draft_fields(r.data)
+
+    admin.post(f"/api/failsafe/commands/{uuid}/signatures/",
+               sign_draft(fields, key_id="alice", private_hex=ALICE_PRIV), format="json")
+    second = admin.post(f"/api/failsafe/commands/{uuid}/signatures/",
+                        sign_draft(fields, key_id="alice-yubikey", private_hex=ALICE_PRIV),
+                        format="json")
+
+    assert second.status_code == 200
+    assert second.data["status"] == "awaiting_signatures", (
+        "one key under two ids was counted as two people, and the engine would "
+        "have refused the command the console published as ready"
+    )
+
+
+def test_two_genuinely_different_keys_still_reach_ready(settings):
+    """The guard must not be a two-person rule nobody can satisfy."""
+    settings.FAILSAFE_OPERATOR_KEYS = {
+        "alice": ALICE_PUB,
+        "alice-yubikey": ALICE_PUB,
+        "bob": BOB_PUB,
+    }
+    admin = _client(_user(User.Roles.ADMIN))
+    r = admin.post("/api/failsafe/commands/",
+                   {"action": "stand_down", "engine_id": "athena-1"}, format="json")
+    uuid, fields = r.data["uuid"], _draft_fields(r.data)
+
+    admin.post(f"/api/failsafe/commands/{uuid}/signatures/",
+               sign_draft(fields, key_id="alice", private_hex=ALICE_PRIV), format="json")
+    bob = admin.post(f"/api/failsafe/commands/{uuid}/signatures/",
+                     sign_draft(fields, key_id="bob", private_hex=BOB_PRIV), format="json")
+
+    assert bob.data["status"] == "ready"
+
+
+def test_the_console_and_the_engine_agree_on_the_same_signature_set(settings):
+    """Asserted against the engine's own verifier rather than against a number.
+
+    A threshold check that agrees with a hard-coded 2 is not the property that
+    matters. The property is that the console never publishes a command the
+    engine will refuse, so this asks the engine.
+    """
+    from mythos_core.failsafe.commands import Command, verify_command
+
+    settings.FAILSAFE_OPERATOR_KEYS = {"alice": ALICE_PUB, "alice-2": ALICE_PUB}
+    admin = _client(_user(User.Roles.ADMIN))
+    r = admin.post("/api/failsafe/commands/",
+                   {"action": "stand_down", "engine_id": "athena-1"}, format="json")
+    uuid, fields = r.data["uuid"], _draft_fields(r.data)
+    for key_id in ("alice", "alice-2"):
+        admin.post(f"/api/failsafe/commands/{uuid}/signatures/",
+                   sign_draft(fields, key_id=key_id, private_hex=ALICE_PRIV), format="json")
+
+    detail = admin.get(f"/api/failsafe/commands/{uuid}/").data
+    console_says_ready = detail["status"] == "ready"
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    ring = {
+        "alice": Ed25519PublicKey.from_public_bytes(bytes.fromhex(ALICE_PUB)),
+        "alice-2": Ed25519PublicKey.from_public_bytes(bytes.fromhex(ALICE_PUB)),
+    }
+    pending = admin.get("/api/failsafe/pending/", HTTP_X_FAILSAFE_POLL_TOKEN=POLL_TOKEN)
+    published = [c for c in (pending.data or {}).get("commands", [])
+                 if c.get("nonce") == fields["nonce"]]
+
+    if console_says_ready:
+        assert published, "the console said ready but published nothing"
+        accepted = verify_command(Command.from_dict(published[0]), keyring=ring,
+                                  engine_id="athena-1")
+        assert accepted, (
+            "the console published a command the engine refuses -- the two sides "
+            "are counting different things again"
+        )
+    else:
+        assert not published

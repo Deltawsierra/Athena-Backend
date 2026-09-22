@@ -106,12 +106,27 @@ def latency_table() -> list[dict[str, Any]]:
 
 
 def reset_timings() -> None:
-    """Drop every recorded sample.
+    """Drop every recorded sample, in place.
 
     For a harness taking a fresh baseline, and for tests that must not read
     another test's samples. Never called from a request path: a request that
     silently cleared the record would make the table depend on which request
     happened to arrive last.
+
+    In place, not by rebinding the global, and the difference is not cosmetic.
+    ``span()`` reads ``TIMINGS`` when it is entered and hands *that object* to
+    ``tracing.span``, which records in its ``finally``. Rebinding between entry
+    and exit sends the sample into an orphan -- and it does so selectively: a
+    span longer than the interval between resets can never survive, so the
+    reset destroys exactly the slow work a p95 exists to find. Measured on the
+    baseline harness, an outer workflow span was lost while all of its children
+    survived, publishing a table with one assessment and five of its own steps.
+    Clearing under the lock keeps every in-flight span pointed at a live object.
     """
-    global TIMINGS
-    TIMINGS = tracing.Timings()
+    with TIMINGS._lock:  # noqa: SLF001 - the recorder's own lock, by design
+        TIMINGS.samples.clear()
+        # The companion total arrives with the bounded recorder in a later
+        # mythos-core; clearing it here is a no-op against the current pin and
+        # keeps the total honest the moment this repo is repinned, rather than
+        # leaving a row that reports a lifetime count against a cleared window.
+        getattr(TIMINGS, "recorded", {}).clear()
