@@ -1560,6 +1560,11 @@ class DispatchAttempt(models.Model):
     class Outcome(models.TextChoices):
         SENT = "sent", "Sent"
         FAILED = "failed", "Failed"
+        # The provider may have committed this before the client lost the answer.
+        # Neither SENT nor FAILED is true: recording it as FAILED licenses a retry
+        # that creates the ticket twice, and recording it as SENT claims a ticket
+        # that may not exist. It stays here until reconciliation resolves it.
+        UNKNOWN = "unknown", "Unknown — may have been committed"
         SKIPPED_INERT = "skipped_inert", "Skipped — connector not configured"
         SKIPPED_NO_KEY = "skipped_no_key", "Skipped — no encryption key"
         SKIPPED_DISABLED = "skipped_disabled", "Skipped — binding disabled"
@@ -1571,6 +1576,11 @@ class DispatchAttempt(models.Model):
 
     #: Outcomes that mean the external system accepted the push — terminal.
     TERMINAL_OUTCOMES = frozenset({Outcome.SENT})
+
+    #: Outcomes whose truth is not known. NOT terminal (nothing was confirmed) and
+    #: NOT retryable (a retry may double-execute) -- the two properties that used to
+    #: be the same thing. An attempt here waits for reconciliation.
+    UNCERTAIN_OUTCOMES = frozenset({Outcome.UNKNOWN})
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -1598,6 +1608,21 @@ class DispatchAttempt(models.Model):
     # The id the external system handed back (Jira key, ServiceNow sys_id, ...),
     # for reconciliation. Blank when there is none.
     external_ref = models.CharField(max_length=255, blank=True, default="")
+    # The durable identity of this operation, sent to the provider as an
+    # idempotency key. Without one, reconciling an uncertain outcome means asking
+    # "did you already do this?" with nothing to name the thing -- and a retry has
+    # no way to be deduplicated by the provider rather than by us guessing.
+    # Deterministic from (finding, connector), so the same operation retried is the
+    # same operation, and a different finding is never mistaken for it.
+    operation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # The policy epoch this was authorized under. A retry after the epoch moved is
+    # being executed under an authority that no longer holds, and that is a
+    # different decision from the one that was made.
+    policy_epoch = models.CharField(max_length=64, blank=True, default="")
+    # When an uncertain outcome was resolved against the provider, and how. Null
+    # while it is still unresolved -- which is the state that blocks the retry.
+    reconciled_at = models.DateTimeField(null=True, blank=True)
+    reconciled_detail = models.TextField(blank=True)
     attempts = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1619,6 +1644,23 @@ class DispatchAttempt(models.Model):
         """Whether this attempt is done (accepted) — the idempotency guard: a
         terminal attempt is never re-pushed."""
         return self.outcome in self.TERMINAL_OUTCOMES
+
+    @property
+    def is_uncertain(self) -> bool:
+        """Whether the provider may have committed this and nobody has checked."""
+        return self.outcome in self.UNCERTAIN_OUTCOMES and self.reconciled_at is None
+
+    @property
+    def blocks_retry(self) -> bool:
+        """Whether this attempt must NOT be pushed again as things stand.
+
+        Two different reasons, and separating them is the point of this change: a
+        terminal attempt was accepted, so re-pushing would duplicate a known
+        ticket; an unresolved uncertain attempt MIGHT have been accepted, so
+        re-pushing might duplicate one nobody can see. Before this, only the first
+        blocked a retry, and the second was retried on every qualifying trigger.
+        """
+        return self.is_terminal or self.is_uncertain
 
     def __str__(self) -> str:
         return f"{self.connector} <- finding {self.finding_id}: {self.outcome}"
