@@ -34,7 +34,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from django.conf import settings
 
@@ -47,19 +47,19 @@ DECLARATION = Path(settings.BASE_DIR) / "deployment" / "approved_deployment.yaml
 # Short on purpose. See the module docstring.
 CACHE_SECONDS = 60
 
-_cache: Dict[str, Any] = {}
+_cache: dict[str, Any] = {}
 _lock = threading.Lock()
 
 
 class DeploymentNotApproved(Exception):
     """The engine is not the deployment that was approved."""
 
-    def __init__(self, message: str, report: Optional[Dict[str, Any]] = None):
+    def __init__(self, message: str, report: dict[str, Any] | None = None):
         super().__init__(message)
         self.report = report or {}
 
 
-def declaration() -> Dict[str, Any]:
+def declaration() -> dict[str, Any]:
     """The approved deployment, as declared in the repository.
 
     yaml is imported here rather than at module scope. This module is
@@ -128,7 +128,7 @@ def deployment_for_routes():
     )
 
 
-def _attestation_for(deployment, client, tenant_id) -> Dict[str, Any]:
+def _attestation_for(deployment, client, tenant_id) -> dict[str, Any]:
     """The attestation half of the report, or an honest absence.
 
     A deployment this backend does not hold cannot have its routes measured, and
@@ -155,9 +155,9 @@ def _attestation_for(deployment, client, tenant_id) -> Dict[str, Any]:
     return _attest_routes(client, deployment, tenant_id=tenant_id)
 
 
-def check(client: Optional[CyberEngineClient] = None,
-          tenant_id: Optional[str] = None,
-          force: bool = False) -> Dict[str, Any]:
+def check(client: CyberEngineClient | None = None,
+          tenant_id: str | None = None,
+          force: bool = False) -> dict[str, Any]:
     """Ask the gates. Returns a report; raises only under enforce."""
     key = f"{tenant_id or 'default'}"
     now = time.monotonic()
@@ -173,7 +173,7 @@ def check(client: Optional[CyberEngineClient] = None,
     client = client or CyberEngineClient.from_settings()
     declared = declaration()
 
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "deployment_id": declared["deployment_id"],
         "mode": mode(),
         "checked_at": time.time(),
@@ -282,7 +282,7 @@ def _serving_routes(deployment) -> tuple[list, list]:
     return measurable, unmeasurable
 
 
-def _attest_routes(client, deployment, tenant_id=None) -> Dict[str, Any]:
+def _attest_routes(client, deployment, tenant_id=None) -> dict[str, Any]:
     """Measure each serving route against its baseline.
 
     Returns a report whose ``verdict`` follows the engine's own vocabulary, and
@@ -381,7 +381,7 @@ def _attest_detail(routes, unmeasurable, truncated) -> str:
     return "; ".join(parts)
 
 
-def _verdict(answer: Any, nested: Optional[str] = None) -> Optional[str]:
+def _verdict(answer: Any, nested: str | None = None) -> str | None:
     """The verdict in an answer, or None if the answer is not one.
 
     The engine's replies are external data. An answer that is not the shape
@@ -398,7 +398,7 @@ def _verdict(answer: Any, nested: Optional[str] = None) -> Optional[str]:
     return verdict if isinstance(verdict, str) else None
 
 
-def _detail(answer: Any, nested: Optional[str] = None) -> str:
+def _detail(answer: Any, nested: str | None = None) -> str:
     if not isinstance(answer, dict):
         return "the engine's answer was not a report"
     if nested and isinstance(answer.get(nested), dict):
@@ -407,7 +407,7 @@ def _detail(answer: Any, nested: Optional[str] = None) -> str:
     return detail if isinstance(detail, str) else "no detail given"
 
 
-def _attest_reason(attestation: Any, verdict: Optional[str]) -> Optional[str]:
+def _attest_reason(attestation: Any, verdict: str | None) -> str | None:
     """Why the attestation half is holding this scan at review, or None.
 
     Three states that are not the same fact, and each says which it is. An
@@ -457,7 +457,7 @@ def _attest_reason(attestation: Any, verdict: Optional[str]) -> Optional[str]:
     return f"route attestation (drift): {_detail(attestation)}"
 
 
-def _decide(report: Dict[str, Any]):
+def _decide(report: dict[str, Any]):
     assurance_verdict = _verdict(report.get("assurance"))
     extension_verdict = _verdict(report.get("extensions"), nested="review")
 
@@ -516,12 +516,12 @@ def _decide(report: Dict[str, Any]):
     return "ok", "the engine is the deployment that was approved"
 
 
-def _store(key: str, report: Dict[str, Any], at: float) -> None:
+def _store(key: str, report: dict[str, Any], at: float) -> None:
     with _lock:
         _cache[key] = {"at": at, "report": report}
 
 
-def _raise_if_enforcing(report: Dict[str, Any]) -> None:
+def _raise_if_enforcing(report: dict[str, Any]) -> None:
     verdict = report.get("verdict")
     if verdict in ("blocked", "unknown") and report.get("mode") == "enforce":
         raise DeploymentNotApproved(report.get("detail") or verdict, report)

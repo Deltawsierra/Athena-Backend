@@ -1,0 +1,19 @@
+# Ruff's behaviour must not depend on which ruff happens to be installed.
+#
+# This repo had no ruff configuration at all, which meant two things could
+# change the result of a lint run with no edit to this repository: the default
+# rule set of whatever ruff version was present, and the inferred target Python
+# version. UP045 (`Optional[X]` -> `X | None`) only applies at py310 and above,
+# so an unresolved target silently decided whether ten findings existed.
+#
+# Both are now stated. The ruff version itself is pinned in requirements-dev.txt,
+# which CI installs; the two together mean a lint result here and a lint result
+# in CI are the same result.
+#
+# Note this file deliberately does NOT narrow `select`. The default rule set
+# still applies locally, so a contributor running `ruff check .` keeps seeing
+# the whole picture -- including the ~435 findings this repo has not yet worked
+# through. Only a named subset is enforced in CI (see .github/workflows/ci.yml),
+# because a gate is a promise about what cannot regress, not a summary of
+# everything known.
+target-version = "py311"
