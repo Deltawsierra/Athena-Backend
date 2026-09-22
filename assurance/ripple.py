@@ -63,14 +63,17 @@ from .capability import (
     _RISK_ORDER,
     _max_risk,
 )
-from .models import SEVERITY_HIGH, Asset, Finding, severity_rank
+from .models import Asset, Finding, RESOLVED_FINDING_STATUSES, SEVERITY_HIGH, severity_rank
 
 # Findings in these states are resolved — no longer a live weakness, so never an
 # active origin. Mirrors ``assurance.decision`` / ``assurance.business_impact`` so
 # every view agrees on what "active" means.
-_RESOLVED_STATUSES = frozenset(
-    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
-)
+# The one definition lives in ``assurance.models`` beside the statuses themselves.
+# Seven modules each kept their own copy of this set, and every one of their
+# comments said it "mirrors" the others so every view would agree on what "active"
+# means -- which is precisely the arrangement that lets them stop agreeing. Adding
+# a status meant editing eight places and silently disagreeing if you missed one.
+_RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 
 # ---------------------------------------------------------------------------
 # Consequence categories — the *kinds* of downstream effect a compromise could

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from .capability import RISK_BASELINE, RISK_ELEVATED, RISK_HIGH
 from .models import (
+    RESOLVED_FINDING_STATUSES,
     SEVERITY_ORDER,
     Asset,
     EvidenceClass,
@@ -48,9 +49,12 @@ from .models import (
 # Findings in these states are resolved — no longer active. Mirrors
 # ``assurance.decision`` and the sibling assessments so every view agrees on what
 # "active" means.
-_RESOLVED_STATUSES = frozenset(
-    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
-)
+# The one definition lives in ``assurance.models`` beside the statuses themselves.
+# Seven modules each kept their own copy of this set, and every one of their
+# comments said it "mirrors" the others so every view would agree on what "active"
+# means -- which is precisely the arrangement that lets them stop agreeing. Adding
+# a status meant editing eight places and silently disagreeing if you missed one.
+_RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 
 # A component is *classified* (covered by discovery) unless it is unknown or an
 # unmanaged shadow — the two coverage gaps. Managed is the narrower governed set.
