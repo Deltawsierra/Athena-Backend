@@ -107,6 +107,54 @@ def mode() -> str:
                                   "require", "required", "strict", "block"} else "observe"
 
 
+def deployment_for_routes():
+    """The Deployment whose serving routes the gate measures, or None.
+
+    Resolved by the declared ``deployment_id``. None when there is no such row:
+    a gate that measured the wrong deployment's routes would be worse than one
+    that measured none, and `_attestation_for` turns None into an explicit
+    "nothing was measured" rather than an empty pass.
+    """
+    from assurance.models import Deployment
+
+    try:
+        declared_id = declaration()["deployment_id"]
+    except DeploymentNotApproved:
+        return None
+    return (
+        Deployment.objects.prefetch_related("assets")
+        .filter(name=declared_id)
+        .first()
+    )
+
+
+def _attestation_for(deployment, client, tenant_id) -> Dict[str, Any]:
+    """The attestation half of the report, or an honest absence.
+
+    A deployment this backend does not hold cannot have its routes measured, and
+    that is reported as ``unobservable`` rather than as a clean sheet: the whole
+    point of this gate is that an unmeasured route never reads like a measured
+    one.
+    """
+    if deployment is None:
+        return {
+            "verdict": ATTEST_UNOBSERVABLE,
+            "detail": (
+                "no deployment record matches the declared deployment_id, so no "
+                "serving route could be measured"
+            ),
+            "routes": [],
+            "unmeasurable": [],
+            # None, not 0. We do not hold the inventory, so we do not know how
+            # many routes went unmeasured -- and "0 not measured" is precisely
+            # the silent zero this gate exists to stop: an absence of knowledge
+            # reading as an absence of gaps.
+            "not_measured_count": None,
+            "truncated": [],
+        }
+    return _attest_routes(client, deployment, tenant_id=tenant_id)
+
+
 def check(client: Optional[CyberEngineClient] = None,
           tenant_id: Optional[str] = None,
           force: bool = False) -> Dict[str, Any]:
@@ -137,6 +185,7 @@ def check(client: Optional[CyberEngineClient] = None,
         )
         report["extensions"] = client.extension_review()
         report["unattributed"] = client.unattributed_effects(limit=25)
+        report["attestation"] = _attestation_for(deployment_for_routes(), client, tenant_id)
     except EngineError as exc:
         # An engine that cannot answer is not an engine that answered yes.
         # Under observe this is logged and the scan proceeds, because the
@@ -150,7 +199,11 @@ def check(client: Optional[CyberEngineClient] = None,
         return report
 
     report["verdict"], report["detail"] = _decide(report)
-    for section in ("assurance", "extensions", "unattributed"):
+    # "attestation" included: it carries the engine's raw route measurements,
+    # which are external data and get stored on the scan row. Left out, a reply
+    # holding anything non-JSON would fail to persist the verdict that governed
+    # the scan.
+    for section in ("assurance", "extensions", "unattributed", "attestation"):
         report[section] = _jsonable(report.get(section))
     _store(key, report, now)
     _raise_if_enforcing(report)
@@ -178,6 +231,156 @@ def _jsonable(value: Any, depth: int = 0) -> Any:
     return repr(value)[:500]
 
 
+# The attestation verdicts the engine returns, named here so this module reads
+# the engine's vocabulary rather than inventing a parallel one.
+ATTEST_UNCHANGED = "unchanged"
+ATTEST_REVIEW = "review"
+ATTEST_BLOCKED = "blocked"
+ATTEST_UNOBSERVABLE = "unobservable"
+
+# How many routes one preflight will measure. Each is a live round trip to a
+# customer endpoint, and a gate that hangs is a gate somebody switches off. The
+# cap is reported when it bites (see `_attest_routes`) rather than silently
+# shortening the answer.
+MAX_ATTESTED_ROUTES = 8
+
+
+def _serving_routes(deployment) -> tuple[list, list]:
+    """The routes this deployment serves inference on, as (measurable, unmeasurable).
+
+    The url comes from ``Asset.identifier``, which the model documents as "an
+    endpoint URL, ARN, tool name, etc." -- so for a serving asset it is the
+    endpoint, and for others it is not a url at all. Nothing else in the record
+    carries one: ``ROUTE_FIELDS`` fingerprints *what* serves (provider, model,
+    engine, template) and the approved-deployment declaration's ``routes`` are
+    inbound path patterns like ``/api/scan``, which nothing can probe.
+
+    An asset that serves inference but whose identifier is not a url is returned
+    in the second list, NOT dropped. A route we cannot measure is a hole in the
+    gate's coverage, and a gate that silently measured six of eight routes would
+    report the same "ok" as one that measured all eight.
+    """
+    from assurance.served_route import serves_inference
+
+    measurable, unmeasurable = [], []
+    for asset in deployment.assets.all():
+        if not serves_inference(asset):
+            continue
+        identifier = (asset.identifier or "").strip()
+        if identifier.startswith(("http://", "https://")):
+            measurable.append((asset.name, identifier))
+        else:
+            unmeasurable.append(
+                {
+                    "name": asset.name,
+                    "why": (
+                        "this asset serves inference but its identifier is not a "
+                        "url, so there is no endpoint to measure"
+                    ),
+                }
+            )
+    return measurable, unmeasurable
+
+
+def _attest_routes(client, deployment, tenant_id=None) -> Dict[str, Any]:
+    """Measure each serving route against its baseline.
+
+    Returns a report whose ``verdict`` follows the engine's own vocabulary, and
+    which never reads better than the worst route in it.
+
+    The behavioural half is NOT re-decided here. ``engine/attestation/store.py``
+    already folds it so it can raise a verdict to review and never to blocked --
+    "a changed fingerprint has four explanations and only one of them is a
+    substituted model" -- and a second opinion from this side would either
+    duplicate that rule or quietly contradict it.
+    """
+    measurable, unmeasurable = _serving_routes(deployment)
+    truncated = []
+    if len(measurable) > MAX_ATTESTED_ROUTES:
+        truncated = [name for name, _ in measurable[MAX_ATTESTED_ROUTES:]]
+        measurable = measurable[:MAX_ATTESTED_ROUTES]
+
+    routes = []
+    for name, url in measurable:
+        try:
+            routes.append(client.attestation_check(name, url, tenant_id=tenant_id))
+        except EngineError as exc:
+            # A route the engine could not be asked about is unobserved, not
+            # unchanged. The egress allowlist refusing a host lands here too, and
+            # "we were not allowed to look" must never read as "we looked and it
+            # was fine".
+            routes.append(
+                {
+                    "name": name,
+                    "url": url,
+                    "verdict": ATTEST_UNOBSERVABLE,
+                    "detail": f"the engine could not measure this route: {exc}",
+                    "blocking": [],
+                    "advisory": [],
+                }
+            )
+
+    return {
+        "verdict": _attest_verdict(routes, unmeasurable, truncated),
+        "detail": _attest_detail(routes, unmeasurable, truncated),
+        "routes": routes,
+        # Carried separately and counted, because these are the routes the gate
+        # did NOT check. Folding them into `routes` would let a coverage hole be
+        # read as a measurement.
+        "unmeasurable": unmeasurable,
+        "not_measured_count": len(unmeasurable) + len(truncated),
+        "truncated": truncated,
+    }
+
+
+def _attest_verdict(routes, unmeasurable, truncated) -> str:
+    """The worst thing seen, and an unmeasured route is not a good thing seen.
+
+    Order matters: blocked beats unobservable beats review beats unchanged. A
+    deployment with nothing serving inference reads ``unchanged`` -- there was
+    nothing to measure and that is a true answer -- while one whose routes could
+    not be read reads ``unobservable``, which is not.
+    """
+    verdicts = {str(r.get("verdict") or "") for r in routes}
+    if ATTEST_BLOCKED in verdicts or any(r.get("blocking") for r in routes):
+        return ATTEST_BLOCKED
+    if ATTEST_UNOBSERVABLE in verdicts or unmeasurable or truncated:
+        return ATTEST_UNOBSERVABLE
+    if ATTEST_REVIEW in verdicts:
+        return ATTEST_REVIEW
+    # A verdict this module does not recognise is not a pass. The engine's
+    # replies are external data and an unknown word must not widen the gate.
+    unknown = verdicts - {ATTEST_UNCHANGED, ""}
+    if unknown:
+        return ATTEST_REVIEW
+    return ATTEST_UNCHANGED
+
+
+def _attest_detail(routes, unmeasurable, truncated) -> str:
+    parts = []
+    for route in routes:
+        verdict = str(route.get("verdict") or "")
+        if verdict and verdict != ATTEST_UNCHANGED:
+            parts.append(f"{route.get('name')}: {route.get('detail') or verdict}")
+    if unmeasurable:
+        parts.append(
+            f"{len(unmeasurable)} serving route(s) carry no measurable endpoint"
+        )
+    if truncated:
+        parts.append(
+            f"{len(truncated)} further route(s) were not measured "
+            f"(cap of {MAX_ATTESTED_ROUTES} per preflight): {', '.join(truncated)}"
+        )
+    if not parts:
+        measured = len(routes)
+        return (
+            f"{measured} serving route(s) match their baseline"
+            if measured
+            else "this deployment serves no inference route with an endpoint to measure"
+        )
+    return "; ".join(parts)
+
+
 def _verdict(answer: Any, nested: Optional[str] = None) -> Optional[str]:
     """The verdict in an answer, or None if the answer is not one.
 
@@ -202,6 +405,56 @@ def _detail(answer: Any, nested: Optional[str] = None) -> str:
         answer = answer[nested]
     detail = answer.get("detail")
     return detail if isinstance(detail, str) else "no detail given"
+
+
+def _attest_reason(attestation: Any, verdict: Optional[str]) -> Optional[str]:
+    """Why the attestation half is holding this scan at review, or None.
+
+    Three states that are not the same fact, and each says which it is. An
+    earlier version of this had three branches that all appended the engine's
+    generic detail, so two of them were decoration: deleting either changed
+    nothing, which a mutation proved. Worse than dead code -- an operator
+    reading "route attestation: ..." could not tell a coverage gap from a moved
+    baseline from a reply nobody could parse, and those call for different work.
+    """
+    if verdict is None:
+        # An answer we cannot read is not an answer that said yes, and it is a
+        # bug in the engine or the contract rather than a fact about the routes.
+        return (
+            "route attestation: the engine's answer was not a report, so nothing "
+            "was established about the routes this scan will touch"
+        )
+    if verdict == ATTEST_UNCHANGED:
+        return None
+    if verdict == ATTEST_UNOBSERVABLE:
+        # Routes we could not measure. Review rather than block: not being able
+        # to look is a coverage gap, not evidence of drift, and blocking on it
+        # would make the first deployment with an un-probeable route unable to
+        # scan at all -- which is how a gate gets switched off.
+        missing = (
+            attestation.get("not_measured_count")
+            if isinstance(attestation, dict)
+            else None
+        )
+        measured = (
+            len(attestation.get("routes") or [])
+            if isinstance(attestation, dict)
+            else 0
+        )
+        # A count we do not have is not a count of zero. Anything that is not a
+        # plain integer -- None from `_attestation_for`, or a malformed number
+        # from the engine's reply -- is reported as unknown rather than coerced
+        # into a reassuring zero.
+        counted = (
+            f"{missing} not measured"
+            if isinstance(missing, int) and not isinstance(missing, bool)
+            else "an unknown number not measured"
+        )
+        return (
+            f"route attestation (coverage): {measured} route(s) measured, "
+            f"{counted} -- {_detail(attestation)}"
+        )
+    return f"route attestation (drift): {_detail(attestation)}"
 
 
 def _decide(report: Dict[str, Any]):
@@ -232,6 +485,15 @@ def _decide(report: Dict[str, Any]):
             "gate to measure against: run `manage.py approve_deployment`"
         )
 
+    attestation = report.get("attestation")
+    attest_verdict = _verdict(attestation)
+    if attest_verdict == ATTEST_BLOCKED:
+        # The certificate half, and only that. A route whose issuer or names
+        # changed under a scan is a different endpoint from the one the baseline
+        # describes, and a scan of a different endpoint is not the scan that was
+        # asked for.
+        return "blocked", f"route attestation: {_detail(attestation)}"
+
     reasons = []
     if assurance_verdict != "unchanged":
         reasons.append(f"assurance gate: {_detail(report.get('assurance'))}")
@@ -239,6 +501,9 @@ def _decide(report: Dict[str, Any]):
         reasons.append(
             f"extension gate: {_detail(report.get('extensions'), nested='review')}"
         )
+    attest_reason = _attest_reason(attestation, attest_verdict)
+    if attest_reason:
+        reasons.append(attest_reason)
     if unattributed:
         # Not blocking: it is a fact about the past, not about this scan.
         reasons.append(

@@ -174,6 +174,14 @@ def test_the_verdict_is_stored_on_the_scan_it_governed(
     factory, analyst, engagement
 ):
     """A verdict in a log file is not next to the work it governed."""
+    # The route-attestation gate needs a deployment whose assets it can
+    # enumerate. Without one it reports "no deployment record matches the
+    # declared deployment_id" and the verdict is review -- correctly, since an
+    # inventory we do not hold is not an inventory of no routes. Creating the
+    # row keeps this test about where the verdict is STORED, which is its point.
+    from assurance.models import Deployment
+
+    Deployment.objects.create(name="mythos-platform", owner=analyst)
     launch(factory, analyst, engagement)
 
     scan = PentestScan.objects.latest("id")
