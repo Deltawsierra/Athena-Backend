@@ -39,6 +39,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # A narrow, named gate rather than the whole of ruff. This repo carries
+      # several hundred other findings that have not been worked through, and a
+      # gate that fails on all of them would be switched off within a week; a
+      # gate that fails on none of them protects nothing. These three rules were
+      # swept to zero in the commit that added this step, so what this enforces
+      # is that they stay there. Widen the list when another family reaches zero,
+      # never by turning the gate off.
+      #
+      # ruff is pinned in requirements-dev.txt and the target Python version in
+      # ruff.toml: between them, this check means the same thing here as it does
+      # on a contributor's machine.
+      - name: Lint (typing modernization)
+        run: ruff check --select UP006,UP045,UP035 .
+
       - name: Django checks
         run: python manage.py check
         env:

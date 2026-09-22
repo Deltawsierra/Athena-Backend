@@ -51,7 +51,8 @@ from __future__ import annotations
 
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 # Reuse — never redefine — the risk-band vocabulary and the evidence taxonomy.
 from ..capability import RISK_BASELINE, RISK_ELEVATED, RISK_HIGH, _RISK_ORDER, _max_risk
