@@ -68,7 +68,7 @@ jobs:
       # findings nobody has worked through. A gate that fails on the day it
       # lands is a gate that gets deleted the day after.
       - name: Lint (silently swallowed exceptions)
-        run: ruff check --select S110,S112,TRY302,B012,PIE790 .
+        run: ruff check --select S110,S112,TRY203,B012,PIE790 .
 
       - name: Django checks
         run: python manage.py check
