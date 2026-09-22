@@ -139,9 +139,7 @@ def _claim_rows(deployment) -> list[dict]:
             "claim_type": claim.claim_type,
             "evidence_class": claim.evidence_class,
         }
-        for claim in deployment.assurance_claims.filter(
-            valid_to__isnull=True
-        ).select_related("asset")
+        for claim in deployment.assurance_claims.current().select_related("asset")
     ]
 
 

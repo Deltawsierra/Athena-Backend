@@ -110,7 +110,7 @@ def plan_revalidation(deployment) -> dict:
     """
     with obs.span(obs.PLAN, component="plan_revalidation", subject=str(deployment.pk)):
         current = list(
-            deployment.assurance_claims.filter(valid_to__isnull=True).exclude(status=Status.REVOKED)
+            deployment.assurance_claims.current().exclude(status=Status.REVOKED)
         )
 
         # Map each OPEN retest obligation to the claim identity it is about. A retest is

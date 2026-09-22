@@ -193,8 +193,8 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version
             AssuranceClaim.objects.filter(
                 deployment=deployment,
                 fingerprint=req.claim.fingerprint,
-                valid_to__isnull=True,
             )
+            .current()
             .exclude(pk=req.claim_id)
             .first()
         )
@@ -253,7 +253,7 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
         invalidated = 0
         opened = 0
         currents = list(
-            AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True)
+            AssuranceClaim.objects.filter(deployment=dep).current()
         )
         for claim in currents:
             # A human REVOKED claim is a withdrawal — never invalidated, marked, or

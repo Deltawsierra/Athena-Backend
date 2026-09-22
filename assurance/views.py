@@ -1183,7 +1183,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         asset and human owner joined, so the list is a fixed number of queries."""
         deployment = self.get_object()
         claims = (
-            AssuranceClaim.objects.filter(deployment=deployment, valid_to__isnull=True)
+            AssuranceClaim.objects.filter(deployment=deployment)
+            .current()
             .select_related("deployment", "asset", "human_owner", "superseded_by")
             .order_by("claim_type", "-updated_at")
         )
@@ -1338,8 +1339,12 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         if status_q:
             qs = qs.filter(status=status_q)
         # Default to the current version of each claim; ?all=true includes history.
+        # Current means believed now AND effective now, so a retroactive claim is
+        # history here even though Mythos still believes it -- it is about a window
+        # that has closed, and a caller asking for "the current claims" is asking
+        # about now.
         if self.request.query_params.get("all") not in ("true", "1", "yes", "on"):
-            qs = qs.filter(valid_to__isnull=True)
+            qs = qs.current()
         return qs
 
     @action(detail=True, methods=["get"], url_path="events")
