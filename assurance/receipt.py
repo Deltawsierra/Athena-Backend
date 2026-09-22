@@ -42,7 +42,22 @@ E, time T, environment C, result R*. It binds, into one deterministic payload:
 - a map of per-**assessment** digests (compliance / capabilities / boundary /
   AI-BOM), each a :func:`_digest` over that assessment's deterministic output, so
   a consumer can detect a change in one specific assessment without transporting
-  the whole payload.
+  the whole payload;
+- the **served route** — what actually ran, as a fingerprint over every route
+  field, with each field either observed or the literal ``unknown`` (see
+  :mod:`assurance.served_route`), because a verdict that cannot name the route it
+  was taken against cannot say whether that route is still the one running;
+- the **coverage** manifest's counts and verdict — what was expected, observed
+  and assessed (see :mod:`assurance.coverage`) — because the evidence root
+  attests to the findings that exist and can say nothing about the components
+  nothing ever tested. A clean test and an absent test leave the same silence,
+  and the receipt has to tell them apart.
+
+Together those two are what make the receipt answer, on its own, *which
+configuration passed and what was not covered*. Neither is retrievable from the
+evidence root, and without them a receipt over a deployment where one asset of
+nine was tested, on a route whose every field was unknown, is indistinguishable
+from one over a fully instrumented, fully assessed system.
 
 The same honesty the rest of this module keeps applies in full: the receipt
 attests **integrity and provenance** — *this is the assurance state that was
@@ -76,7 +91,22 @@ ALGORITHM = "sha256"
 #   1.1 — added the pinned evaluator ``policy_version`` to the hashed content, so
 #         the receipt records not just the declared boundary ("policy Z") but the
 #         rule set the decision was actually made under.
-RECEIPT_VERSION = "mythos.assurance.receipt/1.1"
+#   2.0 — added ``served_route`` (what actually ran, every field observed or
+#         explicitly ``unknown``) and ``coverage`` (what was and was not
+#         assessed). A MAJOR bump, not a minor one: both are new hashed content,
+#         so every 1.1 digest differs from the 2.0 digest of the same state. A
+#         consumer that silently compared the two would report a change that did
+#         not happen, which is why the version is IN the hashed content and a
+#         reader is expected to key on it.
+RECEIPT_VERSION = "mythos.assurance.receipt/2.0"
+
+# Every receipt version this module can describe. A receipt in the wild carries
+# its own ``receipt_version``, and an auditor holding a 1.1 receipt still needs
+# the schema that reads it -- "versioned" is worth nothing if the previous
+# version's shape is only recoverable from git history. :func:`receipt_schema`
+# is the lookup; :data:`RECEIPT_SCHEMA` stays the current one so existing
+# callers are unaffected.
+SUPERSEDED_VERSIONS = ("mythos.assurance.receipt/1.1",)
 
 
 def _digest(payload: dict) -> str:
@@ -179,7 +209,10 @@ RECEIPT_SCHEMA = {
             "properties": {
                 "name": {"type": "string"},
                 "uuid": {"type": "string", "format": "uuid"},
-                "environment": {"type": "string", "description": "dev / staging / production / other."},
+                "environment": {
+                    "type": "string",
+                    "description": "dev / staging / production / other.",
+                },
                 "environment_label": {"type": "string"},
             },
         },
@@ -218,7 +251,10 @@ RECEIPT_SCHEMA = {
             ),
             "properties": {
                 "algorithm": {"type": "string", "const": ALGORITHM},
-                "root": {"type": "string", "description": "64-hex SHA-256 root over the evidence."},
+                "root": {
+                    "type": "string",
+                    "description": "64-hex SHA-256 root over the evidence.",
+                },
                 "finding_count": {"type": "integer"},
             },
         },
@@ -238,13 +274,95 @@ RECEIPT_SCHEMA = {
                 "bom": {"type": "string"},
             },
         },
+        "served_route": {
+            "type": "object",
+            "description": (
+                "What actually ran — the served-route identity (assurance.served_route). "
+                "A model NAME does not say what served the request, and a verdict that "
+                "cannot name the route cannot say whether the thing it was taken "
+                "against is the thing running now. Every field of every route is "
+                "present: one nothing observed is the literal string 'unknown', never "
+                "absent and never guessed, so a fully-instrumented route is "
+                "distinguishable from one where twelve fields were never looked at."
+            ),
+            "properties": {
+                "route_version": {
+                    "type": "string",
+                    "description": "The field roster's version.",
+                },
+                "fingerprint": {
+                    "type": "string",
+                    "description": (
+                        "64-hex SHA-256 over every route, unknowns included. A field "
+                        "moving from 'unknown' to a value moves this: the claim was "
+                        "bound to a state that included the not-knowing."
+                    ),
+                },
+                "route_count": {"type": "integer"},
+                "fully_observed_count": {
+                    "type": "integer",
+                    "description": "Routes with no unknown field.",
+                },
+                "complete": {
+                    "type": "boolean",
+                    "description": (
+                        "Every route fully observed. False when there are no routes at "
+                        "all: nothing served is not everything observed."
+                    ),
+                },
+                "unknown_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Every field unobserved on at least one route, named. A count "
+                        "alone is a number a reader cannot act on."
+                    ),
+                },
+            },
+            "required": ["route_version", "fingerprint", "route_count", "complete"],
+        },
+        "coverage": {
+            "type": "object",
+            "description": (
+                "What was and was not assessed (assurance.coverage). The half of "
+                "'exactly what was and wasn't proven' that the evidence root cannot "
+                "answer: a clean test leaves no finding, so 'no finding on this asset' "
+                "means either 'tested and clean' or 'never tested', and those are the "
+                "two readings that must not be confused."
+            ),
+            "properties": {
+                "expected": {"type": "integer", "description": "Declared components."},
+                "observed": {
+                    "type": "integer",
+                    "description": "Assets discovery found.",
+                },
+                "assessed": {
+                    "type": "integer",
+                    "description": "Assets something tested.",
+                },
+                "verdict": {
+                    "type": "string",
+                    "enum": ["complete", "incomplete", "undeclared"],
+                    "description": (
+                        "'undeclared' is its own answer, not a weak 'complete': with no "
+                        "declared architecture there is no promise to be short of."
+                    ),
+                },
+                "critical_gap": {
+                    "type": "boolean",
+                    "description": "A declared or high-risk component was never assessed.",
+                },
+            },
+            "required": ["expected", "observed", "assessed", "verdict", "critical_gap"],
+        },
         "algorithm": {"type": "string", "const": ALGORITHM},
         "digest": {
             "type": "string",
             "description": (
                 "The top-level SHA-256 over the stable content above (version, system, "
-                "result, policy, evidence root, assessment digests) — reproducible, no "
-                "timestamp inside. This is the value a signature is taken over."
+                "result, policy, evidence root, assessment digests, served route, "
+                "coverage) — reproducible, no timestamp inside. This is the value a "
+                "signature is taken over."
             ),
         },
         "computed_at": {
@@ -261,11 +379,80 @@ RECEIPT_SCHEMA = {
         "policy",
         "evidence",
         "assessments",
+        "served_route",
+        "coverage",
         "algorithm",
         "digest",
         "computed_at",
     ],
 }
+
+
+# The shape a 1.1 receipt has: this one, minus the two blocks 2.0 added. Kept as
+# data rather than in the commit history, because "the schema is versioned and
+# backward-readable" is only true if an auditor holding an older receipt can still
+# obtain the schema that reads it.
+_VERSION_1_1 = "mythos.assurance.receipt/1.1"
+
+_SCHEMA_1_1 = {
+    **{
+        k: v
+        for k, v in RECEIPT_SCHEMA.items()
+        if k not in ("$id", "properties", "required")
+    },
+    "$id": _VERSION_1_1,
+    "properties": {
+        **{
+            k: v
+            for k, v in RECEIPT_SCHEMA["properties"].items()
+            if k not in ("served_route", "coverage")
+        },
+        # Overridden, not inherited. The current schema pins `receipt_version` to
+        # the CURRENT version, so copying it would hand an auditor a 1.1 schema
+        # that requires the string "2.0" -- a schema that rejects the very
+        # receipts it exists to read, which is worse than not shipping one.
+        "receipt_version": {
+            **RECEIPT_SCHEMA["properties"]["receipt_version"],
+            "const": _VERSION_1_1,
+        },
+    },
+    "required": [
+        r for r in RECEIPT_SCHEMA["required"] if r not in ("served_route", "coverage")
+    ],
+}
+
+_SCHEMAS = {
+    RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_1_1: _SCHEMA_1_1,
+}
+
+
+class UnknownReceiptVersion(ValueError):
+    """A receipt version this module cannot describe.
+
+    Raised rather than falling back to the current schema. Handing back the 2.0
+    shape for a version we have never heard of would tell a consumer their receipt
+    has fields it does not have, and the fields it would invent -- served route and
+    coverage -- are exactly the ones whose absence matters.
+    """
+
+
+def receipt_schema(version: str | None = None) -> dict:
+    """The machine-readable schema for ``version``; the current one by default.
+
+    A receipt in the wild carries its own ``receipt_version``, so a consumer reads
+    that and asks here. An unknown version raises :class:`UnknownReceiptVersion`
+    and names what is available, because a wrong schema is worse than no schema.
+    """
+    if version is None:
+        return RECEIPT_SCHEMA
+    try:
+        return _SCHEMAS[version]
+    except KeyError:
+        known = ", ".join(sorted(_SCHEMAS))
+        raise UnknownReceiptVersion(
+            f"no schema for receipt version {version!r}; this module describes: {known}"
+        ) from None
 
 
 def _pinned_policy_version(deployment) -> str:
@@ -324,6 +511,57 @@ def _assessment_digests(deployment) -> dict:
     }
 
 
+def _served_route_reference(deployment) -> dict:
+    """The served-route summary the receipt carries: the fingerprint, how many
+    routes there are, how many were fully observed, and which fields were never
+    observed anywhere.
+
+    The per-route detail is deliberately NOT in the receipt. It is retrievable
+    from the deployment, it would grow the signable payload without bound, and two
+    of its fields are digests of the customer's prompt and tool schema -- the
+    receipt is built to travel to an external party, and the summary answers
+    "which configuration passed" without shipping the configuration.
+
+    ``unknown_fields`` is named rather than counted, because that is the list a
+    reader can act on: a field unknown on every route is an instrumentation gap in
+    the platform. Imported lazily -- :mod:`assurance.served_route` imports this
+    module for the digest helper.
+    """
+    from .served_route import deployment_served_routes
+
+    routes = deployment_served_routes(deployment)
+    return {
+        "route_version": routes["route_version"],
+        "fingerprint": routes["fingerprint"],
+        "route_count": routes["route_count"],
+        "fully_observed_count": routes["fully_observed_count"],
+        "complete": routes["complete"],
+        "unknown_fields": routes["unknown_fields"],
+    }
+
+
+def _coverage_reference(deployment) -> dict:
+    """The coverage manifest reduced to its counts and verdict.
+
+    The named entity lists stay out for the same reason the per-route detail does:
+    they are retrievable, they are unbounded, and the receipt's job is to let a
+    reader tell WHETHER something was left unassessed, then go and look. The
+    verdict carries the distinction that matters -- ``undeclared`` is its own
+    answer and never a weak ``complete``, because with no declared architecture
+    there is no promise to be short of.
+    """
+    from .coverage import coverage_manifest
+
+    manifest = coverage_manifest(deployment)
+    return {
+        "expected": manifest["expected"],
+        "observed": manifest["observed"],
+        "assessed": manifest["assessed"],
+        "verdict": manifest["verdict"],
+        "critical_gap": manifest["critical_gap"],
+    }
+
+
 def build_assurance_receipt(deployment) -> dict:
     """The full, versioned assurance receipt for a deployment — the roadmap tuple
     (*system, version, policy, evidence, time, environment, result*) as one
@@ -367,7 +605,9 @@ def build_assurance_receipt(deployment) -> dict:
             "decision": deployment.decision,
             # None-safe: an unassessed deployment has no decision, and an absent
             # decision is never read as "ready".
-            "decision_label": deployment.get_decision_display() if deployment.decision else None,
+            "decision_label": deployment.get_decision_display()
+            if deployment.decision
+            else None,
         },
         "policy": _policy_reference(deployment),
         "evidence": {
@@ -376,6 +616,13 @@ def build_assurance_receipt(deployment) -> dict:
             "finding_count": evidence_root["finding_count"],
         },
         "assessments": _assessment_digests(deployment),
+        # What actually ran, and what was never looked at. Both are hashed: an
+        # external party reading this receipt alone has to be able to answer
+        # "which configuration passed, and what was not covered", and neither
+        # question is answerable from an evidence root -- a clean test and an
+        # absent test leave the same silence behind them.
+        "served_route": _served_route_reference(deployment),
+        "coverage": _coverage_reference(deployment),
     }
 
     return {
