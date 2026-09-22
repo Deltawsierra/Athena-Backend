@@ -800,6 +800,15 @@ class Unknown(models.Model):
     class Source(models.TextChoices):
         DERIVED = "derived", "Derived from a finding"
         POSTURE = "posture", "Derived from an undeclared provider posture"
+        # Raised by the chain birth registry. Machine-raised, but deliberately
+        # NOT in ``unknowns._MACHINE_SOURCES``: that sweep auto-resolves any gap
+        # whose condition has closed, and a re-born chain is an EVENT rather than
+        # a condition. A chain that was born twice was born twice permanently;
+        # nothing the engine does later un-does it, so the gap closes only when a
+        # person accounts for what happened. Left in the sweep, the next ingest
+        # would quietly resolve the one alert this whole mechanism exists to
+        # raise.
+        CHAIN = "chain", "Raised by the chain birth registry"
         MANUAL = "manual", "Raised manually"
 
     id = models.BigAutoField(primary_key=True)
@@ -1626,6 +1635,96 @@ class LatentCondition(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()}: {self.subject} ({self.state})"
+
+
+class ChainBirth(models.Model):
+    """When an engine's tamper-evident chain was born, held where the engine
+    cannot reach it.
+
+    The engine's chain carries its own integrity checks, and they are good: a
+    deleted row breaks the walk, an edited head fails its mac, a restored older
+    head is behind the watermark. All of them read the same SQLite file.
+
+    So the one edit they cannot catch is the one that removes the file's memory
+    of itself. Delete the scans, the head and the watermark, restart the engine,
+    and it re-seeds: a fresh watermark at sequence zero and a genesis head with a
+    GENUINE mac. Every check then agrees that an empty table is an intact chain,
+    because from inside the file there is nothing left to disagree with. The
+    chain key does not help -- a genesis mac over an empty chain is exactly what
+    the real key computes.
+
+    This row is the outside memory. The engine reports its ``birth_id`` (a digest
+    over the chain name and the instant the chain was born); the control plane
+    records it the first time and compares every time after. A chain that reports
+    a birth_id different from the one on file was born twice, and a chain is born
+    once.
+
+    What this is NOT
+    ----------------
+    It is not prevention. Somebody who can delete the engine's database can also
+    stop the engine reporting, and this row cannot make an engine talk. It
+    detects, and detection is the honest claim: ``last_seen_at`` going stale is
+    itself a fact a reader can act on, which is why it is recorded separately
+    from ``first_registered_at``.
+
+    It is not proof of the chain's contents either. It says this chain is the one
+    we first saw, not that what is in it is true. The walk inside the engine still
+    does that job; this only stops the walk being run against a new chain wearing
+    the old one's name.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="chain_births"
+    )
+    # Which chain on that engine: the engine keeps several (scans, authority,
+    # effects...). Kept because a re-birth of one is not a re-birth of all, and a
+    # registry that collapsed them could not say which.
+    chain = models.CharField(max_length=64)
+
+    # The value the engine reports. Opaque here on purpose: the control plane
+    # compares it, it does not recompute it, because recomputing would need the
+    # engine's chain key and a registry holding that key is a registry that can
+    # forge what it is checking.
+    birth_id = models.CharField(max_length=128)
+    # The instant the engine says the chain was born, carried for a human reading
+    # the record. The comparison is on birth_id; this is the readable half.
+    born_at = models.CharField(max_length=64, blank=True)
+
+    # When we first accepted a birth for this (deployment, chain), and when we
+    # last saw one matching it. Separate fields, deliberately: a registry that
+    # only kept "last seen" could not tell a long-running chain from one that was
+    # re-registered a minute ago.
+    first_registered_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    # The highest sequence the engine has reported for this chain. Advanced only
+    # upward: a report that goes backwards is a signal, not a correction.
+    highest_seq = models.IntegerField(null=True, blank=True)
+
+    # Set when a DIFFERENT birth_id arrived for a chain already on file. The row
+    # keeps the ORIGINAL birth: overwriting it with the new one would destroy the
+    # only evidence that anything happened, which is precisely the edit this
+    # exists to survive.
+    rebirth_seen_at = models.DateTimeField(null=True, blank=True)
+    rebirth_birth_id = models.CharField(max_length=128, blank=True)
+    rebirth_count = models.IntegerField(default=0)
+
+    class Meta:
+        ordering = ["deployment", "chain"]
+        constraints = [
+            # One birth on file per chain per deployment. The second distinct
+            # birth is an event recorded ON this row, never a second row.
+            models.UniqueConstraint(
+                fields=["deployment", "chain"], name="uq_chain_birth_per_chain"
+            ),
+        ]
+        indexes = [models.Index(fields=["deployment", "rebirth_seen_at"])]
+
+    def __str__(self) -> str:
+        state = "re-born" if self.rebirth_seen_at else "original"
+        return f"{self.deployment_id}/{self.chain} ({state})"
 
 
 class RetestRequirement(models.Model):

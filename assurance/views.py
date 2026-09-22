@@ -16,7 +16,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count
 from django.shortcuts import get_object_or_404
-from rest_framework import mixins, permissions, viewsets
+from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
@@ -63,6 +63,7 @@ from .models import (
     RetestRequirement,
     Unknown,
 )
+from .chain_registry import ChainBirthRefused, register_birth, registry_posture
 from .receipt import build_assurance_receipt, deployment_receipt
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
@@ -435,6 +436,78 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             .get(pk=self.get_object().pk)
         )
         return Response(build_assurance_receipt(deployment))
+
+    @action(detail=True, methods=["post", "get"], url_path="chain-birth")
+    def chain_birth(self, request, uuid=None):
+        """Register, or read, the birth of an engine's tamper-evident chain.
+
+        POST is how an engine reports ``{"chain", "birth_id", "born_at", "seq"}``
+        from ``mythos_core.db.verify_scan_chain``. The first report establishes
+        the baseline; every one after it is compared. A different birth for a
+        chain already on file keeps the ORIGINAL, records the event beside it and
+        raises an Unknown.
+
+        This is the only check the engine cannot run on itself. Its chain
+        integrity is good and all of it reads the same SQLite file, so deleting
+        the rows, the head and the watermark and restarting produces a fresh
+        chain with a genuine mac that verifies perfectly. Holding the first birth
+        somewhere else is what makes that visible.
+
+        Admin-only on write: it is the system of record for whether an engine's
+        history is the one we first saw, and a caller that could overwrite it
+        could launder exactly the erasure it exists to catch. GET is a read like
+        the other assurance reads.
+        """
+        deployment = self.get_object()
+        if request.method.lower() == "get":
+            return Response(registry_posture(deployment))
+
+        _require_admin(request)
+        payload = request.data if isinstance(request.data, dict) else {}
+        raw_seq = payload.get("seq")
+        try:
+            seq = int(raw_seq) if raw_seq not in (None, "") else None
+        except (TypeError, ValueError):
+            # A sequence we cannot read is reported as absent rather than zero.
+            # Zero is a real sequence -- a freshly seeded chain -- and coercing
+            # an unreadable value to it would forge the one number that says a
+            # chain went backwards.
+            seq = None
+        try:
+            result = register_birth(
+                deployment,
+                chain=str(payload.get("chain") or ""),
+                birth_id=str(payload.get("birth_id") or ""),
+                born_at=str(payload.get("born_at") or ""),
+                seq=seq,
+            )
+        except ChainBirthRefused as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        birth = result["birth"]
+        return Response(
+            {
+                "status": result["status"],
+                "matched": result["matched"],
+                "chain": birth.chain,
+                "birth_id": birth.birth_id,
+                "first_registered_at": birth.first_registered_at.isoformat(),
+                "rebirth_count": birth.rebirth_count,
+                # Said on every answer, including the matching ones: a match is a
+                # statement about identity, never about the chain's contents.
+                "note": (
+                    "A matching birth means this is the chain we first saw. It "
+                    "says nothing about what is in it -- the engine's own walk "
+                    "does that -- and a chain absent from this registry has not "
+                    "been checked rather than passed."
+                ),
+            },
+            status=(
+                status.HTTP_201_CREATED
+                if result["status"] == "registered"
+                else status.HTTP_200_OK
+            ),
+        )
 
     @action(detail=True, methods=["get"], url_path="connectors")
     def connectors(self, request, uuid=None):
