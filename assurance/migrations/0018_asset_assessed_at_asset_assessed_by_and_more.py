@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0016_alter_finding_confidence_alter_finding_status"),
+        ("assurance", "0017_dispatchattempt_operation_id_and_more"),
     ]
 
     operations = [
