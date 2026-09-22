@@ -13,6 +13,8 @@ configuration it ships in, or the tests prove something nobody runs.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -332,3 +334,64 @@ def test_the_latency_table_is_admin_only(timings):
     """
     assert _latency(_viewer()).status_code == 403
     assert _latency(_admin()).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The exporter, and clearing the record without destroying live spans
+# ---------------------------------------------------------------------------
+
+def test_the_app_wires_the_exporter_at_startup():
+    """configure() was defined here and called from nowhere.
+
+    That is worse than not having it. With a collector configured in the
+    environment, status() reported `exporting: False` and the detail "spans are
+    created and dropped: no collector is configured" -- so the one operator who
+    had done the work was told to go and do it, on the route
+    (/api/assurance/deployments/latency/) that publishes that string. It also
+    dropped this service's half of every cross-engine trace, which is the half
+    the SPINE derivation contributes.
+    """
+    from django.apps import apps
+
+    config = apps.get_app_config("assurance")
+    source = inspect.getsource(config.ready)
+    assert "observability.configure()" in source, (
+        "the assurance app does not wire the tracing exporter at startup"
+    )
+
+
+def test_clearing_the_record_does_not_orphan_a_span_that_is_still_open():
+    """reset_timings() rebound the global; a span holds the object it entered with.
+
+    So a sample recorded after a reset landed in an orphan -- and selectively:
+    a span longer than the gap between resets can never survive, which is
+    exactly the slow work a p95 exists to find. Measured on the baseline
+    harness, an outer workflow span was lost while every one of its children
+    survived, publishing a table with one assessment and five of its own steps.
+    """
+    import assurance.observability as obs
+
+    before = obs.TIMINGS
+    with obs.span(obs.INVOKE_WORKFLOW, component="long_running", subject="deployment:1"):
+        obs.reset_timings()
+        assert obs.TIMINGS is before, (
+            "the recorder was replaced while a span was open; this span's "
+            "duration is about to be recorded into an object nothing reads"
+        )
+
+    rows = {row["component"]: row for row in obs.latency_table()}
+    assert "athena-backend.long_running" in rows, (
+        "the span that was open across the reset did not reach the live table"
+    )
+
+
+def test_clearing_the_record_still_clears_it():
+    """The guard must not be a reset that does not reset."""
+    import assurance.observability as obs
+
+    with obs.span(obs.PLAN, component="transient", subject="deployment:1"):
+        pass
+    assert any(r["component"] == "athena-backend.transient" for r in obs.latency_table())
+
+    obs.reset_timings()
+    assert obs.latency_table() == []

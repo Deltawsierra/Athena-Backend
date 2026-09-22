@@ -14,3 +14,14 @@ class AssuranceConfig(AppConfig):
         # are all in place and covered by tests.test_assurance_ingest_signal — no
         # data-model work remains outstanding under this phase.
         from . import signals  # noqa: F401
+
+        # Wire the tracing exporter. This was defined and never called, which
+        # is worse than not having it: with a collector configured in the
+        # environment, `status()` reported `exporting: False` and the detail
+        # "spans are created and dropped: no collector is configured" -- so the
+        # one operator who had done the work was told to go and do it. It also
+        # dropped the SPINE half of every cross-engine trace, which is the half
+        # this service contributes.
+        from . import observability
+
+        observability.configure()
