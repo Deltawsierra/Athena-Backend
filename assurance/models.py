@@ -83,6 +83,50 @@ EVIDENCE_STRENGTH_ORDER = (
 )
 
 
+# The five-way qualitative vocabulary -- Observed / Reproduced / Inferred /
+# Hypothesized / Unknown -- used in research and training material, mapped onto the
+# ordinal classes above. Two vocabularies for one idea drift apart the moment
+# nobody writes down how they line up, and then a curriculum and a product report
+# use the same word for different strengths of claim.
+#
+# The ORDINAL model above is canonical: it is what the code computes with, what the
+# weakest-link rule ranks, and what a receipt records. The qualitative labels are a
+# reading of it, never a second source of truth, which is why this maps one way
+# only. Reading back would invite writing a label into a field that stores a class.
+#
+# The mapping is deliberately not one-to-one, because the two vocabularies do not
+# carve the world the same way: "Observed" covers everything Mythos saw for itself
+# (a live probe or a read of the running configuration), while everything it was
+# merely told -- a document, a contract, a vendor's word -- is "Inferred", because
+# it is a conclusion drawn from someone else's statement rather than an
+# observation. "Reproduced" has no class of its own: reproduction is a property of
+# how a finding was established (twice, independently), not of the evidence class,
+# and asserting it from a class alone would be inventing a fact.
+QUALITATIVE_EVIDENCE_LABELS = {
+    EvidenceClass.TECHNICALLY_VERIFIED: "Observed",
+    EvidenceClass.CONFIGURATION_VERIFIED: "Observed",
+    EvidenceClass.DOCUMENT_SUPPORTED: "Inferred",
+    EvidenceClass.CONTRACTUALLY_STATED: "Inferred",
+    EvidenceClass.VENDOR_ASSERTED: "Inferred",
+    EvidenceClass.PARTIALLY_VERIFIED: "Hypothesized",
+    EvidenceClass.UNKNOWN: "Unknown",
+    EvidenceClass.NOT_DOCUMENTED: "Unknown",
+}
+
+
+def qualitative_evidence_label(classification: str) -> str:
+    """The qualitative reading of an evidence class, for prose and curricula.
+
+    Unrecognised input reads as "Unknown" -- the same direction
+    :func:`evidence_strength` fails in, so a label nobody defined never reads as a
+    stronger claim than the evidence supports.
+    """
+    try:
+        return QUALITATIVE_EVIDENCE_LABELS[EvidenceClass(classification)]
+    except (ValueError, KeyError):
+        return "Unknown"
+
+
 def evidence_strength(classification: str) -> int:
     """Ordinal for an evidence class (0 = strongest). Unknown values sort weakest
     so an unrecognised label never reads as strong evidence."""
@@ -408,9 +452,36 @@ class Finding(models.Model):
         TRIAGED = "triaged", "Triaged"
         REMEDIATING = "remediating", "Remediating"
         RETESTING = "retesting", "Retesting"
+        # A control limits a specific path, but the underlying defect is still
+        # there. Distinct from REMEDIATING, which says a fix is in progress: a
+        # contained finding may have no fix in progress at all, and reporting it as
+        # REMEDIATING would claim work nobody is doing. Never resolved.
+        CONTAINED = "contained", "Contained (defect not removed)"
+        # A premise behind an earlier decision changed or became unreliable, so the
+        # finding's severity and evidence can no longer be trusted as they stand.
+        # Distinct from OPEN, which says a fresh, undecided case: this one WAS
+        # decided, and the ground moved under it.
+        INVALIDATED = "invalidated", "Invalidated (premise no longer holds)"
         CLOSED = "closed", "Verified closed"
         ACCEPTED = "accepted", "Accepted risk"
         FALSE_POSITIVE = "false_positive", "False positive"
+
+    # What each status must NOT be read as. Two of these states exist because the
+    # existing ones were being stretched to cover them, and a state whose wrong
+    # reading is obvious to whoever added it is not obvious to a reader six months
+    # later looking at a report. Carried as data so the API and the dashboard show
+    # the same caveat rather than each inventing one.
+    MUST_NOT_IMPLY = {
+        Status.CONTAINED: "The defect has not been removed. A control limits one path to "
+        "it; the weakness itself is still present, and no fix is implied.",
+        Status.INVALIDATED: "No exploitation is implied, and no fix is implied. The "
+        "premise behind the earlier assessment changed, so the finding needs "
+        "re-assessing -- it is not a confirmed incident and not a closed case.",
+        Status.REMEDIATING: "A fix being in progress is not a fix being done, and not a "
+        "risk being contained in the meantime.",
+        Status.ACCEPTED: "Accepted is a human decision to carry the risk, not evidence "
+        "that the risk is small.",
+    }
 
     class RemediationState(models.TextChoices):
         """Where the *fix* is in the human remediation workflow (Phase 2.3).
@@ -456,7 +527,13 @@ class Finding(models.Model):
     finding_type = models.CharField(max_length=128)
     title = models.CharField(max_length=512)
     severity = models.CharField(max_length=16, choices=SEVERITY_CHOICES, default=SEVERITY_INFO)
-    confidence = models.FloatField(default=0.5)
+    # Nullable with NO default. A 0.5 default is false precision: it is a number
+    # nobody computed, indistinguishable in every report and every API response
+    # from a real 0.5 that a detector actually measured. The Claims engine already
+    # returns None rather than a number for an unknown confidence; this is the
+    # older model catching up with the discipline the rest of the platform is built
+    # on. Null means "not known", and null is never rendered as a figure.
+    confidence = models.FloatField(null=True, blank=True)
     cvss_score = models.FloatField(null=True, blank=True)
     cvss_vector = models.CharField(max_length=128, blank=True)
 
@@ -555,6 +632,17 @@ class Finding(models.Model):
 RESOLVED_FINDING_STATUSES = frozenset(
     {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
 )
+
+# Statuses whose severity can no longer be trusted as it stands: the finding is
+# neither resolved nor a live weakness at a known severity. An INVALIDATED finding
+# drives "needs more evidence", because its premise moved -- reporting its old
+# severity would be reporting a number the evidence no longer supports, and
+# dropping it would be reporting a clean bill nobody established.
+#
+# CONTAINED is deliberately NOT here: a contained finding's severity is still
+# exactly what it was. What changed is that one path to it is limited, which is not
+# the same as the defect being smaller.
+UNTRUSTED_SEVERITY_STATUSES = frozenset({Finding.Status.INVALIDATED})
 
 
 class Evidence(models.Model):

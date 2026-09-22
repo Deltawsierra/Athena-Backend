@@ -40,6 +40,7 @@ from django.conf import settings
 from django.db import transaction
 
 from .models import (
+    RESOLVED_FINDING_STATUSES,
     ConnectorBinding,
     Deployment,
     DispatchAttempt,
@@ -60,9 +61,12 @@ _BLOCKING_DECISIONS = frozenset(
 )
 
 # Findings that are done — never dispatched on a decision transition.
-_RESOLVED_STATUSES = frozenset(
-    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
-)
+# The one definition lives in ``assurance.models`` beside the statuses themselves.
+# Seven modules each kept their own copy of this set, and every one of their
+# comments said it "mirrors" the others so every view would agree on what "active"
+# means -- which is precisely the arrangement that lets them stop agreeing. Adding
+# a status meant editing eight places and silently disagreeing if you missed one.
+_RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 
 
 def _default_transport_factory():

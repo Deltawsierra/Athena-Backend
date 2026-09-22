@@ -12,10 +12,13 @@ safe now". Evidence for a human release decision, never the decision itself.
 
 Two independent signals, combined worst-first:
 
-- **Findings** (Phase 0.5, unchanged) place the deployment by the worst active
-  finding: a CRITICAL → NOT_RECOMMENDED, HIGH → NEEDS_REMEDIATION, MEDIUM/LOW →
+- **Findings** (Phase 0.5) place the deployment by the worst active finding: a
+  CRITICAL → NOT_RECOMMENDED, HIGH → NEEDS_REMEDIATION, MEDIUM/LOW →
   READY_RESTRICTED, only-unverified → NEEDS_MORE_EVIDENCE, nothing → READY. A
   deployment with no findings of any status is *unassessed by findings* (``None``).
+  An **INVALIDATED** finding does not place the deployment by its recorded
+  severity — that premise moved — but counts as a gap, so it reads as "needs more
+  evidence" rather than as either a live severity or a clean pass.
 - **Claims** (Stage 1C) cap the decision by claim health. A live CONTRADICTED claim
   (an assurance statement the current state falsifies) caps at NEEDS_REMEDIATION; a
   STALE or UNKNOWN claim, or any open retest obligation, caps at
@@ -33,12 +36,24 @@ everything.
 
 from __future__ import annotations
 
-from .models import AssuranceClaim, Deployment, EvidenceClass, Finding, RetestRequirement, severity_rank
+from .models import (
+    UNTRUSTED_SEVERITY_STATUSES,
+    RESOLVED_FINDING_STATUSES,
+    AssuranceClaim,
+    Deployment,
+    EvidenceClass,
+    Finding,
+    RetestRequirement,
+    severity_rank,
+)
 
 # Findings in these states no longer count against a deployment's readiness.
-_RESOLVED_STATUSES = frozenset(
-    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
-)
+# The one definition lives in ``assurance.models`` beside the statuses themselves.
+# Seven modules each kept their own copy of this set, and every one of their
+# comments said it "mirrors" the others so every view would agree on what "active"
+# means -- which is precisely the arrangement that lets them stop agreeing. Adding
+# a status meant editing eight places and silently disagreeing if you missed one.
+_RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 
 # Evidence classes that mean "we genuinely do not know this" — they drive
 # "Requires additional evidence" rather than a clean pass. This is deliberately
@@ -90,6 +105,15 @@ def _decision_from_findings(deployment: Deployment) -> str | None:
     worst_rank = -1
     has_unverified = False
     for f in active:
+        if f.status in UNTRUSTED_SEVERITY_STATUSES:
+            # An INVALIDATED finding was assessed and then the ground moved. Its
+            # recorded severity is a number the evidence no longer supports, so it
+            # does not place the deployment -- but it is not resolved either, and
+            # dropping it would hand back a clean bill nobody established. It
+            # counts as a gap: "needs more evidence", the same as truly unknown
+            # evidence.
+            has_unverified = True
+            continue
         rank = severity_rank(f.severity)
         if rank > worst_rank:
             worst_rank = rank

@@ -116,6 +116,15 @@ class FindingSerializer(serializers.ModelSerializer):
     # to its evidence hashes. Integrity/provenance, not proof the conclusion is
     # true — the evidence class carries how strongly it is known.
     receipt = serializers.SerializerMethodField()
+    # What this status must not be read as, where the status has a wrong reading
+    # worth naming. Served from the model's one table so the API and the dashboard
+    # cannot each invent their own caveat -- a CONTAINED finding that a report
+    # renders as "being fixed", or an INVALIDATED one it renders as an incident, is
+    # the whole reason these states were added.
+    status_must_not_imply = serializers.SerializerMethodField()
+
+    def get_status_must_not_imply(self, obj) -> str | None:
+        return Finding.MUST_NOT_IMPLY.get(obj.status)
 
     class Meta:
         model = Finding
@@ -129,6 +138,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "cvss_score",
             "cvss_vector",
             "status",
+            "status_must_not_imply",
             "owner",
             "assignee",
             "remediation_state",

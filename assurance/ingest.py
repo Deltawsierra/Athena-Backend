@@ -320,10 +320,18 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
         finding_type = str(f.get("type") or "finding").strip() or "finding"
         fingerprint = _fingerprint(deployment, _dedup_basis(f, finding_type))
         severity = _finding_severity(f)
-        try:
-            confidence = float(f.get("confidence", 0.5))
-        except (TypeError, ValueError):
-            confidence = 0.5
+        # No default. An engine that reported no confidence, or something that is
+        # not a number, has told us it does not know -- and 0.5 would put a figure
+        # nobody computed into every report, indistinguishable from a real 0.5 a
+        # detector measured. Null means not known.
+        raw_confidence = f.get("confidence")
+        if raw_confidence is None:
+            confidence = None
+        else:
+            try:
+                confidence = float(raw_confidence)
+            except (TypeError, ValueError):
+                confidence = None
 
         # Fields refreshed on every ingest (the engine's current truth).
         engine_fields = {

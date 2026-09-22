@@ -122,6 +122,7 @@ The return shape of :func:`build_business_impact`::
 from __future__ import annotations
 
 from .models import (
+    RESOLVED_FINDING_STATUSES,
     SEVERITY_HIGH,
     SEVERITY_MEDIUM,
     SEVERITY_ORDER,
@@ -134,9 +135,12 @@ from .models import (
 # view agrees on what "active" means. A resolved finding may still be listed
 # against the dimension it historically implicated, with a zero active count and
 # no exposure band.
-_RESOLVED_STATUSES = frozenset(
-    {Finding.Status.CLOSED, Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE}
-)
+# The one definition lives in ``assurance.models`` beside the statuses themselves.
+# Seven modules each kept their own copy of this set, and every one of their
+# comments said it "mirrors" the others so every view would agree on what "active"
+# means -- which is precisely the arrangement that lets them stop agreeing. Adding
+# a status meant editing eight places and silently disagreeing if you missed one.
+_RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 
 # ---------------------------------------------------------------------------
 # Business-impact dimensions (curated module data)
