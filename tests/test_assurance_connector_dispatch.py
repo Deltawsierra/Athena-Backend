@@ -229,6 +229,15 @@ def test_connector_failure_is_recorded_not_raised(deployment):
 
 @with_key
 def test_transport_exception_is_recorded_not_raised(deployment):
+    """A connector never raises out of a push -- the original point of this test.
+
+    What it records has become more precise: a bare ``ConnectionError`` says the
+    connection broke and not WHEN, so the request may already have been on the
+    wire and the provider may have committed it. That is UNKNOWN, not FAILED,
+    because recording it FAILED is what licenses a retry that double-executes
+    (Phase 3 item 8). The certain cases are covered in
+    tests/test_dispatch_unknown_outcome.py.
+    """
     _jira_binding(deployment)
     finding = _finding(deployment)
 
@@ -239,8 +248,28 @@ def test_transport_exception_is_recorded_not_raised(deployment):
     attempts = dispatch_finding(
         finding, trigger=DispatchAttempt.Trigger.SEVERITY, transport_factory=lambda: BoomTransport()
     )
-    assert attempts[0].outcome == DispatchAttempt.Outcome.FAILED
+    assert attempts[0].outcome == DispatchAttempt.Outcome.UNKNOWN
     assert "transport error" in attempts[0].detail
+
+
+@with_key
+def test_a_refused_connection_is_recorded_as_a_plain_failure(deployment):
+    """The one builtin case that is unambiguous: the peer refused, so nothing was
+    sent, so this stays FAILED and stays retryable."""
+    _jira_binding(deployment)
+    finding = _finding(deployment)
+
+    class RefusedTransport:
+        def post(self, url, *, headers, json):
+            raise ConnectionRefusedError("refused")
+
+    attempts = dispatch_finding(
+        finding,
+        trigger=DispatchAttempt.Trigger.SEVERITY,
+        transport_factory=lambda: RefusedTransport(),
+    )
+    assert attempts[0].outcome == DispatchAttempt.Outcome.FAILED
+    assert attempts[0].blocks_retry is False
 
 
 @with_key

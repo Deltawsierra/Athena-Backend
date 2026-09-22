@@ -65,6 +65,63 @@ class Response(Protocol):
     def text(self) -> str: ...
 
 
+class NotSent(Exception):
+    """The request certainly never reached the provider.
+
+    A connection that was never established, a name that never resolved: nothing
+    left the client, so the provider cannot have committed anything, and retrying
+    is safe. This is the ONLY case a client can be sure about.
+    """
+
+
+class OutcomeUnknown(Exception):
+    """The request may have been received and committed before the answer was lost.
+
+    A read timeout is the canonical case: the request went out, the provider may
+    have created the ticket, and the acknowledgement never came back. Recording this
+    as a failure licenses a retry that double-executes; recording it as a success
+    claims a ticket that may not exist. Neither is true, so it gets its own state.
+    """
+
+
+def classify_transport_error(exc: BaseException) -> type[NotSent] | type[OutcomeUnknown]:
+    """Which of the two an arbitrary transport error is. Defaults to UNKNOWN.
+
+    Fail-closed by construction: an error this does not recognise is treated as
+    possibly-committed, because the alternative default -- assuming nothing was
+    sent -- is the one that licenses a duplicate effect on the customer's system.
+    Only errors that can only happen *before any bytes reach the server* are
+    classified as NotSent, and they are recognised by their cause rather than by
+    their message, because a message is not a contract.
+    """
+    import requests.exceptions as rex
+
+    try:
+        from urllib3.exceptions import NameResolutionError, NewConnectionError
+    except ImportError:  # pragma: no cover - urllib3 ships with requests
+        NameResolutionError = NewConnectionError = ()  # type: ignore[assignment]
+
+    if isinstance(exc, rex.ConnectTimeout):
+        # A connect timeout is exactly "the connection was never made".
+        return NotSent
+    if isinstance(exc, ConnectionRefusedError):
+        # Python's own builtin, and the one builtin case that is unambiguous: the
+        # peer refused the connection, so nothing was ever sent. Its siblings --
+        # ConnectionResetError, BrokenPipeError, ConnectionAbortedError -- all mean
+        # the connection died at a point we cannot pin down, so they fall through.
+        return NotSent
+    if isinstance(exc, rex.ConnectionError):
+        # A ConnectionError covers both "never connected" (DNS, refused) and
+        # "connection died mid-request". Only the first is safe, and urllib3's own
+        # exception type is what tells them apart.
+        cause = exc.args[0] if exc.args else None
+        wrapped = getattr(cause, "reason", cause)
+        if NewConnectionError and isinstance(wrapped, (NewConnectionError, NameResolutionError)):
+            return NotSent
+        return OutcomeUnknown
+    return OutcomeUnknown
+
+
 @runtime_checkable
 class Transport(Protocol):
     """The single I/O primitive every adapter is given. One ``post`` call, with
@@ -117,6 +174,17 @@ class ConnectorResult:
     external_ref: str | None
     detail: str
     connector: str
+    # Whether the outcome is KNOWN. ``ok=False, certain=True`` is "it definitely
+    # did not happen"; ``ok=False, certain=False`` is "it may have happened and we
+    # cannot tell". Defaults to True so every existing result -- a parsed response,
+    # an inert connector -- keeps meaning exactly what it meant: those are the
+    # cases where the client does know.
+    certain: bool = True
+
+    @property
+    def uncertain(self) -> bool:
+        """True when the provider may have committed this and the client cannot tell."""
+        return not self.ok and not self.certain
 
     def as_dict(self) -> dict:
         """A plain, JSON-safe dict — what an API surfaces to a caller."""
@@ -125,6 +193,7 @@ class ConnectorResult:
             "external_ref": self.external_ref,
             "detail": self.detail,
             "connector": self.connector,
+            "certain": self.certain,
         }
 
 
@@ -237,11 +306,24 @@ class Connector(ABC):
         try:
             response = transport.post(url, headers=headers, json=payload)
         except Exception as exc:  # noqa: BLE001 — any transport error is a failed push, not a crash
+            # A transport error is not one thing. "The connection was never made"
+            # and "the request went out and the answer never came back" were both
+            # reported as ok=False, which meant a read timeout after the provider
+            # had already created the ticket was recorded as a failure and retried
+            # -- creating it twice. They are told apart here.
+            kind = classify_transport_error(exc)
+            certain = kind is NotSent
+            what = (
+                "nothing was sent"
+                if certain
+                else "the request may have been received before the answer was lost"
+            )
             return ConnectorResult(
                 ok=False,
                 external_ref=None,
-                detail=f"{self.name} transport error: {exc}",
+                detail=f"{self.name} transport error ({what}): {exc}",
                 connector=self.name,
+                certain=certain,
             )
         return self._parse(response)
 
