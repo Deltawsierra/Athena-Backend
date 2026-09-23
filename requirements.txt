@@ -112,17 +112,27 @@ zopfli==0.2.3.post1
 # definition the engine uses, so the two never disagree, and mythos_core.tracing
 # for the shared span vocabulary assurance/observability.py binds.
 #
-# Pinned to the v0.2.2 release COMMIT rather than "@v0.2.2": tag refs cannot be
-# pushed from these sessions -- the remote answers 403 to a receive-pack for
-# refs/tags/* while branch pushes succeed (Mythos-Core#10 records the same denial
-# for v0.2.0 and what a person still needs to do). A commit pin is immutable and
-# resolves the same tree. CI needs a MYTHOS_CORE_TOKEN secret to install the
-# private dependency, as on the engine repos.
+# Pinned to a COMMIT rather than a tag: tag refs cannot be pushed from these
+# sessions -- the remote answers 403 to a receive-pack for refs/tags/* while
+# branch pushes succeed (Mythos-Core#10 records the same denial for v0.2.0 and
+# what a person still needs to do). A commit pin is immutable and resolves the
+# same tree. CI needs a MYTHOS_CORE_TOKEN secret to install the private
+# dependency, as on the engine repos.
 #
-# v0.2.2 fixes the OTLP exporter being handed a base URL -- every batch POSTed to
-# / and the collector answered 404 while tracing_status() reported "spans are
-# created and exported". This service binds that tracing, so before the bump its
-# telemetry was configured and gone with nothing saying so. The release also
-# redacts userinfo out of the endpoint that status block publishes, and bounds
-# Timings so the measuring apparatus stops changing the latency it measures.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@539538c611a77190bd069c26bbb9da2a05d5877a
+# What this pin adds over the previous one (539538c, Mythos-Core#23):
+#
+# Mythos-Core#24 -- the control loop died on a hostile command. The failure log
+# line evaluated _action_of(command) as an ARGUMENT, so attribute access on the
+# command ran outside the guard written to survive it; a .action property raising
+# anything but AttributeError unwound the daemon thread. An engine in that state
+# can no longer receive the RELEASE that frees it or the TERMINATE that escalates
+# a failed stand-down, and ControlLoop has no restart. This service is the control
+# plane those commands are drafted and relayed from, so an engine stuck that way
+# is an engine its own console cannot reach.
+#
+# Mythos-Core#25 -- a caller-supplied proxies= walked past _check_proxy. A proxy
+# retires both halves of the egress guard (urllib3 hands the proxy a hostname, so
+# the approved address is never dialled), and the merge used `or`, so a caller
+# dict naming any scheme also suppressed the whole of an operator's mandatory
+# proxy configuration while proxy_summary() went on printing it.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@6f4bb4997fcda6fdad9ca8c03c1d8fb9b31c5c7a
