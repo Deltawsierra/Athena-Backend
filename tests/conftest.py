@@ -4,7 +4,6 @@ import os
 import pathlib
 import sys
 
-import django
 import pytest
 
 from tests.mythos_core_provenance import (
@@ -62,7 +61,7 @@ def _imported_file() -> str | None:
     return str(path) if path else None
 
 
-def pytest_sessionstart(session):
+def enforce_dependency_pins() -> None:
     """Refuse to run the suite against a mythos-core that is not the pinned one.
 
     This aborts the session instead of failing a test, because the failure is not
@@ -72,6 +71,27 @@ def pytest_sessionstart(session):
 
     It runs before `django.setup()` below for the same reason -- the drift shows
     up as import-time explosions once Django starts pulling the app in.
+    NOT A ``pytest_sessionstart`` HOOK ANY MORE, and that is the whole point of
+    this function existing under its own name.
+
+    ``pytest_sessionstart`` fires after every conftest has been IMPORTED (and
+    after ``pytest_configure``). A wrong pinned dependency does not politely
+    wait for that: it breaks the imports at the top of this very file, pytest
+    reports a conftest ImportError, and the hook written to explain exactly this
+    failure is the one thing that never runs. Reproduced in Athena-Engine with a
+    `mythos_core` on `PYTHONPATH` that lacks what the engine imports::
+
+        ImportError while loading conftest '.../tests/conftest.py'
+        E   ImportError: cannot import name 'pinned_dns' from 'mythos_core.http'
+
+    A reader sees a missing symbol and goes looking for a bug in the engine. The
+    guard knew: it had the pinned commit, the loaded path, the remedy and the
+    opt-out, and said none of it. Minotaur-Engine hit the same shape for real --
+    a checkout at one commit against a pin at another stopped collection
+    entirely, and the guard could not report it.
+
+    So it is called at IMPORT time, from the line below, above every import in
+    this file that a wrong dependency can break.
     """
     if os.environ.get(OPT_OUT_ENV, "").strip().lower() in {"off", "0", "false", "no"}:
         # Loud on purpose, and on every run. See OPT_OUT_ENV.
@@ -105,6 +125,20 @@ def pytest_sessionstart(session):
         return
 
     raise pytest.UsageError("mythos-core pin guard: " + "\n".join(problems))
+
+
+# Run the guard HERE, at conftest import, before the imports below.
+#
+# The ordering is load-bearing, not tidiness: a wrong pinned dependency breaks
+# those imports, and anything scheduled for later -- a pytest hook, a fixture,
+# a test -- never runs to say why. `enforce_dependency_pins` explains this at
+# length, and `test_the_guard_runs_before_the_imports_it_is_about` pins the
+# ordering so it cannot be undone by a later tidy-up of this file.
+enforce_dependency_pins()
+
+# Imports that a wrong pinned dependency can break, deliberately BELOW
+# the guard call above.
+import django
 
 
 def pytest_configure():
