@@ -1,3 +1,4 @@
+import importlib
 import importlib.metadata
 import os
 import pathlib
@@ -11,6 +12,7 @@ from tests.mythos_core_provenance import (
     complaint,
     declared_pin,
     provenance_from_direct_url,
+    shadow_complaint,
     remedy,
 )
 
@@ -29,6 +31,35 @@ def _installed_direct_url():
         return None
     except OSError:
         return None
+
+
+def _dist_base() -> str | None:
+    """The directory pip's metadata for mythos-core sits in, or None.
+
+    For an ordinary install the package is beside the ``.dist-info``; for an
+    editable one it is not, which is why this is one candidate and not the test.
+    """
+    try:
+        return str(importlib.metadata.distribution("mythos-core").locate_file(""))
+    except (importlib.metadata.PackageNotFoundError, OSError, AttributeError):
+        return None
+
+
+def _imported_file() -> str | None:
+    """Where Python actually loads ``mythos_core`` from, or None.
+
+    A real import, because that is the whole point: every other input to this
+    guard comes from metadata, and metadata is what a shadowing checkout leaves
+    untouched. Broad except on purpose -- any failure to import means the guard
+    cannot show the pinned core was loaded, which `shadow_complaint` reports
+    rather than swallowing.
+    """
+    try:
+        module = importlib.import_module("mythos_core")
+    except BaseException:  # noqa: BLE001 - see docstring
+        return None
+    path = getattr(module, "__file__", None)
+    return str(path) if path else None
 
 
 def pytest_sessionstart(session):
@@ -57,13 +88,23 @@ def pytest_sessionstart(session):
         pin = None
 
     found = provenance_from_direct_url(_installed_direct_url())
+    problems = []
     grievance = complaint(pin, found)
-    if grievance is None:
+    if grievance:
+        problems.append(grievance + "\n  " + remedy(found))
+
+    # Asked separately, and asked even when the pin matched: every check above this
+    # line reads pip's metadata, and a checkout earlier on sys.path satisfies all of
+    # them while Python loads something else entirely. This module's own docstring
+    # is about "what is actually imported"; nothing in it looked at the import.
+    shadow = shadow_complaint(_imported_file(), found, dist_base=_dist_base())
+    if shadow:
+        problems.append(shadow)
+
+    if not problems:
         return
 
-    raise pytest.UsageError(
-        "mythos-core pin guard: " + grievance + "\n  " + remedy(found)
-    )
+    raise pytest.UsageError("mythos-core pin guard: " + "\n".join(problems))
 
 
 def pytest_configure():
