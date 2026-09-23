@@ -25,6 +25,8 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
+from . import composition
+
 # ---------------------------------------------------------------------------
 # Shared vocabularies
 # ---------------------------------------------------------------------------
@@ -2305,3 +2307,149 @@ class DispatchAttempt(models.Model):
 
     def __str__(self) -> str:
         return f"{self.connector} <- finding {self.finding_id}: {self.outcome}"
+
+
+# ---------------------------------------------------------------------------
+# The compositional assurance graph — approved workflows and their chain outcomes
+# ---------------------------------------------------------------------------
+
+
+class ApprovedWorkflow(models.Model):
+    """One approved business workflow: the unit the assurance graph is scoped to.
+
+    :mod:`assurance.composition` states the rule for how N per-workflow chains
+    compose into ONE deployment decision, and that rule turns on a set this
+    database could not previously hold. Its central refusal is the silent zero of
+    this domain:
+
+        *"A deployment with fifty approved workflows and one chain, held, is not a
+        deployment that is ready: it is a deployment where one workflow was
+        checked."*
+
+    That refusal only works if something knows the fifty. This model is the fifty.
+    Without it, :func:`~assurance.composition.compose` can only be called with
+    ``expected_workflows=None`` — which it handles honestly, by reporting that it
+    speaks for the chains it was given and nothing else, but which means the
+    platform can never say a deployment's workflows are *covered*.
+
+    ``slug`` is the identity :class:`WorkflowChainOutcome` names and the string
+    :func:`~assurance.composition.compose` keys on, so an outcome and an approval
+    match on one spelling rather than on a display name somebody re-capitalised.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="approved_workflows"
+    )
+    # The stable identity, and the join key with WorkflowChainOutcome.workflow.
+    # Not the display name: two spellings of one workflow would compose as two
+    # workflows, one of them permanently unreported.
+    slug = models.SlugField(max_length=200)
+    name = models.CharField(max_length=255)
+    # What the workflow is approved TO DO — which agent may use which governed
+    # information, under whose authority, to produce which external effects. Prose
+    # on purpose: this is the human approval, and the machine-checkable half of it
+    # is the chain, not this field.
+    description = models.TextField(blank=True)
+    # Who approved it, kept for provenance. SET_NULL so removing a user never
+    # deletes the approval — an approval whose approver left is still an approval,
+    # and deleting it would silently shrink the expected set, which is the one
+    # direction this model exists to prevent.
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_workflows",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["deployment", "slug"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "slug"],
+                name="uq_approved_workflow_deployment_slug",
+            ),
+        ]
+        indexes = [models.Index(fields=["deployment"])]
+
+    def __str__(self) -> str:
+        return f"approved workflow {self.slug}"
+
+
+class WorkflowChainOutcome(models.Model):
+    """What one exercise of one workflow's authority-to-effect chain established.
+
+    The persisted counterpart of :class:`assurance.composition.ChainOutcome`, and
+    deliberately shaped so nothing is lost on the way in.
+
+    IT NAMES THE WORKFLOW BY SLUG, NOT BY FOREIGN KEY, and that is the whole
+    design. A ``ForeignKey(ApprovedWorkflow)`` would read as the tidier schema and
+    would make one of the composition rule's most important counters permanently
+    zero: :attr:`~assurance.composition.Composition.workflows_unapproved` counts
+    outcomes that arrived for workflows **not** on the approved list, and
+    :func:`~assurance.composition.explain` says so in words. An outcome that can
+    only point at an approved row cannot represent a chain exercising a workflow
+    nobody approved — so the count would be structurally 0, the sentence would
+    always read the reassuring way, and the check would be decorative. A chain
+    exercising an unapproved workflow is precisely what this platform exists to
+    notice, so the schema has to be able to hold one.
+
+    The deployment is the foreign key instead, because that is the real scope: an
+    outcome belongs to a deployment whether or not the workflow it names was ever
+    approved.
+
+    ``observed_at`` is nullable, and null means *recency unknown* rather than
+    *oldest*. :func:`~assurance.composition.compose` already treats an undated
+    outcome as unable to supersede anything and impossible to supersede, which is
+    the conservative reading; storing a fabricated timestamp to avoid the null
+    would hand that rule a fact nobody established.
+    """
+
+    #: The four statuses, taken from the rule module rather than re-typed. A
+    #: model choice and the rule that reads it cannot drift if there is only one
+    #: list — and a status outside the set is an error there, not a default.
+    class Status(models.TextChoices):
+        HELD = composition.HELD, "Held — the chain was exercised and it holds"
+        VIOLATED = composition.VIOLATED, "Violated — exercised, and does not hold"
+        NOT_DEMONSTRATED = (
+            composition.NOT_DEMONSTRATED,
+            "Not demonstrated — exercised, evidence thin",
+        )
+        INCOMPLETE = composition.INCOMPLETE, "Incomplete — not fully exercised"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="chain_outcomes"
+    )
+    # The workflow this outcome is about, by slug. Matched against
+    # ApprovedWorkflow.slug; deliberately NOT a foreign key (see the class
+    # docstring) so an outcome for an unapproved workflow is representable.
+    workflow = models.SlugField(max_length=200)
+    status = models.CharField(max_length=32, choices=Status.choices)
+    # When the chain was exercised. Null = recency unknown, which the rule handles
+    # explicitly; never a stand-in for "a long time ago".
+    observed_at = models.DateTimeField(null=True, blank=True)
+    # Where the outcome came from — a scan, a campaign, an operator. Free text
+    # because the sources are not all modelled here yet, and naming the ones that
+    # are while silently dropping the rest would be worse than naming none.
+    source = models.CharField(max_length=255, blank=True)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Newest first by the instant that matters, with nulls last: an undated
+        # outcome has no place in a recency order, so it goes after the dated ones
+        # rather than sorting as if it were the newest or the oldest.
+        ordering = [models.F("observed_at").desc(nulls_last=True), "-created_at"]
+        indexes = [
+            models.Index(fields=["deployment", "workflow"]),
+            models.Index(fields=["deployment", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workflow}: {self.status}"
