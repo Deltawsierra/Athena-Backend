@@ -196,17 +196,41 @@ def _derive_effective_access(deployment) -> dict:
     """EFFECTIVE_ACCESS claim from :func:`assurance.access.assess_effective_access`.
 
     Any principal carrying a HIGH-risk privileged / over-broad / ungoverned-reach
-    gap ⇒ CONTRADICTED; nothing to assess (no principals) ⇒ UNKNOWN; otherwise
-    SUPPORTED, promoted to VERIFIED only when the reach is configuration-verified
-    and no high-risk gap of any kind remains. The reach is read from declared
-    configuration, so its evidence class is ``configuration_verified``.
+    gap ⇒ CONTRADICTED; nothing to assess (no principals) ⇒ UNKNOWN; any other
+    high-risk gap ⇒ SUPPORTED; a clean reach over a graph with an unplaceable
+    reference in it ⇒ PARTIALLY_VERIFIED; a clean reach over a whole graph ⇒
+    VERIFIED. The reach is read from declared configuration, so its evidence class
+    is ``configuration_verified`` — except where the graph could not be read
+    whole, which is the next paragraph.
 
-    **An unresolved reference caps the claim at SUPPORTED.** The reach is computed
-    over the graph the inventory declares, and a dangling reference means part of
-    that graph could not be placed: the assessment cannot have followed a hop into
-    a component discovery never found. "No high-risk reach" over an incomplete
-    graph is a measurement of what we could see, not a verification, and calling it
-    VERIFIED would turn the hole into a clean bill of health."""
+    **An unresolved reference makes it PARTIALLY_VERIFIED, not VERIFIED.** The
+    reach is computed over the graph the inventory declares, and a dangling
+    reference means part of that graph could not be placed: the assessment cannot
+    have followed a hop into a component discovery never found. "No high-risk
+    reach" over an incomplete graph is a measurement of what we could see, not a
+    verification, and calling it VERIFIED would turn the hole into a clean bill of
+    health.
+
+    PARTIALLY_VERIFIED is the exact state, and it already exists: the reach IS
+    verified over the part of the graph that could be read, and the part that could
+    not be read is why the claim stops short of VERIFIED. SUPPORTED would lose that
+    distinction -- it says "there is supporting evidence", not "we verified what we
+    could see and here is what we could not". The evidence class drops to
+    ``partially_verified`` for the same reason, so the confidence number moves with
+    the hole instead of reading 0.88 either way.
+
+    What this deliberately does NOT do is materialise the unplaced reference as an
+    asset. An earlier version of this change did, and a node nobody enumerated is a
+    manufactured fact: it reads as an undeclared component to the BOM drift check,
+    as a governed one to every ``_MANAGED`` predicate, and it moves the deployment's
+    fingerprint for an inventory that did not change. The gap belongs in the
+    claim's *confidence*, where it is a statement about how well we know; it does
+    not belong in the *graph*, where it would be a statement about what exists.
+
+    PARTIALLY_VERIFIED imposes no decision cap (see
+    :func:`assurance.decision.claim_cap`), which is the point: an unreadable
+    reference is a limit on the measurement, not a finding against the deployment.
+    Nothing here may move a decision on its own."""
     result = assess_effective_access(deployment)
     principals = result["principals"]
     unresolved = result["unresolved"]
@@ -215,55 +239,68 @@ def _derive_effective_access(deployment) -> dict:
         status = Status.UNKNOWN
         evidence_class = EvidenceClass.UNKNOWN.value
         vendor_asserted = True
-        # An unplaceable reference on a graph with no principals is recorded in the
-        # supporting digest rather than as contradicting evidence: there is no
-        # positive claim here for it to contradict, and it is still the reason an
-        # operator should not read "nothing to assess" as "nothing here".
+        # No status or evidence change for an unplaceable reference here: with no
+        # principals the claim is already UNKNOWN, which is as weak as it goes.
+        # It still reaches the supporting digest below, because it is the reason
+        # an operator should not read "nothing to assess" as "nothing here".
     else:
         gaps = [g for p in principals for g in p["gaps"]]
         contradicting = [
             g for g in gaps if g["type"] in _CONTRADICTING_ACCESS_GAPS and g["risk"] == RISK_HIGH
         ]
         any_high_risk_gap = any(g["risk"] == RISK_HIGH for g in gaps)
-        evidence_class = EvidenceClass.CONFIGURATION_VERIFIED.value
+        # The reach is read from declared configuration -- except where it could
+        # not be read at all. An unplaceable reference means the graph the reach
+        # was computed over had a hole in it, and that is a fact about the
+        # strength of the evidence, so it is recorded as one. Without this the
+        # confidence number is identical whether the graph was whole or not.
+        evidence_class = (
+            EvidenceClass.PARTIALLY_VERIFIED.value
+            if unresolved
+            else EvidenceClass.CONFIGURATION_VERIFIED.value
+        )
         vendor_asserted = False
         if contradicting:
             status = Status.CONTRADICTED
-        elif not any_high_risk_gap and not unresolved:
-            status = Status.VERIFIED
-        else:
+        elif any_high_risk_gap:
+            # A measured high-risk gap outranks an unreadable reference: it is
+            # something we found, not something we could not look at. The
+            # incompleteness is not lost on this branch -- the evidence class
+            # above is already partially_verified, and the supporting digest
+            # below names every reference that could not be placed.
             status = Status.SUPPORTED
+        elif unresolved:
+            status = Status.PARTIALLY_VERIFIED
+        else:
+            status = Status.VERIFIED
 
     summary = result["summary"]
     supporting = (
         f"{summary['principals']} principal(s) assessed; "
         f"{summary['privileged']} privileged, {summary['shadow']} shadow, {summary['over_broad']} over-broad."
     )
-    if unresolved and not principals:
+    if unresolved:
+        # In the SUPPORTING digest on both branches, not the contradicting one.
+        # An unplaceable reference is a limit on what was measured, not evidence
+        # that the access is over-broad: nothing about it argues the statement is
+        # false, and filing it as contradicting evidence says we found something
+        # against the deployment when what we found is that we could not look.
+        # The supporting digest is the record of what the assessment covered, and
+        # what it could not reach is part of that record.
+        #
+        # Counted over the SAME set it enumerates. It used to count
+        # len(unresolved) and enumerate a set of "source → reference" pairs, so a
+        # duplicated inventory line said "2 declared reference(s)" above one pair:
+        # an operator told to chase two and handed one goes looking for a
+        # reference that does not exist. Distinct pairs, counted and listed.
+        pairs = sorted({f"{u['source']} → {u['reference']}" for u in unresolved})
         supporting += (
-            f" {len(sorted({(u['source'], u['reference']) for u in unresolved}))} declared "
-            "reference(s) could not be placed, so this is what we could read of the "
-            "inventory rather than all of it."
+            f" {len(pairs)} declared reference(s) could not be placed, so this is "
+            "the reach over the graph we could read rather than all of it: "
+            + ", ".join(pairs)
+            + "."
         )
     contradicting_bits: list[str] = []
-    if unresolved and principals:
-        # Counted over the SAME set it enumerates. It used to count len(unresolved)
-        # and enumerate a set of "source → reference" pairs, so a duplicated
-        # inventory line said "2 declared reference(s)" above one pair: an operator
-        # told to chase two and handed one goes looking for a reference that does
-        # not exist. Distinct pairs, counted and listed.
-        #
-        # Only on the `principals` branch. With nothing to assess the claim is
-        # UNKNOWN and vendor_asserted, and appending measured contradicting
-        # evidence there produced a claim that said "nothing to assess", "the
-        # vendor asserted this" and "here is evidence we measured against it" at
-        # once -- and vendor_asserted is flatly wrong for a finding this platform
-        # produced itself.
-        pairs = sorted({f"{u['source']} → {u['reference']}" for u in unresolved})
-        contradicting_bits.append(
-            f"{len(pairs)} declared reference(s) discovery could not place, so the "
-            "reach was computed over an incomplete graph: " + ", ".join(pairs) + "."
-        )
     if principals:
         offenders = sorted(
             {
