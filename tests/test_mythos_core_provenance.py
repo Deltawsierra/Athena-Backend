@@ -213,7 +213,7 @@ def test_the_session_hook_aborts_when_the_installed_core_is_not_the_pinned_one(
     )
 
     with pytest.raises(pytest.UsageError) as refusal:
-        tests_conftest.pytest_sessionstart(session=None)
+        tests_conftest.enforce_dependency_pins()
 
     assert "mythos-core pin guard" in str(refusal.value)
     assert OTHER[:12] in str(refusal.value)
@@ -252,7 +252,7 @@ def test_the_session_hook_is_silent_when_the_installed_core_is_the_pinned_one(
         ),
     )
 
-    assert tests_conftest.pytest_sessionstart(session=None) is None
+    assert tests_conftest.enforce_dependency_pins() is None
 
 
 @pytest.mark.parametrize("value", ["off", "0", "false", "no", "OFF", "  Off  "])
@@ -268,7 +268,7 @@ def test_the_opt_out_is_honoured_in_the_spellings_it_claims(value, monkeypatch):
         ),
     )
 
-    assert tests_conftest.pytest_sessionstart(session=None) is None
+    assert tests_conftest.enforce_dependency_pins() is None
 
 
 def test_an_unrecognised_opt_out_value_does_not_disable_the_guard(monkeypatch):
@@ -286,7 +286,7 @@ def test_an_unrecognised_opt_out_value_does_not_disable_the_guard(monkeypatch):
     )
 
     with pytest.raises(pytest.UsageError):
-        tests_conftest.pytest_sessionstart(session=None)
+        tests_conftest.enforce_dependency_pins()
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +436,7 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
     ct._imported_file = lambda: "/tmp/a-shadow/mythos_core/__init__.py"
     try:
         with pytest.raises(pytest.UsageError) as refusal:
-            ct.pytest_sessionstart(session=None)
+            ct.enforce_dependency_pins()
         assert "shadowing" in str(refusal.value)
         assert "/tmp/a-shadow/mythos_core/__init__.py" in str(refusal.value)
     finally:
@@ -446,3 +446,165 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
         if saved["env"] is not None:
             os.environ["ATHENA_MYTHOS_CORE_PIN_GUARD"] = saved["env"]
 
+
+# ---------------------------------------------------------------------------
+# WHEN the guard runs. A guard that runs too late is a guard that does not run.
+# ---------------------------------------------------------------------------
+
+#: Does this repo's conftest import anything a wrong pinned dependency can
+#: break? Written down rather than inferred, so the ordering assertion below
+#: cannot quietly become vacuous.
+CONFTEST_HAS_BREAKABLE_IMPORTS = True
+#:
+#: True here: the conftest imports ``import django`` below the guard.
+
+
+def _conftest_source() -> str:
+    return pathlib.Path(tests_conftest.__file__).read_text()
+
+
+def _module_level_imports(source: str):
+    """Every module-level import in a source file, as (line, root module name)."""
+    import ast
+
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield node.lineno, alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            yield node.lineno, node.module.split(".")[0]
+
+
+def _guard_call_line(source: str) -> int:
+    import ast
+
+    lines = [
+        node.lineno
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", None) == "enforce_dependency_pins"
+    ]
+    assert len(lines) == 1, f"expected exactly one module-level guard call, found {lines}"
+    return lines[0]
+
+
+def test_the_guard_runs_before_the_imports_it_is_about():
+    """The ordering IS the fix, so the ordering is what this pins.
+
+    The guard used to be a ``pytest_sessionstart`` hook, which fires only after
+    every conftest has been imported and after ``pytest_configure``. A wrong
+    pinned dependency breaks those imports first: pytest reports a conftest
+    ImportError naming a missing symbol, and the guard written to explain
+    exactly that failure never runs. Reproduced in Athena-Engine with a
+    shadowing `mythos_core` on ``PYTHONPATH`` before the change:
+    ``ImportError: cannot import name 'pinned_dns'``, and not one word about the
+    pin. After: the guard's own diagnosis, naming the loaded path.
+
+    So the call sits above every non-stdlib import in the conftest, and a later
+    tidy-up that moves an import above it fails here rather than silently
+    restoring the hole.
+    """
+    import sys
+
+    source = _conftest_source()
+    guard_line = _guard_call_line(source)
+    # `pytest` and the pin module the guard itself needs are allowed above it;
+    # everything else is something a wrong dependency can break.
+    allowed = set(sys.stdlib_module_names) | {
+        "pytest",
+        "tests",
+        "dependency_pins",
+        "mythos_core_provenance",
+    }
+    above = [
+        (line, module)
+        for line, module in _module_level_imports(source)
+        if line < guard_line and module not in allowed
+    ]
+    assert not above, (
+        f"these imports run before the dependency pin guard at line {guard_line}, so a "
+        f"wrong pinned dependency breaks them first and the guard never reports why: {above}"
+    )
+    below = [
+        (line, module)
+        for line, module in _module_level_imports(source)
+        if line > guard_line and module not in allowed
+    ]
+    # Not vacuous by accident: whether there is anything below to protect is
+    # asserted against what this repo declares, so deleting the last such import
+    # fails here instead of turning the assertion above into a tautology.
+    assert bool(below) == CONFTEST_HAS_BREAKABLE_IMPORTS, (
+        f"CONFTEST_HAS_BREAKABLE_IMPORTS says {CONFTEST_HAS_BREAKABLE_IMPORTS}, "
+        f"but the conftest's imports below the guard are {below}"
+    )
+
+
+_GUARD_MESSAGE = "dependency pin guard: the pinned dependency is not the installed one"
+
+_BROKEN_IMPORT = (
+    "raise ImportError(\"cannot import name 'pinned_dns' from 'mythos_core.http'\")\n"
+)
+
+_GUARD_FIRST = f'''import pytest
+
+
+def enforce_dependency_pins():
+    raise pytest.UsageError({_GUARD_MESSAGE!r})
+
+
+enforce_dependency_pins()
+
+{_BROKEN_IMPORT}'''
+
+_GUARD_LAST = f'''import pytest
+
+{_BROKEN_IMPORT}
+
+def pytest_sessionstart(session):
+    raise pytest.UsageError({_GUARD_MESSAGE!r})
+'''
+
+
+@pytest.mark.parametrize(
+    "name,conftest_source,reaches_the_reader",
+    [
+        ("guard_first", _GUARD_FIRST, True),
+        ("guard_after_the_import", _GUARD_LAST, False),
+    ],
+    ids=["guard_first", "guard_after_the_import"],
+)
+def test_only_a_guard_above_the_broken_import_reaches_the_reader(
+    tmp_path, name, conftest_source, reaches_the_reader
+):
+    """End to end, in a real pytest subprocess, with the wrong order as a control.
+
+    The ``guard_after_the_import`` case is not a leftover: it is the version this
+    repo shipped, and it is here so that this test proves the ORDER does the
+    work rather than merely that a guard exists. If both cases reported the
+    guard's message, the reordering would be decorative.
+    """
+    import os
+    import subprocess
+    import sys
+
+    project = tmp_path / name
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "conftest.py").write_text(conftest_source)
+    (project / "tests" / "test_x.py").write_text("def test_ok():\n    assert True\n")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests", "-p", "no:cacheprovider"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, "the run must not pass; it is measuring the wrong thing"
+    assert (_GUARD_MESSAGE in output) is reaches_the_reader, output[:2000]
+    if not reaches_the_reader:
+        # What the reader gets instead: a missing symbol, pointing at the engine
+        # rather than at the dependency.
+        assert "cannot import name 'pinned_dns'" in output
