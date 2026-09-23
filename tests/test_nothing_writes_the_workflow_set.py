@@ -43,7 +43,11 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+
 from assurance import composition as comp
+from assurance import workflow_chains
 from assurance.decision import decision_support
 from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
 from assurance.views import DeploymentViewSet
@@ -415,7 +419,14 @@ def test_the_payload_shapes_are_pinned():
     outcome = _record(client, dep, "checkout", comp.HELD, source="campaign", note="n")
 
     approved = client.get(_approved_url(dep))
-    assert set(approved.data) == {"approved", "approved_count", "composition"}
+    assert set(approved.data) == {
+        "approved",
+        "returned",
+        "truncated",
+        "page_size",
+        "approved_count",
+        "composition",
+    }
     assert set(approved.data["approved"][0]) == {
         "uuid",
         "slug",
@@ -612,3 +623,248 @@ def test_when_a_chain_was_exercised_and_when_it_was_recorded_are_both_readable()
     assert row["observed_at"] is not None
     assert row["recorded_at"] is not None
     assert row["recorded_at"] > row["observed_at"]
+
+
+# --------------------------------------------------------------------------
+# What an adversarial pass found after the first round, and what now holds.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_composition_read_happens_inside_one_transaction():
+    """`composition_for` takes TWO reads, so they have to be one snapshot.
+
+    ``transaction=True`` IS THE TEST. Under the ordinary ``django_db`` fixture
+    every test body already runs inside an atomic block, so
+    ``connection.in_atomic_block`` is True whatever the view does and the
+    assertion below holds for the unfenced code too. Measured: the first version
+    of this test passed with the fence deleted -- a check that could not fail,
+    which is the one shape this file exists to refuse. Without the wrapping
+    transaction, True means the view opened one.
+
+    Unfenced, the pair can describe a state the database was never in, and the
+    fabricated state is the reassuring one. Measured against a writer looping a
+    cycle in which every committed state was `not_recommended` or
+    `needs_more_evidence` and none was ever ready: **18 of 187 reads (9.6%)
+    published `signal: "ready"`**, explanation and all. The same race against the
+    already-fenced `decision-support` route fabricated nothing in 372 reads.
+
+    A race is not a test -- a timing-dependent assertion that usually fails on the
+    broken version is a flaky test, and this codebase has enough of those. So the
+    property is pinned structurally instead: the reads must happen inside an
+    atomic block. Removing the fence fails this deterministically.
+    """
+    dep = _deployment()
+    client = _client(dep.owner)
+    _declare(client, dep, "checkout")
+
+    seen = []
+    real = workflow_chains.read_expected_workflows
+
+    def watched(deployment):
+        seen.append(connection.in_atomic_block)
+        return real(deployment)
+
+    workflow_chains.read_expected_workflows = watched
+    try:
+        assert client.get(_outcomes_url(dep)).status_code == 200
+        assert client.get(_approved_url(dep)).status_code == 200
+    finally:
+        workflow_chains.read_expected_workflows = real
+
+    assert seen, "the route did not read the approved set at all"
+    assert all(seen), (
+        "the composition was read outside a transaction, so its two queries can "
+        f"come from two moments: in_atomic_block per call = {seen}"
+    )
+
+
+def test_the_explanation_never_contradicts_the_signal_beside_it():
+    """One payload, two answers, and the human-readable one was the wrong one.
+
+    `explain` speaks for the rule; `signal` is what the composition contributes.
+    They differ exactly when the scope is not closed -- and the sentence used to
+    read "so this signal says ready" beside `signal: null`, for a deployment with
+    a chain outcome for a workflow nobody approved. That is the case
+    `workflows_unapproved` exists to make visible, reported reassuringly.
+    """
+    dep = _deployment()
+    client = _client(dep.owner)
+    _declare(client, dep, "checkout")
+    _record(client, dep, "checkout", comp.HELD)
+    response = _record(client, dep, "undeclared-side-channel", comp.HELD)
+
+    composition = response.data["composition"]
+    assert composition["signal"] is None
+    assert composition["rule_decision"] == comp.READY
+    explanation = composition["explanation"]
+    # The rule's verdict is still reported -- hiding it would be its own silent
+    # zero -- but it is no longer offered as what reached the decision.
+    assert "the rule places the deployment at ready" in explanation
+    assert "did NOT reach the deployment decision" in explanation
+    assert "this signal says" not in explanation
+
+
+def test_a_paused_deployment_is_not_told_its_signal_says_ready():
+    dep = _deployment()
+    client = _client(dep.owner)
+    _declare(client, dep, "checkout")
+    _record(client, dep, "checkout", comp.HELD)
+
+    support = decision_support(dep, paused=True)
+    composition = support["composition"]
+    assert composition["signal"] is None
+    assert composition["rule_decision"] == comp.READY
+    explanation = composition["explanation"]
+    assert "did NOT reach the deployment decision" in explanation
+    # And it must NOT blame an open scope: this deployment's scope IS closed, and
+    # an earlier version of the sentence said otherwise for every paused
+    # deployment -- a fabricated reason in place of no reason.
+    assert "scope that is not closed" not in explanation
+    assert "operator failsafe" in explanation
+    assert "this signal says" not in explanation
+
+
+def test_an_agreeing_signal_adds_no_second_sentence():
+    """A control. If every explanation carried the narrowing clause, the clause
+    would say nothing about whether the scope was closed."""
+    dep = _deployment()
+    client = _client(dep.owner)
+    _declare(client, dep, "checkout")
+    response = _record(client, dep, "checkout", comp.HELD)
+
+    composition = response.data["composition"]
+    assert composition["signal"] == composition["rule_decision"] == comp.READY
+    assert "reach the deployment decision" not in composition["explanation"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["null", "5", "true", '"hello"', '"outcomes"'],
+    ids=["null", "number", "bool", "string", "string-named-outcomes"],
+)
+def test_a_body_that_is_neither_a_list_nor_an_object_is_a_400(raw):
+    """Nine body shapes returned 500.
+
+    `request.data.get(key)` is an AttributeError on null, a number, a bool or a
+    string. And `key not in request.data` on a string is a SUBSTRING test, so the
+    body `"outcomes"` routed as a batch and died two frames later while `"hello"`
+    routed as a single object and 400'd correctly: two JSON strings, two code
+    paths, one of them a crash.
+    """
+    dep = _deployment()
+    client = _client(dep.owner)
+    # Raw JSON rather than `format="json"`: DRF's client sends NO body for the
+    # Python value None, which parses as an empty object and is a legitimate empty
+    # declaration. The shape under test is the literal `null` a client can send.
+    put = client.put(_approved_url(dep), raw, content_type="application/json")
+    post = client.post(_outcomes_url(dep), raw, content_type="application/json")
+    assert put.status_code == 400, f"PUT {raw} -> {put.status_code}"
+    assert post.status_code == 400, f"POST {raw} -> {post.status_code}"
+    assert ApprovedWorkflow.objects.count() == 0
+    assert WorkflowChainOutcome.objects.count() == 0
+
+
+def test_the_approved_read_is_bounded_and_says_how_much_it_left_out():
+    """Its sibling's comment called an unbounded list "the defect the project's
+    own pagination default exists to prevent", twenty lines from this route
+    returning every row."""
+    dep = _deployment()
+    size = DeploymentViewSet.APPROVED_WORKFLOW_LIMIT
+    ApprovedWorkflow.objects.bulk_create(
+        ApprovedWorkflow(deployment=dep, slug=f"wf-{n:05d}", name=f"wf {n}")
+        for n in range(size + 3)
+    )
+    response = _client(dep.owner).get(_approved_url(dep))
+
+    assert response.data["returned"] == size
+    assert len(response.data["approved"]) == size
+    assert response.data["truncated"] is True
+    assert response.data["page_size"] == size
+    assert response.data["approved_count"] == size + 3
+    # The composition counts all of them, not the page.
+    assert response.data["composition"]["workflows_expected"] == size + 3
+
+
+def test_reading_the_approved_set_does_not_cost_a_query_per_row():
+    """`approved_by` is read per row, so without `select_related` a thousand-row
+    set issues a thousand extra user queries."""
+    dep = _deployment()
+    client = _client(dep.owner)
+    _declare(client, dep, "one")
+    with CaptureQueriesContext(connection) as few:
+        client.get(_approved_url(dep))
+
+    ApprovedWorkflow.objects.bulk_create(
+        ApprovedWorkflow(deployment=dep, slug=f"extra-{n}", name=f"extra {n}",
+                         approved_by=dep.owner)
+        for n in range(30)
+    )
+    with CaptureQueriesContext(connection) as many:
+        client.get(_approved_url(dep))
+
+    assert len(many) == len(few), (
+        f"{len(few)} queries for 1 row, {len(many)} for 31: the row count is "
+        "reaching the query count."
+    )
+
+
+def test_a_declaration_larger_than_the_cap_is_refused():
+    """The approved set is read on every assurance answer for the deployment, so
+    its size is a cost every later request pays -- including an unprivileged read
+    and the decision route. There was no cap: a 10 MiB body holds ~300,000 rows.
+    """
+    dep = _deployment()
+    limit = DeploymentViewSet.APPROVED_WORKFLOW_LIMIT
+    response = _client(dep.owner).put(
+        _approved_url(dep),
+        {"workflows": [{"slug": f"w{n}", "name": "a"} for n in range(limit + 1)]},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "workflows" in response.data
+    assert ApprovedWorkflow.objects.count() == 0
+
+
+def test_a_batch_larger_than_the_cap_is_refused():
+    dep = _deployment()
+    limit = DeploymentViewSet.CHAIN_OUTCOME_BATCH_LIMIT
+    response = _client(dep.owner).post(
+        _outcomes_url(dep),
+        [{"workflow": f"w{n}", "status": comp.HELD} for n in range(limit + 1)],
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "outcomes" in response.data
+    assert WorkflowChainOutcome.objects.count() == 0
+
+
+def test_the_rule_is_linear_in_the_approved_set_not_quadratic():
+    """`set(approved)` was rebuilt once per surviving workflow.
+
+    Profiled, that one genexpr was 99.5% of `compose`'s runtime: 11ms at 1,000
+    approved workflows, 2.2s at 8,000, 61s at 40,000. A pure rule with no I/O
+    should not be the slowest thing in an assurance read, and this one was
+    reachable from a request body.
+
+    Asserted as a RATIO rather than a wall-clock budget, so the test measures the
+    complexity rather than the speed of the machine it runs on. Quadratic would
+    put this near 4; linear puts it near 1.
+    """
+    import time
+
+    def timed(n):
+        approved = [f"wf-{i}" for i in range(n)]
+        outcomes = [comp.ChainOutcome(workflow=w, status=comp.HELD) for w in approved]
+        start = time.perf_counter()
+        comp.compose(outcomes, expected_workflows=approved)
+        return time.perf_counter() - start
+
+    # Warm the interpreter so the first call does not carry import-time cost.
+    timed(200)
+    small = min(timed(1000) for _ in range(3))
+    large = min(timed(2000) for _ in range(3))
+    assert large / small < 2.5, (
+        f"doubling the approved set multiplied the work by {large / small:.1f}x "
+        f"({small * 1000:.1f}ms -> {large * 1000:.1f}ms); the rule is not linear."
+    )

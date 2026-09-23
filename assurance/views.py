@@ -121,6 +121,46 @@ def _require_admin(request) -> None:
         raise PermissionDenied("Changing the assurance record requires an admin role.")
 
 
+def _rows_from_body(data, *, key: str, single_allowed: bool):
+    """The rows a request body carries, as ``(rows, was_a_single_object)``.
+
+    A body is a list of rows, or an object with ``key`` holding that list, or --
+    when ``single_allowed`` -- one row on its own. Anything else is a 400 from
+    here, and the alternative is not hypothetical: nine body shapes used to
+    return 500.
+
+    ``request.data.get(key, [])`` is an ``AttributeError`` on ``null``, a number,
+    a bool or a string. And ``key not in request.data`` on a string is a
+    SUBSTRING test, so the body ``"outcomes"`` routed as a batch and died on
+    ``request.data["outcomes"]`` two frames later while ``"hello"`` routed as a
+    single object and 400'd correctly -- two JSON strings, two code paths, one of
+    them a 500.
+    """
+    if isinstance(data, list):
+        return data, False
+    if isinstance(data, dict):
+        if key in data:
+            rows = data[key]
+            if not isinstance(rows, list):
+                # `{"workflows": {...}}` and `{"workflows": null}` already reach
+                # the serializer and 400 honestly; keep that, rather than
+                # inventing a second error message for the same mistake.
+                return rows, False
+            return rows, False
+        if single_allowed:
+            return [data], True
+        return [], False
+    raise ValidationError(
+        {
+            key: (
+                f"Send a list of rows, or an object with a {key!r} list"
+                + (", or one row on its own" if single_allowed else "")
+                + f". Got {type(data).__name__}."
+            )
+        }
+    )
+
+
 def _composition_payload(deployment) -> dict:
     """The deployment's live composition, in the shape the decision route publishes.
 
@@ -132,13 +172,31 @@ def _composition_payload(deployment) -> dict:
     close scope looks exactly like one that closes it.
 
     The shape comes from :func:`assurance.workflow_chains.composition_payload`,
-    which :func:`assurance.decision.decision_support` also uses, so the two answers
-    cannot drift. ``signal`` here is what the chains currently carry: these routes
-    make no decision, so they have no failsafe to null it under. Whether the
-    deployment is paused, and therefore whether that signal reached the decision at
-    all, is the decision route's answer to give.
+    which :func:`assurance.decision.decision_support` also uses. That keeps the two
+    payloads the same SHAPE; it is the transaction below, not the shared builder,
+    that keeps them the same ANSWER. An earlier version of this docstring claimed
+    the builder alone meant "the two answers cannot drift", and that was false: the
+    builder cannot drift, the answers demonstrably did, and only in the reassuring
+    direction. Both halves are needed and both are here.
+
+    ``signal`` is what the chains currently carry: these routes make no decision,
+    so they have no failsafe to null it under. Whether the deployment is paused,
+    and therefore whether that signal reached the decision at all, is the decision
+    route's answer to give.
     """
-    composition = composition_for(deployment)
+    # ONE TRANSACTION, because `composition_for` takes TWO reads -- the outcomes,
+    # then the approved set -- and an unfenced pair can describe a state the
+    # database was never in. Measured on the unfenced version, against a writer
+    # looping a cycle in which EVERY committed state was `not_recommended` or
+    # `needs_more_evidence` and none was ever ready: 18 of 187 reads (9.6%)
+    # published `signal: "ready"`, explanation and all. The fabricated answer is
+    # the reassuring one, which is how this defect always presents.
+    #
+    # `decision.decision_support` has had this fence from the start, for the same
+    # reason, and reading through it 372 times against the same writer fabricated
+    # nothing. One line is the difference.
+    with transaction.atomic():
+        composition = composition_for(deployment)
     return composition_payload(
         composition, signal=composition_decision_signal(composition)
     )
@@ -1135,6 +1193,24 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         headers = {"Authorization": f"Bearer {secret}"} if secret else {}
         return RequestsFetcher(base_url=base_url, headers=headers)
 
+    #: How many approved workflows one declaration may carry, and how many the
+    #: read returns. Deliberately the SAME number: a set you are allowed to
+    #: declare is a set you must be able to read back whole, so `truncated` on
+    #: that route can only ever be about rows predating this cap.
+    #:
+    #: There was no cap at all. `compose` is linear in the approved set and the
+    #: route left its size to the caller: a 10 MiB body
+    #: (`DATA_UPLOAD_MAX_MEMORY_SIZE`) holds ~300,000 minimal rows, and every
+    #: later assurance read on that deployment -- including an unprivileged GET
+    #: and the decision route -- pays for them. At 1,000 a composition costs
+    #: about a millisecond.
+    APPROVED_WORKFLOW_LIMIT = 1000
+
+    #: How many chain outcomes one POST may append. Outcomes append forever, so
+    #: the bound is on the request rather than on the total; a campaign with more
+    #: than this many results posts twice and loses nothing.
+    CHAIN_OUTCOME_BATCH_LIMIT = 1000
+
     #: How many chain outcomes `chain_outcomes` returns at most, newest first.
     #: Outcomes are append-only, so this list grows without bound over a
     #: deployment's life; a route that returned all of them would be the
@@ -1166,11 +1242,21 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         deployment = self.get_object()
         if request.method == "PUT":
             _require_admin(request)
-            payload = (
-                request.data
-                if isinstance(request.data, list)
-                else request.data.get("workflows", [])
+            payload, _ = _rows_from_body(
+                request.data, key="workflows", single_allowed=False
             )
+            if isinstance(payload, list) and len(payload) > self.APPROVED_WORKFLOW_LIMIT:
+                raise ValidationError(
+                    {
+                        "workflows": (
+                            f"{len(payload)} workflows is more than the "
+                            f"{self.APPROVED_WORKFLOW_LIMIT} this route accepts. The "
+                            "approved set is read on every assurance answer for this "
+                            "deployment, so its size is a cost every later request "
+                            "pays, including an unprivileged read."
+                        )
+                    }
+                )
             serializer = ApprovedWorkflowSerializer(data=payload, many=True)
             serializer.is_valid(raise_exception=True)
             rows = serializer.validated_data
@@ -1193,11 +1279,23 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     )
                     for row in rows
                 )
-        workflows = deployment.approved_workflows.all()
+        # `select_related` because `approved_by` is read per row: without it a
+        # thousand-row set issues a thousand extra user queries.
+        recorded = deployment.approved_workflows.select_related("approved_by")
+        total = recorded.count()
+        page = list(recorded[: self.APPROVED_WORKFLOW_LIMIT])
         return Response(
             {
-                "approved": ApprovedWorkflowSerializer(workflows, many=True).data,
-                "approved_count": workflows.count(),
+                "approved": ApprovedWorkflowSerializer(page, many=True).data,
+                # Bounded, and saying so, exactly as the outcome route is. This
+                # returned every row while its sibling's comment called an
+                # unbounded list "the defect the project's own pagination default
+                # exists to prevent" -- a rule written down twenty lines from a
+                # route that broke it.
+                "returned": len(page),
+                "truncated": len(page) < total,
+                "page_size": self.APPROVED_WORKFLOW_LIMIT,
+                "approved_count": total,
                 "composition": _composition_payload(deployment),
             }
         )
@@ -1231,16 +1329,20 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             # rather than a list index it never sent -- `many=True` keys its errors
             # by position, which for a single object names something the caller
             # cannot see in its own request.
-            single = not isinstance(request.data, list) and "outcomes" not in request.data
-            payload = (
-                [request.data]
-                if single
-                else (
-                    request.data
-                    if isinstance(request.data, list)
-                    else request.data["outcomes"]
-                )
+            payload, single = _rows_from_body(
+                request.data, key="outcomes", single_allowed=True
             )
+            if isinstance(payload, list) and len(payload) > self.CHAIN_OUTCOME_BATCH_LIMIT:
+                raise ValidationError(
+                    {
+                        "outcomes": (
+                            f"{len(payload)} outcomes is more than the "
+                            f"{self.CHAIN_OUTCOME_BATCH_LIMIT} one request accepts. Post "
+                            "again with the rest; outcomes append, so nothing is lost "
+                            "by splitting a batch."
+                        )
+                    }
+                )
             serializer = WorkflowChainOutcomeSerializer(data=payload, many=True)
             if not serializer.is_valid():
                 raise ValidationError(

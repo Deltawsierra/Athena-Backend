@@ -461,7 +461,14 @@ def compose(
             if workflow not in standing:
                 unreported.add(workflow)
                 standing[workflow] = NOT_DEMONSTRATED
-        unapproved = sum(1 for workflow in standing if workflow not in set(approved))
+        # Hoisted, and that is not a micro-optimisation: `set(approved)` inside
+        # the genexpr was rebuilt once per surviving workflow, making this O(n*m).
+        # Profiled, it was 99.5% of `compose`'s runtime -- 11ms at 1,000 approved
+        # workflows, 2.2s at 8,000, 61s at 40,000 -- and the route that writes the
+        # approved set left its size to the caller. A pure rule with no I/O should
+        # not be the slowest thing in an assurance read.
+        approved_set = set(approved)
+        unapproved = sum(1 for workflow in standing if workflow not in approved_set)
 
     census = dict.fromkeys(sorted(CHAIN_STATUSES), 0)
     for status in standing.values():
@@ -524,7 +531,17 @@ def explain(composition: Composition) -> str:
         if composition.workflows_unapproved:
             scope += f", and {composition.workflows_unapproved} not on the approved list"
     if not composition.deciding:
-        return f"Every chain held across {scope} ({counted}), so this signal says {composition.decision}."
+        # "THE RULE PLACES", not "this signal says". This function knows
+        # `composition.decision` -- the rule's verdict over the outcomes it was
+        # handed -- and nothing about what the caller publishes as its `signal`.
+        # Those two differ exactly when the scope is not closed, and the old
+        # wording then contradicted the field beside it in one payload: a
+        # deployment with an unapproved chain outcome published `signal: null`
+        # next to "so this signal says ready", and a paused deployment published
+        # the same sentence. The reassuring half was the human-readable one.
+        # `workflow_chains.composition_payload` adds the narrowing sentence when
+        # the two differ; this one now only claims what it can see.
+        return f"Every chain held across {scope} ({counted}), so the rule places the deployment at {composition.decision}."
     return (
         f"Across {scope} ({counted}), the worst chain status sets the floor: "
         f"{composition.decision}, from {', '.join(composition.deciding)}."
