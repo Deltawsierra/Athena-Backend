@@ -551,7 +551,11 @@ def test_the_receipt_declares_the_new_major_version():
     dep = _deployment()
     built = receipt_mod.build_assurance_receipt(dep)
     assert built["receipt_version"] == receipt_mod.RECEIPT_VERSION
-    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/2.0"
+    # 3.0 since the coverage block began carrying checks_gap_fingerprint and
+    # checks_reported_at. Both are new HASHED content, so every 2.0 digest differs
+    # from the 3.0 digest of the same state, and a minor bump would have told a
+    # consumer the shapes were compatible when the digests are not.
+    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/3.0"
 
 
 def test_the_schema_requires_the_two_new_blocks():

@@ -127,7 +127,16 @@ def _checks_section(deployment: Deployment) -> dict[str, Any]:
     """
     stored = deployment.check_coverage if isinstance(deployment.check_coverage, dict) else {}
     rows = stored.get("checks")
-    if not isinstance(rows, list) or not rows:
+    unreadable = stored.get("unreadable")
+    unreadable = unreadable if isinstance(unreadable, int) and unreadable > 0 else 0
+    if not isinstance(rows, list):
+        rows = []
+    # Defensive, and asymmetrically so on purpose: `check_coverage` is type-guarded
+    # above but nothing guarded its rows, so a fixture load, a data migration or a
+    # shell session could put a string in the list and crash the decision, the
+    # receipt and the API on a `.get`.
+    rows = [r for r in rows if isinstance(r, dict)]
+    if not rows and not unreadable:
         return {
             "reported": False,
             "complete": None,
@@ -136,8 +145,9 @@ def _checks_section(deployment: Deployment) -> dict[str, Any]:
             "not_performed": [],
             "degraded": [],
             "unmeasured": [],
+            "unrecognised": [],
             "limitations": {},
-            "notes": [],
+            "notes": stored.get("notes") or [],
             "reported_at": None,
             "summary": "No engine reported which checks it ran.",
         }
@@ -146,19 +156,32 @@ def _checks_section(deployment: Deployment) -> dict[str, Any]:
     degraded = [r for r in rows if r.get("state") == CHECK_DEGRADED]
     unmeasured = [r for r in rows if r.get("state") == CHECK_UNMEASURED]
     performed = [r for r in rows if r.get("state") == CHECK_PERFORMED]
+    # A state none of the four. The engine is a separate deployable, so a state it
+    # adds arrives here before this side learns the word -- and it used to be
+    # counted against `complete` (correct) while appearing in no named list, so an
+    # operator saw a shortfall of four with three rows and no way to learn which
+    # check the fourth was. Named now, in its own bucket, which is also where a row
+    # whose `state` key the engine renamed lands.
+    _KNOWN = {CHECK_PERFORMED, CHECK_DEGRADED, CHECK_NOT_PERFORMED, CHECK_UNMEASURED}
+    unrecognised = [r for r in rows if r.get("state") not in _KNOWN]
 
+    total = len(rows) + unreadable
     return {
         "reported": True,
         # Only when every check performed. Degraded and unmeasured both fall
-        # short: one lost probes, the other cannot say what it looked at.
-        "complete": len(performed) == len(rows),
-        "total": len(rows),
+        # short: one lost probes, the other cannot say what it looked at. A row
+        # this side could not read is in the total and never in `performed`, so it
+        # falls short too -- an unparsable row must cap the decision, not shrink
+        # the denominator until the ones left look complete.
+        "complete": len(performed) == total,
+        "total": total,
         "performed": len(performed),
         # Rows, not names: a reader needs the reason, and a check that did not run
         # without a stated reason is the thing this replaces.
         "not_performed": sorted(not_performed, key=lambda r: r.get("check", "")),
         "degraded": sorted(degraded, key=lambda r: r.get("check", "")),
         "unmeasured": sorted(unmeasured, key=lambda r: r.get("check", "")),
+        "unrecognised": sorted(unrecognised, key=lambda r: r.get("check", "")),
         "limitations": stored.get("limitations") or {},
         "notes": stored.get("notes") or [],
         "reported_at": (
@@ -166,10 +189,15 @@ def _checks_section(deployment: Deployment) -> dict[str, Any]:
             if deployment.check_coverage_at else None
         ),
         "summary": (
-            f"{len(performed)} of {len(rows)} checks performed"
+            f"{len(performed)} of {total} checks performed"
             + (f"; {len(not_performed)} never ran" if not_performed else "")
             + (f"; {len(degraded)} degraded" if degraded else "")
             + (f"; {len(unmeasured)} unmeasured" if unmeasured else "")
+            + (
+                f"; {len(unrecognised)} in a state this deployment does not know"
+                if unrecognised else ""
+            )
+            + (f"; {unreadable} row(s) could not be read" if unreadable else "")
         ),
     }
 

@@ -99,7 +99,8 @@ ALGORITHM = "sha256"
 #         consumer that silently compared the two would report a change that did
 #         not happen, which is why the version is IN the hashed content and a
 #         reader is expected to key on it.
-RECEIPT_VERSION = "mythos.assurance.receipt/2.0"
+RECEIPT_VERSION = "mythos.assurance.receipt/3.0"
+_VERSION_2_0 = "mythos.assurance.receipt/2.0"
 
 # Every receipt version this module can describe. A receipt in the wild carries
 # its own ``receipt_version``, and an auditor holding a 1.1 receipt still needs
@@ -107,7 +108,7 @@ RECEIPT_VERSION = "mythos.assurance.receipt/2.0"
 # version's shape is only recoverable from git history. :func:`receipt_schema`
 # is the lookup; :data:`RECEIPT_SCHEMA` stays the current one so existing
 # callers are unaffected.
-SUPERSEDED_VERSIONS = ("mythos.assurance.receipt/1.1",)
+SUPERSEDED_VERSIONS = ("mythos.assurance.receipt/1.1", _VERSION_2_0)
 
 
 def _digest(payload: dict) -> str:
@@ -116,6 +117,33 @@ def _digest(payload: dict) -> str:
     a caller happened to order it."""
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _checks_gap_fingerprint(checks: dict) -> str | None:
+    """A stable digest of WHICH checks fell short, and why.
+
+    The counts alone cannot answer the question this receipt exists to answer. Two
+    deployments -- one where the TLS check never ran against a cleartext target,
+    one where SQL injection was switched off in config -- produce the same four
+    numbers and therefore the same signed artifact, byte for byte apart from
+    `computed_at`. "We never tested transport security" and "we turned off
+    injection testing" are not the same disclosure.
+
+    The named rows still stay out (unbounded, and retrievable). This is the middle
+    term: a digest over the sorted ``(check, state, reason)`` of every row that did
+    not perform, so two different shortfalls never collide, and a reader holding
+    two receipts can tell that the gap changed without the receipt having to list
+    it. ``None`` when nothing was reported, which is distinct from a digest over an
+    empty gap -- that one is a positive statement that every check performed.
+    """
+    if not checks.get("reported"):
+        return None
+    short = [
+        [str(r.get("check", "")), str(r.get("state", "")), str(r.get("reason", ""))]
+        for key in ("not_performed", "degraded", "unmeasured", "unrecognised")
+        for r in (checks.get(key) or [])
+    ]
+    return _digest({"short": sorted(short)})
 
 
 def _evidence_rows(finding) -> list[list[str]]:
@@ -382,11 +410,29 @@ RECEIPT_SCHEMA = {
                         "both directions from false."
                     ),
                 },
+                "checks_gap_fingerprint": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "SHA-256 over the sorted (check, state, reason) of every "
+                        "check that did not perform, so two different shortfalls "
+                        "never produce the same receipt. Null when unreported; a "
+                        "digest over an empty gap is the positive statement that "
+                        "every check performed."
+                    ),
+                },
+                "checks_reported_at": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "When the stored check coverage was reported. Null when "
+                        "unreported. A measurement date, not a render date, which "
+                        "is why it is inside the digest."
+                    ),
+                },
             },
             "required": [
                 "expected", "observed", "assessed", "verdict", "critical_gap",
                 "checks_reported", "checks_total", "checks_performed",
-                "checks_complete",
+                "checks_complete", "checks_gap_fingerprint", "checks_reported_at",
             ],
         },
         "algorithm": {"type": "string", "const": ALGORITHM},
@@ -455,8 +501,53 @@ _SCHEMA_1_1 = {
     ],
 }
 
+# The shape a 2.0 receipt has: this one, minus the check-axis fields 2.1 added.
+#
+# This block exists because the version string did not move when those fields
+# became `required`. For a while `receipt_schema("…/2.0")` handed an auditor
+# holding a genuine 2.0 receipt a schema that rejected it -- the exact failure
+# UnknownReceiptVersion was written to prevent, arriving through the front door.
+# Two payload shapes must not share one version string.
+_SCHEMA_2_0 = {
+    **{
+        k: v
+        for k, v in RECEIPT_SCHEMA.items()
+        if k not in ("$id", "properties")
+    },
+    "$id": _VERSION_2_0,
+    "properties": {
+        **{
+            k: v
+            for k, v in RECEIPT_SCHEMA["properties"].items()
+            if k != "coverage"
+        },
+        "receipt_version": {
+            **RECEIPT_SCHEMA["properties"]["receipt_version"],
+            "const": _VERSION_2_0,
+        },
+        "coverage": {
+            **{
+                k: v
+                for k, v in RECEIPT_SCHEMA["properties"]["coverage"].items()
+                if k not in ("properties", "required")
+            },
+            "properties": {
+                k: v
+                for k, v in RECEIPT_SCHEMA["properties"]["coverage"]["properties"].items()
+                if k not in ("checks_gap_fingerprint", "checks_reported_at")
+            },
+            "required": [
+                r
+                for r in RECEIPT_SCHEMA["properties"]["coverage"]["required"]
+                if r not in ("checks_gap_fingerprint", "checks_reported_at")
+            ],
+        },
+    },
+}
+
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_2_0: _SCHEMA_2_0,
     _VERSION_1_1: _SCHEMA_1_1,
 }
 
@@ -603,6 +694,15 @@ def _coverage_reference(deployment) -> dict:
         "checks_total": checks["total"],
         "checks_performed": checks["performed"],
         "checks_complete": checks["complete"],
+        # Which checks fell short, reduced to a digest so the receipt stays bounded
+        # and names nothing. Without it the four counts above let two materially
+        # different coverage situations sign identically.
+        "checks_gap_fingerprint": _checks_gap_fingerprint(checks),
+        # When the stored manifest was reported. The API and the panel can already
+        # tell a reader the counts are six months old; the signed artifact could
+        # not, and a measurement date belongs inside the digest for the same reason
+        # the served route does.
+        "checks_reported_at": checks["reported_at"],
     }
 
 
