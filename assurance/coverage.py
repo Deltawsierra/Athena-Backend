@@ -6,7 +6,10 @@ and the assessment still be incomplete — and a decision computed only from wha
 inspected reads READY because everything inspected looked good.
 
 This module answers the question the finding count cannot: **what did we not look
-at?** It tracks three sets per deployment and compares them.
+at?** It does so on two axes, because there are two ways to miss something.
+
+The first is breadth over the inventory: which *components* were assessed. It
+tracks three sets per deployment and compares them.
 
 - **Expected** — what the customer *declares* the system is
   (:class:`~assurance.models.DeclaredComponent`). It is the promise the assessment
@@ -24,6 +27,22 @@ clean test leaves none, so "no finding on this asset" means *either* "tested and
 clean" *or* "never tested", and those are the two answers that must not be
 confused. So assessment is recorded when it happens, by whatever did it, and an
 asset nothing has recorded assessing is **unassessed**, never "assessed and clean".
+
+The second axis is the question set: which *checks* ran. It is not derivable from
+the first and does not overlap it. ``Asset.assessed_at`` records that something
+assessed a component; it cannot say what was asked of it. A deployment whose every
+declared component was assessed -- by an engine that never ran the TLS check
+because the target was cleartext, and never ran the object-level authorisation
+check because no second identity was configured -- reads COMPLETE on the asset
+axis and is nothing of the kind. The engine reports its own manifest and ingest
+stores it on :attr:`~assurance.models.Deployment.check_coverage`.
+
+The two axes differ in one way that matters for the decision. The asset axis has
+no baseline unless the customer declares one, which is why UNDECLARED exists. The
+check axis brings its own: the engine knows the whole list of checks it can run,
+so a check that did not run is a gap against a baseline nobody had to remember to
+write down. That makes it the one coverage gap that can cap a decision on a
+deployment with no declared architecture at all.
 
 The critical path
 -----------------
@@ -88,6 +107,83 @@ def _declared_entity(component: DeclaredComponent) -> dict[str, Any]:
     }
 
 
+# The check states the engine reports. Mirrored here rather than imported, because
+# the engine is a separate deployable on its own release cycle: a value it adds is
+# a value this side must learn about deliberately, and an unrecognised state must
+# not silently read as one of these.
+CHECK_PERFORMED = "performed"
+CHECK_DEGRADED = "degraded"
+CHECK_NOT_PERFORMED = "not_performed"
+CHECK_UNMEASURED = "unmeasured"
+
+
+def _checks_section(deployment: Deployment) -> dict[str, Any]:
+    """What the latest scan said about which checks it ran.
+
+    ``reported: False`` when no engine has said -- distinct in every direction
+    from "every check ran". A caller that cannot tell those apart has the bug
+    this module exists to prevent, so the flag is first in the dict and the
+    counts are all None when it is False.
+    """
+    stored = deployment.check_coverage if isinstance(deployment.check_coverage, dict) else {}
+    rows = stored.get("checks")
+    if not isinstance(rows, list) or not rows:
+        return {
+            "reported": False,
+            "complete": None,
+            "total": None,
+            "performed": None,
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": [],
+            "limitations": {},
+            "notes": [],
+            "reported_at": None,
+            "summary": "No engine reported which checks it ran.",
+        }
+
+    not_performed = [r for r in rows if r.get("state") == CHECK_NOT_PERFORMED]
+    degraded = [r for r in rows if r.get("state") == CHECK_DEGRADED]
+    unmeasured = [r for r in rows if r.get("state") == CHECK_UNMEASURED]
+    performed = [r for r in rows if r.get("state") == CHECK_PERFORMED]
+
+    return {
+        "reported": True,
+        # Only when every check performed. Degraded and unmeasured both fall
+        # short: one lost probes, the other cannot say what it looked at.
+        "complete": len(performed) == len(rows),
+        "total": len(rows),
+        "performed": len(performed),
+        # Rows, not names: a reader needs the reason, and a check that did not run
+        # without a stated reason is the thing this replaces.
+        "not_performed": sorted(not_performed, key=lambda r: r.get("check", "")),
+        "degraded": sorted(degraded, key=lambda r: r.get("check", "")),
+        "unmeasured": sorted(unmeasured, key=lambda r: r.get("check", "")),
+        "limitations": stored.get("limitations") or {},
+        "notes": stored.get("notes") or [],
+        "reported_at": (
+            deployment.check_coverage_at.isoformat()
+            if deployment.check_coverage_at else None
+        ),
+        "summary": (
+            f"{len(performed)} of {len(rows)} checks performed"
+            + (f"; {len(not_performed)} never ran" if not_performed else "")
+            + (f"; {len(degraded)} degraded" if degraded else "")
+            + (f"; {len(unmeasured)} unmeasured" if unmeasured else "")
+        ),
+    }
+
+
+def checks_gap(deployment: Deployment) -> bool:
+    """Did the latest scan leave a check unasked, or asked incompletely?
+
+    False when nothing was reported: silence is not a gap, the same way it is not
+    completeness. The gap has to be something an engine actually said.
+    """
+    section = _checks_section(deployment)
+    return bool(section["reported"] and not section["complete"])
+
+
 def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
     """The three tallies, the entities behind them, and what that makes the audit.
 
@@ -137,9 +233,25 @@ def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
     unassessed_entities = [_entity(a) for a in unassessed]
     unassessed_entities.sort(key=lambda c: (c["kind"], c["name"]))
 
-    critical_gap = bool(never_observed or declared_unassessed or high_risk_unassessed)
+    checks = _checks_section(deployment)
 
-    if not declared:
+    # A check the engine never ran holds the decision exactly as a component
+    # nobody assessed does, and for the same reason: the report's silence on it
+    # is not a result. It joins the critical path rather than sitting beside it,
+    # because a gap that only appears in a panel is a gap nothing acts on.
+    critical_gap = bool(
+        never_observed or declared_unassessed or high_risk_unassessed
+        or (checks["reported"] and not checks["complete"])
+    )
+
+    if checks["reported"] and not checks["complete"]:
+        # Checked before the declaration test, and this is the one ordering
+        # decision in the function. The check axis carries its own baseline -- the
+        # engine's list of what it can run -- so a check that did not run is a
+        # measured shortfall even when the customer declared nothing. Reading that
+        # as UNDECLARED would file a known gap under "we have no way to tell".
+        verdict = INCOMPLETE
+    elif not declared:
         # Nothing was declared, so there is no promise to be short of. This is NOT
         # "complete": it is the absence of the baseline that completeness is
         # measured against, and calling it complete would turn a missing
@@ -161,13 +273,18 @@ def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
         # reported, so a reader can tell which is which without recomputing it.
         "critical_gap": critical_gap,
         "has_declared_baseline": bool(declared),
+        # The second axis, whole, so a reader can see which kind of gap this is.
+        "checks": checks,
         "never_observed": never_observed,
         "declared_but_unassessed": declared_unassessed,
         "high_risk_unassessed": high_risk_unassessed,
         "unassessed": unassessed_entities,
         "summary": (
             f"Expected {len(declared)} / Observed {len(assets)} / "
-            f"Assessed {len(assessed)} -> {verdict.upper()}"
+            f"Assessed {len(assessed)}"
+            + (f" / Checks {checks['performed']}/{checks['total']}"
+               if checks["reported"] else "")
+            + f" -> {verdict.upper()}"
         ),
     }
 
@@ -186,6 +303,11 @@ def complete_audit_signal(deployment: Deployment) -> str | None:
     look better. UNDECLARED never lifts anything -- there was no baseline to be
     complete against.
     """
+    # COMPLETE already carries both axes: `coverage_manifest` cannot return it
+    # while a reported check fell short. Re-testing the check axis here would read
+    # as a second safeguard and be unreachable code, so the invariant is pinned as
+    # a property of the verdict instead -- see
+    # test_the_verdict_is_never_complete_while_a_check_fell_short.
     manifest = coverage_manifest(deployment)
     if manifest["verdict"] == COMPLETE:
         return Deployment.Decision.READY
@@ -208,6 +330,12 @@ def coverage_decision_cap(deployment: Deployment) -> str | None:
     blocking verdict nobody can act on. The way to make it actionable is to declare
     the architecture, which is a human step.
     """
+    # The check axis first, and deliberately before the declaration test. A scan
+    # that did not run a check has fallen short of a list the engine brought with
+    # it, so this is the one coverage cap that applies to a deployment whose
+    # architecture nobody declared -- which, in practice, is most of them early on.
+    if checks_gap(deployment):
+        return Deployment.Decision.AUDIT_INCOMPLETE
     if not deployment.declared_components.exists():
         return None
     manifest = coverage_manifest(deployment)
