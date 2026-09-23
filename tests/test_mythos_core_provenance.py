@@ -14,6 +14,8 @@ spot-checking the one that happened to occur.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from tests import conftest as tests_conftest
@@ -236,6 +238,20 @@ def test_the_session_hook_is_silent_when_the_installed_core_is_the_pinned_one(
         ),
     )
 
+    # The faked provenance says "installed from git", which puts the package in
+    # site-packages; the real environment has an editable checkout elsewhere. So the
+    # import location has to be faked consistently, or this test asserts silence
+    # against an input no real install produces -- and the new shadow check rightly
+    # complains about it. `shadow_complaint` has its own tests below; this one is
+    # about the pin match.
+    monkeypatch.setattr(
+        tests_conftest,
+        "_imported_file",
+        lambda: str(
+            pathlib.Path(tests_conftest._dist_base()) / "mythos_core" / "__init__.py"
+        ),
+    )
+
     assert tests_conftest.pytest_sessionstart(session=None) is None
 
 
@@ -271,3 +287,162 @@ def test_an_unrecognised_opt_out_value_does_not_disable_the_guard(monkeypatch):
 
     with pytest.raises(pytest.UsageError):
         tests_conftest.pytest_sessionstart(session=None)
+
+
+# ---------------------------------------------------------------------------
+# The question the guard never asked: where did the module actually come from?
+#
+# Everything above reads pip's `direct_url.json`. That is pip's RECORD of where it
+# put a distribution, and it is not the module Python imports. The two are found by
+# independent searches -- `importlib.metadata` looks for a `*.dist-info` directory
+# on sys.path, `import mythos_core` looks for a `mythos_core` package -- so any
+# directory carrying the package and no dist-info wins the second without touching
+# the first.
+#
+# Demonstrated across every repo sharing this guard, with one environment variable:
+# with PYTHONPATH pointing at a checkout of the PREVIOUS pin (missing the
+# Mythos-Core #25 egress fix), `import mythos_core` loaded that checkout and every
+# suite passed with the pin guard silent. No file edited, no metadata forged, no
+# opt-out set.
+# ---------------------------------------------------------------------------
+
+from tests.mythos_core_provenance import shadow_complaint  # noqa: E402
+
+
+def _vcs(location="https://github.com/o/r", commit="a" * 40):
+    return Provenance(kind="vcs", commit=commit, location=location)
+
+
+def _local(location):
+    return Provenance(kind="local", commit="a" * 40, location=location)
+
+
+def test_a_core_loaded_from_beside_its_metadata_is_the_pinned_one():
+    """The ordinary install: the package sits next to the `.dist-info`. This is the
+    control -- a check that complained here would refuse every normal run."""
+    assert (
+        shadow_complaint(
+            "/srv/site-packages/mythos_core/__init__.py",
+            _vcs(),
+            dist_base="/srv/site-packages",
+        )
+        is None
+    )
+
+
+def test_an_editable_install_may_load_from_its_checkout():
+    """An editable install deliberately leaves the package OUTSIDE site-packages,
+    at the path the `.pth` names. Refusing that would refuse the normal development
+    setup and the guard would be turned off in its first week."""
+    assert (
+        shadow_complaint(
+            "/work/core/src/mythos_core/__init__.py",
+            _local("/work/core"),
+            dist_base="/srv/site-packages",
+        )
+        is None
+    )
+
+
+def test_a_core_loaded_from_somewhere_else_entirely_is_a_complaint():
+    """The finding. Neither beside the metadata nor inside the recorded checkout."""
+    grievance = shadow_complaint(
+        "/tmp/some-other-checkout/src/mythos_core/__init__.py",
+        _local("/work/core"),
+        dist_base="/srv/site-packages",
+    )
+    assert grievance is not None
+    # It has to name all three, or nobody can act on it.
+    assert "/tmp/some-other-checkout/src/mythos_core/__init__.py" in grievance
+    assert "/work/core" in grievance
+    assert "/srv/site-packages" in grievance
+    assert "PYTHONPATH" in grievance
+
+
+def test_a_vcs_url_is_not_offered_as_a_filesystem_candidate():
+    """A VCS provenance's `location` is a URL. Treating it as a path would have
+    `pathlib` resolve it against the CWD -- `./https:/github.com/o/r` -- and a
+    module could then be "inside" it by accident of where pytest was run."""
+    grievance = shadow_complaint(
+        "/tmp/elsewhere/mythos_core/__init__.py",
+        _vcs(location="https://github.com/o/r"),
+        dist_base="/srv/site-packages",
+    )
+    assert grievance is not None
+    assert "https://github.com/o/r" not in grievance
+
+
+def test_a_sibling_directory_with_a_shared_prefix_is_not_inside():
+    """`/srv/core-evil` is not inside `/srv/core`. A bare `startswith` would say it
+    was, and a shadow one directory over would pass as the pinned install."""
+    assert (
+        shadow_complaint(
+            "/srv/core-evil/src/mythos_core/__init__.py",
+            _local("/srv/core"),
+            dist_base=None,
+        )
+        is not None
+    )
+
+
+def test_a_core_that_cannot_be_imported_at_all_is_a_complaint():
+    """`None` means the import produced no file. The distribution is recorded as
+    installed and the code cannot be shown to have loaded, which is exactly the
+    state this module calls a finding rather than a default."""
+    grievance = shadow_complaint(None, _vcs())
+    assert grievance is not None
+    assert "import mythos_core" in grievance
+
+
+def test_nothing_to_compare_against_is_not_a_second_verdict():
+    """With no dist_base and a URL-only location there is no candidate path.
+    `complaint` already reports an unestablished provenance; saying it again here in
+    different words would make one problem look like two."""
+    assert (
+        shadow_complaint(
+            "/anywhere/mythos_core/__init__.py",
+            _vcs(location="https://github.com/o/r"),
+            dist_base=None,
+        )
+        is None
+    )
+
+
+def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
+    """End to end through the real hook, with the pin matching perfectly.
+
+    This is the shape that shipped: provenance correct, pin correct, complaint
+    None -- and the core coming from somewhere else. The hook must still abort.
+    """
+    import os
+
+    from tests.mythos_core_provenance import declared_pin
+
+    ct = tests_conftest
+    pin = declared_pin((ct.ROOT / "requirements.txt").read_text())
+
+    saved = {
+        "direct_url": ct._installed_direct_url,
+        "imported_file": ct._imported_file,
+        "dist_base": ct._dist_base,
+        "env": os.environ.get("ATHENA_MYTHOS_CORE_PIN_GUARD"),
+    }
+    os.environ.pop("ATHENA_MYTHOS_CORE_PIN_GUARD", None)
+    ct._installed_direct_url = lambda: (
+        '{"url": "https://h/r", "vcs_info": {"vcs": "git", '
+        f'"commit_id": "{pin}", "requested_revision": "{pin}"}}}}'
+    )
+    ct._dist_base = lambda: "/srv/site-packages"
+    ct._imported_file = lambda: "/tmp/a-shadow/mythos_core/__init__.py"
+    try:
+        with pytest.raises(pytest.UsageError) as refusal:
+            ct.pytest_sessionstart(session=None)
+        assert "shadowing" in str(refusal.value)
+        assert "/tmp/a-shadow/mythos_core/__init__.py" in str(refusal.value)
+    finally:
+        ct._installed_direct_url = saved["direct_url"]
+        ct._imported_file = saved["imported_file"]
+        ct._dist_base = saved["dist_base"]
+        if saved["env"] is not None:
+            os.environ["ATHENA_MYTHOS_CORE_PIN_GUARD"] = saved["env"]
+

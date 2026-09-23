@@ -213,3 +213,92 @@ def remedy(found: Provenance) -> str:
         f"To run anyway, set {OPT_OUT_ENV}=off -- the opt-out announces itself on "
         "every run."
     )
+
+
+# ---------------------------------------------------------------------------
+# Where the module actually came from
+#
+# Everything above this line reads pip's `direct_url.json` -- pip's RECORD of
+# where it put a distribution. That record is not the module Python imports, and
+# the two are found by independent searches: `importlib.metadata` scans
+# `sys.path` for a `*.dist-info` directory, while `import mythos_core` scans
+# `sys.path` for a `mythos_core` package. Any directory carrying the package and
+# no dist-info wins the second search without touching the first.
+#
+# A src-layout checkout on PYTHONPATH is exactly such a directory, and it defeats
+# everything above with one environment variable -- no file edited, no metadata
+# forged, no opt-out set. Demonstrated in hermes-engine: the suite went green
+# against the PREVIOUS pin, missing an egress fix the current pin carries, and
+# the guard printed nothing.
+#
+# This module's first sentence is "What is actually imported, versus what this
+# repo pins", and its third says "Nothing checked that the module Python imports
+# is the one the pin names". That was still true of this file.
+# ---------------------------------------------------------------------------
+
+
+def _under(child: str, parent: str) -> bool:
+    """Is ``child`` inside ``parent``? Both already absolute and resolved.
+
+    String prefixing with an explicit separator rather than `Path.is_relative_to`
+    alone, so that ``/srv/core-evil`` is not read as living inside ``/srv/core``.
+    """
+    if child == parent:
+        return True
+    return child.startswith(parent.rstrip("/") + "/")
+
+
+def shadow_complaint(
+    module_file: str | None,
+    found: Provenance,
+    *,
+    dist_base: str | None = None,
+) -> str | None:
+    """Why the imported module is not the one the provenance describes, or None.
+
+    The question the rest of this file never asked. Two places the module may
+    legitimately live, and a shadow is in neither:
+
+    * ``dist_base`` -- the directory pip's own metadata sits in. For an ordinary
+      install the package is right there beside the ``.dist-info``.
+    * ``found.location`` -- the checkout a local or editable install points at.
+      An editable install deliberately leaves the package OUTSIDE site-packages,
+      so refusing that case would refuse the normal development setup.
+
+    A VCS ``location`` is a URL, not a path, so it is not offered as a candidate;
+    for that install shape ``dist_base`` is the answer and is sufficient.
+
+    Returns None when there is nothing to compare against rather than inventing a
+    verdict -- an unestablished provenance is already `complaint`'s finding, and
+    reporting it twice in different words would make one problem look like two.
+    """
+    if module_file is None:
+        return (
+            "mythos-core is recorded as installed, but `import mythos_core` "
+            "does not yield a module with a file on disk, so this run cannot be "
+            "shown to have loaded the pinned code at all"
+        )
+
+    candidates = []
+    if dist_base:
+        candidates.append(str(pathlib.Path(dist_base).resolve()))
+    if found.location and not found.location.startswith(("http://", "https://", "git+")):
+        location = found.location
+        if location.startswith("file://"):
+            location = location[len("file://") :]
+        candidates.append(str(pathlib.Path(location).resolve()))
+
+    if not candidates:
+        return None
+
+    resolved = str(pathlib.Path(module_file).resolve())
+    if any(_under(resolved, candidate) for candidate in candidates):
+        return None
+
+    return (
+        f"pip records mythos-core at {' or '.join(candidates)}, but "
+        f"`import mythos_core` loaded {resolved}, which is inside neither. "
+        "Something earlier on sys.path is shadowing the pinned install -- most "
+        "often a checkout on PYTHONPATH -- so the pin describes one copy of this "
+        "dependency and the tests exercised another."
+    )
