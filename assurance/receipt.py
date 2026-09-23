@@ -69,12 +69,35 @@ digest proves nothing was altered between record and report, not that what was
 recorded is correct. :data:`RECEIPT_SCHEMA` documents the shape as data, so
 "documented + machine-readable" is real and not merely prose.
 
-The receipt dict is the **canonical signable payload**. The cryptography
+This receipt is UNSIGNED, and says so in the payload
+-----------------------------------------------------
+
+The receipt dict is the **canonical signable payload**: deterministic,
+canonicalisable, and built so that a change to any stable field changes
+``["digest"]`` and would invalidate any signature over it. The cryptography
 (Ed25519 keys, the Merkle construction) lives in the engine, which owns the keys;
-this backend deliberately does not sign. What it produces is the exact,
-deterministic, canonicalisable object designed to be signed elsewhere — a change
-to any stable field changes :data:`~receipt` ``["digest"]`` and so invalidates any
-signature over it.
+this backend deliberately does not sign.
+
+"Designed to be signed elsewhere" is not "signed elsewhere", and this module said
+the first in a way that read as the second. **No component in the platform signs
+this object today.** The engine's Ed25519 signing covers the evidence-pack
+manifest — a different artifact, in a different repository, with no path between
+the two. So a receipt carrying a prominent SHA-256 ``digest`` and nothing at all
+about signatures reads, to most readers, as cryptographically vouched. A digest is
+a checksum an auditor can recompute; it is not a signature and attests nothing
+about who produced the receipt.
+
+So the payload carries ``signed`` (always ``False`` here), ``signature`` (always
+``None``) and ``unsigned_reason``. This is exactly the discipline the evidence
+pack already keeps — it returns ``signed: false`` with a reason, deliberately, so
+that an unsigned pack says so rather than looking like a signed one nobody
+checked — and the receipt, the artifact the roadmap wants published as a standard,
+was the one that did not keep it.
+
+The three fields sit OUTSIDE the digest, like ``computed_at``: the digest is the
+value a signature covers, so it cannot depend on whether a signature exists. When
+signing lands, ``signed`` becomes true and ``signature`` fills in, and every
+digest recorded before that day still verifies.
 """
 
 from __future__ import annotations
@@ -85,6 +108,18 @@ import json
 from django.utils import timezone
 
 ALGORITHM = "sha256"
+
+#: Why every receipt this module emits is unsigned, in the payload rather than only
+#: in prose. One string, so the answer cannot drift between the schema, the payload
+#: and the docstring.
+UNSIGNED_REASON = (
+    "No component in the platform signs this object. This backend produces the "
+    "canonical signable payload and holds no signing key; the engine's Ed25519 "
+    "signing covers the evidence-pack manifest, a different artifact with no path "
+    "to this one. The `digest` above is a checksum an auditor can recompute to "
+    "confirm the content is unaltered against a copy they already trust; it is not "
+    "a signature and attests nothing about who produced this receipt."
+)
 
 # The version of the Assurance Receipt standard this module emits. A stable
 # string a consumer keys on to know which schema (below) it is reading; bump it
@@ -99,7 +134,15 @@ ALGORITHM = "sha256"
 #         consumer that silently compared the two would report a change that did
 #         not happen, which is why the version is IN the hashed content and a
 #         reader is expected to key on it.
-RECEIPT_VERSION = "mythos.assurance.receipt/3.0"
+# A MINOR bump, and deliberately so. Every previous step here was MAJOR because it
+# added new HASHED content: a 2.0 digest and a 3.0 digest of the same state differ,
+# so a minor bump would have told a consumer the shapes were compatible when the
+# digests were not. The three fields 3.1 adds sit OUTSIDE the digest, so a 3.0
+# digest and a 3.1 digest of the same state are IDENTICAL. Calling this major would
+# be that same error with the sign flipped -- announcing a digest break that did
+# not happen, and inviting a consumer to discard receipts that still verify.
+RECEIPT_VERSION = "mythos.assurance.receipt/3.1"
+_VERSION_3_0 = "mythos.assurance.receipt/3.0"
 _VERSION_2_0 = "mythos.assurance.receipt/2.0"
 
 # Every receipt version this module can describe. A receipt in the wild carries
@@ -108,7 +151,7 @@ _VERSION_2_0 = "mythos.assurance.receipt/2.0"
 # version's shape is only recoverable from git history. :func:`receipt_schema`
 # is the lookup; :data:`RECEIPT_SCHEMA` stays the current one so existing
 # callers are unaffected.
-SUPERSEDED_VERSIONS = ("mythos.assurance.receipt/1.1", _VERSION_2_0)
+SUPERSEDED_VERSIONS = ("mythos.assurance.receipt/1.1", _VERSION_2_0, _VERSION_3_0)
 
 
 def _digest(payload: dict) -> str:
@@ -450,6 +493,32 @@ RECEIPT_SCHEMA = {
             "format": "date-time",
             "description": "When this receipt was rendered — metadata only, OUTSIDE the digest.",
         },
+        "signed": {
+            "type": "boolean",
+            "const": False,
+            "description": (
+                "Whether this receipt carries a cryptographic signature. Always false: "
+                "no component in the platform signs this object today. Present so a "
+                "reader cannot mistake the digest — a checksum anyone can recompute — "
+                "for a signature. OUTSIDE the digest, like computed_at, because the "
+                "digest is the value a signature covers."
+            ),
+        },
+        "signature": {
+            "type": "null",
+            "description": (
+                "The signature block, when there is one. Always null today. Null rather "
+                "than absent, because an absent key reads as 'nothing to say here' and "
+                "here there is something to say."
+            ),
+        },
+        "unsigned_reason": {
+            "type": "string",
+            "description": (
+                "Why this receipt is unsigned, in words a reader can act on. Never "
+                "empty while signed is false."
+            ),
+        },
     },
     "required": [
         "receipt_version",
@@ -464,6 +533,9 @@ RECEIPT_SCHEMA = {
         "algorithm",
         "digest",
         "computed_at",
+        "signed",
+        "signature",
+        "unsigned_reason",
     ],
 }
 
@@ -545,8 +617,32 @@ _SCHEMA_2_0 = {
     },
 }
 
+# The shape a 3.0 receipt has: this one, minus the three fields 3.1 added to say
+# the receipt is unsigned. Kept as data for the same reason 1.1 and 2.0 are: an
+# auditor holding a 3.0 receipt needs the schema that reads it, and "versioned and
+# backward-readable" is worth nothing if the previous shape lives only in git.
+_HONESTY_FIELDS = ("signed", "signature", "unsigned_reason")
+
+_SCHEMA_3_0 = {
+    **{k: v for k, v in RECEIPT_SCHEMA.items() if k not in ("$id", "properties", "required")},
+    "$id": _VERSION_3_0,
+    "properties": {
+        **{
+            k: v
+            for k, v in RECEIPT_SCHEMA["properties"].items()
+            if k not in _HONESTY_FIELDS
+        },
+        "receipt_version": {
+            **RECEIPT_SCHEMA["properties"]["receipt_version"],
+            "const": _VERSION_3_0,
+        },
+    },
+    "required": [r for r in RECEIPT_SCHEMA["required"] if r not in _HONESTY_FIELDS],
+}
+
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_3_0: _SCHEMA_3_0,
     _VERSION_2_0: _SCHEMA_2_0,
     _VERSION_1_1: _SCHEMA_1_1,
 }
@@ -776,4 +872,19 @@ def build_assurance_receipt(deployment) -> dict:
         "digest": _digest(stable),
         # Metadata only, OUTSIDE the hash — exactly like the other receipts here.
         "computed_at": timezone.now().isoformat(),
+        # Also outside the hash, and for the same reason: the digest is what a
+        # signature covers, so it cannot depend on whether a signature exists.
+        #
+        # Said in the payload rather than left to the docstring, because the reader
+        # this receipt is built for is an auditor holding the JSON and nothing else.
+        # A prominent SHA-256 `digest` with no mention of signatures reads as
+        # cryptographically vouched; a digest is a checksum anyone can recompute and
+        # attests nothing about who produced the receipt. The evidence pack has
+        # returned `signed: false` with a reason from the start, deliberately, so an
+        # unsigned pack says so rather than looking like a signed one nobody checked
+        # — and the receipt, the artifact meant to be published as a standard, was
+        # the one that did not.
+        "signed": False,
+        "signature": None,
+        "unsigned_reason": UNSIGNED_REASON,
     }

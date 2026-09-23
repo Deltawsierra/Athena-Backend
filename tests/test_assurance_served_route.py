@@ -555,7 +555,11 @@ def test_the_receipt_declares_the_new_major_version():
     # checks_reported_at. Both are new HASHED content, so every 2.0 digest differs
     # from the 3.0 digest of the same state, and a minor bump would have told a
     # consumer the shapes were compatible when the digests are not.
-    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/3.0"
+    #
+    # 3.1 added signed/signature/unsigned_reason, which are NOT hashed. The digest
+    # is byte-identical to 3.0's for the same state, so this step is minor by the
+    # same rule that made the earlier ones major.
+    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/3.1"
 
 
 def test_the_schema_requires_the_two_new_blocks():
