@@ -57,6 +57,49 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict):
     return by_identifier.get(key) or by_name.get(key)
 
 
+#: What a malformed ``tools`` declaration is reported as, in place of the
+#: references it does not contain.
+MALFORMED_TOOLS = "tools (not a list)"
+
+
+def tool_references(metadata: dict) -> list:
+    """The tool references a ``tools`` declaration holds -- or one finding saying it
+    is not a list.
+
+    ``metadata["tools"]`` is meant to be a list of strings. A string is a plausible
+    typo for a one-element list (``"reader"`` for ``["reader"]``) and iterating it
+    yields its CHARACTERS: six manufactured gaps from one mistyped field, each
+    counted in both readers' summaries, and -- since resolution falls back to a
+    name -- a single character matching an asset's name becomes a declared hop.
+    Manufacturing findings is the same defect as dropping them, pointed the other
+    way, so a malformed declaration is reported as exactly that: one thing wrong,
+    which is what it is.
+    """
+    raw = metadata.get("tools")
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return [MALFORMED_TOOLS]
+
+
+def sort_references(rows: list[dict]) -> list[dict]:
+    """The unresolved rows in one order, whatever order they were found in.
+
+    The two readers walk the inventory differently -- one interleaves an asset's
+    ``tools`` and its ``server`` per asset, the other walks every agent's tools
+    first and then every asset's server -- so the same two gaps came out as the
+    same SET in a different LIST. Measured at roughly one in ten agent-heavy
+    inventories. Both lists are returned verbatim from their own endpoint, so the
+    same gaps appeared in two reports in two orders, and a caller comparing them
+    for agreement (the parity tests do, with ``==``) was comparing find order.
+
+    Sorted on the row's own content rather than on iteration, so the order is a
+    property of the graph and not of the walk.
+    """
+    return sorted(rows, key=lambda r: (r["source"], r["mechanism"], r["reference"]))
+
+
 def dangling_reference(source, reference, mechanism: str) -> dict:
     """One unresolved reference, in the shape both readers report.
 

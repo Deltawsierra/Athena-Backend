@@ -226,7 +226,7 @@ def test_personal_context_api_returns_200_and_shape():
     force_authenticate(req, user=analyst)
     resp = view(req, uuid=str(dep.uuid))
     assert resp.status_code == 200
-    assert set(resp.data.keys()) == {"stores", "gaps", "summary"}
+    assert set(resp.data.keys()) == {"stores", "gaps", "unresolved", "summary"}
     assert resp.data["summary"]["personal_data_components"] == 1
 
 

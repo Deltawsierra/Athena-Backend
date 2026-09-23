@@ -418,11 +418,18 @@ def assess_ripple(deployment) -> dict:
             "evidenced_consequences": evidenced_total,
             "bounded": evidenced_total > len(consequences),
             "by_category": dict(sorted(by_category.items())),
+        # The reach graph both of these are built on. An unplaceable reference
+        # means part of that graph could not be found, so this report is what the
+        # graph we HAVE supports -- not a statement about the whole system. It is
+        # carried through rather than re-derived: one source for the gap, the same
+        # shape in every report that stands on it.
+            "unresolved_references": len(access["unresolved"]),
             "worst_risk": worst_risk,
         }
 
         return {
             "origins": origin_list,
             "consequences": consequences,
+            "unresolved": access["unresolved"],
             "summary": summary,
         }

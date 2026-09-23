@@ -55,6 +55,21 @@ def _dep(name="d"):
     return Deployment.objects.create(name=name, owner=_user(f"u-{name}"))
 
 
+def _scan(dep, inventory: dict):
+    """A completed scan carrying a declared inventory in ``target_config``, which is
+    what the production asset writer reads. Built through the real model so the test
+    exercises the writer rather than a hand-made asset shape it never produces."""
+    from pentest.models import PentestScan
+
+    return PentestScan.objects.create(
+        user=dep.owner,
+        target_url="https://app.example.com/",
+        consent=True,
+        status=PentestScan.STATUS_COMPLETED,
+        target_config=inventory,
+    )
+
+
 def _asset(dep, *, kind, name, identifier=None, metadata=None,
            classification=Asset.Classification.KNOWN):
     return Asset.objects.create(
@@ -329,3 +344,226 @@ def test_an_unresolved_reference_stops_the_access_claim_reaching_verified():
     assert capped["status"] == "supported"
     assert "could not place" in capped["contradicting_summary"]
     assert "assistant → ghost-tool" in capped["contradicting_summary"]
+
+
+# ---- What an adversary pass found once the readers agreed on the SET. ----
+#
+# The set of hops and the set of unplaceable references really did agree: 500
+# randomized inventories produced zero set-level divergences. What did not agree
+# was the LIST, the COUNTS, and -- worse -- whether the gap was real at all. The
+# platform's own writer was manufacturing one.
+
+
+def test_a_server_a_tool_names_is_a_node_not_a_dangling_reference():
+    """The writer used to manufacture the gap the readers then reported.
+
+    ``assets.py`` writes ``server`` onto every tool entry that declares one, but
+    only entries in ``cfg["tools"]`` become assets. So "tool `reader` is hosted by
+    `mcp-prod`", without listing `mcp-prod` separately, stored a reference to a
+    component no code path created: not a gap in the customer's inventory, a gap
+    in our reading of it. It reached every reader, and — before this — capped the
+    EFFECTIVE_ACCESS claim of a deployment with one read-only tool and no
+    privileged reach at all.
+
+    Naming a host IS declaring it exists, so the honest record is a node whose
+    classification says nobody has verified it.
+    """
+    from assurance.assets import derive_assets
+
+    dep = _dep("declared")
+    scan = _scan(dep, {
+        "agent": {"name": "assistant", "identifier": "assistant"},
+        "tools": [{"name": "reader", "identifier": "reader",
+                   "permissions": ["read"], "server": "mcp-prod"}],
+    })
+    derive_assets(dep, scan)
+
+    server = dep.assets.filter(kind=Asset.Kind.MCP_SERVER, identifier="mcp-prod").first()
+    assert server is not None, "the named host must be a node"
+    # KNOWN, like the tool that named it: one inventory, one authority. Not
+    # APPROVED (nobody approved this component on its own) and not UNKNOWN, which
+    # would make every declared tool's declared host an ungoverned target -- the
+    # negative control below is what catches that.
+    assert server.classification == Asset.Classification.KNOWN
+    assert server.metadata["named_by_tool"] is True
+    assert server.metadata["declared"] is False, (
+        "the inventory declared a tool that pointed at it, not this component, and "
+        "a reader that wants to treat the two differently needs the distinction"
+    )
+
+    # And so there is no gap for either reader to report.
+    assert _unresolved_rows(dep) == ([], [])
+    assert ("reader", "mcp-prod") in _route_declared_hops(dep)
+
+
+def test_a_routine_declared_inventory_still_verifies():
+    """The negative control for the test above, at the claim level. A deployment
+    with one agent, one read-only tool and a named host has no privileged reach, no
+    shadow principal and nothing over-broad. Its access claim must verify."""
+    from assurance.assets import derive_assets
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep("routine")
+    scan = _scan(dep, {
+        "agent": {"name": "assistant", "identifier": "assistant"},
+        "tools": [{"name": "reader", "identifier": "reader",
+                   "permissions": ["read"], "server": "mcp-prod"}],
+    })
+    derive_assets(dep, scan)
+
+    claim = _derive_effective_access(dep)
+    assert claim["status"] == "verified"
+    assert claim["contradicting_summary"] == ""
+
+
+def test_both_readers_report_the_same_gaps_in_the_same_order():
+    """The set agreed; the list did not. ``access`` interleaves an asset's tools and
+    its server per asset; ``route`` walks every agent's tools first and then every
+    asset's server. Two agents with one gap each came out in opposite orders —
+    measured at roughly one in ten agent-heavy inventories — and both lists are
+    returned verbatim from their own endpoint, so the same gaps appeared in two
+    reports in two orders. Sorted on the row's content, so the order is a property
+    of the graph rather than of the walk."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="billing-agent", identifier="billing-agent",
+           metadata={"server": "mcp-payments"})
+    _asset(dep, kind=Asset.Kind.AGENT, name="support-agent", identifier="support-agent",
+           metadata={"tools": ["zendesk-tool"]})
+
+    access_rows, route_rows = _unresolved_rows(dep)
+    assert access_rows == route_rows
+    assert [(r["source"], r["reference"]) for r in access_rows] == [
+        ("billing-agent", "mcp-payments"),
+        ("support-agent", "zendesk-tool"),
+    ]
+
+
+def test_one_relationship_is_one_edge_even_when_declared_and_inferred_agree():
+    """A declared edge and the inferred spine's guess at the same pair used to be
+    drawn as two arrows between two nodes. The declared-vs-inferred ratio is this
+    map's central honesty claim — how much of the picture is attested rather than
+    guessed — and it was inflated on the attested side by an inferred edge nobody
+    needed, because the pair was already attested."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"server": "customer-db"})
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="customer-db", identifier="customer-db")
+
+    result = route.build_route_map(dep)
+    assert result["summary"]["edge_count"] == 1
+    assert result["summary"]["declared_edges"] == 1
+    assert result["summary"]["inferred_edges"] == 0
+    assert result["edges"][0]["kind"] == "connects_to"
+
+
+def test_the_same_target_named_twice_is_one_hop_to_both_readers():
+    """Named through both mechanisms at once. The reach assessment dedups on the
+    node pair and reports one hop; the map dedups on (source, target, KIND) and
+    reported two declared edges plus an inferred one — three edges for one
+    relationship, and the two readers disagreeing about the size of one graph."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="orchestrator", identifier="orchestrator",
+           metadata={"tools": ["vec-1"], "server": "vec-1"})
+    _asset(dep, kind=Asset.Kind.VECTOR_DB, name="vec-1", identifier="vec-1")
+
+    result = route.build_route_map(dep)
+    assert result["summary"]["declared_edges"] == 1
+    assert result["summary"]["edge_count"] == 1
+    assert len(_access_hops(dep)) == 1
+    assert _route_declared_hops(dep) == _access_hops(dep)
+
+
+def test_the_claim_counts_the_references_it_lists():
+    """It counted ``len(unresolved)`` and enumerated a SET of pairs, so a duplicated
+    inventory line said "2 declared reference(s)" above one pair. An operator told
+    to chase two and handed one goes looking for a reference that does not exist."""
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"tools": ["ghost-tool", "ghost-tool"]})
+    _asset(dep, kind=Asset.Kind.TOOL, name="reader", identifier="reader",
+           metadata={"permissions": ["read"]})
+
+    claim = _derive_effective_access(dep)
+    assert "1 declared reference(s)" in claim["contradicting_summary"]
+    assert claim["contradicting_summary"].count("→") == 1
+
+
+def test_an_unknown_claim_does_not_carry_measured_contradicting_evidence():
+    """With no principals the claim is UNKNOWN and ``vendor_asserted``. Appending a
+    measured gap as *contradicting* evidence produced a claim saying "nothing to
+    assess", "the vendor asserted this" and "here is evidence we measured against
+    it" at once — and ``vendor_asserted`` is flatly wrong for a finding this
+    platform produced itself. The gap is still said, on the supporting side, where
+    it reads as the limit of what we could see."""
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="orders-db", identifier="orders-db",
+           metadata={"server": "ghost-backend"})
+
+    claim = _derive_effective_access(dep)
+    assert claim["status"] == "unknown"
+    assert claim["vendor_asserted"] is True
+    assert claim["contradicting_summary"] == ""
+    assert "could not be placed" in claim["supporting_summary"]
+
+
+def test_a_malformed_tools_declaration_is_one_finding_not_one_per_character():
+    """``metadata["tools"] = "reader"`` is a plausible typo for ``["reader"]``, and
+    iterating a string yields its characters: six manufactured gaps from one
+    mistyped field, counted in both summaries, and — since resolution falls back to
+    a name — a single character matching an asset's name became a declared hop.
+    Manufacturing findings is the same defect as dropping them, pointed the other
+    way."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"tools": "xy"})
+    _asset(dep, kind=Asset.Kind.TOOL, name="x", identifier="tool-4471")
+
+    access_rows, route_rows = _unresolved_rows(dep)
+    assert access_rows == route_rows
+    assert [r["reference"] for r in access_rows] == ["tools (not a list)"]
+    assert _route_declared_hops(dep) == set(), "no hop is fabricated from one character"
+    # The agent declares nothing usable, so it reaches nothing. (The tool is then
+    # owned by no agent, which the reach assessment reports honestly as reachable
+    # by the deployment's own surface -- that is not a fabricated hop, it is what
+    # an unowned capability-bearing tool means.)
+    assert not any(p == "assistant" for p, _ in _access_hops(dep))
+
+
+def test_neither_reader_raises_on_metadata_that_is_not_a_dict():
+    """Two readers cannot agree about a graph when one of them cannot read it. The
+    map's front-door lookup had no isinstance guard where the reach assessment
+    guards every metadata read, so an asset whose metadata is a JSON string made
+    the map raise AttributeError while the assessment returned normally."""
+    dep = _dep()
+    a = _asset(dep, kind=Asset.Kind.API, name="app.example.com", identifier="app.example.com")
+    Asset.objects.filter(pk=a.pk).update(metadata="not-a-dict")
+
+    assert route.build_route_map(dep)["summary"]["node_count"] == 1
+    assert assess_effective_access(dep)["summary"]["principals"] == 0
+
+
+def test_every_report_built_on_the_reach_graph_carries_its_gaps():
+    """The commit's own thesis — a gap that reads as an absence of gaps — still held
+    for three more reports. ``ripple`` (blast radius) and ``personal_context``
+    (who can reach personal data) both read the reach assessment wholesale and
+    published summaries built on it while reading only ``principals``. Carried
+    through rather than re-derived: one source for the gap, one shape."""
+    from assurance.personal_context import assess_personal_context
+    from assurance.ripple import assess_ripple
+
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"tools": ["ghost-mcp"]})
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="orders-db", identifier="orders-db",
+           metadata={"server": "ghost-backend"})
+
+    expected = assess_effective_access(dep)["unresolved"]
+    assert len(expected) == 2
+
+    for report in (assess_ripple(dep), assess_personal_context(dep)):
+        assert report["unresolved"] == expected
+        assert report["summary"]["unresolved_references"] == 2

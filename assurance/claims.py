@@ -215,6 +215,10 @@ def _derive_effective_access(deployment) -> dict:
         status = Status.UNKNOWN
         evidence_class = EvidenceClass.UNKNOWN.value
         vendor_asserted = True
+        # An unplaceable reference on a graph with no principals is recorded in the
+        # supporting digest rather than as contradicting evidence: there is no
+        # positive claim here for it to contradict, and it is still the reason an
+        # operator should not read "nothing to assess" as "nothing here".
     else:
         gaps = [g for p in principals for g in p["gaps"]]
         contradicting = [
@@ -235,15 +239,30 @@ def _derive_effective_access(deployment) -> dict:
         f"{summary['principals']} principal(s) assessed; "
         f"{summary['privileged']} privileged, {summary['shadow']} shadow, {summary['over_broad']} over-broad."
     )
+    if unresolved and not principals:
+        supporting += (
+            f" {len(sorted({(u['source'], u['reference']) for u in unresolved}))} declared "
+            "reference(s) could not be placed, so this is what we could read of the "
+            "inventory rather than all of it."
+        )
     contradicting_bits: list[str] = []
-    if unresolved:
-        # Said on the contradicting side, not the supporting one: this is what the
-        # assessment could not see, and it is the reason the claim is not VERIFIED.
+    if unresolved and principals:
+        # Counted over the SAME set it enumerates. It used to count len(unresolved)
+        # and enumerate a set of "source → reference" pairs, so a duplicated
+        # inventory line said "2 declared reference(s)" above one pair: an operator
+        # told to chase two and handed one goes looking for a reference that does
+        # not exist. Distinct pairs, counted and listed.
+        #
+        # Only on the `principals` branch. With nothing to assess the claim is
+        # UNKNOWN and vendor_asserted, and appending measured contradicting
+        # evidence there produced a claim that said "nothing to assess", "the
+        # vendor asserted this" and "here is evidence we measured against it" at
+        # once -- and vendor_asserted is flatly wrong for a finding this platform
+        # produced itself.
+        pairs = sorted({f"{u['source']} → {u['reference']}" for u in unresolved})
         contradicting_bits.append(
-            f"{len(unresolved)} declared reference(s) discovery could not place, so the "
-            "reach was computed over an incomplete graph: "
-            + ", ".join(sorted({f"{u['source']} → {u['reference']}" for u in unresolved}))
-            + "."
+            f"{len(pairs)} declared reference(s) discovery could not place, so the "
+            "reach was computed over an incomplete graph: " + ", ".join(pairs) + "."
         )
     if principals:
         offenders = sorted(

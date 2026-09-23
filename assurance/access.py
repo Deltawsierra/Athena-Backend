@@ -71,6 +71,8 @@ from .graph_refs import (
     MECHANISM_TOOLS,
     dangling_reference,
     resolve_reference,
+    sort_references,
+    tool_references,
 )
 from .models import Asset
 
@@ -168,7 +170,7 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
     for asset in assets:
         metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
         if asset.kind == Asset.Kind.AGENT:
-            for ident in metadata.get("tools") or []:
+            for ident in tool_references(metadata):
                 if not str(ident or "").strip():
                     continue
                 target = resolve_reference(ident, by_identifier, by_name)
@@ -479,6 +481,7 @@ def assess_effective_access(deployment) -> dict:
         by_name.setdefault(asset.name, asset)
 
     edges, unresolved = _build_edges(assets, by_identifier, by_name)
+    unresolved = sort_references(unresolved)
 
     agents = [a for a in assets if a.kind == Asset.Kind.AGENT]
     service_accounts = [a for a in assets if a.kind == Asset.Kind.SERVICE_ACCOUNT]

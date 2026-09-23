@@ -184,6 +184,7 @@ def _agent_and_tools(deployment: Deployment, cfg: dict, now) -> tuple[Asset | No
 
     # The tools the agent is wired to — each a graph node with its permissions.
     tool_identifiers: list[str] = []
+    declared_servers: list[str] = []
     raw_tools = cfg.get("tools")
     if isinstance(raw_tools, list):
         for entry in raw_tools:
@@ -216,6 +217,57 @@ def _agent_and_tools(deployment: Deployment, cfg: dict, now) -> tuple[Asset | No
             if asset:
                 touched.append(asset)
                 tool_identifiers.append(identifier)
+                server = str(entry.get("server") or "").strip()
+                if server:
+                    declared_servers.append(server)
+
+    # A server a tool says hosts it, which the inventory did not also enumerate as
+    # a tool entry of its own.
+    #
+    # This block exists because the line above writes `server` onto every tool
+    # entry that declares one, while only entries in cfg["tools"] become assets --
+    # so an inventory saying "tool `reader` is hosted by `mcp-prod`" without
+    # listing `mcp-prod` separately stored a reference to a component no code path
+    # created. Every reader of the graph then saw a dangling reference that this
+    # writer had manufactured: not a gap in the customer's inventory, a gap in our
+    # reading of it.
+    #
+    # Naming a host IS declaring it exists, so the honest record is a node -- with
+    # the classification saying nobody has verified it. Nothing is fabricated: the
+    # identifier and the name are the customer's own string. A `server` that is a
+    # URL is named after its URL, which is what this module already does for an
+    # LLM provider's host and for a scanned API surface.
+    placed = {a.identifier for a in touched} | {a.name for a in touched}
+    for server in dict.fromkeys(declared_servers):
+        if server in placed:
+            continue
+        asset = _get_or_refresh(
+            deployment,
+            kind=Asset.Kind.MCP_SERVER,
+            identifier=server,
+            name=server,
+            # KNOWN, like the tool that named it: one inventory, one authority.
+            # Not APPROVED -- nobody approved this component on its own -- and not
+            # UNKNOWN, which would make every declared tool's declared host an
+            # ungoverned target and turn a routine read-only deployment's access
+            # claim CONTRADICTED. That is the same unearned behaviour change the
+            # dangling reference caused, moved one step along.
+            classification=Asset.Classification.KNOWN,
+            now=now,
+            metadata={
+                "source": "declared_inventory",
+                # Named by a tool, never enumerated in its own right. `declared` is
+                # False because the inventory did not declare THIS component -- it
+                # declared a tool that pointed at it. A reader that wants to treat
+                # the two differently has the distinction; nothing here decides for
+                # it, and nothing here pretends the component was enumerated.
+                "declared": False,
+                "named_by_tool": True,
+            },
+        )
+        if asset:
+            touched.append(asset)
+            placed.add(server)
 
     # The agent identity itself — the node the tools hang off. It is declared
     # explicitly (an ``agent`` block) or implied by a scan that declares tools.

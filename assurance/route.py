@@ -43,6 +43,8 @@ from .graph_refs import (
     MECHANISM_TOOLS,
     dangling_reference,
     resolve_reference,
+    sort_references,
+    tool_references,
 )
 from .models import Asset, Provider
 
@@ -145,14 +147,28 @@ def build_route_map(deployment) -> dict:
     seen: set[tuple[str, str, str]] = set()
     unresolved: list[dict] = []
 
+    # Pairs a DECLARED edge already covers. Dedup is per (source, target, kind), so
+    # without this the same relationship could be drawn twice: once as the
+    # declaration the inventory attests, once as the inferred spine's own guess at
+    # it. That inflates `declared_edges + inferred_edges` on one node pair, and the
+    # declared-vs-inferred ratio is this map's central honesty claim -- how much of
+    # the picture is attested rather than guessed. An attested pair does not need
+    # guessing about, so the inferred edge is suppressed rather than added beside it.
+    attested_pairs: set[tuple[str, str]] = set()
+
     def add_edge(src_asset, dst_asset, kind: str, label: str, declared: bool) -> None:
         if src_asset is None or dst_asset is None or src_asset.pk == dst_asset.pk:
             return
-        key = (str(src_asset.uuid), str(dst_asset.uuid), kind)
+        pair = (str(src_asset.uuid), str(dst_asset.uuid))
+        if declared:
+            attested_pairs.add(pair)
+        elif pair in attested_pairs:
+            return
+        key = (pair[0], pair[1], kind)
         if key in seen:
             return
         seen.add(key)
-        edges.append(_edge(str(src_asset.uuid), str(dst_asset.uuid), kind, label, declared))
+        edges.append(_edge(pair[0], pair[1], kind, label, declared))
 
     # ---- Declared edges: what the inventory actually attests. ----
 
@@ -161,7 +177,7 @@ def build_route_map(deployment) -> dict:
 
     for agent in agent_assets:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
-        for ident in metadata.get("tools") or []:
+        for ident in tool_references(metadata):
             if not str(ident or "").strip():
                 continue
             target = resolve_reference(ident, by_identifier, by_name)
@@ -188,6 +204,13 @@ def build_route_map(deployment) -> dict:
             # no edge, and no unresolved row either, because only the agent→tool
             # mechanism had a channel for a miss.
             unresolved.append(dangling_reference(source, server, MECHANISM_SERVER))
+        elif (str(source.uuid), str(host.uuid)) in attested_pairs:
+            # The same target, already attested through the agent-to-tool
+            # mechanism. One relationship declared two ways is one relationship:
+            # the reach assessment counts it as a single hop (it dedups on the
+            # node pair), and a map that counted it twice would disagree with the
+            # assessment about the size of the same graph.
+            continue
         elif host.kind == Asset.Kind.MCP_SERVER:
             add_edge(source, host, "hosted_by", "hosted by", declared=True)
         else:
@@ -202,7 +225,18 @@ def build_route_map(deployment) -> dict:
     # The application's front door: the scanned surface if we have it, else any
     # app-layer API, else the agent. The orchestrating brain: the agent.
     app_apis = [a for a in assets if a.kind == Asset.Kind.API]
-    front = next((a for a in app_apis if (a.metadata or {}).get("source") == "scan_target"), None)
+    front = next(
+        (
+            a
+            for a in app_apis
+            # Guarded like every other metadata read in `assurance.access`: an
+            # asset whose metadata is not a dict used to raise AttributeError
+            # here, so this reader 500s on a graph the other reads fine -- and two
+            # readers cannot agree about a graph when one of them cannot read it.
+            if isinstance(a.metadata, dict) and a.metadata.get("source") == "scan_target"
+        ),
+        None,
+    )
     front = front or (app_apis[0] if app_apis else None) or (agent_assets[0] if agent_assets else None)
     brain = agent_assets[0] if agent_assets else None
 
@@ -245,6 +279,8 @@ def build_route_map(deployment) -> dict:
         }
         for layer in LAYER_ORDER
     ]
+
+    unresolved = sort_references(unresolved)
 
     summary = {
         "node_count": len(nodes),
