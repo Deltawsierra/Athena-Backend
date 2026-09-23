@@ -43,7 +43,6 @@ from .models import (
     AssuranceClaim,
     Deployment,
     EvidenceClass,
-    Finding,
     RetestRequirement,
     severity_rank,
 )

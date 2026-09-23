@@ -90,6 +90,15 @@ jobs:
       - name: Lint (exception handling and optional parameters)
         run: ruff check --select BLE001,RUF013 .
 
+      # Syntax errors and undefined/unused names. The cheapest family there is,
+      # and the one whose absence is least defensible: an F821 is a crash the
+      # gate would have caught, and an F401 is a reader being told a module
+      # depends on something it does not. minotaur-website has gated these since
+      # it got CI at all; this repo had six dead imports and one name read from a
+      # star import, which is the state a rule nobody runs produces.
+      - name: Lint (undefined and unused names)
+        run: ruff check --select E9,F .
+
       - name: Django checks
         run: python manage.py check
         env:

@@ -14,6 +14,13 @@ os.environ.setdefault("DJANGO_SECRET_KEY", "test-secret-key-not-used-outside-tes
 
 from config.settings import *  # noqa: F401,F403
 
+# The one name this file READS from the base settings rather than sets, imported
+# explicitly beside the star. Relying on the star for a read is what F405 objects
+# to, and it is right to: if the base settings ever stopped defining this, the
+# override below would fail at import with a bare NameError and no hint that a
+# setting had moved.
+from config.settings import REST_FRAMEWORK as BASE_REST_FRAMEWORK
+
 # A file, not ":memory:". The in-memory backend uses a shared cache, and a
 # second thread writing to it raises "database table is locked" immediately
 # rather than waiting, so the concurrency tests could not run at all. A file
@@ -43,4 +50,7 @@ CYBERENGINE_OPERATOR_KEY = "test-operator-key"
 DEFENDER_MONITOR_ONLY = True
 
 # Throttling would make the ordering of tests significant.
-REST_FRAMEWORK = {**REST_FRAMEWORK, "DEFAULT_THROTTLE_RATES": {"anon": None, "user": None}}
+REST_FRAMEWORK = {
+    **BASE_REST_FRAMEWORK,
+    "DEFAULT_THROTTLE_RATES": {"anon": None, "user": None},
+}

@@ -100,7 +100,7 @@ The return shape of :func:`build_compliance_map`::
 
 from __future__ import annotations
 
-from .models import Finding, RESOLVED_FINDING_STATUSES, SEVERITY_ORDER, severity_rank
+from .models import RESOLVED_FINDING_STATUSES, SEVERITY_ORDER, severity_rank
 
 # Findings in these states are resolved — no longer an open control gap. Mirrors
 # ``assurance.decision._RESOLVED_STATUSES`` so the two views agree on what

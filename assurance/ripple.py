@@ -63,7 +63,7 @@ from .capability import (
     _RISK_ORDER,
     _max_risk,
 )
-from .models import Asset, Finding, RESOLVED_FINDING_STATUSES, SEVERITY_HIGH, severity_rank
+from .models import Asset, RESOLVED_FINDING_STATUSES, SEVERITY_HIGH, severity_rank
 
 # Findings in these states are resolved — no longer a live weakness, so never an
 # active origin. Mirrors ``assurance.decision`` / ``assurance.business_impact`` so
