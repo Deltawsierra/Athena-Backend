@@ -111,6 +111,13 @@ def _finding_rows(deployment) -> list[dict]:
                 "finding_type": finding.finding_type,
                 "severity": finding.severity,
                 "status": finding.status,
+                # The bundle is a report, and a slug is not a statement. A row
+                # reading `status: "contained"` with nothing beside it leaves an
+                # auditor to decide for themselves whether that means handled --
+                # which is the reading the state was added to prevent. Both fields
+                # come from the model's own tables, never worded here.
+                "status_label": finding.get_status_display(),
+                "status_must_not_imply": finding.MUST_NOT_IMPLY.get(finding.status),
             }
         )
     return rows

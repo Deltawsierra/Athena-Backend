@@ -120,6 +120,19 @@ def _finding_identity(finding) -> dict:
         "severity_label": finding.get_severity_display(),
         "status": finding.status,
         "status_label": finding.get_status_display(),
+        # A pack headed "incident evidence" carries its own worst misreading. An
+        # INVALIDATED finding in one reads as a confirmed incident unless the pack
+        # says otherwise, and CONTAINED reads as handled. Served from the model's
+        # one table (Finding.MUST_NOT_IMPLY) so the pack, the API and the console
+        # cannot each word the caveat differently. None where the status has no
+        # wrong reading worth naming -- absent, not empty.
+        #
+        # Read off the instance rather than through an import of .models: this
+        # function already reaches into the finding for get_status_display(), and
+        # MUST_NOT_IMPLY is that same class's table. It keeps this module free of a
+        # models import, which is how the rest of it stays callable on any object
+        # carrying these attributes.
+        "status_must_not_imply": finding.MUST_NOT_IMPLY.get(finding.status),
     }
 
 
@@ -402,6 +415,14 @@ INCIDENT_PACK_SCHEMA = {
                         "severity_label": {"type": "string"},
                         "status": {"type": "string"},
                         "status_label": {"type": "string"},
+                        "status_must_not_imply": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "What this disposition must NOT be read as, where it "
+                                "has a wrong reading worth naming. Null means the "
+                                "status has none -- never that the caveat was dropped."
+                            ),
+                        },
                     },
                 },
             },

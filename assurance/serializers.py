@@ -122,6 +122,12 @@ class FindingSerializer(serializers.ModelSerializer):
     # renders as "being fixed", or an INVALIDATED one it renders as an incident, is
     # the whole reason these states were added.
     status_must_not_imply = serializers.SerializerMethodField()
+    # The disposition's own words. Without it a consumer has only the slug, and
+    # the only way to render "contained" as anything a reader understands is to
+    # write a label of its own -- which is how two surfaces end up disagreeing
+    # about a state that exists *because* its wrong reading is easy. The caveat
+    # beside it is served from the same table for the same reason.
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     def get_status_must_not_imply(self, obj) -> str | None:
         return Finding.MUST_NOT_IMPLY.get(obj.status)
@@ -138,6 +144,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "cvss_score",
             "cvss_vector",
             "status",
+            "status_label",
             "status_must_not_imply",
             "owner",
             "assignee",
