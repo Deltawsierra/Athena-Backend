@@ -180,10 +180,22 @@ def _implicated_provider(finding) -> dict | None:
         return None
     provider = asset.provider
     return {
-        "name": provider.name,
+        # REDACTED, like every other model field that reaches the payload. This
+        # was the one that was not, and it is the field naming the recipient.
+        #
+        # `assurance.assets.derive_assets` builds a Provider from the customer's
+        # declared target with `provider_name = _host(base_url)` -- so for a
+        # self-hosted or private gateway, `Provider.name` IS the customer's
+        # internal hostname. The same payload redacted that host out of `title`
+        # and handed it over two fields above, which is worse than not redacting
+        # at all: it reads as sanitised.
+        "name": _redact(provider.name),
         "kind": provider.kind,
         "kind_label": provider.get_kind_display(),
-        "region": provider.region or "",
+        # Free text an operator fills in. "us-east-1" is fine to send; an earlier
+        # real value was "10.20.30.40 / us-east-1", and the field cannot tell the
+        # difference, so it goes through the same pass as everything else.
+        "region": _redact(provider.region or ""),
         # The component class, NOT the customer's name for their instance of it.
         "component_kind": asset.kind,
         "component_kind_label": asset.get_kind_display(),
@@ -361,7 +373,7 @@ def build_vendor_packet(finding: Finding, *, salt: str | None = None) -> dict:
         ),
     }
 
-    return {
+    payload = {
         "packet_version": PACKET_VERSION,
         "built_at": timezone.now().isoformat(),
         # The finding's stable identity, so the customer and the vendor can refer
@@ -386,6 +398,79 @@ def build_vendor_packet(finding: Finding, *, salt: str | None = None) -> dict:
             "the vendor's implementation, which was not observed."
         ),
     }
+
+    # The guard, last, over everything the builders produced. Defence in depth:
+    # every branch above already redacts, and the whole point is that one of them
+    # did not and nothing noticed for as long as the module existed.
+    guarded, caught = _guard_payload(payload)
+    guarded["redaction"] = {
+        # What the guard had to clean up after the builders. Empty is the
+        # expected state and says so, rather than being absent -- an absent key
+        # reads as "nothing to report" exactly like an empty list does, and this
+        # module exists to keep that distinction.
+        "guard_caught": caught,
+        "guard_clean": not caught,
+        "marker": _REDACTED,
+    }
+    return guarded
+
+
+#: Keys whose values are constructed by this module and are not customer data:
+#: the salted digest (deliberately opaque and high-entropy), the version string,
+#: the build timestamp, and the fixed scope note. Excluded from the guard because
+#: the guard's job is to catch customer material that escaped redaction, and a
+#: digest that happens to match a credential shape is a false positive that would
+#: redact the one reference the vendor needs.
+_GUARD_EXEMPT_KEYS = frozenset(
+    {"packet_version", "built_at", "finding_reference", "scope_note", "status"}
+)
+
+
+def _guard_payload(value, *, path: str = "", caught: list[str] | None = None):
+    """Walk the RENDERED payload and redact anything still matching a leak shape.
+
+    The guard this module's docstring has always described and never had. The
+    leak patterns were enumerated for it -- their own comment says "so the guard
+    can walk the rendered payload rather than trusting that each builder branch
+    remembered to redact" -- and then every branch was trusted. One of them had
+    not remembered, and it was the field naming the packet's recipient.
+
+    IT REDACTS RATHER THAN RAISING, and that is a decision rather than caution.
+    Raising would mean a forgotten field takes out the route for real customer
+    data; a packet that cannot be built is not safer than one built correctly, it
+    is just a different failure. Redacting is fail-safe: whatever this finds
+    cannot leave.
+
+    IT RECORDS THAT IT FIRED, which is the half that keeps it from becoming the
+    thing it was written to prevent. A guard that silently cleans up is
+    indistinguishable from a guard that never runs, and the module would go on
+    passing its tests with a second forgotten field. Every path it catches is
+    named in ``redaction.guard_caught``, so a builder branch that stops redacting
+    surfaces as a reported anomaly instead of as nothing.
+    """
+    if caught is None:
+        caught = []
+    if isinstance(value, str):
+        cleaned = _redact(value)
+        if cleaned != value:
+            caught.append(path or "<root>")
+        return cleaned, caught
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key in _GUARD_EXEMPT_KEYS:
+                out[key] = item
+                continue
+            out[key], caught = _guard_payload(item, path=f"{path}.{key}" if path else key, caught=caught)
+        return out, caught
+    if isinstance(value, list):
+        rebuilt = []
+        for index, item in enumerate(value):
+            cleaned, caught = _guard_payload(item, path=f"{path}[{index}]", caught=caught)
+            rebuilt.append(cleaned)
+        return rebuilt, caught
+    # Numbers, booleans and None carry no identifier shape.
+    return value, caught
 
 
 def packet_candidates(deployment) -> list[Finding]:

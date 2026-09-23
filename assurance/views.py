@@ -274,6 +274,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "uuid"
 
+    #: How many eligible findings `vendor_packet_candidates` returns at most.
+    #: Matches REST_FRAMEWORK PAGE_SIZE, because a custom @action returning a bare
+    #: Response does not pass through DEFAULT_PAGINATION_CLASS and so silently
+    #: opts out of the bound the rest of the API keeps.
+    CANDIDATE_PAGE_SIZE = 50
+
     def get_queryset(self):
         qs = Deployment.objects.all().annotate(finding_count=Count("findings"))
         user = self.request.user
@@ -455,9 +461,20 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
 
         ``total`` is the deployment's whole finding count beside the eligible one,
         because "three of forty implicate a vendor" and "three of three" are
-        different situations and a bare list of three cannot tell them apart."""
+        different situations and a bare list of three cannot tell them apart.
+
+        ``eligible`` is BOUNDED, at ``CANDIDATE_PAGE_SIZE``. This route returns a
+        bare ``Response``, so it does not pass through
+        ``DEFAULT_PAGINATION_CLASS`` -- and the project's own settings say that
+        class exists because "List endpoints returned every row. A hundred and
+        fifty scans came back in one response, and nothing bounded it." A new list
+        endpoint reintroducing that is the same defect with a newer date on it.
+        The counts stay whole: ``eligible_count`` is how many are eligible, not how
+        many were returned, so a truncated page cannot read as the complete set --
+        which is the only way bounding a list is honest."""
         deployment = self.get_object()
         candidates = packet_candidates(deployment)
+        page = candidates[: self.CANDIDATE_PAGE_SIZE]
         return Response(
             {
                 "eligible": [
@@ -469,8 +486,13 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                         "provider_kind": finding.asset.provider.kind,
                         "component_kind": finding.asset.kind,
                     }
-                    for finding in candidates
+                    for finding in page
                 ],
+                # Returned vs eligible, stated separately and always. `len(eligible)`
+                # is not the count and must not be usable as one.
+                "eligible_returned": len(page),
+                "eligible_truncated": len(page) < len(candidates),
+                "page_size": self.CANDIDATE_PAGE_SIZE,
                 "eligible_count": len(candidates),
                 "total": deployment.findings.count(),
                 "basis": (
