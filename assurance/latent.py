@@ -42,7 +42,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from . import observability as obs
-from .models import Asset, AssuranceClaim, DataBoundary, LatentCondition, Provider
+from .models import AssuranceClaim, DataBoundary, LatentCondition, Provider
+from .governance import is_shadow
 
 Kind = LatentCondition.Kind
 State = LatentCondition.State
@@ -54,8 +55,6 @@ _BOUNDARY_PRACTICES = {
     "third_party_sharing": "third_party_sharing_allowed",
 }
 
-# The classifications that mean "we do not manage this".
-_UNMANAGED = {Asset.Classification.UNMANAGED, Asset.Classification.UNKNOWN}
 
 
 class LatentConditionRefused(ValueError):
@@ -130,7 +129,15 @@ def _observe_asset_becomes_unmanaged(condition, deployment) -> tuple[bool, str]:
         # whether it became unmanaged -- an asset that left the inventory is a
         # coverage question, not a clean bill of health.
         raise Unobservable(f"no asset named {condition.subject!r} on this deployment")
-    return asset.classification in _UNMANAGED, (
+    # `is_shadow`, not a private {UNMANAGED, UNKNOWN} set.
+    #
+    # An operator who declares this condition is saying "tell me when this asset
+    # stops being governed". A move from `known` to `high_risk` or to `retired`
+    # is exactly that -- somebody looked at the component and flagged it -- and
+    # the tripwire did not fire, so the person who asked to be told was not
+    # told. The enum's own label has been widened to match, because a predicate
+    # that means more than its label is how this defect gets made again.
+    return is_shadow(asset.classification), (
         f"asset {condition.subject!r} classification={asset.classification}"
     )
 

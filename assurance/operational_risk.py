@@ -69,6 +69,7 @@ from .models import (
     Provider,
     severity_rank,
 )
+from .governance import GOVERNED
 
 # ---------------------------------------------------------------------------
 # Ordinal risk bands
@@ -130,7 +131,8 @@ _RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 # The classifications that make an asset *managed* — a governed component. Anything
 # else (unmanaged / unknown / high_risk / retired) is a shadow source. Mirrors
 # ``assurance.capability._MANAGED``.
-_MANAGED = frozenset({Asset.Classification.APPROVED, Asset.Classification.KNOWN})
+# The single definition, not a fourth private copy of it.
+_MANAGED = GOVERNED
 
 
 # ---------------------------------------------------------------------------

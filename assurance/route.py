@@ -47,6 +47,7 @@ from .graph_refs import (
     tool_references,
 )
 from .models import Asset, Provider
+from .governance import is_shadow
 
 # The canonical pipeline, front to back. The map lays nodes out in this order and
 # draws the inferred spine along it.
@@ -103,7 +104,11 @@ def _node(asset, layer: str) -> dict:
         "classification": asset.classification,
         "classification_label": asset.get_classification_display(),
         "layer": layer,
-        "shadow": asset.classification == Asset.Classification.UNMANAGED,
+        # `is_shadow`, not `== UNMANAGED`. An asset a person flagged high-risk,
+        # or marked retired-but-reachable, is not a governed node on the system
+        # map -- and this reading said it was, while the capability map on the
+        # same deployment said the opposite.
+        "shadow": is_shadow(asset.classification),
         "provider_name": asset.provider.name if getattr(asset, "provider", None) else None,
     }
 

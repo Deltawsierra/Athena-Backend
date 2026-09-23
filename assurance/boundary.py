@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 
 from .models import Asset
+from .governance import is_shadow
 
 # The asset kinds that are data destinations — a place the deployment's data can
 # flow to. A shadow (unmanaged) one is a flow outside any approved boundary.
@@ -345,7 +346,9 @@ def assess_boundary(deployment) -> dict:
     for asset in deployment.assets.all():
         if asset.kind not in DATA_DESTINATION_KINDS:
             continue
-        if asset.classification == Asset.Classification.UNMANAGED:
+        # A destination somebody flagged high-risk is not a governed
+        # destination for customer data. See assurance.governance.
+        if is_shadow(asset.classification):
             shadow.append(
                 {
                     "asset_name": asset.name,

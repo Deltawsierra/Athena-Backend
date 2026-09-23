@@ -307,6 +307,66 @@ def test_an_unobservable_condition_does_not_flip_the_claim_either():
     assert not RetestRequirement.objects.filter(claim=claim).exists()
 
 
+@pytest.mark.parametrize(
+    "classification",
+    [
+        Asset.Classification.UNMANAGED,
+        Asset.Classification.UNKNOWN,
+        Asset.Classification.HIGH_RISK,
+        Asset.Classification.RETIRED,
+    ],
+)
+def test_the_tripwire_fires_whenever_the_asset_stops_being_governed(classification):
+    """The operator declared "tell me when this asset stops being managed".
+
+    The predicate behind it was a private ``{UNMANAGED, UNKNOWN}`` set, so a
+    component moving from ``known`` to ``high_risk`` or to ``retired`` left
+    governance without tripping the condition -- and those two are the only
+    classifications a *person* ever sets, so the case that did not fire was the
+    case where somebody had looked at the component and flagged it. The enum's
+    own label has been widened with the predicate."""
+    dep = _deployment()
+    asset = _asset(dep, kind=Asset.Kind.TOOL, name="reader")
+    claim = _claim(dep)
+    condition = declare_condition(
+        claim,
+        kind=Kind.ASSET_BECOMES_UNMANAGED,
+        subject="reader",
+        description="the reader tool falling out of management would break this",
+    )
+
+    assert observe(condition, dep)[0] is False, "it is governed to begin with"
+
+    asset.classification = classification
+    asset.save(update_fields=["classification"])
+
+    fired, why = observe(condition, dep)
+    assert fired is True, f"{classification} did not trip the condition"
+    assert str(classification) in why
+
+
+@pytest.mark.parametrize(
+    "classification", [Asset.Classification.APPROVED, Asset.Classification.KNOWN]
+)
+def test_the_tripwire_does_not_fire_on_a_governed_asset(classification):
+    """The negative control. Widening the predicate must not make it fire on
+    everything -- a condition that always trips tells an operator nothing."""
+    dep = _deployment()
+    asset = _asset(dep, kind=Asset.Kind.TOOL, name="reader")
+    claim = _claim(dep)
+    condition = declare_condition(
+        claim,
+        kind=Kind.ASSET_BECOMES_UNMANAGED,
+        subject="reader",
+        description="the reader tool falling out of management would break this",
+    )
+
+    asset.classification = classification
+    asset.save(update_fields=["classification"])
+
+    assert observe(condition, dep)[0] is False
+
+
 def test_a_missing_asset_is_unobservable_rather_than_still_managed():
     dep = _deployment()
     _asset(dep, kind=Asset.Kind.TOOL, name="reader")

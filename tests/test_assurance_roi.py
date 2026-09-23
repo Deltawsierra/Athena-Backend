@@ -84,7 +84,13 @@ def test_asset_coverage_is_real_counts_and_true_ratios():
     assert cov["classified"] == 2  # known + approved
     assert cov["managed"] == 2
     assert cov["unknown"] == 1
-    assert cov["shadow"] == 1
+    # Two, not one. `shadow` used to be `== UNMANAGED`, which called an UNKNOWN
+    # asset governed -- so of the two assets here that nothing stands behind,
+    # the headline counted one. It is `is_shadow` now: the complement of
+    # {APPROVED, KNOWN}, which is the same reading the capability map, the
+    # vendor report and the access claim were already using. See
+    # assurance.governance.
+    assert cov["shadow"] == 2
     assert cov["coverage_ratio"] == 0.5  # 2/4
     assert cov["managed_ratio"] == 0.5
 

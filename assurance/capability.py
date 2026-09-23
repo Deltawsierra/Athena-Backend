@@ -36,6 +36,7 @@ Prefetch ``assets`` on the caller side to keep it query-light.
 from __future__ import annotations
 
 from .models import Asset
+from .governance import GOVERNED
 
 # Risk bands, strongest concern first. A capability's risk is the highest band
 # among the components that grant it, raised one step when it is a shadow one.
@@ -53,7 +54,11 @@ def _max_risk(a: str, b: str) -> str:
 # The classifications that make an asset *managed* — a governed component we can
 # tie a capability to. Anything else (unmanaged / unknown / high_risk) is a
 # shadow source: the power is present, but no approved component accounts for it.
-_MANAGED = {Asset.Classification.APPROVED, Asset.Classification.KNOWN}
+# Re-exported from assurance.governance, which is now the single definition.
+# It lived here and was copied verbatim into three other modules; the copies
+# agreed, but two OTHER predicates elsewhere did not, and this is where they
+# are reconciled. Kept as a name because seven modules import it from here.
+_MANAGED = GOVERNED
 
 # One capability per asset kind: the power that owning that component confers.
 # The label is what the system can *do*, not what the component *is*.
