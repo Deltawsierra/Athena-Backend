@@ -244,7 +244,21 @@ def _reconcile_finding(deployment, *, fingerprint, finding_type, title, severity
     finding, created = Finding.objects.get_or_create(
         deployment=deployment,
         fingerprint=fingerprint,
-        defaults={**machine_fields, "confidence": 0.9, "first_seen": now},
+        # `confidence` is deliberately ABSENT, which leaves it null.
+        #
+        # It used to be 0.9. Nothing measured 0.9. Drift is a set difference --
+        # this component is declared and was not observed, or was observed and is
+        # not declared -- and a set difference does not have a confidence; it is
+        # either right about what it compared or the inputs were wrong, and 0.9
+        # says neither. The number was indistinguishable in every report and
+        # every API response from a 0.9 a detector had actually computed.
+        #
+        # `Finding.confidence` is nullable with no default for exactly this
+        # reason, and its own comment in models.py says so. This deriver was
+        # writing past it two files away. Null is not a weaker claim than 0.9
+        # here -- it is the only honest one, and null is never rendered as a
+        # figure.
+        defaults={**machine_fields, "first_seen": now},
     )
     if created:
         return "created"
