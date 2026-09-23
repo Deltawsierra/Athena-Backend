@@ -47,8 +47,9 @@ E, time T, environment C, result R*. It binds, into one deterministic payload:
   field, with each field either observed or the literal ``unknown`` (see
   :mod:`assurance.served_route`), because a verdict that cannot name the route it
   was taken against cannot say whether that route is still the one running;
-- the **coverage** manifest's counts and verdict — what was expected, observed
-  and assessed (see :mod:`assurance.coverage`) — because the evidence root
+- the **coverage** manifest's counts and verdict on both of its axes — what was
+  expected, observed and assessed, and how many of the checks an engine can run
+  actually ran (see :mod:`assurance.coverage`) — because the evidence root
   attests to the findings that exist and can say nothing about the components
   nothing ever tested. A clean test and an absent test leave the same silence,
   and the receipt has to tell them apart.
@@ -350,10 +351,43 @@ RECEIPT_SCHEMA = {
                 },
                 "critical_gap": {
                     "type": "boolean",
-                    "description": "A declared or high-risk component was never assessed.",
+                    "description": (
+                        "A declared or high-risk component was never assessed, or a "
+                        "check the engine can run did not run."
+                    ),
+                },
+                "checks_reported": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether any engine stated which checks it ran. False means "
+                        "nobody said -- never that every check ran, which is the "
+                        "reading the coverage axes exist to prevent."
+                    ),
+                },
+                "checks_total": {
+                    "type": ["integer", "null"],
+                    "description": "Checks the engine can run. Null when unreported.",
+                },
+                "checks_performed": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "Checks that ran and completed every probe. Null when "
+                        "unreported. Lower than the total means questions went unasked."
+                    ),
+                },
+                "checks_complete": {
+                    "type": ["boolean", "null"],
+                    "description": (
+                        "Every check performed. Null when unreported -- distinct in "
+                        "both directions from false."
+                    ),
                 },
             },
-            "required": ["expected", "observed", "assessed", "verdict", "critical_gap"],
+            "required": [
+                "expected", "observed", "assessed", "verdict", "critical_gap",
+                "checks_reported", "checks_total", "checks_performed",
+                "checks_complete",
+            ],
         },
         "algorithm": {"type": "string", "const": ALGORITHM},
         "digest": {
@@ -553,12 +587,22 @@ def _coverage_reference(deployment) -> dict:
     from .coverage import coverage_manifest
 
     manifest = coverage_manifest(deployment)
+    checks = manifest["checks"]
     return {
         "expected": manifest["expected"],
         "observed": manifest["observed"],
         "assessed": manifest["assessed"],
         "verdict": manifest["verdict"],
         "critical_gap": manifest["critical_gap"],
+        # The check axis, at the same reduction: counts and the one boolean, with
+        # the named rows left out to be retrieved. `checks_reported: false` is the
+        # load-bearing value -- a receipt that omitted it would be indistinguishable
+        # from one attesting that every check ran, which is the reading this whole
+        # module refuses to allow anywhere else.
+        "checks_reported": checks["reported"],
+        "checks_total": checks["total"],
+        "checks_performed": checks["performed"],
+        "checks_complete": checks["complete"],
     }
 
 

@@ -357,6 +357,28 @@ class Deployment(models.Model):
         blank=True,
         help_text="When a scan last ran to completion against this deployment.",
     )
+    # The latest scan's own statement of which checks it ran -- the engine's
+    # coverage manifest, stored verbatim. The second axis of coverage, and the
+    # one no amount of asset bookkeeping can supply: `Asset.assessed_at` records
+    # that something assessed a component, and says nothing about which
+    # questions were asked of it. A deployment where every declared component
+    # was assessed, by an engine that never ran the TLS check because the target
+    # was cleartext and never ran the IDOR check because no credentials were
+    # configured, reads COMPLETE on the asset axis alone.
+    #
+    # Empty means no engine has reported its checks -- never "every check ran",
+    # which is the reading that would make this decorative.
+    check_coverage = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="The latest scan's coverage manifest: which checks ran, which "
+                  "did not, and why. Empty means none was reported.",
+    )
+    check_coverage_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the stored check coverage was reported.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -216,6 +216,23 @@ def _findings_payload(engine_response: Any) -> tuple[list[dict], bool]:
     return [f for f in findings if isinstance(f, dict) and not f.get("internal")], True
 
 
+# The ``coverage`` key on an engine response carries TWO independent statements,
+# and neither implies the other:
+#
+#   coverage.assessed   which COMPONENTS the engine says it assessed, read by
+#                       `_reported_coverage` below and stamped onto assets
+#   coverage.checks     which CHECKS the engine ran, read by `_reported_checks`
+#                       and stored on the deployment
+#
+# An engine may report either, both or neither. Athena reports checks and not
+# components (it has no component model of its own); an engine that enumerates
+# components may report those and not checks. Both readers therefore tolerate the
+# other's absence, and absence always means "did not say" -- never "all of it".
+#
+# Written down here because the two arrived years apart and a reader finding one
+# of them would reasonably assume it was the whole contract.
+
+
 def _reported_coverage(engine_response: Any) -> tuple[list[dict], str]:
     """The components an engine says it assessed, and what it calls itself.
 
@@ -256,6 +273,65 @@ def _record_reported_coverage(scan, deployment) -> int:
     # the coverage without the assessor is better than dropping it -- but the
     # placeholder says plainly that the assessor is unknown rather than guessing one.
     return record_assessment(matched, assessed_by=engine or "unnamed engine")
+
+
+def _reported_checks(engine_response: Any) -> dict:
+    """The engine's statement of which checks it ran, or ``{}``.
+
+    Read from ``coverage.checks`` on the engine response -- a list of rows, each
+    naming a check and its state. Validated only as far as "is this the shape the
+    manifest promises": a payload that is not is discarded whole rather than
+    half-read, because a partial coverage claim is worse than none.
+
+    ``{}`` means the engine did not say. It never means every check ran.
+    """
+    if not isinstance(engine_response, dict):
+        return {}
+    coverage = engine_response.get("coverage")
+    if not isinstance(coverage, dict):
+        return {}
+    checks = coverage.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return {}
+    rows = [
+        row for row in checks
+        if isinstance(row, dict) and row.get("check") and row.get("state")
+    ]
+    if not rows:
+        return {}
+    return {
+        "checks": rows,
+        # Recomputed from the rows rather than trusted from the payload: the
+        # engine's own summary lists are a convenience, and a manifest whose
+        # summary disagreed with its rows would be read by the summary.
+        "not_performed": sorted(
+            {r["check"] for r in rows if r["state"] == "not_performed"}
+        ),
+        "degraded": sorted({r["check"] for r in rows if r["state"] == "degraded"}),
+        "unmeasured": sorted({r["check"] for r in rows if r["state"] == "unmeasured"}),
+        "performed": sorted({r["check"] for r in rows if r["state"] == "performed"}),
+        "limitations": (
+            coverage["limitations"]
+            if isinstance(coverage.get("limitations"), dict) else {}
+        ),
+        "notes": [n for n in (coverage.get("notes") or []) if isinstance(n, str)],
+    }
+
+
+def _record_reported_checks(scan, deployment) -> bool:
+    """Store the latest scan's check coverage on the deployment. True if stored.
+
+    Latest wins, and only a scan that said something overwrites one that did. An
+    engine that reports nothing must not erase what a previous engine reported,
+    because the decision reads this and silence would quietly lift the cap.
+    """
+    reported = _reported_checks(scan.engine_response)
+    if not reported:
+        return False
+    deployment.check_coverage = reported
+    deployment.check_coverage_at = timezone.now()
+    deployment.save(update_fields=["check_coverage", "check_coverage_at", "updated_at"])
+    return True
 
 
 def _scan_was_incomplete(scan) -> bool:
@@ -441,6 +517,11 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
     # engine that reports no coverage leaves every asset unassessed, which is the
     # honest reading and is what the Coverage Manifest then says out loud.
     _record_reported_coverage(scan, deployment)
+
+    # And what it actually ASKED. The two are independent: an engine can assess
+    # every component while never running whole checks against them, and the
+    # asset column cannot show that.
+    _record_reported_checks(scan, deployment)
 
     # Turn every "we couldn't verify this" into a managed gap before we score the
     # deployment, so the Unknowns Register is current alongside the findings

@@ -1,0 +1,209 @@
+{
+  "checks": [
+    {
+      "check": "api_fuzz",
+      "probes_attempted": 50,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "basic_scanner",
+      "probes_attempted": 1,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "bruteforce",
+      "detail": "Red-team chaining did not select this check: nothing earlier in the scan produced a finding that leads to it.",
+      "reason": "not_selected",
+      "state": "not_performed",
+      "team": "red"
+    },
+    {
+      "check": "command_injection",
+      "probes_attempted": 75,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "cors",
+      "probes_attempted": 30,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "csrf",
+      "probes_attempted": 15,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "directory_traversal",
+      "probes_attempted": 240,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "endpoint_discovery",
+      "probes_attempted": 13,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "header_injection",
+      "probes_attempted": 45,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "header_scanner",
+      "probes_attempted": 1,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "hygiene",
+      "probes_attempted": 7,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "idor",
+      "detail": "IDOR compares what two principals can read, and this scan had 0 configured. Authenticated scanning was not set up, so object-level authorisation was not tested.",
+      "reason": "precondition",
+      "state": "not_performed",
+      "team": "blue"
+    },
+    {
+      "check": "json_injection",
+      "probes_attempted": 20,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "open_redirect",
+      "probes_attempted": 105,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "port_scanner",
+      "probes_attempted": 7,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "prompt_injection",
+      "probes_attempted": 20,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "rate_limit_tester",
+      "probes_attempted": 60,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "rce",
+      "probes_attempted": 75,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "sca",
+      "probes_attempted": 5,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "secret_leak",
+      "probes_attempted": 15,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "sql_injection",
+      "probes_attempted": 300,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "ssrf",
+      "probes_attempted": 60,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "subdomain_scanner",
+      "probes_attempted": 6,
+      "probes_failed": 6,
+      "state": "degraded",
+      "team": "blue"
+    },
+    {
+      "check": "tls",
+      "detail": "The target is http, not https, so there is no TLS configuration to inspect. This scan says nothing about the certificate or protocol versions the site would present over https.",
+      "reason": "precondition",
+      "state": "not_performed",
+      "team": "blue"
+    },
+    {
+      "check": "waf_detector",
+      "probes_attempted": 3,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "red"
+    },
+    {
+      "check": "xss",
+      "probes_attempted": 360,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    },
+    {
+      "check": "xxe",
+      "probes_attempted": 42,
+      "probes_failed": 0,
+      "state": "performed",
+      "team": "blue"
+    }
+  ],
+  "complete": false,
+  "degraded": [
+    "subdomain_scanner"
+  ],
+  "limitations": {
+    "header_injection": [
+      "Raw CRLF header injection is not probed. `requests` refuses a header value containing a bare newline before the request leaves this process, and a client that would emit one is a request-smuggling tool. A target vulnerable only to raw CRLF in a request header is not covered by this check."
+    ]
+  },
+  "not_performed": [
+    "bruteforce",
+    "idor",
+    "tls"
+  ],
+  "notes": [],
+  "unmeasured": []
+}
