@@ -32,7 +32,7 @@ pytest-django>=4.8
 # foundations for the same service, and tests/test_mythos_core_pin.py fails if
 # they ever disagree.
 cryptography>=41.0
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@5bb35e266a436e99430aff3cce9e3b5e1f90a749
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@844820dde0d4207355cc4f8c67bcd11e849d49d1
 
 # Ruff is a CI gate (see .github/workflows/ci.yml), so it is a pinned dependency
 # rather than whatever version a contributor happens to have. Its default rule
