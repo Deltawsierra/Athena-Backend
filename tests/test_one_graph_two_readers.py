@@ -322,8 +322,9 @@ def test_an_unresolved_reference_stops_the_access_claim_reaching_verified():
     its VERIFIED status means "we checked and the reach is least-privilege". A
     dangling reference means the assessment could not follow part of the graph it
     was asked to assess, so VERIFIED would be a statement about a graph we do not
-    have. It caps at SUPPORTED and says on the contradicting side what it could not
-    place."""
+    have. It lands on PARTIALLY_VERIFIED — the reach IS verified over the part
+    that could be read — and names what it could not place in the supporting
+    digest."""
     from assurance.claims import _derive_effective_access
 
     clean = _dep("clean")
@@ -341,9 +342,15 @@ def test_an_unresolved_reference_stops_the_access_claim_reaching_verified():
     _asset(holed, kind=Asset.Kind.TOOL, name="reader", identifier="reader",
            metadata={"permissions": ["read"]})
     capped = _derive_effective_access(holed)
-    assert capped["status"] == "supported"
-    assert "could not place" in capped["contradicting_summary"]
-    assert "assistant → ghost-tool" in capped["contradicting_summary"]
+    assert capped["status"] == "partially_verified"
+    assert capped["evidence_class"] == "partially_verified"
+    # In the supporting digest, not the contradicting one. Nothing about an
+    # unreadable reference argues the access IS over-broad, and filing it as
+    # contradicting evidence claims we found something against the deployment
+    # when what we found is that we could not look.
+    assert capped["contradicting_summary"] == ""
+    assert "could not be placed" in capped["supporting_summary"]
+    assert "assistant → ghost-tool" in capped["supporting_summary"]
 
 
 # ---- What an adversary pass found once the readers agreed on the SET. ----
@@ -354,19 +361,22 @@ def test_an_unresolved_reference_stops_the_access_claim_reaching_verified():
 # platform's own writer was manufacturing one.
 
 
-def test_a_server_a_tool_names_is_a_node_not_a_dangling_reference():
-    """The writer used to manufacture the gap the readers then reported.
+def test_a_server_a_tool_names_stays_a_reference_and_never_becomes_a_node():
+    """The first attempt at this fixed a manufactured gap by manufacturing a node,
+    which is the same defect pointed the other way.
 
-    ``assets.py`` writes ``server`` onto every tool entry that declares one, but
+    ``assets.py`` writes ``server`` onto every tool entry that declares one, while
     only entries in ``cfg["tools"]`` become assets. So "tool `reader` is hosted by
-    `mcp-prod`", without listing `mcp-prod` separately, stored a reference to a
-    component no code path created: not a gap in the customer's inventory, a gap
-    in our reading of it. It reached every reader, and — before this — capped the
-    EFFECTIVE_ACCESS claim of a deployment with one read-only tool and no
-    privileged reach at all.
+    `mcp-prod`", without listing `mcp-prod` separately, leaves a reference to a
+    component no code path created. The fix that shipped materialised `mcp-prod` as
+    an MCP_SERVER asset — and a node nobody enumerated is a fact nobody stated. It
+    read as an undeclared component to the BOM drift check, as a governed one to
+    every ``_MANAGED`` predicate, and it moved the deployment fingerprint for an
+    inventory that had not changed.
 
-    Naming a host IS declaring it exists, so the honest record is a node whose
-    classification says nobody has verified it.
+    So: the reference stays a reference. It is reported as unresolved by both
+    readers — which is true, the inventory really did not enumerate that component
+    — and what it costs is the *claim's* confidence, not the *graph's* contents.
     """
     from assurance.assets import derive_assets
 
@@ -378,28 +388,26 @@ def test_a_server_a_tool_names_is_a_node_not_a_dangling_reference():
     })
     derive_assets(dep, scan)
 
-    server = dep.assets.filter(kind=Asset.Kind.MCP_SERVER, identifier="mcp-prod").first()
-    assert server is not None, "the named host must be a node"
-    # KNOWN, like the tool that named it: one inventory, one authority. Not
-    # APPROVED (nobody approved this component on its own) and not UNKNOWN, which
-    # would make every declared tool's declared host an ungoverned target -- the
-    # negative control below is what catches that.
-    assert server.classification == Asset.Classification.KNOWN
-    assert server.metadata["named_by_tool"] is True
-    assert server.metadata["declared"] is False, (
-        "the inventory declared a tool that pointed at it, not this component, and "
-        "a reader that wants to treat the two differently needs the distinction"
+    assert not dep.assets.filter(identifier="mcp-prod").exists(), (
+        "the inventory named a host; it did not enumerate a component, and a node "
+        "written from a name is a fact this platform invented"
     )
+    access_rows, route_rows = _unresolved_rows(dep)
+    assert [(r["source"], r["reference"]) for r in access_rows] == [("reader", "mcp-prod")]
+    assert access_rows == route_rows
 
-    # And so there is no gap for either reader to report.
-    assert _unresolved_rows(dep) == ([], [])
-    assert ("reader", "mcp-prod") in _route_declared_hops(dep)
 
+def test_a_routine_declared_inventory_is_partially_verified_not_verified():
+    """The claim-level half. A deployment with one agent, one read-only tool and a
+    named-but-unenumerated host has no privileged reach, no shadow principal and
+    nothing over-broad — so the reach is clean over the graph that could be read,
+    and part of the graph could not be read.
 
-def test_a_routine_declared_inventory_still_verifies():
-    """The negative control for the test above, at the claim level. A deployment
-    with one agent, one read-only tool and a named host has no privileged reach, no
-    shadow principal and nothing over-broad. Its access claim must verify."""
+    That is PARTIALLY_VERIFIED exactly: not VERIFIED, which would report the hole
+    as a clean bill of health, and not SUPPORTED, which would lose that the part we
+    could see *was* verified. The unplaceable reference is named in the supporting
+    digest and nowhere in the contradicting one — it is a limit on the measurement,
+    not evidence the access is over-broad."""
     from assurance.assets import derive_assets
     from assurance.claims import _derive_effective_access
 
@@ -412,8 +420,116 @@ def test_a_routine_declared_inventory_still_verifies():
     derive_assets(dep, scan)
 
     claim = _derive_effective_access(dep)
+    assert claim["status"] == "partially_verified"
+    assert claim["evidence_class"] == "partially_verified"
+    assert claim["contradicting_summary"] == "", (
+        "an unreadable reference does not argue the statement is false"
+    )
+    assert "reader → mcp-prod" in claim["supporting_summary"]
+    # Not a silent zero and not a pass. The confidence must MOVE.
+    assert claim["confidence"] is not None
+    assert claim["confidence"] < 0.88
+
+
+def test_a_whole_graph_still_verifies_at_full_confidence():
+    """The negative control for the two above. The same inventory with the host
+    enumerated has nothing unresolved, so the claim must VERIFY at the
+    configuration-verified evidence class. Without this, "unresolved weakens the
+    claim" could be satisfied by weakening every claim."""
+    from assurance.assets import derive_assets
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep("whole")
+    scan = _scan(dep, {
+        "agent": {"name": "assistant", "identifier": "assistant"},
+        "tools": [
+            {"name": "reader", "identifier": "reader",
+             "permissions": ["read"], "server": "mcp-prod"},
+            {"name": "mcp-prod", "identifier": "mcp-prod", "kind": "mcp_server"},
+        ],
+    })
+    derive_assets(dep, scan)
+
+    assert _unresolved_rows(dep) == ([], [])
+    claim = _derive_effective_access(dep)
     assert claim["status"] == "verified"
-    assert claim["contradicting_summary"] == ""
+    assert claim["evidence_class"] == "configuration_verified"
+    assert "could not be placed" not in claim["supporting_summary"]
+
+
+def test_the_unreadable_reference_moves_no_decision_and_no_fingerprint():
+    """What the materialisation actually cost, measured through the real derivers.
+
+    The shipped fix wrote the named host in as an ``MCP_SERVER`` asset. That node
+    was not a DeclaredComponent, so ``assess_bom_drift`` called it undeclared
+    shadow supply chain at high severity, which raised a
+    ``bom_drift.undeclared_component`` finding, which moved the decision from
+    ``audit_incomplete`` to ``needs_remediation`` — strictly worse, and the exact
+    unearned change the whole change existed to prevent, moved one step along. It
+    also put an asset in the graph that the customer never enumerated, so the
+    system fingerprint moved for an inventory that had not changed.
+
+    Same inventory, same declaration: none of that may happen."""
+    from assurance.assets import derive_assets
+    from assurance.bom_drift import assess_bom_drift
+    from assurance.claims import _derive_effective_access
+    from assurance.decision import recompute_decision
+    from assurance.fingerprint import compute_system_fingerprint
+    from assurance.models import Asset as AssetModel, DeclaredComponent
+
+    dep = _dep("named-only")
+    derive_assets(dep, _scan(dep, {
+        "agent": {"name": "assistant", "identifier": "assistant"},
+        "tools": [{"name": "reader", "identifier": "reader",
+                   "permissions": ["read"], "server": "mcp-prod"}],
+    }))
+    # The customer declared everything that was observed -- the agent, the tool,
+    # and the scan's own target surface. So the declaration is complete, and the
+    # ONLY thing that can turn up undeclared below is a component this platform
+    # invented. That is what makes the assertion sharp rather than incidental.
+    for kind, ident in (
+        (AssetModel.Kind.AGENT, "assistant"),
+        (AssetModel.Kind.TOOL, "reader"),
+        (AssetModel.Kind.API, "app.example.com"),
+    ):
+        DeclaredComponent.objects.create(
+            deployment=dep, kind=kind, identifier=ident, name=ident
+        )
+
+    # 1. No node nobody enumerated -- which is also why the fingerprint holds.
+    #    (``app.example.com`` is the scan's own target surface, which every scan
+    #    produces and the declaration does not cover; it is not what this is about.)
+    assert sorted(dep.assets.values_list("identifier", flat=True)) == [
+        "app.example.com", "assistant", "reader",
+    ]
+    fingerprint = compute_system_fingerprint(dep)
+
+    # 2. No manufactured drift finding. `mcp-prod` is a name in a tool entry, not
+    #    a component the customer is hiding.
+    drift = assess_bom_drift(dep)
+    assert drift["undeclared"] == [], drift["undeclared"]
+    assert drift["drift_detected"] is False
+
+    # 3. No decision change. An unreadable reference is a limit on the
+    #    measurement, and a limit is not a defect to remediate.
+    decision = recompute_decision(dep)
+    assert decision != "needs_remediation", decision
+
+    # 4. And the whole cost lands where it belongs: on the claim's confidence.
+    claim = _derive_effective_access(dep)
+    assert claim["status"] == "partially_verified"
+
+    # Deriving twice changes nothing -- the shipped version forked a duplicate on
+    # a rename, so idempotency is part of the contract now.
+    derive_assets(dep, _scan(dep, {
+        "agent": {"name": "assistant", "identifier": "assistant"},
+        "tools": [{"name": "reader", "identifier": "reader",
+                   "permissions": ["read"], "server": "mcp-prod"}],
+    }))
+    assert sorted(dep.assets.values_list("identifier", flat=True)) == [
+        "app.example.com", "assistant", "reader",
+    ]
+    assert compute_system_fingerprint(dep) == fingerprint
 
 
 def test_both_readers_report_the_same_gaps_in_the_same_order():
@@ -486,8 +602,8 @@ def test_the_claim_counts_the_references_it_lists():
            metadata={"permissions": ["read"]})
 
     claim = _derive_effective_access(dep)
-    assert "1 declared reference(s)" in claim["contradicting_summary"]
-    assert claim["contradicting_summary"].count("→") == 1
+    assert "1 declared reference(s)" in claim["supporting_summary"]
+    assert claim["supporting_summary"].count("→") == 1
 
 
 def test_an_unknown_claim_does_not_carry_measured_contradicting_evidence():
