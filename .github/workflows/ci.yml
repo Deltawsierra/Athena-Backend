@@ -81,14 +81,21 @@ jobs:
       # is required while the default says otherwise, so the documented way to
       # call the function is the unchecked path.
       #
-      # NOT here: RUF100. Six `noqa` directives in this repo name rules the gate
-      # does not enable (E402, F401, F403, F405, SLF001), and RUF100 reports each
-      # as unused. They are not residue -- they are suppressions waiting for a
-      # gate, with reasons attached. Enforcing RUF100 would demand deleting them,
-      # which would throw away deliberate annotations to satisfy a checker. It
-      # becomes enforceable when every rule they name is enabled, and not before.
+      # B904 joins them because it is the same defect one step further on. A
+      # `raise X(...)` inside an `except` with no `from` reports the original as
+      # an error that happened WHILE handling this one, so the cause reads as a
+      # fault in the error handling rather than the fault itself -- and the three
+      # in the engine client were exactly that, a connection refused presented as
+      # something that went wrong while reporting a connection refused.
+      #
+      # NOT here: RUF100. A `noqa` is unused only relative to the rules of the
+      # run that reads it, and this workflow enables its rules across four
+      # separate invocations, so no single one of them can tell a live
+      # suppression from residue: every directive naming a rule the other three
+      # steps enable reports as unused here. It becomes enforceable when one
+      # invocation selects the whole enabled union, and not before.
       - name: Lint (exception handling and optional parameters)
-        run: ruff check --select BLE001,RUF013 .
+        run: ruff check --select BLE001,RUF013,B904 .
 
       # Syntax errors and undefined/unused names. The cheapest family there is,
       # and the one whose absence is least defensible: an F821 is a crash the
