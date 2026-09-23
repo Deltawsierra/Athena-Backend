@@ -170,7 +170,15 @@ class ChainOutcome:
 
     ``observed_at`` may be ``None``. An outcome with no time is not "oldest" --
     it is an outcome whose recency is unknown, and `_surviving` treats it as
-    unable to supersede anything rather than as superseded by everything.
+    unable to supersede anything AND as impossible to supersede.
+
+    What it may NOT be is naive. A naive and an aware datetime cannot be
+    compared at all, and two outcomes for one workflow are compared -- so a
+    single naive row would take a whole deployment's composition down with a
+    `TypeError` raised three frames from anything that names a workflow. It is
+    refused here, where the offending workflow can still be named, for the same
+    reason an unknown status is: this module does not produce answers it does
+    not have, and it does not fail in a place that cannot say why.
     """
 
     workflow: str
@@ -184,8 +192,22 @@ class ChainOutcome:
                 f"chain outcome for {self.workflow!r} has status {self.status!r}; "
                 f"this module defines {', '.join(sorted(CHAIN_STATUSES))}"
             )
+        # A name, not merely something truthy. Two workflows named by values of
+        # different types compare fine in a dict and blow up the moment the
+        # deciding workflows are sorted -- an error about `<` arriving from a
+        # module whose subject is assurance.
+        if not isinstance(self.workflow, str):
+            raise TypeError(
+                f"a workflow is named by a string, not by {type(self.workflow).__name__}"
+            )
         if not self.workflow:
             raise ValueError("a chain outcome must name the workflow it is about")
+        if self.observed_at is not None and self.observed_at.tzinfo is None:
+            raise ValueError(
+                f"chain outcome for {self.workflow!r} carries a naive timestamp "
+                f"({self.observed_at!r}); an instant with no zone cannot be compared "
+                "with one that has a zone, so it cannot establish recency"
+            )
 
     @property
     def demonstrated(self) -> bool:
@@ -213,6 +235,17 @@ class Composition:
     ``workflows_expected`` is how many approved workflows the caller said exist,
     or ``None`` when the caller did not say. ``workflows_unreported`` is how many
     of them had no outcome -- counted as `not_demonstrated`, never as absent.
+
+    ``workflows_unapproved`` is the other direction, and it is the more
+    interesting one: outcomes arrived for this many workflows that are NOT on
+    the approved list. A chain exercising a workflow nobody approved is exactly
+    what this platform exists to notice, so it is counted and named rather than
+    quietly folded in -- and without it the scope reads "2 of 1 approved
+    workflow(s)", which is not a sentence anyone can check a rule against.
+
+    ``superseded`` counts outcomes a re-run genuinely displaced: strictly later,
+    both dated. An outcome nothing could be shown to be newer than is not
+    superseded, and is not counted here.
     """
 
     decision: str | None
@@ -221,6 +254,7 @@ class Composition:
     workflows_assessed: int = 0
     workflows_expected: int | None = None
     workflows_unreported: int = 0
+    workflows_unapproved: int = 0
     superseded: int = 0
 
     @property
@@ -233,52 +267,70 @@ class Composition:
         return self.workflows_assessed > 0 and self.census[HELD] == self.workflows_assessed
 
 
-def _is_newer(candidate: ChainOutcome, incumbent: ChainOutcome) -> bool:
-    """Does ``candidate`` supersede ``incumbent``?
-
-    Only when both carry a time and the candidate's is strictly later. An
-    outcome with no time supersedes nothing -- "we do not know when this was
-    observed" is not evidence that it is current -- and nothing supersedes it
-    either, so it stays in contention and the tie rule below decides.
-    """
-    if candidate.observed_at is None or incumbent.observed_at is None:
-        return False
-    return candidate.observed_at > incumbent.observed_at
-
-
 def _worse_status(a: str, b: str) -> str:
-    """The status that places a deployment worse. Used only to break a tie."""
+    """The status that places a deployment worse.
+
+    A total order on the four statuses, because their four floors have four
+    distinct ranks -- asserted by test, since two statuses sharing a rank would
+    make this depend on which one it was handed first.
+    """
     return a if _RANK[FLOORS.get(a, READY)] >= _RANK[FLOORS.get(b, READY)] else b
 
 
-def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome], int]:
-    """One outcome per workflow -- the newest -- and how many were superseded.
+def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
+    """The status that stands for each workflow, and how many a re-run displaced.
 
-    A re-run supersedes its predecessor: that is what re-running means. Where
-    recency cannot be established (equal timestamps, or either side missing
-    one), the WORSE status survives. Picking by iteration order would make the
-    decision depend on the order rows came back from a database, which is the
-    kind of dependency that produces a decision no one can reproduce; picking
-    the better would let a passing re-run erase a violation it never
-    contradicted.
+    An outcome is SUPERSEDED when another outcome for the same workflow is
+    strictly later and BOTH carry a time. That is the whole rule, and it is a
+    property of the workflow's history rather than of any order it arrives in.
+    Everything not superseded survives, and the WORST surviving status stands.
+
+    THIS WAS A FOLD, AND THE FOLD WAS ORDER-DEPENDENT. It compared each outcome
+    to a single running incumbent and carried the winner's own timestamp
+    forward. An undated outcome -- which this module promises supersedes nothing
+    and is superseded by nothing -- could therefore be evicted by proxy: a
+    same-status duplicate that happened to carry a date won the tie, became the
+    incumbent, and was then legitimately superseded by something newer, taking
+    the undated outcome's verdict with it. Measured on the version before this
+    one, with three rows for one workflow:
+
+        [violated(no time), violated(Jan 1), held(Jan 2)] -> ready
+        [violated(Jan 1), violated(no time), held(Jan 2)] -> not_recommended
+
+    Two recorded violations of one workflow, and one arrival order reported
+    `ready` with `census["violated"] == 0` and `explain()` saying "Every chain
+    held". That is the silent zero this module was written to refuse, produced
+    by the module itself, and reachable from nothing more exotic than a
+    three-row history with a nullable timestamp. Both directions were reachable:
+    288 status/time multisets of size two or three disagreed across orderings,
+    half of them reading BETTER than the rule allows and half WORSE -- a
+    manufactured violation being just as wrong as a vanished one.
+
+    A fold cannot be rescued by a better tie-break here, because the defect is
+    that "newest" is not a total order once recency can be unknown. So survival
+    is computed against the workflow's whole history: one pass for the newest
+    established instant, one to keep everything that instant does not displace.
     """
-    latest: dict[str, ChainOutcome] = {}
-    superseded = 0
+    history: dict[str, list[ChainOutcome]] = {}
     for outcome in outcomes:
-        incumbent = latest.get(outcome.workflow)
-        if incumbent is None:
-            latest[outcome.workflow] = outcome
-            continue
-        superseded += 1
-        if _is_newer(outcome, incumbent):
-            latest[outcome.workflow] = outcome
-        elif _is_newer(incumbent, outcome):
-            continue
-        elif _worse_status(outcome.status, incumbent.status) == outcome.status:
-            # A genuine tie on recency. The worse status survives, and it is a
-            # tie rather than a judgement that the newer one is wrong.
-            latest[outcome.workflow] = outcome
-    return latest, superseded
+        history.setdefault(outcome.workflow, []).append(outcome)
+
+    standing: dict[str, str] = {}
+    superseded = 0
+    for workflow, attempts in history.items():
+        dated = [attempt.observed_at for attempt in attempts if attempt.observed_at is not None]
+        newest = max(dated) if dated else None
+        survivors = [
+            attempt
+            for attempt in attempts
+            if attempt.observed_at is None or newest is None or attempt.observed_at >= newest
+        ]
+        superseded += len(attempts) - len(survivors)
+        status = survivors[0].status
+        for attempt in survivors[1:]:
+            status = _worse_status(status, attempt.status)
+        standing[workflow] = status
+    return standing, superseded
 
 
 def compose(
@@ -299,35 +351,44 @@ def compose(
     The decision is the worst floor among the surviving outcomes. A composition
     over nothing is ``None``.
     """
-    latest, superseded = _surviving(outcomes)
+    standing, superseded = _surviving(outcomes)
 
-    unreported: list[str] = []
-    if expected_workflows is not None:
-        # Every approved workflow with no outcome is undemonstrated. Added as
-        # real entries rather than as a number on the side, so the census, the
+    # Materialised once. It is read twice below, and a caller passing a
+    # generator got the second read empty: `workflows_expected` came back 0
+    # while three workflows had just been counted against it, and `explain()`
+    # said "3 of 0 approved workflow(s)". A confident wrong number is worse
+    # than a refusal, and this module is about not producing either.
+    approved = None if expected_workflows is None else tuple(expected_workflows)
+
+    unreported: set[str] = set()
+    unapproved = 0
+    if approved is not None:
+        # Every approved workflow with no outcome is undemonstrated. Added as a
+        # real entry rather than as a number on the side, so the census, the
         # floor and `deciding` all see them and no consumer has to remember to
         # add them back in.
-        for workflow in expected_workflows:
-            if workflow not in latest:
-                unreported.append(workflow)
-                latest[workflow] = ChainOutcome(workflow=workflow, status=NOT_DEMONSTRATED)
+        for workflow in approved:
+            if workflow not in standing:
+                unreported.add(workflow)
+                standing[workflow] = NOT_DEMONSTRATED
+        unapproved = sum(1 for workflow in standing if workflow not in set(approved))
 
     census = dict.fromkeys(sorted(CHAIN_STATUSES), 0)
-    for outcome in latest.values():
-        census[outcome.status] += 1
+    for status in standing.values():
+        census[status] += 1
 
     decision: str | None = None
     deciding: list[str] = []
-    for outcome in latest.values():
-        floor = FLOORS.get(outcome.status)
+    for workflow, status in standing.items():
+        floor = FLOORS.get(status)
         if floor is None:
             continue
         if decision is None or _RANK[floor] > _RANK[decision]:
-            decision, deciding = floor, [outcome.workflow]
+            decision, deciding = floor, [workflow]
         elif floor == decision:
-            deciding.append(outcome.workflow)
+            deciding.append(workflow)
 
-    if decision is None and latest:
+    if decision is None and standing:
         # Every chain held. READY *by this signal*; `decision.py` still combines
         # it with findings, claims and coverage, any of which can be worse.
         decision = READY
@@ -336,9 +397,10 @@ def compose(
         decision=decision,
         census=census,
         deciding=tuple(sorted(deciding)),
-        workflows_assessed=len(latest),
-        workflows_expected=None if expected_workflows is None else len(set(expected_workflows)),
+        workflows_assessed=len(standing),
+        workflows_expected=None if approved is None else len(set(approved)),
         workflows_unreported=len(unreported),
+        workflows_unapproved=unapproved,
         superseded=superseded,
     )
 
@@ -353,17 +415,24 @@ def explain(composition: Composition) -> str:
     """
     if composition.decision is None:
         return "No chains were composed, so this signal places the deployment nowhere."
+    # Every status, including the zeros. `Composition` argues at length that a
+    # count which appears only when it is non-zero is a count nobody checks, and
+    # that its absence reads as "no violated chains" exactly as a zero does.
+    # This sentence used to drop them, which made the argument true of the one
+    # line a human actually reads.
     counted = ", ".join(
-        f"{count} {status}" for status, count in sorted(composition.census.items()) if count
+        f"{count} {status}" for status, count in sorted(composition.census.items())
     )
-    scope = (
-        f"{composition.workflows_assessed} workflow(s)"
-        if composition.workflows_expected is None
-        else (
-            f"{composition.workflows_assessed} of {composition.workflows_expected} "
-            f"approved workflow(s), {composition.workflows_unreported} of them never exercised"
+    if composition.workflows_expected is None:
+        scope = f"{composition.workflows_assessed} workflow(s), with no approved list to compare against"
+    else:
+        scope = (
+            f"{composition.workflows_assessed} workflow(s) against "
+            f"{composition.workflows_expected} approved, "
+            f"{composition.workflows_unreported} of them never exercised"
         )
-    )
+        if composition.workflows_unapproved:
+            scope += f", and {composition.workflows_unapproved} not on the approved list"
     if not composition.deciding:
         return f"Every chain held across {scope} ({counted}), so this signal says {composition.decision}."
     return (

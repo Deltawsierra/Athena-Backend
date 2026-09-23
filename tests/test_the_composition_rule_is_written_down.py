@@ -14,11 +14,13 @@ Everything else here defends a specific way the rule could be got wrong.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import permutations
 
 import pytest
 
 from assurance import composition as comp
 from assurance.composition import (
+    CHAIN_STATUSES,
     HELD,
     INCOMPLETE,
     NOT_DEMONSTRATED,
@@ -74,12 +76,84 @@ def test_the_rule_produces_one_deterministic_decision(statuses, expected) -> Non
 
 def test_the_rule_is_order_independent() -> None:
     """A decision that depended on the order rows came back from a database is a
-    decision nobody can reproduce."""
-    statuses = [HELD, VIOLATED, INCOMPLETE, NOT_DEMONSTRATED, HELD]
-    forward = _outcomes(*[(f"w{i}", s) for i, s in enumerate(statuses)])
-    backward = list(reversed(forward))
-    assert compose(forward).decision == compose(backward).decision
-    assert compose(forward).census == compose(backward).census
+    decision nobody can reproduce.
+
+    EVERY permutation, and every outcome names the SAME workflow. The version of
+    this test that shipped first used five DISTINCT workflows, which meant it
+    never entered the only code path that can be order-dependent -- with one
+    outcome per workflow the decision is a max over floors and the census is a
+    bag of counts, both order-independent whatever `_surviving` does. It
+    survived `_surviving` being replaced by "the last row wins" and by "the
+    first row wins", and it passed against the live defect below. A test that
+    names a property and cannot fail on it is worse than no test: it is a
+    claim on the record that nobody checked.
+    """
+    history = [
+        ChainOutcome("w", VIOLATED, observed_at=None),
+        ChainOutcome("w", VIOLATED, observed_at=T0),
+        ChainOutcome("w", HELD, observed_at=T0 + timedelta(days=1)),
+        ChainOutcome("w", INCOMPLETE, observed_at=T0 + timedelta(days=1)),
+        ChainOutcome("w", NOT_DEMONSTRATED, observed_at=T0 - timedelta(days=1)),
+    ]
+    answers = {
+        (compose(list(order)).decision, tuple(sorted(compose(list(order)).census.items())))
+        for order in permutations(history)
+    }
+    assert len(answers) == 1, f"the answer depends on the arrival order: {answers}"
+
+
+def test_two_recorded_violations_do_not_compose_into_ready() -> None:
+    """The defect an adversarial review caught before this merged.
+
+    `_surviving` was a fold over a single running incumbent, carrying the
+    winner's own timestamp forward. An undated outcome -- which this module
+    promises supersedes nothing and is superseded by nothing -- was evicted by
+    proxy: the same-status dated duplicate won the tie, became the incumbent,
+    and was then legitimately superseded by something newer, taking the undated
+    violation's verdict with it.
+
+    One arrival order out of six answered `ready`, with `census["violated"] == 0`
+    and `explain()` saying "Every chain held", for a workflow with TWO recorded
+    violations. Written as the adversary reproduced it.
+    """
+    history = [
+        ChainOutcome("billing-export", VIOLATED, observed_at=None),
+        ChainOutcome("billing-export", VIOLATED, observed_at=T0),
+        ChainOutcome("billing-export", HELD, observed_at=T0 + timedelta(days=1)),
+    ]
+    for order in permutations(history):
+        result = compose(list(order), expected_workflows=["billing-export"])
+        assert result.decision == comp.NOT_RECOMMENDED, [o.status for o in order]
+        assert result.census[VIOLATED] == 1
+        assert "held" not in comp.explain(result).lower().split(",")[0]
+
+
+def test_a_superseded_violation_is_not_manufactured_back() -> None:
+    """The same defect's mirror, and the reason the fix is not "keep the worst".
+
+    An undated HELD alongside a dated HELD that genuinely supersedes a dated
+    VIOLATED must stay `ready`. A rule that simply kept the worst status it ever
+    saw would report a violation the history says was superseded -- a
+    manufactured fact, which this module treats as exactly as bad as a silent
+    zero.
+    """
+    history = [
+        ChainOutcome("w", HELD, observed_at=None),
+        ChainOutcome("w", HELD, observed_at=T0 + timedelta(days=1)),
+        ChainOutcome("w", VIOLATED, observed_at=T0),
+    ]
+    for order in permutations(history):
+        assert compose(list(order)).decision == comp.READY, [o.status for o in order]
+
+
+def test_the_four_statuses_have_four_distinct_floors() -> None:
+    """`_worse_status` is only a total order if no two statuses tie on rank.
+
+    If two did, the worse of them would depend on which was handed in first,
+    and every order-independence claim above would be true only by accident.
+    """
+    ranks = {status: comp._RANK[comp.FLOORS.get(status, comp.READY)] for status in CHAIN_STATUSES}
+    assert len(set(ranks.values())) == len(CHAIN_STATUSES), ranks
 
 
 # --- worst-of-N rather than coverage-weighted --------------------------------
@@ -382,3 +456,134 @@ def test_the_explanation_says_how_much_was_never_exercised() -> None:
     result = compose(_outcomes(("a", HELD)), expected_workflows=["a", "b", "c"])
     assert "never exercised" in comp.explain(result)
     assert "1 of 3" in comp.explain(result) or "3 approved" in comp.explain(result)
+
+
+# --- what the module will not let itself be asked -----------------------------
+
+
+def test_a_naive_timestamp_is_refused_where_the_workflow_can_still_be_named() -> None:
+    """A naive and an aware datetime cannot be compared at all.
+
+    Left to `_surviving`, one legacy row took a whole deployment's composition
+    down with a `TypeError` raised three frames from anything that names a
+    workflow. Refused at construction, where the refusal can say which workflow
+    and why -- the same reason an unknown status raises rather than defaults.
+    """
+    with pytest.raises(ValueError) as refusal:
+        # DTZ001 is right about production code and is the subject here: a naive
+        # datetime is exactly the input under test.
+        ChainOutcome("billing-export", HELD, observed_at=datetime(2026, 1, 1))  # noqa: DTZ001
+
+    assert "billing-export" in str(refusal.value)
+    assert "naive" in str(refusal.value)
+
+
+def test_a_workflow_is_named_by_a_string() -> None:
+    """Truthiness was the whole check, so `1` and `True` were workflow names.
+
+    Two workflows named by values of different types live happily in a dict and
+    blow up the moment `deciding` is sorted -- a `TypeError` about `<` arriving
+    from a module whose subject is assurance.
+    """
+    for not_a_name in (1, True, ("tuple",), 3.0):
+        with pytest.raises(TypeError):
+            ChainOutcome(not_a_name, HELD)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        ChainOutcome("", HELD)
+
+
+def test_an_exhausted_iterable_cannot_invent_a_denominator() -> None:
+    """`expected_workflows` is read twice, and a generator was empty the second time.
+
+    The result claimed `workflows_expected == 0` while three workflows had just
+    been counted against it, and `explain()` said "3 of 0 approved workflow(s)".
+    A confident wrong number is the manufactured half of what this module
+    refuses; it is materialised once now.
+    """
+    result = compose(_outcomes(("a", HELD)), expected_workflows=(w for w in ["a", "b", "c"]))
+
+    assert result.workflows_expected == 3
+    assert result.workflows_unreported == 2
+    assert "3 approved" in comp.explain(result)
+
+
+# --- what the numbers beside the decision have to mean -------------------------
+
+
+def test_nothing_assessed_is_not_everything_held() -> None:
+    """`all_held` over an empty composition is the silent zero in one property.
+
+    `census[HELD] == workflows_assessed` is `0 == 0` for a composition that
+    assessed nothing at all, so without its guard "we looked at nothing" reads
+    as "every workflow held".
+    """
+    assert compose([]).all_held is False
+    assert compose(_outcomes(("a", HELD))).all_held is True
+    assert compose(_outcomes(("a", HELD), ("b", VIOLATED))).all_held is False
+
+
+def test_a_tie_on_recency_is_not_a_supersession() -> None:
+    """`superseded` counts what a re-run displaced, and a tie displaced nothing.
+
+    It used to increment for every duplicate, including the pairs where
+    `_surviving` explicitly establishes that neither outcome supersedes the
+    other -- reporting a re-run that never happened.
+    """
+    undated_beside_dated = compose(
+        [
+            ChainOutcome("w", VIOLATED, observed_at=None),
+            ChainOutcome("w", HELD, observed_at=T0),
+        ]
+    )
+    assert undated_beside_dated.superseded == 0
+
+    same_instant = compose(
+        [
+            ChainOutcome("w", VIOLATED, observed_at=T0),
+            ChainOutcome("w", HELD, observed_at=T0),
+        ]
+    )
+    assert same_instant.superseded == 0
+
+    genuinely_newer = compose(
+        [
+            ChainOutcome("w", VIOLATED, observed_at=T0),
+            ChainOutcome("w", HELD, observed_at=T0 + timedelta(days=1)),
+        ]
+    )
+    assert genuinely_newer.superseded == 1
+
+
+def test_a_workflow_nobody_approved_is_counted_and_named() -> None:
+    """An outcome for an unapproved workflow is a finding, not a rounding error.
+
+    A chain exercising a workflow that is not on the approved list is exactly
+    what this platform exists to notice. It also has to be counted for the scope
+    sentence to be checkable: without it the explanation read "2 of 1 approved
+    workflow(s)", which is not something a reviewer can check a rule against.
+    """
+    result = compose(
+        _outcomes(("approved", HELD), ("shadow", VIOLATED)),
+        expected_workflows=["approved"],
+    )
+
+    assert result.workflows_assessed == 2
+    assert result.workflows_expected == 1
+    assert result.workflows_unapproved == 1
+    assert result.decision == comp.NOT_RECOMMENDED
+    assert "shadow" in result.deciding
+
+    sentence = comp.explain(result)
+    assert "2 of 1" not in sentence
+    assert "not on the approved list" in sentence
+
+
+def test_the_explanation_keeps_the_zeros_the_census_keeps() -> None:
+    """`Composition` argues that a count appearing only when non-zero is a count
+    nobody checks. The sentence a human actually reads used to drop them."""
+    sentence = comp.explain(compose(_outcomes(("a", HELD), ("b", HELD))))
+
+    assert "0 violated" in sentence
+    assert "0 incomplete" in sentence
+    assert "0 not_demonstrated" in sentence
