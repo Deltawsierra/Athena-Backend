@@ -22,7 +22,7 @@ Two queries, no writes, no clock.
 
 from __future__ import annotations
 
-from .composition import READY, ChainOutcome, Composition, compose
+from .composition import READY, ChainOutcome, Composition, compose, explain
 
 
 def read_chain_outcomes(deployment) -> list[ChainOutcome]:
@@ -133,6 +133,45 @@ def composition_decision_signal(composition: Composition) -> str | None:
         and composition.workflows_unapproved == 0
     )
     return READY if closed_scope else None
+
+
+def composition_payload(composition: Composition, *, signal: str | None) -> dict:
+    """The reported shape of a composition. Built here so its two publishers
+    cannot drift apart.
+
+    :func:`assurance.decision.decision_support` publishes this block, and so do
+    the ingest routes that write the approved set and the chain outcomes. Those
+    are separate call sites describing the same thing, and an operator who
+    declares three approved workflows, reads ``workflows_expected: 3`` back from
+    the write route, then reads ``workflows_expected: null`` from the decision
+    route has been told two incompatible things about one deployment. One builder
+    is the only way that stays impossible as fields are added.
+
+    ``census`` always carries all four statuses including the zeros, and
+    ``workflows_expected: null`` is the honest answer when nobody has recorded the
+    approved set -- distinguishable from a recorded set of zero, which is the
+    distinction the whole signal turns on.
+
+    ``signal`` is passed in rather than derived. Only the caller knows what the
+    composition contributed *to the answer it is publishing*:
+    :func:`~assurance.decision.decision_support` nulls it under the operator
+    failsafe, because then the failsafe decided and no signal contributed; the
+    ingest routes are not making a decision, so they pass what the chains
+    currently carry. The census below is never nulled either way -- a paused
+    deployment's violated chain is still a violated chain.
+    """
+    return {
+        "signal": signal,
+        "rule_decision": composition.decision,
+        "census": dict(composition.census),
+        "deciding": list(composition.deciding),
+        "workflows_assessed": composition.workflows_assessed,
+        "workflows_expected": composition.workflows_expected,
+        "workflows_unreported": composition.workflows_unreported,
+        "workflows_unapproved": composition.workflows_unapproved,
+        "superseded": composition.superseded,
+        "explanation": explain(composition),
+    }
 
 
 def composition_signal(deployment) -> str | None:

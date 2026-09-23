@@ -56,7 +56,11 @@ from .composition import READY as composition_READY
 from .composition import compose as compose_chains
 from .composition import Composition
 from .composition import explain as explain_composition
-from .workflow_chains import composition_decision_signal, composition_for
+from .workflow_chains import (
+    composition_decision_signal,
+    composition_for,
+    composition_payload,
+)
 from .models import (
     UNTRUSTED_SEVERITY_STATUSES,
     RESOLVED_FINDING_STATUSES,
@@ -506,22 +510,10 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
         "claim_cap": signal["cap"],
         "coverage_cap": coverage_cap,
         # The compositional assurance graph, reported rather than only decided
-        # with. `census` always carries all four statuses including zeros, and
-        # `workflows_expected: null` is the honest answer when nobody has recorded
-        # the approved set -- distinguishable from a recorded set of zero, which
-        # is the distinction the whole signal turns on.
-        "composition": {
-            "signal": chain_signal,
-            "rule_decision": parts.composition.decision,
-            "census": dict(parts.composition.census),
-            "deciding": list(parts.composition.deciding),
-            "workflows_assessed": parts.composition.workflows_assessed,
-            "workflows_expected": parts.composition.workflows_expected,
-            "workflows_unreported": parts.composition.workflows_unreported,
-            "workflows_unapproved": parts.composition.workflows_unapproved,
-            "superseded": parts.composition.superseded,
-            "explanation": explain_composition(parts.composition),
-        },
+        # with. Shaped by `workflow_chains.composition_payload` because the ingest
+        # routes publish the same block, and two hand-written copies of one shape
+        # are two things that can disagree about the same deployment.
+        "composition": composition_payload(parts.composition, signal=chain_signal),
         "paused": paused,
         # The assurance policy this decision is made under — pinned so a later
         # change to the rules can tell whether the policy still holds.
