@@ -570,6 +570,11 @@ class DeploymentSerializer(serializers.ModelSerializer):
             "environment",
             "decision",
             "decision_label",
+            # The monotonic revision this decision was written at. Served because
+            # the revision fence was unreachable over HTTP: a consumer could read a
+            # decision and had no way to tell a fresh one from one superseded
+            # between its read and its action.
+            "decision_revision",
             "description",
             "finding_count",
             "created_at",

@@ -33,7 +33,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from assurance.claims import record_retroactive_claim
+from assurance.claims import _identity_fingerprint, record_retroactive_claim
 from assurance.models import AssuranceClaim, Deployment
 
 pytestmark = pytest.mark.django_db
@@ -235,9 +235,24 @@ def test_two_retroactive_claims_about_different_windows_both_persist():
 
 
 def test_recording_a_late_observation_does_not_disturb_the_current_claim():
+    """The bar's case: a late observation about a closed window must not overwrite
+    today's claim OF THE SAME IDENTITY.
+
+    This test used `fingerprint="untouched"` -- a literal that
+    `_identity_fingerprint` can never produce, so today's claim and the late one
+    were different claims and the test proved only that an UNRELATED row was left
+    alone. The overwrite it was written to forbid could be added and it would pass:
+    making `record_retroactive_claim` supersede the same-identity current claim
+    first left 99 tests green.
+
+    The fingerprint is now the one the production writer computes, so the two rows
+    are two versions of one claim -- which is the only arrangement in which
+    "without overwriting" means anything.
+    """
     dep = _deployment()
     now = timezone.now()
-    today = _claim(dep, fingerprint="untouched")
+    identity = _identity_fingerprint(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY, "")
+    today = _claim(dep, fingerprint=identity)
     before = (today.status, today.valid_to, today.effective_to, today.updated_at)
 
     late = record_retroactive_claim(
@@ -261,6 +276,18 @@ def test_recording_a_late_observation_does_not_disturb_the_current_claim():
     assert late.valid_to is None, "Mythos believes it"
     assert late.effective_to is not None, "about a window that has closed"
     assert late not in AssuranceClaim.objects.filter(deployment=dep).current()
+    # Same identity, so this is the assertion that has teeth: today's claim is
+    # still the current version of it, and the late one sits beside it.
+    assert late.fingerprint == identity, "the two rows must be one claim's history"
+    current = list(AssuranceClaim.objects.filter(deployment=dep, fingerprint=identity).current())
+    assert current == [today], (
+        "the late observation replaced today's claim as the current version of the "
+        "same claim -- the silent overwrite two temporal axes exist to prevent"
+    )
+    believed = set(
+        AssuranceClaim.objects.filter(deployment=dep, fingerprint=identity).believed_now()
+    )
+    assert believed == {today, late}, "both versions must be believed now"
 
 
 def test_a_retroactive_claim_records_both_dates_in_its_lifecycle_event():

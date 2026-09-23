@@ -288,15 +288,55 @@ def test_a_reader_never_sees_a_decision_whose_transition_is_missing():
 
     Without the single commit boundary the decision could land and the transition
     not yet exist, and a reader catching that window would have a decision it
-    could not account for — which reads exactly like a decision it can."""
+    could not account for — which reads exactly like a decision it can.
+
+    THE CHECK HAPPENS AT READ TIME, and that is the whole test. It used to collect
+    every observation and compare them against the outbox after every writer had
+    joined — by which point every transition exists, so a transient window could
+    not be detected at all. Moving the transition's `create` outside the
+    transaction with a 50ms gap, which is precisely the tear this module's
+    docstring says cannot happen, left all 97 tests in this file green. Asking at
+    the moment of the read reports it 634 times."""
     dep = _deployment()
-    observations: list[dict] = []
+    observed: list[int] = []
+    torn: list[dict] = []
     stop = threading.Event()
 
     def reader():
-        while not stop.is_set():
-            observations.append(read_decision(dep))
-        connection.close()
+        try:
+            while not stop.is_set():
+                seen = read_decision(dep)
+                revision = seen["revision"]
+                if revision == 0:
+                    if seen["decision"] is not None:
+                        torn.append({"revision": 0, "why": "a decision at revision 0"})
+                    continue
+                # Asked NOW. A window that has closed by the time the writers have
+                # finished is still a window a consumer can read inside.
+                behind = (
+                    DecisionTransition.objects.filter(deployment=dep, revision=revision)
+                    .values_list("to_decision", flat=True)
+                    .first()
+                )
+                if behind is None:
+                    torn.append(
+                        {
+                            "revision": revision,
+                            "decision": seen["decision"],
+                            "why": "no transition behind it at the moment it was readable",
+                        }
+                    )
+                elif behind != seen["decision"]:
+                    torn.append(
+                        {
+                            "revision": revision,
+                            "decision": seen["decision"],
+                            "why": f"the transition for that revision says {behind!r}",
+                        }
+                    )
+                observed.append(revision)
+        finally:
+            connection.close()
 
     watcher = threading.Thread(target=reader)
     watcher.start()
@@ -307,18 +347,8 @@ def test_a_reader_never_sees_a_decision_whose_transition_is_missing():
         stop.set()
         watcher.join()
 
-    by_revision = {t.revision: t.to_decision for t in dep.decision_transitions.all()}
-    assert observations, "the reader never ran"
-    for seen in observations:
-        if seen["revision"] == 0:
-            assert seen["decision"] is None
-            continue
-        assert seen["revision"] in by_revision, (
-            f"revision {seen['revision']} was observable with no transition behind it"
-        )
-        assert seen["decision"] == by_revision[seen["revision"]], (
-            "the decision read does not match the transition that produced that revision"
-        )
+    assert observed, "the reader never observed a written revision"
+    assert not torn, f"a reader saw a decision it could not account for: {torn[:5]}"
 
 
 @pytest.mark.django_db(transaction=True)
