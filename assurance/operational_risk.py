@@ -65,9 +65,7 @@ from .models import (
     RESOLVED_FINDING_STATUSES,
     SEVERITY_HIGH,
     SEVERITY_MEDIUM,
-    SEVERITY_ORDER,
     Asset,
-    Finding,
     Provider,
     severity_rank,
 )

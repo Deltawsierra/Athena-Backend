@@ -126,7 +126,6 @@ from .models import (
     SEVERITY_HIGH,
     SEVERITY_MEDIUM,
     SEVERITY_ORDER,
-    Finding,
     severity_rank,
 )
 
