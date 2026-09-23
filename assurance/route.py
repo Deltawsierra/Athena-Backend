@@ -19,10 +19,15 @@ It is honest about how strongly each edge is known:
   reader never mistakes it for an observed flow.
 
 It never invents a node, and it surfaces the gaps rather than papering over them:
-a declared tool the agent names but discovery could not place is an **unresolved
-edge** (a dangling reference to chase), an unmanaged node is a **shadow** on the
-map, and an empty **logs** layer is the honest finding that nobody can say where
-this system's logs go.
+a reference the inventory declares but discovery could not place is an
+**unresolved edge** (a dangling reference to chase), an unmanaged node is a
+**shadow** on the map, and an empty **logs** layer is the honest finding that
+nobody can say where this system's logs go.
+
+Declared references are resolved by :mod:`assurance.graph_refs`, which is also
+what :func:`assurance.access.assess_effective_access` reads the graph with. That
+module exists because these two readers used to resolve the same strings
+differently, and so disagreed about which hops were real.
 
 Computed on read (a pure function of the stored asset graph), like
 :func:`assurance.boundary.assess_boundary` and
@@ -33,6 +38,12 @@ here reaches the network.
 
 from __future__ import annotations
 
+from .graph_refs import (
+    MECHANISM_SERVER,
+    MECHANISM_TOOLS,
+    dangling_reference,
+    resolve_reference,
+)
 from .models import Asset, Provider
 
 # The canonical pipeline, front to back. The map lays nodes out in this order and
@@ -151,23 +162,40 @@ def build_route_map(deployment) -> dict:
     for agent in agent_assets:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
         for ident in metadata.get("tools") or []:
-            target = by_identifier.get(str(ident))
+            if not str(ident or "").strip():
+                continue
+            target = resolve_reference(ident, by_identifier, by_name)
             if target is not None:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
             else:
                 # A tool the agent names but discovery could not place: a dangling
                 # reference to chase, surfaced rather than silently dropped.
-                unresolved.append({"agent": agent.name, "tool_identifier": str(ident)})
+                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS))
 
-    # A tool that declares the MCP server hosting it → an edge to that server node.
-    for tool in tool_assets:
-        metadata = tool.metadata if isinstance(tool.metadata, dict) else {}
+    # A component that declares the backend it is wired to → an edge to that node.
+    # Every asset, not only the tool-layer ones: the `server` key is a declaration
+    # wherever it appears, and this map used to read it on three kinds while
+    # :mod:`assurance.access` read it on all of them — so an API naming its backend
+    # was a proven hop to one reader and did not exist for the other.
+    for source in assets:
+        metadata = source.metadata if isinstance(source.metadata, dict) else {}
         server = str(metadata.get("server") or "").strip()
         if not server:
             continue
-        host = by_identifier.get(server) or by_name.get(server)
-        if host is not None and host.kind == Asset.Kind.MCP_SERVER:
-            add_edge(tool, host, "hosted_by", "hosted by", declared=True)
+        host = resolve_reference(server, by_identifier, by_name)
+        if host is None:
+            # The reference names nothing in the inventory. This used to vanish:
+            # no edge, and no unresolved row either, because only the agent→tool
+            # mechanism had a channel for a miss.
+            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER))
+        elif host.kind == Asset.Kind.MCP_SERVER:
+            add_edge(source, host, "hosted_by", "hosted by", declared=True)
+        else:
+            # The reference resolves, but not to an MCP server — a tool wired to a
+            # data store, say. That is still a declared edge, and dropping it was
+            # the worse half of this defect: a hop the inventory attests, absent
+            # from the map AND absent from the gaps, so the map read as complete.
+            add_edge(source, host, "connects_to", "wired to", declared=True)
 
     # ---- Inferred spine: the reference pipeline between populated layers. ----
 
@@ -225,6 +253,8 @@ def build_route_map(deployment) -> dict:
         "inferred_edges": sum(1 for e in edges if not e["declared"]),
         "shadow_nodes": sum(1 for n in nodes if n["shadow"]),
         "unresolved_edges": len(unresolved),
+        "unresolved_tool_references": sum(1 for u in unresolved if u["mechanism"] == MECHANISM_TOOLS),
+        "unresolved_server_references": sum(1 for u in unresolved if u["mechanism"] == MECHANISM_SERVER),
         "layers_present": [layer for layer in LAYER_ORDER if layer_members[layer]],
         # The honest gap: nobody discovered where this system's logs go.
         "logs_observed": bool(layer_members[LAYER_LOGS]),

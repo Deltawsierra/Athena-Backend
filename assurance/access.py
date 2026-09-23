@@ -66,6 +66,12 @@ from .capability import (
     _max_risk,
     _permission_specs,
 )
+from .graph_refs import (
+    MECHANISM_SERVER,
+    MECHANISM_TOOLS,
+    dangling_reference,
+    resolve_reference,
+)
 from .models import Asset
 
 # The kinds that are principals in their own right: an identity that can act.
@@ -127,19 +133,14 @@ def _asset_permission_specs(asset) -> list[tuple[str, dict]]:
     return out
 
 
-def _resolve(ident, by_identifier: dict, by_name: dict):
-    """Resolve a declared reference (a tool identifier, a server name) to the
-    asset it names, or ``None`` when discovery could not place it — an
-    unresolvable reference is a dangling edge, never a fabricated node."""
-    key = str(ident or "").strip()
-    if not key:
-        return None
-    return by_identifier.get(key) or by_name.get(key)
 
 
-def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> dict:
-    """The declared asset→asset edges the inventory attests, as
-    ``{source_pk: [(target_asset, hop_label, capability_key), ...]}``.
+def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict, list]:
+    """The declared asset→asset edges the inventory attests, plus the references
+    it could not place.
+
+    Returns ``({source_pk: [(target_asset, hop_label, capability_key), ...]},
+    [dangling reference, ...])``.
 
     Two declared mechanisms, both ground truth:
 
@@ -148,9 +149,13 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> dict:
       (an MCP server that hosts it, a data store it is wired to).
 
     Nothing inferred: an edge exists only where the inventory names the target and
-    discovery placed it.
+    discovery placed it. And nothing dropped: a reference that resolves to no
+    asset is returned as a dangling reference rather than skipped. It used to be
+    skipped, which made an inventory pointing at a component nobody can find
+    indistinguishable from an inventory that pointed at nothing.
     """
     edges: dict[int, list[tuple]] = {}
+    unresolved: list[dict] = []
 
     def add(src, tgt, hop: str, cap_key: str) -> None:
         if tgt is None or src.pk == tgt.pk:
@@ -164,16 +169,22 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> dict:
         metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
         if asset.kind == Asset.Kind.AGENT:
             for ident in metadata.get("tools") or []:
-                target = _resolve(ident, by_identifier, by_name)
+                if not str(ident or "").strip():
+                    continue
+                target = resolve_reference(ident, by_identifier, by_name)
                 if target is not None:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
+                else:
+                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS))
         server = metadata.get("server")
         if server and str(server).strip():
-            target = _resolve(server, by_identifier, by_name)
+            target = resolve_reference(server, by_identifier, by_name)
             if target is not None:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
+            else:
+                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER))
 
-    return edges
+    return edges, unresolved
 
 
 def _reach(first_hops: list, start_path: list, start_keys: list, edges: dict, visited: set) -> list:
@@ -467,7 +478,7 @@ def assess_effective_access(deployment) -> dict:
             by_identifier.setdefault(asset.identifier, asset)
         by_name.setdefault(asset.name, asset)
 
-    edges = _build_edges(assets, by_identifier, by_name)
+    edges, unresolved = _build_edges(assets, by_identifier, by_name)
 
     agents = [a for a in assets if a.kind == Asset.Kind.AGENT]
     service_accounts = [a for a in assets if a.kind == Asset.Kind.SERVICE_ACCOUNT]
@@ -587,10 +598,21 @@ def assess_effective_access(deployment) -> dict:
         "high_risk_reach": sum(
             1 for p in principals for r in p["effective_reach"] if r["risk"] == RISK_HIGH
         ),
+        # How much of the graph this assessment could not resolve. A reach
+        # computed over a graph with dangling references is a reach over an
+        # incomplete graph, and a reader is entitled to know that before
+        # treating "no high-risk reach" as reassurance.
+        "unresolved_references": len(unresolved),
         "worst_risk": worst_risk,
     }
 
     return {
         "principals": principals,
+        # References the inventory declares and discovery could not place. This
+        # assessment had no channel for them at all: `_resolve` returned None and
+        # the caller moved on, so an agent naming a tool that is not in the
+        # inventory produced no edge, no gap and no count -- an absence of
+        # evidence that read as evidence of absence.
+        "unresolved": unresolved,
         "summary": summary,
     }

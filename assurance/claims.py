@@ -199,9 +199,17 @@ def _derive_effective_access(deployment) -> dict:
     gap ⇒ CONTRADICTED; nothing to assess (no principals) ⇒ UNKNOWN; otherwise
     SUPPORTED, promoted to VERIFIED only when the reach is configuration-verified
     and no high-risk gap of any kind remains. The reach is read from declared
-    configuration, so its evidence class is ``configuration_verified``."""
+    configuration, so its evidence class is ``configuration_verified``.
+
+    **An unresolved reference caps the claim at SUPPORTED.** The reach is computed
+    over the graph the inventory declares, and a dangling reference means part of
+    that graph could not be placed: the assessment cannot have followed a hop into
+    a component discovery never found. "No high-risk reach" over an incomplete
+    graph is a measurement of what we could see, not a verification, and calling it
+    VERIFIED would turn the hole into a clean bill of health."""
     result = assess_effective_access(deployment)
     principals = result["principals"]
+    unresolved = result["unresolved"]
 
     if not principals:
         status = Status.UNKNOWN
@@ -217,7 +225,7 @@ def _derive_effective_access(deployment) -> dict:
         vendor_asserted = False
         if contradicting:
             status = Status.CONTRADICTED
-        elif not any_high_risk_gap:
+        elif not any_high_risk_gap and not unresolved:
             status = Status.VERIFIED
         else:
             status = Status.SUPPORTED
@@ -228,6 +236,15 @@ def _derive_effective_access(deployment) -> dict:
         f"{summary['privileged']} privileged, {summary['shadow']} shadow, {summary['over_broad']} over-broad."
     )
     contradicting_bits: list[str] = []
+    if unresolved:
+        # Said on the contradicting side, not the supporting one: this is what the
+        # assessment could not see, and it is the reason the claim is not VERIFIED.
+        contradicting_bits.append(
+            f"{len(unresolved)} declared reference(s) discovery could not place, so the "
+            "reach was computed over an incomplete graph: "
+            + ", ".join(sorted({f"{u['source']} → {u['reference']}" for u in unresolved}))
+            + "."
+        )
     if principals:
         offenders = sorted(
             {
@@ -258,6 +275,7 @@ def _derive_effective_access(deployment) -> dict:
             "A principal's effective reach spans data, execution and network (over-broad).",
             "A principal reaches an unmanaged / shadow target.",
             "A new shadow identity appears.",
+            "A declared reference between components cannot be resolved to a discovered component.",
         ],
     }
 

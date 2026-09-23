@@ -100,7 +100,13 @@ def test_a_tool_the_agent_names_but_we_cannot_place_is_an_unresolved_edge():
 
     result = route.build_route_map(dep)
     assert result["summary"]["unresolved_edges"] == 1
-    assert result["unresolved"][0]["tool_identifier"] == "ghost-tool"
+    assert result["summary"]["unresolved_tool_references"] == 1
+    assert result["unresolved"][0] == {
+        "source": "a",
+        "source_kind": Asset.Kind.AGENT,
+        "reference": "ghost-tool",
+        "mechanism": "tools",
+    }
 
 
 def test_a_tool_declares_the_mcp_server_that_hosts_it():
