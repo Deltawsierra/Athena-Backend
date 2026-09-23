@@ -86,12 +86,41 @@ def test_a_component_only_coverage_payload_is_not_read_as_checks():
     }) == {}
 
 
-def test_a_malformed_checks_payload_is_discarded_whole():
+def test_a_payload_with_no_readable_structure_at_all_is_discarded_whole():
     """Half a coverage claim is worse than none: it would report the checks it
-    could parse as the complete list."""
+    could parse as the complete list.
+
+    That principle is unchanged. What changed is how it is kept. This case is the
+    one where nothing can be salvaged -- `checks` is not a list, or is empty -- so
+    there is no claim to read and the answer is "nobody said".
+    """
     assert _reported_checks({"coverage": {"checks": "not a list"}}) == {}
-    assert _reported_checks({"coverage": {"checks": [{"no": "check key"}]}}) == {}
-    assert _reported_checks({"coverage": {"checks": [{"check": "x"}]}}) == {}
+    assert _reported_checks({"coverage": {"checks": []}}) == {}
+    assert _reported_checks({"coverage": {}}) == {}
+    assert _reported_checks({"coverage": "checks"}) == {}
+
+
+def test_a_row_it_cannot_read_is_kept_rather_than_deleted():
+    """The other end of the same principle, and the correction to it.
+
+    These used to return ``{}`` as well, on the reasoning that a payload which is
+    not the promised shape should be discarded whole. But discarding a payload
+    that DID arrive turns a reported shortfall into silence, and silence imposes
+    no cap -- so an engine that renamed one key moved the deployment from
+    "audit incomplete" to "ready".
+
+    A row that arrived and cannot be interpreted is a check whose outcome is
+    unknown. It is kept, it reaches the denominator, and it never reaches
+    ``performed``. That is what stops it being "reported as the complete list".
+    """
+    read = _reported_checks({"coverage": {"checks": [{"no": "check key"}]}})
+    assert read != {}
+    assert read["checks"] == []
+    assert read["unreadable"] == 1
+
+    read = _reported_checks({"coverage": {"checks": [{"check": "x"}]}})
+    assert read["checks"] == [{"check": "x"}]
+    assert read["performed"] == [], "a row with no state has not performed"
 
 
 def test_the_summary_lists_are_recomputed_from_the_rows():

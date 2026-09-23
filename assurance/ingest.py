@@ -284,6 +284,15 @@ def _reported_checks(engine_response: Any) -> dict:
     half-read, because a partial coverage claim is worse than none.
 
     ``{}`` means the engine did not say. It never means every check ran.
+
+    A row this side cannot interpret is KEPT, not dropped. The per-row filter that
+    used to stand here was itself the half-read the docstring above warns against,
+    and it failed in the worst available direction: a row spelling ``status``
+    instead of ``state`` was deleted, and the denominator shrank with it, so two
+    never-run checks became a manifest of two performed checks out of two and a
+    receipt attesting ``checks_complete: true``. The engine is a separate
+    deployable on its own release cycle; a key it renames must cap the decision,
+    not clear it.
     """
     if not isinstance(engine_response, dict):
         return {}
@@ -293,23 +302,30 @@ def _reported_checks(engine_response: Any) -> dict:
     checks = coverage.get("checks")
     if not isinstance(checks, list) or not checks:
         return {}
-    rows = [
-        row for row in checks
-        if isinstance(row, dict) and row.get("check") and row.get("state")
-    ]
-    if not rows:
+    rows = []
+    # Rows with nothing this side can even name. Counted, because a row that
+    # arrived and could not be read is a check whose outcome is unknown, and
+    # unknown must reach the denominator; not named, because there is no name.
+    unreadable = 0
+    for row in checks:
+        if isinstance(row, dict) and row.get("check"):
+            rows.append(row)
+        else:
+            unreadable += 1
+    if not rows and not unreadable:
         return {}
     return {
         "checks": rows,
+        "unreadable": unreadable,
         # Recomputed from the rows rather than trusted from the payload: the
         # engine's own summary lists are a convenience, and a manifest whose
         # summary disagreed with its rows would be read by the summary.
         "not_performed": sorted(
-            {r["check"] for r in rows if r["state"] == "not_performed"}
+            {r["check"] for r in rows if r.get("state") == "not_performed"}
         ),
-        "degraded": sorted({r["check"] for r in rows if r["state"] == "degraded"}),
-        "unmeasured": sorted({r["check"] for r in rows if r["state"] == "unmeasured"}),
-        "performed": sorted({r["check"] for r in rows if r["state"] == "performed"}),
+        "degraded": sorted({r["check"] for r in rows if r.get("state") == "degraded"}),
+        "unmeasured": sorted({r["check"] for r in rows if r.get("state") == "unmeasured"}),
+        "performed": sorted({r["check"] for r in rows if r.get("state") == "performed"}),
         "limitations": (
             coverage["limitations"]
             if isinstance(coverage.get("limitations"), dict) else {}
