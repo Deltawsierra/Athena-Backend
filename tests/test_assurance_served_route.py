@@ -624,3 +624,107 @@ def test_the_schema_describes_every_key_the_receipt_actually_emits():
     built = receipt_mod.build_assurance_receipt(dep)
     described = set(receipt_mod.receipt_schema()["properties"])
     assert set(built) <= described, sorted(set(built) - described)
+
+
+# ---------------------------------------------------------------------------
+# The two multi-source fields may not infer
+# ---------------------------------------------------------------------------
+#
+# `provider` and `region` are the only two readers with a fallback chain, and
+# they were the only two with no test forbidding inference. An audit made
+# `_provider_value` return "openai" whenever the model name contained "gpt" and
+# nothing had observed a provider, and made `_region_value` read a region out of
+# the provider's name. Both mutations survived the ENTIRE suite -- 1262 passed,
+# not one failure.
+#
+# That is the worst available shape for this defect. A fabricated provider or
+# region is a plain string, indistinguishable from an observed one, and it is
+# hashed into the route fingerprint and from there into the signed receipt. The
+# rest of this module is careful about exactly this; these two fields simply had
+# nothing holding them to it.
+#
+# The asset fixture's default name is "gpt-x" and the deployment's is
+# "checkout-assistant", which is convenient here: a reader that guessed from the
+# model name would have everything it needed to guess.
+
+
+def test_a_model_with_no_provider_anywhere_reports_provider_unknown():
+    """No Provider row, no `provider` metadata key -- and a model name that names
+    its vendor to anyone reading it. Nothing observed the provider, so the only
+    honest answer is that nobody said."""
+    dep = _deployment()
+    asset = _model_asset(dep, name="gpt-4o", metadata={"model": "gpt-4o"})
+    assert asset.provider is None
+    assert served_route(asset)["provider"] == UNKNOWN
+
+
+def test_a_provider_row_with_a_blank_region_reports_region_unknown():
+    """The provider is recorded and its region is not. A region read out of the
+    provider's NAME would be an inference dressed as an observation -- and the
+    name here would give one up readily."""
+    dep = _deployment()
+    provider = Provider.objects.create(name="eu-central-hosted-llm", region="")
+    asset = _model_asset(dep, provider=provider)
+    route = served_route(asset)
+    assert route["provider"] == "eu-central-hosted-llm"
+    assert route["region"] == UNKNOWN
+
+
+def test_neither_field_is_guessed_from_any_other_observed_field():
+    """A route where everything else is observed is where an inference would be
+    easiest to justify and hardest to notice."""
+    dep = _deployment()
+    asset = _model_asset(
+        dep,
+        name="claude-sonnet-eu",
+        metadata={
+            "model": "claude-sonnet-eu",
+            "model_version": "2026-01-01",
+            "endpoint": "https://api.eu-west-1.example/v1/messages",
+            "deployment_kind": "managed",
+        },
+    )
+    route = served_route(asset)
+    assert route["provider"] == UNKNOWN, "the provider was guessed from another field"
+    assert route["region"] == UNKNOWN, "the region was guessed from an endpoint or a name"
+
+
+# -- the negative controls: an observation still arrives, from either source ---
+
+
+def test_an_observed_provider_arrives_from_the_recorded_relationship():
+    dep = _deployment()
+    provider = Provider.objects.create(name="Anthropic", region="us-east-1")
+    route = served_route(_model_asset(dep, provider=provider))
+    assert route["provider"] == "Anthropic"
+    assert route["region"] == "us-east-1"
+
+
+def test_an_observed_provider_arrives_from_the_assets_own_metadata():
+    dep = _deployment()
+    route = served_route(
+        _model_asset(dep, metadata={"provider": "Anthropic", "region": "eu-west-1"})
+    )
+    assert route["provider"] == "Anthropic"
+    assert route["region"] == "eu-west-1"
+
+
+def test_the_two_sources_are_read_in_the_order_the_docstrings_state():
+    """Both are observations, so when they disagree the order decides, and the
+    order is deliberate and opposite for the two fields: the provider comes from
+    the recorded relationship first (an FK is a relationship somebody recorded,
+    the metadata key is the asset's self-report), the region from the asset's own
+    metadata first (the provider's region is where the PROVIDER is, which is the
+    fallback, not the first answer). Pinned so a reordering is a decision rather
+    than a diff nobody read."""
+    dep = _deployment()
+    provider = Provider.objects.create(name="FromTheRow", region="row-region")
+    route = served_route(
+        _model_asset(
+            dep,
+            provider=provider,
+            metadata={"provider": "FromTheMetadata", "region": "metadata-region"},
+        )
+    )
+    assert route["provider"] == "FromTheRow"
+    assert route["region"] == "metadata-region"
