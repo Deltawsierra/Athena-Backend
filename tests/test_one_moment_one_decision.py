@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import pytest
 from assurance import decision as decision_module
+from assurance.composition import compose as compose_chains
 from assurance.decision import (
     DecisionParts,
     compute_decision,
@@ -197,6 +198,13 @@ def test_parts_handed_in_are_the_parts_used_and_not_a_hint():
         claim_signal={"cap": None},
         scan_cap=None,
         coverage_cap=None,
+        # Spelled out rather than defaulted. `DecisionParts.composition` has no
+        # default on purpose: a decision input a caller can silently omit is a
+        # signal that reads as "nothing to say" when it was never asked, which is
+        # the one failure mode this whole dataclass exists to prevent. The cost is
+        # that adding a signal breaks every direct construction, and that is the
+        # point -- each one has to say what it means by it.
+        composition=compose_chains([]),
     )
     assert compute_decision(dep, parts=invented) == D.NOT_RECOMMENDED
 

@@ -1,5 +1,5 @@
-"""Aggregate a deployment's findings AND its assurance claims into its six-state
-deployment decision.
+"""Aggregate a deployment's findings, its assurance claims and its per-workflow
+assurance chains into its six-state deployment decision.
 
 Phase 0.5 gave a Deployment a `decision` field and computed it from the live
 findings so a scan culminates in a decision-support artifact, not a vulnerability
@@ -24,23 +24,39 @@ Two independent signals, combined worst-first:
   STALE or UNKNOWN claim, or any open retest obligation, caps at
   NEEDS_MORE_EVIDENCE. Supported/verified claims and a deployment with no claims add
   no cap.
+- **Workflow chains** (the compositional assurance graph) place the deployment by
+  the worst status among its approved business workflows' authority-to-effect
+  chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
+  a NOT_DEMONSTRATED one → NEEDS_MORE_EVIDENCE, all held → READY. Worst-of-N, never
+  coverage-weighted: forty-nine of fifty workflows holding does not make a
+  deployment that can move customer records to an unauthorised destination 98%
+  safe. :mod:`assurance.composition` is the rule and argues for itself at length;
+  :mod:`assurance.workflow_chains` reads the rows and decides the one thing the
+  pure rule cannot — that this signal may contribute READY only when the approved
+  workflow set is recorded and every workflow in it reported, so ONE held chain
+  cannot make an otherwise-unassessed deployment ready.
 
-The decision is the **worse** of the two. The claim cap can only hold a decision
-back or leave it, never improve it (the same weakest-link discipline the evidence
-model keeps): a green finding set cannot paper over a contradicted claim, and a
+The decision is the **worse** of them. The claim cap can only hold a decision back
+or leave it, never improve it (the same weakest-link discipline the evidence model
+keeps): a green finding set cannot paper over a contradicted claim, and a
 contradicted claim cannot make a critical finding look better. The decision is
-``None`` — *no decision* — only when neither signal has assessed anything; an absent
+``None`` — *no decision* — only when no signal has assessed anything; an absent
 decision is never READY. ``paused`` (the operator failsafe) still overrides
 everything.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from django.db import transaction
 
 from .coverage import complete_audit_signal, coverage_decision_cap, coverage_manifest
+from .composition import READY as composition_READY
+from .composition import compose as compose_chains
+from .composition import Composition
+from .composition import explain as explain_composition
+from .workflow_chains import composition_decision_signal, composition_for
 from .models import (
     UNTRUSTED_SEVERITY_STATUSES,
     RESOLVED_FINDING_STATUSES,
@@ -252,6 +268,12 @@ class DecisionParts:
     claim_signal: dict
     scan_cap: str | None
     coverage_cap: str | None
+    # The per-workflow assurance chains, composed by `assurance.composition`'s
+    # rule and narrowed by `workflow_chains.composition_decision_signal`. The
+    # whole `Composition` rather than just the signal, because `decision_support`
+    # reports the census and the deciding workflows, and reading those a second
+    # time is the tear this dataclass exists to close.
+    composition: Composition
 
 
 def read_decision_parts(deployment: Deployment) -> DecisionParts:
@@ -270,6 +292,7 @@ def read_decision_parts(deployment: Deployment) -> DecisionParts:
         claim_signal=claim_decision_signal(deployment),
         scan_cap=incomplete_evidence_cap(deployment),
         coverage_cap=coverage_decision_cap(deployment),
+        composition=composition_for(deployment),
     )
 
 
@@ -281,12 +304,24 @@ def decide(parts: DecisionParts) -> str | None:
     # deployment scanned clean read as "not yet assessed", which is the same
     # answer as a deployment nobody ever scanned.
     base = _worse(
-        _worse(parts.from_findings, parts.completed_scan),
-        # A complete audit that found nothing is an assessment too, and the reason
-        # coverage is recorded rather than only reported: without it, a deployment
-        # whose every declared component was assessed clean has no findings and so
-        # reads as unassessed -- indistinguishable from one nobody has looked at.
-        parts.complete_audit,
+        _worse(
+            _worse(parts.from_findings, parts.completed_scan),
+            # A complete audit that found nothing is an assessment too, and the reason
+            # coverage is recorded rather than only reported: without it, a deployment
+            # whose every declared component was assessed clean has no findings and so
+            # reads as unassessed -- indistinguishable from one nobody has looked at.
+            parts.complete_audit,
+        ),
+        # The compositional assurance graph: what the deployment's per-workflow
+        # authority-to-effect chains establish, composed worst-of-N by
+        # `assurance.composition`. It enters through `_worse` like the other two
+        # assessments, and it can only be READY here when the approved workflow set
+        # is recorded and fully reported -- `composition_decision_signal` returns
+        # None otherwise, precisely so one held chain cannot make an unassessed
+        # deployment ready. A chain that VIOLATES sets NOT_RECOMMENDED, and this is
+        # the only signal that can: a deployment producing an effect its authority
+        # does not cover is a fact about the deployment, not a doubt about it.
+        composition_decision_signal(parts.composition),
     )
     cap = parts.claim_signal["cap"]
     # Coverage of the system, not strength of the evidence: something the customer
@@ -305,10 +340,12 @@ def compute_decision(
     parts: DecisionParts | None = None,
 ) -> str | None:
     """The six-state decision implied by a deployment's active findings, its
-    current assurance claims (Stage 1C), and whether its latest scan finished.
+    current assurance claims (Stage 1C), whether its latest scan finished, and
+    what its approved workflows' assurance chains establish.
 
-    The decision is the *worse* of the finding-based signal, the claim-based cap
-    and the incomplete-evidence cap. ``paused`` (the operator failsafe, passed by
+    The decision is the *worse* of the finding-based signal, the claim-based cap,
+    the incomplete-evidence cap and the compositional chain signal
+    (:mod:`assurance.composition`, read by :mod:`assurance.workflow_chains`). ``paused`` (the operator failsafe, passed by
     the caller) overrides everything. Returns ``None`` — no decision — only when
     nothing has assessed the deployment; an absent decision is never READY.
 
@@ -333,6 +370,15 @@ def _claim_brief(claim: AssuranceClaim) -> dict:
         "status": claim.status,
         "statement": claim.statement,
     }
+
+
+#: A composition that assessed nothing, used to ask what the decision would be
+#: WITHOUT the chain signal. `decision_support` needs that counterfactual to say
+#: whether the chains are the binding constraint or merely agree with something
+#: else, and a note that says "the chains place it there" when the findings
+#: already did is the kind of near-miss sentence an operator acts on wrongly.
+#: Pure and constant: `compose([])` reads nothing and calls no clock.
+_NO_CHAINS: Composition = compose_chains([])
 
 
 def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
@@ -372,10 +418,31 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     from_findings = None if paused else parts.from_findings
     scan_cap = None if paused else parts.scan_cap
     coverage_cap = None if paused else parts.coverage_cap
+    # Nulled under `paused` like the other signals, for the same reason: the
+    # failsafe decides, so no signal contributed to THIS decision. The census
+    # below is NOT nulled -- a paused deployment's violated chain is still a
+    # violated chain, and hiding it would be the silent zero with a good excuse.
+    chain_signal = None if paused else composition_decision_signal(parts.composition)
     decision = compute_decision(deployment, paused=paused, parts=parts)
+    # What the decision would be if the chains had said nothing. Not an
+    # optimisation: it is the only way to tell a chain that SET the decision from
+    # one that agrees with a finding that already had.
+    without_chains = None if paused else decide(replace(parts, composition=_NO_CHAINS))
+    chains_are_binding = not paused and decision != without_chains
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
+    elif chain_signal is not None and chain_signal != composition_READY and chains_are_binding:
+        # The per-workflow chains, and nothing else, place the deployment here --
+        # `chains_are_binding` is what earns the "not" in the sentence. Without the
+        # counterfactual this branch fired whenever the chains merely AGREED with the
+        # finding signal, and told the operator to go look at workflow chains for a
+        # decision the findings had already made.
+        note = (
+            f"{explain_composition(parts.composition)} Approved-workflow chains, not "
+            f"findings or claims, place it there: without them this deployment would "
+            f"read {without_chains or 'not yet assessed'}."
+        )
     elif coverage_cap is not None and decision == Deployment.Decision.AUDIT_INCOMPLETE:
         manifest = coverage_manifest(deployment)
         note = (
@@ -413,8 +480,18 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
             )
         else:
             note = f"Ready, and supported by {len(signal['supporting'])} current assurance claim(s) with no open retest."
+    elif chain_signal == composition_READY and chains_are_binding:
+        # READY that came from the chains rather than from a scan or a claim. Before
+        # this the sentence fell through to "Decision reflects the deployment's
+        # active findings", which for a deployment with no findings at all is a
+        # statement about nothing, offered as the reason.
+        note = (
+            f"Ready: every one of the {parts.composition.workflows_expected} approved "
+            f"workflow(s) has a chain outcome and all of them hold. "
+            f"{explain_composition(parts.composition)}"
+        )
     elif decision is None:
-        note = "Not yet assessed: no findings and no assurance claims."
+        note = "Not yet assessed: no findings, no assurance claims and no workflow chains."
     else:
         note = "Decision reflects the deployment's active findings; no current claim holds it back."
 
@@ -428,6 +505,23 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
         "from_findings": from_findings,
         "claim_cap": signal["cap"],
         "coverage_cap": coverage_cap,
+        # The compositional assurance graph, reported rather than only decided
+        # with. `census` always carries all four statuses including zeros, and
+        # `workflows_expected: null` is the honest answer when nobody has recorded
+        # the approved set -- distinguishable from a recorded set of zero, which
+        # is the distinction the whole signal turns on.
+        "composition": {
+            "signal": chain_signal,
+            "rule_decision": parts.composition.decision,
+            "census": dict(parts.composition.census),
+            "deciding": list(parts.composition.deciding),
+            "workflows_assessed": parts.composition.workflows_assessed,
+            "workflows_expected": parts.composition.workflows_expected,
+            "workflows_unreported": parts.composition.workflows_unreported,
+            "workflows_unapproved": parts.composition.workflows_unapproved,
+            "superseded": parts.composition.superseded,
+            "explanation": explain_composition(parts.composition),
+        },
         "paused": paused,
         # The assurance policy this decision is made under — pinned so a later
         # change to the rules can tell whether the policy still holds.
