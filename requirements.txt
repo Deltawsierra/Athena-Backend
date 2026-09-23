@@ -125,4 +125,4 @@ zopfli==0.2.3.post1
 # telemetry was configured and gone with nothing saying so. The release also
 # redacts userinfo out of the endpoint that status block publishes, and bounds
 # Timings so the measuring apparatus stops changing the latency it measures.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@9fc4e60dcc441e631099a920694add7aee4d9868
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@539538c611a77190bd069c26bbb9da2a05d5877a
