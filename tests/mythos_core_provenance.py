@@ -57,6 +57,13 @@ class Provenance:
     commit: str | None = None
     location: str = ""
     dirty: bool = False
+    #: Tracked files git has been told not to watch, and whether any of them is
+    #: actually altered. Separate from `dirty` because they are different facts:
+    #: `dirty` is "git says this changed", `unwatched` is "git was told not to
+    #: say". See `unwatched_paths` for why the second cannot be folded into the
+    #: first.
+    unwatched: tuple[str, ...] = ()
+    unwatched_altered: tuple[str, ...] = ()
     why: str = ""
 
 
@@ -78,6 +85,57 @@ def _git(repo: pathlib.Path, *args: str) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout.strip() if done.returncode == 0 else None
+
+
+def unwatched_paths(repo: pathlib.Path, *, git=_git) -> tuple[str, ...]:
+    """Tracked files git has been TOLD not to look at, in ``repo``.
+
+    ``git update-index --assume-unchanged`` and ``--skip-worktree`` both make a
+    modified file invisible to the commands that ask whether a checkout is clean.
+    Measured, on a one-file repo with the file rewritten:
+
+        git status --porcelain      ->  (empty)      # reads clean
+        git diff-index --quiet HEAD ->  exit 0       # reads clean
+        git ls-files -v             ->  "h f.py"     # the bit, still visible
+        index blob vs worktree blob ->  differ       # the tamper, still visible
+
+    So the bypass is the index, not the command, and swapping `status` for
+    `diff-index` -- which is what this fix first tried -- changes nothing. The one
+    command that re-stats past the bit is ``git update-index --really-refresh``,
+    and it does so by CLEARING the bit and writing the dependency's index: a
+    read-only guard must not mutate the checkout it is judging, and doing it would
+    destroy the evidence that someone set the bit at all.
+
+    So the bits are reported as themselves. A pinned dependency with a file git
+    has been told to ignore is a checkout whose contents this guard CANNOT
+    establish -- and "cannot establish" is a finding here, never a pass. That is
+    the same rule the rest of this module applies to an unresolvable provenance.
+    """
+    listing = git(repo, "ls-files", "-v")
+    if not listing:
+        return ()
+    flagged = []
+    for line in listing.splitlines():
+        # `-v` prefixes each path with a status letter. Upper case H is the
+        # ordinary "cached" state; lower case means assume-unchanged, and S/s
+        # mean skip-worktree. Anything that is not H is a file git was told to
+        # stop watching.
+        if len(line) > 2 and line[0] != "H" and line[1] == " ":
+            flagged.append(line[2:])
+    return tuple(sorted(flagged))
+
+
+def _content_differs(repo: pathlib.Path, path: str, *, git=_git) -> bool:
+    """Does ``path``'s worktree content differ from what the index records?
+
+    Flag-blind on purpose: it compares blob hashes and never asks git whether the
+    file is "modified", so an assume-unchanged bit cannot hide the answer. Used
+    only on the handful of paths `unwatched_paths` flagged, because a hash per
+    tracked file would be too slow to run on every suite start.
+    """
+    recorded = git(repo, "rev-parse", f":{path}")
+    actual = git(repo, "hash-object", path)
+    return bool(recorded) and bool(actual) and recorded != actual
 
 
 def provenance_from_direct_url(raw: str | None, *, git=_git) -> Provenance:
@@ -141,11 +199,16 @@ def provenance_from_direct_url(raw: str | None, *, git=_git) -> Provenance:
                 why=f"{path} is not a readable git checkout, so its commit is unknown",
             )
         status = git(path, "status", "--porcelain")
+        unwatched = unwatched_paths(path, git=git)
         return Provenance(
             kind="local",
             commit=head,
             location=str(path),
             dirty=bool(status),
+            unwatched=unwatched,
+            unwatched_altered=tuple(
+                name for name in unwatched if _content_differs(path, name, git=git)
+            ),
         )
 
     return Provenance(
@@ -193,6 +256,23 @@ def complaint(pin: str | None, found: Provenance) -> str | None:
             f"the imported mythos-core is at the pinned commit {pin[:12]} but its "
             f"checkout at {found.location} has uncommitted changes, so the code "
             "being imported is not that commit."
+        )
+
+    if found.unwatched_altered:
+        return (
+            f"the imported mythos-core is at the pinned commit {pin[:12]}, and "
+            f"{len(found.unwatched_altered)} file(s) in {found.location} have been "
+            "altered while marked assume-unchanged or skip-worktree, so `git status` "
+            f"reports the checkout clean and it is not: {', '.join(found.unwatched_altered[:5])}."
+        )
+
+    if found.unwatched:
+        return (
+            f"the imported mythos-core is at the pinned commit {pin[:12]}, but git has "
+            f"been told not to watch {len(found.unwatched)} file(s) in {found.location} "
+            "(assume-unchanged or skip-worktree), so this guard cannot establish that "
+            f"what is on disk is that commit: {', '.join(found.unwatched[:5])}. Clear the "
+            "bits with `git update-index --no-assume-unchanged --no-skip-worktree <path>`."
         )
 
     return None

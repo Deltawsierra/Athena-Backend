@@ -19,6 +19,8 @@ import pathlib
 import pytest
 
 from tests import conftest as tests_conftest
+from tests.mythos_core_provenance import _content_differs as _differs
+from tests.mythos_core_provenance import unwatched_paths as conftest_module_unwatched
 from tests.mythos_core_provenance import (
     OPT_OUT_ENV,
     Provenance,
@@ -608,3 +610,171 @@ def test_only_a_guard_above_the_broken_import_reaches_the_reader(
         # What the reader gets instead: a missing symbol, pointing at the engine
         # rather than at the dependency.
         assert "cannot import name 'pinned_dns'" in output
+
+# ---------------------------------------------------------------------------
+# "Clean" must mean clean, not "git was told not to look"
+# ---------------------------------------------------------------------------
+
+
+def _repo(tmp_path, content="original\n"):
+    """A one-commit git checkout, standing in for a pinned dependency."""
+    import subprocess
+
+    repo = tmp_path / "dep"
+    repo.mkdir()
+
+    def run(*args):
+        subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    run("init", "-q", ".")
+    (repo / "f.py").write_text(content)
+    run("add", "f.py")
+    run("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init")
+    return repo
+
+
+def test_an_ordinary_clean_checkout_flags_nothing():
+    """The control. If every checkout looked unwatched, the check would say
+    nothing about the one that is."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(pathlib.Path(tmp))
+        assert conftest_module_unwatched(repo) == ()
+
+
+def test_a_modified_file_marked_assume_unchanged_is_reported():
+    """The hole this closes.
+
+    `git status --porcelain` is EMPTY for a file marked assume-unchanged, however
+    thoroughly the file has been rewritten -- and so is `git diff-index --quiet
+    HEAD`, which is what this fix first reached for. The bypass is the index, not
+    the command.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(pathlib.Path(tmp))
+        (repo / "f.py").write_text("TAMPERED\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "update-index", "--assume-unchanged", "f.py"],
+            check=True,
+            capture_output=True,
+        )
+
+        # The two commands a reader would trust, both silent:
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+        )
+        assert status.stdout.strip() == "", "the premise of this test no longer holds"
+        assert (
+            subprocess.run(
+                ["git", "-C", str(repo), "diff-index", "--quiet", "HEAD"],
+                capture_output=True,
+            ).returncode
+            == 0
+        ), "the premise of this test no longer holds"
+
+        # The guard is not:
+        assert conftest_module_unwatched(repo) == ("f.py",)
+        assert _differs(repo, "f.py") is True
+
+
+def test_skip_worktree_hides_a_file_the_same_way_and_is_also_reported():
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(pathlib.Path(tmp))
+        (repo / "f.py").write_text("TAMPERED\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "update-index", "--skip-worktree", "f.py"],
+            check=True,
+            capture_output=True,
+        )
+        assert conftest_module_unwatched(repo) == ("f.py",)
+        assert _differs(repo, "f.py") is True
+
+
+def test_an_unwatched_file_that_was_not_altered_is_still_a_complaint():
+    """Reported even when the content happens to match.
+
+    The bit means git has been told to stop looking, so from here on the guard
+    cannot establish what is on disk. "Cannot establish" is a finding in this
+    module, never a pass -- the same rule it applies to an unresolvable
+    provenance.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(pathlib.Path(tmp))
+        subprocess.run(
+            ["git", "-C", str(repo), "update-index", "--assume-unchanged", "f.py"],
+            check=True,
+            capture_output=True,
+        )
+        assert conftest_module_unwatched(repo) == ("f.py",)
+        assert _differs(repo, "f.py") is False
+
+        found = Provenance(kind="local", commit=PIN, location=str(repo), unwatched=("f.py",))
+        message = complaint(PIN, found)
+        assert message and "told not to watch" in message
+        assert "no-assume-unchanged" in message
+
+
+def test_an_altered_unwatched_file_is_named_as_altered_not_merely_unwatched():
+    """The two states are different facts and get different sentences: one says
+    the guard cannot tell, the other says it can and the answer is no."""
+    found = Provenance(
+        kind="local",
+        commit=PIN,
+        location="/srv/dep",
+        unwatched=("a.py", "b.py"),
+        unwatched_altered=("b.py",),
+    )
+    message = complaint(PIN, found)
+    assert message and "have been altered while marked" in message
+    assert "b.py" in message
+
+
+def test_the_guard_does_not_write_to_the_checkout_it_judges():
+    """`git update-index --really-refresh` DOES re-stat past the bit -- and it
+    clears the bit and writes the dependency's index to do it. A read-only guard
+    must not mutate what it is judging, and clearing the bit would destroy the
+    evidence that someone set it. So the index must be byte-identical afterwards.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(pathlib.Path(tmp))
+        (repo / "f.py").write_text("TAMPERED\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "update-index", "--assume-unchanged", "f.py"],
+            check=True,
+            capture_output=True,
+        )
+        before = (repo / ".git" / "index").read_bytes()
+
+        conftest_module_unwatched(repo)
+        _differs(repo, "f.py")
+
+        assert (repo / ".git" / "index").read_bytes() == before, (
+            "the guard wrote to the dependency's git index"
+        )
+        # ...and the bit is still there to be reported.
+        listing = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-v"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert listing.startswith("h "), listing
