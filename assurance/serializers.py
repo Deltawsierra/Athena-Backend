@@ -14,6 +14,7 @@ from rest_framework import serializers
 from .change import CHANGE_LABELS, age_days, change_status, is_stale
 from .receipt import finding_receipt
 from .models import (
+    ApprovedWorkflow,
     Asset,
     AssuranceClaim,
     ClaimEvent,
@@ -27,6 +28,7 @@ from .models import (
     RemediationEvent,
     RetestRequirement,
     Unknown,
+    WorkflowChainOutcome,
     evidence_strength,
 )
 
@@ -419,6 +421,108 @@ class DeclaredComponentSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("A declared component needs a name.")
         return value
+
+
+class ApprovedWorkflowSerializer(serializers.ModelSerializer):
+    """One approved business workflow — the unit the compositional assurance graph
+    is scoped to (:mod:`assurance.composition`).
+
+    The write shape is the DECLARATION: which workflows the customer has approved.
+    That set is what lets the rule refuse its central silent zero -- "a deployment
+    with fifty approved workflows and one chain, held, is not ready" only works if
+    something knows the fifty.
+
+    NO HAND-WRITTEN FIELD VALIDATORS, deliberately. The first draft of this class
+    carried ``validate_slug`` and ``validate_name`` rejecting empty and
+    whitespace-only values; both were removed once they were actually exercised,
+    because the model fields already refuse every case they claimed to catch --
+    ``slug`` is a :class:`~django.db.models.SlugField` and ``name`` a
+    non-blank ``CharField``, so DRF derives ``allow_blank=False`` and trims before
+    checking. A validator whose branch no input can reach reads as a control and
+    enforces nothing, which is the exact shape this module's neighbours exist to
+    refuse. What does the refusing is pinned by tests, so it cannot quietly go away
+    if a field's type changes.
+    """
+
+    #: Who approved it, and when. The model keeps ``approved_by`` "for
+    #: provenance" and nothing could read it back, which makes provenance a field
+    #: the database holds and no reader can see -- a record kept for an audit that
+    #: cannot reach it. Read-only: the approver is whoever made the request, not
+    #: whoever the body says.
+    approved_by = serializers.SerializerMethodField()
+    approved_at = serializers.DateTimeField(source="created_at", read_only=True)
+
+    class Meta:
+        model = ApprovedWorkflow
+        fields = [
+            "uuid",
+            "slug",
+            "name",
+            "description",
+            "approved_by",
+            "approved_at",
+        ]
+        read_only_fields = ["uuid"]
+
+    def get_approved_by(self, obj) -> str | None:
+        """The approver's username, or ``None`` when the account is gone.
+
+        ``approved_by`` is ``SET_NULL``, so this really can be ``None``, and
+        ``None`` means *the approver's account was deleted* -- not *nobody
+        approved it*. The approval stands either way, which is why the FK does not
+        cascade.
+        """
+        return obj.approved_by.username if obj.approved_by_id else None
+
+
+class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
+    """What one exercise of one workflow's authority-to-effect chain established.
+
+    An OBSERVATION, not a declaration, and the difference decides the write shape:
+    outcomes are appended, never replaced. :mod:`assurance.composition` picks the
+    newest verdict per workflow and counts what a re-run superseded, so a
+    replace-on-write would leave exactly one outcome per workflow and make
+    supersession unreachable -- the rule would keep its logic and lose its input.
+
+    ``workflow`` is a free slug on purpose. It is NOT validated against the
+    approved set, because an outcome for a workflow nobody approved is exactly what
+    :attr:`~assurance.composition.Composition.workflows_unapproved` exists to
+    count; refusing it here would make that counter unreachable and this serializer
+    the place the platform stopped noticing shadow workflows.
+
+    ``observed_at`` may be omitted, and omitting it means *recency unknown* --
+    which :func:`~assurance.composition.compose` handles explicitly, by treating an
+    undated outcome as unable to supersede anything and impossible to supersede.
+    A naive instant would break the rule's comparison, and does not need rejecting
+    here: ``USE_TZ`` is on, so DRF's ``enforce_timezone`` makes an offset-less
+    instant aware in the current zone before validation returns. A guard for it was
+    written and then removed for being unreachable; the conversion is pinned by
+    ``test_naive_observed_at_is_made_aware_rather_than_reaching_the_rule`` instead,
+    so turning ``USE_TZ`` off fails a test rather than reaching the rule with a
+    datetime it cannot compare.
+    """
+
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    #: When the outcome was RECORDED here, which is not when the chain was
+    #: exercised. ``observed_at`` is the exercise; this is the write. A campaign
+    #: replaying a month of history posts outcomes whose ``observed_at`` is old and
+    #: whose ``recorded_at`` is now, and a reader who cannot see both cannot tell
+    #: fresh measurement from backfill.
+    recorded_at = serializers.DateTimeField(source="created_at", read_only=True)
+
+    class Meta:
+        model = WorkflowChainOutcome
+        fields = [
+            "uuid",
+            "workflow",
+            "status",
+            "status_label",
+            "observed_at",
+            "recorded_at",
+            "source",
+            "note",
+        ]
+        read_only_fields = ["uuid", "status_label"]
 
 
 class ClaimEventSerializer(serializers.ModelSerializer):

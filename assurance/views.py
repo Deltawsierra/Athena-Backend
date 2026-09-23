@@ -48,6 +48,7 @@ from .packs import UnknownPack, apply_pack, list_packs
 from .roi import build_executive_summary
 from .route import build_route_map
 from .models import (
+    ApprovedWorkflow,
     Asset,
     AssuranceClaim,
     ConnectorBinding,
@@ -62,14 +63,21 @@ from .models import (
     ProviderAssertion,
     RetestRequirement,
     Unknown,
+    WorkflowChainOutcome,
 )
 from .chain_registry import ChainBirthRefused, register_birth, registry_posture
 from .receipt import build_assurance_receipt, deployment_receipt
 from .vendor_packet import build_vendor_packet, packet_candidates
+from .workflow_chains import (
+    composition_decision_signal,
+    composition_for,
+    composition_payload,
+)
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
 from .vendor import assess_vendors
 from .serializers import (
+    ApprovedWorkflowSerializer,
     AssetSerializer,
     AssuranceClaimSerializer,
     ClaimEventSerializer,
@@ -82,6 +90,7 @@ from .serializers import (
     RemediationEventSerializer,
     RetestRequirementSerializer,
     UnknownSerializer,
+    WorkflowChainOutcomeSerializer,
 )
 
 User = get_user_model()
@@ -110,6 +119,87 @@ def _require_admin(request) -> None:
     open — a non-admin gets a clean 403, not a silent success."""
     if not _is_admin(request.user):
         raise PermissionDenied("Changing the assurance record requires an admin role.")
+
+
+def _rows_from_body(data, *, key: str, single_allowed: bool):
+    """The rows a request body carries, as ``(rows, was_a_single_object)``.
+
+    A body is a list of rows, or an object with ``key`` holding that list, or --
+    when ``single_allowed`` -- one row on its own. Anything else is a 400 from
+    here, and the alternative is not hypothetical: nine body shapes used to
+    return 500.
+
+    ``request.data.get(key, [])`` is an ``AttributeError`` on ``null``, a number,
+    a bool or a string. And ``key not in request.data`` on a string is a
+    SUBSTRING test, so the body ``"outcomes"`` routed as a batch and died on
+    ``request.data["outcomes"]`` two frames later while ``"hello"`` routed as a
+    single object and 400'd correctly -- two JSON strings, two code paths, one of
+    them a 500.
+    """
+    if isinstance(data, list):
+        return data, False
+    if isinstance(data, dict):
+        if key in data:
+            rows = data[key]
+            if not isinstance(rows, list):
+                # `{"workflows": {...}}` and `{"workflows": null}` already reach
+                # the serializer and 400 honestly; keep that, rather than
+                # inventing a second error message for the same mistake.
+                return rows, False
+            return rows, False
+        if single_allowed:
+            return [data], True
+        return [], False
+    raise ValidationError(
+        {
+            key: (
+                f"Send a list of rows, or an object with a {key!r} list"
+                + (", or one row on its own" if single_allowed else "")
+                + f". Got {type(data).__name__}."
+            )
+        }
+    )
+
+
+def _composition_payload(deployment) -> dict:
+    """The deployment's live composition, in the shape the decision route publishes.
+
+    The ingest routes below return this beside every read and every write, so an
+    operator who declares an approved set or records an outcome is told in the same
+    response what it did to the compositional assurance graph -- rather than
+    writing, getting a 200, and having to go and ask a second endpoint whether
+    anything changed. A write that reports only itself is how a set that fails to
+    close scope looks exactly like one that closes it.
+
+    The shape comes from :func:`assurance.workflow_chains.composition_payload`,
+    which :func:`assurance.decision.decision_support` also uses. That keeps the two
+    payloads the same SHAPE; it is the transaction below, not the shared builder,
+    that keeps them the same ANSWER. An earlier version of this docstring claimed
+    the builder alone meant "the two answers cannot drift", and that was false: the
+    builder cannot drift, the answers demonstrably did, and only in the reassuring
+    direction. Both halves are needed and both are here.
+
+    ``signal`` is what the chains currently carry: these routes make no decision,
+    so they have no failsafe to null it under. Whether the deployment is paused,
+    and therefore whether that signal reached the decision at all, is the decision
+    route's answer to give.
+    """
+    # ONE TRANSACTION, because `composition_for` takes TWO reads -- the outcomes,
+    # then the approved set -- and an unfenced pair can describe a state the
+    # database was never in. Measured on the unfenced version, against a writer
+    # looping a cycle in which EVERY committed state was `not_recommended` or
+    # `needs_more_evidence` and none was ever ready: 18 of 187 reads (9.6%)
+    # published `signal: "ready"`, explanation and all. The fabricated answer is
+    # the reassuring one, which is how this defect always presents.
+    #
+    # `decision.decision_support` has had this fence from the start, for the same
+    # reason, and reading through it 372 times against the same writer fabricated
+    # nothing. One line is the difference.
+    with transaction.atomic():
+        composition = composition_for(deployment)
+    return composition_payload(
+        composition, signal=composition_decision_signal(composition)
+    )
 
 
 # Form-encoded bodies send booleans as strings, and ``bool("false")`` is ``True``.
@@ -1102,6 +1192,182 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         secret = binding.get_secret()
         headers = {"Authorization": f"Bearer {secret}"} if secret else {}
         return RequestsFetcher(base_url=base_url, headers=headers)
+
+    #: How many approved workflows one declaration may carry, and how many the
+    #: read returns. Deliberately the SAME number: a set you are allowed to
+    #: declare is a set you must be able to read back whole, so `truncated` on
+    #: that route can only ever be about rows predating this cap.
+    #:
+    #: There was no cap at all. `compose` is linear in the approved set and the
+    #: route left its size to the caller: a 10 MiB body
+    #: (`DATA_UPLOAD_MAX_MEMORY_SIZE`) holds ~300,000 minimal rows, and every
+    #: later assurance read on that deployment -- including an unprivileged GET
+    #: and the decision route -- pays for them. At 1,000 a composition costs
+    #: about a millisecond.
+    APPROVED_WORKFLOW_LIMIT = 1000
+
+    #: How many chain outcomes one POST may append. Outcomes append forever, so
+    #: the bound is on the request rather than on the total; a campaign with more
+    #: than this many results posts twice and loses nothing.
+    CHAIN_OUTCOME_BATCH_LIMIT = 1000
+
+    #: How many chain outcomes `chain_outcomes` returns at most, newest first.
+    #: Outcomes are append-only, so this list grows without bound over a
+    #: deployment's life; a route that returned all of them would be the
+    #: unbounded-list defect the project's own pagination default exists to
+    #: prevent. The counts beside it stay whole.
+    CHAIN_OUTCOME_PAGE_SIZE = 100
+
+    @action(detail=True, methods=["get", "put"], url_path="approved-workflows")
+    def approved_workflows(self, request, uuid=None):
+        """The deployment's APPROVED BUSINESS WORKFLOWS — the set the compositional
+        assurance graph is scoped to (:mod:`assurance.composition`).
+
+        GET returns the set beside the live composition, so a reader sees what the
+        declaration *does* in the same response rather than having to go and ask.
+        PUT REPLACES the whole set (admin-only — it mutates the shared record).
+
+        Replace, not merge, and for the same reason the declared-architecture route
+        replaces: a set you can only add to is a set nobody can correct, and an
+        approved workflow that was withdrawn has to be able to leave.
+
+        REPLACING THE SET DOES NOT TOUCH RECORDED OUTCOMES. `WorkflowChainOutcome`
+        names its workflow by slug rather than by foreign key, so withdrawing an
+        approval cannot cascade-delete the measurements taken under it. The
+        outcomes for a withdrawn workflow become `workflows_unapproved` -- visible,
+        counted and named -- which is the honest result: exercising a workflow the
+        customer has since un-approved is a fact worth keeping, not one to erase by
+        editing the roster.
+        """
+        deployment = self.get_object()
+        if request.method == "PUT":
+            _require_admin(request)
+            payload, _ = _rows_from_body(
+                request.data, key="workflows", single_allowed=False
+            )
+            if isinstance(payload, list) and len(payload) > self.APPROVED_WORKFLOW_LIMIT:
+                raise ValidationError(
+                    {
+                        "workflows": (
+                            f"{len(payload)} workflows is more than the "
+                            f"{self.APPROVED_WORKFLOW_LIMIT} this route accepts. The "
+                            "approved set is read on every assurance answer for this "
+                            "deployment, so its size is a cost every later request "
+                            "pays, including an unprivileged read."
+                        )
+                    }
+                )
+            serializer = ApprovedWorkflowSerializer(data=payload, many=True)
+            serializer.is_valid(raise_exception=True)
+            rows = serializer.validated_data
+            slugs = [row["slug"] for row in rows]
+            if len(set(slugs)) != len(slugs):
+                raise ValidationError(
+                    {
+                        "workflows": (
+                            "Two entries name the same workflow slug. The slug is the "
+                            "identity outcomes are matched on, so a duplicate would "
+                            "silently drop one of the two declarations."
+                        )
+                    }
+                )
+            with transaction.atomic():
+                deployment.approved_workflows.all().delete()
+                ApprovedWorkflow.objects.bulk_create(
+                    ApprovedWorkflow(
+                        deployment=deployment, approved_by=request.user, **row
+                    )
+                    for row in rows
+                )
+        # `select_related` because `approved_by` is read per row: without it a
+        # thousand-row set issues a thousand extra user queries.
+        recorded = deployment.approved_workflows.select_related("approved_by")
+        total = recorded.count()
+        page = list(recorded[: self.APPROVED_WORKFLOW_LIMIT])
+        return Response(
+            {
+                "approved": ApprovedWorkflowSerializer(page, many=True).data,
+                # Bounded, and saying so, exactly as the outcome route is. This
+                # returned every row while its sibling's comment called an
+                # unbounded list "the defect the project's own pagination default
+                # exists to prevent" -- a rule written down twenty lines from a
+                # route that broke it.
+                "returned": len(page),
+                "truncated": len(page) < total,
+                "page_size": self.APPROVED_WORKFLOW_LIMIT,
+                "approved_count": total,
+                "composition": _composition_payload(deployment),
+            }
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="chain-outcomes")
+    def chain_outcomes(self, request, uuid=None):
+        """What the deployment's per-workflow assurance chains established.
+
+        GET returns the most recent outcomes beside the live composition. POST
+        APPENDS one or more (admin-only — it writes the shared record).
+
+        APPEND, NOT REPLACE, and this is the load-bearing difference from the
+        approved set above. An outcome is an OBSERVATION at an instant.
+        :mod:`assurance.composition` picks the newest verdict per workflow and
+        counts what a re-run superseded; replacing on write would leave exactly one
+        outcome per workflow, so supersession would become unreachable and the rule
+        would keep its logic while losing its input. It would also let a later
+        inconclusive run erase a recorded violation, which the rule refuses by
+        design.
+
+        The workflow slug is NOT checked against the approved set. An outcome for a
+        workflow nobody approved is precisely what `workflows_unapproved` counts,
+        and refusing it here would make that counter unreachable and this route the
+        place the platform stopped noticing shadow workflows.
+        """
+        deployment = self.get_object()
+        if request.method == "POST":
+            _require_admin(request)
+            # One outcome or many. A campaign posts a batch; an operator recording
+            # a single run posts an object, and gets its FIELDS back on a 400
+            # rather than a list index it never sent -- `many=True` keys its errors
+            # by position, which for a single object names something the caller
+            # cannot see in its own request.
+            payload, single = _rows_from_body(
+                request.data, key="outcomes", single_allowed=True
+            )
+            if isinstance(payload, list) and len(payload) > self.CHAIN_OUTCOME_BATCH_LIMIT:
+                raise ValidationError(
+                    {
+                        "outcomes": (
+                            f"{len(payload)} outcomes is more than the "
+                            f"{self.CHAIN_OUTCOME_BATCH_LIMIT} one request accepts. Post "
+                            "again with the rest; outcomes append, so nothing is lost "
+                            "by splitting a batch."
+                        )
+                    }
+                )
+            serializer = WorkflowChainOutcomeSerializer(data=payload, many=True)
+            if not serializer.is_valid():
+                raise ValidationError(
+                    serializer.errors[0] if single else serializer.errors
+                )
+            with transaction.atomic():
+                WorkflowChainOutcome.objects.bulk_create(
+                    WorkflowChainOutcome(deployment=deployment, **row)
+                    for row in serializer.validated_data
+                )
+        recorded = deployment.chain_outcomes.all()
+        total = recorded.count()
+        page = list(recorded[: self.CHAIN_OUTCOME_PAGE_SIZE])
+        return Response(
+            {
+                "outcomes": WorkflowChainOutcomeSerializer(page, many=True).data,
+                # Returned vs recorded, stated separately and always: `len(outcomes)`
+                # is not the count and must not be usable as one.
+                "returned": len(page),
+                "truncated": len(page) < total,
+                "page_size": self.CHAIN_OUTCOME_PAGE_SIZE,
+                "recorded_count": total,
+                "composition": _composition_payload(deployment),
+            }
+        )
 
     @action(detail=True, methods=["get"], url_path="ai-bom")
     def ai_bom(self, request, uuid=None):
