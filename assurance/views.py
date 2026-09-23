@@ -65,6 +65,7 @@ from .models import (
 )
 from .chain_registry import ChainBirthRefused, register_birth, registry_posture
 from .receipt import build_assurance_receipt, deployment_receipt
+from .vendor_packet import build_vendor_packet, packet_candidates
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
 from .vendor import assess_vendors
@@ -436,6 +437,50 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             .get(pk=self.get_object().pk)
         )
         return Response(build_assurance_receipt(deployment))
+
+    @action(detail=True, methods=["get"], url_path="vendor-packet-candidates")
+    def vendor_packet_candidates(self, request, uuid=None):
+        """Which of this deployment's findings a **vendor-coordination packet** can
+        be built for (Phase 2 item 10).
+
+        The packet route lives on the finding, and it REFUSES a finding that
+        implicates no third party. Without this list a caller has to discover that
+        by trying, one finding at a time, and a 409 is a poor way to learn which
+        door to knock on. So the eligible set is its own read.
+
+        Membership is exactly :func:`assurance.vendor_packet.packet_candidates`:
+        read off the asset -> provider edge, never inferred from a title or a
+        finding type. One function, called by both routes, so the list and the
+        refusal can never disagree about who is eligible.
+
+        ``total`` is the deployment's whole finding count beside the eligible one,
+        because "three of forty implicate a vendor" and "three of three" are
+        different situations and a bare list of three cannot tell them apart."""
+        deployment = self.get_object()
+        candidates = packet_candidates(deployment)
+        return Response(
+            {
+                "eligible": [
+                    {
+                        "uuid": str(finding.uuid),
+                        "title": finding.title,
+                        "severity": finding.severity,
+                        "provider": finding.asset.provider.name,
+                        "provider_kind": finding.asset.provider.kind,
+                        "component_kind": finding.asset.kind,
+                    }
+                    for finding in candidates
+                ],
+                "eligible_count": len(candidates),
+                "total": deployment.findings.count(),
+                "basis": (
+                    "A finding is eligible when its asset names a provider. Read off "
+                    "that edge, never inferred from the finding's title or type: a "
+                    "packet sent to a vendor who is not involved is worse than no "
+                    "packet."
+                ),
+            }
+        )
 
     @action(detail=True, methods=["post", "get"], url_path="chain-birth")
     def chain_birth(self, request, uuid=None):
@@ -1577,6 +1622,57 @@ class FindingViewSet(
             .get(pk=self.get_object().pk)
         )
         return Response(assemble_incident_pack(finding))
+
+    @action(detail=True, methods=["get"], url_path="vendor-packet")
+    def vendor_packet(self, request, uuid=None):
+        """The finding's **vendor-coordination packet** (Phase 2 item 10): the
+        narrow, mechanical artifact you hand the third party this finding
+        implicates, built for a reader with no deployment context (see
+        :func:`assurance.vendor_packet.build_vendor_packet`).
+
+        It was a complete, tested module that no view, URL, admin action or export
+        referenced, so the product could not hand it to anyone. A capability with
+        no route is a decorative one.
+
+        A read, like the receipt and the incident pack: computed, never stored,
+        open to any operator who can see the finding.
+
+        **Refused when the finding implicates no third party.** The module's own
+        rule is that a packet sent to a vendor who is not involved is worse than no
+        packet, and a packet naming NO vendor is the degenerate case of that: an
+        artifact whose whole purpose is coordination with a specific party,
+        addressed to nobody. ``implicated_component`` would be null and every
+        section would still render, which reads as a finished packet.
+        :func:`assurance.vendor_packet.packet_candidates`, exposed on the
+        deployment, is how a caller finds the findings this can be asked for
+        rather than guessing.
+
+        The packet asks; it does not conclude. No PASS/FAIL on the vendor's code,
+        no severity judgment of their product, and the customer's identifying
+        material is redacted before it leaves — all of which the module enforces
+        and its own tests pin. This route adds a door, not a claim."""
+        finding = (
+            Finding.objects.select_related(
+                "deployment", "deployment__owner", "asset__provider", "scan"
+            )
+            .prefetch_related("evidence")
+            .get(pk=self.get_object().pk)
+        )
+        if finding.asset is None or finding.asset.provider is None:
+            return Response(
+                {
+                    "detail": (
+                        "This finding implicates no third-party component, so there "
+                        "is nobody to coordinate with. Membership is read off the "
+                        "asset -> provider edge and is never inferred from a title "
+                        "or a finding type. See the deployment's "
+                        "vendor-packet-candidates route for the findings a packet "
+                        "can be built for."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(build_vendor_packet(finding))
 
     @action(detail=True, methods=["post"], url_path="remediation/transition")
     def remediation_transition(self, request, uuid=None):
