@@ -101,16 +101,17 @@ from __future__ import annotations
 
 from .capability import RISK_BASELINE, RISK_ELEVATED, RISK_HIGH, _RISK_ORDER, _RISK_RAISED
 from .models import (
-    Asset,
     EvidenceClass,
     ProviderAssertion,
     evidence_strength,
 )
+from .governance import GOVERNED
 
 # The classifications that make a component *managed* — a governed dependency.
 # Anything else (unmanaged / unknown / high_risk / retired) is ungoverned, the
 # same set :mod:`assurance.capability` treats as managed.
-_MANAGED = {Asset.Classification.APPROVED, Asset.Classification.KNOWN}
+# The single definition, not a fourth private copy of it.
+_MANAGED = GOVERNED
 
 # The evidence-strength ordinals we key the honesty distinctions on. An assertion
 # is "independently evidenced" only when its evidence is *stronger* than a bare

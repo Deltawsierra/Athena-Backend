@@ -45,6 +45,7 @@ from .models import (
     evidence_strength,
     severity_rank,
 )
+from .governance import GOVERNED, is_shadow
 
 # Findings in these states are resolved — no longer active. Mirrors
 # ``assurance.decision`` and the sibling assessments so every view agrees on what
@@ -58,7 +59,14 @@ _RESOLVED_STATUSES = RESOLVED_FINDING_STATUSES
 
 # A component is *classified* (covered by discovery) unless it is unknown or an
 # unmanaged shadow — the two coverage gaps. Managed is the narrower governed set.
-_MANAGED = {Asset.Classification.APPROVED, Asset.Classification.KNOWN}
+# The single definition, not a fourth private copy of it.
+_MANAGED = GOVERNED
+# A DIFFERENT axis from governance, deliberately. This asks "has anybody
+# classified this at all", which is why `high_risk` and `retired` count as
+# classified here while `is_shadow` calls them ungoverned: somebody looked at
+# them and said something, and what they said was bad. Coverage and governance
+# are two questions; collapsing them is how three predicates became three
+# answers. See assurance.governance.
 _COVERAGE_GAP_CLASSIFICATIONS = {Asset.Classification.UNKNOWN, Asset.Classification.UNMANAGED}
 
 # Evidence classes that mean "genuinely not known", counted as unverified — the
@@ -102,7 +110,7 @@ def _asset_coverage(deployment) -> dict:
             managed += 1
         if asset.classification == Asset.Classification.UNKNOWN:
             unknown += 1
-        if asset.classification == Asset.Classification.UNMANAGED:
+        if is_shadow(asset.classification):
             shadow += 1
         if asset.classification == Asset.Classification.HIGH_RISK:
             high_risk += 1

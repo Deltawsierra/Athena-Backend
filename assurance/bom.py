@@ -32,8 +32,9 @@ from __future__ import annotations
 
 from django.utils import timezone
 
-from .models import Asset, evidence_strength
+from .models import evidence_strength
 from .receipt import ALGORITHM, _digest
+from .governance import is_shadow
 
 BOM_FORMAT = "athena-ai-bom"
 BOM_VERSION = "1.0"
@@ -66,7 +67,10 @@ def _component(asset) -> dict:
         "classification": asset.classification,
         "classification_label": asset.get_classification_display(),
         # Shadow supply chain: a component nobody approved.
-        "shadow": asset.classification == Asset.Classification.UNMANAGED,
+        # See assurance.governance: `== UNMANAGED` counted a high-risk or
+        # retired component as a governed part of the supply chain, and read
+        # any value it did not recognise as governed too.
+        "shadow": is_shadow(asset.classification),
         "provider_uuid": str(provider.uuid) if provider else None,
         "provider_name": provider.name if provider else None,
         "facts": _component_facts(asset.metadata),

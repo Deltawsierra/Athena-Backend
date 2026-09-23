@@ -1551,7 +1551,13 @@ class LatentCondition(models.Model):
         ASSET_APPEARS = "asset_appears", "An asset with a given name appears"
         ASSET_BECOMES_UNMANAGED = (
             "asset_becomes_unmanaged",
-            "A named asset becomes unmanaged or unknown",
+            # Widened with the predicate behind it, not after it. This used to
+            # read "unmanaged or unknown" and fire on exactly those two, so a
+            # component a person flagged high-risk, or marked retired but still
+            # reachable, left governance without tripping the condition an
+            # operator had declared to hear about precisely that.
+            "A named asset stops being governed (unmanaged, unknown, high risk "
+            "or retired)",
         )
         BOUNDARY_ALLOWS = (
             "boundary_allows",
