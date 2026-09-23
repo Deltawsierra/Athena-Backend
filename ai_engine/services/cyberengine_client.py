@@ -25,6 +25,20 @@ SCAN_POLL_SECONDS = float(getattr(django_settings, "CYBERENGINE_POLL_INTERVAL", 
 SCAN_INLINE_WAIT_SECONDS = 20.0
 
 
+# How much of a bad response body goes into an exception message. The engine's
+# body is not bounded by anything this process controls -- a proxy in front of
+# it answers with its own error page, which can be large -- and an exception
+# message becomes a log line, a traceback, and an API error field.
+MAX_BODY_EXCERPT = 500
+
+
+def _excerpt(text: str) -> str:
+    """The head of a response body, with the full size named rather than lost."""
+    if len(text) <= MAX_BODY_EXCERPT:
+        return text
+    return f"{text[:MAX_BODY_EXCERPT]}... ({len(text)} characters total)"
+
+
 class EngineError(Exception):
     pass
 
@@ -69,18 +83,52 @@ class CyberEngineClient:
             api_key=settings.CYBERENGINE_OPERATOR_KEY,
         )
 
+    def _read_json(self, resp: requests.Response, path: str) -> dict:
+        """
+        The body of a successful engine response, as the object it must be.
+
+        This exists because resp.json() used to be called outside the try
+        blocks below. EngineError is this client's whole contract with the
+        nine places that handle an engine which cannot answer -- the two
+        views modules, preflight, and the approve_deployment command -- and
+        a 2xx response whose body is not JSON raised JSONDecodeError straight
+        past all of them. An engine fronted by a proxy that answers 200 with
+        an HTML holding page, or a write truncated mid-object, read as a bug
+        in this process rather than as a bad answer from the engine.
+
+        A body that decodes to something other than an object is the same
+        failure one step later: every caller and this file's own annotations
+        say dict, so a JSON null or list travels as far as the first .get()
+        and surfaces as an AttributeError with no mention of the engine.
+        """
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise EngineError(
+                f"Engine returned a body that is not JSON from {path} "
+                f"(status {resp.status_code}): {_excerpt(resp.text)}"
+            ) from exc
+
+        if not isinstance(body, dict):
+            raise EngineError(
+                f"Engine returned {type(body).__name__}, not an object, from "
+                f"{path} (status {resp.status_code}): {_excerpt(resp.text)}"
+            )
+
+        return body
+
     def _get(self, path: str) -> dict:
         try:
             resp = requests.get(
                 f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT
             )
         except requests.RequestException as e:
-            raise EngineError(f"Engine unreachable: {e}")
+            raise EngineError(f"Engine unreachable: {e}") from e
 
         if not (200 <= resp.status_code < 300):
-            raise EngineError(f"Engine error {resp.status_code}: {resp.text}")
+            raise EngineError(f"Engine error {resp.status_code}: {_excerpt(resp.text)}")
 
-        return resp.json()
+        return self._read_json(resp, path)
 
     def _post(self, path: str, payload: dict) -> dict:
         try:
@@ -94,14 +142,14 @@ class CyberEngineClient:
                 timeout=ENGINE_TIMEOUT,
             )
         except requests.RequestException as e:
-            raise EngineError(f"Engine unreachable: {e}")
+            raise EngineError(f"Engine unreachable: {e}") from e
 
         if not (200 <= resp.status_code < 300):
             raise EngineError(
-                f"Engine error {resp.status_code}: {resp.text}"
+                f"Engine error {resp.status_code}: {_excerpt(resp.text)}"
             )
 
-        return resp.json()
+        return self._read_json(resp, path)
 
     # --------------------------------------------------
     # ENGINE ENDPOINTS
@@ -202,14 +250,14 @@ class CyberEngineClient:
                 timeout=30,
             )
         except requests.RequestException as e:
-            raise EngineError(f"Engine unreachable: {e}")
+            raise EngineError(f"Engine unreachable: {e}") from e
 
         if not (200 <= resp.status_code < 300):
             raise EngineError(
-                f"Engine error {resp.status_code}: {resp.text}"
+                f"Engine error {resp.status_code}: {_excerpt(resp.text)}"
             )
 
-        return resp.json()
+        return self._read_json(resp, "/api/defend-log/file")
 
     # --------------------------------------------------
     # GOVERNANCE
