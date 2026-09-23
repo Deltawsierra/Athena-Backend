@@ -88,6 +88,14 @@ def _claim_work(claim: AssuranceClaim, requirement: RetestRequirement | None) ->
     }
 
 
+# A claim in one of these states is not established: UNKNOWN never had evidence,
+# PARTIALLY_VERIFIED was established over a graph part of which could not be read.
+# Neither is drift, so neither belongs in `required` -- re-running the same
+# assessment over the same inventory produces the same hole. Both are real work
+# to reach assurance, which is what `outstanding_unknowns` is for.
+_NOT_ESTABLISHED = frozenset({Status.UNKNOWN, Status.PARTIALLY_VERIFIED})
+
+
 def plan_revalidation(deployment) -> dict:
     """The minimal revalidation plan for a deployment (Stage 1D).
 
@@ -96,11 +104,24 @@ def plan_revalidation(deployment) -> dict:
     - **required** — the claim has an open retest obligation, is STALE, or is
       CONTRADICTED: name the exact Athena reassessment and Achilles capability areas
       to re-run. This is the change-driven minimal set.
-    - **outstanding_unknowns** — the claim is UNKNOWN: a pre-existing gap (never had
-      evidence), surfaced as work to reach assurance but distinct from what *this*
-      change invalidated.
-    - **still_current** — the claim is supported/verified with no open obligation:
-      explicitly NOT re-run.
+    - **outstanding_unknowns** — the claim is UNKNOWN or PARTIALLY_VERIFIED: a
+      pre-existing gap in what could be established, surfaced as work to reach
+      assurance but distinct from what *this* change invalidated. Each entry
+      carries its ``status``, so the two cases stay distinguishable: UNKNOWN
+      never had evidence, PARTIALLY_VERIFIED was established over a graph part
+      of which could not be read.
+    - **still_current** — the claim is SUPPORTED or VERIFIED with no open
+      obligation: explicitly NOT re-run.
+
+    PARTIALLY_VERIFIED belongs in the second bucket, not the third. It used to
+    fall through to ``still_current`` — whose contract, two lines up, is
+    "supported/verified with no open obligation" — and the plan's note then said
+    "every current claim is supported or verified ... Nothing needs to be
+    re-run." Both statements were false about it, and the unplaceable reference
+    it records is the one item in the whole plan a person could actually go and
+    chase. A plan that tells an operator there is nothing to do, about the claim
+    that exists to say part of the graph could not be read, is worse than no
+    plan.
 
     Pure and deterministic: rules are read once, matched to their open obligations by
     stable claim identity (fingerprint), and the required list is sorted by claim
@@ -133,7 +154,7 @@ def plan_revalidation(deployment) -> dict:
             drifted = requirement is not None or claim.status in (Status.CONTRADICTED, Status.STALE)
             if drifted:
                 required.append(_claim_work(claim, requirement))
-            elif claim.status == Status.UNKNOWN:
+            elif claim.status in _NOT_ESTABLISHED:
                 outstanding_unknowns.append(
                     {
                         "claim_uuid": str(claim.uuid),
@@ -159,6 +180,17 @@ def plan_revalidation(deployment) -> dict:
                 f"contradiction; {len(still_current)} remain current and need not be re-run. Re-run "
                 "only the named Athena reassessment(s) and Achilles capability area(s), then recompute "
                 "claims to rebind the deployment to its current state."
+            )
+        elif outstanding_unknowns:
+            # Not "nothing to do". Nothing DRIFTED, which is a different
+            # statement, and saying the first when only the second is true turns
+            # a known gap into a clean bill of health.
+            note = (
+                f"No claim needs revalidation: nothing drifted, expired or was contradicted. "
+                f"But {len(outstanding_unknowns)} current claim(s) are not fully established — "
+                "re-running an assessment will not close them, because the gap is in what could "
+                "be read, not in when it was read. See each claim's supporting summary for what "
+                "it could not establish."
             )
         else:
             note = (

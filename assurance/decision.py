@@ -397,7 +397,22 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
             reason = "an open retest obligation" if signal["retest_pending"] and not (signal["stale"] or signal["unknown"]) else f"a stale or unproven claim ({held})"
             note = f"Held at 'needs more evidence' by {reason}; supporting evidence is not current."
     elif decision == Deployment.Decision.READY and signal["supporting"]:
-        note = f"Ready, and supported by {len(signal['supporting'])} current assurance claim(s) with no open retest."
+        # The partially-verified ones are counted SEPARATELY. They impose no cap
+        # -- an unreadable reference is a limit on the measurement, not a defect
+        # to remediate -- but folding them silently into one "supported by N"
+        # tells the operator that N claims stand behind this, when one of them
+        # was established over a graph it could not read whole. The decision is
+        # right; the sentence about it has to be right too.
+        partial = [c for c in signal["supporting"] if c.status == AssuranceClaim.ClaimStatus.PARTIALLY_VERIFIED]
+        if partial:
+            note = (
+                f"Ready, and supported by {len(signal['supporting'])} current assurance claim(s) "
+                f"with no open retest — {len(partial)} of them only partially verified "
+                f"({', '.join(sorted(c.claim_type for c in partial))}), measured over a graph "
+                "part of which could not be read."
+            )
+        else:
+            note = f"Ready, and supported by {len(signal['supporting'])} current assurance claim(s) with no open retest."
     elif decision is None:
         note = "Not yet assessed: no findings and no assurance claims."
     else:
