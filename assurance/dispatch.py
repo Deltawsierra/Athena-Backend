@@ -104,10 +104,42 @@ def policy_epoch(deployment) -> str:
     Today the deployment's standing decision is the whole of it: a dispatch
     authorized while a deployment was NOT_RECOMMENDED was authorized under a
     different posture than one authorized while it was READY, and a retry that
-    crosses that boundary is executing an old decision. Recorded rather than
-    enforced here -- naming it is the prerequisite for enforcing it.
+    crosses that boundary is executing an old decision.
+
+    It is now enforced as well as recorded -- see :func:`_epoch_moved`. An unset
+    decision reads as ``"unassessed"`` rather than blank, so a live deployment
+    never produces the empty epoch that means "nobody wrote one down".
     """
     return str(getattr(deployment, "decision", "") or "unassessed")
+
+
+def _epoch_moved(existing, finding) -> tuple[str, str] | None:
+    """The (authorized, now) pair when a retry would cross an authority boundary.
+
+    ``None`` means it would not, and there are three ways for that to be true:
+
+    * there is no earlier attempt -- a first dispatch records the epoch in force,
+      it does not judge it;
+    * the earlier attempt has no epoch recorded. Rows predate the field, and blank
+      is not an epoch that moved, it is one nobody wrote down. Refusing on it would
+      block every retry of every historical attempt, which is a bigger outage than
+      the defect;
+    * the epoch is the same, which is the ordinary retry the FAILED outcome exists
+      to license.
+
+    Only the *automatic* triggers are held. A MANUAL dispatch is a person deciding
+    to push under the authority in force now, which is exactly what
+    re-authorization is -- and without that escape hatch the refusal would be
+    permanent, because the recorded epoch and the current one would disagree
+    forever. A permanent block nobody can clear is a worse failure than the one
+    this closes.
+    """
+    if existing is None or not existing.policy_epoch:
+        return None
+    now = policy_epoch(finding.deployment)
+    if existing.policy_epoch == now:
+        return None
+    return existing.policy_epoch, now
 
 
 def reconcile_attempt(attempt, *, readback=None) -> DispatchAttempt:
@@ -149,7 +181,7 @@ def reconcile_attempt(attempt, *, readback=None) -> DispatchAttempt:
     return attempt
 
 
-def _record(finding, binding, *, trigger, outcome, detail, external_ref=None):
+def _record(finding, binding, *, trigger, outcome, detail, external_ref=None, reauthorize=False):
     """Create or update the single ``(finding, connector)`` attempt record. The
     detail is human-readable and never a secret; ``attempts`` counts retries of a
     not-yet-sent record."""
@@ -181,9 +213,18 @@ def _record(finding, binding, *, trigger, outcome, detail, external_ref=None):
         # it, so an old attempt can still be reconciled.
         if not obj.operation_id:
             obj.operation_id = operation_id(finding, binding.connector)
-        # The epoch DOES move: a retry happens under whatever authority holds now,
-        # and recording the old one would misstate what this attempt was made under.
-        obj.policy_epoch = policy_epoch(finding.deployment)
+        # The epoch is the AUTHORIZING one and is not rewritten by the attempt it
+        # authorizes. This used to assign unconditionally, on the reasoning that a
+        # retry happens under whatever authority holds now -- true about the retry,
+        # and it destroyed the only record that anything had moved, in the same
+        # save that crossed the boundary. `_epoch_moved` compares against this
+        # field, so a field the retry overwrites cannot be evidence about the retry.
+        #
+        # Backfilled when blank, like `operation_id` above, so a row predating the
+        # field gets one; advanced only when the caller says this attempt IS the
+        # re-authorization.
+        if reauthorize or not obj.policy_epoch:
+            obj.policy_epoch = policy_epoch(finding.deployment)
         obj.save(
             update_fields=[
                 "deployment",
@@ -216,6 +257,36 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
         # asked for. The second case used to be retried on every qualifying
         # trigger, because "not accepted" and "safe to retry" were the same test.
         return existing
+
+    # The authority check, before anything is built or sent. An operation
+    # authorized under one epoch and retried under another is executing a decision
+    # that was withdrawn -- the rule `DispatchAttempt.policy_epoch` states on the
+    # field itself, and which nothing enforced: the field was written in two places
+    # and read in none.
+    #
+    # The reachable sequence is ordinary operation throughout. A push is authorized
+    # while the deployment is READY; the answer is lost, so the attempt is UNKNOWN
+    # and held. An operator moves the deployment to NOT_RECOMMENDED. Reconciliation
+    # finds the provider does not have it, so the attempt resolves to FAILED --
+    # neither terminal nor uncertain, so retryable again. The next trigger then
+    # created the ticket on the customer's system under an authority that had been
+    # withdrawn, and overwrote the epoch in the same save, so nothing recorded that
+    # it had moved.
+    moved = _epoch_moved(existing, finding)
+    if moved is not None and trigger != DispatchAttempt.Trigger.MANUAL:
+        authorized, now = moved
+        return _record(
+            finding,
+            binding,
+            trigger=trigger,
+            outcome=DispatchAttempt.Outcome.SKIPPED_EPOCH_MOVED,
+            detail=(
+                f"authorized under policy epoch {authorized!r}, which is now "
+                f"{now!r} — this retry would execute a decision made under an "
+                "authority that no longer holds. Dispatch it manually to "
+                "re-authorize it under the epoch in force."
+            ),
+        )
 
     if not binding.enabled:
         return _record(
@@ -267,6 +338,11 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
         trigger=trigger,
         outcome=outcome,
         detail=result.detail,
+        # A manual dispatch across a moved epoch is a person choosing to push under
+        # the authority in force now, which is what re-authorization is. Only then
+        # does the recorded epoch advance -- an automatic retry never reaches here
+        # with a moved epoch, and one under the SAME epoch has nothing to advance.
+        reauthorize=moved is not None,
         external_ref=result.external_ref,
     )
 

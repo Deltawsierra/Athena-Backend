@@ -2191,6 +2191,13 @@ class DispatchAttempt(models.Model):
         SKIPPED_INERT = "skipped_inert", "Skipped — connector not configured"
         SKIPPED_NO_KEY = "skipped_no_key", "Skipped — no encryption key"
         SKIPPED_DISABLED = "skipped_disabled", "Skipped — binding disabled"
+        # An automatic retry of an operation authorized under an epoch that has
+        # since moved. Not a failure and not a skip for configuration: the push
+        # was declined because the authority behind it no longer holds.
+        SKIPPED_EPOCH_MOVED = (
+            "skipped_epoch_moved",
+            "Skipped — authorized under an authority that has since changed",
+        )
 
     class Trigger(models.TextChoices):
         SEVERITY = "severity", "Finding severity threshold"
@@ -2241,6 +2248,17 @@ class DispatchAttempt(models.Model):
     # The policy epoch this was authorized under. A retry after the epoch moved is
     # being executed under an authority that no longer holds, and that is a
     # different decision from the one that was made.
+    #
+    # Immutable once written, for the same reason `operation_id` is: it is the
+    # evidence the enforcement compares against, and a field that the retry
+    # overwrites cannot be evidence about the retry. It used to be rewritten on
+    # every attempt, on the reasoning that "a retry happens under whatever
+    # authority holds now" -- true about the retry, and it destroyed the only
+    # record that anything had moved, in the same save that crossed the boundary.
+    #
+    # It advances in exactly one case: a MANUAL dispatch, which is a person
+    # deciding to push under the authority in force now. See
+    # `assurance.dispatch._epoch_moved`.
     policy_epoch = models.CharField(max_length=64, blank=True, default="")
     # When an uncertain outcome was resolved against the provider, and how. Null
     # while it is still unresolved -- which is the state that blocks the retry.
