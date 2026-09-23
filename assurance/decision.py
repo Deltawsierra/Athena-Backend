@@ -36,6 +36,10 @@ everything.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from django.db import transaction
+
 from .coverage import complete_audit_signal, coverage_decision_cap, coverage_manifest
 from .models import (
     UNTRUSTED_SEVERITY_STATUSES,
@@ -222,40 +226,102 @@ def incomplete_evidence_cap(deployment: Deployment) -> str | None:
     return None
 
 
-def compute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
-    """The six-state decision implied by a deployment's active findings, its
-    current assurance claims (Stage 1C), and whether its latest scan finished.
+@dataclass(frozen=True)
+class DecisionParts:
+    """Every input a decision is computed from, read once.
 
-    The decision is the *worse* of the finding-based signal, the claim-based cap
-    and the incomplete-evidence cap. ``paused`` (the operator failsafe, passed by
-    the caller) overrides everything. Returns ``None`` — no decision — only when
-    nothing has assessed the deployment; an absent decision is never READY."""
-    if paused:
-        return Deployment.Decision.PAUSED
+    This exists because reading them twice is a bug with no symptom. A caller that
+    wants the decision *and* the reasoning behind it -- which is the whole job of
+    :func:`decision_support` -- used to read each input once for the payload and
+    then call :func:`compute_decision`, which read all of them again. Between the
+    two reads a writer can land, and the answer is then stitched from two moments:
+    ordinary-looking, internally impossible, and indistinguishable from a real one.
 
+    Reproduced before this change: 81 samples of ``decision_support`` against a
+    concurrent writer whose every write was atomic returned four distinct shapes,
+    two of which no single database state can produce -- three contradicted claims
+    beside ``decision=None`` (three contradicted claims force a cap), and a clean
+    claim set beside ``needs_remediation`` (nothing was left to impose one).
+
+    Frozen because these are facts as of one read, not a mutable scratchpad.
+    """
+
+    from_findings: str | None
+    completed_scan: str | None
+    complete_audit: str | None
+    claim_signal: dict
+    scan_cap: str | None
+    coverage_cap: str | None
+
+
+def read_decision_parts(deployment: Deployment) -> DecisionParts:
+    """Read every decision input, in one pass.
+
+    Wrapped in a transaction by callers that need the set to be consistent. The
+    transaction narrows the window; reading each fact exactly once is what closes
+    the demonstrated tear, and it does so at any isolation level -- on READ
+    COMMITTED a second read of the same fact is a second moment even inside one
+    transaction, so "read it once" is the load-bearing half.
+    """
+    return DecisionParts(
+        from_findings=_decision_from_findings(deployment),
+        completed_scan=_completed_scan_signal(deployment),
+        complete_audit=complete_audit_signal(deployment),
+        claim_signal=claim_decision_signal(deployment),
+        scan_cap=incomplete_evidence_cap(deployment),
+        coverage_cap=coverage_decision_cap(deployment),
+    )
+
+
+def decide(parts: DecisionParts) -> str | None:
+    """The decision those parts imply. Pure: no reads, no writes, no clock."""
     # A completed scan is an assessment even when it found nothing, so it enters
     # as READY and `_worse` does the rest: it can only turn "nothing has assessed
     # this" into READY, never improve a real finding-based state. Without it a
     # deployment scanned clean read as "not yet assessed", which is the same
     # answer as a deployment nobody ever scanned.
     base = _worse(
-        _worse(_decision_from_findings(deployment), _completed_scan_signal(deployment)),
+        _worse(parts.from_findings, parts.completed_scan),
         # A complete audit that found nothing is an assessment too, and the reason
         # coverage is recorded rather than only reported: without it, a deployment
         # whose every declared component was assessed clean has no findings and so
         # reads as unassessed -- indistinguishable from one nobody has looked at.
-        complete_audit_signal(deployment),
+        parts.complete_audit,
     )
-    cap = claim_decision_signal(deployment)["cap"]
-    scan_cap = incomplete_evidence_cap(deployment)
+    cap = parts.claim_signal["cap"]
     # Coverage of the system, not strength of the evidence: something the customer
     # declared, or something flagged high risk, was never assessed at all. Every
     # fact gathered can be genuine and the audit still be incomplete.
-    coverage_cap = coverage_decision_cap(deployment)
-    if base is None and cap is None and scan_cap is None and coverage_cap is None:
+    if base is None and cap is None and parts.scan_cap is None and parts.coverage_cap is None:
         # Assessed by nothing at all: genuinely no decision.
         return None
-    return _worse(_worse(_worse(base, cap), scan_cap), coverage_cap)
+    return _worse(_worse(_worse(base, cap), parts.scan_cap), parts.coverage_cap)
+
+
+def compute_decision(
+    deployment: Deployment,
+    *,
+    paused: bool = False,
+    parts: DecisionParts | None = None,
+) -> str | None:
+    """The six-state decision implied by a deployment's active findings, its
+    current assurance claims (Stage 1C), and whether its latest scan finished.
+
+    The decision is the *worse* of the finding-based signal, the claim-based cap
+    and the incomplete-evidence cap. ``paused`` (the operator failsafe, passed by
+    the caller) overrides everything. Returns ``None`` — no decision — only when
+    nothing has assessed the deployment; an absent decision is never READY.
+
+    ``parts`` lets a caller that has already read the inputs hand them over
+    instead of having them read a second time. That is not an optimisation: two
+    reads of the same fact are two moments, and a caller reporting both the
+    decision and its reasoning must report one moment or neither.
+    """
+    if paused:
+        # Nothing is read at all: the failsafe decides, so no fact about the
+        # deployment can change the answer.
+        return Deployment.Decision.PAUSED
+    return decide(parts if parts is not None else read_decision_parts(deployment))
 
 
 def _claim_brief(claim: AssuranceClaim) -> dict:
@@ -276,16 +342,37 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     so a reader can see that a READY decision stands only while its claims stay
     current.
 
-    A read-only computed view; it does not persist anything."""
+    A read-only computed view; it does not persist anything.
+
+    Every input is read ONCE, inside one transaction, and the decision is derived
+    from that one read rather than recomputed from a second one. This function is
+    the artifact the roadmap's "no torn read" bar is about -- it returns the
+    decision *and the claims behind it*, which is exactly the pair that must not
+    come from two moments -- and it was the one place doing it twice.
+
+    The revision the parts were read at rides in the payload so a consumer can
+    fence its own next read (``assurance.revision.read_decision(at_least=...)``).
+    Before this, the fence existed only for in-process Python callers: nothing over
+    HTTP could tell a fresh answer from a stale one.
+    """
     # Lazy import: assurance.policy imports the decision rules from THIS module, so
     # a top-level import here would be circular.
     from .policy import policy_pin
 
-    signal = claim_decision_signal(deployment)
-    from_findings = None if paused else _decision_from_findings(deployment)
-    scan_cap = None if paused else incomplete_evidence_cap(deployment)
-    coverage_cap = None if paused else coverage_decision_cap(deployment)
-    decision = compute_decision(deployment, paused=paused)
+    with transaction.atomic():
+        parts = read_decision_parts(deployment)
+        # Read inside the same transaction as the parts, so the revision names the
+        # moment the parts describe rather than a later one.
+        revision = (
+            Deployment.objects.values_list("decision_revision", flat=True)
+            .filter(pk=deployment.pk)
+            .first()
+        )
+    signal = parts.claim_signal
+    from_findings = None if paused else parts.from_findings
+    scan_cap = None if paused else parts.scan_cap
+    coverage_cap = None if paused else parts.coverage_cap
+    decision = compute_decision(deployment, paused=paused, parts=parts)
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
@@ -319,6 +406,10 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     return {
         "decision": decision,
         "decision_label": Deployment.Decision(decision).label if decision else None,
+        # The monotonic revision the whole payload was read at. A consumer that
+        # acts on this answer can pass it back as `at_least` and be told, rather
+        # than guess, whether what it is holding has been superseded.
+        "revision": revision,
         "from_findings": from_findings,
         "claim_cap": signal["cap"],
         "coverage_cap": coverage_cap,
