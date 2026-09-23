@@ -13,7 +13,7 @@ Everything else here defends a specific way the rule could be got wrong.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import permutations
 
 import pytest
@@ -31,6 +31,27 @@ from assurance.composition import (
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _signature(result):
+    """Every value a caller can read, including the sentence.
+
+    Order-independence has to be asserted over the whole of what is reported.
+    Reading only `decision` and `census` left six fields and `explain()` free to
+    depend on the arrival order, and one of them did.
+    """
+    return (
+        result.decision,
+        tuple(sorted(result.census.items())),
+        result.deciding,
+        result.workflows_assessed,
+        result.workflows_expected,
+        result.workflows_unreported,
+        result.workflows_unapproved,
+        result.superseded,
+        result.all_held,
+        comp.explain(result),
+    )
 
 
 def _outcomes(*pairs, at=None):
@@ -95,11 +116,29 @@ def test_the_rule_is_order_independent() -> None:
         ChainOutcome("w", INCOMPLETE, observed_at=T0 + timedelta(days=1)),
         ChainOutcome("w", NOT_DEMONSTRATED, observed_at=T0 - timedelta(days=1)),
     ]
+    answers = {_signature(compose(list(order))) for order in permutations(history)}
+    assert len(answers) == 1, f"the answer depends on the arrival order: {answers}"
+
+
+def test_every_reported_field_is_order_independent_not_only_the_decision() -> None:
+    """The signature above is the WHOLE composition, and this is why.
+
+    It was `(decision, census)`, and with that signature `deciding` losing its
+    `sorted()` -- arrival-order dependence in a reported field, the exact defect
+    class this branch exists to fix -- passed the entire suite. A property test
+    that reads two of eight fields is a property test for two of eight fields.
+    """
+    history = [
+        ChainOutcome("zebra", VIOLATED, observed_at=T0),
+        ChainOutcome("alpha", VIOLATED, observed_at=T0),
+        ChainOutcome("alpha", INCOMPLETE, observed_at=T0 + timedelta(days=1)),
+        ChainOutcome("middle", HELD, observed_at=None),
+    ]
     answers = {
-        (compose(list(order)).decision, tuple(sorted(compose(list(order)).census.items())))
+        _signature(compose(list(order), expected_workflows=["alpha", "zebra", "unrun"]))
         for order in permutations(history)
     }
-    assert len(answers) == 1, f"the answer depends on the arrival order: {answers}"
+    assert len(answers) == 1, f"a reported field depends on the arrival order: {answers}"
 
 
 def test_two_recorded_violations_do_not_compose_into_ready() -> None:
@@ -454,8 +493,39 @@ def test_the_explanation_of_nothing_does_not_claim_a_decision() -> None:
 def test_the_explanation_says_how_much_was_never_exercised() -> None:
     """The number that turns "one chain holds" into something a reader can size."""
     result = compose(_outcomes(("a", HELD)), expected_workflows=["a", "b", "c"])
-    assert "never exercised" in comp.explain(result)
-    assert "1 of 3" in comp.explain(result) or "3 approved" in comp.explain(result)
+    sentence = comp.explain(result)
+
+    # Every number, read back. The version of this test that shipped first
+    # asserted `"never exercised" in text` -- a static literal in the f-string,
+    # which can never be absent -- and `"1 of 3" in text or "3 approved" in
+    # text`, where the second disjunct is present unconditionally. It could not
+    # fail on the quantity it is named after, and a mutation replacing
+    # `{workflows_unreported}` with `0` printed "0 of them never exercised
+    # (... 49 not_demonstrated ...)" with the whole suite green.
+    assert "3 workflow(s) against 3 approved" in sentence, sentence
+    assert "2 of them never exercised" in sentence, sentence
+
+
+def test_the_explanation_counts_a_large_gap_correctly() -> None:
+    """The self-contradicting sentence, as its own case.
+
+    Fifty approved workflows and one exercised is the scenario the module's own
+    docstring argues about, and it is where a wrong count is least likely to be
+    noticed by eye.
+    """
+    approved = [f"w{i}" for i in range(50)]
+    sentence = comp.explain(compose(_outcomes(("w1", HELD)), expected_workflows=approved))
+
+    assert "50 workflow(s) against 50 approved" in sentence, sentence
+    assert "49 of them never exercised" in sentence, sentence
+    assert "49 not_demonstrated" in sentence, sentence
+
+
+def test_the_explanation_counts_what_it_has_when_there_is_no_approved_list() -> None:
+    """The other branch of the scope sentence, which nothing read at all."""
+    sentence = comp.explain(compose(_outcomes(("a", HELD), ("b", VIOLATED))))
+
+    assert "2 workflow(s), with no approved list" in sentence, sentence
 
 
 # --- what the module will not let itself be asked -----------------------------
@@ -587,3 +657,183 @@ def test_the_explanation_keeps_the_zeros_the_census_keeps() -> None:
     assert "0 violated" in sentence
     assert "0 incomplete" in sentence
     assert "0 not_demonstrated" in sentence
+
+
+# --- only a verdict supersedes ------------------------------------------------
+
+
+@pytest.mark.parametrize("later", [INCOMPLETE, NOT_DEMONSTRATED], ids=["a gap", "thin evidence"])
+def test_a_later_non_observation_does_not_erase_a_recorded_violation(later) -> None:
+    """A scan that could not look is not news that the violation went away.
+
+    It used to supersede: a violation on Jan 1 and a Jan 5 run that could not
+    finish composed to `audit_incomplete` with `census["violated"] == 0`. An
+    operator reading `0 violated` for a workflow this platform recorded
+    violating would call that wrong, and the module's own definitions agree --
+    `violated` is "A fact, not a doubt", the other two are the absence of one.
+    It is also the same argument the module already makes about an undated
+    outcome, on the other axis: what is not known cannot displace what is.
+    """
+    result = compose(
+        [
+            ChainOutcome("billing-export", VIOLATED, observed_at=T0),
+            ChainOutcome("billing-export", later, observed_at=T0 + timedelta(days=4)),
+        ],
+        expected_workflows=["billing-export"],
+    )
+
+    assert result.decision == comp.NOT_RECOMMENDED
+    assert result.census[VIOLATED] == 1
+    assert result.superseded == 0, "nothing was displaced, so nothing should be counted as such"
+
+
+def test_a_later_verdict_does_clear_a_violation() -> None:
+    """The control, and the reason this is not just "the worst status wins".
+
+    A re-run that actually exercised the chain and found it holding supersedes,
+    exactly as before. Without this the rule above could be satisfied by a
+    module that had simply stopped superseding anything.
+    """
+    cleared = compose(
+        [
+            ChainOutcome("billing-export", VIOLATED, observed_at=T0),
+            ChainOutcome("billing-export", HELD, observed_at=T0 + timedelta(days=4)),
+        ]
+    )
+    assert cleared.decision == comp.READY
+    assert cleared.superseded == 1
+
+    # And a verdict supersedes everything older, gaps included.
+    through_a_gap = compose(
+        [
+            ChainOutcome("billing-export", VIOLATED, observed_at=T0),
+            ChainOutcome("billing-export", INCOMPLETE, observed_at=T0 + timedelta(days=4)),
+            ChainOutcome("billing-export", HELD, observed_at=T0 + timedelta(days=9)),
+        ]
+    )
+    assert through_a_gap.decision == comp.READY
+    assert through_a_gap.superseded == 2
+
+
+def test_a_later_violation_supersedes_an_earlier_pass() -> None:
+    """The rule is about verdicts, not about good news.
+
+    A `held` on Jan 1 and a `violated` on Jan 10 is one workflow that has since
+    been found violating, not two standing facts. Without this, narrowing
+    `VERDICTS` to `{held}` alone -- so that only good news could supersede --
+    reaches the same decision by a different route and reports `superseded: 0`
+    for a re-run that plainly displaced something.
+    """
+    result = compose(
+        [
+            ChainOutcome("billing-export", HELD, observed_at=T0),
+            ChainOutcome("billing-export", VIOLATED, observed_at=T0 + timedelta(days=9)),
+        ]
+    )
+
+    assert result.decision == comp.NOT_RECOMMENDED
+    assert result.census[HELD] == 0
+    assert result.superseded == 1
+
+
+def test_verdicts_are_the_two_statuses_that_say_whether_the_chain_holds() -> None:
+    """Membership, stated once, so the rule above cannot drift from its reason."""
+    assert comp.VERDICTS == {HELD, VIOLATED}
+    assert comp.VERDICTS < CHAIN_STATUSES
+
+
+def test_a_re_run_is_counted_for_every_workflow_that_had_one() -> None:
+    """`superseded` is a total across workflows, and it was only ever tested
+    with one. A `+=` written as `=` counted the last workflow alone and passed
+    the whole suite."""
+    result = compose(
+        [
+            ChainOutcome("a", VIOLATED, observed_at=T0),
+            ChainOutcome("a", HELD, observed_at=T0 + timedelta(days=1)),
+            ChainOutcome("b", VIOLATED, observed_at=T0),
+            ChainOutcome("b", HELD, observed_at=T0 + timedelta(days=1)),
+        ]
+    )
+
+    assert result.superseded == 2
+    assert result.workflows_assessed == 2
+
+
+# --- an instant, and an approved list, are checked like a name ----------------
+
+
+def test_a_timestamp_must_be_a_datetime() -> None:
+    """Anything with a `.tzinfo` attribute used to pass.
+
+    An aware `datetime.time` was accepted and then raised `TypeError: '>' not
+    supported between datetime.datetime and datetime.time` from inside
+    `_surviving`; a `str`, an `int` and a `date` were refused only by accident,
+    with an `AttributeError` naming no workflow at all.
+    """
+    for not_an_instant in (datetime(2026, 1, 1, tzinfo=UTC).time(), "2026-01-01", 0, 1.5):
+        with pytest.raises(TypeError) as refusal:
+            ChainOutcome("billing-export", HELD, observed_at=not_an_instant)  # type: ignore[arg-type]
+        assert "billing-export" in str(refusal.value)
+
+
+def test_a_tzinfo_that_offers_no_offset_is_still_naive() -> None:
+    """`tzinfo is None` is not what aware means.
+
+    A tzinfo whose `utcoffset()` returns `None` leaves `.tzinfo` set and the
+    datetime NAIVE in Python's own model. The guard that used to be here
+    accepted it, and the `TypeError: can't compare offset-naive and
+    offset-aware datetimes` still arrived from `_surviving` -- with a guard
+    sitting in front of it claiming otherwise, which is worse than no guard,
+    because the next reader believes it.
+    """
+
+    class NoOffset(tzinfo):
+        def utcoffset(self, moment):
+            return None
+
+        def tzname(self, moment):
+            return "no-offset"
+
+        def dst(self, moment):
+            return None
+
+    looks_aware = datetime(2026, 1, 1, tzinfo=NoOffset())
+    assert looks_aware.tzinfo is not None
+    assert looks_aware.utcoffset() is None
+
+    with pytest.raises(ValueError) as refusal:
+        ChainOutcome("billing-export", HELD, observed_at=looks_aware)
+
+    assert "billing-export" in str(refusal.value)
+    assert "naive" in str(refusal.value)
+
+
+def test_one_workflow_name_is_not_an_approved_list() -> None:
+    """`str` satisfies `Sequence[str]`, so no type checker objects.
+
+    Iterating it shredded one name into seven approved workflows: a wrong
+    denominator, a wrong census, `needs_more_evidence` where the truth was
+    `ready`, and a sentence naming workflows `c, e, h, k, o, t, u`. Same failure
+    mode as the exhausted generator, through a door the `tuple()` fix did not
+    close.
+    """
+    with pytest.raises(TypeError) as refusal:
+        compose(_outcomes(("checkout", HELD)), expected_workflows="checkout")
+
+    assert "one name" in str(refusal.value)
+
+
+def test_an_approved_workflow_is_named_by_a_string() -> None:
+    """The same `sorted()` TypeError `ChainOutcome` now refuses, one door over.
+
+    An unreported approved workflow becomes a real entry, so a non-string name
+    reaches `tuple(sorted(deciding))` and raises from a module whose subject is
+    assurance. Closing one door and leaving the other open is a guard that only
+    looks like one.
+    """
+    for bad in ([1, "a"], [None], [("tuple",)]):
+        with pytest.raises(TypeError):
+            compose([], expected_workflows=bad)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        compose([], expected_workflows=["a", ""])

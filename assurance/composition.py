@@ -111,6 +111,29 @@ CHAIN_STATUSES: frozenset[str] = frozenset({HELD, VIOLATED, NOT_DEMONSTRATED, IN
 #: passing one.
 DEMONSTRATED: frozenset[str] = frozenset({HELD})
 
+#: The statuses that SAY WHETHER THE CHAIN HOLDS. Only these supersede.
+#:
+#: `held` and `violated` are verdicts. `not_demonstrated` and `incomplete` are
+#: the absence of one -- thin evidence and a gap -- and an absence is not news
+#: that contradicts an earlier fact. Without this, a later non-observation
+#: erased a recorded violation:
+#:
+#:     violated Jan 1, then a Jan 5 scan that could not finish (incomplete)
+#:         -> audit_incomplete, census["violated"] == 0
+#:
+#: An operator reading `0 violated` for a workflow this platform recorded
+#: violating, whose only later news is that a scanner could not look at it,
+#: would call that wrong, and they would be right: it is the silent zero, and a
+#: scan that failed to run is the last thing that should clear a finding. It is
+#: also the same argument the module already makes about an undated outcome --
+#: what is not known cannot displace what is -- applied to the other axis.
+#:
+#: The cost is owned rather than hidden: a recorded violation now stands until
+#: something actually exercises that chain again and returns a verdict. Repeated
+#: inconclusive re-runs do not clear it. That is the conservative direction, and
+#: it is the one this module is for.
+VERDICTS: frozenset[str] = frozenset({HELD, VIOLATED})
+
 # Decision states, spelled as the strings `Deployment.Decision` uses. Duplicated
 # rather than imported so this module stays importable without Django -- and
 # `test_the_composition_rule_is_written_down.py` asserts the two agree, so the
@@ -202,12 +225,33 @@ class ChainOutcome:
             )
         if not self.workflow:
             raise ValueError("a chain outcome must name the workflow it is about")
-        if self.observed_at is not None and self.observed_at.tzinfo is None:
-            raise ValueError(
-                f"chain outcome for {self.workflow!r} carries a naive timestamp "
-                f"({self.observed_at!r}); an instant with no zone cannot be compared "
-                "with one that has a zone, so it cannot establish recency"
-            )
+        if self.observed_at is not None:
+            # `isinstance`, because ANYTHING with a `.tzinfo` attribute passed the
+            # check that used to be here -- an aware `datetime.time` among them,
+            # which then raised `TypeError: '>' not supported between
+            # datetime.datetime and datetime.time` from inside `_surviving`. A
+            # `str`, an `int` and a `date` were refused only by accident, with an
+            # `AttributeError` naming no workflow.
+            if not isinstance(self.observed_at, datetime):
+                raise TypeError(
+                    f"chain outcome for {self.workflow!r} carries "
+                    f"{type(self.observed_at).__name__} as an instant; recency is "
+                    "established between datetimes"
+                )
+            # `utcoffset()`, not `tzinfo is None`. A tzinfo whose `utcoffset()`
+            # returns None leaves `.tzinfo` set and the datetime NAIVE in
+            # Python's own model, so the previous check accepted it and the
+            # `TypeError: can't compare offset-naive and offset-aware datetimes`
+            # still arrived from `_surviving`, three frames from anything that
+            # names a workflow -- with a guard sitting in front of it claiming
+            # otherwise. A guard that is wrong is worse than no guard, because
+            # the next reader believes it.
+            if self.observed_at.utcoffset() is None:
+                raise ValueError(
+                    f"chain outcome for {self.workflow!r} carries a naive timestamp "
+                    f"({self.observed_at!r}); an instant with no offset cannot be "
+                    "compared with one that has a zone, so it cannot establish recency"
+                )
 
     @property
     def demonstrated(self) -> bool:
@@ -280,10 +324,15 @@ def _worse_status(a: str, b: str) -> str:
 def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
     """The status that stands for each workflow, and how many a re-run displaced.
 
-    An outcome is SUPERSEDED when another outcome for the same workflow is
-    strictly later and BOTH carry a time. That is the whole rule, and it is a
-    property of the workflow's history rather than of any order it arrives in.
-    Everything not superseded survives, and the WORST surviving status stands.
+    An outcome is SUPERSEDED when a later VERDICT exists for the same workflow:
+    another outcome that says whether the chain holds (`held` or `violated`),
+    strictly later, with both carrying a time. Everything not superseded
+    survives, and the WORST surviving status stands. It is a property of the
+    workflow's history rather than of any order it arrives in.
+
+    Only a verdict supersedes, because only a verdict is news. See `VERDICTS`:
+    a re-run that could not finish is not evidence that an earlier violation
+    has gone away.
 
     THIS WAS A FOLD, AND THE FOLD WAS ORDER-DEPENDENT. It compared each outcome
     to a single running incumbent and carried the winner's own timestamp
@@ -318,7 +367,11 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
     standing: dict[str, str] = {}
     superseded = 0
     for workflow, attempts in history.items():
-        dated = [attempt.observed_at for attempt in attempts if attempt.observed_at is not None]
+        dated = [
+            attempt.observed_at
+            for attempt in attempts
+            if attempt.observed_at is not None and attempt.status in VERDICTS
+        ]
         newest = max(dated) if dated else None
         survivors = [
             attempt
@@ -331,6 +384,43 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
             status = _worse_status(status, attempt.status)
         standing[workflow] = status
     return standing, superseded
+
+
+def _checked_approved(expected_workflows: Sequence[str]) -> tuple[str, ...]:
+    """The approved workflow list, materialised once and checked like a name.
+
+    Materialised because it is read twice, and a generator was empty the second
+    time: `workflows_expected` came back 0 while three workflows had been
+    counted against it.
+
+    Checked because `str` satisfies `Sequence[str]`, so no type checker objects
+    to `compose(outcomes, expected_workflows="checkout")` -- and iterating it
+    shredded one workflow name into seven approved workflows, with a wrong
+    denominator, a wrong census, a decision of `needs_more_evidence` where the
+    truth was `ready`, and a sentence naming workflows `c, e, h, k, o, t, u`.
+    A confident wrong number is worse than a refusal.
+
+    And checked per entry, because a non-string name here reaches
+    `tuple(sorted(deciding))` and raises the same `TypeError: '<' not supported
+    between instances of 'str' and 'int'` that `ChainOutcome` now refuses at
+    construction. Closing one door on that and leaving the other open would be
+    a guard that only looks like one.
+    """
+    if isinstance(expected_workflows, str):
+        raise TypeError(
+            "expected_workflows is the set of approved workflows, not one name: "
+            f"{expected_workflows!r} would be read one character at a time"
+        )
+    approved = tuple(expected_workflows)
+    for workflow in approved:
+        if not isinstance(workflow, str):
+            raise TypeError(
+                f"approved workflow {workflow!r} is named by "
+                f"{type(workflow).__name__}, not by a string"
+            )
+        if not workflow:
+            raise ValueError("an approved workflow must have a name")
+    return approved
 
 
 def compose(
@@ -358,7 +448,7 @@ def compose(
     # while three workflows had just been counted against it, and `explain()`
     # said "3 of 0 approved workflow(s)". A confident wrong number is worse
     # than a refusal, and this module is about not producing either.
-    approved = None if expected_workflows is None else tuple(expected_workflows)
+    approved = None if expected_workflows is None else _checked_approved(expected_workflows)
 
     unreported: set[str] = set()
     unapproved = 0
