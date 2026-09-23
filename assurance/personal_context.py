@@ -366,11 +366,18 @@ def assess_personal_context(deployment) -> dict:
             1 for s in stores for g in s["gaps"] if g["type"] == "crosses_boundary"
         ),
         "gaps": len(gap_rollup),
+    # The reach graph both of these are built on. An unplaceable reference
+    # means part of that graph could not be found, so this report is what the
+    # graph we HAVE supports -- not a statement about the whole system. It is
+    # carried through rather than re-derived: one source for the gap, the same
+    # shape in every report that stands on it.
+        "unresolved_references": len(access_result["unresolved"]),
         "worst_risk": worst_risk,
     }
 
     return {
         "stores": stores,
         "gaps": gap_rollup,
+        "unresolved": access_result["unresolved"],
         "summary": summary,
     }

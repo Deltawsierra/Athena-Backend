@@ -308,6 +308,6 @@ def test_ripple_api_is_open_to_any_operator():
     force_authenticate(req, user=analyst)
     resp = view(req, uuid=str(dep.uuid))
     assert resp.status_code == 200
-    assert set(resp.data.keys()) == {"origins", "consequences", "summary"}
+    assert set(resp.data.keys()) == {"origins", "consequences", "unresolved", "summary"}
     assert resp.data["summary"]["origins"] >= 1
     assert any(c["category"] == CATEGORY_CODE_EXECUTION for c in resp.data["consequences"])
