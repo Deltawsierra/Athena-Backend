@@ -2478,7 +2478,25 @@ class WorkflowChainOutcome(models.Model):
         max_length=32, choices=Basis.choices, default=composition.BASIS_UNKNOWN
     )
     note = models.TextField(blank=True)
+    # THE EVIDENCE A DEMONSTRATED ROW RESTS ON, written only by
+    # assurance.observed_outcomes from a verified signed outcome and blank on
+    # every row an operator posted. ``outcome_id`` is unique, so the same signed
+    # outcome cannot be recorded twice anywhere; the key id says which trusted key
+    # signed it, the engine which observer it is bound to, and the digest what the
+    # run saw. The envelope is kept whole so the row can be re-verified later
+    # against the bytes that were signed rather than against these columns.
+    outcome_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
+    observer_engine = models.CharField(max_length=64, blank=True)
+    observer_key_id = models.CharField(max_length=64, blank=True)
+    evidence_digest = models.CharField(max_length=71, blank=True)
+    envelope = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def rests_on_signed_evidence(self) -> bool:
+        """Whether this row's ``demonstrated`` is backed by a verified envelope.
+        A row that says demonstrated without one was typed in, whatever it says."""
+        return bool(self.outcome_id) and self.envelope is not None
 
     class Meta:
         # Newest first by the instant that matters, with nulls last: an undated

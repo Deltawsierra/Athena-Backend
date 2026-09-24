@@ -459,6 +459,13 @@ def test_the_payload_shapes_are_pinned():
         "recorded_at",
         "source",
         "note",
+        # The evidence a demonstrated row rests on: blank on every row an
+        # operator posts, filled only from a verified signed outcome.
+        "signed",
+        "outcome_id",
+        "observer_engine",
+        "observer_key_id",
+        "evidence_digest",
     }
     assert set(outcome.data["composition"]) == {
         "signal",

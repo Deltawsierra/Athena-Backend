@@ -503,10 +503,10 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
 
     ``basis`` may be omitted, and omitting it means the record does not say what the
     row rests on -- which is exactly what every row written before the column
-    existed says. It is NOT defaulted to ``attested`` even though an operator POST
-    is the only writer today: a default that names an attester is a default that
-    invents one, and a poster who did not make that claim should not have it made
-    for them.
+    existed says. It is NOT defaulted to ``attested``: a default that names an
+    attester is a default that invents one, and a poster who did not make that
+    claim should not have it made for them. It may not be ``demonstrated``, which
+    only a verified signed outcome can establish (see ``validate_basis``).
     """
 
     status_label = serializers.CharField(source="get_status_display", read_only=True)
@@ -517,6 +517,11 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     #: whose ``recorded_at`` is now, and a reader who cannot see both cannot tell
     #: fresh measurement from backfill.
     recorded_at = serializers.DateTimeField(source="created_at", read_only=True)
+
+    #: Whether this row's ``demonstrated`` is backed by a verified signed outcome.
+    #: A reader deciding what the graph rests on should not have to infer it from
+    #: which evidence columns happen to be blank.
+    signed = serializers.BooleanField(source="rests_on_signed_evidence", read_only=True)
 
     class Meta:
         model = WorkflowChainOutcome
@@ -531,8 +536,35 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "recorded_at",
             "source",
             "note",
+            "signed",
+            "outcome_id",
+            "observer_engine",
+            "observer_key_id",
+            "evidence_digest",
         ]
-        read_only_fields = ["uuid", "status_label"]
+        read_only_fields = [
+            "uuid",
+            "status_label",
+            "outcome_id",
+            "observer_engine",
+            "observer_key_id",
+            "evidence_digest",
+        ]
+
+    def validate_basis(self, value):
+        """``demonstrated`` means a run produced this outcome, and a POST is not a
+        run. It used to be accepted here, which let the one field built to tell a
+        measurement from an assertion be set by an assertion: fifty typed-in
+        ``held`` rows marked demonstrated composed to READY with nothing exercised.
+        A demonstrated outcome arrives only as a signed envelope an engine produced,
+        through ``chain-outcomes/observed``."""
+        if value == WorkflowChainOutcome.Basis.DEMONSTRATED:
+            raise serializers.ValidationError(
+                "demonstrated is recorded only from a verified signed outcome; post "
+                "the engine's envelope to chain-outcomes/observed. An operator's own "
+                "record is attested."
+            )
+        return value
 
 
 class ClaimEventSerializer(serializers.ModelSerializer):

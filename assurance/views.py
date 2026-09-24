@@ -28,7 +28,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import observability
+from . import observability, observed_outcomes
 from .bundle import assurance_bundle
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -1522,6 +1522,57 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "recorded_count": total,
                 "composition": _composition_payload(deployment),
             }
+        )
+
+    @action(detail=True, methods=["post"], url_path="chain-outcomes/observed")
+    def observed_chain_outcomes(self, request, uuid=None):
+        """Record chain outcomes an engine OBSERVED, from its signed envelopes.
+
+        The only route that writes ``basis=demonstrated``. The body is one DSSE
+        envelope or ``{"envelopes": [...]}``; each is verified against this
+        deployment's outcome keyring and against what a signature does not prove
+        (the deployment it names, replay, staleness, clock skew), and the batch is
+        recorded whole or not at all -- a 400 names every refusal by position.
+        Admin-only, like the operator route: it writes the shared record. What
+        makes a row demonstrated is the engine's signature, not who posted it.
+        """
+        deployment = self.get_object()
+        _require_admin(request)
+        if len(request.body or b"") > observed_outcomes.MAX_BODY_BYTES:
+            return Response(
+                {"error": "the request is larger than a batch of signed outcomes can be"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        data = request.data
+        if isinstance(data, dict) and "envelopes" in data:
+            envelopes = data["envelopes"]
+        else:
+            envelopes = [data]
+        if not isinstance(envelopes, list) or not envelopes:
+            raise ValidationError({"envelopes": "a non-empty list of signed outcomes"})
+        if len(envelopes) > observed_outcomes.BATCH_LIMIT:
+            raise ValidationError(
+                {"envelopes": f"at most {observed_outcomes.BATCH_LIMIT} outcomes per request"}
+            )
+        try:
+            rows, refusals = observed_outcomes.ingest(deployment, envelopes)
+        except observed_outcomes.KeyringUnavailable as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if refusals:
+            return Response(
+                {
+                    "recorded": 0,
+                    "refused": [{"index": r.index, "reason": r.reason} for r in refusals],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {
+                "recorded": len(rows),
+                "outcomes": WorkflowChainOutcomeSerializer(rows, many=True).data,
+                "composition": _composition_payload(deployment),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
     @action(detail=True, methods=["get"], url_path="ai-bom")

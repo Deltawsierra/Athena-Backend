@@ -25,7 +25,15 @@ them in a transaction.
 
 from __future__ import annotations
 
-from .composition import READY, ChainOutcome, Composition, compose, explain
+from .composition import (
+    BASIS_ATTESTED,
+    BASIS_DEMONSTRATED,
+    READY,
+    ChainOutcome,
+    Composition,
+    compose,
+    explain,
+)
 
 
 def read_chain_outcomes(deployment) -> list[ChainOutcome]:
@@ -43,10 +51,25 @@ def read_chain_outcomes(deployment) -> list[ChainOutcome]:
             workflow=row.workflow,
             status=row.status,
             observed_at=row.observed_at,
-            basis=row.basis,
+            basis=_basis_of(row),
         )
         for row in deployment.chain_outcomes.all()
     ]
+
+
+def _basis_of(row) -> str:
+    """The basis the rule may rely on for ``row``.
+
+    ``demonstrated`` means a run produced the outcome, and the only evidence of a
+    run this platform holds is a verified signed outcome. A row that says
+    demonstrated without one -- written before signed ingest existed, or through
+    any path other than :mod:`assurance.observed_outcomes` -- was typed in, so it
+    is read as ``attested``: a person asserted it. The column keeps what was
+    written; the rule is told what it rests on.
+    """
+    if row.basis == BASIS_DEMONSTRATED and not row.rests_on_signed_evidence:
+        return BASIS_ATTESTED
+    return row.basis
 
 
 #: How many distinct sources the provenance census names before rolling the rest
