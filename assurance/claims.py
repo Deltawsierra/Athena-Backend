@@ -48,7 +48,7 @@ from __future__ import annotations
 import hashlib
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from . import observability as obs
@@ -492,23 +492,47 @@ def _make_claim(deployment, *, identity_fp, system_fp, input_fp, pol_version, re
 _READING_FIELDS = ("evidence_class", "vendor_asserted", "supporting_summary", "contradicting_summary")
 
 
-def _same_reading(claim: AssuranceClaim, derived) -> bool:
+def _status_set_by_a_person(claim: AssuranceClaim) -> bool:
+    """Whether the claim's current status was put there by a person.
+
+    Read from the claim's own lifecycle: the latest event that CHANGED its status
+    carries an actor when :func:`apply_claim_transition` made it, and none when a
+    derive or an invalidation did."""
+    last_move = (
+        claim.events.exclude(from_status=models.F("to_status")).order_by("-pk").first()
+    )
+    return bool(
+        last_move is not None
+        and last_move.actor_id is not None
+        and last_move.to_status == claim.status
+    )
+
+
+def _same_reading(claim: AssuranceClaim, derived, *, human_status: bool = False) -> bool:
     """Whether a stored version already reads what the deriver reads now.
 
-    A stored STALE is a lifecycle mark (evidence expired, or a retest pending),
-    not a reading, so it matches whatever status the deriver produces; every other
-    status must match exactly."""
-    if claim.status != Status.STALE and claim.status != derived["status"]:
+    Two statuses are not the machine's reading, so they match whatever status the
+    deriver produces: a STALE mark (evidence expired, or a retest pending) and a
+    status a person set (``human_status``). Every other status must match
+    exactly. The machine's own reading -- evidence class, vendor reliance, the two
+    summaries -- must always match."""
+    if (
+        not human_status
+        and claim.status != Status.STALE
+        and claim.status != derived["status"]
+    ):
         return False
     return all(getattr(claim, field) == derived[field] for field in _READING_FIELDS)
 
 
-def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now) -> bool:
+def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now, *, human_status: bool = False) -> bool:
     """Refresh a current claim's MACHINE fields in place (system state unchanged),
-    preserving every human field. Writes a :class:`ClaimEvent` only on an actual
-    status change. Returns whether the row was updated."""
+    preserving every human field -- including a status a person set, which stands
+    on this version until the inputs or the policy it was set against change.
+    Writes a :class:`ClaimEvent` only on an actual status change. Returns whether
+    the row was updated."""
     old_status = claim.status
-    new_status = derived["status"]
+    new_status = old_status if human_status else derived["status"]
 
     claim.statement = derived["statement"]
     claim.evidence_class = derived["evidence_class"]
@@ -755,14 +779,25 @@ def _derive_claims(dep, now) -> dict:
         # to this claim: it used to supersede every claim on the deployment at once.
         state_moved = claim_state_moved(current, system_fp=system_fp, input_fps=input_fps)
         policy_moved = current.policy_version != pol_version
-        reading_moved = not (state_moved or policy_moved) and not _same_reading(current, derived)
+        # A person's verdict on this version -- a claim moved to CONTRADICTED with
+        # "we know it leaks" -- is not the machine's reading drifting. It stands on
+        # this version while the inputs and policy it was set against hold, and a
+        # re-derivation refreshes the machine's fields around it. It used to be
+        # overwritten in place, and for one round was superseded with a note
+        # blaming a gap in CLAIM_INPUTS; neither was true. When the inputs or the
+        # policy move, the version is superseded as always: the verdict was about
+        # the state that moved.
+        human_status = _status_set_by_a_person(current)
+        reading_moved = not (state_moved or policy_moved) and not _same_reading(
+            current, derived, human_status=human_status
+        )
         if not (state_moved or policy_moved or reading_moved):
             if not current.input_fingerprint:
                 # A legacy row whose state and reading both still hold: bind it to
                 # its inputs now, so the next change is read per claim rather than
                 # for the whole deployment.
                 current.input_fingerprint = input_fp
-            if _refresh_machine_fields(current, derived, receipt_digest, now):
+            if _refresh_machine_fields(current, derived, receipt_digest, now, human_status=human_status):
                 counts["updated"] += 1
         else:
             if state_moved and policy_moved:

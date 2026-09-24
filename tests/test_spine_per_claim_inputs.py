@@ -842,3 +842,198 @@ def test_a_backdated_check_is_not_answered_by_the_derive_before_it():
     resolve_satisfied_requirements(_prefetched(dep))
 
     assert RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).exists()
+
+
+# --------------------------------------------------------------- round three
+
+
+def _person():
+    return get_user_model().objects.create_user(username=f"reviewer{get_user_model().objects.count()}", password="x")
+
+
+def test_a_persons_verdict_stands_on_its_version_through_a_re_derive():
+    """A reviewer moves the boundary claim to CONTRADICTED -- "we know it leaks".
+    Nothing the claim rests on changed, so re-deriving must neither overwrite that
+    verdict in place nor supersede it as though the fingerprint had a gap."""
+    from assurance.claims import apply_claim_transition
+
+    dep = _deployment()
+    derive_claims(dep)
+    claim = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
+    apply_claim_transition(claim, Status.CONTRADICTED, actor=_person(), note="we know it leaks")
+
+    counts = derive_claims(dep)
+
+    assert counts["superseded"] == 0
+    claim.refresh_from_db()
+    assert claim.valid_to is None
+    assert claim.status == Status.CONTRADICTED
+    assert not claim.events.filter(note__contains="no input this claim is bound to").exists()
+
+
+def test_a_persons_verdict_ends_with_the_state_it_was_about():
+    from assurance.claims import apply_claim_transition
+
+    dep = _deployment()
+    derive_claims(dep)
+    claim = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
+    apply_claim_transition(claim, Status.CONTRADICTED, actor=_person(), note="we know it leaks")
+    _widen_boundary(dep)
+
+    counts = derive_claims(dep)
+
+    assert counts["superseded"] == 1
+    current = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
+    assert current.pk != claim.pk
+    assert current.status != Status.CONTRADICTED
+
+
+def test_a_status_the_machine_did_not_derive_and_no_person_set_is_versioned():
+    """The other side of the person's verdict: a status nobody attributed differs
+    from the reading, and that is a new version."""
+    dep = _deployment()
+    derive_claims(dep)
+    AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).update(status=Status.UNKNOWN)
+
+    assert derive_claims(dep)["superseded"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("evidence_class", EvidenceClass.VENDOR_ASSERTED),
+        ("vendor_asserted", True),
+        ("supporting_summary", "a reading this state does not produce"),
+        ("contradicting_summary", "a reading this state does not produce"),
+    ],
+)
+def test_every_part_of_the_reading_is_compared(field, value):
+    dep = _deployment()
+    derive_claims(dep)
+    claim = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
+    assert getattr(claim, field) != value, "the premise"
+    AssuranceClaim.objects.filter(pk=claim.pk).update(**{field: value})
+
+    assert derive_claims(dep)["superseded"] == 1
+
+
+def test_a_backend_that_shares_a_name_with_an_agent_does_not_make_the_agent_a_hop():
+    """A ``server`` is a backend, never a principal. Resolving it to an agent put
+    that agent's tools inside another agent's reach, and an agent that gained no
+    power was named privileged."""
+    dep = _deployment()
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="wh",
+        classification=Asset.Classification.KNOWN,
+    )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.AGENT, name="ops", identifier="ops",
+        classification=Asset.Classification.KNOWN, metadata={"tools": ["shell"]},
+    )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="shell", identifier="shell",
+        classification=Asset.Classification.KNOWN, metadata={"permissions": ["code_execution"]},
+    )
+    before = _readings(dep)[ACCESS]
+
+    Asset.objects.filter(deployment=dep, identifier="ops").update(name="warehouse")
+
+    after = _readings(dep)[ACCESS]
+    # The renamed agent is still the one privileged principal; nobody else is.
+    assert before["contradicting_summary"].rsplit("on: ", 1)[1] == "ops"
+    assert after["contradicting_summary"].rsplit("on: ", 1)[1] == "warehouse"
+    principals = {p["name"]: p for p in assess_effective_access(_prefetched(dep))["principals"]}
+    reach = [" > ".join(r["via"]) for r in principals["agent"]["effective_reach"]]
+    assert not any("shell" in via for via in reach)
+
+
+def test_a_backend_reference_that_names_only_a_principal_is_unresolved_and_says_so():
+    from assurance.graph_refs import UNRESOLVED_NAMES_A_PRINCIPAL
+
+    dep = _deployment()
+    tool = _asset(dep, "reader")
+    tool.metadata = {**tool.metadata, "server": "agent"}
+    tool.save(update_fields=["metadata"])
+    fresh = _prefetched(dep)
+    for rows in (assess_effective_access(fresh)["unresolved"], build_route_map(fresh)["unresolved"]):
+        assert ("agent", UNRESOLVED_NAMES_A_PRINCIPAL) in [(r["reference"], r["reason"]) for r in rows]
+
+
+def test_the_graph_modules_agree_on_what_a_principal_is():
+    from assurance.graph_refs import PRINCIPAL_KINDS
+
+    assert PRINCIPAL_KINDS == {Asset.Kind.AGENT.value, Asset.Kind.SERVICE_ACCOUNT.value}
+
+
+def test_an_ambiguous_backend_is_followed_to_the_ungoverned_candidate_too():
+    """Two stores named ``warehouse``, one managed, created first, and one not. Following
+    only the first candidate would read the reach as governed."""
+    dep = _deployment()
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="wh-managed",
+        classification=Asset.Classification.KNOWN,
+    )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="wh-shadow",
+        classification=Asset.Classification.UNMANAGED,
+    )
+    assert _readings(dep)[ACCESS]["status"] == Status.CONTRADICTED
+    fresh = _prefetched(dep)
+    route_pairs = {
+        (e["source"], e["target"]) for e in build_route_map(fresh)["edges"] if e.get("declared")
+    }
+    targets = {str(a.uuid) for a in Asset.objects.filter(deployment=dep, name="warehouse")}
+    reader = str(_asset(dep, "reader").uuid)
+    assert {(reader, t) for t in targets} <= route_pairs
+
+
+def test_shadow_destinations_are_listed_in_an_order_the_rows_cannot_change():
+    from assurance.boundary import assess_boundary
+
+    dep = _deployment()
+    for identifier in ("s-b", "s-a"):
+        Asset.objects.create(
+            deployment=dep, kind=Asset.Kind.VECTOR_DB, name="shadow", identifier=identifier,
+            classification=Asset.Classification.UNMANAGED,
+        )
+    before = assess_boundary(_prefetched(dep))
+    _recreate(_asset_by_identifier(dep, "s-b").pk)
+    after = assess_boundary(_prefetched(dep))
+    key = next(k for k, v in before.items() if isinstance(v, list) and v and "asset_name" in v[0])
+    assert [s["identifier"] for s in after[key]] == ["s-a", "s-b"] == [s["identifier"] for s in before[key]]
+
+
+def test_any_re_derive_after_the_retest_opened_answers_it_whatever_its_clock():
+    """The requirement records when its claim was last derived as of the opening, and
+    any later derive answers it -- including one whose own `now` reads earlier than
+    the opening's, because what is being asked is whether the claim was read again."""
+    dep = _deployment()
+    derive_claims(dep)
+    seen = AssuranceClaim.objects.get(deployment=dep, claim_type=BOUNDARY).last_seen
+    _widen_boundary(dep)
+    check_invalidations(dep, now=seen + timedelta(hours=2))
+    boundary = DataBoundary.objects.get(deployment=dep)
+    boundary.allowed_regions = ["eu-west-1"]
+    boundary.save(update_fields=["allowed_regions"])
+
+    derive_claims(dep, now=seen + timedelta(hours=1))
+
+    assert not RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).exists()
+
+
+def test_a_version_still_marked_stale_does_not_answer_its_retest():
+    dep = _deployment()
+    derive_claims(dep)
+    _widen_boundary(dep)
+    check_invalidations(dep)
+    claim = AssuranceClaim.objects.get(deployment=dep, claim_type=BOUNDARY)
+    boundary = DataBoundary.objects.get(deployment=dep)
+    boundary.allowed_regions = ["eu-west-1"]
+    boundary.save(update_fields=["allowed_regions"])
+    AssuranceClaim.objects.filter(pk=claim.pk).update(
+        status=Status.STALE, last_seen=claim.last_seen + timedelta(hours=1)
+    )
+
+    resolve_satisfied_requirements(_prefetched(dep))
+
+    assert RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).exists()

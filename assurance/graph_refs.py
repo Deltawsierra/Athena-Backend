@@ -45,6 +45,10 @@ from __future__ import annotations
 MECHANISM_TOOLS = "tools"
 MECHANISM_SERVER = "server"
 
+#: The kinds that are principals: something that acts, not something acted on.
+#: Spelled as the ``Asset.Kind`` values so this module stays free of the models.
+PRINCIPAL_KINDS = frozenset({"agent", "service_account"})
+
 
 #: Why a reference could not be placed. A reference that names nothing and one
 #: that names two things are both unresolved, and they are different
@@ -52,6 +56,9 @@ MECHANISM_SERVER = "server"
 #: an inventory that does not say which of two components it means.
 UNRESOLVED_NOT_FOUND = "not_found"
 UNRESOLVED_AMBIGUOUS = "ambiguous"
+#: A ``server`` names something that exists but is a principal -- an agent, a
+#: service account -- not a backend anything can be wired to.
+UNRESOLVED_NAMES_A_PRINCIPAL = "names_a_principal"
 
 
 def reference_index(assets) -> tuple[dict, dict]:
@@ -76,7 +83,7 @@ def reference_index(assets) -> tuple[dict, dict]:
     return by_identifier, by_name
 
 
-def resolve_reference(reference, by_identifier: dict, by_name: dict):
+def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kinds=frozenset()):
     """``(candidates, reason)``: every asset a declared reference could name, and
     why it did not name exactly one.
 
@@ -92,6 +99,14 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict):
     says the inventory does not say which one it meant. A reference whose
     identifier matches does not fall through to a name.
 
+    ``not_kinds`` are kinds this mechanism cannot mean. A ``server`` is a backend
+    something is wired to; it is never an agent or a service account, and
+    resolving it to one made that principal a hop -- so a data store that shared
+    its name with an agent put the agent's tools inside another agent's reach and
+    named an agent that gained no power as privileged. Candidates of those kinds
+    are dropped before the rest are followed; a reference that names only such a
+    thing is unresolved and says so.
+
     An empty list is not permission to invent a node, and it is not permission to
     say nothing either: the caller records the reason.
     """
@@ -101,7 +116,10 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict):
     for index in (by_identifier, by_name):
         matches = index.get(key)
         if matches:
-            return list(matches), (UNRESOLVED_AMBIGUOUS if len(matches) > 1 else None)
+            usable = [m for m in matches if m.kind not in not_kinds]
+            if not usable:
+                return [], UNRESOLVED_NAMES_A_PRINCIPAL
+            return usable, (UNRESOLVED_AMBIGUOUS if len(usable) > 1 else None)
     return [], UNRESOLVED_NOT_FOUND
 
 

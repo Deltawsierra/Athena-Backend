@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from .graph_refs import (
     MECHANISM_SERVER,
+    PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     dangling_reference,
     reference_index,
@@ -218,7 +219,9 @@ def build_route_map(deployment) -> dict:
         server = str(metadata.get("server") or "").strip()
         if not server:
             continue
-        hosts, why = resolve_reference(server, by_identifier, by_name)
+        hosts, why = resolve_reference(
+            server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+        )
         if why:
             # The reference names nothing in the inventory, or more than one
             # thing. The first used to vanish: no edge, and no unresolved row

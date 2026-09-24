@@ -68,6 +68,7 @@ from .capability import (
 )
 from .graph_refs import (
     MECHANISM_SERVER,
+    PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     dangling_reference,
     reference_index,
@@ -181,7 +182,9 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
                     unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, why))
         server = metadata.get("server")
         if server and str(server).strip():
-            targets, why = resolve_reference(server, by_identifier, by_name)
+            targets, why = resolve_reference(
+                server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+            )
             for target in targets:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
             if why:
