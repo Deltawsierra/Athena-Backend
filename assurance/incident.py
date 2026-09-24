@@ -292,9 +292,13 @@ def _ripple(finding, deployment) -> dict:
 def _decision(deployment) -> dict:
     """The deployment's standing six-state decision, None-safe. An unassessed
     deployment has no decision, and an absent decision is never read as "ready"."""
+    from .decision import current_decision
+
+    # Reconciled first: see `decision.current_decision`.
+    decision = current_decision(deployment)
     return {
-        "decision": deployment.decision,
-        "decision_label": deployment.get_decision_display() if deployment.decision else None,
+        "decision": decision,
+        "decision_label": deployment.get_decision_display() if decision else None,
     }
 
 

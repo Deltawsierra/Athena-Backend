@@ -183,12 +183,10 @@ def _refresh_stored_decision(deployment) -> None:
     the recompute route refreshed it. So a workflow set or a chain outcome written
     over HTTP changed what decision-support computed live while the receipt kept
     reporting the decision from before -- a signed violation left a stored READY
-    in place, read by every surface that trusts the record. Preserves an operator's
-    failsafe pause, as the recompute route does.
+    in place, read by every surface that trusts the record. Keeps an operator's
+    failsafe pause as the LOCKED row holds it, not as this request first read it.
     """
-    recompute_decision(
-        deployment, paused=deployment.decision == Deployment.Decision.PAUSED
-    )
+    recompute_decision(deployment)
 
 
 def _composition_payload(deployment) -> dict:
@@ -505,8 +503,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         this the same way; the manual path used to default to False and clear it.)"""
         _require_admin(request)
         deployment = self.get_object()
-        currently_paused = deployment.decision == Deployment.Decision.PAUSED
-        paused = _parse_paused(request.data.get("paused"), currently_paused)
+        # Absent -> None: keep whatever the LOCKED row says. Reading "currently
+        # paused" here, before the lock, let a pause committed meanwhile be lifted.
+        raw_paused = request.data.get("paused")
+        paused = None if raw_paused is None else _parse_paused(raw_paused, False)
         decision = recompute_decision(deployment, paused=paused)
         # Commercial spine: if the decision has entered a blocking state and this
         # deployment's policy opts into it, auto-dispatch its qualifying findings.

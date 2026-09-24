@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
-from django.db import transaction
+from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db.models.signals import post_migrate, post_save
 from django.dispatch import receiver
 
@@ -89,32 +89,27 @@ def auto_dispatch_finding(sender, instance, created, update_fields=None, **kwarg
     schedule_finding_dispatch(instance)
 
 
-#: The marker migration whose application makes stored chain decisions stale.
-DEMOTION_MIGRATION = ("assurance", "0033_recompute_decisions_after_typed_in_demotion")
-
-
 @receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
-def recompute_decisions_after_demotion(sender, plan=None, **kwargs):
-    """Recompute every stored decision with chain outcomes under it, once, after the
-    ``migrate`` that applied the demotion marker. See that migration for why the
-    work is here rather than in it.
+def recompute_decisions_computed_under_another_rule(sender, using=None, **kwargs):
+    """Recompute every stored decision with chain outcomes under it that was never
+    computed under the signed-outcome rule (``decision_keyring`` NULL).
 
-    Keyed on the PLAN, not on the database: ``post_migrate`` fires on every
-    ``migrate`` and once per app, and a recompute on each would move decisions
-    whenever an operator ran an unrelated migration. Only a forward application of
-    the marker in the plan just applied triggers it, and only on the assurance
-    app's signal, so it runs exactly once per upgrade.
+    Keyed on the DATA, not on the migration plan. It used to fire only when the
+    plan just applied contained the marker migration -- and Django sends
+    ``post_migrate`` only after a whole plan succeeds, so a ``migrate`` that
+    failed on a later migration recorded the marker as applied and the re-run's
+    plan no longer contained it: the recompute was skipped for good. A NULL
+    stamp is still NULL on the re-run. Rows already stamped are not touched, so
+    an unrelated ``migrate`` moves no decision; only this app's signal, and only
+    for the database the decision rule reads.
     """
-    if getattr(sender, "name", None) != "assurance" or not plan:
+    if getattr(sender, "name", None) != "assurance":
         return
-    if not any(
-        (migration.app_label, migration.name) == DEMOTION_MIGRATION and not backwards
-        for migration, backwards in plan
-    ):
+    if using not in (None, DEFAULT_DB_ALIAS):
         return
     from .decision import recompute_decision
     from .models import Deployment, WorkflowChainOutcome
 
     deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
-    for deployment in Deployment.objects.filter(pk__in=deployment_ids):
-        recompute_decision(deployment, paused=deployment.decision == Deployment.Decision.PAUSED)
+    for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):
+        recompute_decision(deployment)

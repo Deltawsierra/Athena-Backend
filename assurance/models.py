@@ -336,6 +336,21 @@ class Deployment(models.Model):
     # perfectly ordinary answer. The revision is what makes the seam visible; see
     # `assurance.revision`.
     decision_revision = models.PositiveBigIntegerField(default=0, db_index=True)
+    # Which outcome keyring the stored decision was computed under: a fingerprint of
+    # the trusted keys (see `observed_outcomes.keyring_fingerprint`), "" when none was
+    # configured, NULL when the stored decision predates the signed-outcome rule.
+    #
+    # The keyring is the one input to the decision that changes without a write to
+    # this database -- an operator withdraws a key by editing a file -- so nothing
+    # recomputed on it, and a READY resting on a withdrawn key's signature went on
+    # being reported by the receipt while the live rule said needs_more_evidence.
+    # Recording it lets a reader of the stored decision see that it is stale and
+    # reconcile it (`decision.current_decision`), and lets the upgrade find the
+    # decisions still computed under the old rule (NULL) however many times
+    # `migrate` is run.
+    decision_keyring = models.CharField(
+        max_length=64, null=True, blank=True, default=None, editable=False
+    )
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
     # `assurance.decision`: a deployment whose latest evidence is partial cannot

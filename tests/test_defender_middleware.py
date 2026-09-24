@@ -663,3 +663,29 @@ def test_the_text_fallback_redacts_what_the_single_pattern_did(text, expected):
     from audit.middleware import _redact_text
 
     assert _redact_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Letters whose case folds into ASCII: under the pattern this scan replaced
+        # (compiled re.I) they were part of the key token, and the value redacted.
+        ("paſſword=hunter2", "paſſword: [redacted]"),
+        ("ſession=abc123", "ſession: [redacted]"),
+        ("client_secret=x&paſſ=y", "client_secret: [redacted]&paſſ: [redacted]"),
+        ("apiKey: v", "apiKey: [redacted]"),
+    ],
+)
+def test_the_text_fallback_folds_case_as_the_pattern_it_replaced_did(text, expected):
+    from audit.middleware import _redact_text
+
+    assert _redact_text(text) == expected
+
+
+@pytest.mark.parametrize("key", ["paſſword", "ſession", "api_Key"])
+def test_the_structured_paths_fold_case_too(key):
+    """``.lower()`` keeps the long s, so the JSON and form paths forwarded the value
+    the text path redacted."""
+    from audit.middleware import _is_sensitive_key
+
+    assert _is_sensitive_key(key)

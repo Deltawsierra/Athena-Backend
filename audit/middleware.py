@@ -119,7 +119,9 @@ _BLOCKING_ACTIONS = frozenset({"block", "blocked", "deny", "denied", "refuse", "
 
 
 def _is_sensitive_key(key):
-    lowered = str(key).lower()
+    # casefold, not lower: "paſſword".lower() keeps the ſ and matched no part, so
+    # the JSON and form paths forwarded that value while the text path redacted it.
+    lowered = str(key).casefold()
     return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
 
 
@@ -151,10 +153,17 @@ def _redact_structure(value):
 _KEY_CHARS = r"A-Za-z0-9_.\[\]-"
 _TEXT_KEY_BODY = r'("?)([' + _KEY_CHARS + r']+)\1\s*([:=])\s*'
 # Anywhere a run of key characters starts ...
-_TEXT_KEY = re.compile(r'("?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)\1\s*([:=])\s*')
+_TEXT_KEY = re.compile(
+    r'("?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)\1\s*([:=])\s*', re.I
+)
 # ... or exactly where the scan resumes, which may be mid-run: a value stops at
 # `]`, and the pattern this replaces let the next key begin on that `]`.
-_TEXT_KEY_HERE = re.compile(_TEXT_KEY_BODY)
+#
+# Both case-insensitive, as the pattern they replace was: under re.I, [A-Za-z]
+# also matches the letters whose case folds into ASCII (ſ U+017F -> s,
+# K U+212A -> k), so "paſſword=hunter2" was one key token and redacted. Without
+# it the ſ split the token and the secret went through.
+_TEXT_KEY_HERE = re.compile(_TEXT_KEY_BODY, re.I)
 _SENSITIVE_TEXT_PART = re.compile(
     "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS), re.I
 )

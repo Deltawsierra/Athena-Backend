@@ -546,7 +546,7 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     }
 
 
-def recompute_decision(deployment: Deployment, *, paused: bool = False) -> str | None:
+def recompute_decision(deployment: Deployment, *, paused: bool | None = None) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
 
@@ -556,9 +556,50 @@ def recompute_decision(deployment: Deployment, *, paused: bool = False) -> str |
     own: a consumer reading it alongside the claims behind it could catch the two
     from different moments, and the result was an ordinary-looking answer
     assembled from a state that never existed.
+
+    Computed UNDER the row lock, from inside the transaction that writes it. It was
+    computed first and written after, so a signed violation recorded between the
+    two was overwritten by the READY computed before it arrived, and an operator's
+    pause committed in between was lifted by a caller that had read "not paused"
+    at the start of its request.
+
+    ``paused``: ``True`` pauses, ``False`` computes without a pause (an explicit
+    lift), and ``None`` -- the default -- keeps whatever the LOCKED row says, which
+    is the only reading of "don't change the pause" a concurrent operator cannot
+    slip past.
     """
+    from . import observed_outcomes
     from .revision import accept_transition
 
-    decision = compute_decision(deployment, paused=paused)
-    accept_transition(deployment, to_decision=decision)
+    with transaction.atomic():
+        locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
+        hold_pause = locked.decision == Deployment.Decision.PAUSED if paused is None else paused
+        keyring = observed_outcomes.trusted_keyring()
+        decision = compute_decision(locked, paused=hold_pause)
+        accept_transition(locked, to_decision=decision)
+        Deployment.objects.filter(pk=locked.pk).update(
+            decision_keyring=observed_outcomes.keyring_fingerprint(keyring)
+        )
+    deployment.decision = locked.decision
+    deployment.decision_revision = locked.decision_revision
+    deployment.decision_keyring = observed_outcomes.keyring_fingerprint(keyring)
     return decision
+
+
+def current_decision(deployment: Deployment) -> str | None:
+    """The stored decision, reconciled first if it was computed under a different
+    outcome keyring than the one in force -- or before the signed-outcome rule.
+
+    For the surfaces that PUBLISH the stored decision (the receipt, the bundle, the
+    incident pack). Every other input reaches the decision through a write that
+    recomputes it; the keyring is a file, and a withdrawn key used to leave a
+    stored READY behind that the receipt went on reporting. Only deployments with
+    chain outcomes can move on a keyring change, so only they are reconciled."""
+    from . import observed_outcomes
+
+    if deployment.chain_outcomes.exists() and (
+        deployment.decision_keyring is None
+        or deployment.decision_keyring != observed_outcomes.keyring_fingerprint()
+    ):
+        recompute_decision(deployment)
+    return deployment.decision

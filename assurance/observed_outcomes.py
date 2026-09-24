@@ -241,6 +241,19 @@ def recorded_outcome_is_authentic(row, keyring, *, deployment_uuid: str | None =
     )
 
 
+def keyring_fingerprint(keyring: dict[str, oc.TrustedKey] | None = None) -> str:
+    """Which keys are trusted right now, as one comparable value; "" for none.
+
+    Over the (key id, engine) pairs rather than the file's bytes: what decides
+    whether an outcome verifies is which keys are trusted for which engine, and a
+    reformatted file that trusts the same keys must not read as a rotation."""
+    keyring = trusted_keyring() if keyring is None else keyring
+    if not keyring:
+        return ""
+    pairs = sorted((key_id, key.engine) for key_id, key in keyring.items())
+    return hashlib.sha256(json.dumps(pairs).encode()).hexdigest()
+
+
 def basis_in_force(row, keyring, *, deployment_uuid: str | None = None) -> str:
     """The basis the rule relies on for ``row``, which is not always its column.
 
@@ -410,5 +423,6 @@ __all__ = [
     "Refusal",
     "basis_in_force",
     "ingest",
+    "keyring_fingerprint",
     "load_keyring",
 ]

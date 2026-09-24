@@ -171,9 +171,12 @@ def _decision_row(deployment) -> dict:
     The decision is about the deployment as a whole, so its subject is the bare
     deployment name with nothing appended — the one stream where that is right.
     """
+    from .decision import current_decision
+
     return {
         "subject": _subject(deployment.name),
-        "state": deployment.decision,
+        # Reconciled first: see `decision.current_decision`.
+        "state": current_decision(deployment),
         "environment": deployment.environment,
     }
 
