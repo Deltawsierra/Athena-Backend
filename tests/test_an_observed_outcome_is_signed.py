@@ -637,6 +637,15 @@ def test_one_refusal_names_every_envelope_it_refuses_whatever_check_refused_it()
     assert "already recorded" in refused[1]["reason"]
     assert WorkflowChainOutcome.objects.filter(deployment=dep).count() == 1
 
+    # The other way round: the replay first, the forgery last. The two checks
+    # run in two passes, and the refusals still come back in the caller's order.
+    reversed_batch = [recorded, _signed(dep, workflow="export"), forged]
+    response = client.post(_url(dep), {"envelopes": reversed_batch}, format="json")
+    assert response.status_code == 400, response.content
+    refused = response.json()["refused"]
+    assert [r["index"] for r in refused] == [0, 2]
+    assert "already recorded" in refused[0]["reason"]
+
 
 def test_a_row_publishes_the_basis_the_rule_relies_on_beside_the_one_it_was_written_with(tmp_path, monkeypatch):
     """``basis`` is what was written; ``basis_in_force`` is what the graph counts.
