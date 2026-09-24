@@ -371,6 +371,36 @@ def test_a_genuine_envelope_copied_onto_another_deployment_is_not_evidence_there
     assert composition_signal(target) == comp.NEEDS_MORE_EVIDENCE
 
 
+def test_a_signed_row_moved_to_another_deployment_is_not_evidence_there():
+    """The same row, every column intact -- outcome_id included -- reassigned to a
+    different deployment. Only the deployment the signature names separates the
+    two, so this is the check that it is compared at all."""
+    source, target = _deployment(), _deployment()
+    _approved(target, "refund-over-limit")
+    row = _ingested(source)
+    assert row.rests_on_signed_evidence
+    WorkflowChainOutcome.objects.filter(pk=row.pk).update(deployment=target)
+    moved = WorkflowChainOutcome.objects.get(pk=row.pk)
+    assert not moved.rests_on_signed_evidence
+    assert composition_signal(target) == comp.NEEDS_MORE_EVIDENCE
+    assert composition_for(target).basis_census[comp.BASIS_ATTESTED] == 1
+
+
+def test_signed_is_a_statement_about_a_demonstrated_row_only():
+    """``signed`` answers "does this row's demonstrated rest on a signature". A row
+    whose basis says attested makes no such claim, whatever its columns carry, and
+    must not be published as signed beside a basis that says a person asserted it."""
+    dep = _deployment()
+    row = _ingested(dep)
+    WorkflowChainOutcome.objects.filter(pk=row.pk).update(basis=comp.BASIS_ATTESTED)
+    demoted = WorkflowChainOutcome.objects.get(pk=row.pk)
+    assert not demoted.rests_on_signed_evidence
+    listed = _client().get(_operator_url(dep)).json()
+    rows = listed["results"] if isinstance(listed, dict) and "results" in listed else listed
+    rows = rows["outcomes"] if isinstance(rows, dict) and "outcomes" in rows else rows
+    assert [r["signed"] for r in rows] == [False]
+
+
 def test_withdrawing_a_key_withdraws_what_it_vouched_for(tmp_path, monkeypatch):
     dep = _deployment()
     _approved(dep, "refund-over-limit")
