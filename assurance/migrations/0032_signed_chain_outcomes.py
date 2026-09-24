@@ -8,7 +8,25 @@ def typed_in_demonstrated_is_attested(apps, schema_editor):
     Nothing produced them that this platform can show, and the column that exists
     to say so should not keep saying otherwise."""
     WorkflowChainOutcome = apps.get_model("assurance", "WorkflowChainOutcome")
-    WorkflowChainOutcome.objects.filter(basis="demonstrated").update(basis="attested")
+    WorkflowChainOutcome.objects.filter(basis="demonstrated", outcome_id__isnull=True).update(
+        basis="attested"
+    )
+
+
+def refuse_to_drop_signed_evidence(apps, schema_editor):
+    """Reversing drops the envelope columns, and with them the only evidence a run
+    produced any outcome here. A signed row would survive as a bare
+    ``demonstrated`` that nothing backs, and re-applying this migration would then
+    -- correctly, and irreversibly -- demote it to attested. Losing signed evidence
+    is not something a rollback should do quietly, so it does not do it at all
+    while any exists: export or delete those rows first, on purpose."""
+    WorkflowChainOutcome = apps.get_model("assurance", "WorkflowChainOutcome")
+    signed = WorkflowChainOutcome.objects.filter(outcome_id__isnull=False).count()
+    if signed:
+        raise RuntimeError(
+            f"refusing to reverse 0032: {signed} chain outcome(s) rest on signed "
+            "evidence, and reversing would drop it; remove them deliberately first"
+        )
 
 
 class Migration(migrations.Migration):
@@ -43,5 +61,5 @@ class Migration(migrations.Migration):
             name="envelope",
             field=models.JSONField(blank=True, null=True),
         ),
-        migrations.RunPython(typed_in_demonstrated_is_attested, migrations.RunPython.noop),
+        migrations.RunPython(typed_in_demonstrated_is_attested, refuse_to_drop_signed_evidence),
     ]

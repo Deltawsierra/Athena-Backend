@@ -199,3 +199,16 @@ def _sqlite_wal(django_db_setup, django_db_blocker):
         if connection.vendor == "sqlite":
             with connection.cursor() as cursor:
                 cursor.execute("PRAGMA journal_mode=WAL")
+
+
+@pytest.fixture
+def engine_keyring(tmp_path, monkeypatch):
+    """Configure an outcome keyring that trusts :data:`tests.signed_chains.ENGINE_KEYS`,
+    so rows written by :func:`tests.signed_chains.record_signed` read as demonstrated."""
+    from assurance import observed_outcomes
+    from tests.signed_chains import write_keyring
+
+    path = tmp_path / "engine-keyring.json"
+    write_keyring(path)
+    monkeypatch.setenv(observed_outcomes.KEYRING_ENV, str(path))
+    return path

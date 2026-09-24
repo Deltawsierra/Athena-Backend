@@ -20,6 +20,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 
 from django.db import transaction
@@ -1524,7 +1525,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             }
         )
 
-    @action(detail=True, methods=["post"], url_path="chain-outcomes/observed")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="chain-outcomes/observed",
+        # JSON only. A signed outcome is a JSON document, and a form or multipart
+        # body is not one: with the default parsers a multipart POST reached a 500,
+        # because the audit middleware had already consumed the stream as a form.
+        parser_classes=[JSONParser],
+    )
     def observed_chain_outcomes(self, request, uuid=None):
         """Record chain outcomes an engine OBSERVED, from its signed envelopes.
 
@@ -1538,10 +1547,26 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         """
         deployment = self.get_object()
         _require_admin(request)
-        if len(request.body or b"") > observed_outcomes.MAX_BODY_BYTES:
+        # The DECLARED length, read before the body is. Reading ``request.body`` to
+        # measure it answered a body over Django's own upload cap with Django's
+        # generic 400, and raised on a stream the middleware had already consumed;
+        # the header answers every size with this route's own 413.
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > observed_outcomes.MAX_BODY_BYTES:
             return Response(
                 {"error": "the request is larger than a batch of signed outcomes can be"},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        # Refused by name rather than left to the parser: once the audit middleware
+        # has read a form body, DRF hands a non-JSON request back as empty data, and
+        # that read as "one malformed envelope" -- a refusal about the wrong thing.
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": "signed outcomes are posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             )
         data = request.data
         if isinstance(data, dict) and "envelopes" in data:

@@ -100,7 +100,9 @@ def load_keyring(path: str | None = None) -> dict[str, oc.TrustedKey]:
     try:
         with open(location, encoding="utf-8") as handle:
             entries = json.load(handle)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
+        # RecursionError: a file of nested brackets exhausts the parser's stack,
+        # which is a keyring nobody can use -- not a server error.
         raise KeyringUnavailable(f"the outcome keyring could not be read: {exc}") from exc
     if not isinstance(entries, list) or not entries:
         raise KeyringUnavailable("the outcome keyring is not a non-empty list of keys")
@@ -120,6 +122,75 @@ def load_keyring(path: str | None = None) -> dict[str, oc.TrustedKey]:
             )
         keyring[key_id] = key
     return keyring
+
+
+#: The last keyring read for verification at READ time, keyed by the file's
+#: identity so an edited or replaced keyring is re-read rather than trusted stale.
+_READ_KEYRING: dict[str, tuple[tuple, dict[str, oc.TrustedKey] | None]] = {}
+
+
+def trusted_keyring() -> dict[str, oc.TrustedKey] | None:
+    """The configured keyring for verifying RECORDED outcomes, or ``None``.
+
+    ``None`` rather than an exception, because a reader must still answer: with no
+    usable keyring, no recorded outcome can be shown to rest on a signature, so
+    every one reads as the assertion it then is. That is the direction this
+    module fails in on purpose -- ingest refuses with a 503 for the same reason.
+    """
+    location = os.environ.get(KEYRING_ENV)
+    if not location:
+        return None
+    try:
+        stat = os.stat(location)
+    except OSError:
+        return None
+    identity = (location, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    cached = _READ_KEYRING.get("keyring")
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    try:
+        keyring: dict[str, oc.TrustedKey] | None = load_keyring(location)
+    except KeyringUnavailable:
+        keyring = None
+    _READ_KEYRING["keyring"] = (identity, keyring)
+    return keyring
+
+
+def recorded_outcome_is_authentic(row, keyring, *, deployment_uuid: str | None = None) -> bool:
+    """Does ``row`` rest on an envelope a trusted engine signed, saying what the row says?
+
+    Checked at READ time, every time, rather than trusted from ingest. The row's
+    columns are writable by anything with the ORM -- a fixture, a shell, a future
+    route -- and a check of their mere presence let ``envelope={}`` with any
+    ``outcome_id`` read as a run, and let a genuine envelope signed for ANOTHER
+    deployment, copied onto this one's row, read as a run here. So the envelope is
+    verified against the keyring as it stands now (a key since withdrawn no longer
+    vouches for anything), and every column the rule reads must be the one the
+    signature covers. The ingest-time windows (skew, age, replay order) are NOT
+    re-applied: they judge when an outcome may be recorded, not whether a recorded
+    one is authentic.
+    """
+    if not keyring or not row.outcome_id or not isinstance(row.envelope, dict):
+        return False
+    verdict = oc.verify_outcome(row.envelope, keyring)
+    if verdict.verdict != oc.AUTHENTIC or verdict.outcome is None:
+        return False
+    outcome = verdict.outcome
+    try:
+        observed = _instant(outcome["observed_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    deployment = deployment_uuid if deployment_uuid is not None else str(row.deployment.uuid)
+    return (
+        outcome["outcome_id"] == row.outcome_id
+        and outcome["deployment"] == deployment
+        and outcome["workflow"] == row.workflow
+        and outcome["status"] == row.status
+        and observed == row.observed_at
+        and outcome["observer"]["engine"] == row.observer_engine
+        and verdict.key_id == row.observer_key_id
+        and outcome["evidence_digest"] == row.evidence_digest
+    )
 
 
 def _instant(value: str) -> datetime:

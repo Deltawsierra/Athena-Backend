@@ -54,9 +54,9 @@ def _signature(result):
     )
 
 
-def _outcomes(*pairs, at=None):
+def _outcomes(*pairs, at=None, basis=comp.BASIS_UNKNOWN):
     return [
-        ChainOutcome(workflow=name, status=status, observed_at=at)
+        ChainOutcome(workflow=name, status=status, observed_at=at, basis=basis)
         for name, status in pairs
     ]
 
@@ -264,11 +264,71 @@ def test_every_approved_workflow_exercised_and_holding_is_ready() -> None:
     unreachable, the parameter would just be a way to never pass."""
     approved = ["a", "b", "c"]
     result = compose(
-        _outcomes(("a", HELD), ("b", HELD), ("c", HELD)), expected_workflows=approved
+        _outcomes(("a", HELD), ("b", HELD), ("c", HELD), basis=comp.BASIS_DEMONSTRATED),
+        expected_workflows=approved,
     )
     assert result.decision == comp.READY
     assert result.workflows_unreported == 0
     assert result.all_held is True
+
+
+@pytest.mark.parametrize("basis", sorted(comp.UNEXERCISED_BASES))
+def test_every_approved_workflow_held_but_not_exercised_is_not_ready(basis) -> None:
+    """The same approved set, every chain held, and no run behind any of them.
+    "Exercised" is what READY asks for; a held nobody demonstrated floors exactly
+    as an approved workflow that never reported, and the explanation says so."""
+    approved = ["a", "b", "c"]
+    result = compose(
+        _outcomes(("a", HELD), ("b", HELD), ("c", HELD), basis=basis),
+        expected_workflows=approved,
+    )
+    assert result.decision == comp.NEEDS_MORE_EVIDENCE
+    assert result.deciding == ("a", "b", "c")
+    assert result.workflows_unexercised == 3
+    assert "counts as not_demonstrated" in comp.explain(result)
+
+    # Demonstrating two of the three leaves the third deciding.
+    mixed = compose(
+        _outcomes(("a", HELD), ("b", HELD), basis=comp.BASIS_DEMONSTRATED)
+        + _outcomes(("c", HELD), basis=basis),
+        expected_workflows=approved,
+    )
+    assert mixed.decision == comp.NEEDS_MORE_EVIDENCE
+    assert mixed.deciding == ("c",)
+
+    # No approved list: nothing to count it against, and no floor.
+    assert compose(_outcomes(("a", HELD), basis=basis)).decision == comp.READY
+
+
+def test_an_asserted_verdict_cannot_supersede_a_demonstrated_one() -> None:
+    """A later ATTESTED held -- however late; 2099 is as late as any -- does not
+    displace an earlier DEMONSTRATED violated. Evidence may outrank an assertion,
+    not the reverse. And a later demonstrated verdict still supersedes both."""
+    from datetime import datetime, timezone as tz
+
+    early = datetime(2026, 1, 1, tzinfo=tz.utc)
+    late = datetime(2099, 1, 1, tzinfo=tz.utc)
+    demonstrated = ChainOutcome(workflow="w", status=VIOLATED, observed_at=early, basis=comp.BASIS_DEMONSTRATED)
+    asserted = ChainOutcome(workflow="w", status=HELD, observed_at=late, basis=comp.BASIS_ATTESTED)
+    for order in ([demonstrated, asserted], [asserted, demonstrated]):
+        result = compose(order)
+        assert result.decision == comp.NOT_RECOMMENDED
+        assert result.census[VIOLATED] == 1
+        assert result.superseded == 0
+
+    rerun = ChainOutcome(
+        workflow="w", status=HELD, observed_at=datetime(2026, 2, 1, tzinfo=tz.utc), basis=comp.BASIS_DEMONSTRATED
+    )
+    result = compose([demonstrated, asserted, rerun])
+    assert result.census[VIOLATED] == 0
+    assert result.superseded == 1, "the demonstrated re-run displaces the violation; the assertion stands beside it"
+
+    # The other direction is unchanged: a later demonstrated verdict displaces an assertion.
+    earlier_assertion = ChainOutcome(workflow="w", status=VIOLATED, observed_at=early, basis=comp.BASIS_ATTESTED)
+    later_run = ChainOutcome(workflow="w", status=HELD, observed_at=late, basis=comp.BASIS_DEMONSTRATED)
+    result = compose([earlier_assertion, later_run])
+    assert result.census[VIOLATED] == 0
+    assert result.superseded == 1
 
 
 def test_an_outcome_for_a_workflow_nobody_approved_still_counts() -> None:

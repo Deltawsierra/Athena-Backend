@@ -2494,9 +2494,15 @@ class WorkflowChainOutcome(models.Model):
 
     @property
     def rests_on_signed_evidence(self) -> bool:
-        """Whether this row's ``demonstrated`` is backed by a verified envelope.
-        A row that says demonstrated without one was typed in, whatever it says."""
-        return bool(self.outcome_id) and self.envelope is not None
+        """Whether this row's ``demonstrated`` is backed by an envelope that verifies
+        NOW, against the configured keyring, and says what this row says. A row
+        that says demonstrated without one was typed in, whatever it says. See
+        :func:`assurance.observed_outcomes.recorded_outcome_is_authentic`."""
+        from . import observed_outcomes
+
+        return self.basis == self.Basis.DEMONSTRATED and observed_outcomes.recorded_outcome_is_authentic(
+            self, observed_outcomes.trusted_keyring()
+        )
 
     class Meta:
         # Newest first by the instant that matters, with nulls last: an undated

@@ -9,6 +9,7 @@ responses, and the API surfaces structured columns, not raw target material.
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from .change import CHANGE_LABELS, age_days, change_status, is_stale
@@ -563,6 +564,23 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
                 "demonstrated is recorded only from a verified signed outcome; post "
                 "the engine's envelope to chain-outcomes/observed. An operator's own "
                 "record is attested."
+            )
+        return value
+
+    def validate_observed_at(self, value):
+        """An observation cannot be dated after the moment it is recorded.
+
+        Signed ingest already refuses a future ``observed_at``; this route did not,
+        and recency is what decides which outcome stands. A typed-in row dated 2099
+        would be the newest thing ever said about its workflow for seventy years.
+        The same skew allowance as signed ingest, so the two doors agree about what
+        "now" means."""
+        from .observed_outcomes import MAX_CLOCK_SKEW
+
+        if value is not None and value > timezone.now() + MAX_CLOCK_SKEW:
+            raise serializers.ValidationError(
+                f"observed_at {value.isoformat()} is in the future; an outcome is "
+                "recorded after it is observed, not before"
             )
         return value
 

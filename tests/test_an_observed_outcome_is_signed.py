@@ -25,7 +25,7 @@ from rest_framework.test import APIClient
 from assurance import composition as comp
 from assurance import observed_outcomes
 from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
-from assurance.workflow_chains import composition_for
+from assurance.workflow_chains import composition_for, composition_signal
 
 pytestmark = pytest.mark.django_db
 
@@ -294,7 +294,265 @@ def test_a_typed_in_held_cannot_make_a_workflow_exercised_and_a_signed_one_can()
     typed = composition_for(dep)
     assert typed.workflows_unexercised == 1
     assert "refund-over-limit" in typed.unexercised
+    # And it is not READY: the approved workflow counts as never having reported.
+    assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE
 
     assert _client().post(_url(dep), _signed(dep), format="json").status_code == 201
     signed = composition_for(dep)
     assert signed.workflows_unexercised == 0
+    assert composition_signal(dep) == comp.READY
+
+
+# ------------------------------------------------ what a recorded row rests on
+
+
+def _operator_url(dep):
+    return f"/api/assurance/deployments/{dep.uuid}/chain-outcomes/"
+
+
+def _ingested(dep, **kw):
+    assert _client().post(_url(dep), _signed(dep, **kw), format="json").status_code == 201
+    return WorkflowChainOutcome.objects.filter(deployment=dep).order_by("-created_at").first()
+
+
+def _approved(dep, *slugs):
+    for slug in slugs:
+        ApprovedWorkflow.objects.create(deployment=dep, slug=slug, name=slug)
+
+
+def test_a_row_is_demonstrated_only_while_its_envelope_verifies_and_says_what_the_row_says():
+    """Presence of the evidence columns proved nothing: an ORM row with
+    ``envelope={}`` read as a run, and so did a genuine envelope copied from
+    another deployment. Every column the rule reads must be one the signature
+    covers, checked on every read."""
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    row = _ingested(dep)
+    assert row.rests_on_signed_evidence
+    assert composition_signal(dep) == comp.READY
+
+    tampered = {
+        "an empty envelope": {"envelope": {}},
+        "another outcome_id": {"outcome_id": uuid.uuid4().hex},
+        "another workflow": {"workflow": "payout"},
+        "another status": {"status": comp.VIOLATED},
+        "another instant": {"observed_at": row.observed_at - timedelta(seconds=1)},
+        "another engine": {"observer_engine": "athena"},
+        "another key id": {"observer_key_id": "k" * 16},
+        "another digest": {"evidence_digest": "sha256:" + "00" * 32},
+    }
+    for why, change in tampered.items():
+        WorkflowChainOutcome.objects.filter(pk=row.pk).update(**change)
+        reread = WorkflowChainOutcome.objects.get(pk=row.pk)
+        assert not reread.rests_on_signed_evidence, why
+        assert composition_for(dep).basis_census[comp.BASIS_ATTESTED] == 1, why
+        # Restore, so each change is tested alone.
+        WorkflowChainOutcome.objects.filter(pk=row.pk).update(
+            envelope=row.envelope, outcome_id=row.outcome_id, workflow=row.workflow,
+            status=row.status, observed_at=row.observed_at, observer_engine=row.observer_engine,
+            observer_key_id=row.observer_key_id, evidence_digest=row.evidence_digest,
+        )
+    assert WorkflowChainOutcome.objects.get(pk=row.pk).rests_on_signed_evidence
+
+
+def test_a_genuine_envelope_copied_onto_another_deployment_is_not_evidence_there():
+    source, target = _deployment(), _deployment()
+    _approved(target, "refund-over-limit")
+    genuine = _ingested(source)
+    WorkflowChainOutcome.objects.create(
+        deployment=target, workflow=genuine.workflow, status=genuine.status,
+        basis=comp.BASIS_DEMONSTRATED, observed_at=genuine.observed_at,
+        outcome_id=uuid.uuid4().hex, observer_engine=genuine.observer_engine,
+        observer_key_id=genuine.observer_key_id, evidence_digest=genuine.evidence_digest,
+        envelope=genuine.envelope,
+    )
+    copied = WorkflowChainOutcome.objects.get(deployment=target)
+    assert not copied.rests_on_signed_evidence
+    assert composition_signal(target) == comp.NEEDS_MORE_EVIDENCE
+
+
+def test_withdrawing_a_key_withdraws_what_it_vouched_for(tmp_path, monkeypatch):
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert composition_signal(dep) == comp.READY
+
+    only_athena = tmp_path / "rotated.json"
+    only_athena.write_text(json.dumps(
+        [{"engine": "athena", "public_key": base64.b64encode(oc.raw_public_key(ATHENA)).decode()}]
+    ))
+    monkeypatch.setenv(observed_outcomes.KEYRING_ENV, str(only_athena))
+    assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE
+    assert composition_for(dep).basis_census[comp.BASIS_ATTESTED] == 1
+
+    monkeypatch.delenv(observed_outcomes.KEYRING_ENV)
+    assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE, "no keyring: nothing can be shown signed"
+
+
+def test_the_basis_census_reports_a_typed_in_demonstrated_as_attested():
+    """``_basis_of`` reads a demonstrated row with no evidence as ATTESTED -- a
+    person asserted it -- not as unknown. The census is where that shows."""
+    dep = _deployment()
+    WorkflowChainOutcome.objects.create(
+        deployment=dep, workflow="w", status=comp.HELD, basis=comp.BASIS_DEMONSTRATED,
+        observed_at=_now() - timedelta(hours=1),
+    )
+    census = composition_for(dep).basis_census
+    assert census[comp.BASIS_ATTESTED] == 1
+    assert census[comp.BASIS_UNKNOWN] == 0
+    assert census[comp.BASIS_DEMONSTRATED] == 0
+
+
+# ------------------------------------------------ an assertion cannot outrank evidence
+
+
+def test_a_future_dated_typed_in_held_is_refused_and_could_not_hide_a_signed_violation():
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep, status=oc.VIOLATED)
+    assert composition_signal(dep) == comp.NOT_RECOMMENDED
+
+    far = _client().post(
+        _operator_url(dep),
+        {"workflow": "refund-over-limit", "status": comp.HELD, "basis": comp.BASIS_ATTESTED,
+         "observed_at": "2099-01-01T00:00:00Z"},
+        format="json",
+    )
+    assert far.status_code == 400
+    assert "in the future" in json.dumps(far.json())
+
+    # Within the skew allowance it is accepted -- and still does not displace the
+    # signed violation, however much later it is dated.
+    near = _client().post(
+        _operator_url(dep),
+        {"workflow": "refund-over-limit", "status": comp.HELD, "basis": comp.BASIS_ATTESTED,
+         "observed_at": (_now() + timedelta(minutes=1)).isoformat()},
+        format="json",
+    )
+    assert near.status_code == 200, near.content
+    composed = composition_for(dep)
+    assert composed.census[comp.VIOLATED] == 1
+    assert composition_signal(dep) == comp.NOT_RECOMMENDED
+
+
+def test_evidence_fields_posted_to_the_operator_route_are_ignored():
+    dep = _deployment()
+    response = _client().post(
+        _operator_url(dep),
+        {"workflow": "w", "status": comp.HELD, "basis": comp.BASIS_ATTESTED,
+         "outcome_id": uuid.uuid4().hex, "observer_engine": "achilles",
+         "observer_key_id": "k", "evidence_digest": "sha256:" + "ab" * 32},
+        format="json",
+    )
+    assert response.status_code == 200, response.content
+    row = WorkflowChainOutcome.objects.get(deployment=dep)
+    assert row.outcome_id is None
+    assert (row.observer_engine, row.observer_key_id, row.evidence_digest) == ("", "", "")
+    assert not row.rests_on_signed_evidence
+
+
+# ------------------------------------------------ the replay rule's edges
+
+
+def test_the_replay_rule_is_per_deployment_per_workflow_and_admits_the_same_instant():
+    dep, other = _deployment(), _deployment()
+    at = _now() - timedelta(minutes=5)
+    _ingested(dep, workflow="refund-over-limit", observed_at=at)
+
+    # Another deployment's newer outcome is not this one's history.
+    _ingested(other, workflow="refund-over-limit", observed_at=_now() - timedelta(minutes=1))
+    # Nor is another workflow's.
+    _ingested(dep, workflow="payout", observed_at=_now() - timedelta(minutes=1))
+    assert _client().post(
+        _url(dep), _signed(dep, workflow="refund-over-limit", observed_at=at - timedelta(minutes=1)),
+        format="json",
+    ).status_code == 400, "older than this engine's newest for this workflow here"
+    # A second, distinct outcome at the same instant is not older than the newest.
+    same = _client().post(
+        _url(dep), _signed(dep, workflow="refund-over-limit", observed_at=at, status=oc.VIOLATED),
+        format="json",
+    )
+    assert same.status_code == 201, same.content
+    assert composition_for(dep).census[comp.VIOLATED] == 1
+
+
+def test_one_more_than_the_batch_limit_is_refused():
+    dep = _deployment()
+    envelopes = [_signed(dep, workflow=f"w{n}") for n in range(observed_outcomes.BATCH_LIMIT + 1)]
+    response = _client().post(_url(dep), {"envelopes": envelopes}, format="json")
+    assert response.status_code == 400
+    assert str(observed_outcomes.BATCH_LIMIT) in json.dumps(response.json())
+    assert not WorkflowChainOutcome.objects.filter(deployment=dep).exists()
+    exact = _client().post(_url(dep), {"envelopes": envelopes[:-1]}, format="json")
+    assert exact.status_code == 201, exact.content
+
+
+# ------------------------------------------------ refusals, not server errors
+
+
+@pytest.mark.parametrize("content", ["[]", "{}", "[" * 100_000], ids=["empty-list", "object", "nested"])
+def test_an_unusable_keyring_is_a_503_with_a_reason(tmp_path, monkeypatch, content):
+    path = tmp_path / "unusable.json"
+    path.write_text(content)
+    monkeypatch.setenv(observed_outcomes.KEYRING_ENV, str(path))
+    dep = _deployment()
+    response = _client().post(_url(dep), _signed(dep), format="json")
+    assert response.status_code == 503, response.content
+    assert "keyring" in response.json()["error"]
+
+
+def test_a_multipart_body_is_refused_not_a_server_error():
+    dep = _deployment()
+    response = _client().post(_url(dep), {"envelopes": "x"}, format="multipart")
+    assert response.status_code == 415, response.content
+    assert not WorkflowChainOutcome.objects.filter(deployment=dep).exists()
+
+
+def test_a_body_past_djangos_own_cap_still_gets_this_routes_413():
+    from django.conf import settings
+
+    dep = _deployment()
+    too_big = (settings.DATA_UPLOAD_MAX_MEMORY_SIZE or 2_621_440) + 1024
+    body = json.dumps({"envelopes": [], "padding": "x" * too_big})
+    response = _client().post(_url(dep), body, content_type="application/json")
+    assert response.status_code == 413, response.status_code
+
+    exact = json.dumps({"p": "x" * (observed_outcomes.MAX_BODY_BYTES - len(json.dumps({"p": ""})))})
+    assert len(exact) == observed_outcomes.MAX_BODY_BYTES
+    assert _client().post(_url(dep), exact, content_type="application/json").status_code != 413
+
+
+# ------------------------------------------------ the migration
+
+
+def _migration_0032():
+    import importlib
+
+    return importlib.import_module("assurance.migrations.0032_signed_chain_outcomes")
+
+
+def test_the_migration_demotes_typed_in_demonstrated_and_leaves_signed_rows_alone():
+    from django.apps import apps
+
+    dep = _deployment()
+    signed = _ingested(dep)
+    typed = WorkflowChainOutcome.objects.create(
+        deployment=dep, workflow="payout", status=comp.HELD, basis=comp.BASIS_DEMONSTRATED,
+        observed_at=_now() - timedelta(hours=1),
+    )
+    _migration_0032().typed_in_demonstrated_is_attested(apps, None)
+    assert WorkflowChainOutcome.objects.get(pk=typed.pk).basis == comp.BASIS_ATTESTED
+    assert WorkflowChainOutcome.objects.get(pk=signed.pk).basis == comp.BASIS_DEMONSTRATED
+
+
+def test_reversing_the_migration_refuses_while_signed_evidence_exists():
+    from django.apps import apps
+
+    module = _migration_0032()
+    step = next(op for op in module.Migration.operations if op.__class__.__name__ == "RunPython")
+    assert step.reverse_code is module.refuse_to_drop_signed_evidence
+
+    module.refuse_to_drop_signed_evidence(apps, None)  # nothing signed: allowed
+    _ingested(_deployment())
+    with pytest.raises(RuntimeError, match="signed evidence"):
+        module.refuse_to_drop_signed_evidence(apps, None)

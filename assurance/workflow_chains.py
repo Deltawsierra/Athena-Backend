@@ -25,6 +25,7 @@ them in a transaction.
 
 from __future__ import annotations
 
+from . import observed_outcomes
 from .composition import (
     BASIS_ATTESTED,
     BASIS_DEMONSTRATED,
@@ -46,18 +47,21 @@ def read_chain_outcomes(deployment) -> list[ChainOutcome]:
     no input can reach -- and that counter is how a chain exercising an
     unapproved workflow becomes visible at all.
     """
+    # One keyring read for the whole deployment, not one per row.
+    keyring = observed_outcomes.trusted_keyring()
+    deployment_uuid = str(deployment.uuid)
     return [
         ChainOutcome(
             workflow=row.workflow,
             status=row.status,
             observed_at=row.observed_at,
-            basis=_basis_of(row),
+            basis=_basis_of(row, keyring, deployment_uuid),
         )
         for row in deployment.chain_outcomes.all()
     ]
 
 
-def _basis_of(row) -> str:
+def _basis_of(row, keyring, deployment_uuid: str) -> str:
     """The basis the rule may rely on for ``row``.
 
     ``demonstrated`` means a run produced the outcome, and the only evidence of a
@@ -67,7 +71,9 @@ def _basis_of(row) -> str:
     is read as ``attested``: a person asserted it. The column keeps what was
     written; the rule is told what it rests on.
     """
-    if row.basis == BASIS_DEMONSTRATED and not row.rests_on_signed_evidence:
+    if row.basis == BASIS_DEMONSTRATED and not observed_outcomes.recorded_outcome_is_authentic(
+        row, keyring, deployment_uuid=deployment_uuid
+    ):
         return BASIS_ATTESTED
     return row.basis
 

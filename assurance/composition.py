@@ -221,6 +221,44 @@ FLOORS: Mapping[str, str] = {
 }
 
 
+def _floor_of(workflow: str, outcome: ChainOutcome, approved: set[str] | None) -> str | None:
+    """The floor one standing outcome puts under the decision.
+
+    Its status's floor, with ONE addition: a ``held`` on an APPROVED workflow that
+    rests on no demonstrated exercise floors exactly as that workflow would had it
+    never reported at all -- :data:`NOT_DEMONSTRATED`'s floor.
+
+    Without it, a closed approved set whose every chain was typed in composed to
+    READY, and ``composition_decision_signal`` handed that READY to the decision:
+    the deployment was ready on the strength of assertions, with
+    ``workflows_unexercised`` counting every one of them and deciding nothing. An
+    approved workflow is one the deployment says it must be able to do safely; an
+    assertion that it does is not the demonstration READY asks for, and treating
+    it as one would make typing ``held`` a way to skip the run. Typing it now does
+    exactly what not reporting does, which is the honest reading of an outcome no
+    run produced.
+
+    Deliberately NOT applied:
+
+    * to a workflow off the approved list, or with no list at all. There the
+      composition makes no claim about the deployment -- the signal it hands the
+      decision is already ``None`` -- and a floor would make recording an
+      assertion WORSE than recording nothing, a reason to stop recording them.
+    * to any status but ``held``. An asserted violation, gap or thin evidence
+      already carries a floor at least this bad; a claim that something failed is
+      one to act on whoever makes it, which is the conservative direction.
+    """
+    floor = FLOORS.get(outcome.status)
+    if (
+        floor is None
+        and approved is not None
+        and workflow in approved
+        and outcome.basis in UNEXERCISED_BASES
+    ):
+        return FLOORS[NOT_DEMONSTRATED]
+    return floor
+
+
 class UnknownChainBasis(ValueError):
     """A basis outside :data:`CHAIN_BASES`.
 
@@ -403,6 +441,21 @@ def _worse_status(a: str, b: str) -> str:
     return a if _RANK[FLOORS.get(a, READY)] >= _RANK[FLOORS.get(b, READY)] else b
 
 
+def _newest_verdict(attempts: Sequence[ChainOutcome]) -> datetime | None:
+    """The latest instant at which any of ``attempts`` returned a dated verdict."""
+    dated = [
+        attempt.observed_at
+        for attempt in attempts
+        if attempt.observed_at is not None and attempt.status in VERDICTS
+    ]
+    return max(dated) if dated else None
+
+
+def _survives(attempt: ChainOutcome, newest: datetime | None) -> bool:
+    """Is ``attempt`` still standing, given the newest verdict allowed to displace it?"""
+    return attempt.observed_at is None or newest is None or attempt.observed_at >= newest
+
+
 def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome], int]:
     """The outcome that stands for each workflow, and how many a re-run displaced.
 
@@ -455,16 +508,24 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
     standing: dict[str, ChainOutcome] = {}
     superseded = 0
     for workflow, attempts in history.items():
-        dated = [
-            attempt.observed_at
-            for attempt in attempts
-            if attempt.observed_at is not None and attempt.status in VERDICTS
-        ]
-        newest = max(dated) if dated else None
+        # Two newest instants, because what may supersede depends on what is being
+        # superseded. ANY later verdict displaces an outcome no run produced; only a
+        # later DEMONSTRATED verdict displaces one a run did. Without the split, a
+        # typed-in `held` dated after a signed `violated` -- or dated 2099 -- evicted
+        # it: the violation left the census and the deployment read READY, and every
+        # later signed violation was evicted by the same row. An assertion may be
+        # outranked by evidence; it may not outrank it.
+        newest_verdict = _newest_verdict(attempts)
+        newest_demonstrated = _newest_verdict(
+            [attempt for attempt in attempts if attempt.basis == BASIS_DEMONSTRATED]
+        )
         survivors = [
             attempt
             for attempt in attempts
-            if attempt.observed_at is None or newest is None or attempt.observed_at >= newest
+            if _survives(
+                attempt,
+                newest_demonstrated if attempt.basis == BASIS_DEMONSTRATED else newest_verdict,
+            )
         ]
         superseded += len(attempts) - len(survivors)
         status = survivors[0].status
@@ -591,7 +652,7 @@ def compose(
     decision: str | None = None
     deciding: list[str] = []
     for workflow, outcome in standing.items():
-        floor = FLOORS.get(outcome.status)
+        floor = _floor_of(workflow, outcome, approved_set if approved is not None else None)
         if floor is None:
             continue
         if decision is None or _RANK[floor] > _RANK[decision]:
@@ -665,6 +726,16 @@ def explain(composition: Composition) -> str:
         )
     else:
         basis_clause = ""
+    # When an approved workflow's typed-in `held` is what set the floor, the
+    # sentence above names a held workflow as the reason the decision is not ready,
+    # which reads as a contradiction unless it says why.
+    if composition.workflows_expected is not None and composition.workflows_unexercised and composition.deciding:
+        held_clause = (
+            f" An approved workflow whose held rests on no demonstrated exercise"
+            f" counts as {NOT_DEMONSTRATED}: an assertion is not the run READY asks for."
+        )
+    else:
+        held_clause = ""
 
     if not composition.deciding:
         # "THE RULE PLACES", not "this signal says". This function knows
@@ -682,6 +753,7 @@ def explain(composition: Composition) -> str:
             f"deployment at {composition.decision}.{basis_clause}"
         )
     return (
-        f"Across {scope} ({counted}), the worst chain status sets the floor: "
+        f"Across {scope} ({counted}), the worst chain sets the floor: "
         f"{composition.decision}, from {', '.join(composition.deciding)}.{basis_clause}"
+        f"{held_clause}"
     )
