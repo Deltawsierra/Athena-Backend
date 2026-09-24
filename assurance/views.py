@@ -66,7 +66,15 @@ from .models import (
     WorkflowChainOutcome,
 )
 from .chain_registry import ChainBirthRefused, register_birth, registry_posture
-from .receipt import build_assurance_receipt, deployment_receipt
+from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
+
+from .receipt import (
+    NOT_SIGNED_OVER,
+    NOT_SIGNED_OVER_REASON,
+    build_assurance_receipt,
+    deployment_receipt,
+    signable_receipt,
+)
 from .vendor_packet import build_vendor_packet, packet_candidates
 from .workflow_chains import (
     composition_decision_signal,
@@ -533,6 +541,99 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             .get(pk=self.get_object().pk)
         )
         return Response(build_assurance_receipt(deployment))
+
+    @action(detail=True, methods=["get"], url_path="signed-assurance-receipt")
+    def signed_assurance_receipt(self, request, uuid=None):
+        """The Assurance Receipt in a **signed DSSE envelope**, or an honest
+        statement of why it is not signed.
+
+        ``assurance-receipt`` returns the canonical payload and stays exactly as it
+        was for existing callers; this is the signed surface beside it.
+
+        WHAT IS SIGNED is the receipt's signable projection
+        (:func:`assurance.receipt.signable_receipt`), not the payload
+        ``assurance-receipt`` serves. The full payload carries a ``computed_at``
+        wall clock and its own ``signed: false`` self-report, and signing those
+        would produce an envelope whose signed bytes deny their own signature and
+        that differs on every read of an unchanged deployment. Both groups are
+        already outside ``digest``, so the signed copy and the unsigned one carry
+        the SAME digest and are checkably the same assurance state. ``receipt`` in
+        this response is exactly the bytes that were signed -- serving a different
+        document beside an envelope is the mismatch this route exists to prevent --
+        and ``not_signed_over`` names what was left out and why.
+
+        Signed on read, not stored. The projection is deterministic over stable
+        content, so signing at read time yields the same envelope for the same
+        state and there is nothing to go stale. Storing it would buy offline
+        retention and introduce a class of bug this project has spent the quarter
+        removing: a stored signature over an older assurance state, served beside a
+        current receipt, is a signature that vouches for something other than what
+        the reader is looking at.
+
+        FAILS OPEN ABOUT ITS OWN FAILURE, never about the signature. When the
+        engine cannot sign -- unreachable, no key, no keyring -- the response is
+        200 with ``signed: false`` and the engine's own reason, and NO envelope.
+        That is deliberate on both counts: a 500 would make an unsigned receipt
+        indistinguishable from a broken server, and an envelope with an empty
+        signature list would be a receipt that looks signed, which is worse than
+        one that says it is not.
+
+        What a verified signature establishes: this is the assurance state
+        athena-backend recorded, unaltered since the engine signed it. Not that the
+        assessment is correct or the system safe -- the receipt carries a
+        ``needs_more_evidence`` result or a ``vendor_asserted`` claim at its true
+        strength, and a valid signature over a weak claim is a valid signature over
+        a weak claim.
+
+        Verification is the auditor's job and is done OFFLINE, against the keyring
+        the engine publishes, with ``tools/verify_receipt.py``. This route does not
+        verify what it just asked to be signed; a checker that trusted the signer's
+        own report would establish only that the engine agrees with itself.
+        """
+        deployment = (
+            Deployment.objects.prefetch_related(
+                "findings__evidence", "assets__provider__assertions"
+            )
+            .select_related("data_boundary")
+            .get(pk=self.get_object().pk)
+        )
+        payload = signable_receipt(build_assurance_receipt(deployment))
+        # One dict, spread into both branches, so the two answers can never drift
+        # into different shapes. `signed` here is the OUTER, authoritative answer:
+        # the projection deliberately drops the receipt's own `signed` field, and
+        # a reader must have exactly one place to look.
+        base = {
+            "receipt": payload,
+            "not_signed_over": {
+                "fields": list(NOT_SIGNED_OVER),
+                "why": NOT_SIGNED_OVER_REASON,
+            },
+        }
+
+        try:
+            client = CyberEngineClient.from_settings()
+            envelope = client.sign_assurance_receipt(payload)
+        except (EngineError, RuntimeError) as exc:
+            # RuntimeError is from_settings' own refusal when the engine is not
+            # configured at all. Both are "this deployment cannot sign", and the
+            # reader needs to know which -- a missing setting and an engine with no
+            # key are different things to go and fix.
+            return Response({**base, "signed": False, "reason": str(exc), "envelope": None})
+
+        return Response(
+            {
+                **base,
+                "signed": True,
+                "reason": None,
+                "envelope": envelope,
+                "verify": (
+                    "verify offline against the engine's published keyring "
+                    "(GET /api/assurance/keyring) with tools/verify_receipt.py. "
+                    "A keyring taken from the same place as the receipt proves "
+                    "only that they agree with each other."
+                ),
+            }
+        )
 
     @action(detail=True, methods=["get"], url_path="vendor-packet-candidates")
     def vendor_packet_candidates(self, request, uuid=None):

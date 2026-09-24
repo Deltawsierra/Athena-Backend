@@ -155,6 +155,37 @@ class CyberEngineClient:
     # ENGINE ENDPOINTS
     # --------------------------------------------------
 
+    def sign_assurance_receipt(self, receipt: dict) -> dict:
+        """Ask the engine to sign an assurance receipt, returning a DSSE envelope.
+
+        The engine holds the keys and this backend does not -- `assurance.receipt`
+        has said so since it was written, and this is the call that makes the
+        sentence true rather than an explanation of an absence.
+
+        What comes back is an envelope whose signature is bound to the document
+        kind, so it cannot be re-presented as an evidence pack. Verification is the
+        auditor's job and is done offline against the engine's published keyring;
+        this client does not verify, and a caller must not read the envelope's
+        payload as though it had.
+
+        Raises EngineError like every other call here, including when the engine
+        has no key -- it answers 503 and says which. The caller's job is to report
+        the receipt as UNSIGNED with that reason, never to drop the reason and
+        serve a bare receipt that looks like a deliberate choice.
+        """
+        return self._post("/api/assurance/receipt/sign", {"receipt": receipt})
+
+    def assurance_keyring(self) -> dict:
+        """The engine's published public keyring, for an auditor verifying offline.
+
+        Proxied so an operator reading a signed receipt here can reach the keys
+        without a second credential. It remains true that a keyring fetched
+        alongside the artifact it checks proves less than one fetched out of band,
+        and the engine's own response says so in its `caveat`; this passes that
+        through rather than stripping it.
+        """
+        return self._get("/api/assurance/keyring")
+
     def run_scan(self, target: str, engagement_ref: str | None = None) -> dict:
         """
         Run a scan and return its findings.

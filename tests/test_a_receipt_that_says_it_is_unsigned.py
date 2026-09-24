@@ -2,9 +2,16 @@
 
 `assurance.receipt`'s docstring said the receipt is "the canonical signable
 payload ... designed to be signed elsewhere". True, and it read as "signed
-elsewhere". Nothing in the platform signs this object: the engine's Ed25519
-signing covers the evidence-pack manifest, a different artifact in a different
-repository with no path to this one.
+elsewhere". When this was written, nothing in the platform signed this object:
+the engine's Ed25519 signing covered the evidence-pack manifest, a different
+artifact in a different repository with no path to this one.
+
+That path now exists -- the engine signs receipts, and
+``signed-assurance-receipt`` walks it -- but these tests still hold, because the
+route that walks it is a SEPARATE surface. The payload ``assurance-receipt``
+returns is still an unsigned copy and still has to say so; what changed is that
+``unsigned_reason`` now names where the signed copy is instead of saying there
+isn't one.
 
 The reader this receipt is built for is an auditor holding the JSON and nothing
 else, and what they saw was a prominent SHA-256 `digest` with no mention of
