@@ -19,12 +19,15 @@ looking at -- which is the failure mode this whole project exists to remove.
 
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
-from assurance import receipt
+from assurance import receipt, views
 from assurance.models import (
     Asset,
     Deployment,
@@ -98,19 +101,35 @@ def _fetch(dep, user):
 
 class _Signer:
     """An engine that signs. Records what it was handed, because what the backend
-    sends is half of what this route is for."""
+    sends is half of what this route is for.
+
+    It returns an envelope over THAT PAYLOAD. It used to return
+    ``"payload": "eyJ9"`` -- base64 of ``{"}``, not valid JSON and certainly not the
+    receipt -- and all nineteen tests passed, because nothing looked. A fixture that
+    encodes an envelope which does not contain the signed document, in a suite about
+    signing that document, was declaring the route correct for the wrong reason.
+    """
 
     def __init__(self):
         self.signed = None
 
     def sign_assurance_receipt(self, payload):
         self.signed = payload
-        return {
-            "envelope_version": 1,
-            "payloadType": "application/vnd.mythos.assurance-receipt+json",
-            "payload": "eyJ9",
-            "signatures": [{"keyid": "sha256:" + "a" * 32, "sig": "c2ln"}],
-        }
+        return _envelope_over(payload)
+
+
+def _envelope_over(document, *, payload_type=receipt.ASSURANCE_RECEIPT_TYPE, signatures=None):
+    """A well-formed DSSE envelope over ``document``, as the engine returns one."""
+    return {
+        "envelope_version": 1,
+        "payloadType": payload_type,
+        "payload": base64.b64encode(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        ).decode(),
+        "signatures": [{"keyid": "sha256:" + "a" * 32, "sig": "c2ln"}]
+        if signatures is None
+        else signatures,
+    }
 
 
 def _engine(monkeypatch, engine):
@@ -327,7 +346,14 @@ def test_the_signed_bytes_do_not_deny_their_own_signature(monkeypatch):
 
     _fetch(_deployment(_user()), _user("reader"))
 
-    for field in receipt.NOT_SIGNED_OVER:
+    # A LITERAL, not `for field in receipt.NOT_SIGNED_OVER`. That loop iterated the
+    # very constant it was validating, so removing a field from the deny-list
+    # removed it from the assertion too -- and `unsigned_reason` really did survive
+    # being dropped, putting "THIS COPY is unsigned" back inside the signed bytes
+    # with all nineteen tests green. A test that reads its subject as its own oracle
+    # cannot fail.
+    assert set(receipt.NOT_SIGNED_OVER) == {"computed_at", "signed", "signature", "unsigned_reason"}
+    for field in ("computed_at", "signed", "signature", "unsigned_reason"):
         assert field not in signer.signed, f"{field} must not be inside the signed bytes"
 
 
@@ -390,7 +416,17 @@ def test_the_projection_keeps_everything_else():
     """It is a projection, not a rewrite: one dict comprehension over a deny-list,
     so a field added to the receipt tomorrow is signed without anyone remembering
     to add it here."""
-    full = {"a": 1, "digest": "d", "computed_at": "t", "signed": False, "signature": None}
+    full = {
+        "a": 1,
+        "digest": "d",
+        "computed_at": "t",
+        "signed": False,
+        "signature": None,
+        # Present because its absence is what let a shrunken deny-list survive: this
+        # was the one deny-listed field the fixture did not carry, so dropping it
+        # from NOT_SIGNED_OVER changed nothing here.
+        "unsigned_reason": "because",
+    }
     assert receipt.signable_receipt(full) == {"a": 1, "digest": "d"}
 
 
@@ -405,3 +441,143 @@ def test_the_route_is_actually_routed():
     assert resolve(url).func.cls is DeploymentViewSet
     # And it is a different endpoint from the unsigned one, not an alias.
     assert url != reverse("deployment-assurance-receipt", kwargs={"uuid": _UUID})
+
+
+# ------------------------- signed: true meant "the call did not raise" -------
+#
+# An adversarial pass over the merged route found the one field the response tells
+# a reader is authoritative saying `true` for anything the engine handed back. Each
+# case below was measured through the real view before it was closed.
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        ({}, "envelope_version"),
+        ({"envelope_version": 2}, "version 1"),
+        (
+            {
+                "envelope_version": 1,
+                "payloadType": "application/vnd.mythos.evidence-pack+json",
+                "payload": "e30=",
+                "signatures": [{"keyid": "k", "sig": "s"}],
+            },
+            "another document kind",
+        ),
+        ({"error": "lol", "status": "ok"}, "envelope_version"),
+    ],
+    ids=["empty-dict", "wrong-version", "wrong-payload-type", "not-an-envelope"],
+)
+def test_a_thing_that_is_not_an_envelope_is_not_served_as_signed(monkeypatch, answer, expected):
+    class _Hostile:
+        def sign_assurance_receipt(self, payload):
+            return answer
+
+    _engine(monkeypatch, _Hostile())
+    data = _fetch(_deployment(_user()), _user("r")).data
+
+    assert data["signed"] is False
+    assert data["envelope"] is None
+    assert expected in data["reason"]
+    # And the receipt is still there and still correct: this is a missing signature,
+    # not a broken server.
+    assert data["receipt"]["digest"]
+
+
+@pytest.mark.parametrize(
+    "signatures",
+    [[], [{}], [{"keyid": "k"}], [{"sig": "s"}], [{"keyid": "", "sig": "s"}]],
+    ids=["none", "empty-entry", "no-sig", "no-keyid", "blank-keyid"],
+)
+def test_an_envelope_nobody_signed_is_not_signed(monkeypatch, signatures):
+    """The route's own docstring: "an envelope with an empty signature list would be
+    a receipt that looks signed, which is worse than one that says it is not." It
+    served exactly that."""
+
+    class _Unsigned:
+        def sign_assurance_receipt(self, payload):
+            return _envelope_over(payload, signatures=signatures)
+
+    _engine(monkeypatch, _Unsigned())
+    data = _fetch(_deployment(_user()), _user("r")).data
+
+    assert data["signed"] is False
+    assert data["envelope"] is None
+
+
+def test_an_envelope_over_a_different_document_is_refused(monkeypatch):
+    """THE WORST OF THEM. The envelope attested `ready`; the receipt served beside it
+    said `needs_more_evidence`; `signed` said true. A reader is told exactly one
+    place to look, and it pointed at a signature on something else.
+
+    Not covered by "verification is the auditor's job": an auditor checks the
+    envelope, not the receipt printed next to it, so a compromised engine holding a
+    trusted key makes this verify OFFLINE too -- over the forged document.
+    """
+
+    class _Substitutes:
+        def sign_assurance_receipt(self, payload):
+            return _envelope_over({"result": {"decision": "ready"}, "digest": "0" * 64})
+
+    _engine(monkeypatch, _Substitutes())
+    dep = _deployment(_user())
+    data = _fetch(dep, _user("r")).data
+
+    assert data["signed"] is False
+    assert data["envelope"] is None
+    assert "DIFFERENT document" in data["reason"]
+    assert data["receipt"]["result"]["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_a_payload_that_is_not_readable_json_is_refused(monkeypatch):
+    class _Garbage:
+        def sign_assurance_receipt(self, payload):
+            envelope = _envelope_over(payload)
+            envelope["payload"] = base64.b64encode(b"{not json").decode()
+            return envelope
+
+    _engine(monkeypatch, _Garbage())
+    data = _fetch(_deployment(_user()), _user("r")).data
+    assert data["signed"] is False
+    assert "not readable JSON" in data["reason"]
+
+
+def test_the_check_compares_content_and_not_bytes(monkeypatch):
+    """A signer is entitled to re-serialise. The claim worth making is "the envelope
+    contains the document we sent", so an envelope whose JSON differs only in key
+    order and whitespace is accepted -- byte equality would refuse a correct
+    envelope."""
+
+    class _Reserialises:
+        def sign_assurance_receipt(self, payload):
+            envelope = _envelope_over(payload)
+            envelope["payload"] = base64.b64encode(
+                json.dumps(payload, indent=2, sort_keys=False).encode()
+            ).decode()
+            return envelope
+
+    _engine(monkeypatch, _Reserialises())
+    data = _fetch(_deployment(_user()), _user("r")).data
+    assert data["signed"] is True
+    assert data["envelope"] is not None
+
+
+def test_signed_is_still_true_for_an_honest_signer(monkeypatch):
+    """The control. Every case above must not have made the route refuse everything."""
+    signer = _Signer()
+    _engine(monkeypatch, signer)
+    data = _fetch(_deployment(_user()), _user("r")).data
+    assert data["signed"] is True
+    assert data["envelope"]["signatures"]
+    assert json.loads(base64.b64decode(data["envelope"]["payload"])) == data["receipt"]
+
+
+def test_the_response_field_list_follows_the_constant(monkeypatch):
+    """`not_signed_over.fields` must be DERIVED. A literal that happened to equal
+    `list(NOT_SIGNED_OVER)` satisfied the old assertion, so the suite could not tell
+    a derived value from a clone -- and the constant exists precisely so the route
+    and the tests cannot disagree about what was signed."""
+    _engine(monkeypatch, _Signer())
+    monkeypatch.setattr(views, "NOT_SIGNED_OVER", ("computed_at",))
+    data = _fetch(_deployment(_user()), _user("r")).data
+    assert data["not_signed_over"]["fields"] == ["computed_at"]

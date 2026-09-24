@@ -102,6 +102,8 @@ digest recorded before that day still verifies.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 
@@ -910,6 +912,112 @@ def build_assurance_receipt(deployment) -> dict:
         "signature": None,
         "unsigned_reason": UNSIGNED_REASON,
     }
+
+
+#: The DSSE payload type an assurance-receipt envelope must carry. Mirrors
+#: ``engine.evidence.envelope.ASSURANCE_RECEIPT``; kept as a literal rather than
+#: imported, because this backend does not depend on the engine and must not start.
+ASSURANCE_RECEIPT_TYPE = "application/vnd.mythos.assurance-receipt+json"
+
+#: The envelope version this backend knows how to read.
+ENVELOPE_VERSION = 1
+
+
+class NotAnEnvelope(ValueError):
+    """What came back from the signer is not an envelope over the document we sent.
+
+    Raised BEFORE anything is served as signed. Not a verification failure -- this
+    backend holds no keys and deliberately does not verify -- but the weaker check
+    it can make and was not making: is this an envelope at all, does it carry a
+    signature, and does it contain the bytes we asked to have signed.
+    """
+
+
+def envelope_over(document: dict, envelope: object) -> dict:
+    """``envelope``, if it is an envelope over ``document``. Otherwise raise.
+
+    THE ROUTE SERVED ``signed: true`` FOR ANYTHING THE ENGINE RETURNED. Measured,
+    through the real view, against four hostile signers:
+
+        {}                                        -> signed: true, envelope: {}
+        {..., "signatures": []}                   -> signed: true
+        {"error": "lol", "status": "ok"}          -> signed: true
+        an envelope over a DIFFERENT document     -> signed: true, and the
+            envelope attested `ready` while the receipt served beside it said
+            `needs_more_evidence`
+
+    The route's own docstring said an envelope with an empty signature list "would
+    be a receipt that looks signed, which is worse than one that says it is not",
+    and that serving a different document beside an envelope "is the mismatch this
+    route exists to prevent". It prevented only the BACKEND substituting a
+    document; the same mismatch arriving from the engine was served with
+    ``signed: true``.
+
+    "Verification is the auditor's job" does not cover it. A merely buggy engine --
+    a stale cache, the wrong deployment, a proxy answering 200 with an error body --
+    makes ``signed`` true for every reader who trusts the one field the response
+    tells them is authoritative. And a compromised engine holding a trusted key
+    makes the mismatched envelope verify OFFLINE too, over the forged document; the
+    auditor checks the envelope, not the receipt printed beside it.
+
+    What this checks, and what it does not:
+
+    * Shape: ``envelope_version``, the payload type bound into the signed bytes,
+      and at least one signature entry carrying a non-empty ``keyid`` and ``sig``.
+      A signature list that is empty, or entries missing either field, is a
+      document nobody signed.
+    * Containment: the base64 payload decodes to JSON EQUAL to ``document``.
+      Compared as decoded objects rather than as bytes: the claim worth making is
+      "the envelope contains the document we sent", and a signer is entitled to
+      re-serialise it. Byte equality would refuse a correct envelope over a
+      different key order.
+    * NOT the signature. That needs the keyring, and checking it here would make
+      this route the thing it says it is not -- a checker that trusts the signer's
+      own report establishes only that the engine agrees with itself.
+    """
+    if not isinstance(envelope, dict):
+        raise NotAnEnvelope(
+            f"the signer returned {type(envelope).__name__}, not an envelope object"
+        )
+    version = envelope.get("envelope_version")
+    if version != ENVELOPE_VERSION:
+        raise NotAnEnvelope(
+            f"the signer returned envelope_version {version!r}; this backend reads "
+            f"version {ENVELOPE_VERSION}"
+        )
+    payload_type = envelope.get("payloadType")
+    if payload_type != ASSURANCE_RECEIPT_TYPE:
+        raise NotAnEnvelope(
+            f"the signer returned payloadType {payload_type!r}, not "
+            f"{ASSURANCE_RECEIPT_TYPE!r} -- an envelope over another document kind "
+            "is not a signature on this receipt"
+        )
+    signatures = envelope.get("signatures")
+    if not isinstance(signatures, list) or not signatures:
+        raise NotAnEnvelope(
+            "the signer returned an envelope with no signatures, which is a receipt "
+            "that looks signed and is not"
+        )
+    for index, entry in enumerate(signatures):
+        if not isinstance(entry, dict) or not entry.get("keyid") or not entry.get("sig"):
+            raise NotAnEnvelope(
+                f"signature {index} names no key or carries no signature bytes"
+            )
+    raw = envelope.get("payload")
+    if not isinstance(raw, str):
+        raise NotAnEnvelope("the envelope carries no base64 payload to compare")
+    try:
+        inside = json.loads(base64.b64decode(raw, validate=True))
+    except (ValueError, binascii.Error) as unreadable:
+        raise NotAnEnvelope(
+            f"the envelope's payload is not readable JSON: {unreadable.__class__.__name__}"
+        ) from unreadable
+    if inside != document:
+        raise NotAnEnvelope(
+            "the envelope is over a DIFFERENT document than the one sent to be "
+            "signed, so the signature does not attest this receipt"
+        )
+    return envelope
 
 
 def signable_receipt(receipt: dict) -> dict:
