@@ -313,10 +313,10 @@ def test_an_engine_timeout_still_leaves_a_record_of_the_attempt(factory, analyst
     the engine ran live-fire tests against a customer and the platform kept no
     record of who authorised it.
     """
-    from ai_engine.services.cyberengine_client import EngineError
+    from ai_engine.services.cyberengine_client import ENGINE_UNREACHABLE, EngineError
 
     engine = mock.Mock()
-    engine.run_scan.side_effect = EngineError("Read timed out")
+    engine.run_scan.side_effect = EngineError("Read timed out", kind=ENGINE_UNREACHABLE)
 
     response = scan_through(factory, analyst, engagement, engine)
 

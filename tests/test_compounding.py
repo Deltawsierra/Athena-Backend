@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from ai_engine.services.cyberengine_client import EngineError
+from ai_engine.services.cyberengine_client import ENGINE_UNREACHABLE, EngineError
 from pentest import views
 from pentest.models import Engagement, PentestScan
 
@@ -110,7 +110,7 @@ def test_an_engine_that_never_answers_leaves_a_failed_row_not_a_pending_one(
     so it must be closed out on every path back.
     """
     engine = mock.Mock()
-    engine.run_scan.side_effect = EngineError("Read timed out")
+    engine.run_scan.side_effect = EngineError("Read timed out", kind=ENGINE_UNREACHABLE)
 
     response = launch(
         factory, analyst,
@@ -166,7 +166,7 @@ def test_a_mixed_burst_answers_each_arm_the_way_it_would_alone(factory, analyst,
     def run_scan(_url, **_kwargs):
         mode = getattr(behaviour, "mode", "ok")
         if mode == "timeout":
-            raise EngineError("Read timed out")
+            raise EngineError("Read timed out", kind=ENGINE_UNREACHABLE)
         if mode == "refuse":
             return {"results": [{"type": "error", "message": "Refused by egress policy"}]}
         return {"results": [{"type": "info"}]}

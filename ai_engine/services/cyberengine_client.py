@@ -39,8 +39,59 @@ def _excerpt(text: str) -> str:
     return f"{text[:MAX_BODY_EXCERPT]}... ({len(text)} characters total)"
 
 
+#: What KIND of engine failure this was, as a stable token rather than a sentence.
+#:
+#: The message is for a log. It carries the engine's own words -- its host and port
+#: from ``requests``, up to ``MAX_BODY_EXCERPT`` of whatever body it answered with --
+#: and this file's own comment above already says where such a message ends up: "a
+#: log line, a traceback, and an API error field". The last of those is the problem.
+#: ``assurance`` serves an unsigned receipt whose ``reason`` was ``str(exc)``, so a
+#: deployment whose engine was unreachable published, to every authenticated reader:
+#:
+#:     Engine unreachable: HTTPConnectionPool(host='cyberengine.internal', port=8443)
+#:     ... Failed to resolve 'cyberengine.internal'
+#:
+#: and a 500 from the engine published up to 500 characters of its traceback --
+#: source paths, a key path, an upstream address. None of that is the reader's
+#: business and none of it was ever on the signed route.
+#:
+#: So a caller that must TELL a reader what happened reads these instead. They carry
+#: no text the engine chose.
+ENGINE_UNREACHABLE = "unreachable"
+ENGINE_REFUSED = "refused"
+ENGINE_UNREADABLE = "unreadable"
+ENGINE_RUN_FAILED = "run_failed"
+ENGINE_STILL_RUNNING = "still_running"
+
+ENGINE_FAILURE_KINDS = (
+    ENGINE_UNREACHABLE,
+    ENGINE_REFUSED,
+    ENGINE_UNREADABLE,
+    ENGINE_RUN_FAILED,
+    ENGINE_STILL_RUNNING,
+)
+
+
 class EngineError(Exception):
-    pass
+    """A call to the engine did not produce an answer this process can use.
+
+    ``kind`` is one of :data:`ENGINE_FAILURE_KINDS` and ``status`` is the engine's
+    HTTP status where there was one. Both are structured so a caller can describe
+    the failure without quoting the message -- see the note above
+    :data:`ENGINE_UNREACHABLE`.
+
+    ``kind`` has no default. A default would be taken by every raise site nobody
+    updated, and the value of the field is that it is always the right one: a caller
+    branching on a kind that silently means "some other failure" is back to reading
+    the message.
+    """
+
+    def __init__(self, message: str, *, kind: str, status: int | None = None) -> None:
+        super().__init__(message)
+        if kind not in ENGINE_FAILURE_KINDS:
+            raise ValueError(f"unknown engine failure kind {kind!r}")
+        self.kind = kind
+        self.status = status
 
 
 class ScanStillRunning(EngineError):
@@ -53,7 +104,7 @@ class ScanStillRunning(EngineError):
     """
 
     def __init__(self, message: str, run_id: str):
-        super().__init__(message)
+        super().__init__(message, kind=ENGINE_STILL_RUNNING)
         self.run_id = run_id
 
 
@@ -106,13 +157,17 @@ class CyberEngineClient:
         except ValueError as exc:
             raise EngineError(
                 f"Engine returned a body that is not JSON from {path} "
-                f"(status {resp.status_code}): {_excerpt(resp.text)}"
+                f"(status {resp.status_code}): {_excerpt(resp.text)}",
+                kind=ENGINE_UNREADABLE,
+                status=resp.status_code,
             ) from exc
 
         if not isinstance(body, dict):
             raise EngineError(
                 f"Engine returned {type(body).__name__}, not an object, from "
-                f"{path} (status {resp.status_code}): {_excerpt(resp.text)}"
+                f"{path} (status {resp.status_code}): {_excerpt(resp.text)}",
+                kind=ENGINE_UNREADABLE,
+                status=resp.status_code,
             )
 
         return body
@@ -123,10 +178,14 @@ class CyberEngineClient:
                 f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT
             )
         except requests.RequestException as e:
-            raise EngineError(f"Engine unreachable: {e}") from e
+            raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
         if not (200 <= resp.status_code < 300):
-            raise EngineError(f"Engine error {resp.status_code}: {_excerpt(resp.text)}")
+            raise EngineError(
+                f"Engine error {resp.status_code}: {_excerpt(resp.text)}",
+                kind=ENGINE_REFUSED,
+                status=resp.status_code,
+            )
 
         return self._read_json(resp, path)
 
@@ -142,11 +201,13 @@ class CyberEngineClient:
                 timeout=ENGINE_TIMEOUT,
             )
         except requests.RequestException as e:
-            raise EngineError(f"Engine unreachable: {e}") from e
+            raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
         if not (200 <= resp.status_code < 300):
             raise EngineError(
-                f"Engine error {resp.status_code}: {_excerpt(resp.text)}"
+                f"Engine error {resp.status_code}: {_excerpt(resp.text)}",
+                kind=ENGINE_REFUSED,
+                status=resp.status_code,
             )
 
         return self._read_json(resp, path)
@@ -229,7 +290,8 @@ class CyberEngineClient:
                     return status.get("result") or {}
                 raise EngineError(
                     f"Scan {status.get('state')}: "
-                    f"{status.get('reason') or (status.get('result') or {}).get('error') or 'no reason given'}"
+                    f"{status.get('reason') or (status.get('result') or {}).get('error') or 'no reason given'}",
+                    kind=ENGINE_RUN_FAILED,
                 )
 
             if time.monotonic() >= deadline:
@@ -281,11 +343,13 @@ class CyberEngineClient:
                 timeout=30,
             )
         except requests.RequestException as e:
-            raise EngineError(f"Engine unreachable: {e}") from e
+            raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
         if not (200 <= resp.status_code < 300):
             raise EngineError(
-                f"Engine error {resp.status_code}: {_excerpt(resp.text)}"
+                f"Engine error {resp.status_code}: {_excerpt(resp.text)}",
+                kind=ENGINE_REFUSED,
+                status=resp.status_code,
             )
 
         return self._read_json(resp, "/api/defend-log/file")

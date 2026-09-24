@@ -25,7 +25,7 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from ai_engine.services import preflight
-from ai_engine.services.cyberengine_client import EngineError
+from ai_engine.services.cyberengine_client import ENGINE_REFUSED, EngineError
 from assurance.models import Asset, Deployment
 
 pytestmark = pytest.mark.django_db
@@ -283,7 +283,7 @@ def test_an_engine_that_cannot_be_asked_is_unobservable_not_unchanged():
     look" must never read as "we looked and it was fine"."""
     dep = _deployment()
     _serving(dep)
-    client = _client(raises=EngineError("host not on the engine allowlist"))
+    client = _client(raises=EngineError("host not on the engine allowlist", kind=ENGINE_REFUSED))
 
     report = preflight._attest_routes(client, dep)
 

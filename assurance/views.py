@@ -10,6 +10,7 @@ matching how ``pentest`` already scopes visibility.
 
 from __future__ import annotations
 
+import logging
 import uuid as uuidlib
 
 from django.contrib.auth import get_user_model
@@ -76,6 +77,7 @@ from .receipt import (
     deployment_receipt,
     envelope_over,
     signable_receipt,
+    unsigned_reason_for,
 )
 from .vendor_packet import build_vendor_packet, packet_candidates
 from .workflow_chains import (
@@ -500,8 +502,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 fresh = Deployment.objects.get(pk=deployment_pk)
                 dispatch_for_blocking_decision(fresh)
             except Exception:  # dispatch must never break a recompute
-                import logging
-
                 logging.getLogger(__name__).exception(
                     "blocking-decision dispatch failed for deployment %s", deployment_pk
                 )
@@ -643,7 +643,27 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             # condition that the call did not raise, so an empty dict, a signature
             # list of length zero, and an envelope attesting a DIFFERENT decision
             # were all served as signed. See `envelope_over`.
-            return Response({**base, "signed": False, "reason": str(exc), "envelope": None})
+            # `str(exc)` used to go straight into `reason`. An EngineError message
+            # carries the engine's own words -- reproduced against an unresolvable
+            # host, it read:
+            #
+            #     Engine unreachable: HTTPConnectionPool(host='cyberengine.internal',
+            #     port=8443) ... Failed to resolve 'cyberengine.internal'
+            #
+            # and a 500 from the engine carried up to 500 characters of its body:
+            # source paths, a key path, an upstream address. This route is
+            # IsAuthenticated, so that went to every reader, and none of it was ever
+            # on the signed route. The message belongs in the log; the reason is said
+            # in our own words. See `unsigned_reason_for`.
+            logging.getLogger(__name__).warning(
+                "assurance receipt for deployment %s could not be signed (%s): %s",
+                deployment.uuid,
+                type(exc).__name__,
+                exc,
+            )
+            return Response(
+                {**base, "signed": False, "reason": unsigned_reason_for(exc), "envelope": None}
+            )
 
         return Response(
             {

@@ -26,7 +26,12 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
+from ai_engine.services.cyberengine_client import (
+    ENGINE_REFUSED,
+    ENGINE_UNREACHABLE,
+    CyberEngineClient,
+    EngineError,
+)
 from assurance import receipt, views
 from assurance.models import (
     Asset,
@@ -183,18 +188,31 @@ def test_the_response_says_how_to_verify_and_that_it_is_not_self_verified(monkey
 @pytest.mark.parametrize(
     "boom,expected",
     [
-        (EngineError("Engine unreachable: timed out"), "unreachable"),
-        (EngineError("Engine error 503: no signing key"), "no signing key"),
+        (
+            EngineError("Engine unreachable: timed out", kind=ENGINE_UNREACHABLE),
+            "could not be reached",
+        ),
+        (
+            EngineError("Engine error 503: no signing key", kind=ENGINE_REFUSED, status=503),
+            "refused to sign",
+        ),
         (RuntimeError("CYBERENGINE_URL is not configured"), "not configured"),
     ],
-    ids=["unreachable", "no-key", "not-configured"],
+    ids=["unreachable", "refused", "not-configured"],
 )
 def test_an_engine_that_cannot_sign_yields_an_unsigned_receipt_and_the_reason(
     monkeypatch, boom, expected
 ):
     """Three different failures, three different reasons, and NO envelope in any of
-    them. A missing setting and an engine with no key are different things to go
-    and fix, and collapsing them would send a reader to the wrong place."""
+    them. A missing setting and an engine that refused are different things to go
+    and fix, and collapsing them would send a reader to the wrong place.
+
+    The engine-side reasons are this service's words now, keyed off the failure
+    KIND. The second case used to assert ``"no signing key" in reason`` -- the
+    engine's own body text, quoted through ``str(exc)`` into the response. That
+    assertion is what pinned the leak in place, so it is gone rather than loosened,
+    and the paragraph below tests what replaced it.
+    """
 
     class _Broken:
         def sign_assurance_receipt(self, payload):
@@ -581,3 +599,212 @@ def test_the_response_field_list_follows_the_constant(monkeypatch):
     monkeypatch.setattr(views, "NOT_SIGNED_OVER", ("computed_at",))
     data = _fetch(_deployment(_user()), _user("r")).data
     assert data["not_signed_over"]["fields"] == ["computed_at"]
+
+
+# ------------------------------------------- the reason must not quote the engine
+
+
+#: An EngineError message shaped like the real ones. `requests` puts the host and
+#: port in for an unreachable engine, and `_excerpt` puts up to MAX_BODY_EXCERPT
+#: characters of the engine's own body in for a non-2xx.
+_LEAKY_UNREACHABLE = (
+    "Engine unreachable: HTTPConnectionPool(host='cyberengine.internal', port=8443): "
+    "Max retries exceeded with url: /api/assurance/sign (Caused by "
+    "NameResolutionError(\"Failed to resolve 'cyberengine.internal'\"))"
+)
+_LEAKY_BODY = (
+    "Engine error 500: Traceback (most recent call last):\n"
+    '  File "/srv/cyberengine/signer.py", line 88, in sign\n'
+    "    key = load(os.environ['OPERATOR_KEY_PATH'])  # /etc/athena/operator.pem\n"
+    "FileNotFoundError: /etc/athena/operator.pem\nupstream: 10.4.2.19:9000\n"
+)
+
+#: Every substring that must not appear in a response served to a reader.
+_SECRETS = (
+    "cyberengine.internal",
+    "8443",
+    "HTTPConnectionPool",
+    "/srv/cyberengine/signer.py",
+    "/etc/athena/operator.pem",
+    "OPERATOR_KEY_PATH",
+    "10.4.2.19",
+    "Traceback",
+)
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        EngineError(_LEAKY_UNREACHABLE, kind=ENGINE_UNREACHABLE),
+        EngineError(_LEAKY_BODY, kind=ENGINE_REFUSED, status=500),
+    ],
+    ids=["unreachable", "refused-with-a-traceback"],
+)
+def test_the_engines_own_words_do_not_reach_the_reader(monkeypatch, boom):
+    """This route is IsAuthenticated, and `reason` was `str(exc)`.
+
+    So every authenticated reader of an unsigned receipt was served the engine's
+    internal hostname and port, and for a non-2xx up to 500 characters of whatever
+    body it answered with -- source paths, a key path, an upstream address. None of
+    it was ever on the signed route, and none of it is the reader's business.
+
+    Asserted over the WHOLE serialized response rather than over `reason` alone: the
+    point is that this text does not leave the process by this door, and a future
+    field carrying it would satisfy a check that only read `reason`.
+    """
+
+    class _Broken:
+        def sign_assurance_receipt(self, payload):
+            raise boom
+
+    _engine(monkeypatch, _Broken())
+    data = _fetch(_deployment(_user()), _user("reader")).data
+
+    served = json.dumps(data, default=str)
+    leaked = [secret for secret in _SECRETS if secret in served]
+    assert not leaked, f"the engine's own words reached the reader: {leaked}"
+
+    # ...and the reader is still told something they can act on.
+    assert data["signed"] is False
+    assert "unsigned" in data["reason"]
+    assert data["receipt"]["digest"]
+
+
+def test_the_engines_message_is_logged_even_though_it_is_not_served(monkeypatch, caplog):
+    """Withheld from the reader, not discarded. An operator debugging an unsigned
+    receipt needs the engine's address and its body; the difference is who sees it.
+
+    Without this, "do not publish the message" and "lose the message" are the same
+    change, and the second makes the failure harder to fix than before."""
+
+    class _Broken:
+        def sign_assurance_receipt(self, payload):
+            raise EngineError(_LEAKY_UNREACHABLE, kind=ENGINE_UNREACHABLE)
+
+    _engine(monkeypatch, _Broken())
+    with caplog.at_level("WARNING", logger="assurance.views"):
+        _fetch(_deployment(_user()), _user("reader"))
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "cyberengine.internal" in logged, "the operator needs the engine's address"
+    assert "could not be signed" in logged
+
+
+def test_the_status_travels_but_the_body_does_not(monkeypatch):
+    """A status code is the engine's ANSWER, not its contents: 503 and 500 send an
+    operator to different places and neither is a secret. The body is different --
+    it is whatever that engine chose to write."""
+
+    class _Broken:
+        def sign_assurance_receipt(self, payload):
+            raise EngineError(_LEAKY_BODY, kind=ENGINE_REFUSED, status=503)
+
+    _engine(monkeypatch, _Broken())
+    data = _fetch(_deployment(_user()), _user("reader")).data
+
+    assert "503" in data["reason"]
+    assert "Traceback" not in data["reason"]
+
+
+def test_a_failure_kind_nobody_wrote_a_reason_for_does_not_fall_back_to_the_message():
+    """The hazard the mapping introduces: a NEW kind added to the client with no
+    reason written here, falling through to `str(exc)` and reopening the leak. The
+    fallback is ours and says plainly that it could not be more specific."""
+    from ai_engine.services import cyberengine_client
+    from assurance.receipt import unsigned_reason_for
+
+    exc = EngineError(_LEAKY_UNREACHABLE, kind=ENGINE_UNREACHABLE)
+    # A kind the mapping does not know. Set after construction because the
+    # constructor refuses one it does not recognise -- which is the point of the
+    # test below; this one asks what happens if a future kind gets past it.
+    exc.kind = "a_kind_added_later"
+
+    reason = unsigned_reason_for(exc)
+
+    assert "cyberengine.internal" not in reason
+    assert "could not classify" in reason
+    assert cyberengine_client.ENGINE_UNREACHABLE  # the real constants still exist
+
+
+def test_an_unknown_kind_is_refused_at_construction_rather_than_at_publication():
+    """Better still: the client cannot raise an unknown kind in the first place.
+    The test above covers a kind smuggled past that check; this covers the check."""
+    with pytest.raises(ValueError, match="unknown engine failure kind"):
+        EngineError("boom", kind="not-a-kind")
+
+
+def test_kind_is_required_and_has_no_default():
+    """The reasoning behind that, asserted rather than only written down.
+
+    A default would be taken by every raise site nobody updated, and the value of the
+    field is that it is always the RIGHT one -- a caller branching on a kind that
+    silently means "some other failure" is back to reading the message, which is the
+    leak. Mutating the signature to ``kind: str = "refused"`` passed the whole suite
+    before this test existed: a new raise site would then quietly claim the engine
+    had refused when it had not.
+    """
+    with pytest.raises(TypeError, match="kind"):
+        EngineError("boom")
+
+
+@pytest.mark.parametrize(
+    "call,expected_kind,expected_status",
+    [
+        ("_get", ENGINE_REFUSED, 503),
+        ("_post", ENGINE_REFUSED, 503),
+    ],
+)
+def test_a_refusing_engine_is_classified_with_its_status(
+    monkeypatch, call, expected_kind, expected_status
+):
+    """Both halves at every raise site, not just at one.
+
+    Mutating all three refused sites to drop ``status=resp.status_code`` passed the
+    suite: only ``unsigned_reason_for`` was ever asked about a status, and it was
+    handed one by a hand-built exception. Nothing checked that the CLIENT records it,
+    so the status could stop travelling at the source with the reason-formatting test
+    still green.
+    """
+    import requests
+
+    from ai_engine.services import cyberengine_client
+
+    class _Resp:
+        status_code = expected_status
+        text = "the engine's own body, which must not travel"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
+    client = cyberengine_client.CyberEngineClient("http://engine", "key")
+
+    with pytest.raises(EngineError) as raised:
+        getattr(client, call)("/api/x") if call == "_get" else getattr(client, call)("/api/x", {})
+
+    assert raised.value.kind == expected_kind
+    assert raised.value.status == expected_status
+
+
+def test_an_unreachable_engine_is_classified_unreachable_at_every_call(monkeypatch):
+    """And not as "refused". Mutating all three unreachable sites to ENGINE_REFUSED
+    passed the suite, which would tell a reader the engine had answered and declined
+    when it was never reached -- two different things to go and fix, which is the
+    distinction the kinds exist to carry."""
+    import requests
+
+    from ai_engine.services import cyberengine_client
+
+    def _boom(*args, **kwargs):
+        raise requests.RequestException("no route to host")
+
+    monkeypatch.setattr(requests, "get", _boom)
+    monkeypatch.setattr(requests, "post", _boom)
+    client = cyberengine_client.CyberEngineClient("http://engine", "key")
+
+    for attempt in (lambda: client._get("/api/x"), lambda: client._post("/api/x", {})):
+        with pytest.raises(EngineError) as raised:
+            attempt()
+        assert raised.value.kind == ENGINE_UNREACHABLE
+        assert raised.value.status is None

@@ -109,6 +109,14 @@ import json
 
 from django.utils import timezone
 
+from ai_engine.services.cyberengine_client import (
+    ENGINE_REFUSED,
+    ENGINE_RUN_FAILED,
+    ENGINE_STILL_RUNNING,
+    ENGINE_UNREACHABLE,
+    ENGINE_UNREADABLE,
+)
+
 ALGORITHM = "sha256"
 
 #: Why every receipt this module emits is unsigned, in the payload rather than only
@@ -931,6 +939,86 @@ class NotAnEnvelope(ValueError):
     it can make and was not making: is this an envelope at all, does it carry a
     signature, and does it contain the bytes we asked to have signed.
     """
+
+
+#: What a reader is told when the engine could not be reached or refused, keyed by
+#: the failure kind the client records. Our words, not the engine's.
+#:
+#: Each one says what happened and where to go, which is what the route's own
+#: docstring asks of a reason: "a missing setting and an engine with no key are
+#: different things to go and fix". What it does NOT do is quote the engine. An
+#: `EngineError` message carries the engine's host and port straight out of
+#: `requests`, and for a non-2xx up to `MAX_BODY_EXCERPT` characters of whatever
+#: body it answered with -- reproduced against an unresolvable host and a
+#: traceback body, that was an internal hostname, a port, a source path, a key
+#: path and an upstream address, served to every authenticated reader of an
+#: unsigned receipt. The signed route never exposed any of it.
+_ENGINE_REASONS = {
+    ENGINE_UNREACHABLE: (
+        "the signing engine could not be reached, so this receipt is unsigned. That "
+        "is an environment fact, not a defect in the receipt: check that the engine "
+        "is running and that CYBERENGINE_URL points at it. The engine's own error, "
+        "including its address, is in this service's log and deliberately not here."
+    ),
+    ENGINE_REFUSED: (
+        "the signing engine was reached and refused to sign, so this receipt is "
+        "unsigned. Its status is named at the end of this sentence; what it said is in "
+        "this service's log, because an engine's response body is not this reader's business."
+    ),
+    ENGINE_UNREADABLE: (
+        "the signing engine answered with something this service could not read as "
+        "a signing response, so this receipt is unsigned. The body it sent is in "
+        "this service's log."
+    ),
+    ENGINE_RUN_FAILED: (
+        "the signing engine reported that the operation failed, so this receipt is "
+        "unsigned. What it reported is in this service's log."
+    ),
+    ENGINE_STILL_RUNNING: (
+        "the signing engine had not finished when this service stopped waiting, so "
+        "this receipt is unsigned. Ask again; nothing is lost."
+    ),
+}
+
+#: The reason for an engine failure whose kind this mapping does not know. A NEW kind
+#: added to the client must not fall through to the engine's own message, which is
+#: the defect this function exists to fix -- so the fallback is ours too, and says
+#: plainly that it cannot be more specific.
+_UNKNOWN_ENGINE_REASON = (
+    "the signing engine did not produce a signature, so this receipt is unsigned. "
+    "This service could not classify the failure any further; it is in the log."
+)
+
+
+def unsigned_reason_for(exc: BaseException) -> str:
+    """Why a receipt is unsigned, in words this service chose.
+
+    Three kinds of failure reach here and the caller needs to tell them apart:
+
+    * ``RuntimeError`` -- ``CyberEngineClient.from_settings`` refusing, because this
+      deployment is not configured with an engine at all. Passed through verbatim:
+      the message names OUR setting, which is exactly what the reader must go and
+      fix, and there is no engine in it to leak.
+    * :class:`NotAnEnvelope` -- the engine answered and the answer is not an envelope
+      over the document we sent. Also verbatim, and also ours: these messages say
+      things like "a DIFFERENT document" and "not readable JSON", which are this
+      service's own findings about the answer, not the answer's text.
+    * ``EngineError`` -- the engine could not be reached, refused, or answered
+      something unusable. The message is the engine's and does not travel; the KIND
+      does, through :data:`_ENGINE_REASONS`.
+
+    An exception of some fourth type is possible only if a caller widens its
+    ``except``, and it gets the unknown-kind reason rather than ``str(exc)``: a
+    function whose whole purpose is not to publish an exception's text must not have
+    a branch that publishes an exception's text.
+    """
+    kind = getattr(exc, "kind", None)
+    if kind is None:
+        # Not an EngineError. Ours to publish, and the informative one.
+        return str(exc)
+    reason = _ENGINE_REASONS.get(kind, _UNKNOWN_ENGINE_REASON)
+    status = getattr(exc, "status", None)
+    return f"{reason} (engine status {status})" if status is not None else reason
 
 
 def envelope_over(document: dict, envelope: object) -> dict:
