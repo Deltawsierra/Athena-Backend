@@ -599,3 +599,67 @@ def test_the_failure_window_does_not_lose_failures_under_concurrency(middleware)
         thread.join()
 
     assert len(instance._recent_failures) == 16 * 200
+
+
+# ---------------------------------------------------------------------------
+# The text fallback, which runs before authentication on every route
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("[" * (64 * 1024), id="brackets"),
+        pytest.param("[" * (32 * 1024) + "]" * (32 * 1024), id="nested-past-the-parser"),
+        pytest.param(("token" * 20_000)[: 64 * 1024], id="sensitive-parts-in-one-run"),
+        pytest.param(("a:" * 40_000)[: 64 * 1024], id="separators"),
+        pytest.param(("apikey:x]" * 10_000)[: 64 * 1024], id="value-stops-on-a-key-char"),
+        pytest.param("password:" + "\n" * (64 * 1024 - 9), id="whitespace-to-backtrack"),
+    ],
+)
+def test_the_text_fallback_is_linear_in_the_body(factory, middleware, body):
+    """A body the JSON path cannot parse fell to one regex with a sensitive-part
+    alternation between two unbounded runs of key characters, a class that
+    includes brackets. Eight kilobytes of `[` held a worker for seven seconds,
+    before authentication. The forwarding cap is 64 KiB; every shape here used to
+    take minutes at that size and must now take well under a second."""
+    import time
+
+    post = engine_says()
+    request = factory.post("/api/pentest/scan/", data=body, content_type="text/plain")
+    started = time.perf_counter()
+    with mock.patch("audit.middleware.requests.post", post):
+        middleware(DEFENDER_MAX_BODY_BYTES=64 * 1024)(request)
+    assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A key may begin where a redacted value stopped, on a key character: the
+        # value class stops at `]`, and `]` is a key character.
+        ("apikey:Token]api-keyv=%s" % SECRET, "apikey: [redacted]]api-keyv: [redacted]"),
+        # A quoted key right after other key characters.
+        ('ab"password": %s' % SECRET, 'ab"password": [redacted]'),
+        # A key after a non-sensitive pair.
+        ("name: bob password: %s" % SECRET, "name: bob password: [redacted]"),
+        # The value runs to the end of the line for a colon.
+        ("Authorization: Bearer %s\nnext" % SECRET, "Authorization: [redacted]\nnext"),
+        # ... and to the next separator for an equals sign.
+        ("api-key=%s&page=2" % SECRET, "api-key: [redacted]&page=2"),
+        # A value that is whitespace before a separator is still what follows the key.
+        ("auth: ,rest", "auth: [redacted],rest"),
+        ("Token=\t", "Token: [redacted]"),
+        # Nothing after the key at all: kept, and nothing invented.
+        ("password:", "password:"),
+        ("password:\n", "password:\n"),
+        # Not a secret.
+        ("name: bob", "name: bob"),
+    ],
+)
+def test_the_text_fallback_redacts_what_the_single_pattern_did(text, expected):
+    """Pinned against the pattern this scan replaced; a differential run of 1.2
+    million generated inputs found no case where the two disagree."""
+    from audit.middleware import _redact_text
+
+    assert _redact_text(text) == expected

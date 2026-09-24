@@ -139,12 +139,71 @@ def _redact_structure(value):
 # "key": value pair, or a bare key=value / key: value pair. The value runs to
 # the end of the line for a colon (so `Authorization: Bearer x` loses the whole
 # credential, not just the word "Bearer") and to the next separator otherwise.
-_SENSITIVE_TEXT = re.compile(
-    r'("?)([A-Za-z0-9_.\[\]-]*(?:'
-    + "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS)
-    + r')[A-Za-z0-9_.\[\]-]*)\1\s*(?::\s*(?:"(?:\\.|[^"\\])*"|[^\r\n,}\]]+)|=\s*(?:"(?:\\.|[^"\\])*"|[^&;\r\n]+))',
-    re.I,
+#
+# A SCAN, not one regex. The single pattern this replaces put a sensitive-part
+# alternation between two unbounded runs of key characters -- a class that
+# includes `[` and `]` -- and could start at every position inside a run. A body
+# of brackets that is not JSON (so the structured path fails) took quadratic time
+# with a large constant: eight kilobytes held a worker for seven seconds, before
+# authentication, on any route. Here a key token may only START where a run of
+# key characters starts, so each run is tried once; whether it names a secret is
+# decided in Python, and the value is matched once, anchored where the key ends.
+_KEY_CHARS = r"A-Za-z0-9_.\[\]-"
+_TEXT_KEY_BODY = r'("?)([' + _KEY_CHARS + r']+)\1\s*([:=])\s*'
+# Anywhere a run of key characters starts ...
+_TEXT_KEY = re.compile(r'("?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)\1\s*([:=])\s*')
+# ... or exactly where the scan resumes, which may be mid-run: a value stops at
+# `]`, and the pattern this replaces let the next key begin on that `]`.
+_TEXT_KEY_HERE = re.compile(_TEXT_KEY_BODY)
+_SENSITIVE_TEXT_PART = re.compile(
+    "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS), re.I
 )
+_TEXT_VALUE = {
+    ":": re.compile(r'"(?:\\.|[^"\\])*"|[^\r\n,}\]]+'),
+    "=": re.compile(r'"(?:\\.|[^"\\])*"|[^&;\r\n]+'),
+}
+
+
+def _text_value(text, key):
+    """The value after a sensitive key, or ``None``.
+
+    Tried where the whitespace after the separator ends, then -- as the pattern
+    this replaces did by backtracking -- at each earlier position back to the
+    separator. Every failed attempt there is at a line break, which fails at its
+    first character, so this stays linear.
+    """
+    pattern = _TEXT_VALUE[key.group(3)]
+    for start in range(key.end(), key.end(3) - 1, -1):
+        value = pattern.match(text, start)
+        if value is not None:
+            return value
+    return None
+
+
+def _redact_text(text):
+    """``text`` with the value after every sensitive ``key:`` / ``key=`` replaced.
+
+    Linear in the length of ``text``: see the note above ``_TEXT_KEY``.
+    """
+    out = []
+    pos = 0
+    while True:
+        key = _TEXT_KEY_HERE.match(text, pos) or _TEXT_KEY.search(text, pos)
+        if key is None:
+            break
+        value = _text_value(text, key) if _SENSITIVE_TEXT_PART.search(key.group(2)) else None
+        if value is None:
+            # Not a secret, or a secret with nothing after it: kept verbatim, and
+            # the scan resumes after the separator, where the next key can start.
+            out.append(text[pos:key.end()])
+            pos = key.end()
+            continue
+        quote = key.group(1)
+        out.append(text[pos:key.start()])
+        out.append(f"{quote}{key.group(2)}{quote}: {REDACTED}")
+        pos = value.end()
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _redact_form(text):
@@ -193,7 +252,7 @@ def redact(text, form=False):
         except (ValueError, TypeError, RecursionError):
             pass
 
-    return _SENSITIVE_TEXT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}: {REDACTED}", text)
+    return _redact_text(text)
 
 
 class DefenderMiddleware:
