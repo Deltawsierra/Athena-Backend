@@ -44,21 +44,61 @@ def _dist_base() -> str | None:
         return None
 
 
-def _imported_file() -> str | None:
-    """Where Python actually loads ``mythos_core`` from, or None.
+def _imported_locations() -> dict[str, str]:
+    """EVERY place mythos_core's code can come from, labelled by how it is reached.
 
     A real import, because that is the whole point: every other input to this
     guard comes from metadata, and metadata is what a shadowing checkout leaves
-    untouched. Broad except on purpose -- any failure to import means the guard
-    cannot show the pinned core was loaded, which `shadow_complaint` reports
-    rather than swallowing.
+    untouched.
+
+    Checking only ``__file__`` was not enough, and the gap was demonstrated rather
+    than argued. A package object whose ``__file__`` points at the pinned install
+    while its ``__path__`` points elsewhere passes a ``__file__`` check and then
+    loads every SUBMODULE from the other place::
+
+        m = types.ModuleType("mythos_core")
+        m.__file__ = "<pinned>/mythos_core/__init__.py"   # what the guard checked
+        m.__path__ = ["<attacker>/mythos_core"]           # where submodules load
+        sys.modules["mythos_core"] = m
+
+    Measured against the previous guard: ``shadow_complaint`` returned None while
+    ``import mythos_core.http`` loaded the attacker's file. A ``.pth`` file in
+    site-packages does this at interpreter startup, before any conftest runs,
+    which is the realistic delivery for it -- a wheel may ship one.
+
+    So this returns three kinds of location: ``__file__`` as before; every
+    ``__path__`` entry submodule imports will search, which is what catches the
+    forgery and catches it BEFORE any submodule loads; and any submodule already
+    imported when the guard runs, which is the harm itself rather than a route to
+    it.
+
+    Broad except on purpose -- any failure to import means the guard cannot show
+    the pinned core was loaded, which `shadow_complaint` reports rather than
+    swallowing.
     """
     try:
         module = importlib.import_module("mythos_core")
     except BaseException:  # noqa: BLE001 - see docstring
-        return None
-    path = getattr(module, "__file__", None)
-    return str(path) if path else None
+        return {}
+
+    locations: dict[str, str] = {}
+    own_file = getattr(module, "__file__", None)
+    if own_file:
+        locations["mythos_core.__file__"] = str(own_file)
+
+    # A namespace package legitimately has several entries; every one is a place
+    # code can come from, so every one is checked rather than the first.
+    for index, entry in enumerate(getattr(module, "__path__", ()) or ()):
+        locations[f"mythos_core.__path__[{index}]"] = str(entry)
+
+    for name, loaded in sorted(sys.modules.items()):
+        if not name.startswith("mythos_core.") or loaded is None:
+            continue
+        sub_file = getattr(loaded, "__file__", None)
+        if sub_file:
+            locations[f"{name}.__file__"] = str(sub_file)
+
+    return locations
 
 
 def enforce_dependency_pins() -> None:
@@ -117,7 +157,7 @@ def enforce_dependency_pins() -> None:
     # line reads pip's metadata, and a checkout earlier on sys.path satisfies all of
     # them while Python loads something else entirely. This module's own docstring
     # is about "what is actually imported"; nothing in it looked at the import.
-    shadow = shadow_complaint(_imported_file(), found, dist_base=_dist_base())
+    shadow = shadow_complaint(_imported_locations(), found, dist_base=_dist_base())
     if shadow:
         problems.append(shadow)
 

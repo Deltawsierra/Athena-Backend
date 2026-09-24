@@ -248,10 +248,15 @@ def test_the_session_hook_is_silent_when_the_installed_core_is_the_pinned_one(
     # about the pin match.
     monkeypatch.setattr(
         tests_conftest,
-        "_imported_file",
-        lambda: str(
-            pathlib.Path(tests_conftest._dist_base()) / "mythos_core" / "__init__.py"
-        ),
+        "_imported_locations",
+        lambda: {
+            "mythos_core.__file__": str(
+                pathlib.Path(tests_conftest._dist_base()) / "mythos_core" / "__init__.py"
+            ),
+            "mythos_core.__path__[0]": str(
+                pathlib.Path(tests_conftest._dist_base()) / "mythos_core"
+            ),
+        },
     )
 
     assert tests_conftest.enforce_dependency_pins() is None
@@ -324,7 +329,7 @@ def test_a_core_loaded_from_beside_its_metadata_is_the_pinned_one():
     control -- a check that complained here would refuse every normal run."""
     assert (
         shadow_complaint(
-            "/srv/site-packages/mythos_core/__init__.py",
+            {"mythos_core.__file__": "/srv/site-packages/mythos_core/__init__.py"},
             _vcs(),
             dist_base="/srv/site-packages",
         )
@@ -338,7 +343,7 @@ def test_an_editable_install_may_load_from_its_checkout():
     setup and the guard would be turned off in its first week."""
     assert (
         shadow_complaint(
-            "/work/core/src/mythos_core/__init__.py",
+            {"mythos_core.__file__": "/work/core/src/mythos_core/__init__.py"},
             _local("/work/core"),
             dist_base="/srv/site-packages",
         )
@@ -349,7 +354,7 @@ def test_an_editable_install_may_load_from_its_checkout():
 def test_a_core_loaded_from_somewhere_else_entirely_is_a_complaint():
     """The finding. Neither beside the metadata nor inside the recorded checkout."""
     grievance = shadow_complaint(
-        "/tmp/some-other-checkout/src/mythos_core/__init__.py",
+        {"mythos_core.__file__": "/tmp/some-other-checkout/src/mythos_core/__init__.py"},
         _local("/work/core"),
         dist_base="/srv/site-packages",
     )
@@ -366,7 +371,7 @@ def test_a_vcs_url_is_not_offered_as_a_filesystem_candidate():
     `pathlib` resolve it against the CWD -- `./https:/github.com/o/r` -- and a
     module could then be "inside" it by accident of where pytest was run."""
     grievance = shadow_complaint(
-        "/tmp/elsewhere/mythos_core/__init__.py",
+        {"mythos_core.__file__": "/tmp/elsewhere/mythos_core/__init__.py"},
         _vcs(location="https://github.com/o/r"),
         dist_base="/srv/site-packages",
     )
@@ -379,7 +384,7 @@ def test_a_sibling_directory_with_a_shared_prefix_is_not_inside():
     was, and a shadow one directory over would pass as the pinned install."""
     assert (
         shadow_complaint(
-            "/srv/core-evil/src/mythos_core/__init__.py",
+            {"mythos_core.__file__": "/srv/core-evil/src/mythos_core/__init__.py"},
             _local("/srv/core"),
             dist_base=None,
         )
@@ -391,7 +396,7 @@ def test_a_core_that_cannot_be_imported_at_all_is_a_complaint():
     """`None` means the import produced no file. The distribution is recorded as
     installed and the code cannot be shown to have loaded, which is exactly the
     state this module calls a finding rather than a default."""
-    grievance = shadow_complaint(None, _vcs())
+    grievance = shadow_complaint({}, _vcs())
     assert grievance is not None
     assert "import mythos_core" in grievance
 
@@ -402,7 +407,7 @@ def test_nothing_to_compare_against_is_not_a_second_verdict():
     different words would make one problem look like two."""
     assert (
         shadow_complaint(
-            "/anywhere/mythos_core/__init__.py",
+            {"mythos_core.__file__": "/anywhere/mythos_core/__init__.py"},
             _vcs(location="https://github.com/o/r"),
             dist_base=None,
         )
@@ -425,7 +430,7 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
 
     saved = {
         "direct_url": ct._installed_direct_url,
-        "imported_file": ct._imported_file,
+        "imported_locations": ct._imported_locations,
         "dist_base": ct._dist_base,
         "env": os.environ.get("ATHENA_MYTHOS_CORE_PIN_GUARD"),
     }
@@ -435,7 +440,9 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
         f'"commit_id": "{pin}", "requested_revision": "{pin}"}}}}'
     )
     ct._dist_base = lambda: "/srv/site-packages"
-    ct._imported_file = lambda: "/tmp/a-shadow/mythos_core/__init__.py"
+    ct._imported_locations = lambda: {
+        "mythos_core.__file__": "/tmp/a-shadow/mythos_core/__init__.py"
+    }
     try:
         with pytest.raises(pytest.UsageError) as refusal:
             ct.enforce_dependency_pins()
@@ -443,7 +450,7 @@ def test_the_session_hook_catches_a_shadow_the_metadata_cannot_see():
         assert "/tmp/a-shadow/mythos_core/__init__.py" in str(refusal.value)
     finally:
         ct._installed_direct_url = saved["direct_url"]
-        ct._imported_file = saved["imported_file"]
+        ct._imported_locations = saved["imported_locations"]
         ct._dist_base = saved["dist_base"]
         if saved["env"] is not None:
             os.environ["ATHENA_MYTHOS_CORE_PIN_GUARD"] = saved["env"]
@@ -778,3 +785,190 @@ def test_the_guard_does_not_write_to_the_checkout_it_judges():
             text=True,
         ).stdout
         assert listing.startswith("h "), listing
+
+
+# ---------------------------------------------------------------------------
+# The guard checked the front door
+#
+# `shadow_complaint` verified the package's `__file__` and nothing else, while
+# every test in this repo imports SUBMODULES of mythos_core. A package whose
+# `__file__` is the pinned install and whose `__path__` is elsewhere passed, and
+# then loaded each submodule from elsewhere. Found by an adversarial pass against
+# the merged guard and reproduced end to end before being fixed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_path_entry_outside_the_install_is_caught_even_when_the_file_is_right():
+    """THE FINDING. `__file__` is the pinned install; `__path__` is not.
+
+    This is the exact state the old guard passed. Every submodule import would
+    have come from the attacker's directory while the guard reported nothing."""
+    grievance = shadow_complaint(
+        {
+            "mythos_core.__file__": "/srv/site-packages/mythos_core/__init__.py",
+            "mythos_core.__path__[0]": "/tmp/evil/mythos_core",
+        },
+        _vcs(),
+        dist_base="/srv/site-packages",
+    )
+    assert grievance is not None, (
+        "the package's __file__ was right and its __path__ was not, and the "
+        "guard said nothing -- the defect this test exists for"
+    )
+    assert "__path__[0]" in grievance
+    assert "/tmp/evil/mythos_core" in grievance
+    assert "1 of 2" in grievance
+
+
+def test_an_already_imported_submodule_from_elsewhere_is_caught():
+    """A submodule loaded before the guard ran is the harm itself, not a route to
+    it. A `.pth` or an early plugin can import one before pytest reaches conftest."""
+    grievance = shadow_complaint(
+        {
+            "mythos_core.__file__": "/srv/site-packages/mythos_core/__init__.py",
+            "mythos_core.__path__[0]": "/srv/site-packages/mythos_core",
+            "mythos_core.http.__file__": "/tmp/evil/mythos_core/http.py",
+        },
+        _vcs(),
+        dist_base="/srv/site-packages",
+    )
+    assert grievance is not None
+    assert "mythos_core.http.__file__" in grievance
+
+
+def test_every_stray_is_listed_not_just_the_first():
+    """An operator who fixes the one location named and re-runs, only to be told
+    about the next one, learns to distrust the message. All of them, once."""
+    grievance = shadow_complaint(
+        {
+            "mythos_core.__file__": "/tmp/a/mythos_core/__init__.py",
+            "mythos_core.__path__[0]": "/tmp/b/mythos_core",
+            "mythos_core.http.__file__": "/tmp/c/mythos_core/http.py",
+        },
+        _vcs(),
+        dist_base="/srv/site-packages",
+    )
+    assert grievance is not None
+    assert "3 of 3" in grievance
+    for stray in ("/tmp/a/mythos_core", "/tmp/b/mythos_core", "/tmp/c/mythos_core"):
+        assert stray in grievance
+
+
+def test_a_normal_package_with_its_path_beside_its_file_is_silent():
+    """THE CONTROL. An ordinary install has `__path__` pointing at the package
+    directory inside `dist_base`. If that complained, the guard would refuse every
+    normal run and be switched off within a week."""
+    assert (
+        shadow_complaint(
+            {
+                "mythos_core.__file__": "/srv/site-packages/mythos_core/__init__.py",
+                "mythos_core.__path__[0]": "/srv/site-packages/mythos_core",
+                "mythos_core.http.__file__": "/srv/site-packages/mythos_core/http.py",
+            },
+            _vcs(),
+            dist_base="/srv/site-packages",
+        )
+        is None
+    )
+
+
+def test_an_editable_installs_path_and_submodules_are_still_allowed():
+    """The development setup, in full: package, path entry and submodules all
+    inside the recorded checkout."""
+    failsafe = "/work/core/src/mythos_core/failsafe/__init__.py"
+    assert (
+        shadow_complaint(
+            {
+                "mythos_core.__file__": "/work/core/src/mythos_core/__init__.py",
+                "mythos_core.__path__[0]": "/work/core/src/mythos_core",
+                "mythos_core.failsafe.__file__": failsafe,
+            },
+            _local("/work/core"),
+            dist_base="/srv/site-packages",
+        )
+        is None
+    )
+
+
+def test_the_collector_reports_the_path_and_the_loaded_submodules(monkeypatch):
+    """`_imported_locations` must actually gather the three kinds, against a real
+    module object. A collector that returned only `__file__` would leave the check
+    above with nothing to catch."""
+    import sys
+    import types
+
+    package = types.ModuleType("mythos_core")
+    package.__file__ = "/srv/pkg/__init__.py"
+    package.__path__ = ["/srv/pkg", "/tmp/extra"]
+    submodule = types.ModuleType("mythos_core.child")
+    submodule.__file__ = "/tmp/evil/child.py"
+
+    monkeypatch.setitem(sys.modules, "mythos_core", package)
+    monkeypatch.setitem(sys.modules, "mythos_core.child", submodule)
+    found = tests_conftest._imported_locations()
+
+    assert found["mythos_core.__file__"] == "/srv/pkg/__init__.py"
+    assert found["mythos_core.__path__[0]"] == "/srv/pkg"
+    assert found["mythos_core.__path__[1]"] == "/tmp/extra", (
+        "only the first __path__ entry was collected; a namespace package has "
+        "several and every one is a place code comes from"
+    )
+    assert found["mythos_core.child.__file__"] == "/tmp/evil/child.py"
+
+
+def test_a_sibling_package_name_is_not_mistaken_for_a_submodule(monkeypatch):
+    """`mythos_core_extras` is not inside `mythos_core`. Collecting it would make
+    an unrelated package's location a finding against this one."""
+    import sys
+    import types
+
+    package = types.ModuleType("mythos_core")
+    package.__file__ = "/srv/pkg/__init__.py"
+    package.__path__ = ["/srv/pkg"]
+    sibling = types.ModuleType("mythos_core_extras")
+    sibling.__file__ = "/tmp/unrelated/__init__.py"
+
+    monkeypatch.setitem(sys.modules, "mythos_core", package)
+    monkeypatch.setitem(sys.modules, "mythos_core_extras", sibling)
+    found = tests_conftest._imported_locations()
+
+    assert not any("extras" in label for label in found), found
+
+
+def test_the_hook_refuses_a_path_shadow_end_to_end():
+    """Through the real hook, with the pin and the provenance both perfect and the
+    package's own file in the right place -- the shape that passed before."""
+    import os
+
+    from tests.mythos_core_provenance import declared_pin
+
+    ct = tests_conftest
+    pin = declared_pin((ct.ROOT / "requirements.txt").read_text())
+
+    saved = {
+        "direct_url": ct._installed_direct_url,
+        "imported_locations": ct._imported_locations,
+        "dist_base": ct._dist_base,
+        "env": os.environ.get("ATHENA_MYTHOS_CORE_PIN_GUARD"),
+    }
+    os.environ.pop("ATHENA_MYTHOS_CORE_PIN_GUARD", None)
+    ct._installed_direct_url = lambda: (
+        '{"url": "https://h/r", "vcs_info": {"vcs": "git", '
+        f'"commit_id": "{pin}", "requested_revision": "{pin}"}}}}'
+    )
+    ct._dist_base = lambda: "/srv/site-packages"
+    ct._imported_locations = lambda: {
+        "mythos_core.__file__": "/srv/site-packages/mythos_core/__init__.py",
+        "mythos_core.__path__[0]": "/tmp/a-path-shadow/mythos_core",
+    }
+    try:
+        with pytest.raises(pytest.UsageError) as refusal:
+            ct.enforce_dependency_pins()
+        assert "__path__[0]" in str(refusal.value)
+        assert "/tmp/a-path-shadow/mythos_core" in str(refusal.value)
+    finally:
+        ct._installed_direct_url = saved["direct_url"]
+        ct._imported_locations = saved["imported_locations"]
+        ct._dist_base = saved["dist_base"]
+        if saved["env"] is not None:
+            os.environ["ATHENA_MYTHOS_CORE_PIN_GUARD"] = saved["env"]

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Mapping
 import re
 import subprocess
 from dataclasses import dataclass
@@ -329,12 +330,20 @@ def _under(child: str, parent: str) -> bool:
 
 
 def shadow_complaint(
-    module_file: str | None,
+    locations: Mapping[str, str],
     found: Provenance,
     *,
     dist_base: str | None = None,
 ) -> str | None:
     """Why the imported module is not the one the provenance describes, or None.
+
+    ``locations`` is EVERY place mythos_core's code can be reached from, labelled
+    by how it is reached -- its ``__file__``, each ``__path__`` entry submodules
+    will search, and any submodule already imported. See
+    ``conftest._imported_locations`` for why a single ``__file__`` was not enough:
+    a package whose ``__file__`` is the pinned install and whose ``__path__`` is
+    elsewhere passed the old check and then loaded every submodule from elsewhere.
+    Verified, not supposed -- the old guard returned None on exactly that state.
 
     The question the rest of this file never asked. Two places the module may
     legitimately live, and a shadow is in neither:
@@ -352,7 +361,7 @@ def shadow_complaint(
     verdict -- an unestablished provenance is already `complaint`'s finding, and
     reporting it twice in different words would make one problem look like two.
     """
-    if module_file is None:
+    if not locations:
         return (
             "mythos-core is recorded as installed, but `import mythos_core` "
             "does not yield a module with a file on disk, so this run cannot be "
@@ -371,14 +380,26 @@ def shadow_complaint(
     if not candidates:
         return None
 
-    resolved = str(pathlib.Path(module_file).resolve())
-    if any(_under(resolved, candidate) for candidate in candidates):
+    # Every location, not the first. A guard that stopped at the first location
+    # inside a candidate would pass the package root and never look at the
+    # __path__ the submodules actually come from.
+    strays = {
+        label: str(pathlib.Path(where).resolve())
+        for label, where in locations.items()
+        if not any(
+            _under(str(pathlib.Path(where).resolve()), candidate)
+            for candidate in candidates
+        )
+    }
+    if not strays:
         return None
 
+    listed = "; ".join(f"{label} -> {where}" for label, where in sorted(strays.items()))
     return (
         f"pip records mythos-core at {' or '.join(candidates)}, but "
-        f"`import mythos_core` loaded {resolved}, which is inside neither. "
-        "Something earlier on sys.path is shadowing the pinned install -- most "
-        "often a checkout on PYTHONPATH -- so the pin describes one copy of this "
-        "dependency and the tests exercised another."
+        f"{len(strays)} of {len(locations)} places `import mythos_core` can reach "
+        f"code are inside neither -- {listed}. Something is shadowing the pinned "
+        "install -- a checkout on PYTHONPATH, or a .pth that rewrites the "
+        "package's __path__ -- so the pin describes one copy of this dependency "
+        "and the tests exercise another."
     )
