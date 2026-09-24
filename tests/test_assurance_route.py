@@ -106,6 +106,7 @@ def test_a_tool_the_agent_names_but_we_cannot_place_is_an_unresolved_edge():
         "source_kind": Asset.Kind.AGENT,
         "reference": "ghost-tool",
         "mechanism": "tools",
+        "reason": "not_found",
     }
 
 

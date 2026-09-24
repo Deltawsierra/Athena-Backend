@@ -54,18 +54,24 @@ _SALIENT_METADATA_KEYS = (
 )
 
 
-def _salient_metadata(metadata) -> dict:
-    """The salient, non-empty config facts for a component, from its metadata.
-    Only the curated, security-relevant keys — never a timestamp, uuid, or
-    counter — so the descriptor is stable under incidental churn."""
+def _present(metadata, keys) -> dict:
+    """The listed keys a component's metadata carries, with their values.
+
+    Present means present: an empty string, list or mapping is kept, and only a
+    missing key or ``None`` is left out. Readers act on empty values -- a
+    ``tools`` of ``""`` or ``{}`` is reported as a malformed declaration, which
+    lowers the effective-access reading -- so a descriptor that dropped them
+    could not see a change the reading could."""
     if not isinstance(metadata, dict):
         return {}
-    facts: dict = {}
-    for key in _SALIENT_METADATA_KEYS:
-        value = metadata.get(key)
-        if value not in (None, "", [], {}):
-            facts[key] = value
-    return facts
+    return {k: metadata[k] for k in keys if metadata.get(k) is not None}
+
+
+def _salient_metadata(metadata) -> dict:
+    """The salient config facts for a component, from its metadata. Only the
+    curated, security-relevant keys — never a timestamp, uuid, or counter — so the
+    descriptor is stable under incidental churn."""
+    return _present(metadata, _SALIENT_METADATA_KEYS)
 
 
 def _asset_descriptor(asset) -> dict:
@@ -110,6 +116,27 @@ def _provider_descriptor(provider) -> dict:
     }
 
 
+def _distinct_providers(assets, describe) -> list:
+    """Each distinct provider the assets resolve to, described once, in a stable
+    order.
+
+    Keyed by ``(name, kind)``, which is what makes a provider distinct
+    (``Provider`` is unique on the pair). Keying by name alone collapsed an
+    ``openai`` LLM provider and an ``openai`` vector store into whichever came
+    first, so the second one's posture was invisible: it could start training on
+    customer data and no fingerprint moved, while the boundary assessment --
+    which groups by provider row -- read the violation."""
+    seen: dict[tuple[str, str], dict] = {}
+    for asset in assets:
+        provider = getattr(asset, "provider", None)
+        if provider is None:
+            continue
+        key = (provider.name, provider.kind)
+        if key not in seen:
+            seen[key] = describe(provider)
+    return [seen[key] for key in sorted(seen)]
+
+
 def _boundary_descriptor(deployment) -> dict | None:
     """The approved data boundary, None-safe. An undeclared boundary is ``None``
     in the descriptor — the honest "nothing approved", never a fabricated policy —
@@ -139,13 +166,7 @@ def compute_system_fingerprint(deployment) -> str:
         key=lambda d: (d["kind"], d["identifier"], d["name"]),
     )
 
-    # The distinct providers the deployment's assets resolve to, described once.
-    providers_by_name: dict[str, dict] = {}
-    for asset in deployment.assets.all():
-        provider = getattr(asset, "provider", None)
-        if provider is not None and provider.name not in providers_by_name:
-            providers_by_name[provider.name] = _provider_descriptor(provider)
-    providers = [providers_by_name[name] for name in sorted(providers_by_name)]
+    providers = _distinct_providers(deployment.assets.all(), _provider_descriptor)
 
     descriptor = {
         "environment": deployment.environment,
@@ -189,23 +210,34 @@ def compute_system_fingerprint(deployment) -> str:
 # What each family is, and which assessor reads it:
 #
 #   environment          the deployment's environment. Every claim is made in it.
+#   deployment_name      the deployment's name. The effective-access graph names
+#                        its base principal after it, so a rename changes that
+#                        claim's reading (who holds the reach), not only its text.
 #   boundary             the approved data boundary (assurance.boundary).
-#   providers            each provider's identity, region, evidence class and
+#   providers            each distinct provider (by name AND kind): region and
 #                        graded assertions (boundary postures; the BOM's declared
-#                        facts).
-#   asset_identity       each component's kind, name, identifier, classification
-#                        and the provider it resolves to. Every assessor walks it.
+#                        facts). Not the provider row's own evidence_class, which
+#                        no deriver reads.
+#   asset_identity       each component's kind, name, identifier and
+#                        classification. Every assessor walks it.
+#   asset_provider       which provider each component resolves to (the boundary
+#                        groups by it; the BOM and its drift name it). Not read by
+#                        the access graph, so a provider change is not an access
+#                        change.
 #   asset_bom_facts      the metadata the AI-BOM carries per component
 #                        (assurance.bom._COMPONENT_FACT_KEYS).
 #   asset_access         the metadata the effective-access graph follows:
 #                        permissions, tools, server, identity (assurance.access).
 #   declared_components  the customer's declared architecture (bom_drift).
-#   served_route         what actually served (assurance.served_route).
+#
+# The served route is not a family: no claim deriver reads it. It stays in the
+# system fingerprint, which is what a decision is fenced on.
 #
 # A family missing from a claim's list is a change that claim would NOT notice,
 # which is the dangerous direction. It is pinned by a test that mutates every
 # family and requires any change to a claim's derived reading to move that
-# claim's fingerprint -- never the other way round.
+# claim's fingerprint. The other direction -- a family listed that the deriver
+# does not read -- costs a retest nobody needed, and is pinned too, per family.
 _ACCESS_METADATA_KEYS = ("identity", "permissions", "server", "tools")
 _BOM_FACT_METADATA_KEYS = (
     "adapter",
@@ -218,28 +250,78 @@ _BOM_FACT_METADATA_KEYS = (
 )
 
 CLAIM_INPUTS: dict[str, tuple[str, ...]] = {
-    "data_boundary": ("environment", "boundary", "providers", "asset_identity"),
+    "data_boundary": (
+        "environment",
+        "boundary",
+        "providers",
+        "asset_identity",
+        "asset_provider",
+    ),
     "ai_bom": (
         "environment",
         "providers",
         "asset_identity",
+        "asset_provider",
         "asset_bom_facts",
         "declared_components",
-        "served_route",
     ),
-    "effective_access": ("environment", "asset_identity", "asset_access"),
+    "effective_access": (
+        "environment",
+        "deployment_name",
+        "asset_identity",
+        "asset_access",
+    ),
 }
+
+#: The families the whole-system fingerprint covers, each as much or more than
+#: the family itself does. A row bound before per-claim fingerprints can only be
+#: shown unchanged on these. A claim that also reads a family outside this set
+#: cannot be, and is treated as moved: the declared architecture is deliberately
+#: not in the system fingerprint (see assurance.bom_drift), and neither is the
+#: deployment's name.
+_SYSTEM_COVERED = frozenset(
+    {
+        "environment",
+        "boundary",
+        "providers",
+        "asset_identity",
+        "asset_provider",
+        "asset_bom_facts",
+        "asset_access",
+    }
+)
 
 
 def _metadata_subset(metadata, keys) -> dict:
-    if not isinstance(metadata, dict):
-        return {}
-    return {k: metadata[k] for k in keys if metadata.get(k) not in (None, "", [], {})}
+    return _present(metadata, keys)
 
 
 def _asset_identity(asset) -> dict:
-    descriptor = _asset_descriptor(asset)
-    descriptor.pop("metadata")
+    return {
+        "kind": asset.kind,
+        "name": asset.name,
+        "identifier": asset.identifier,
+        "classification": asset.classification,
+    }
+
+
+def _asset_provider(asset) -> dict:
+    provider = getattr(asset, "provider", None)
+    return {
+        "kind": asset.kind,
+        "name": asset.name,
+        "identifier": asset.identifier,
+        "provider": provider.name if provider else None,
+        "provider_kind": provider.kind if provider else None,
+    }
+
+
+def _claim_provider_descriptor(provider) -> dict:
+    """A provider as the claim derivers read it: the system descriptor without the
+    provider row's own evidence class, which no deriver reads (the boundary and
+    the BOM grade each ASSERTION's evidence class, and those stay)."""
+    descriptor = _provider_descriptor(provider)
+    descriptor.pop("evidence_class")
     return descriptor
 
 
@@ -264,17 +346,13 @@ def _families(deployment) -> dict:
             key=lambda d: (d["kind"], d["identifier"], d["name"]),
         )
 
-    providers_by_name: dict[str, dict] = {}
-    for asset in assets:
-        provider = getattr(asset, "provider", None)
-        if provider is not None and provider.name not in providers_by_name:
-            providers_by_name[provider.name] = _provider_descriptor(provider)
-
     return {
         "environment": deployment.environment,
+        "deployment_name": deployment.name,
         "boundary": _boundary_descriptor(deployment),
-        "providers": [providers_by_name[n] for n in sorted(providers_by_name)],
+        "providers": _distinct_providers(assets, _claim_provider_descriptor),
         "asset_identity": by_asset(_asset_identity),
+        "asset_provider": by_asset(_asset_provider),
         "asset_bom_facts": by_asset(
             lambda a: {
                 **_asset_identity(a),
@@ -291,7 +369,6 @@ def _families(deployment) -> dict:
             (_declared_component_descriptor(c) for c in deployment.declared_components.all()),
             key=lambda d: (d["kind"], d["identifier"], d["name"], d["provider_name"]),
         ),
-        "served_route": served_route_fingerprint(deployment),
     }
 
 
@@ -322,20 +399,30 @@ def claim_input_fingerprint(deployment, claim_type: str) -> str:
     return claim_input_fingerprints(deployment)[claim_type]
 
 
+def legacy_row_is_provable(claim_type: str) -> bool:
+    """Whether a row with no input fingerprint can be shown unchanged at all: only
+    when every family its claim type reads is inside the system fingerprint."""
+    return set(CLAIM_INPUTS.get(claim_type, ())) <= _SYSTEM_COVERED
+
+
 def claim_state_moved(claim, *, system_fp: str, input_fps: dict[str, str]) -> bool:
     """Whether the state a claim version is bound to no longer holds.
 
     A claim bound to its own inputs is compared on those inputs alone. A row bound
-    before per-claim fingerprints existed carries none, and is compared on the
-    whole system fingerprint -- the conservative reading, which is how every claim
-    used to be compared. The one predicate derive, invalidate and resolve all use,
-    so the three can never disagree about whether a claim drifted."""
+    before per-claim fingerprints carries none. It is compared on the whole system
+    fingerprint when that covers everything its claim reads, and is otherwise
+    moved: the system fingerprint cannot see a change to the declared architecture
+    an AI-BOM reads, so an unchanged system fingerprint is no evidence that an
+    AI-BOM row still holds. The one predicate derive, invalidate and resolve all
+    use, so the three can never disagree about whether a claim drifted."""
     if claim.input_fingerprint:
         expected = input_fps.get(claim.claim_type)
         if expected is None:
             # An unmapped type rests on the whole system (see claim_input_fingerprint).
             expected = system_fp
         return claim.input_fingerprint != expected
+    if not legacy_row_is_provable(claim.claim_type):
+        return True
     return claim.system_fingerprint != system_fp
 
 

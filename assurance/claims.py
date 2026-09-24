@@ -488,6 +488,21 @@ def _make_claim(deployment, *, identity_fp, system_fp, input_fp, pol_version, re
     return claim
 
 
+#: The fields that are a claim's reading: what it says, how strongly, and why.
+_READING_FIELDS = ("evidence_class", "vendor_asserted", "supporting_summary", "contradicting_summary")
+
+
+def _same_reading(claim: AssuranceClaim, derived) -> bool:
+    """Whether a stored version already reads what the deriver reads now.
+
+    A stored STALE is a lifecycle mark (evidence expired, or a retest pending),
+    not a reading, so it matches whatever status the deriver produces; every other
+    status must match exactly."""
+    if claim.status != Status.STALE and claim.status != derived["status"]:
+        return False
+    return all(getattr(claim, field) == derived[field] for field in _READING_FIELDS)
+
+
 def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now) -> bool:
     """Refresh a current claim's MACHINE fields in place (system state unchanged),
     preserving every human field. Writes a :class:`ClaimEvent` only on an actual
@@ -740,11 +755,22 @@ def _derive_claims(dep, now) -> dict:
         # to this claim: it used to supersede every claim on the deployment at once.
         state_moved = claim_state_moved(current, system_fp=system_fp, input_fps=input_fps)
         policy_moved = current.policy_version != pol_version
+        if (
+            not (state_moved or policy_moved)
+            and not current.input_fingerprint
+            and not _same_reading(current, derived)
+        ):
+            # A row bound before per-claim fingerprints, whose whole-system state
+            # still holds, but whose reading does not. Binding it in place would
+            # rewrite the old version's verdict under it: one version spanning two
+            # readings, with no supersede and no retest. A reading that moved is a
+            # new version whatever the fingerprint says.
+            state_moved = True
         if not (state_moved or policy_moved):
             if not current.input_fingerprint:
-                # A row bound before per-claim fingerprints, whose whole-system state
-                # still holds: bind it to its inputs now, so the next change is read
-                # per claim rather than for the whole deployment.
+                # A legacy row whose state and reading both still hold: bind it to
+                # its inputs now, so the next change is read per claim rather than
+                # for the whole deployment.
                 current.input_fingerprint = input_fp
             if _refresh_machine_fields(current, derived, receipt_digest, now):
                 counts["updated"] += 1

@@ -158,14 +158,22 @@ def _inputs_phrase(claim) -> str:
     return ", ".join(CLAIM_INPUTS.get(claim.claim_type, ("the whole system state",)))
 
 
+def _rederived_since(claim, req) -> bool:
+    """Whether a derivation has re-read this version since the requirement was
+    opened, and left it reading something other than the STALE mark the
+    invalidation put on it."""
+    return claim.last_seen > req.opened_at and claim.status != Status.STALE
+
+
 def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version=None, now=None, input_fps=None) -> int:
     """Resolve every open retest obligation that a fresh derivation has satisfied.
 
     An obligation is satisfied when the claim's CURRENT version is bound to the
-    deployment's current system state (``system_fingerprint == system_fp``) AND the
-    policy in force (``policy_version``) and is a *different* version than the one
-    that was invalidated — i.e. a fresh :func:`assurance.claims.derive_claims` has
-    rebound the claim to the changed state and policy. A claim still bound to the
+    inputs in force (:func:`assurance.fingerprint.claim_state_moved`) AND the
+    policy in force (``policy_version``), and a fresh
+    :func:`assurance.claims.derive_claims` has read it: either a new version it
+    opened on the changed state, or -- when the change was reverted -- the same
+    version, re-derived after the requirement opened. A claim still bound to the
     old state or the old policy (the version that drifted, whatever its status) does
     not satisfy anything: a machine no longer flagging drift is not a retest, a
     rebinding re-derivation is. Records ``resolving_claim`` and ``resolved_at`` and
@@ -193,16 +201,24 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version
                 fingerprint=req.claim.fingerprint,
             )
             .current()
-            .exclude(pk=req.claim_id)
             .first()
         )
-        # Only a NEW current version bound to the current state AND policy answers
-        # the retest — a rebinding that matches both, not just one.
+        # Only a current version bound to the current state AND policy answers the
+        # retest — a rebinding that matches both, not just one.
         if (
             current is None
             or claim_state_moved(current, system_fp=system_fp, input_fps=input_fps)
             or current.policy_version != policy_version
         ):
+            continue
+        if current.pk == req.claim_id and not _rederived_since(current, req):
+            # The version the retest was opened on, bound to the current state
+            # again because the change was reverted. That alone is a machine no
+            # longer flagging drift, not a retest. It answers the retest once a
+            # derivation has re-read it after the requirement opened: it used to
+            # be excluded outright, so a reverted change left its retest open --
+            # and the claim capped at NEEDS_MORE_EVIDENCE -- until some unrelated
+            # change happened to supersede it.
             continue
         req.resolving_claim = current
         req.resolved_at = now

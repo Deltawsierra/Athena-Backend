@@ -29,7 +29,9 @@ operator can be told rather than something only the code knew.
 
 The resolution order is identifier first, then name. The identifier is the
 dedup key (``UniqueConstraint(deployment, kind, identifier)``); the name is not
-unique, so it is the fallback and never the first answer. A reference is matched
+unique, so it is the fallback and never the first answer. A key that more than
+one asset carries resolves to neither: it is reported as ambiguous, because
+picking one would make the graph depend on the order rows come back in. A reference is matched
 against the assets of ONE deployment; nothing here can reach across a boundary.
 """
 
@@ -43,18 +45,59 @@ MECHANISM_TOOLS = "tools"
 MECHANISM_SERVER = "server"
 
 
-def resolve_reference(reference, by_identifier: dict, by_name: dict):
-    """The asset a declared reference names, or ``None``.
+#: Why a reference could not be placed. A reference that names nothing and one
+#: that names two things are both unresolved, and they are different
+#: conversations: the first is a component discovery never found, the second is
+#: an inventory that does not say which of two components it means.
+UNRESOLVED_NOT_FOUND = "not_found"
+UNRESOLVED_AMBIGUOUS = "ambiguous"
 
-    Identifier first, then name. ``None`` for an empty reference and for one that
-    matches nothing -- and the caller must record that, not drop it. Returning
+
+def reference_index(assets) -> tuple[dict, dict]:
+    """``(by_identifier, by_name)`` over one deployment's assets, each mapping a key
+    to EVERY asset that carries it.
+
+    Every asset, not the first one seen. Both readers used to build these with
+    ``setdefault``, so when two assets shared a name the reference resolved to
+    whichever the database returned first -- a primary-key tie-break nothing
+    else in the graph can see. Deleting a component and recreating it
+    identically could turn a proven hop to a managed store into one to an
+    unmanaged one, with no change anyone could point to, and on Postgres the
+    same rows can come back in either order. A reference that could mean two
+    components does not get to mean one of them by accident.
+    """
+    by_identifier: dict[str, list] = {}
+    by_name: dict[str, list] = {}
+    for asset in assets:
+        if asset.identifier:
+            by_identifier.setdefault(asset.identifier, []).append(asset)
+        by_name.setdefault(asset.name, []).append(asset)
+    return by_identifier, by_name
+
+
+def resolve_reference(reference, by_identifier: dict, by_name: dict):
+    """``(asset, None)`` for the one asset a declared reference names, or
+    ``(None, reason)`` when it names none or more than one.
+
+    Identifier first, then name. An identifier is unique only within a kind, so
+    two assets of different kinds can share one; that is as ambiguous as a
+    shared name and is reported the same way, never settled by kind order. A
+    reference whose identifier is ambiguous does not fall through to a name
+    match: the inventory named something, and what it named is not one thing.
+
     ``None`` is not permission to invent a node, and it is not permission to say
-    nothing either.
+    nothing either: the caller records the reason.
     """
     key = str(reference or "").strip()
     if not key:
-        return None
-    return by_identifier.get(key) or by_name.get(key)
+        return None, UNRESOLVED_NOT_FOUND
+    for index in (by_identifier, by_name):
+        matches = index.get(key)
+        if matches:
+            if len(matches) > 1:
+                return None, UNRESOLVED_AMBIGUOUS
+            return matches[0], None
+    return None, UNRESOLVED_NOT_FOUND
 
 
 #: What a malformed ``tools`` declaration is reported as, in place of the
@@ -100,16 +143,18 @@ def sort_references(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: (r["source"], r["mechanism"], r["reference"]))
 
 
-def dangling_reference(source, reference, mechanism: str) -> dict:
+def dangling_reference(source, reference, mechanism: str, reason: str = UNRESOLVED_NOT_FOUND) -> dict:
     """One unresolved reference, in the shape both readers report.
 
     Names what declared it as well as what it named: an operator chasing a
     dangling edge needs the source to know where to look, and the source's kind
-    to know what kind of declaration to fix.
+    to know what kind of declaration to fix. ``reason`` says whether the
+    reference named nothing or named more than one thing.
     """
     return {
         "source": source.name,
         "source_kind": source.kind,
         "reference": str(reference or "").strip(),
         "mechanism": mechanism,
+        "reason": reason,
     }

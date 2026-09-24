@@ -191,6 +191,7 @@ def test_a_server_reference_naming_nothing_is_recorded_by_both_readers():
         "source_kind": Asset.Kind.TOOL,
         "reference": "mcp-ghost",
         "mechanism": MECHANISM_SERVER,
+        "reason": "not_found",
     }
     assert access_rows == [expected]
     assert route_rows == [expected]
@@ -228,6 +229,7 @@ def test_an_unresolvable_tool_reference_is_recorded_identically_by_both_readers(
         "source_kind": Asset.Kind.AGENT,
         "reference": "ghost-tool",
         "mechanism": MECHANISM_TOOLS,
+        "reason": "not_found",
     }
     assert access_rows == [expected]
     assert route_rows == [expected]

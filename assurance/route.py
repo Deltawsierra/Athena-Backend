@@ -42,6 +42,7 @@ from .graph_refs import (
     MECHANISM_SERVER,
     MECHANISM_TOOLS,
     dangling_reference,
+    reference_index,
     resolve_reference,
     sort_references,
     tool_references,
@@ -134,8 +135,7 @@ def build_route_map(deployment) -> dict:
 
     nodes: list[dict] = []
     by_uuid: dict[str, dict] = {}
-    by_identifier: dict[str, Asset] = {}
-    by_name: dict[str, Asset] = {}
+    by_identifier, by_name = reference_index(assets)
     layer_members: dict[str, list[Asset]] = {layer: [] for layer in LAYER_ORDER}
 
     for asset in assets:
@@ -144,9 +144,6 @@ def build_route_map(deployment) -> dict:
         nodes.append(node)
         by_uuid[str(asset.uuid)] = node
         layer_members[layer].append(asset)
-        if asset.identifier:
-            by_identifier.setdefault(asset.identifier, asset)
-        by_name.setdefault(asset.name, asset)
 
     edges: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
@@ -185,13 +182,13 @@ def build_route_map(deployment) -> dict:
         for ident in tool_references(metadata):
             if not str(ident or "").strip():
                 continue
-            target = resolve_reference(ident, by_identifier, by_name)
+            target, why = resolve_reference(ident, by_identifier, by_name)
             if target is not None:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
             else:
                 # A tool the agent names but discovery could not place: a dangling
                 # reference to chase, surfaced rather than silently dropped.
-                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS))
+                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, why))
 
     # A component that declares the backend it is wired to → an edge to that node.
     # Every asset, not only the tool-layer ones: the `server` key is a declaration
@@ -203,12 +200,12 @@ def build_route_map(deployment) -> dict:
         server = str(metadata.get("server") or "").strip()
         if not server:
             continue
-        host = resolve_reference(server, by_identifier, by_name)
+        host, why = resolve_reference(server, by_identifier, by_name)
         if host is None:
             # The reference names nothing in the inventory. This used to vanish:
             # no edge, and no unresolved row either, because only the agent→tool
             # mechanism had a channel for a miss.
-            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER))
+            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER, why))
         elif (str(source.uuid), str(host.uuid)) in attested_pairs:
             # The same target, already attested through the agent-to-tool
             # mechanism. One relationship declared two ways is one relationship:

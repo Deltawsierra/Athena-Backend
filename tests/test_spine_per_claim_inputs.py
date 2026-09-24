@@ -26,12 +26,18 @@ from assurance.claims import (
     _prefetched,
     derive_claims,
 )
+from types import SimpleNamespace
+
+from assurance.access import assess_effective_access
 from assurance.fingerprint import (
     CLAIM_INPUTS,
     claim_input_fingerprints,
+    claim_state_moved,
     compute_system_fingerprint,
 )
-from assurance.invalidation import check_invalidations
+from assurance.graph_refs import UNRESOLVED_AMBIGUOUS
+from assurance.invalidation import check_invalidations, resolve_satisfied_requirements
+from assurance.route import build_route_map
 from assurance.models import (
     Asset,
     AssuranceClaim,
@@ -172,6 +178,20 @@ def _move_environment(dep):
     dep.save(update_fields=["environment"])
 
 
+def _malform_tools(dep):
+    # An empty string is not "no tools": the access graph reports it as a
+    # malformed declaration. A descriptor that dropped falsy values could not see it.
+    agent = _asset(dep, "agent")
+    agent.metadata = {**agent.metadata, "tools": ""}
+    agent.save(update_fields=["metadata"])
+
+
+def _rename_deployment(dep):
+    # The effective-access graph names its base principal after the deployment.
+    dep.name = "renamed"
+    dep.save(update_fields=["name"])
+
+
 def _add_component(dep):
     Asset.objects.create(
         deployment=dep, kind=Asset.Kind.VECTOR_DB, name="pinecone", identifier="pinecone",
@@ -193,6 +213,8 @@ _MUTATIONS = [
     _declare_extra,
     _move_environment,
     _add_component,
+    _malform_tools,
+    _rename_deployment,
 ]
 
 
@@ -250,6 +272,8 @@ def test_every_mapped_claim_type_is_a_real_claim_type():
         (_move_provider_region, {BOUNDARY, BOM}),
         (_add_component, {BOUNDARY, ACCESS, BOM}),
         (_move_environment, {BOUNDARY, ACCESS, BOM}),
+        (_malform_tools, {ACCESS}),
+        (_rename_deployment, {ACCESS}),
     ],
     ids=lambda v: v.__name__.lstrip("_") if callable(v) else "+".join(sorted(v)),
 )
@@ -336,14 +360,277 @@ def test_a_row_bound_before_per_claim_fingerprints_is_compared_on_the_whole_syst
     assert counts["invalidated"] == 3
 
 
-def test_a_legacy_row_whose_system_still_holds_is_bound_to_its_inputs_on_re_derive():
+def test_a_legacy_row_whose_inputs_the_system_covers_is_bound_to_them_on_re_derive():
+    """Only the boundary claim reads nothing outside the system fingerprint, so only
+    its legacy row can be shown unchanged and bound in place. The AI-BOM reads the
+    declared architecture and the access graph reads the deployment's name, neither
+    of which the system fingerprint carries: their legacy rows cannot be shown
+    unchanged, and are versioned rather than trusted."""
     dep = _deployment()
     derive_claims(dep)
     AssuranceClaim.objects.filter(deployment=dep).update(input_fingerprint="")
 
     counts = derive_claims(dep)
 
-    assert counts["superseded"] == 0
+    assert counts["superseded"] == 2
     fps = _fps(dep)
     for claim in AssuranceClaim.objects.filter(deployment=dep).current():
         assert claim.input_fingerprint == fps[claim.claim_type]
+    assert AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).count() == 1
+
+
+def test_a_legacy_bom_row_is_invalidated_by_a_change_the_system_fingerprint_cannot_see():
+    """The system fingerprint deliberately leaves out the declared architecture, and
+    the AI-BOM reads it. Comparing a legacy AI-BOM row on the system fingerprint was
+    weaker than the per-claim check it stood in for, not stricter."""
+    dep = _deployment()
+    derive_claims(dep)
+    AssuranceClaim.objects.filter(deployment=dep).update(input_fingerprint="")
+    system_before = compute_system_fingerprint(_prefetched(dep))
+
+    _undeclare_tool(dep)
+    assert compute_system_fingerprint(_prefetched(dep)) == system_before, "the premise"
+    check_invalidations(dep)
+
+    bom = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOM).current().get()
+    assert bom.status == Status.STALE
+    assert RetestRequirement.objects.filter(claim=bom, resolved_at__isnull=True).exists()
+
+
+def test_a_legacy_row_whose_reading_moved_is_versioned_not_rewritten():
+    """A legacy row is bound in place only if it already reads what the deriver reads
+    now. Otherwise binding it would rewrite the old version's verdict under it."""
+    dep = _deployment()
+    derive_claims(dep)
+    AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).update(
+        input_fingerprint="", contradicting_summary="a reading this state does not produce"
+    )
+
+    derive_claims(dep)
+
+    versions = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY)
+    assert versions.count() == 2
+    assert versions.filter(status=Status.SUPERSEDED).count() == 1
+
+
+# --------------------------------------------------------------- what an adversary found
+
+
+def _add_same_named_vector_store(dep):
+    """A second provider called "openai" -- a vector store, not the model provider.
+    ``Provider`` is unique on (name, kind), so this is a different provider."""
+    store = Provider.objects.create(name="openai", kind=Provider.Kind.VECTOR_DB, region="eu-west-1")
+    for field, value in (("region", "eu-west-1"), ("trains_on_data", "No"), ("subprocessors", "None")):
+        ProviderAssertion.objects.create(
+            provider=store, field=field, value=value,
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED,
+        )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.VECTOR_DB, name="vectors", identifier="vectors",
+        provider=store, classification=Asset.Classification.KNOWN,
+    )
+    DeclaredComponent.objects.create(deployment=dep, kind=Asset.Kind.VECTOR_DB, name="vectors", identifier="vectors")
+    return store
+
+
+def test_a_second_provider_with_the_same_name_is_not_invisible():
+    """Providers were described once per NAME, so a vector store called "openai"
+    was folded into the model provider called "openai". It could start training on
+    customer data, the boundary claim would read CONTRADICTED, and no fingerprint --
+    per claim or system -- moved."""
+    dep = _deployment()
+    store = _add_same_named_vector_store(dep)
+    readings_before, fps_before = _readings(dep), _fps(dep)
+    system_before = compute_system_fingerprint(_prefetched(dep))
+
+    assertion = ProviderAssertion.objects.get(provider=store, field="trains_on_data")
+    assertion.value = "Yes - trains on customer data"
+    assertion.evidence_class = EvidenceClass.VENDOR_ASSERTED
+    assertion.save(update_fields=["value", "evidence_class"])
+
+    readings_after, fps_after = _readings(dep), _fps(dep)
+    assert readings_before[BOUNDARY] != readings_after[BOUNDARY], "the premise: the boundary reading moved"
+    assert fps_before[BOUNDARY] != fps_after[BOUNDARY]
+    assert fps_before[BOM] != fps_after[BOM]
+    assert fps_before[ACCESS] == fps_after[ACCESS]
+    assert compute_system_fingerprint(_prefetched(dep)) != system_before
+
+
+def _two_stores_named_db(dep):
+    """Two data stores with one name: one managed, one not. The agent names "db"."""
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="db", identifier="db-a",
+        classification=Asset.Classification.KNOWN,
+    )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="db", identifier="db-b",
+        classification=Asset.Classification.UNMANAGED,
+    )
+    agent = _asset(dep, "agent")
+    agent.metadata = {**agent.metadata, "tools": ["reader", "db"]}
+    agent.save(update_fields=["metadata"])
+
+
+def _recreate(asset_id):
+    """Delete an asset and create it again, identically: same state, new pk."""
+    asset = Asset.objects.get(pk=asset_id)
+    fields = {
+        f: getattr(asset, f)
+        for f in ("deployment", "kind", "name", "identifier", "classification", "provider", "metadata")
+    }
+    asset.delete()
+    return Asset.objects.create(**fields)
+
+
+def test_a_name_two_components_share_resolves_to_neither_whatever_the_row_order():
+    """Both graph readers resolved a name with ``setdefault`` over the rows in
+    database order, so a shared name meant whichever row came first -- a primary-key
+    tie-break no fingerprint can see. Deleting the managed store and recreating it
+    identically turned a VERIFIED effective-access claim CONTRADICTED with no input
+    moving. A reference that could mean two components is reported as ambiguous."""
+    dep = _deployment()
+    _two_stores_named_db(dep)
+    readings_before, fps_before = _readings(dep), _fps(dep)
+
+    _recreate(Asset.objects.get(deployment=dep, identifier="db-a").pk)
+
+    assert _readings(dep) == readings_before
+    assert _fps(dep) == fps_before
+
+    fresh = _prefetched(dep)
+    for rows in (assess_effective_access(fresh)["unresolved"], build_route_map(fresh)["unresolved"]):
+        assert [(r["reference"], r["reason"]) for r in rows if r["reference"] == "db"] == [
+            ("db", UNRESOLVED_AMBIGUOUS)
+        ]
+
+
+def test_a_provider_rows_own_evidence_class_moves_no_claim():
+    """No deriver reads the provider row's evidence class -- each ASSERTION's class
+    is graded -- so changing it versions no claim. It still moves the system
+    fingerprint, which is the whole descriptor."""
+    dep = _deployment()
+    before, system_before = _fps(dep), compute_system_fingerprint(_prefetched(dep))
+    provider = Provider.objects.get(name="openai")
+    other = next(c for c in EvidenceClass.values if c != provider.evidence_class)
+    Provider.objects.filter(pk=provider.pk).update(evidence_class=other)
+    assert _fps(dep) == before
+    assert compute_system_fingerprint(_prefetched(dep)) != system_before
+
+
+def test_a_provider_region_is_not_an_access_input():
+    """The access graph never reads which provider a component resolves to, so a
+    provider moving region is a boundary and BOM change, not an access change."""
+    dep = _deployment()
+    before = _fps(dep)
+    Provider.objects.filter(name="openai").update(region="us-east-1")
+    after = _fps(dep)
+    assert {t for t in before if before[t] != after[t]} == {BOUNDARY, BOM}
+
+
+def test_a_served_route_fact_no_deriver_reads_moves_no_claim():
+    """The served route is in the system fingerprint (a decision is fenced on it)
+    and in no claim's inputs, because no claim deriver reads it."""
+    dep = _deployment()
+    before, system_before = _fps(dep), compute_system_fingerprint(_prefetched(dep))
+    model = _asset(dep, "gpt")
+    model.metadata = {**model.metadata, "quantization": "int8"}
+    model.save(update_fields=["metadata"])
+    assert _fps(dep) == before
+    assert compute_system_fingerprint(_prefetched(dep)) != system_before
+
+
+def test_an_unmapped_claim_type_is_compared_on_the_whole_system():
+    claim = SimpleNamespace(claim_type="not_a_mapped_type", input_fingerprint="a" * 64, system_fingerprint="")
+    assert claim_state_moved(claim, system_fp="a" * 64, input_fps={}) is False
+    assert claim_state_moved(claim, system_fp="b" * 64, input_fps={}) is True
+
+
+def _reopen(req):
+    req.resolved_at = None
+    req.resolving_claim = None
+    req.save(update_fields=["resolved_at", "resolving_claim", "updated_at"])
+
+
+def test_a_retest_is_resolved_by_a_version_bound_to_its_own_inputs_not_the_whole_system():
+    """A change to another claim's inputs moves the system fingerprint. It is no
+    reason to keep this claim's retest open."""
+    dep = _deployment()
+    derive_claims(dep)
+    _widen_boundary(dep)
+    check_invalidations(dep)
+    derive_claims(dep)
+    req = RetestRequirement.objects.get(deployment=dep)
+    _reopen(req)
+
+    _grant_permission(dep)
+    resolve_satisfied_requirements(_prefetched(dep))
+
+    req.refresh_from_db()
+    assert req.resolved_at is not None
+    assert req.resolving_claim.claim_type == BOUNDARY
+
+
+def test_a_retest_is_not_resolved_by_a_version_that_has_itself_drifted():
+    dep = _deployment()
+    derive_claims(dep)
+    _widen_boundary(dep)
+    check_invalidations(dep)
+    derive_claims(dep)
+    req = RetestRequirement.objects.get(deployment=dep)
+    _reopen(req)
+
+    boundary = DataBoundary.objects.get(deployment=dep)
+    boundary.training_allowed = True
+    boundary.save(update_fields=["training_allowed"])
+    resolve_satisfied_requirements(_prefetched(dep))
+
+    req.refresh_from_db()
+    assert req.resolved_at is None
+
+
+def test_a_reverted_change_is_answered_by_the_next_derive():
+    """A retest opened on a change that was then reverted used to stay open, because
+    only a DIFFERENT version could answer it and the derive refreshed the same one
+    in place. The claim sat capped at NEEDS_MORE_EVIDENCE until some unrelated
+    change superseded it."""
+    dep = _deployment()
+    derive_claims(dep)
+    _widen_boundary(dep)
+    check_invalidations(dep)
+    req = RetestRequirement.objects.get(deployment=dep)
+
+    boundary = DataBoundary.objects.get(deployment=dep)
+    boundary.allowed_regions = ["eu-west-1"]
+    boundary.save(update_fields=["allowed_regions"])
+
+    # A check alone is not a retest: nothing has re-read the claim.
+    check_invalidations(dep)
+    req.refresh_from_db()
+    assert req.resolved_at is None
+
+    counts = derive_claims(dep)
+    req.refresh_from_db()
+    assert counts["superseded"] == 0
+    assert req.resolved_at is not None
+    assert req.resolving_claim_id == req.claim_id
+    assert req.claim.status != Status.STALE
+
+
+@pytest.mark.parametrize("malformed", ["", {}], ids=["empty-string", "empty-mapping"])
+def test_an_empty_tools_value_on_an_agent_that_had_none_moves_the_access_claim(malformed):
+    """An agent with no ``tools`` key, given ``tools: ""`` or ``{}``. The access graph
+    reads that as a malformed declaration -- one unresolved reference, a lower
+    reading -- and a descriptor that dropped empty values saw no change at all."""
+    dep = _deployment()
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.AGENT, name="idle", identifier="idle",
+        classification=Asset.Classification.KNOWN, metadata={"identity": "svc-idle"},
+    )
+    readings_before, fps_before = _readings(dep), _fps(dep)
+
+    idle = _asset(dep, "idle")
+    idle.metadata = {**idle.metadata, "tools": malformed}
+    idle.save(update_fields=["metadata"])
+
+    assert _readings(dep)[ACCESS] != readings_before[ACCESS], "the premise: the reading moved"
+    assert _fps(dep)[ACCESS] != fps_before[ACCESS]
