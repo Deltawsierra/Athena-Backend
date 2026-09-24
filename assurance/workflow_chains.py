@@ -43,6 +43,7 @@ def read_chain_outcomes(deployment) -> list[ChainOutcome]:
             workflow=row.workflow,
             status=row.status,
             observed_at=row.observed_at,
+            basis=row.basis,
         )
         for row in deployment.chain_outcomes.all()
     ]
@@ -261,6 +262,16 @@ def composition_payload(
         "workflows_unreported": composition.workflows_unreported,
         "workflows_unapproved": composition.workflows_unapproved,
         "superseded": composition.superseded,
+        # Beside the status census, not inside it: what a chain SAYS and what the
+        # record RESTS ON are two independent distributions.
+        "basis_census": dict(composition.basis_census),
+        # The number a reader of this payload most needs and cannot compute from the
+        # two censuses: standing outcomes whose status claims an exercise while the
+        # record does not say one happened. Published with the names, because a count
+        # says how much of the graph is assertion and only the names say which part
+        # of the deployment to go and exercise.
+        "workflows_unexercised": composition.workflows_unexercised,
+        "unexercised": list(composition.unexercised),
         "explanation": _explanation(composition, signal),
         # Required rather than defaulted, for the reason this builder exists at
         # all: a default would let a new publisher omit provenance and still

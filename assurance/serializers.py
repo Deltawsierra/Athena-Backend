@@ -500,9 +500,17 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     ``test_naive_observed_at_is_made_aware_rather_than_reaching_the_rule`` instead,
     so turning ``USE_TZ`` off fails a test rather than reaching the rule with a
     datetime it cannot compare.
+
+    ``basis`` may be omitted, and omitting it means the record does not say what the
+    row rests on -- which is exactly what every row written before the column
+    existed says. It is NOT defaulted to ``attested`` even though an operator POST
+    is the only writer today: a default that names an attester is a default that
+    invents one, and a poster who did not make that claim should not have it made
+    for them.
     """
 
     status_label = serializers.CharField(source="get_status_display", read_only=True)
+    basis_label = serializers.CharField(source="get_basis_display", read_only=True)
     #: When the outcome was RECORDED here, which is not when the chain was
     #: exercised. ``observed_at`` is the exercise; this is the write. A campaign
     #: replaying a month of history posts outcomes whose ``observed_at`` is old and
@@ -517,6 +525,8 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "workflow",
             "status",
             "status_label",
+            "basis",
+            "basis_label",
             "observed_at",
             "recorded_at",
             "source",
