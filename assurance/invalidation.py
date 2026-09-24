@@ -9,15 +9,17 @@ and **requires a retest** before they may be read as current again.
 
 The mechanism, and why it is honest:
 
-- **Detection is grounded in the fingerprint, not a guess.** A claim is true of a
-  system state; :func:`assurance.fingerprint.compute_system_fingerprint` is the
-  stable, timestamp-free identity of that state. A current claim whose bound
-  ``system_fingerprint`` no longer equals the deployment's current fingerprint has
-  drifted — its evidence no longer reflects what is running. That, and only that,
-  is what "invalidated" means here. The human-readable ``invalidation_conditions``
-  a claim carries (a region change, an added permission, a changed boundary) are
-  exactly the inputs the system fingerprint is computed over, so a fingerprint
-  drift *is* one of those conditions having fired — the two never disagree.
+- **Detection is grounded in the fingerprint, not a guess.** A claim is true of
+  the inputs its deriver reads; :func:`assurance.fingerprint.claim_input_fingerprints`
+  is the stable, timestamp-free identity of exactly those inputs, per claim type
+  (:data:`assurance.fingerprint.CLAIM_INPUTS`). A current claim whose bound
+  ``input_fingerprint`` no longer equals its current one has drifted — its evidence
+  no longer reflects what is running. That, and only that, is what "invalidated"
+  means here, and it is decided per claim: a change to an input only one claim
+  reads invalidates that claim and no other. A row bound before per-claim
+  fingerprints carries none and is compared on the whole
+  :func:`assurance.fingerprint.compute_system_fingerprint`, the conservative
+  reading.
 
 - **Invalidation never reads as a pass.** A drifted claim is not left reading
   VERIFIED/SUPPORTED while a retest is pending; it is moved *away* from a pass to
@@ -51,7 +53,12 @@ from django.utils import timezone
 
 from . import observability as obs
 from .claims import Status
-from .fingerprint import compute_system_fingerprint
+from .fingerprint import (
+    CLAIM_INPUTS,
+    claim_input_fingerprints,
+    claim_state_moved,
+    compute_system_fingerprint,
+)
 from .fingerprint import policy_version as _current_policy_version
 from .models import AssuranceClaim, ClaimEvent, Deployment, RetestRequirement
 
@@ -67,41 +74,22 @@ _STALE_SKIP = frozenset({Status.CONTRADICTED, Status.REVOKED, Status.STALE, Stat
 
 
 # ---------------------------------------------------------------------------
-# Cross-claim propagation — the INVALIDATES edge (explicit, minimal, honest)
+# Cross-claim propagation — the INVALIDATES relation
 # ---------------------------------------------------------------------------
 
-# The declared dependency edges between claim types: "a change to the inputs of
-# the KEY claim type should also require a retest of the VALUE claim types,
-# because they rest on those same inputs." This is the small, readable
-# INVALIDATES table the roadmap asks for — NOT a general graph engine.
+# There used to be a `_CLAIM_DEPENDENCIES` table here, and it was documentation,
+# not code: every claim bound to ONE deployment-wide fingerprint, so any change
+# co-invalidated every claim and the table could never be exercised. Its own
+# comment named the seam -- "when per-claim-type input fingerprints land ... this
+# is exactly where propagation plugs in".
 #
-#   - AI_BOM rests on the provider/component supply chain. A change there also
-#     bears on DATA_BOUNDARY (which providers data reaches) and EFFECTIVE_ACCESS
-#     (which components a principal can reach).
-#   - DATA_BOUNDARY rests on the approved boundary + provider postures; a change
-#     bears on the supply-chain reading AI_BOM makes.
-#   - EFFECTIVE_ACCESS rests on the asset/permission graph.
-#
-# IMPORTANT — why this table is documentation today, not an extra code path:
-# every claim in Phase 1 binds to the SAME deployment-wide
-# ``compute_system_fingerprint`` (models: one ``system_fp`` for all derivers), so
-# ANY change to the asset / provider / boundary graph moves the fingerprint of
-# EVERY current claim at once. Single-claim invalidation therefore ALREADY opens a
-# retest on each dependent claim — the propagation is a consequence of the shared
-# fingerprint, and opening additional requirements off this map would be
-# redundant, not a distinct edge. Rather than fake an edge the current inputs make
-# indistinguishable from co-invalidation, this table is left as the explicit,
-# commented SEAM: when per-claim-type input fingerprints land (so a change can
-# move one claim's fingerprint without the others'), this is exactly where
-# propagation plugs in — iterate the directly-invalidated types, union their
-# dependents, and open requirements on those dependents' current claims too.
-_CLAIM_DEPENDENCIES: dict[str, frozenset[str]] = {
-    ClaimType.AI_BOM.value: frozenset(
-        {ClaimType.DATA_BOUNDARY.value, ClaimType.EFFECTIVE_ACCESS.value}
-    ),
-    ClaimType.DATA_BOUNDARY.value: frozenset({ClaimType.AI_BOM.value}),
-    ClaimType.EFFECTIVE_ACCESS.value: frozenset(),
-}
+# They have landed, as :data:`assurance.fingerprint.CLAIM_INPUTS`, and propagation
+# did not need a second table after all. Each claim binds to the inputs its
+# deriver reads; two claims that rest on a shared input (the asset graph, a
+# provider's posture) both move when it moves, and a change to an input only one
+# of them reads (the approved boundary, a principal's permissions) moves only
+# that one. The relation is the input table read in the other direction, so it
+# cannot drift from what the derivers actually read.
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +150,15 @@ def _mark_stale(claim, now) -> None:
     )
 
 
-def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version=None, now=None) -> int:
+def _inputs_phrase(claim) -> str:
+    """The input families a claim rests on, for a reason a human reads. A row with
+    no input fingerprint was bound to the whole system, and says so."""
+    if not claim.input_fingerprint:
+        return "the whole system state, bound before per-claim fingerprints"
+    return ", ".join(CLAIM_INPUTS.get(claim.claim_type, ("the whole system state",)))
+
+
+def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version=None, now=None, input_fps=None) -> int:
     """Resolve every open retest obligation that a fresh derivation has satisfied.
 
     An obligation is satisfied when the claim's CURRENT version is bound to the
@@ -183,6 +179,8 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version
         system_fp = compute_system_fingerprint(deployment)
     if policy_version is None:
         policy_version = _current_policy_version(deployment)
+    if input_fps is None:
+        input_fps = claim_input_fingerprints(deployment)
 
     resolved = 0
     open_reqs = RetestRequirement.objects.filter(
@@ -200,7 +198,11 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version
         )
         # Only a NEW current version bound to the current state AND policy answers
         # the retest — a rebinding that matches both, not just one.
-        if current is None or current.system_fingerprint != system_fp or current.policy_version != policy_version:
+        if (
+            current is None
+            or claim_state_moved(current, system_fp=system_fp, input_fps=input_fps)
+            or current.policy_version != policy_version
+        ):
             continue
         req.resolving_claim = current
         req.resolved_at = now
@@ -243,11 +245,14 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
     with obs.span(obs.PLAN, component="check_invalidations", subject=str(deployment.pk)):
         now = now or timezone.now()
         dep = (
-            Deployment.objects.prefetch_related("assets__provider__assertions")
+            Deployment.objects.prefetch_related(
+                "assets__provider__assertions", "declared_components"
+            )
             .select_related("data_boundary")
             .get(pk=deployment.pk)
         )
         system_fp = compute_system_fingerprint(dep)
+        input_fps = claim_input_fingerprints(dep)
         policy_version = _current_policy_version(dep)
 
         invalidated = 0
@@ -264,16 +269,17 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
             # judged under, no longer matches what is in force. (See the module
             # docstring on why this is the honest, fingerprint-grounded definition of
             # "invalidated".)
-            state_drift = claim.system_fingerprint != system_fp
+            state_drift = claim_state_moved(claim, system_fp=system_fp, input_fps=input_fps)
             policy_drift = claim.policy_version != policy_version
             if not (state_drift or policy_drift):
                 continue
             invalidated += 1
             if not _has_open_requirement(dep, claim):
+                inputs = _inputs_phrase(claim)
                 if state_drift and policy_drift:
-                    reason = "System fingerprint and assurance policy both changed; the state and the policy this claim was true of no longer match the deployment."
+                    reason = f"The inputs this claim rests on ({inputs}) and the assurance policy both changed; the state and the policy this claim was true of no longer match the deployment."
                 elif state_drift:
-                    reason = "System fingerprint changed; the state this claim was true of no longer matches the deployment."
+                    reason = f"The inputs this claim rests on ({inputs}) changed; the state this claim was true of no longer matches the deployment."
                 else:
                     reason = "Assurance policy changed; the policy this claim was assessed under is no longer the policy in force."
                 _open_requirement(
@@ -290,6 +296,6 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
             _mark_stale(claim, now)
 
         resolved = resolve_satisfied_requirements(
-            dep, system_fp=system_fp, policy_version=policy_version, now=now
+            dep, system_fp=system_fp, policy_version=policy_version, now=now, input_fps=input_fps
         )
         return {"invalidated": invalidated, "retests_opened": opened, "retests_resolved": resolved}

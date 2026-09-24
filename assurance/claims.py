@@ -23,7 +23,7 @@ Three parts:
   fingerprint, finds the current version, and: creates it if none exists; refreshes
   the machine fields in place when the system state is unchanged (preserving human
   fields and never overwriting a human REVOKED); or SUPERSEDES the old version and
-  opens a new one when the system state has changed. It also marks a current,
+  opens a new one when the inputs that claim rests on have changed. It also marks a current,
   non-contradicted claim STALE once its evidence expires — never toward a pass.
 
 - **:func:`apply_claim_transition`** — the attributed lifecycle state machine,
@@ -31,8 +31,11 @@ Three parts:
   STALE/SUPERSEDED be a human target, and HARD-refuses any move into VERIFIED that
   is not backed by configuration/technically-verified, non-vendor evidence.
 
-The system_fingerprint-change → supersede seam is the cross-version mechanism
-here; the temporal INVALIDATES backbone that turns a state change into an
+The input-fingerprint-change → supersede seam is the cross-version mechanism
+here. Each claim binds to a fingerprint of the inputs ITS deriver reads
+(:data:`assurance.fingerprint.CLAIM_INPUTS`), so a change versions exactly the
+claims that rest on it; the deployment-wide system fingerprint is still recorded on
+every version, and still decides for a row bound before per-claim fingerprints; the temporal INVALIDATES backbone that turns a state change into an
 attributed, durable *retest obligation* on the affected claims lives in
 :mod:`assurance.invalidation` (SPINE Phase 2), which extends this module. Its one
 tie-back into :func:`derive_claims` is at the end of the reconciler: once a
@@ -55,7 +58,12 @@ from .bom_drift import assess_bom_drift
 from .boundary import assess_boundary
 from .capability import RISK_HIGH
 from .change import EVIDENCE_TTL_DAYS, age_days
-from .fingerprint import compute_system_fingerprint, policy_version
+from .fingerprint import (
+    claim_input_fingerprints,
+    claim_state_moved,
+    compute_system_fingerprint,
+    policy_version,
+)
 from .models import AssuranceClaim, ClaimEvent, Deployment, EvidenceClass, evidence_strength
 from .receipt import build_assurance_receipt
 
@@ -444,7 +452,7 @@ def _prefetched(deployment) -> Deployment:
     )
 
 
-def _make_claim(deployment, *, identity_fp, system_fp, pol_version, receipt_digest, derived, now, human_owner=None) -> AssuranceClaim:
+def _make_claim(deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now, human_owner=None) -> AssuranceClaim:
     """Create a new CURRENT claim version from a deriver's output, and seed its
     lifecycle with a ``∅ → status`` :class:`ClaimEvent`."""
     status = derived["status"]
@@ -455,6 +463,7 @@ def _make_claim(deployment, *, identity_fp, system_fp, pol_version, receipt_dige
         statement=derived["statement"],
         fingerprint=identity_fp,
         system_fingerprint=system_fp,
+        input_fingerprint=input_fp,
         policy_version=pol_version,
         environment=deployment.environment,
         status=status,
@@ -599,7 +608,7 @@ def record_retroactive_claim(
     return claim
 
 
-def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, pol_version, receipt_digest, derived, now) -> None:
+def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now, note) -> None:
     """Close the current version (``valid_to`` set, status SUPERSEDED, its own
     ClaimEvent), open a new current version bound to the new system state, and link
     ``old.superseded_by = new``. The old version is closed BEFORE the new one is
@@ -614,12 +623,13 @@ def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, p
         from_status=old_status,
         to_status=Status.SUPERSEDED,
         actor=None,
-        note="System fingerprint changed; version superseded.",
+        note=note,
     )
     new_claim = _make_claim(
         deployment,
         identity_fp=identity_fp,
         system_fp=system_fp,
+        input_fp=input_fp,
         pol_version=pol_version,
         receipt_digest=receipt_digest,
         derived=derived,
@@ -662,9 +672,9 @@ def derive_claims(deployment, *, now=None) -> dict:
     """Reconcile a deployment's assurance claims with its current state.
 
     Idempotent and transactional. For each deriver: computes the stable identity
-    fingerprint and the current system fingerprint; finds the current version
-    (``valid_to`` null); then creates it, refreshes it in place (system state
-    unchanged), or supersedes it (system state changed). A human REVOKED claim is
+    fingerprint and the claim's current input fingerprint; finds the current version
+    (``valid_to`` null); then creates it, refreshes it in place (its inputs and the
+    policy unchanged), or supersedes it (either changed). A human REVOKED claim is
     left untouched. Finally marks current, non-contradicted claims STALE once their
     evidence expires. Returns ``{created, updated, superseded, stale}``.
 
@@ -685,6 +695,7 @@ def _derive_claims(dep, now) -> dict:
     change in that diff.
     """
     system_fp = compute_system_fingerprint(dep)
+    input_fps = claim_input_fingerprints(dep)
     pol_version = policy_version(dep)
     receipt_digest = build_assurance_receipt(dep)["digest"]
 
@@ -695,6 +706,7 @@ def _derive_claims(dep, now) -> dict:
         subject = derived["subject"]
         subject_key = str(subject.uuid) if subject is not None else ""
         identity_fp = _identity_fingerprint(dep, derived["claim_type"], subject_key)
+        input_fp = input_fps.get(derived["claim_type"], system_fp)
 
         current = (
             AssuranceClaim.objects.filter(deployment=dep, fingerprint=identity_fp)
@@ -707,6 +719,7 @@ def _derive_claims(dep, now) -> dict:
                 dep,
                 identity_fp=identity_fp,
                 system_fp=system_fp,
+                input_fp=input_fp,
                 pol_version=pol_version,
                 receipt_digest=receipt_digest,
                 derived=derived,
@@ -720,24 +733,39 @@ def _derive_claims(dep, now) -> dict:
         if current.status == Status.REVOKED:
             continue
 
-        # A claim is bound to BOTH the system state and the policy it was assessed
-        # under. It is refreshed in place only while both still hold; a change to
-        # either the system fingerprint OR the policy version supersedes it and opens
-        # a new current version bound to the change, so a policy change versions a
-        # claim exactly as a state change does.
-        if current.system_fingerprint == system_fp and current.policy_version == pol_version:
+        # A claim is bound to BOTH the inputs it rests on and the policy it was
+        # assessed under. It is refreshed in place only while both still hold; a
+        # change to either supersedes it and opens a new current version bound to
+        # the change. A change to an input this claim does not read is not a change
+        # to this claim: it used to supersede every claim on the deployment at once.
+        state_moved = claim_state_moved(current, system_fp=system_fp, input_fps=input_fps)
+        policy_moved = current.policy_version != pol_version
+        if not (state_moved or policy_moved):
+            if not current.input_fingerprint:
+                # A row bound before per-claim fingerprints, whose whole-system state
+                # still holds: bind it to its inputs now, so the next change is read
+                # per claim rather than for the whole deployment.
+                current.input_fingerprint = input_fp
             if _refresh_machine_fields(current, derived, receipt_digest, now):
                 counts["updated"] += 1
         else:
+            if state_moved and policy_moved:
+                note = "The inputs this claim rests on and the assurance policy both changed; version superseded."
+            elif state_moved:
+                note = "The inputs this claim rests on changed; version superseded."
+            else:
+                note = "Assurance policy changed; version superseded."
             _supersede(
                 current,
                 dep,
                 identity_fp=identity_fp,
                 system_fp=system_fp,
+                input_fp=input_fp,
                 pol_version=pol_version,
                 receipt_digest=receipt_digest,
                 derived=derived,
                 now=now,
+                note=note,
             )
             counts["superseded"] += 1
 
@@ -752,7 +780,9 @@ def _derive_claims(dep, now) -> dict:
     # and the check-invalidations endpoint reports the resolved count itself.
     from .invalidation import resolve_satisfied_requirements
 
-    resolve_satisfied_requirements(dep, system_fp=system_fp, policy_version=pol_version, now=now)
+    resolve_satisfied_requirements(
+        dep, system_fp=system_fp, policy_version=pol_version, now=now, input_fps=input_fps
+    )
     return counts
 
 

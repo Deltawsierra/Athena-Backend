@@ -1313,9 +1313,18 @@ class AssuranceClaim(models.Model):
     # subject_key). The same across every version of the same claim, so a
     # re-derive finds the current version rather than duplicating it.
     fingerprint = models.CharField(max_length=64, db_index=True)
-    # The system state this claim was observed true of. A CHANGE here versions the
-    # claim (supersede + new current version); it is never a dedup key on its own.
+    # The whole-deployment system state when this version was bound, kept as the
+    # record of it. It versions a claim on its own only for a row with no
+    # `input_fingerprint` (bound before per-claim fingerprints); otherwise the
+    # claim's own inputs decide. Never a dedup key on its own.
     system_fingerprint = models.CharField(max_length=64)
+    # The inputs THIS claim type rests on (assurance.fingerprint.CLAIM_INPUTS),
+    # fingerprinted on their own. A change HERE versions and invalidates the claim;
+    # a change to the system fingerprint alone, in an input this claim does not
+    # read, does not. Blank on a row bound before per-claim fingerprints existed:
+    # such a row is compared by its system fingerprint, the conservative reading,
+    # until a re-derive binds it.
+    input_fingerprint = models.CharField(max_length=64, blank=True, default="")
     # The rule-set / evaluator version the claim was assessed under (= the receipt
     # standard version), so a consumer knows which policy produced this result.
     policy_version = models.CharField(max_length=120)

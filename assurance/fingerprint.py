@@ -168,6 +168,177 @@ def compute_system_fingerprint(deployment) -> str:
     return _digest(descriptor)
 
 
+# ---------------------------------------------------------------------------
+# Per-claim input fingerprints -- the INVALIDATES table
+# ---------------------------------------------------------------------------
+#
+# The system fingerprint above is ONE digest per deployment, and every claim used
+# to bind to it. That made invalidation a co-invalidation: any change anywhere
+# moved every claim's bound state at once, so widening the data boundary staled
+# the AI-BOM and effective-access claims too, though neither reads the boundary.
+# Minotaur measured it as two false accusations on every run, and the key's
+# `claim.effective_access_stale` case sat as a known gap because "a change touched
+# THIS claim's inputs" could not be told apart from "something changed".
+#
+# So each claim type binds to a fingerprint of the inputs its deriver actually
+# reads, and only those. Propagation between claims is no longer a separate edge
+# table: two claims that rest on a shared input both move when it moves, and
+# neither moves when an input only the other reads does. The table below IS the
+# INVALIDATES relation, read in the other direction.
+#
+# What each family is, and which assessor reads it:
+#
+#   environment          the deployment's environment. Every claim is made in it.
+#   boundary             the approved data boundary (assurance.boundary).
+#   providers            each provider's identity, region, evidence class and
+#                        graded assertions (boundary postures; the BOM's declared
+#                        facts).
+#   asset_identity       each component's kind, name, identifier, classification
+#                        and the provider it resolves to. Every assessor walks it.
+#   asset_bom_facts      the metadata the AI-BOM carries per component
+#                        (assurance.bom._COMPONENT_FACT_KEYS).
+#   asset_access         the metadata the effective-access graph follows:
+#                        permissions, tools, server, identity (assurance.access).
+#   declared_components  the customer's declared architecture (bom_drift).
+#   served_route         what actually served (assurance.served_route).
+#
+# A family missing from a claim's list is a change that claim would NOT notice,
+# which is the dangerous direction. It is pinned by a test that mutates every
+# family and requires any change to a claim's derived reading to move that
+# claim's fingerprint -- never the other way round.
+_ACCESS_METADATA_KEYS = ("identity", "permissions", "server", "tools")
+_BOM_FACT_METADATA_KEYS = (
+    "adapter",
+    "base_url",
+    "model",
+    "provenance",
+    "server",
+    "subkind",
+    "version",
+)
+
+CLAIM_INPUTS: dict[str, tuple[str, ...]] = {
+    "data_boundary": ("environment", "boundary", "providers", "asset_identity"),
+    "ai_bom": (
+        "environment",
+        "providers",
+        "asset_identity",
+        "asset_bom_facts",
+        "declared_components",
+        "served_route",
+    ),
+    "effective_access": ("environment", "asset_identity", "asset_access"),
+}
+
+
+def _metadata_subset(metadata, keys) -> dict:
+    if not isinstance(metadata, dict):
+        return {}
+    return {k: metadata[k] for k in keys if metadata.get(k) not in (None, "", [], {})}
+
+
+def _asset_identity(asset) -> dict:
+    descriptor = _asset_descriptor(asset)
+    descriptor.pop("metadata")
+    return descriptor
+
+
+def _declared_component_descriptor(component) -> dict:
+    """A declared component, by the fields bom_drift compares -- never its row
+    uuid or timestamps."""
+    return {
+        "kind": component.kind,
+        "name": component.name,
+        "identifier": component.identifier,
+        "provider_name": getattr(component, "provider_name", "") or "",
+    }
+
+
+def _families(deployment) -> dict:
+    """Every input family, computed once over a (prefetched) deployment."""
+    assets = list(deployment.assets.all())
+
+    def by_asset(project) -> list:
+        return sorted(
+            (project(a) for a in assets),
+            key=lambda d: (d["kind"], d["identifier"], d["name"]),
+        )
+
+    providers_by_name: dict[str, dict] = {}
+    for asset in assets:
+        provider = getattr(asset, "provider", None)
+        if provider is not None and provider.name not in providers_by_name:
+            providers_by_name[provider.name] = _provider_descriptor(provider)
+
+    return {
+        "environment": deployment.environment,
+        "boundary": _boundary_descriptor(deployment),
+        "providers": [providers_by_name[n] for n in sorted(providers_by_name)],
+        "asset_identity": by_asset(_asset_identity),
+        "asset_bom_facts": by_asset(
+            lambda a: {
+                **_asset_identity(a),
+                "facts": _metadata_subset(a.metadata, _BOM_FACT_METADATA_KEYS),
+            }
+        ),
+        "asset_access": by_asset(
+            lambda a: {
+                **_asset_identity(a),
+                "access": _metadata_subset(a.metadata, _ACCESS_METADATA_KEYS),
+            }
+        ),
+        "declared_components": sorted(
+            (_declared_component_descriptor(c) for c in deployment.declared_components.all()),
+            key=lambda d: (d["kind"], d["identifier"], d["name"], d["provider_name"]),
+        ),
+        "served_route": served_route_fingerprint(deployment),
+    }
+
+
+def claim_input_fingerprints(deployment) -> dict[str, str]:
+    """The input fingerprint of every claim type, keyed by claim type.
+
+    Each is a SHA-256 over the families :data:`CLAIM_INPUTS` names for that type,
+    and only those, so a change moves exactly the claims that rest on it. Computed
+    together because the families are shared; prefetch as for
+    :func:`compute_system_fingerprint`, plus ``declared_components``.
+    """
+    families = _families(deployment)
+    return {
+        claim_type: _digest(
+            {"claim_type": claim_type, **{name: families[name] for name in names}}
+        )
+        for claim_type, names in CLAIM_INPUTS.items()
+    }
+
+
+def claim_input_fingerprint(deployment, claim_type: str) -> str:
+    """One claim type's input fingerprint. A claim type with no entry in
+    :data:`CLAIM_INPUTS` rests on the whole system state: it gets the system
+    fingerprint, so an unmapped type is invalidated by any change rather than by
+    none."""
+    if claim_type not in CLAIM_INPUTS:
+        return compute_system_fingerprint(deployment)
+    return claim_input_fingerprints(deployment)[claim_type]
+
+
+def claim_state_moved(claim, *, system_fp: str, input_fps: dict[str, str]) -> bool:
+    """Whether the state a claim version is bound to no longer holds.
+
+    A claim bound to its own inputs is compared on those inputs alone. A row bound
+    before per-claim fingerprints existed carries none, and is compared on the
+    whole system fingerprint -- the conservative reading, which is how every claim
+    used to be compared. The one predicate derive, invalidate and resolve all use,
+    so the three can never disagree about whether a claim drifted."""
+    if claim.input_fingerprint:
+        expected = input_fps.get(claim.claim_type)
+        if expected is None:
+            # An unmapped type rests on the whole system (see claim_input_fingerprint).
+            expected = system_fp
+        return claim.input_fingerprint != expected
+    return claim.system_fingerprint != system_fp
+
+
 def policy_version(deployment) -> str:
     """The pinned assurance-policy version a claim is assessed under — the rule set
     (six-state thresholds, required-evidence rules, claim caps) bound to the
