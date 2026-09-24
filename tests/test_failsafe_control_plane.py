@@ -157,7 +157,9 @@ def test_state_reports_not_available_when_the_engine_cannot_be_reached(monkeypat
     from ai_engine.services import cyberengine_client
 
     def _boom(cls):
-        raise cyberengine_client.EngineError("engine unreachable")
+        raise cyberengine_client.EngineError(
+            "engine unreachable", kind=cyberengine_client.ENGINE_UNREACHABLE
+        )
 
     monkeypatch.setattr(cyberengine_client.CyberEngineClient, "from_settings", classmethod(_boom))
     analyst = _client(_user(User.Roles.ANALYST))

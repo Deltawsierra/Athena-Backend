@@ -136,7 +136,7 @@ def test_a_blocked_deployment_is_recorded_but_proceeds_under_observe(
 def test_an_engine_that_cannot_be_asked_is_not_an_engine_that_said_yes(
     factory, analyst, engagement
 ):
-    from ai_engine.services.cyberengine_client import EngineError
+    from ai_engine.services.cyberengine_client import ENGINE_UNREACHABLE, EngineError
 
     request = factory.post("/api/pentest/scan/",
                            {"url": TARGET, "consent": True,
@@ -144,7 +144,7 @@ def test_an_engine_that_cannot_be_asked_is_not_an_engine_that_said_yes(
     force_authenticate(request, user=analyst)
 
     engine = mock.Mock()
-    engine.assurance_check.side_effect = EngineError("connection refused")
+    engine.assurance_check.side_effect = EngineError("connection refused", kind=ENGINE_UNREACHABLE)
 
     with mock.patch("pentest.views.target_is_out_of_bounds", return_value=None), \
             mock.patch("pentest.views.CyberEngineClient") as client, \
