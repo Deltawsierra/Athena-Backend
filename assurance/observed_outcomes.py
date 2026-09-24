@@ -39,6 +39,7 @@ depending on the order a campaign happened to send it in.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -98,11 +99,24 @@ def load_keyring(path: str | None = None) -> dict[str, oc.TrustedKey]:
             "can be verified here"
         )
     try:
-        with open(location, encoding="utf-8") as handle:
-            entries = json.load(handle)
-    except (OSError, ValueError, RecursionError) as exc:
+        with open(location, "rb") as handle:
+            content = handle.read()
+    except OSError as exc:
+        raise KeyringUnavailable(f"the outcome keyring could not be read: {exc}") from exc
+    return _parse_keyring(content)
+
+
+def _parse_keyring(content: bytes) -> dict[str, oc.TrustedKey]:
+    """The keyring in ``content``. Separate from the read so a caller that has
+    the bytes -- :func:`trusted_keyring`, which caches by their hash -- parses
+    exactly the bytes it hashed, not a second read of a file that may have
+    changed in between."""
+    try:
+        entries = json.loads(content.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
         # RecursionError: a file of nested brackets exhausts the parser's stack,
-        # which is a keyring nobody can use -- not a server error.
+        # which is a keyring nobody can use -- not a server error. ValueError
+        # covers a body that is not UTF-8 as well as one that is not JSON.
         raise KeyringUnavailable(f"the outcome keyring could not be read: {exc}") from exc
     if not isinstance(entries, list) or not entries:
         raise KeyringUnavailable("the outcome keyring is not a non-empty list of keys")
@@ -141,19 +155,53 @@ def trusted_keyring() -> dict[str, oc.TrustedKey] | None:
     if not location:
         return None
     try:
-        stat = os.stat(location)
+        with open(location, "rb") as handle:
+            content = handle.read()
     except OSError:
+        # Gone or unreadable: nothing is trusted, and the stale entry goes with it.
+        _READ_KEYRING.pop("keyring", None)
         return None
-    identity = (location, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    # The identity is the CONTENT, not the file's metadata. Inode, mtime and size
+    # can all survive an in-place rewrite (`cp -p` over the file, a same-length key
+    # rotation), and a cache keyed on them kept trusting a withdrawn key. A keyring
+    # is a few hundred bytes; hashing it on every read costs nothing.
+    identity = (location, hashlib.sha256(content).hexdigest())
     cached = _READ_KEYRING.get("keyring")
     if cached is not None and cached[0] == identity:
         return cached[1]
     try:
-        keyring: dict[str, oc.TrustedKey] | None = load_keyring(location)
+        keyring: dict[str, oc.TrustedKey] | None = _parse_keyring(content)
     except KeyringUnavailable:
         keyring = None
     _READ_KEYRING["keyring"] = (identity, keyring)
     return keyring
+
+
+#: Signature verdicts already computed, keyed by the envelope's exact bytes and the
+#: keyring they were checked against. Outcomes are append-only and every read of a
+#: deployment re-verified every signed row -- measured at ~0.25 ms a row, 1.4 s for
+#: 5,000 -- so the Ed25519 work is done once per (envelope, keyring). Only the
+#: SIGNATURE is memoised: the checks that the row's columns match the signed
+#: payload run on every read, because the columns are what can be edited.
+_VERDICTS: dict[tuple, Any] = {}
+_VERDICT_LIMIT = 50_000
+
+
+def _verified(envelope: dict, keyring: dict[str, oc.TrustedKey]):
+    try:
+        memo_key = (
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+            tuple(sorted((kid, key.engine) for kid, key in keyring.items())),
+        )
+    except (TypeError, ValueError):
+        return oc.verify_outcome(envelope, keyring)
+    verdict = _VERDICTS.get(memo_key)
+    if verdict is None:
+        verdict = oc.verify_outcome(envelope, keyring)
+        if len(_VERDICTS) >= _VERDICT_LIMIT:
+            _VERDICTS.clear()
+        _VERDICTS[memo_key] = verdict
+    return verdict
 
 
 def recorded_outcome_is_authentic(row, keyring, *, deployment_uuid: str | None = None) -> bool:
@@ -172,7 +220,7 @@ def recorded_outcome_is_authentic(row, keyring, *, deployment_uuid: str | None =
     """
     if not keyring or not row.outcome_id or not isinstance(row.envelope, dict):
         return False
-    verdict = oc.verify_outcome(row.envelope, keyring)
+    verdict = _verified(row.envelope, keyring)
     if verdict.verdict != oc.AUTHENTIC or verdict.outcome is None:
         return False
     outcome = verdict.outcome
@@ -191,6 +239,24 @@ def recorded_outcome_is_authentic(row, keyring, *, deployment_uuid: str | None =
         and verdict.key_id == row.observer_key_id
         and outcome["evidence_digest"] == row.evidence_digest
     )
+
+
+def basis_in_force(row, keyring, *, deployment_uuid: str | None = None) -> str:
+    """The basis the rule relies on for ``row``, which is not always its column.
+
+    ``demonstrated`` means a run produced the outcome, and the only evidence of a
+    run this platform holds is an envelope that verifies now (see
+    :func:`recorded_outcome_is_authentic`). A row that says demonstrated without
+    one -- typed in before signed ingest existed, written by any other path, or
+    signed by a key since withdrawn -- is read as ``attested``: someone asserted
+    it. The column keeps what was written; this is what the rule is told, and
+    what a reader of the row is shown beside it, so the two cannot disagree.
+    """
+    if row.basis == composition.BASIS_DEMONSTRATED and not recorded_outcome_is_authentic(
+        row, keyring, deployment_uuid=deployment_uuid
+    ):
+        return composition.BASIS_ATTESTED
+    return row.basis
 
 
 def _instant(value: str) -> datetime:
@@ -243,8 +309,11 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
             continue
         seen_ids.add(outcome["outcome_id"])
         accepted.append((index, outcome, key_id, envelope))
-    if refusals:
-        return [], refusals
+    # No early return on a first-pass refusal: the envelopes that passed still go
+    # through the database checks below, so one 400 names EVERY refusal in the
+    # batch. Returning here named only the signature failures, and a caller who
+    # fixed those and posted again met the replays next -- one round trip per
+    # kind of refusal, for a batch that was never going to be recorded anyway.
 
     # The newest outcome each (workflow, engine) reports within this batch. A
     # verdict older than one the same engine reports alongside it is the same
@@ -306,7 +375,7 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                     )
                 )
         if refusals:
-            return [], refusals
+            return [], sorted(refusals, key=lambda refusal: refusal.index)
         rows = [
             WorkflowChainOutcome(
                 deployment=deployment,
@@ -339,6 +408,7 @@ __all__ = [
     "MAX_CLOCK_SKEW",
     "KeyringUnavailable",
     "Refusal",
+    "basis_in_force",
     "ingest",
     "load_keyring",
 ]

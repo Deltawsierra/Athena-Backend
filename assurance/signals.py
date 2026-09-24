@@ -25,7 +25,7 @@ import logging
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models.signals import post_save
+from django.db.models.signals import post_migrate, post_save
 from django.dispatch import receiver
 
 logger = logging.getLogger(__name__)
@@ -87,3 +87,34 @@ def auto_dispatch_finding(sender, instance, created, update_fields=None, **kwarg
     from .dispatch import schedule_finding_dispatch
 
     schedule_finding_dispatch(instance)
+
+
+#: The marker migration whose application makes stored chain decisions stale.
+DEMOTION_MIGRATION = ("assurance", "0033_recompute_decisions_after_typed_in_demotion")
+
+
+@receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
+def recompute_decisions_after_demotion(sender, plan=None, **kwargs):
+    """Recompute every stored decision with chain outcomes under it, once, after the
+    ``migrate`` that applied the demotion marker. See that migration for why the
+    work is here rather than in it.
+
+    Keyed on the PLAN, not on the database: ``post_migrate`` fires on every
+    ``migrate`` and once per app, and a recompute on each would move decisions
+    whenever an operator ran an unrelated migration. Only a forward application of
+    the marker in the plan just applied triggers it, and only on the assurance
+    app's signal, so it runs exactly once per upgrade.
+    """
+    if getattr(sender, "name", None) != "assurance" or not plan:
+        return
+    if not any(
+        (migration.app_label, migration.name) == DEMOTION_MIGRATION and not backwards
+        for migration, backwards in plan
+    ):
+        return
+    from .decision import recompute_decision
+    from .models import Deployment, WorkflowChainOutcome
+
+    deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
+    for deployment in Deployment.objects.filter(pk__in=deployment_ids):
+        recompute_decision(deployment, paused=deployment.decision == Deployment.Decision.PAUSED)

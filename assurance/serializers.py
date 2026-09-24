@@ -522,7 +522,13 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     #: Whether this row's ``demonstrated`` is backed by a verified signed outcome.
     #: A reader deciding what the graph rests on should not have to infer it from
     #: which evidence columns happen to be blank.
-    signed = serializers.BooleanField(source="rests_on_signed_evidence", read_only=True)
+    signed = serializers.SerializerMethodField()
+    #: The basis the composition rule relies on for this row, which is ``basis``
+    #: except where ``basis`` says demonstrated and no envelope verifies now --
+    #: then attested. Published beside the column because the column alone let a
+    #: row read ``basis: demonstrated, signed: false`` while the graph counted it
+    #: attested: two answers about one row, and the more flattering one on it.
+    basis_in_force = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowChainOutcome
@@ -533,6 +539,7 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "status_label",
             "basis",
             "basis_label",
+            "basis_in_force",
             "observed_at",
             "recorded_at",
             "source",
@@ -551,6 +558,31 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "observer_key_id",
             "evidence_digest",
         ]
+
+    def _basis_in_force(self, obj) -> str:
+        """One verification per row, whichever field asks first, against one
+        keyring read per serialisation rather than one per row."""
+        cached = getattr(obj, "_basis_in_force", None)
+        if cached is None:
+            from . import observed_outcomes
+
+            context = self.context
+            if "chain_keyring" not in context:
+                context["chain_keyring"] = observed_outcomes.trusted_keyring()
+            cached = observed_outcomes.basis_in_force(
+                obj, context["chain_keyring"], deployment_uuid=context.get("deployment_uuid")
+            )
+            obj._basis_in_force = cached
+        return cached
+
+    def get_basis_in_force(self, obj) -> str:
+        return self._basis_in_force(obj)
+
+    def get_signed(self, obj) -> bool:
+        return (
+            obj.basis == WorkflowChainOutcome.Basis.DEMONSTRATED
+            and self._basis_in_force(obj) == WorkflowChainOutcome.Basis.DEMONSTRATED
+        )
 
     def validate_basis(self, value):
         """``demonstrated`` means a run produced this outcome, and a POST is not a

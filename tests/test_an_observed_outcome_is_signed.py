@@ -436,16 +436,17 @@ def test_the_basis_census_reports_a_typed_in_demonstrated_as_attested():
 # ------------------------------------------------ an assertion cannot outrank evidence
 
 
-def test_a_future_dated_typed_in_held_is_refused_and_could_not_hide_a_signed_violation():
+@pytest.mark.parametrize("basis", [comp.BASIS_ATTESTED, comp.BASIS_UNKNOWN, None], ids=["attested", "unknown", "omitted"])
+def test_a_future_dated_typed_in_held_is_refused_and_could_not_hide_a_signed_violation(basis):
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep, status=oc.VIOLATED)
     assert composition_signal(dep) == comp.NOT_RECOMMENDED
+    said = {} if basis is None else {"basis": basis}
 
     far = _client().post(
         _operator_url(dep),
-        {"workflow": "refund-over-limit", "status": comp.HELD, "basis": comp.BASIS_ATTESTED,
-         "observed_at": "2099-01-01T00:00:00Z"},
+        {"workflow": "refund-over-limit", "status": comp.HELD, "observed_at": "2099-01-01T00:00:00Z", **said},
         format="json",
     )
     assert far.status_code == 400
@@ -455,8 +456,8 @@ def test_a_future_dated_typed_in_held_is_refused_and_could_not_hide_a_signed_vio
     # signed violation, however much later it is dated.
     near = _client().post(
         _operator_url(dep),
-        {"workflow": "refund-over-limit", "status": comp.HELD, "basis": comp.BASIS_ATTESTED,
-         "observed_at": (_now() + timedelta(minutes=1)).isoformat()},
+        {"workflow": "refund-over-limit", "status": comp.HELD,
+         "observed_at": (_now() + timedelta(minutes=1)).isoformat(), **said},
         format="json",
     )
     assert near.status_code == 200, near.content
@@ -586,3 +587,282 @@ def test_reversing_the_migration_refuses_while_signed_evidence_exists():
     _ingested(_deployment())
     with pytest.raises(RuntimeError, match="signed evidence"):
         module.refuse_to_drop_signed_evidence(apps, None)
+
+
+# ------------------------------------------------ round two
+
+
+def _rows(response):
+    return response.json()["outcomes"]
+
+
+def test_the_skew_allowance_on_the_operator_route_is_the_signed_routes_five_minutes():
+    """Just inside the allowance is accepted, just outside refused -- the bound the
+    two doors share, pinned at both edges rather than only far past it."""
+    assert observed_outcomes.MAX_CLOCK_SKEW == timedelta(minutes=5)
+    dep = _deployment()
+    client = _client()
+    inside = client.post(
+        _operator_url(dep),
+        {"workflow": "w", "status": comp.HELD, "observed_at": (_now() + timedelta(minutes=4)).isoformat()},
+        format="json",
+    )
+    assert inside.status_code == 200, inside.content
+    outside = client.post(
+        _operator_url(dep),
+        {"workflow": "w", "status": comp.HELD, "observed_at": (_now() + timedelta(minutes=6)).isoformat()},
+        format="json",
+    )
+    assert outside.status_code == 400
+    assert "in the future" in json.dumps(outside.json())
+
+
+def test_one_refusal_names_every_envelope_it_refuses_whatever_check_refused_it():
+    """A forged envelope and a replay in one batch: both are named in the one 400.
+    The envelope checks used to return first, so the replay surfaced only after
+    the caller fixed the forgery and posted again."""
+    dep = _deployment()
+    client = _client()
+    recorded = _signed(dep, workflow="refund-over-limit")
+    assert client.post(_url(dep), recorded, format="json").status_code == 201
+
+    forged = dict(_signed(dep, workflow="payout"))
+    forged["signatures"] = [{**forged["signatures"][0], "sig": base64.b64encode(b"\0" * 64).decode()}]
+    batch = [forged, _signed(dep, workflow="export"), recorded]
+    response = client.post(_url(dep), {"envelopes": batch}, format="json")
+
+    assert response.status_code == 400, response.content
+    refused = response.json()["refused"]
+    assert [r["index"] for r in refused] == [0, 2]
+    assert "already recorded" in refused[1]["reason"]
+    assert WorkflowChainOutcome.objects.filter(deployment=dep).count() == 1
+
+
+def test_a_row_publishes_the_basis_the_rule_relies_on_beside_the_one_it_was_written_with(tmp_path, monkeypatch):
+    """``basis`` is what was written; ``basis_in_force`` is what the graph counts.
+    With the signing key withdrawn the row still says demonstrated, and the graph
+    counts it attested -- and the row now says so too, instead of publishing the
+    more flattering answer alone."""
+    dep = _deployment()
+    _ingested(dep)
+    WorkflowChainOutcome.objects.create(
+        deployment=dep, workflow="typed", status=comp.HELD, observed_at=_now() - timedelta(hours=1)
+    )
+    by_workflow = {r["workflow"]: r for r in _rows(_client().get(_operator_url(dep)))}
+    assert by_workflow["refund-over-limit"]["basis_in_force"] == comp.BASIS_DEMONSTRATED
+    assert by_workflow["refund-over-limit"]["signed"] is True
+    assert by_workflow["typed"]["basis_in_force"] == comp.BASIS_UNKNOWN
+    assert by_workflow["typed"]["signed"] is False
+
+    only_athena = tmp_path / "rotated.json"
+    only_athena.write_text(_athena_only())
+    monkeypatch.setenv(observed_outcomes.KEYRING_ENV, str(only_athena))
+    withdrawn = {r["workflow"]: r for r in _rows(_client().get(_operator_url(dep)))}["refund-over-limit"]
+    assert withdrawn["basis"] == comp.BASIS_DEMONSTRATED
+    assert withdrawn["basis_in_force"] == comp.BASIS_ATTESTED
+    assert withdrawn["signed"] is False
+    assert composition_for(dep).basis_census[comp.BASIS_ATTESTED] == 1
+
+
+def test_the_signed_route_response_publishes_the_basis_in_force():
+    dep = _deployment()
+    response = _client().post(_url(dep), _signed(dep), format="json")
+    assert response.status_code == 201
+    assert _rows(response)[0]["basis_in_force"] == comp.BASIS_DEMONSTRATED
+
+
+# ------------------------------------------------ the keyring as it stands now
+
+
+def _achilles_only():
+    return json.dumps([{"engine": "achilles", "public_key": base64.b64encode(oc.raw_public_key(ACHILLES)).decode()}])
+
+
+def _athena_only():
+    # "athena " padded to the length of "achilles", so a rotation between the two
+    # is a same-size rewrite. The engine name is not part of the key id.
+    return json.dumps([{"engine": "athena  ", "public_key": base64.b64encode(oc.raw_public_key(ATHENA)).decode()}])
+
+
+def test_a_same_size_in_place_rewrite_of_the_keyring_is_read_not_trusted_stale(keyring):
+    """The rotation that kept a withdrawn key trusted: same path, same length,
+    same mtime. The cache is keyed on the content, so it is seen."""
+    import os
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    achilles, athena = _achilles_only(), _athena_only()
+    assert len(achilles) == len(athena), "the test needs a same-length rotation"
+    keyring.write_text(achilles)
+    assert composition_signal(dep) == comp.READY
+
+    stat = os.stat(keyring)
+    keyring.write_text(athena)
+    os.utime(keyring, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert os.stat(keyring).st_size == stat.st_size
+    assert os.stat(keyring).st_mtime_ns == stat.st_mtime_ns
+
+    assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE
+    keyring.write_text(achilles)
+    assert composition_signal(dep) == comp.READY, "and rotating back is seen too"
+
+
+@pytest.mark.parametrize("damage", ["deleted", "corrupted", "not-utf8", "nested"])
+def test_a_keyring_gone_or_damaged_after_a_good_read_trusts_nothing(keyring, damage):
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert composition_signal(dep) == comp.READY, "a good read first, so a cache exists"
+
+    if damage == "deleted":
+        keyring.unlink()
+    elif damage == "corrupted":
+        keyring.write_text('[{"engine": "achilles", "public_key": "not base64!"}]')
+    elif damage == "not-utf8":
+        keyring.write_bytes(b"\xff\xfe" + b"\x00" * 40)
+    else:
+        keyring.write_text("[" * 100_000)
+    assert observed_outcomes.trusted_keyring() is None
+    assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE
+
+
+# ------------------------------------------------ the stored decision follows the chains
+
+
+def _stored(dep):
+    dep.refresh_from_db()
+    return dep.decision
+
+
+def _approved_url(dep):
+    return f"/api/assurance/deployments/{dep.uuid}/approved-workflows/"
+
+
+def test_every_chain_write_route_refreshes_the_stored_decision():
+    """The receipt and the bundle read the STORED decision. Each route that moves
+    the chains under it now moves it too."""
+    dep = _deployment()
+    client = _client()
+    refund = {"slug": "refund-over-limit", "name": "Refund"}
+    assert client.put(_approved_url(dep), {"workflows": [refund]}, format="json").status_code == 200
+    # Approved and never reported: not demonstrated, and the stored decision says so.
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+    assert client.post(_url(dep), _signed(dep, observed_at=_now() - timedelta(minutes=2)), format="json").status_code == 201
+    assert _stored(dep) == Deployment.Decision.READY
+
+    # Widening the approved set moves it: the new workflow never reported.
+    payout = {"slug": "payout", "name": "Payout"}
+    assert client.put(_approved_url(dep), {"workflows": [refund, payout]}, format="json").status_code == 200
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    # And narrowing it back moves it back.
+    assert client.put(_approved_url(dep), {"workflows": [refund]}, format="json").status_code == 200
+    assert _stored(dep) == Deployment.Decision.READY
+
+    violated = _signed(dep, status=oc.VIOLATED, observed_at=_now() - timedelta(seconds=10))
+    assert client.post(_url(dep), violated, format="json").status_code == 201
+    assert _stored(dep) == Deployment.Decision.NOT_RECOMMENDED
+
+
+def test_an_operator_chain_write_refreshes_the_stored_decision():
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    response = _client().post(
+        _operator_url(dep),
+        {"workflow": "refund-over-limit", "status": comp.VIOLATED, "observed_at": _now().isoformat()},
+        format="json",
+    )
+    assert response.status_code == 200, response.content
+    assert _stored(dep) == Deployment.Decision.NOT_RECOMMENDED
+
+
+def test_a_chain_write_does_not_lift_an_operators_pause():
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.PAUSED)
+    assert _client().post(_url(dep), _signed(dep), format="json").status_code == 201
+    assert _stored(dep) == Deployment.Decision.PAUSED
+
+
+# ------------------------------------------------ the upgrade recomputes, once
+
+
+def _plan(*names, backwards=False):
+    from django.db import connection
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(connection)
+    return [(loader.get_migration("assurance", name), backwards) for name in names]
+
+
+def _assurance_app():
+    from django.apps import apps
+
+    return apps.get_app_config("assurance")
+
+
+def test_the_upgrade_recomputes_a_stored_ready_that_rested_on_typed_in_chains():
+    from assurance.signals import DEMOTION_MIGRATION, recompute_decisions_after_demotion
+
+    marker = DEMOTION_MIGRATION[1]
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    WorkflowChainOutcome.objects.create(
+        deployment=dep, workflow="refund-over-limit", status=comp.HELD,
+        basis=comp.BASIS_ATTESTED, observed_at=_now() - timedelta(hours=1),
+    )
+    untouched = _deployment()
+    Deployment.objects.filter(pk__in=[dep.pk, untouched.pk]).update(decision=Deployment.Decision.READY)
+
+    # Not this app's signal, not the marker, or the marker unapplied: nothing moves.
+    recompute_decisions_after_demotion(sender=object(), plan=_plan(marker))
+    recompute_decisions_after_demotion(sender=_assurance_app(), plan=_plan("0032_signed_chain_outcomes"))
+    recompute_decisions_after_demotion(sender=_assurance_app(), plan=_plan(marker, backwards=True))
+    recompute_decisions_after_demotion(sender=_assurance_app(), plan=None)
+    assert _stored(dep) == Deployment.Decision.READY
+
+    recompute_decisions_after_demotion(sender=_assurance_app(), plan=_plan(marker))
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert _stored(untouched) == Deployment.Decision.READY, "a deployment with no chains is not the upgrade's to move"
+
+
+def test_the_upgrade_recompute_keeps_an_operators_pause():
+    from assurance.signals import DEMOTION_MIGRATION, recompute_decisions_after_demotion
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    WorkflowChainOutcome.objects.create(
+        deployment=dep, workflow="refund-over-limit", status=comp.VIOLATED, observed_at=_now(),
+    )
+    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.PAUSED)
+    recompute_decisions_after_demotion(sender=_assurance_app(), plan=_plan(DEMOTION_MIGRATION[1]))
+    assert _stored(dep) == Deployment.Decision.PAUSED
+
+
+def test_the_marker_migration_does_nothing_itself():
+    """The work is in the post_migrate receiver, where the schema is whole. A
+    RunPython here would import live models against a historical schema."""
+    import importlib
+
+    module = importlib.import_module("assurance.migrations.0033_recompute_decisions_after_typed_in_demotion")
+    assert module.Migration.operations == []
+
+
+# ------------------------------------------------ a body nested past the stack
+
+
+@pytest.mark.parametrize("route", ["observed", "operator", "approved"])
+def test_a_body_nested_past_the_stack_is_a_400_not_a_500(route):
+    dep = _deployment()
+    url = {"observed": _url(dep), "operator": _operator_url(dep), "approved": _approved_url(dep)}[route]
+    method = "put" if route == "approved" else "post"
+    # Past the interpreter's recursion limit, and no deeper: the audit middleware
+    # reads the body too, and its fallback redaction is its own subject.
+    import sys
+
+    depth = sys.getrecursionlimit() + 500
+    body = "[" * depth + "]" * depth
+    response = getattr(_client(), method)(url, body, content_type="application/json")
+    assert response.status_code == 400, response.status_code
+    assert "nested too deeply" in json.dumps(response.json())

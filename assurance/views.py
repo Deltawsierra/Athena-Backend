@@ -20,10 +20,11 @@ from django.shortcuts import get_object_or_404
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 
 from django.db import transaction
+
+from config.parsers import SafeJSONParser
 
 from .access import assess_effective_access
 from .bom import build_ai_bom
@@ -172,6 +173,21 @@ def _rows_from_body(data, *, key: str, single_allowed: bool):
                 + f". Got {type(data).__name__}."
             )
         }
+    )
+
+
+def _refresh_stored_decision(deployment) -> None:
+    """Recompute and persist the deployment's decision after its chains moved.
+
+    The receipt and the bundle read the STORED decision, and only scan ingest and
+    the recompute route refreshed it. So a workflow set or a chain outcome written
+    over HTTP changed what decision-support computed live while the receipt kept
+    reporting the decision from before -- a signed violation left a stored READY
+    in place, read by every surface that trusts the record. Preserves an operator's
+    failsafe pause, as the recompute route does.
+    """
+    recompute_decision(
+        deployment, paused=deployment.decision == Deployment.Decision.PAUSED
     )
 
 
@@ -1435,6 +1451,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     )
                     for row in rows
                 )
+                _refresh_stored_decision(deployment)
         # `select_related` because `approved_by` is read per row: without it a
         # thousand-row set issues a thousand extra user queries.
         recorded = deployment.approved_workflows.select_related("approved_by")
@@ -1509,12 +1526,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     WorkflowChainOutcome(deployment=deployment, **row)
                     for row in serializer.validated_data
                 )
+                _refresh_stored_decision(deployment)
         recorded = deployment.chain_outcomes.all()
         total = recorded.count()
         page = list(recorded[: self.CHAIN_OUTCOME_PAGE_SIZE])
         return Response(
             {
-                "outcomes": WorkflowChainOutcomeSerializer(page, many=True).data,
+                "outcomes": WorkflowChainOutcomeSerializer(
+                    page, many=True, context={"deployment_uuid": str(deployment.uuid)}
+                ).data,
                 # Returned vs recorded, stated separately and always: `len(outcomes)`
                 # is not the count and must not be usable as one.
                 "returned": len(page),
@@ -1532,7 +1552,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # JSON only. A signed outcome is a JSON document, and a form or multipart
         # body is not one: with the default parsers a multipart POST reached a 500,
         # because the audit middleware had already consumed the stream as a form.
-        parser_classes=[JSONParser],
+        parser_classes=[SafeJSONParser],
     )
     def observed_chain_outcomes(self, request, uuid=None):
         """Record chain outcomes an engine OBSERVED, from its signed envelopes.
@@ -1591,10 +1611,13 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        _refresh_stored_decision(deployment)
         return Response(
             {
                 "recorded": len(rows),
-                "outcomes": WorkflowChainOutcomeSerializer(rows, many=True).data,
+                "outcomes": WorkflowChainOutcomeSerializer(
+                    rows, many=True, context={"deployment_uuid": str(deployment.uuid)}
+                ).data,
                 "composition": _composition_payload(deployment),
             },
             status=status.HTTP_201_CREATED,

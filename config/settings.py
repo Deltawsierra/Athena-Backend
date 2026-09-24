@@ -183,6 +183,13 @@ AUTH_PASSWORD_VALIDATORS = [
 # -------------------------------------------------------------------
 
 REST_FRAMEWORK = {
+    # DRF's defaults with its JSON parser swapped for one that answers a body
+    # nested past the interpreter's stack with a 400 rather than a 500.
+    "DEFAULT_PARSER_CLASSES": (
+        "config.parsers.SafeJSONParser",
+        "rest_framework.parsers.FormParser",
+        "rest_framework.parsers.MultiPartParser",
+    ),
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),

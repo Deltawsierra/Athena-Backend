@@ -148,6 +148,10 @@ CHAIN_BASES: frozenset[str] = frozenset({BASIS_DEMONSTRATED, BASIS_ATTESTED, BAS
 #: than `!= BASIS_DEMONSTRATED`, so a basis added later has to be classified here
 #: on purpose instead of silently joining the supported side.
 UNEXERCISED_BASES: frozenset[str] = frozenset({BASIS_ATTESTED, BASIS_UNKNOWN})
+#: Strongest first, for breaking a tie between survivors that report one status.
+#: Total over :data:`CHAIN_BASES` -- asserted by test -- so the tie never falls to
+#: arrival order.
+_BASIS_RANK: Mapping[str, int] = {BASIS_DEMONSTRATED: 0, BASIS_ATTESTED: 1, BASIS_UNKNOWN: 2}
 
 #: How many unexercised workflows `explain` names before rolling the rest into a
 #: count. One sentence naming fifty workflows is a sentence nobody reads, and the
@@ -420,6 +424,13 @@ class Composition:
     #: says how much of the graph is assertion, and only the names say which part of
     #: the deployment to go and exercise.
     unexercised: tuple[str, ...] = ()
+    #: The deciding workflows whose floor came from the typed-in-``held`` rule in
+    #: :func:`_floor_of` rather than from their status, sorted. ``explain`` keys its
+    #: "an assertion is not the run READY asks for" clause on this and nothing
+    #: looser: the clause is true of exactly these workflows, and a looser trigger
+    #: (any unexercised outcome beside any deciding one) printed it under a floor a
+    #: signed ``violated`` set, where it explained a decision it had no part in.
+    held_floored: tuple[str, ...] = ()
 
     @property
     def all_held(self) -> bool:
@@ -531,17 +542,19 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
         status = survivors[0].status
         for attempt in survivors[1:]:
             status = _worse_status(status, attempt.status)
-        # Among the survivors carrying that status, a DEMONSTRATED one wins the tie.
-        # Two survivors saying the same thing about one chain, one of them from a
-        # run, means a run really did establish it, and reporting the attested row's
-        # basis there would understate what the platform holds. The other direction
-        # is the one that matters more and is already handled by taking the worst
-        # status first: an attested `held` cannot hide a demonstrated `violated`,
-        # because the violated status wins outright.
+        # Among the survivors carrying that status, the strongest basis wins the tie:
+        # demonstrated, then attested, then unknown. Two survivors saying the same
+        # thing about one chain, one of them from a run, means a run really did
+        # establish it, and reporting the weaker row's basis there would understate
+        # what the platform holds. Ranked in full rather than "demonstrated, else
+        # whichever came first": between an attested and an unknown row the answer
+        # used to depend on arrival order, so the same outcomes composed to two
+        # different basis censuses. The other direction is the one that matters
+        # more and is already handled by taking the worst status first: an attested
+        # `held` cannot hide a demonstrated `violated`, because the violated status
+        # wins outright.
         tied = [attempt for attempt in survivors if attempt.status == status]
-        standing[workflow] = next(
-            (attempt for attempt in tied if attempt.basis == BASIS_DEMONSTRATED), tied[0]
-        )
+        standing[workflow] = min(tied, key=lambda attempt: _BASIS_RANK[attempt.basis])
     return standing, superseded
 
 
@@ -651,10 +664,13 @@ def compose(
 
     decision: str | None = None
     deciding: list[str] = []
+    floored_by_rule: set[str] = set()
     for workflow, outcome in standing.items():
         floor = _floor_of(workflow, outcome, approved_set if approved is not None else None)
         if floor is None:
             continue
+        if FLOORS.get(outcome.status) is None:
+            floored_by_rule.add(workflow)
         if decision is None or _RANK[floor] > _RANK[decision]:
             decision, deciding = floor, [workflow]
         elif floor == decision:
@@ -677,6 +693,7 @@ def compose(
         basis_census=basis_census,
         workflows_unexercised=len(unexercised),
         unexercised=tuple(sorted(unexercised)),
+        held_floored=tuple(sorted(set(deciding) & floored_by_rule)),
     )
 
 
@@ -728,11 +745,15 @@ def explain(composition: Composition) -> str:
         basis_clause = ""
     # When an approved workflow's typed-in `held` is what set the floor, the
     # sentence above names a held workflow as the reason the decision is not ready,
-    # which reads as a contradiction unless it says why.
-    if composition.workflows_expected is not None and composition.workflows_unexercised and composition.deciding:
+    # which reads as a contradiction unless it says why -- and only then.
+    if composition.held_floored:
+        floored = ", ".join(composition.held_floored[:_UNEXERCISED_NAMED])
+        if len(composition.held_floored) > _UNEXERCISED_NAMED:
+            floored += f" and {len(composition.held_floored) - _UNEXERCISED_NAMED} more"
         held_clause = (
-            f" An approved workflow whose held rests on no demonstrated exercise"
-            f" counts as {NOT_DEMONSTRATED}: an assertion is not the run READY asks for."
+            f" The held reported for {floored} rests on no demonstrated exercise, and"
+            f" on an approved workflow that counts as {NOT_DEMONSTRATED}: an assertion"
+            f" is not the run READY asks for."
         )
     else:
         held_clause = ""
