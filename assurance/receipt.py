@@ -113,12 +113,34 @@ ALGORITHM = "sha256"
 #: in prose. One string, so the answer cannot drift between the schema, the payload
 #: and the docstring.
 UNSIGNED_REASON = (
-    "No component in the platform signs this object. This backend produces the "
-    "canonical signable payload and holds no signing key; the engine's Ed25519 "
-    "signing covers the evidence-pack manifest, a different artifact with no path "
-    "to this one. The `digest` above is a checksum an auditor can recompute to "
-    "confirm the content is unaltered against a copy they already trust; it is not "
-    "a signature and attests nothing about who produced this receipt."
+    "THIS COPY is unsigned. This backend produces the canonical signable payload "
+    "and holds no signing key. A signed copy exists: GET the deployment's "
+    "`signed-assurance-receipt`, which asks the engine to wrap the signable "
+    "projection of this same receipt (see `signable_receipt`) in a DSSE envelope "
+    "and returns the envelope, or an honest reason it could not. The `digest` "
+    "above is a checksum an auditor can recompute to confirm the content is "
+    "unaltered against a copy they already trust; it is not a signature and "
+    "attests nothing about who produced this receipt."
+)
+
+#: The fields a receipt carries for its reader that a signature must NOT cover.
+#: Kept as data, not a literal in the view, so the route, the tests and any future
+#: second signer cannot disagree about what was signed.
+NOT_SIGNED_OVER = ("computed_at", "signed", "signature", "unsigned_reason")
+
+#: Why each of those is excluded, in the response rather than only in prose --
+#: a reader comparing the signed copy against the unsigned one will find fields
+#: missing and is owed the reason without reading this source file.
+NOT_SIGNED_OVER_REASON = (
+    "`computed_at` is a wall clock outside the digest: signing it would make two "
+    "signatures over the SAME assurance state differ, so 'has anything changed?' "
+    "could no longer be answered by comparing envelopes. `signed`, `signature` and "
+    "`unsigned_reason` are a document's self-report about whether it is signed, "
+    "which is false the moment it is signed -- whether an artifact carries a "
+    "signature is a property of the envelope around it, not a claim the content "
+    "can make about itself. Neither group is inside `digest`, so the signed copy "
+    "and the unsigned one carry the identical `digest` and are checkably the same "
+    "assurance state."
 )
 
 # The version of the Assurance Receipt standard this module emits. A stable
@@ -888,3 +910,26 @@ def build_assurance_receipt(deployment) -> dict:
         "signature": None,
         "unsigned_reason": UNSIGNED_REASON,
     }
+
+
+def signable_receipt(receipt: dict) -> dict:
+    """The projection of an Assurance Receipt that a signature covers.
+
+    ``build_assurance_receipt`` returns a payload built for a human auditor
+    holding the JSON and nothing else, so it carries two things a signature must
+    not: the wall clock it was computed at, and its own report of whether it is
+    signed. Signing the whole dict would produce an artifact whose signed bytes
+    say ``"signed": false`` -- a signature over the assertion that there is no
+    signature -- and an envelope that differs on every read of an unchanged
+    deployment, which destroys the one comparison an envelope is good for.
+
+    Both excluded groups are already OUTSIDE ``digest``, which is computed over
+    the stable content alone. So this projection carries the same ``digest`` as
+    the full payload: the signed copy and the copy served by ``assurance-receipt``
+    are checkably the same assurance state, and an auditor can hold either.
+
+    Deterministic by construction: two calls to ``build_assurance_receipt`` for an
+    unchanged deployment differ only in ``computed_at``, so their projections are
+    equal, and the engine returns the same envelope for both.
+    """
+    return {k: v for k, v in receipt.items() if k not in NOT_SIGNED_OVER}
