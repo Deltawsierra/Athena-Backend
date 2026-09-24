@@ -71,8 +71,10 @@ from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
 from .receipt import (
     NOT_SIGNED_OVER,
     NOT_SIGNED_OVER_REASON,
+    NotAnEnvelope,
     build_assurance_receipt,
     deployment_receipt,
+    envelope_over,
     signable_receipt,
 )
 from .vendor_packet import build_vendor_packet, packet_candidates
@@ -550,6 +552,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ``assurance-receipt`` returns the canonical payload and stays exactly as it
         was for existing callers; this is the signed surface beside it.
 
+        WHAT COMES BACK IS CHECKED against what went out, before anything is
+        called signed. Not the signature -- that needs the keyring and is the
+        auditor's job -- but the weaker question this route can answer and was not
+        asking: is the thing the engine returned an envelope at all, does it carry a
+        signature, and does it contain the bytes we sent? ``signed: true`` used to
+        mean only "the call did not raise", so ``{}``, a signature list of length
+        zero, and an envelope attesting a different decision were all served as
+        signed, beside a receipt that said otherwise. See
+        :func:`assurance.receipt.envelope_over`.
+
         WHAT IS SIGNED is the receipt's signable projection
         (:func:`assurance.receipt.signable_receipt`), not the payload
         ``assurance-receipt`` serves. The full payload carries a ``computed_at``
@@ -604,20 +616,33 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # a reader must have exactly one place to look.
         base = {
             "receipt": payload,
+            # Derived from the constant, never restated. A literal that happened
+            # to agree would hide a later divergence for exactly as long as it
+            # kept agreeing, and the constant exists so "the route, the tests and
+            # any future second signer cannot disagree about what was signed".
             "not_signed_over": {
-                "fields": list(NOT_SIGNED_OVER),
+                "fields": [field for field in NOT_SIGNED_OVER],
                 "why": NOT_SIGNED_OVER_REASON,
             },
         }
 
         try:
             client = CyberEngineClient.from_settings()
-            envelope = client.sign_assurance_receipt(payload)
-        except (EngineError, RuntimeError) as exc:
+            envelope = envelope_over(payload, client.sign_assurance_receipt(payload))
+        except (EngineError, RuntimeError, NotAnEnvelope) as exc:
             # RuntimeError is from_settings' own refusal when the engine is not
             # configured at all. Both are "this deployment cannot sign", and the
             # reader needs to know which -- a missing setting and an engine with no
             # key are different things to go and fix.
+            #
+            # NotAnEnvelope is the third: the engine answered, and what it answered
+            # is not an envelope over what we sent. That reads as unsigned for the
+            # same reason the other two do -- there is no signature on this receipt
+            # -- and NOT as a 500, because the receipt itself is still correct and
+            # still worth reading. `signed: true` used to be set on the sole
+            # condition that the call did not raise, so an empty dict, a signature
+            # list of length zero, and an envelope attesting a DIFFERENT decision
+            # were all served as signed. See `envelope_over`.
             return Response({**base, "signed": False, "reason": str(exc), "envelope": None})
 
         return Response(
