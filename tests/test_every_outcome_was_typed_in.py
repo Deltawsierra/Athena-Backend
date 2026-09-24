@@ -196,13 +196,45 @@ def test_an_uncapped_census_says_it_hid_nothing():
 
 
 def test_the_census_is_the_same_twice_for_an_unchanged_deployment():
-    """Ties are ordered deterministically, so a payload cannot change without the
-    deployment changing — otherwise a consumer cannot diff two reads."""
+    """A payload cannot change without the deployment changing, or a consumer
+    cannot diff two reads."""
     dep = _deployment()
     for n in range(6):
         _outcome(dep, f"w{n}", source=f"same-count-{n}")
 
     assert read_chain_provenance(dep) == read_chain_provenance(dep)
+
+
+def test_arrival_order_does_not_decide_which_sources_survive_the_cap():
+    """Equal counts are broken by NAME, not by the order rows happened to arrive.
+
+    Reading one deployment twice does not prove this: Python's sort is stable and
+    the query order is the same both times, so a census with no name tiebreaker
+    passes that test while still letting row order pick the survivors. Which it
+    would: two deployments with identical evidence would then publish different
+    censuses, and the same deployment would reshuffle when an unrelated row moved.
+
+    So two deployments, the same multiset of sources, inserted in opposite orders.
+    Enough distinct equal-count sources to overflow the cap, because the tiebreaker
+    only has consequences where it decides what is KEPT.
+    """
+    names = [f"producer-{n:03d}" for n in range(PROVENANCE_LIMIT + 4)]
+
+    forwards = _deployment("forwards")
+    for n, source in enumerate(names):
+        _outcome(forwards, f"w{n}", source=source)
+
+    backwards = _deployment("backwards")
+    for n, source in enumerate(reversed(names)):
+        _outcome(backwards, f"w{n}", source=source)
+
+    first = read_chain_provenance(forwards)
+    second = read_chain_provenance(backwards)
+
+    assert first == second
+    # And it is the name order that decided, not an accident of either insertion:
+    # the lowest-named sources are the ones kept.
+    assert sorted(first["sources"]) == names[:PROVENANCE_LIMIT]
 
 
 def test_a_graph_nobody_fed_reports_a_count_rather_than_nothing():
