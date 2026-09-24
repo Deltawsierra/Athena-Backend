@@ -457,6 +457,7 @@ def test_the_payload_shapes_are_pinned():
     assert set(outcome.data["composition"]) == {
         "signal",
         "rule_decision",
+        "provenance",
         "census",
         "deciding",
         "workflows_assessed",

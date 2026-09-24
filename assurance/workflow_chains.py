@@ -17,7 +17,10 @@ load-bearing rather than tidy: `compose` stays exercisable from a plain Python
 prompt with four hand-made outcomes, so its tests cannot be made vacuous by a
 database fixture, and everything that needs a deployment lives here.
 
-Two queries, no writes, no clock.
+Three queries, no writes, no clock. It was two until the provenance census
+below; the count is stated rather than left stale, because a docstring that
+undercounts its own reads is how a caller ends up fencing the wrong number of
+them in a transaction.
 """
 
 from __future__ import annotations
@@ -43,6 +46,76 @@ def read_chain_outcomes(deployment) -> list[ChainOutcome]:
         )
         for row in deployment.chain_outcomes.all()
     ]
+
+
+#: How many distinct sources the provenance census names before rolling the rest
+#: up. `source` is free text on purpose -- the producers are not all modelled --
+#: so its cardinality is whatever callers posted, and an uncapped census would
+#: put an unbounded dict in every decision payload.
+PROVENANCE_LIMIT = 20
+
+#: The key a blank ``source`` is counted under. A recorded outcome that does not
+#: say where it came from is a fact about the graph, so it gets a name rather than
+#: being dropped into the total or folded in with something attributed.
+UNATTRIBUTED = "unattributed"
+
+
+def read_chain_provenance(deployment) -> dict:
+    """Where the outcomes under a deployment's composition came from. One query.
+
+    WHY THIS EXISTS. Every other counter in the payload describes what the chains
+    SAID. None of them described who said it, and `source` -- recorded per row
+    since the model was written, and serialised per row by the outcome routes --
+    was never aggregated anywhere a reader of the graph would meet it. So a
+    compositional assurance graph assembled entirely by one operator with a REST
+    client read exactly like one fed by real campaign runs.
+
+    That is not hypothetical. Across this platform's repositories the only writer
+    of a chain outcome is this app's own admin POST route: no engine, no campaign,
+    no scan and no dispatch writes one. Every composition that exists today rests
+    on hand-entered input, and until now the graph could not say so. A control
+    whose inputs are all typed in is a different control from one that observes,
+    and a reader deciding how much weight to give a `held` needs to be able to
+    tell which they are looking at.
+
+    THE CENSUS COUNTS EVERY RECORDED OUTCOME, INCLUDING SUPERSEDED ONES, and that
+    is deliberate. The question it answers is "what has ever fed this graph",
+    which a superseded operator entry answers as much as a standing one. So these
+    counts do NOT sum to ``workflows_assessed`` and must not be read as if they
+    did -- ``recorded`` is published beside them to say what they do sum to.
+
+    Workflows that are approved but unreported are NOT in the census. The rule
+    synthesises those as `not_demonstrated`, and they are the absence of an
+    outcome rather than an outcome from nowhere; giving them a provenance entry
+    would invent a source for a row that does not exist.
+    """
+    counts: dict[str, int] = {}
+    recorded = 0
+    for source in deployment.chain_outcomes.values_list("source", flat=True):
+        recorded += 1
+        key = (source or "").strip() or UNATTRIBUTED
+        counts[key] = counts.get(key, 0) + 1
+
+    # Sorted by count then name so the census is deterministic: an arbitrary tie
+    # order would make two reads of one unchanged deployment differ, and a payload
+    # that changes without the deployment changing is one a consumer cannot diff.
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    kept = dict(ranked[:PROVENANCE_LIMIT])
+    dropped = ranked[PROVENANCE_LIMIT:]
+
+    return {
+        "sources": kept,
+        # Stated separately and always, in the idiom the outcome route already
+        # uses: `len(sources)` is not the number of distinct sources and must not
+        # be usable as one.
+        "distinct": len(counts),
+        "recorded": recorded,
+        "truncated": bool(dropped),
+        # What the cap hid, as a number rather than silently. A census that
+        # dropped rows without saying how many would understate a producer nobody
+        # has noticed -- which is the whole thing this census is for.
+        "not_shown": sum(count for _, count in dropped),
+    }
 
 
 def read_expected_workflows(deployment) -> list[str] | None:
@@ -151,7 +224,9 @@ def composition_decision_signal(composition: Composition) -> str | None:
     return READY if closed_scope(composition) else None
 
 
-def composition_payload(composition: Composition, *, signal: str | None) -> dict:
+def composition_payload(
+    composition: Composition, *, signal: str | None, provenance: dict
+) -> dict:
     """The reported shape of a composition. Built here so its two publishers
     cannot drift apart.
 
@@ -187,6 +262,11 @@ def composition_payload(composition: Composition, *, signal: str | None) -> dict
         "workflows_unapproved": composition.workflows_unapproved,
         "superseded": composition.superseded,
         "explanation": _explanation(composition, signal),
+        # Required rather than defaulted, for the reason this builder exists at
+        # all: a default would let a new publisher omit provenance and still
+        # render a payload, and the omission would read as a graph with nothing
+        # to say about its sources rather than as a caller that did not look.
+        "provenance": provenance,
     }
 
 

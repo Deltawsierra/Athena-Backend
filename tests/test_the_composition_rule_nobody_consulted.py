@@ -460,7 +460,12 @@ def test_the_decision_read_gains_exactly_the_two_queries():
         for q in captured
         if "approvedworkflow" in q["sql"].lower() or "workflowchainoutcome" in q["sql"].lower()
     ]
-    assert len(chain_queries) == 2, chain_queries
+    # THREE, not two: the outcomes, the approved set, and the provenance census.
+    # The census was added deliberately and is read inside the same pass for the
+    # reason this test exists -- a census from a later moment published beside
+    # this composition would describe a graph nobody ever had. The number is
+    # asserted rather than bounded so a FOURTH query has to be a decision too.
+    assert len(chain_queries) == 3, chain_queries
 
 
 def test_ready_already_implies_every_approved_workflow_reported():
