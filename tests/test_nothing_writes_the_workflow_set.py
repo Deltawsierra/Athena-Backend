@@ -449,6 +449,12 @@ def test_the_payload_shapes_are_pinned():
         "workflow",
         "status",
         "status_label",
+        # What the row RESTS ON, beside what it says. `source` is free text and
+        # cannot answer it: `source="nightly-scan"` on a hand-typed row reads
+        # identically. Added to this pinned set deliberately -- that is what the
+        # pin is for.
+        "basis",
+        "basis_label",
         "observed_at",
         "recorded_at",
         "source",
@@ -465,11 +471,18 @@ def test_the_payload_shapes_are_pinned():
         "workflows_unreported",
         "workflows_unapproved",
         "superseded",
+        "basis_census",
+        "workflows_unexercised",
+        "unexercised",
         "explanation",
     }
     # All four statuses, always, including the zeros: a census that omits the
     # zeros cannot be read as "none of these" rather than "not measured".
     assert set(outcome.data["composition"]["census"]) == set(comp.CHAIN_STATUSES)
+    # And all three bases, for the same reason. A basis census that omits
+    # `demonstrated` when nothing was demonstrated reads as a graph that does not
+    # track the question rather than one whose answer is none.
+    assert set(outcome.data["composition"]["basis_census"]) == set(comp.CHAIN_BASES)
 
 
 def test_the_write_routes_and_the_decision_route_report_one_composition():

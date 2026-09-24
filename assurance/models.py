@@ -2421,6 +2421,22 @@ class WorkflowChainOutcome(models.Model):
         )
         INCOMPLETE = composition.INCOMPLETE, "Incomplete — not fully exercised"
 
+    #: WHAT THE ROW RESTS ON, which ``source`` cannot answer. ``source`` is free
+    #: text, so ``source="nightly-scan"`` on a hand-typed row reads exactly like a
+    #: real one, and a census of those strings can only report what was claimed --
+    #: never whether a run happened. Every status above claims an EXERCISE (``held``
+    #: is "the chain was exercised and it holds"), and this is the axis that says
+    #: whether one did.
+    #:
+    #: Taken from the rule module like ``Status``, so the vocabulary cannot drift.
+    class Basis(models.TextChoices):
+        DEMONSTRATED = (
+            composition.BASIS_DEMONSTRATED,
+            "Demonstrated — a run produced this outcome",
+        )
+        ATTESTED = composition.BASIS_ATTESTED, "Attested — a person asserted it"
+        UNKNOWN = composition.BASIS_UNKNOWN, "Unknown — the record does not say"
+
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
     deployment = models.ForeignKey(
@@ -2438,6 +2454,13 @@ class WorkflowChainOutcome(models.Model):
     # because the sources are not all modelled here yet, and naming the ones that
     # are while silently dropping the rest would be worse than naming none.
     source = models.CharField(max_length=255, blank=True)
+    # DEFAULTS TO UNKNOWN. Every row written before this column existed made no
+    # claim about its own basis, and a migration choosing either other value for
+    # them would invent an attester or a run -- the same refusal `observed_at`
+    # already makes about an absent timestamp, on the axis beside it.
+    basis = models.CharField(
+        max_length=32, choices=Basis.choices, default=composition.BASIS_UNKNOWN
+    )
     note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

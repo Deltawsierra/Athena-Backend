@@ -87,7 +87,7 @@ over a real state. An absent decision is not a good one.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 #: The chain was exercised and holds.
@@ -104,6 +104,55 @@ INCOMPLETE = "incomplete"
 #: unknown status as bad -- also silently accepts a typo forever, and the one
 #: that is convenient reads an unrecognised word as `held`.
 CHAIN_STATUSES: frozenset[str] = frozenset({HELD, VIOLATED, NOT_DEMONSTRATED, INCOMPLETE})
+
+#: WHAT THE RECORD RESTS ON, which is a different axis from what it says.
+#:
+#: Every status above claims an EXERCISE. `held` is spelled "the chain was
+#: exercised and it holds"; `not_demonstrated` is "the chain was exercised and did
+#: not establish itself"; even `incomplete` is "not FULLY exercised". The status
+#: axis cannot express "nobody exercised this and a person told us it holds", and
+#: that is the only shape any outcome in this platform has ever had: across every
+#: repository the sole writer of a chain outcome is an operator POST.
+#:
+#: Measured, before this axis existed. Fifty approved workflows, fifty rows typed
+#: in by hand as `held`, and the graph answered:
+#:
+#:     "Every chain held across 50 workflow(s) against 50 approved, 0 of them
+#:      never exercised (50 held, 0 incomplete, 0 not_demonstrated, 0 violated),
+#:      so the rule places the deployment at ready."
+#:
+#: "0 of them never exercised", over a graph where nothing was exercised at all.
+#: `source` was recorded per row and censused by
+#: `workflow_chains.read_chain_provenance`, but it is FREE TEXT:
+#: `source="nightly-scan"` on those same hand-typed rows reads identically, and a
+#: blank one is counted as `unattributed`. A census of strings cannot answer "did a
+#: run produce this", so nothing could.
+BASIS_DEMONSTRATED = "demonstrated"
+#: A person asserted it. An assertion may well be true; what it is not is an
+#: exercise, and a record that cannot tell the two apart reports an assertion in
+#: the words of a measurement.
+BASIS_ATTESTED = "attested"
+#: The record does not say. THE DEFAULT, and deliberately not either of the
+#: others: every row written before this axis existed made no claim about its own
+#: basis, and defaulting them to `attested` would invent an attester while
+#: defaulting them to `demonstrated` would invent a run. The same refusal
+#: `observed_at` already makes about an absent timestamp, on the axis beside it.
+BASIS_UNKNOWN = "unknown"
+
+#: Every basis this module understands. A value outside it is an error rather than
+#: a default, for the reason `CHAIN_STATUSES` gives: the convenient default reads a
+#: typo as the reassuring value.
+CHAIN_BASES: frozenset[str] = frozenset({BASIS_DEMONSTRATED, BASIS_ATTESTED, BASIS_UNKNOWN})
+
+#: The bases that do NOT support a status claiming an exercise. Membership rather
+#: than `!= BASIS_DEMONSTRATED`, so a basis added later has to be classified here
+#: on purpose instead of silently joining the supported side.
+UNEXERCISED_BASES: frozenset[str] = frozenset({BASIS_ATTESTED, BASIS_UNKNOWN})
+
+#: How many unexercised workflows `explain` names before rolling the rest into a
+#: count. One sentence naming fifty workflows is a sentence nobody reads, and the
+#: full list is on `Composition.unexercised` for anyone who needs it.
+_UNEXERCISED_NAMED = 3
 
 #: Statuses under which a workflow is actually demonstrated. Membership, not
 #: `!= VIOLATED`: three of the four are not-held for three different reasons, and
@@ -172,6 +221,16 @@ FLOORS: Mapping[str, str] = {
 }
 
 
+class UnknownChainBasis(ValueError):
+    """A basis outside :data:`CHAIN_BASES`.
+
+    Its own type rather than a bare ``ValueError`` for the reason
+    :class:`UnknownChainStatus` has one: a caller wanting to handle "this row is
+    malformed" differently from "this row is about an unapproved workflow" needs to
+    be able to, and matching on message text is not that.
+    """
+
+
 class UnknownChainStatus(ValueError):
     """A chain outcome carries a status this module does not define.
 
@@ -208,12 +267,21 @@ class ChainOutcome:
     status: str
     observed_at: datetime | None = None
     detail: str = ""
+    #: What the outcome rests on -- see :data:`BASIS_UNKNOWN`, the default: a
+    #: caller that says nothing has made no claim, and the two other values are
+    #: both claims.
+    basis: str = BASIS_UNKNOWN
 
     def __post_init__(self) -> None:
         if self.status not in CHAIN_STATUSES:
             raise UnknownChainStatus(
                 f"chain outcome for {self.workflow!r} has status {self.status!r}; "
                 f"this module defines {', '.join(sorted(CHAIN_STATUSES))}"
+            )
+        if self.basis not in CHAIN_BASES:
+            raise UnknownChainBasis(
+                f"chain outcome for {self.workflow!r} has basis {self.basis!r}; "
+                f"this module defines {', '.join(sorted(CHAIN_BASES))}"
             )
         # A name, not merely something truthy. Two workflows named by values of
         # different types compare fine in a dict and blow up the moment the
@@ -300,6 +368,20 @@ class Composition:
     workflows_unreported: int = 0
     workflows_unapproved: int = 0
     superseded: int = 0
+    #: How many standing outcomes rest on each basis. Beside ``census`` rather than
+    #: folded into it: what a chain SAYS and what the record RESTS ON are two
+    #: independent distributions, and one table keyed by pairs would have twelve
+    #: cells most of which are structurally empty.
+    basis_census: Mapping[str, int] = field(default_factory=dict)
+    #: Standing outcomes whose status claims an exercise while their basis does not
+    #: say one happened. Every status claims one, so this is every standing outcome
+    #: with an attested or unknown basis -- and a consumer cannot derive it from the
+    #: two censuses, which is why it is a field rather than left to them.
+    workflows_unexercised: int = 0
+    #: Which ones, sorted, for the reason ``deciding`` names its workflows: a count
+    #: says how much of the graph is assertion, and only the names say which part of
+    #: the deployment to go and exercise.
+    unexercised: tuple[str, ...] = ()
 
     @property
     def all_held(self) -> bool:
@@ -321,8 +403,14 @@ def _worse_status(a: str, b: str) -> str:
     return a if _RANK[FLOORS.get(a, READY)] >= _RANK[FLOORS.get(b, READY)] else b
 
 
-def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
-    """The status that stands for each workflow, and how many a re-run displaced.
+def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome], int]:
+    """The outcome that stands for each workflow, and how many a re-run displaced.
+
+    Returns the surviving OUTCOME rather than its status alone, and that is how the
+    basis axis became reportable at all: the value the rule composed over had
+    already thrown away everything the row said about itself. A parallel dict of
+    bases keyed by workflow would work and would be a second thing to keep in step
+    with this one; one dict of outcomes cannot disagree with itself.
 
     An outcome is SUPERSEDED when a later VERDICT exists for the same workflow:
     another outcome that says whether the chain holds (`held` or `violated`),
@@ -364,7 +452,7 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
     for outcome in outcomes:
         history.setdefault(outcome.workflow, []).append(outcome)
 
-    standing: dict[str, str] = {}
+    standing: dict[str, ChainOutcome] = {}
     superseded = 0
     for workflow, attempts in history.items():
         dated = [
@@ -382,7 +470,17 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, str], int]:
         status = survivors[0].status
         for attempt in survivors[1:]:
             status = _worse_status(status, attempt.status)
-        standing[workflow] = status
+        # Among the survivors carrying that status, a DEMONSTRATED one wins the tie.
+        # Two survivors saying the same thing about one chain, one of them from a
+        # run, means a run really did establish it, and reporting the attested row's
+        # basis there would understate what the platform holds. The other direction
+        # is the one that matters more and is already handled by taking the worst
+        # status first: an attested `held` cannot hide a demonstrated `violated`,
+        # because the violated status wins outright.
+        tied = [attempt for attempt in survivors if attempt.status == status]
+        standing[workflow] = next(
+            (attempt for attempt in tied if attempt.basis == BASIS_DEMONSTRATED), tied[0]
+        )
     return standing, superseded
 
 
@@ -460,7 +558,13 @@ def compose(
         for workflow in approved:
             if workflow not in standing:
                 unreported.add(workflow)
-                standing[workflow] = NOT_DEMONSTRATED
+                # BASIS_UNKNOWN, and not a fourth basis meaning "never reported".
+                # `workflows_unreported` already counts these exactly, so a separate
+                # basis would be a second spelling of one fact and would put two
+                # numbers in the payload that must always agree.
+                standing[workflow] = ChainOutcome(
+                    workflow=workflow, status=NOT_DEMONSTRATED, basis=BASIS_UNKNOWN
+                )
         # Hoisted, and that is not a micro-optimisation: `set(approved)` inside
         # the genexpr was rebuilt once per surviving workflow, making this O(n*m).
         # Profiled, it was 99.5% of `compose`'s runtime -- 11ms at 1,000 approved
@@ -471,13 +575,23 @@ def compose(
         unapproved = sum(1 for workflow in standing if workflow not in approved_set)
 
     census = dict.fromkeys(sorted(CHAIN_STATUSES), 0)
-    for status in standing.values():
-        census[status] += 1
+    basis_census = dict.fromkeys(sorted(CHAIN_BASES), 0)
+    # Chains whose status CLAIMS an exercise while their basis does not say one
+    # happened. Every status claims an exercise, so this is every standing outcome
+    # whose basis is attested or unknown -- counted here rather than left for a
+    # consumer to derive, because the two censuses are independent distributions and
+    # this number is not in either of them.
+    unexercised: list[str] = []
+    for workflow, outcome in standing.items():
+        census[outcome.status] += 1
+        basis_census[outcome.basis] += 1
+        if outcome.basis in UNEXERCISED_BASES:
+            unexercised.append(workflow)
 
     decision: str | None = None
     deciding: list[str] = []
-    for workflow, status in standing.items():
-        floor = FLOORS.get(status)
+    for workflow, outcome in standing.items():
+        floor = FLOORS.get(outcome.status)
         if floor is None:
             continue
         if decision is None or _RANK[floor] > _RANK[decision]:
@@ -499,6 +613,9 @@ def compose(
         workflows_unreported=len(unreported),
         workflows_unapproved=unapproved,
         superseded=superseded,
+        basis_census=basis_census,
+        workflows_unexercised=len(unexercised),
+        unexercised=tuple(sorted(unexercised)),
     )
 
 
@@ -530,6 +647,25 @@ def explain(composition: Composition) -> str:
         )
         if composition.workflows_unapproved:
             scope += f", and {composition.workflows_unapproved} not on the approved list"
+    # The basis clause, appended to whichever sentence follows. It used to be
+    # absent, and "0 of them never exercised" was then printed over a graph where
+    # nothing had been exercised -- the one line a human actually reads making the
+    # strongest available claim about evidence nobody had. Silent when every
+    # standing outcome is demonstrated, because a clause that appears
+    # unconditionally is one readers learn to skip; `basis_census` carries the zero
+    # for anything reading the payload rather than the sentence.
+    if composition.workflows_unexercised:
+        named = ", ".join(composition.unexercised[:_UNEXERCISED_NAMED])
+        if len(composition.unexercised) > _UNEXERCISED_NAMED:
+            named += f" and {len(composition.unexercised) - _UNEXERCISED_NAMED} more"
+        basis_clause = (
+            f" {composition.workflows_unexercised} of these rest on no demonstrated"
+            f" exercise ({named}): every status above claims the chain was"
+            f" exercised, and for these the record does not say one was."
+        )
+    else:
+        basis_clause = ""
+
     if not composition.deciding:
         # "THE RULE PLACES", not "this signal says". This function knows
         # `composition.decision` -- the rule's verdict over the outcomes it was
@@ -541,8 +677,11 @@ def explain(composition: Composition) -> str:
         # the same sentence. The reassuring half was the human-readable one.
         # `workflow_chains.composition_payload` adds the narrowing sentence when
         # the two differ; this one now only claims what it can see.
-        return f"Every chain held across {scope} ({counted}), so the rule places the deployment at {composition.decision}."
+        return (
+            f"Every chain held across {scope} ({counted}), so the rule places the "
+            f"deployment at {composition.decision}.{basis_clause}"
+        )
     return (
         f"Across {scope} ({counted}), the worst chain status sets the floor: "
-        f"{composition.decision}, from {', '.join(composition.deciding)}."
+        f"{composition.decision}, from {', '.join(composition.deciding)}.{basis_clause}"
     )
