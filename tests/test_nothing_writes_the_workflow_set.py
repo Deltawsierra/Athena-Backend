@@ -472,6 +472,7 @@ def test_the_payload_shapes_are_pinned():
         # pin is for.
         "basis",
         "basis_label",
+        "basis_in_force",
         "observed_at",
         "recorded_at",
         "source",
