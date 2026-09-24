@@ -14,9 +14,10 @@ idempotent, and that only a rebinding re-derivation resolves it:
   drift never resolves it, only an earned re-derivation does;
 - a human REVOKED claim is never invalidated, marked, or given an obligation;
 - invalidation never leaves a claim reading as a pass;
-- cross-claim propagation: a supply-chain change (an AI_BOM input) also opens a
-  retest on the dependent DATA_BOUNDARY claim — via the shared deployment
-  fingerprint, the documented INVALIDATES seam (see ``assurance.invalidation``);
+- cross-claim propagation: a supply-chain change (a provider posture, which both
+  AI_BOM and DATA_BOUNDARY read) also opens a retest on the DATA_BOUNDARY claim --
+  because the input is shared, not because every claim moves together (see
+  ``assurance.fingerprint.CLAIM_INPUTS`` and ``tests/test_spine_per_claim_inputs``);
 - the API endpoints return scoped reads and admin-gated mutations.
 
 The migration applying is implicit: the test database is built from it.
@@ -316,10 +317,10 @@ def test_revoked_claim_is_never_invalidated():
 
 
 def test_cross_claim_change_opens_dependent_boundary_retest():
-    """A supply-chain change (an AI_BOM input — a provider assertion) also opens a
-    retest on the dependent DATA_BOUNDARY claim. With Phase 1's deployment-wide
-    system fingerprint the dependent claims co-invalidate, which is the documented
-    INVALIDATES seam (assurance.invalidation._CLAIM_DEPENDENCIES)."""
+    """A supply-chain change (a provider assertion) also opens a retest on the
+    DATA_BOUNDARY claim, because the provider's posture is an input BOTH claims read
+    (assurance.fingerprint.CLAIM_INPUTS). Propagation is a shared input, not a
+    deployment-wide co-invalidation."""
     dep = Deployment.objects.create(name="d", owner=_user())
     p = _provider("OpenAI", ev=EvidenceClass.CONFIGURATION_VERIFIED, region="eu-west-1", trains_on_data="No")
     _asset(dep, provider=p, name="gpt", identifier="gpt", metadata={"region": "eu-west-1"})

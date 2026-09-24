@@ -40,8 +40,10 @@ from __future__ import annotations
 
 from .graph_refs import (
     MECHANISM_SERVER,
+    PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     dangling_reference,
+    reference_index,
     resolve_reference,
     sort_references,
     tool_references,
@@ -134,8 +136,7 @@ def build_route_map(deployment) -> dict:
 
     nodes: list[dict] = []
     by_uuid: dict[str, dict] = {}
-    by_identifier: dict[str, Asset] = {}
-    by_name: dict[str, Asset] = {}
+    by_identifier, by_name = reference_index(assets)
     layer_members: dict[str, list[Asset]] = {layer: [] for layer in LAYER_ORDER}
 
     for asset in assets:
@@ -144,9 +145,6 @@ def build_route_map(deployment) -> dict:
         nodes.append(node)
         by_uuid[str(asset.uuid)] = node
         layer_members[layer].append(asset)
-        if asset.identifier:
-            by_identifier.setdefault(asset.identifier, asset)
-        by_name.setdefault(asset.name, asset)
 
     edges: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
@@ -185,13 +183,31 @@ def build_route_map(deployment) -> dict:
         for ident in tool_references(metadata):
             if not str(ident or "").strip():
                 continue
-            target = resolve_reference(ident, by_identifier, by_name)
-            if target is not None:
+            targets, why = resolve_reference(ident, by_identifier, by_name)
+            for target in targets:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
-            else:
-                # A tool the agent names but discovery could not place: a dangling
-                # reference to chase, surfaced rather than silently dropped.
-                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS))
+            if why:
+                # A tool the agent names but discovery could not place -- or could
+                # place as more than one component: a reference to chase, surfaced
+                # rather than silently dropped.
+                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, why))
+
+    def _declare_server_edge(source, host) -> None:
+        if (str(source.uuid), str(host.uuid)) in attested_pairs:
+            # The same target, already attested through the agent-to-tool
+            # mechanism. One relationship declared two ways is one relationship:
+            # the reach assessment counts it as a single hop (it dedups on the
+            # node pair), and a map that counted it twice would disagree with the
+            # assessment about the size of the same graph.
+            return
+        if host.kind == Asset.Kind.MCP_SERVER:
+            add_edge(source, host, "hosted_by", "hosted by", declared=True)
+        else:
+            # The reference resolves, but not to an MCP server — a tool wired to a
+            # data store, say. That is still a declared edge, and dropping it was
+            # the worse half of this defect: a hop the inventory attests, absent
+            # from the map AND absent from the gaps, so the map read as complete.
+            add_edge(source, host, "connects_to", "wired to", declared=True)
 
     # A component that declares the backend it is wired to → an edge to that node.
     # Every asset, not only the tool-layer ones: the `server` key is a declaration
@@ -203,27 +219,17 @@ def build_route_map(deployment) -> dict:
         server = str(metadata.get("server") or "").strip()
         if not server:
             continue
-        host = resolve_reference(server, by_identifier, by_name)
-        if host is None:
-            # The reference names nothing in the inventory. This used to vanish:
-            # no edge, and no unresolved row either, because only the agent→tool
-            # mechanism had a channel for a miss.
-            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER))
-        elif (str(source.uuid), str(host.uuid)) in attested_pairs:
-            # The same target, already attested through the agent-to-tool
-            # mechanism. One relationship declared two ways is one relationship:
-            # the reach assessment counts it as a single hop (it dedups on the
-            # node pair), and a map that counted it twice would disagree with the
-            # assessment about the size of the same graph.
-            continue
-        elif host.kind == Asset.Kind.MCP_SERVER:
-            add_edge(source, host, "hosted_by", "hosted by", declared=True)
-        else:
-            # The reference resolves, but not to an MCP server — a tool wired to a
-            # data store, say. That is still a declared edge, and dropping it was
-            # the worse half of this defect: a hop the inventory attests, absent
-            # from the map AND absent from the gaps, so the map read as complete.
-            add_edge(source, host, "connects_to", "wired to", declared=True)
+        hosts, why = resolve_reference(
+            server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+        )
+        if why:
+            # The reference names nothing in the inventory, or more than one
+            # thing. The first used to vanish: no edge, and no unresolved row
+            # either, because only the agent→tool mechanism had a channel for a
+            # miss. An ambiguous one is also drawn to every candidate below.
+            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER, why))
+        for host in hosts:
+            _declare_server_edge(source, host)
 
     # ---- Inferred spine: the reference pipeline between populated layers. ----
 

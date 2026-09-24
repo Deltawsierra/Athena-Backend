@@ -68,8 +68,10 @@ from .capability import (
 )
 from .graph_refs import (
     MECHANISM_SERVER,
+    PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     dangling_reference,
+    reference_index,
     resolve_reference,
     sort_references,
     tool_references,
@@ -173,18 +175,20 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
             for ident in tool_references(metadata):
                 if not str(ident or "").strip():
                     continue
-                target = resolve_reference(ident, by_identifier, by_name)
-                if target is not None:
+                targets, why = resolve_reference(ident, by_identifier, by_name)
+                for target in targets:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
-                else:
-                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS))
+                if why:
+                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, why))
         server = metadata.get("server")
         if server and str(server).strip():
-            target = resolve_reference(server, by_identifier, by_name)
-            if target is not None:
+            targets, why = resolve_reference(
+                server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+            )
+            for target in targets:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
-            else:
-                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER))
+            if why:
+                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER, why))
 
     return edges, unresolved
 
@@ -473,12 +477,7 @@ def assess_effective_access(deployment) -> dict:
     a computed view of the stored asset graph, never a stored record."""
     assets = list(deployment.assets.all())
 
-    by_identifier: dict[str, Asset] = {}
-    by_name: dict[str, Asset] = {}
-    for asset in assets:
-        if asset.identifier:
-            by_identifier.setdefault(asset.identifier, asset)
-        by_name.setdefault(asset.name, asset)
+    by_identifier, by_name = reference_index(assets)
 
     edges, unresolved = _build_edges(assets, by_identifier, by_name)
     unresolved = sort_references(unresolved)

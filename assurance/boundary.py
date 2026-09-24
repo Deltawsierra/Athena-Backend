@@ -288,7 +288,7 @@ def _assess_flow(provider, assets, policy) -> dict:
             elif not _region_allowed(region["value"], policy.allowed_regions):
                 violations.append(
                     f"declared region '{region['value']}' is not within the approved "
-                    f"boundary {list(policy.allowed_regions)}"
+                    f"boundary {sorted(str(r) for r in policy.allowed_regions)}"
                 )
         # Training: forbidden unless the boundary approves it.
         if not policy.training_allowed:
@@ -366,7 +366,21 @@ def assess_boundary(deployment) -> dict:
         _assess_flow(entry["provider"], entry["assets"], policy)
         for entry in by_provider.values()
     ]
-    flows.sort(key=lambda f: (f["status"] != "violation", f["status"] != "unknown", f["provider_name"]))
+    # Ordered by the flow's own content, never by the order rows came back in.
+    # The provider name alone ties when two providers share it (Provider is unique
+    # on name AND kind), and the tie used to fall to primary-key order -- which
+    # decides whose violations the claim's contradicting summary names first, so
+    # recreating a row identically rewrote the claim's reading with no input
+    # moving. Name and kind together are unique, so this order is total.
+    flows.sort(
+        key=lambda f: (
+            f["status"] != "violation",
+            f["status"] != "unknown",
+            f["provider_name"],
+            f["kind"],
+        )
+    )
+    shadow.sort(key=lambda s: (s["kind"], s["identifier"], s["asset_name"]))
 
     summary = {
         "approved": sum(1 for f in flows if f["status"] == "approved"),
