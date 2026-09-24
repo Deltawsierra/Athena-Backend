@@ -26,11 +26,13 @@ from assurance.claims import (
     _prefetched,
     derive_claims,
 )
+from datetime import timedelta
 from types import SimpleNamespace
 
 from assurance.access import assess_effective_access
 from assurance.fingerprint import (
     CLAIM_INPUTS,
+    _families,
     claim_input_fingerprints,
     claim_state_moved,
     compute_system_fingerprint,
@@ -108,6 +110,10 @@ def _deployment():
 
 def _asset(dep, name):
     return Asset.objects.get(deployment=dep, name=name)
+
+
+def _asset_by_identifier(dep, identifier):
+    return Asset.objects.get(deployment=dep, identifier=identifier)
 
 
 def _widen_boundary(dep):
@@ -482,12 +488,13 @@ def _recreate(asset_id):
     return Asset.objects.create(**fields)
 
 
-def test_a_name_two_components_share_resolves_to_neither_whatever_the_row_order():
+def test_a_name_two_components_share_is_read_the_same_whatever_the_row_order():
     """Both graph readers resolved a name with ``setdefault`` over the rows in
     database order, so a shared name meant whichever row came first -- a primary-key
     tie-break no fingerprint can see. Deleting the managed store and recreating it
     identically turned a VERIFIED effective-access claim CONTRADICTED with no input
-    moving. A reference that could mean two components is reported as ambiguous."""
+    moving. A reference that could mean two components is now followed to both and
+    reported as ambiguous, identically by both readers."""
     dep = _deployment()
     _two_stores_named_db(dep)
     readings_before, fps_before = _readings(dep), _fps(dep)
@@ -498,10 +505,65 @@ def test_a_name_two_components_share_resolves_to_neither_whatever_the_row_order(
     assert _fps(dep) == fps_before
 
     fresh = _prefetched(dep)
+    access_rows = assess_effective_access(fresh)["unresolved"]
+    route_rows = build_route_map(fresh)["unresolved"]
+    assert access_rows == route_rows
+    assert [(r["reference"], r["reason"]) for r in access_rows if r["reference"] == "db"] == [
+        ("db", UNRESOLVED_AMBIGUOUS)
+    ]
+
+
+def test_a_second_component_with_the_same_name_cannot_launder_a_contradiction():
+    """Resolving an ambiguous name to NEITHER candidate let a duplicate hide a reach:
+    one unmanaged ``warehouse`` behind the tool read as ungoverned reach, two of them
+    read as nothing reached at all, and the claim eased from CONTRADICTED to
+    PARTIALLY_VERIFIED. Every candidate is followed, so the reading is never milder
+    than any way the reference could be resolved."""
+    dep = _deployment()
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="wh-1",
+        classification=Asset.Classification.UNMANAGED,
+    )
+    one = _readings(dep)[ACCESS]
+    assert one["status"] == Status.CONTRADICTED, "the premise"
+
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="wh-2",
+        classification=Asset.Classification.UNMANAGED,
+    )
+    two = _readings(dep)[ACCESS]
+
+    assert two["status"] == Status.CONTRADICTED
+    fresh = _prefetched(dep)
     for rows in (assess_effective_access(fresh)["unresolved"], build_route_map(fresh)["unresolved"]):
-        assert [(r["reference"], r["reason"]) for r in rows if r["reference"] == "db"] == [
-            ("db", UNRESOLVED_AMBIGUOUS)
-        ]
+        assert ("warehouse", UNRESOLVED_AMBIGUOUS) in [(r["reference"], r["reason"]) for r in rows]
+
+
+def test_an_identifier_two_kinds_share_is_ambiguous_not_first_wins():
+    """The identifier is unique only within a kind. Two kinds carrying it are as
+    ambiguous as a shared name, never settled by which kind sorts first."""
+    dep = _deployment()
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.DATA_STORE, name="warehouse-store", identifier="warehouse",
+        classification=Asset.Classification.KNOWN,
+    )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.API, name="warehouse-api", identifier="warehouse",
+        classification=Asset.Classification.KNOWN,
+    )
+    fresh = _prefetched(dep)
+    for rows in (assess_effective_access(fresh)["unresolved"], build_route_map(fresh)["unresolved"]):
+        assert ("warehouse", UNRESOLVED_AMBIGUOUS) in [(r["reference"], r["reason"]) for r in rows]
+
+
+def test_a_padded_reference_resolves_like_the_bare_one():
+    dep = _deployment()
+    agent = _asset(dep, "agent")
+    before = _readings(dep)[ACCESS]
+    agent.metadata = {**agent.metadata, "tools": ["  reader  "]}
+    agent.save(update_fields=["metadata"])
+    assert _readings(dep)[ACCESS] == before
+    assert not [r for r in assess_effective_access(_prefetched(dep))["unresolved"] if r["reference"] == "reader"]
 
 
 def test_a_provider_rows_own_evidence_class_moves_no_claim():
@@ -634,3 +696,149 @@ def test_an_empty_tools_value_on_an_agent_that_had_none_moves_the_access_claim(m
 
     assert _readings(dep)[ACCESS] != readings_before[ACCESS], "the premise: the reading moved"
     assert _fps(dep)[ACCESS] != fps_before[ACCESS]
+
+
+def test_the_order_regions_were_stored_in_is_not_a_change():
+    """The descriptor sorts the approved regions and the violation text printed them
+    as stored, so reordering the same regions changed the boundary claim's reading
+    and moved no fingerprint. The text is written from the sorted list now."""
+    dep = _deployment()
+    _move_provider_region(dep)
+    _widen_boundary(dep)
+    readings_before, fps_before = _readings(dep), _fps(dep)
+    assert readings_before[BOUNDARY]["status"] == Status.CONTRADICTED, "the premise"
+
+    boundary = DataBoundary.objects.get(deployment=dep)
+    boundary.allowed_regions = list(reversed(boundary.allowed_regions))
+    boundary.save(update_fields=["allowed_regions"])
+
+    assert _readings(dep) == readings_before
+    assert _fps(dep) == fps_before
+
+
+def test_two_same_named_providers_are_reported_in_an_order_the_rows_cannot_change():
+    """Two providers called "openai", both violating, behind two models both called
+    "gpt". The flows tied on provider name and fell to row order, which decided whose
+    violations the summary named: deleting one model and recreating it identically
+    rewrote the claim's reading in place."""
+    dep = _deployment()
+    _move_provider_region(dep)
+    store = _add_same_named_vector_store(dep)
+    ProviderAssertion.objects.filter(provider=store, field="region").update(value="ap-south-1")
+    first = Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.MODEL, name="gpt", identifier="gpt-b",
+        provider=store, classification=Asset.Classification.KNOWN,
+    )
+    before = _readings(dep)[BOUNDARY]
+    assert before["status"] == Status.CONTRADICTED, "the premise"
+
+    _recreate(_asset_by_identifier(dep, "gpt").pk)
+    after_one = _readings(dep)[BOUNDARY]
+    _recreate(first.pk)
+    after_both = _readings(dep)[BOUNDARY]
+
+    assert after_one == before
+    assert after_both == before
+
+
+def test_re_pointing_a_component_at_a_same_named_provider_moves_the_boundary_claim():
+    """Both "openai" providers stay referenced, so the providers family does not
+    move; only which one the model resolves to does. The boundary reads the
+    difference, so asset_provider must be one of its inputs."""
+    dep = _deployment()
+    store = _add_same_named_vector_store(dep)
+    ProviderAssertion.objects.filter(provider=store, field="region").update(value="us-east-1")
+    # Neither holder is a data destination, so neither forms a boundary flow; they
+    # only keep BOTH providers referenced, so the providers family cannot move.
+    Asset.objects.filter(deployment=dep, name="vectors").update(kind=Asset.Kind.AGENT)
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.AGENT, name="holder", identifier="holder",
+        provider=Provider.objects.get(name="openai", kind=Provider.Kind.MODEL_PROVIDER),
+        classification=Asset.Classification.KNOWN,
+    )
+    families_before = _families(_prefetched(dep))
+    readings_before, fps_before = _readings(dep), _fps(dep)
+
+    Asset.objects.filter(deployment=dep, name="gpt").update(provider=store)
+
+    families_after = _families(_prefetched(dep))
+    assert [k for k in families_before if families_before[k] != families_after[k]] == [
+        "asset_provider"
+    ], "the premise: only which provider the model resolves to moved"
+
+    assert _readings(dep)[BOUNDARY] != readings_before[BOUNDARY], "the premise"
+    assert _fps(dep)[BOUNDARY] != fps_before[BOUNDARY]
+
+
+def test_any_reading_that_moved_with_no_input_is_versioned_and_says_so():
+    """A reading the deriver produces differently while every input it is bound to
+    holds is what a gap in CLAIM_INPUTS looks like from the reconciler. It is a new
+    version with a note naming that, never an in-place rewrite."""
+    dep = _deployment()
+    derive_claims(dep)
+    AssuranceClaim.objects.filter(deployment=dep, claim_type=ACCESS).update(
+        contradicting_summary="a reading this state does not produce"
+    )
+
+    counts = derive_claims(dep)
+
+    assert counts["superseded"] == 1
+    old = AssuranceClaim.objects.get(deployment=dep, claim_type=ACCESS, status=Status.SUPERSEDED)
+    assert "no input this claim is bound to" in old.events.order_by("-pk").first().note
+
+
+def test_an_expired_claim_is_refreshed_in_place_not_versioned():
+    """STALE is a lifecycle mark, not a reading: evidence that expired and is read
+    again the same is the same version, re-verified."""
+    dep = _deployment()
+    derive_claims(dep)
+    AssuranceClaim.objects.filter(deployment=dep, claim_type=ACCESS).update(status=Status.STALE)
+
+    counts = derive_claims(dep)
+
+    assert counts["superseded"] == 0
+    assert AssuranceClaim.objects.get(deployment=dep, claim_type=ACCESS).status != Status.STALE
+
+
+def test_a_contradicted_claims_retest_is_not_answered_without_a_derive():
+    """The invalidation never softens a CONTRADICTED claim, so it is not marked
+    STALE; a reverted change followed by a check -- no derivation -- must not read
+    as the retest being answered."""
+    dep = _deployment()
+    _move_provider_region(dep)
+    derive_claims(dep)
+    boundary = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
+    assert boundary.status == Status.CONTRADICTED, "the premise"
+
+    region = ProviderAssertion.objects.get(provider__name="openai", field="region")
+    region.value = "ap-south-1"
+    region.save(update_fields=["value"])
+    check_invalidations(dep)
+    region.value = "us-east-1"
+    region.save(update_fields=["value"])
+
+    check_invalidations(dep)
+    assert RetestRequirement.objects.filter(
+        deployment=dep, claim__claim_type=BOUNDARY, resolved_at__isnull=True
+    ).exists()
+
+    derive_claims(dep)
+    assert not RetestRequirement.objects.filter(
+        deployment=dep, claim__claim_type=BOUNDARY, resolved_at__isnull=True
+    ).exists()
+
+
+def test_a_backdated_check_is_not_answered_by_the_derive_before_it():
+    dep = _deployment()
+    derive_claims(dep)
+    seen = AssuranceClaim.objects.get(deployment=dep, claim_type=BOUNDARY).last_seen
+    _widen_boundary(dep)
+    check_invalidations(dep, now=seen - timedelta(hours=1))
+    boundary = DataBoundary.objects.get(deployment=dep)
+    boundary.allowed_regions = ["eu-west-1"]
+    boundary.save(update_fields=["allowed_regions"])
+    AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).update(status=Status.VERIFIED)
+
+    resolve_satisfied_requirements(_prefetched(dep))
+
+    assert RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).exists()

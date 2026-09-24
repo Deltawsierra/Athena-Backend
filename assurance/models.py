@@ -1837,6 +1837,13 @@ class RetestRequirement(models.Model):
         related_name="opened_retest_requirements",
     )
     opened_at = models.DateTimeField(default=timezone.now)
+    # When the invalidated claim was last derived, as of the moment this opened.
+    # A re-derivation of that same version (the change was reverted) answers the
+    # retest only once the claim has been read again since -- judged on the
+    # claim's own clock, so a requirement opened under a backdated `now` cannot
+    # be satisfied by a derive that happened before it. Null on rows opened before
+    # this field existed, which fall back to `opened_at`.
+    claim_seen_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

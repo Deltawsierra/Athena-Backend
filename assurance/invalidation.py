@@ -121,6 +121,7 @@ def _open_requirement(deployment, claim, *, system_fp, now, actor, reason) -> Re
         triggering_system_fingerprint=system_fp,
         actor=actor,
         opened_at=now,
+        claim_seen_at=claim.last_seen,
     )
     ClaimEvent.objects.create(
         claim=claim,
@@ -161,8 +162,15 @@ def _inputs_phrase(claim) -> str:
 def _rederived_since(claim, req) -> bool:
     """Whether a derivation has re-read this version since the requirement was
     opened, and left it reading something other than the STALE mark the
-    invalidation put on it."""
-    return claim.last_seen > req.opened_at and claim.status != Status.STALE
+    invalidation put on it.
+
+    Judged against when the claim was last derived as of the opening, not against
+    the opening's own timestamp: a check run with a backdated ``now`` would
+    otherwise be answered by the derive that happened BEFORE it, and a claim the
+    invalidation leaves as it was (CONTRADICTED is never softened) would resolve
+    its retest with no derivation at all."""
+    seen = req.claim_seen_at or req.opened_at
+    return claim.last_seen > seen and claim.status != Status.STALE
 
 
 def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version=None, now=None, input_fps=None) -> int:

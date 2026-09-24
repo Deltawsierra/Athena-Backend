@@ -30,8 +30,9 @@ operator can be told rather than something only the code knew.
 The resolution order is identifier first, then name. The identifier is the
 dedup key (``UniqueConstraint(deployment, kind, identifier)``); the name is not
 unique, so it is the fallback and never the first answer. A key that more than
-one asset carries resolves to neither: it is reported as ambiguous, because
-picking one would make the graph depend on the order rows come back in. A reference is matched
+one asset carries is followed to all of them and ALSO reported as ambiguous:
+picking one would make the graph depend on the order rows come back in, and
+following none would let a duplicate name hide a reach. A reference is matched
 against the assets of ONE deployment; nothing here can reach across a boundary.
 """
 
@@ -76,28 +77,32 @@ def reference_index(assets) -> tuple[dict, dict]:
 
 
 def resolve_reference(reference, by_identifier: dict, by_name: dict):
-    """``(asset, None)`` for the one asset a declared reference names, or
-    ``(None, reason)`` when it names none or more than one.
+    """``(candidates, reason)``: every asset a declared reference could name, and
+    why it did not name exactly one.
 
-    Identifier first, then name. An identifier is unique only within a kind, so
-    two assets of different kinds can share one; that is as ambiguous as a
-    shared name and is reported the same way, never settled by kind order. A
-    reference whose identifier is ambiguous does not fall through to a name
-    match: the inventory named something, and what it named is not one thing.
+    Identifier first, then name. One match is ``([asset], None)``. No match is
+    ``([], UNRESOLVED_NOT_FOUND)``. More than one -- a shared name, or an
+    identifier two kinds both carry -- is every candidate with
+    ``UNRESOLVED_AMBIGUOUS``: the reference is followed to ALL of them AND
+    recorded as unresolved. Picking one made the graph depend on row order;
+    following none let a second same-named component launder a verdict -- one
+    unmanaged ``warehouse`` read as ungoverned reach, two of them read as nothing
+    reached at all. Following every candidate means the reading is never milder
+    than any way the reference could be resolved, and the unresolved row still
+    says the inventory does not say which one it meant. A reference whose
+    identifier matches does not fall through to a name.
 
-    ``None`` is not permission to invent a node, and it is not permission to say
-    nothing either: the caller records the reason.
+    An empty list is not permission to invent a node, and it is not permission to
+    say nothing either: the caller records the reason.
     """
     key = str(reference or "").strip()
     if not key:
-        return None, UNRESOLVED_NOT_FOUND
+        return [], UNRESOLVED_NOT_FOUND
     for index in (by_identifier, by_name):
         matches = index.get(key)
         if matches:
-            if len(matches) > 1:
-                return None, UNRESOLVED_AMBIGUOUS
-            return matches[0], None
-    return None, UNRESOLVED_NOT_FOUND
+            return list(matches), (UNRESOLVED_AMBIGUOUS if len(matches) > 1 else None)
+    return [], UNRESOLVED_NOT_FOUND
 
 
 #: What a malformed ``tools`` declaration is reported as, in place of the

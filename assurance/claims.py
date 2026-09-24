@@ -755,18 +755,8 @@ def _derive_claims(dep, now) -> dict:
         # to this claim: it used to supersede every claim on the deployment at once.
         state_moved = claim_state_moved(current, system_fp=system_fp, input_fps=input_fps)
         policy_moved = current.policy_version != pol_version
-        if (
-            not (state_moved or policy_moved)
-            and not current.input_fingerprint
-            and not _same_reading(current, derived)
-        ):
-            # A row bound before per-claim fingerprints, whose whole-system state
-            # still holds, but whose reading does not. Binding it in place would
-            # rewrite the old version's verdict under it: one version spanning two
-            # readings, with no supersede and no retest. A reading that moved is a
-            # new version whatever the fingerprint says.
-            state_moved = True
-        if not (state_moved or policy_moved):
+        reading_moved = not (state_moved or policy_moved) and not _same_reading(current, derived)
+        if not (state_moved or policy_moved or reading_moved):
             if not current.input_fingerprint:
                 # A legacy row whose state and reading both still hold: bind it to
                 # its inputs now, so the next change is read per claim rather than
@@ -779,8 +769,22 @@ def _derive_claims(dep, now) -> dict:
                 note = "The inputs this claim rests on and the assurance policy both changed; version superseded."
             elif state_moved:
                 note = "The inputs this claim rests on changed; version superseded."
-            else:
+            elif policy_moved:
                 note = "Assurance policy changed; version superseded."
+            else:
+                # Neither the inputs this claim is bound to nor the policy moved,
+                # and the deriver reads something else now. Refreshing in place
+                # would rewrite the version's verdict under it -- one version
+                # spanning two readings, with no supersede and no retest. That is
+                # what a gap in CLAIM_INPUTS looks like from here, and a row bound
+                # before per-claim fingerprints lands here too when its system
+                # state holds but its reading does not. Either way a reading that
+                # moved is a new version, and the note says why, so the gap is
+                # visible in the claim's own history rather than silent.
+                note = (
+                    "The reading changed though no input this claim is bound to did; "
+                    "version superseded."
+                )
             _supersede(
                 current,
                 dep,
