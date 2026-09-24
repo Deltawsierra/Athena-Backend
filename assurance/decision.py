@@ -60,6 +60,7 @@ from .workflow_chains import (
     composition_decision_signal,
     composition_for,
     composition_payload,
+    read_chain_provenance,
 )
 from .models import (
     UNTRUSTED_SEVERITY_STATUSES,
@@ -278,6 +279,12 @@ class DecisionParts:
     # reports the census and the deciding workflows, and reading those a second
     # time is the tear this dataclass exists to close.
     composition: Composition
+    # Where those chains' outcomes came from. Part of the same read for the
+    # same reason: a provenance census from a later moment, published beside
+    # this composition, would describe a graph nobody ever had. It takes no
+    # part in the decision -- `decide` never reads it -- and is carried here
+    # only so the payload can report it without a second read.
+    chain_provenance: dict
 
 
 def read_decision_parts(deployment: Deployment) -> DecisionParts:
@@ -297,6 +304,11 @@ def read_decision_parts(deployment: Deployment) -> DecisionParts:
         scan_cap=incomplete_evidence_cap(deployment),
         coverage_cap=coverage_decision_cap(deployment),
         composition=composition_for(deployment),
+        # Read here with everything else, inside the caller's transaction, for
+        # the reason the docstring above gives: reading each fact exactly once
+        # is what closes the tear. A census read later would describe a
+        # different moment from the composition it is published beside.
+        chain_provenance=read_chain_provenance(deployment),
     )
 
 
@@ -513,7 +525,11 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
         # with. Shaped by `workflow_chains.composition_payload` because the ingest
         # routes publish the same block, and two hand-written copies of one shape
         # are two things that can disagree about the same deployment.
-        "composition": composition_payload(parts.composition, signal=chain_signal),
+        "composition": composition_payload(
+            parts.composition,
+            signal=chain_signal,
+            provenance=parts.chain_provenance,
+        ),
         "paused": paused,
         # The assurance policy this decision is made under — pinned so a later
         # change to the rules can tell whether the policy still holds.

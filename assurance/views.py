@@ -84,6 +84,7 @@ from .workflow_chains import (
     composition_decision_signal,
     composition_for,
     composition_payload,
+    read_chain_provenance,
 )
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
@@ -207,10 +208,18 @@ def _composition_payload(deployment) -> dict:
     # `decision.decision_support` has had this fence from the start, for the same
     # reason, and reading through it 372 times against the same writer fabricated
     # nothing. One line is the difference.
+    #
+    # The provenance census joins them inside the same fence. It is a THIRD read,
+    # and leaving it outside would publish a census of one moment beside a
+    # composition of another -- the same tear this comment is about, in the field
+    # whose whole job is to say what the composition rests on.
     with transaction.atomic():
         composition = composition_for(deployment)
+        provenance = read_chain_provenance(deployment)
     return composition_payload(
-        composition, signal=composition_decision_signal(composition)
+        composition,
+        signal=composition_decision_signal(composition),
+        provenance=provenance,
     )
 
 

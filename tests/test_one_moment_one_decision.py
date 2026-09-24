@@ -205,6 +205,17 @@ def test_parts_handed_in_are_the_parts_used_and_not_a_hint():
         # that adding a signal breaks every direct construction, and that is the
         # point -- each one has to say what it means by it.
         composition=compose_chains([]),
+        # Spelled out for the same reason, and it means: this invented read saw
+        # no outcomes, so there is no provenance to report. Distinct from a
+        # census nobody took -- `recorded: 0` is a count, and the field is
+        # required precisely so that distinction cannot be skipped.
+        chain_provenance={
+            "sources": {},
+            "distinct": 0,
+            "recorded": 0,
+            "truncated": False,
+            "not_shown": 0,
+        },
     )
     assert compute_decision(dep, parts=invented) == D.NOT_RECOMMENDED
 
