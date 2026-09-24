@@ -160,7 +160,7 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
     keyring = keyring if keyring is not None else load_keyring()
     now = now or datetime.now(dt_timezone.utc)
     refusals: list[Refusal] = []
-    accepted: list[tuple[dict, str, Any]] = []
+    accepted: list[tuple[int, dict, str, Any]] = []
     seen_ids: set[str] = set()
     for index, envelope in enumerate(envelopes):
         outcome, key_id, why = _examine(envelope, deployment, keyring, now)
@@ -171,9 +171,20 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
             refusals.append(Refusal(index, "the same outcome appears twice in this batch"))
             continue
         seen_ids.add(outcome["outcome_id"])
-        accepted.append((outcome, key_id, envelope))
+        accepted.append((index, outcome, key_id, envelope))
     if refusals:
         return [], refusals
+
+    # The newest outcome each (workflow, engine) reports within this batch. A
+    # verdict older than one the same engine reports alongside it is the same
+    # replay as one posted after it: whether the two arrive together or apart
+    # must not decide whether the stale one is recorded.
+    batch_newest: dict[tuple[str, str], datetime] = {}
+    for _, outcome, _, _ in accepted:
+        key = (outcome["workflow"], outcome["observer"]["engine"])
+        instant = _instant(outcome["observed_at"])
+        if key not in batch_newest or instant > batch_newest[key]:
+            batch_newest[key] = instant
 
     with transaction.atomic():
         # Checked inside the transaction and against the database, so two
@@ -181,10 +192,12 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
         # backs this if they race anyway.
         existing = set(
             WorkflowChainOutcome.objects.filter(
-                outcome_id__in=[o["outcome_id"] for o, _, _ in accepted]
+                outcome_id__in=[o["outcome_id"] for _, o, _, _ in accepted]
             ).values_list("outcome_id", flat=True)
         )
-        for index, (outcome, _, _) in enumerate(accepted):
+        # ``index`` is the envelope's place in the batch the caller sent, never its
+        # place in ``accepted`` -- a refusal must name the envelope it refuses.
+        for index, outcome, _, _ in accepted:
             if outcome["outcome_id"] in existing:
                 refusals.append(Refusal(index, f"outcome {outcome['outcome_id']} was already recorded"))
                 continue
@@ -200,13 +213,25 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 .values_list("observed_at", flat=True)
                 .first()
             )
-            if newest is not None and _instant(outcome["observed_at"]) < newest:
+            observed = _instant(outcome["observed_at"])
+            if newest is not None and observed < newest:
                 refusals.append(
                     Refusal(
                         index,
                         f"observed_at {outcome['observed_at']} is older than the newest "
                         f"outcome {outcome['observer']['engine']} already reported for "
                         f"{outcome['workflow']!r} here ({newest.isoformat()})",
+                    )
+                )
+                continue
+            in_batch = batch_newest[(outcome["workflow"], outcome["observer"]["engine"])]
+            if observed < in_batch:
+                refusals.append(
+                    Refusal(
+                        index,
+                        f"observed_at {outcome['observed_at']} is older than the newest "
+                        f"outcome {outcome['observer']['engine']} reports for "
+                        f"{outcome['workflow']!r} in this same batch ({in_batch.isoformat()})",
                     )
                 )
         if refusals:
@@ -229,7 +254,7 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 evidence_digest=outcome["evidence_digest"],
                 envelope=envelope,
             )
-            for outcome, key_id, envelope in accepted
+            for _, outcome, key_id, envelope in accepted
         ]
         WorkflowChainOutcome.objects.bulk_create(rows)
     return rows, []

@@ -125,6 +125,50 @@ def test_a_batch_is_recorded_whole_or_not_at_all():
     assert not WorkflowChainOutcome.objects.filter(deployment=dep).exists()
 
 
+def test_a_refusal_found_against_the_record_still_refuses_the_whole_batch_and_names_its_envelope():
+    """The checks against what is already recorded run after the envelope checks
+    pass. A refusal there must still record nothing, and must name the envelope by
+    its place in the batch the caller sent."""
+    dep = _deployment()
+    client = _client()
+    recorded = _signed(dep, workflow="refund-over-limit")
+    assert client.post(_url(dep), recorded, format="json").status_code == 201
+
+    batch = [_signed(dep, workflow="payout"), _signed(dep, workflow="export"), recorded]
+    response = client.post(_url(dep), {"envelopes": batch}, format="json")
+
+    assert response.status_code == 400, response.content
+    refused = response.json()["refused"]
+    assert [r["index"] for r in refused] == [2]
+    assert "already recorded" in refused[0]["reason"]
+    assert set(WorkflowChainOutcome.objects.filter(deployment=dep).values_list("workflow", flat=True)) == {
+        "refund-over-limit"
+    }
+
+
+@pytest.mark.parametrize("order", ["newer-first", "older-first"])
+def test_a_stale_verdict_is_refused_whether_it_arrives_with_the_newer_one_or_after_it(order):
+    dep = _deployment()
+    newer = _signed(dep, status=oc.NOT_DEMONSTRATED, observed_at=_now() - timedelta(minutes=5))
+    older = _signed(dep, status=oc.HELD, observed_at=_now() - timedelta(hours=5))
+    batch = [newer, older] if order == "newer-first" else [older, newer]
+
+    response = _client().post(_url(dep), {"envelopes": batch}, format="json")
+
+    assert response.status_code == 400, response.content
+    refused = response.json()["refused"]
+    assert [r["index"] for r in refused] == [batch.index(older)]
+    assert "in this same batch" in refused[0]["reason"]
+    assert not WorkflowChainOutcome.objects.filter(deployment=dep).exists()
+    # The same engine on another workflow, or another engine on this one, is no replay.
+    alongside = [
+        newer,
+        _signed(dep, workflow="payout", observed_at=_now() - timedelta(hours=5)),
+        _signed(dep, key=ATHENA, engine="athena", observed_at=_now() - timedelta(hours=5)),
+    ]
+    assert _client().post(_url(dep), {"envelopes": alongside}, format="json").status_code == 201
+
+
 @pytest.mark.parametrize(
     ("make", "why"),
     [
