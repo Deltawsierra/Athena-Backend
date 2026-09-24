@@ -731,3 +731,80 @@ def test_an_unknown_kind_is_refused_at_construction_rather_than_at_publication()
     The test above covers a kind smuggled past that check; this covers the check."""
     with pytest.raises(ValueError, match="unknown engine failure kind"):
         EngineError("boom", kind="not-a-kind")
+
+
+def test_kind_is_required_and_has_no_default():
+    """The reasoning behind that, asserted rather than only written down.
+
+    A default would be taken by every raise site nobody updated, and the value of the
+    field is that it is always the RIGHT one -- a caller branching on a kind that
+    silently means "some other failure" is back to reading the message, which is the
+    leak. Mutating the signature to ``kind: str = "refused"`` passed the whole suite
+    before this test existed: a new raise site would then quietly claim the engine
+    had refused when it had not.
+    """
+    with pytest.raises(TypeError, match="kind"):
+        EngineError("boom")
+
+
+@pytest.mark.parametrize(
+    "call,expected_kind,expected_status",
+    [
+        ("_get", ENGINE_REFUSED, 503),
+        ("_post", ENGINE_REFUSED, 503),
+    ],
+)
+def test_a_refusing_engine_is_classified_with_its_status(
+    monkeypatch, call, expected_kind, expected_status
+):
+    """Both halves at every raise site, not just at one.
+
+    Mutating all three refused sites to drop ``status=resp.status_code`` passed the
+    suite: only ``unsigned_reason_for`` was ever asked about a status, and it was
+    handed one by a hand-built exception. Nothing checked that the CLIENT records it,
+    so the status could stop travelling at the source with the reason-formatting test
+    still green.
+    """
+    import requests
+
+    from ai_engine.services import cyberengine_client
+
+    class _Resp:
+        status_code = expected_status
+        text = "the engine's own body, which must not travel"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
+    client = cyberengine_client.CyberEngineClient("http://engine", "key")
+
+    with pytest.raises(EngineError) as raised:
+        getattr(client, call)("/api/x") if call == "_get" else getattr(client, call)("/api/x", {})
+
+    assert raised.value.kind == expected_kind
+    assert raised.value.status == expected_status
+
+
+def test_an_unreachable_engine_is_classified_unreachable_at_every_call(monkeypatch):
+    """And not as "refused". Mutating all three unreachable sites to ENGINE_REFUSED
+    passed the suite, which would tell a reader the engine had answered and declined
+    when it was never reached -- two different things to go and fix, which is the
+    distinction the kinds exist to carry."""
+    import requests
+
+    from ai_engine.services import cyberengine_client
+
+    def _boom(*args, **kwargs):
+        raise requests.RequestException("no route to host")
+
+    monkeypatch.setattr(requests, "get", _boom)
+    monkeypatch.setattr(requests, "post", _boom)
+    client = cyberengine_client.CyberEngineClient("http://engine", "key")
+
+    for attempt in (lambda: client._get("/api/x"), lambda: client._post("/api/x", {})):
+        with pytest.raises(EngineError) as raised:
+            attempt()
+        assert raised.value.kind == ENGINE_UNREACHABLE
+        assert raised.value.status is None
