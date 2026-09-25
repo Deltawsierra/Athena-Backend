@@ -394,9 +394,9 @@ def _key_across(scan, start, end):
       -- only the quoted reading sees a secret in "session id", whose last word
       names nothing. Its opening quote is looked for on its closing quote's line,
       or back to ``start`` when that is on an earlier line: a quote before both
-      is one the scan has read past, and the scan never reads a quoted key back
-      past where it has read to. A quote in the text from ``start`` is not: a
-      string value can span lines and close a key itself,
+      is one the scan has read past, and only _QuotedKeys reads a quoted key
+      back past where the scan has read to. A quote in the text from ``start``
+      is not: a string value can span lines and close a key itself,
       `token: "a\\nsession id"\\n: ...`, as the scan reads it anywhere else.
 
     Linear: it looks back over the blanks before one separator, one run of key
@@ -692,6 +692,17 @@ def _text_value(scan, start, separator_at, separator):
 # was read as a value. Walking back from each separator needs no pairing at all,
 # so a stray quote costs nothing after it. Each character is scanned once: the
 # walk back never passes the previous candidate's closing quote.
+#
+# Nor past where the scan has read to -- but for the quote a redacted value ends
+# on, which may open a key as well as close that value. A key that lost its
+# opening quote opens on the quote that closed the value before it:
+# `{"q": "a", session id": "S3CR3T"}` was redacted, and after `"otp"`, whose
+# value the scan had redacted and read past, the same S3CR3T was forwarded as
+# cleanly inspected. A key read from that quote reads the quote twice, which is
+# reported. And its value is text the scan used to read on through, where the
+# key after it could open -- `{"otp": "a", session id": ["b"], secret key":
+# "S3CR3T"}` -- so the walk back goes on into the value of each key that opens
+# before where the scan has read to (see _text_redaction).
 _KEY_CLOSE = re.compile(r"([\"'])\s*+([:=])\s*+")
 
 
@@ -742,12 +753,14 @@ class _QuotedKeys:
         self.floor = 0
         self.pending = None
 
-    def peek(self, pos):
-        """The next candidate that starts at or after ``pos``, as ``(start, close)``."""
+    def peek(self, pos, lower=None):
+        """The next candidate that closes at or after ``pos`` and opens at or after
+        ``lower`` (``pos`` by default), as ``(start, close)``."""
         text = self.text
+        lower = pos if lower is None else lower
         while True:
             if self.pending is not None:
-                if self.pending[0] >= pos:
+                if self.pending[0] >= lower:
                     return self.pending
                 # The scan ran past this key's opening quote. Read back again
                 # from where it stopped, no other quote would open it: the scan
@@ -760,9 +773,14 @@ class _QuotedKeys:
             if close is None:
                 return None
             quote = close.start(1)
-            if quote < pos or _escaped(text, quote, pos):
+            if _escaped(text, quote, lower):
                 continue
-            bound = max(pos, self.floor)
+            if quote < pos:
+                # In a value the scan read past: no key closes there, and none
+                # after it opens before it, as when that value is kept.
+                self.floor = quote + 1
+                continue
+            bound = max(lower, self.floor)
             self.floor = quote + 1
             start = _opening_quote(text, quote, bound)
             if start >= 0:
@@ -783,15 +801,15 @@ def _token_pair(scan, key):
     return (key.start(), scan.text[key.start():key.end(3)], *value)
 
 
-def _quoted_pair(scan, start, close):
-    """The same for a quoted key.
+def _quoted_pair(scan, start, close, pos):
+    """The same for a quoted key, which may open before ``pos`` (see _QuotedKeys).
 
     A key/value pair can be written INSIDE the quotes -- `'s my token: abc and
     the users': x` walks back from the second quote to the first -- and the
     quoted key is copied out verbatim. So such a pair's own value is redacted
     too, through whichever reading ends latest. A key that merely ENDS in a
     separator, `{"New Password:": "x"}`, is not one: nothing follows it but the
-    closing quote."""
+    closing quote. The pairs before ``pos`` are in a value already redacted."""
     text = scan.text
     quote = close.start(1)
     if not _is_sensitive_key(_decoded_name(text[start:quote + 1])):
@@ -817,7 +835,7 @@ def _quoted_pair(scan, start, close):
     first = None
     ends = []
     reach = start
-    for inner in _TEXT_KEY.finditer(text, start + 1, quote):
+    for inner in _TEXT_KEY.finditer(text, max(start + 1, pos), quote):
         if inner.start() < reach or not _is_sensitive_key(inner.group(2)):
             continue
         if inner.end() == quote:
@@ -862,6 +880,13 @@ def _held(scan, quote):
     return end, True
 
 
+def _ends_on_a_quote(scan, end):
+    """Whether the character before ``end`` is a quote no backslash escapes: one
+    that closes a string, and so may open a key."""
+    quote = scan.text[end - 1]
+    return quote in _QUOTES and scan.next(quote, end - 1) == end - 1
+
+
 def _text_redaction(text):
     """``text`` with the value after every sensitive ``key:`` / ``key=`` replaced,
     and whether any value had no certain end and was redacted to the end of its
@@ -893,18 +918,22 @@ def _text_redaction(text):
     scan = _Scan(text)
     out = []
     pos = 0
+    # Where a quoted key may open (see _QuotedKeys): ``pos``, or the quote before
+    # it that the value last redacted ended on -- and there still while each key
+    # read after it opens before ``pos``.
+    lower = 0
     doubtful = False
     quoted = _QuotedKeys(text)
     token = _TEXT_KEY.search(text)
     while True:
         if token is not None and token.start() < pos:
             token = _TEXT_KEY.search(text, pos)
-        candidate = quoted.peek(pos)
+        candidate = quoted.peek(pos, lower)
         if candidate is not None and (token is None or candidate[0] <= token.start()):
             # A quoted key first when both start at the same quote: it is read
             # whole, escapes and spaces included.
             quoted.take()
-            found = _quoted_pair(scan, *candidate)
+            found = _quoted_pair(scan, *candidate, pos)
             if found is None:
                 continue
         elif token is not None:
@@ -914,15 +943,23 @@ def _text_redaction(text):
                 # and the scan resumes after the separator, where the next key
                 # can start.
                 out.append(text[pos:token.end()])
-                pos = token.end()
+                pos = lower = token.end()
                 continue
         else:
             break
         key_start, key_text, end, certain = found
+        # A key that opened before ``pos``: what it opened in is not copied out
+        # again, and that text, read twice, is reported.
+        reread = candidate is not None and candidate[0] < pos
+        if key_start < pos:
+            key_text = text[pos:key_start + len(key_text)]
+            key_start = pos
         out.append(text[pos:key_start])
         out.append(f"{key_text}: {REDACTED}")
+        if not reread:
+            lower = end - 1 if _ends_on_a_quote(scan, end) else end
         pos = end
-        doubtful = doubtful or not certain
+        doubtful = doubtful or not certain or reread
     out.append(text[pos:])
     return "".join(out), doubtful
 

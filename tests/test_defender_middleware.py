@@ -1889,3 +1889,133 @@ def test_a_split_keys_value_never_reaches_the_engine_whatever_its_blanks_or_sepa
         "request body could not be fully inspected: a value after a sensitive key had "
         "no certain end and was redacted to the end of its line"
     ) in logged(caplog)
+
+
+# ---- Round 11: a key that lost its opening quote, after a secret's value. ----
+
+
+@pytest.mark.parametrize(
+    ("body", "forwarded"),
+    [
+        ('{"otp": "a", session id": "S3CR3T"}', '{"otp": [redacted], session id": [redacted]}'),
+        ('{"password": "hunter2", secret key": "S3CR3T"}', '{"password": [redacted], secret key": [redacted]}'),
+        ('{"api_key": "k", otp code": "S3CR3T"}', '{"api_key": [redacted], otp code": [redacted]}'),
+        ("{'otp': 'a', session id': 'S3CR3T'}", "{'otp': [redacted], session id': [redacted]}"),
+    ],
+)
+def test_a_key_that_lost_its_opening_quote_after_a_secret_never_forwards_its_value(
+    factory, middleware, caplog, body, forwarded
+):
+    """The last word of each key names nothing, so only the quoted reading -- from
+    the quote that closed the value before it -- sees a secret in it. After a
+    key that names nothing that reading was made; after a secret, whose value
+    the scan had redacted and read past, it was not, and S3CR3T reached the
+    engine with the body called cleanly inspected. That quote is read twice, as
+    the close of one value and the opening of a key, and that is reported."""
+    post = engine_says()
+    with (
+        caplog.at_level(logging.WARNING, logger="audit.middleware"),
+        mock.patch("audit.middleware.requests.post", post),
+    ):
+        middleware()(factory.post("/api/x/", data=body, content_type="application/json"))
+    assert post.call_args.kwargs["json"]["body"] == forwarded
+    assert "S3CR3T" not in logged(caplog)
+    assert (
+        "request body could not be fully inspected: a value after a sensitive key had "
+        "no certain end and was redacted to the end of its line"
+    ) in logged(caplog)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # After a key that names nothing the key was read already, and still is.
+        ('{"q": "a", session id": "S3CR3T"}', '{"q": "a", session id": [redacted]}'),
+        # A key that lost its opening quote and names nothing costs nothing.
+        (
+            '{"otp": "a", q": "keep", "note": "UNION SELECT"}',
+            '{"otp": [redacted], q": "keep", "note": "UNION SELECT"}',
+        ),
+        # A quote a backslash escapes closes no string and opens no key, after a
+        # secret as after a key that names nothing.
+        ('"token": ab\\", session id": keep', '"token": [redacted], session id": keep'),
+        ('"q": ab\\", session id": keep', '"q": ab\\", session id": keep'),
+    ],
+)
+def test_a_lost_quote_key_reads_the_same_whatever_the_key_before_it(text, expected):
+    assert _outcome(text) == (expected, False)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The key closes lines after the quote that opens it, and its separator
+        # is on a line of its own.
+        (
+            'otp: "a"\n\nsession id"\n: S3CR3T\nq: UNION SELECT',
+            'otp: [redacted]\n\nsession id": [redacted]\nq: UNION SELECT',
+        ),
+        (
+            'secret: "\\\\" \nsession id"\t\n: "S3CR3T"\nq: UNION SELECT',
+            'secret: [redacted] \nsession id": [redacted]\nq: UNION SELECT',
+        ),
+        (
+            "pwd: 'a \n\\\\' \nsession id'\n\n= S3CR3T\nq: UNION SELECT",
+            "pwd: [redacted] \nsession id': [redacted]\nq: UNION SELECT",
+        ),
+        (
+            '{"otp": "a",\n session id": "S3CR3T",\n "q": "UNION SELECT"}',
+            '{"otp": [redacted],\n session id": [redacted],\n "q": "UNION SELECT"}',
+        ),
+    ],
+)
+def test_a_lost_quote_key_closed_lines_after_a_secrets_value_is_read(text, expected):
+    assert _outcome(text) == (expected, True)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The key after it opens on the quote that closes "b" ...
+        (
+            '{"otp": "a", session id": ["b"], secret key": "S3CR3T"}',
+            '{"otp": [redacted], session id": [redacted], secret key": [redacted]}',
+        ),
+        (
+            "token = 'V'\npwd:\"V\",\nid':['P'], x y\nsecret key': 'S3CR3T'",
+            "token: [redacted]\npwd: [redacted], x y\nsecret key': [redacted]",
+        ),
+        # ... or on an apostrophe in it. Nothing of that value is copied out
+        # again as part of that key, not even a key inside it.
+        (
+            '{"otp": "a", session id": "it\'s S3CR3T", secret key\': "b"}',
+            '{"otp": [redacted], session id": [redacted], secret key\': [redacted]}',
+        ),
+        (
+            '{"otp": "a", session id": "it\'s token: S3CR3T", code key\': "b"}',
+            '{"otp": [redacted], session id": [redacted], code key\': [redacted]}',
+        ),
+        # A quote a backslash escapes in that value closes no key, and the walk
+        # back goes on past it ...
+        (
+            '{"otp": "a", session id": "it\'s \\\': x", secret key\': "S3CR3T"}',
+            '{"otp": [redacted], session id": [redacted], secret key\': [redacted]}',
+        ),
+        # ... but a key in it is part of it, and the quote that closes such a
+        # key opens none after it.
+        (
+            '{"otp": "a", session id": "x \'token\': y", b\': "keep"}',
+            '{"otp": [redacted], session id": [redacted], b\': "keep"}',
+        ),
+        (
+            '{"otp": "a", session id": "x \'q\': token", b\': "keep"}',
+            '{"otp": [redacted], session id": [redacted], b\': "keep"}',
+        ),
+    ],
+)
+def test_the_key_after_one_read_from_that_quote_still_opens_in_its_value(text, expected):
+    """The value such a key takes is text the scan used to read on through, and
+    the key after it opened on a quote there. That key's value was redacted
+    before the key was read from the quote, and forwarded by a scan that then
+    read back no further than the value it had just taken."""
+    assert _outcome(text) == (expected, True)
