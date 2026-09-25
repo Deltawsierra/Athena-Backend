@@ -758,6 +758,17 @@ class DeploymentSerializer(serializers.ModelSerializer):
     decision_label = serializers.CharField(source="get_decision_display", read_only=True)
     finding_count = serializers.IntegerField(read_only=True)
 
+    def to_representation(self, instance):
+        # The deployment list and detail publish the stored decision, as the
+        # receipt does; reconciled first with the keyring in force, or a
+        # withdrawn key's READY stood here while the receipt said otherwise.
+        # `current_decision` refreshes `instance`, so the decision, its label and
+        # its revision below are all the reconciled ones.
+        from .decision import current_decision
+
+        current_decision(instance)
+        return super().to_representation(instance)
+
     class Meta:
         model = Deployment
         fields = [

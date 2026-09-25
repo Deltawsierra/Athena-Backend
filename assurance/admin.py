@@ -45,6 +45,11 @@ class DeploymentAdmin(admin.ModelAdmin):
     list_display = ("name", "environment", "decision", "updated_at")
     list_filter = ("environment", "decision")
     search_fields = ("name",)
+    # Written only through `assurance.revision.accept_transition`. Editable here,
+    # an admin could set a READY no rule computed -- and one `current_decision`
+    # would trust, the keyring stamp untouched -- and any save wrote back the
+    # decision the form was rendered with over a recompute made meanwhile.
+    readonly_fields = ("decision", "decision_revision", "decision_keyring")
 
 
 @admin.register(Finding)

@@ -150,7 +150,11 @@ def _redact_structure(value):
 # authentication, on any route. Here a key token may only START where a run of
 # key characters starts, so each run is tried once; whether it names a secret is
 # decided in Python, and the value is matched once, anchored where the key ends.
-_KEY_CHARS = r"A-Za-z0-9_.\[\]-"
+# `\w`, not `A-Za-z0-9_`: a key in any script is one token. With ASCII only,
+# "Passwörter=hunter2" split at the ö into "Passw" and "rter", neither of which
+# the separator follows, and the value went through.
+_KEY_CHARS = r"\w.\[\]-"
+_KEY_TOKEN = re.compile(r"[" + _KEY_CHARS + r"]+")
 _TEXT_KEY_BODY = r'("?)([' + _KEY_CHARS + r']+)\1\s*([:=])\s*'
 # Anywhere a run of key characters starts ...
 _TEXT_KEY = re.compile(
@@ -189,11 +193,43 @@ def _text_value(text, key):
     return None
 
 
+# A QUOTED key the scan above cannot tokenise -- one with a space or any other
+# character outside the key class: `{"client secret": "hunter2",}` is not JSON
+# (the trailing comma), so it reaches this path, and the structured path would
+# have redacted it. Bounded, so every attempt stops within 128 characters of the
+# quote it starts at, and the pass stays linear.
+_QUOTED_KEY = re.compile(r'"((?:[^"\\\r\n]|\\.){1,128})"\s*:\s*')
+
+
+def _redact_quoted_keys(text):
+    out = []
+    pos = 0
+    for key in _QUOTED_KEY.finditer(text):
+        if key.start() < pos:
+            continue
+        name = key.group(1)
+        # Keys the scan could tokenise it has already judged; only the others here.
+        if _KEY_TOKEN.fullmatch(name) or not _is_sensitive_key(name):
+            continue
+        value = _TEXT_VALUE[":"].match(text, key.end())
+        if value is None:
+            continue
+        out.append(text[pos:key.start()])
+        out.append(f'"{name}": {REDACTED}')
+        pos = value.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def _redact_text(text):
     """``text`` with the value after every sensitive ``key:`` / ``key=`` replaced.
 
     Linear in the length of ``text``: see the note above ``_TEXT_KEY``.
     """
+    return _redact_quoted_keys(_redact_token_keys(text))
+
+
+def _redact_token_keys(text):
     out = []
     pos = 0
     while True:

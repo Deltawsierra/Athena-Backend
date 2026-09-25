@@ -692,3 +692,40 @@ def test_the_structured_paths_fold_case_too(key):
     from audit.middleware import _is_sensitive_key
 
     assert _is_sensitive_key(key)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A key in any script is one token: the ö split "Passwörter" in two.
+        ("Passwörter=hunter2", "Passwörter: [redacted]"),
+        ("contraseña_token: abc", "contraseña_token: [redacted]"),
+        # A quoted key the token scan cannot read -- a space in it -- in a body
+        # that is not JSON (the trailing comma), which the structured path would
+        # have redacted.
+        ('{"client secret": "hunter2",}', '{"client secret": [redacted],}'),
+        ('{"my \\"secret\\" key": v,}', '{"my \\"secret\\" key": [redacted],}'),
+        # ...and only those: a readable key is judged once, and a harmless one kept.
+        ('{"password": "x", "display name": "bob",}', '{"password": [redacted], "display name": "bob",}'),
+    ],
+)
+def test_the_text_fallback_redacts_what_the_structured_path_would(text, expected):
+    from audit.middleware import _redact_text
+
+    assert _redact_text(text) == expected
+
+
+def test_the_quoted_key_pass_stays_linear():
+    import time
+
+    from audit.middleware import _redact_text
+
+    for unit in ('"a', '"\\"', '"x' + "a" * 127):
+        small, large = unit * 2000, unit * 8000
+        start = time.perf_counter()
+        _redact_text(small)
+        t_small = time.perf_counter() - start
+        start = time.perf_counter()
+        _redact_text(large)
+        t_large = time.perf_counter() - start
+        assert t_large < max(t_small, 0.002) * 12, (unit[:4], t_small, t_large)

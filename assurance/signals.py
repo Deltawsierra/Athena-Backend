@@ -107,6 +107,17 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, **kwargs
         return
     if using not in (None, DEFAULT_DB_ALIAS):
         return
+    # `post_migrate` fires after EVERY migrate, including one that leaves this
+    # app below the migration adding the stamp (a rollback, a staged upgrade):
+    # the column is not there to query, and every such migrate crashed here.
+    from django.db import connections
+    from django.db.migrations.recorder import MigrationRecorder
+
+    applied = MigrationRecorder(connections[using or DEFAULT_DB_ALIAS]).migration_qs.filter(
+        app="assurance", name="0033_deployment_decision_keyring"
+    )
+    if not applied.exists():
+        return
     from .decision import recompute_decision
     from .models import Deployment, WorkflowChainOutcome
 

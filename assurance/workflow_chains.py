@@ -35,7 +35,7 @@ from .composition import (
 )
 
 
-def read_chain_outcomes(deployment) -> list[ChainOutcome]:
+def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> list[ChainOutcome]:
     """Every recorded chain outcome for a deployment, as the rule's own type.
 
     The conversion is deliberately TOTAL: every row becomes a
@@ -45,8 +45,11 @@ def read_chain_outcomes(deployment) -> list[ChainOutcome]:
     no input can reach -- and that counter is how a chain exercising an
     unapproved workflow becomes visible at all.
     """
-    # One keyring read for the whole deployment, not one per row.
-    keyring = observed_outcomes.trusted_keyring()
+    # One keyring read for the whole deployment, not one per row -- or none, when
+    # the caller read it already: a decision stamped with the keyring it was
+    # computed under must have been computed under exactly that one.
+    if keyring is observed_outcomes.READ_KEYRING:
+        keyring = observed_outcomes.trusted_keyring()
     deployment_uuid = str(deployment.uuid)
     return [
         ChainOutcome(
@@ -154,10 +157,10 @@ def read_expected_workflows(deployment) -> list[str] | None:
     return slugs or None
 
 
-def composition_for(deployment) -> Composition:
+def composition_for(deployment, keyring=observed_outcomes.READ_KEYRING) -> Composition:
     """The composition of a deployment's recorded chains. Two queries, no writes."""
     return compose(
-        read_chain_outcomes(deployment),
+        read_chain_outcomes(deployment, keyring),
         expected_workflows=read_expected_workflows(deployment),
     )
 

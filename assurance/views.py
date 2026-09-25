@@ -15,7 +15,7 @@ import uuid as uuidlib
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Count
+from django.db.models import Count, Exists, OuterRef
 from django.shortcuts import get_object_or_404
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
@@ -39,7 +39,7 @@ from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
-from .decision import decision_support, recompute_decision
+from .decision import current_decision, decision_support, recompute_decision
 from .revalidation import plan_revalidation
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
@@ -164,7 +164,10 @@ def _rows_from_body(data, *, key: str, single_allowed: bool):
             return rows, False
         if single_allowed:
             return [data], True
-        return [], False
+        # Not "no rows": an object that does not carry the list is a body this
+        # route cannot read, and a true-replace reading it as empty cleared the
+        # whole set -- `PUT {"a": 1}` lifted every approved workflow's floor. An
+        # empty set is said on purpose, as `[]` or `{key: []}`.
     raise ValidationError(
         {
             key: (
@@ -407,7 +410,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     CANDIDATE_PAGE_SIZE = 50
 
     def get_queryset(self):
-        qs = Deployment.objects.all().annotate(finding_count=Count("findings"))
+        qs = Deployment.objects.all().annotate(
+            finding_count=Count("findings"),
+            # Lets the serializer reconcile the decision it publishes without a
+            # query per row for a deployment whose stamp is current.
+            has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))),
+        )
         user = self.request.user
         if _is_privileged(user):
             return qs
@@ -505,6 +513,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         deployment = self.get_object()
         # Absent -> None: keep whatever the LOCKED row says. Reading "currently
         # paused" here, before the lock, let a pause committed meanwhile be lifted.
+        if not isinstance(request.data, dict):
+            raise ValidationError({"paused": "Send an object, optionally with a boolean 'paused'."})
         raw_paused = request.data.get("paused")
         paused = None if raw_paused is None else _parse_paused(raw_paused, False)
         decision = recompute_decision(deployment, paused=paused)
@@ -1749,6 +1759,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         computed, never stored. Every value is a real count, a true ratio of real
         counts, or an ordinal band: there is no dollar figure, ROI amount, or
         realized-loss number anywhere, and nothing claims the system is secure."""
+        deployment = self.get_object()
+        # The summary publishes the standing decision: reconciled with the keyring
+        # in force first, as the receipt is, so the two cannot disagree.
+        current_decision(deployment)
         assessed = (
             Deployment.objects.prefetch_related(
                 "findings__evidence",
@@ -1757,7 +1771,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "assets__provider__assertions",
             )
             .select_related("data_boundary")
-            .get(pk=self.get_object().pk)
+            .get(pk=deployment.pk)
         )
         return Response(build_executive_summary(assessed))
 
@@ -1774,9 +1788,11 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         (None when there is no basis, never a fake 0%), or an ordinal band: there is
         no dollar figure anywhere, and nothing reads "healthy"/"current"/"secure" as
         an unearned fact — an unassessed or stale deployment reads honestly."""
+        deployment = self.get_object()
+        current_decision(deployment)  # as the executive summary: see there
         assessed = Deployment.objects.prefetch_related(
             "findings__evidence", "findings__remediation_events"
-        ).get(pk=self.get_object().pk)
+        ).get(pk=deployment.pk)
         return Response(assess_operational(assessed))
 
     @action(detail=True, methods=["get"], url_path="operational-risk")

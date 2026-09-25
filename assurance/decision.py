@@ -56,6 +56,7 @@ from .composition import READY as composition_READY
 from .composition import compose as compose_chains
 from .composition import Composition
 from .composition import explain as explain_composition
+from .observed_outcomes import READ_KEYRING as _READ_KEYRING
 from .workflow_chains import (
     composition_decision_signal,
     composition_for,
@@ -287,7 +288,7 @@ class DecisionParts:
     chain_provenance: dict
 
 
-def read_decision_parts(deployment: Deployment) -> DecisionParts:
+def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING) -> DecisionParts:
     """Read every decision input, in one pass.
 
     Wrapped in a transaction by callers that need the set to be consistent. The
@@ -303,7 +304,7 @@ def read_decision_parts(deployment: Deployment) -> DecisionParts:
         claim_signal=claim_decision_signal(deployment),
         scan_cap=incomplete_evidence_cap(deployment),
         coverage_cap=coverage_decision_cap(deployment),
-        composition=composition_for(deployment),
+        composition=composition_for(deployment, keyring),
         # Read here with everything else, inside the caller's transaction, for
         # the reason the docstring above gives: reading each fact exactly once
         # is what closes the tear. A census read later would describe a
@@ -354,6 +355,7 @@ def compute_decision(
     *,
     paused: bool = False,
     parts: DecisionParts | None = None,
+    keyring=_READ_KEYRING,
 ) -> str | None:
     """The six-state decision implied by a deployment's active findings, its
     current assurance claims (Stage 1C), whether its latest scan finished, and
@@ -374,7 +376,7 @@ def compute_decision(
         # Nothing is read at all: the failsafe decides, so no fact about the
         # deployment can change the answer.
         return Deployment.Decision.PAUSED
-    return decide(parts if parts is not None else read_decision_parts(deployment))
+    return decide(parts if parts is not None else read_decision_parts(deployment, keyring=keyring))
 
 
 def _claim_brief(claim: AssuranceClaim) -> dict:
@@ -575,7 +577,11 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
         locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
         hold_pause = locked.decision == Deployment.Decision.PAUSED if paused is None else paused
         keyring = observed_outcomes.trusted_keyring()
-        decision = compute_decision(locked, paused=hold_pause)
+        # ONE read of the keyring: the decision is computed under it and stamped
+        # with it. Three reads (here, inside the composition, and in the
+        # fingerprint) could each see a different file mid-rotation, and a READY
+        # computed under the old keys was stamped as current under the new ones.
+        decision = compute_decision(locked, paused=hold_pause, keyring=keyring)
         accept_transition(locked, to_decision=decision)
         Deployment.objects.filter(pk=locked.pk).update(
             decision_keyring=observed_outcomes.keyring_fingerprint(keyring)

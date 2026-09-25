@@ -241,13 +241,26 @@ def recorded_outcome_is_authentic(row, keyring, *, deployment_uuid: str | None =
     )
 
 
-def keyring_fingerprint(keyring: dict[str, oc.TrustedKey] | None = None) -> str:
-    """Which keys are trusted right now, as one comparable value; "" for none.
+class _ReadNow:
+    def __repr__(self) -> str:
+        return "READ_KEYRING"
+
+
+#: "Read the keyring now" -- distinct from ``None``, which is a keyring that was
+#: read and found absent. With one value for both, a caller that had read "no
+#: keyring" and passed it on was silently given a fresh read instead, and a stamp
+#: could name a different keyring from the one its decision was computed under.
+READ_KEYRING: Any = _ReadNow()
+
+
+def keyring_fingerprint(keyring: Any = READ_KEYRING) -> str:
+    """Which keys ``keyring`` trusts, as one comparable value; "" for none.
 
     Over the (key id, engine) pairs rather than the file's bytes: what decides
     whether an outcome verifies is which keys are trusted for which engine, and a
-    reformatted file that trusts the same keys must not read as a rotation."""
-    keyring = trusted_keyring() if keyring is None else keyring
+    reformatted file that trusts the same keys must not read as a rotation.
+    ``READ_KEYRING`` (the default) reads the one in force now."""
+    keyring = trusted_keyring() if keyring is READ_KEYRING else keyring
     if not keyring:
         return ""
     pairs = sorted((key_id, key.engine) for key_id, key in keyring.items())

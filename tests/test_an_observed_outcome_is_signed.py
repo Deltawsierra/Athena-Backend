@@ -933,9 +933,12 @@ def test_the_decision_is_computed_from_inside_the_transaction_that_writes_it(mon
     dep = _deployment()
     seen = []
     real = decision_module.compute_decision
+    # The test itself runs inside pytest-django's transaction, so "in an atomic
+    # block" was always true and asserted nothing: the depth has to grow.
+    depth_outside = len(connection.atomic_blocks)
 
     def recording(deployment, **kw):
-        seen.append(connection.in_atomic_block)
+        seen.append(len(connection.atomic_blocks) > depth_outside)
         return real(deployment, **kw)
 
     monkeypatch.setattr(decision_module, "compute_decision", recording)
@@ -1123,3 +1126,207 @@ def test_the_rotation_command_brings_every_stored_decision_current(tmp_path, mon
     call_command("recompute_chain_decisions", stdout=out)
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
     assert "1 decision(s) moved" in out.getvalue()
+
+
+# ------------------------------------------------ the gaps round four found
+
+
+def _ready_then_rotated(keyring):
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert _stored(dep) == Deployment.Decision.READY
+    keyring.write_text(_rotated_to_a_new_achilles_key())
+    return dep
+
+
+@pytest.mark.parametrize("route", ["detail", "list", "executive-summary", "operational-assurance"])
+def test_every_surface_that_publishes_the_decision_publishes_the_reconciled_one(keyring, route):
+    """The deployment detail and list, the executive summary and the operational
+    roll-up all published the stored decision unreconciled: READY beside a
+    receipt saying NEEDS_MORE_EVIDENCE for the same deployment."""
+    dep = _ready_then_rotated(keyring)
+    client = _client()
+    base = f"/api/assurance/deployments/{dep.uuid}/"
+    if route == "detail":
+        body = client.get(base).json()
+        got, label = body["decision"], body["decision_label"]
+        assert label == Deployment.Decision(got).label
+    elif route == "list":
+        body = client.get("/api/assurance/deployments/").json()
+        rows = body["results"] if isinstance(body, dict) else body
+        got = next(row for row in rows if row["uuid"] == str(dep.uuid))["decision"]
+    else:
+        got = client.get(base + route + "/").json()["decision"]["decision"]
+    assert got == Deployment.Decision.NEEDS_MORE_EVIDENCE == _receipt_decision(dep)
+
+
+def test_an_ingest_refreshes_a_decision_whose_pause_was_lifted_after_it_loaded():
+    """The ingest skipped the refresh on the pause it read when it LOADED the
+    deployment; an unpause committed since left a critical finding undecided."""
+    from pentest.models import PentestScan
+
+    from assurance import ingest
+    from assurance.decision import compute_decision
+
+    dep = _deployment()
+    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.PAUSED)
+    loaded = Deployment.objects.get(pk=dep.pk)
+    lifted = _client().post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": False}, format="json")
+    assert lifted.status_code == 200
+    scan = PentestScan.objects.create(
+        user=dep.owner,
+        target_url="https://app.example/",
+        consent=True,
+        status=PentestScan.STATUS_COMPLETED,
+        engine_response={"findings": [{"type": "sqli", "severity": "critical", "title": "SQLi"}]},
+    )
+    ingest.ingest_scan(scan, deployment=loaded)
+    live = compute_decision(Deployment.objects.get(pk=dep.pk))
+    assert live not in (None, Deployment.Decision.PAUSED)
+    assert _stored(dep) == live
+
+
+def test_an_ingest_still_keeps_an_operators_pause():
+    from pentest.models import PentestScan
+
+    from assurance import ingest
+
+    dep = _deployment()
+    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.PAUSED)
+    scan = PentestScan.objects.create(
+        user=dep.owner,
+        target_url="https://app.example/",
+        consent=True,
+        status=PentestScan.STATUS_COMPLETED,
+        engine_response={"findings": [{"type": "sqli", "severity": "critical", "title": "SQLi"}]},
+    )
+    ingest.ingest_scan(scan, deployment=Deployment.objects.get(pk=dep.pk))
+    assert _stored(dep) == Deployment.Decision.PAUSED
+
+
+def test_the_stamp_names_the_keyring_the_decision_was_computed_under(keyring, monkeypatch):
+    """One recompute read the keyring three times; a rotation landing between
+    them stamped a READY computed under the old keys as current under the new."""
+    from assurance import decision as decision_module
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    real = observed_outcomes.trusted_keyring
+    reads = []
+
+    def rotates_after_the_first_read():
+        got = real()
+        reads.append(got)
+        if len(reads) == 1:
+            keyring.write_text(_rotated_to_a_new_achilles_key())
+        return got
+
+    monkeypatch.setattr(observed_outcomes, "trusted_keyring", rotates_after_the_first_read)
+    decision_module.recompute_decision(dep)
+    assert len(reads) == 1, "the decision and its stamp are read from one keyring"
+    monkeypatch.setattr(observed_outcomes, "trusted_keyring", real)
+    # Computed and stamped under the OLD keyring; the new one is in force, so the
+    # stamp is stale and the next read reconciles.
+    assert _receipt_decision(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_no_keyring_is_a_keyring_not_a_request_to_read_one(keyring):
+    assert observed_outcomes.keyring_fingerprint(None) == ""
+    assert observed_outcomes.keyring_fingerprint() != ""
+
+
+def test_a_current_stamp_is_read_without_a_query_or_a_write(django_assert_num_queries):
+    from django.db.models import Exists, OuterRef
+
+    from assurance.decision import current_decision
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    annotated = Deployment.objects.annotate(
+        has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk")))
+    ).get(pk=dep.pk)
+    revision = annotated.decision_revision
+    with django_assert_num_queries(0):
+        assert current_decision(annotated) == Deployment.Decision.READY
+    assert Deployment.objects.get(pk=dep.pk).decision_revision == revision
+
+
+def test_the_fingerprint_does_not_depend_on_the_order_the_keys_are_listed_in(keyring):
+    before = observed_outcomes.keyring_fingerprint()
+    keyring.write_text(json.dumps(list(reversed(json.loads(keyring.read_text())))))
+    assert observed_outcomes.keyring_fingerprint() == before
+
+
+def test_the_rotation_command_counts_only_the_decisions_that_moved(keyring):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    moves = _deployment()
+    _approved(moves, "refund-over-limit")
+    _ingested(moves)
+    stays = _deployment()
+    _approved(stays, "refund-over-limit")
+    _ingested(stays, key=ATHENA, engine="athena")
+    keyring.write_text(_rotated_to_a_new_achilles_key())
+    out = StringIO()
+    call_command("recompute_chain_decisions", stdout=out)
+    assert _stored(moves) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert _stored(stays) == Deployment.Decision.READY
+    assert "recomputed 2 deployment(s); 1 decision(s) moved" in out.getvalue()
+
+
+def test_the_upgrade_recompute_waits_for_the_column_it_reads():
+    """``post_migrate`` fires after every migrate, including one that leaves this
+    app below 0033 -- where the stamp column does not exist, and every such
+    migrate crashed in this receiver."""
+    from django.apps import apps
+    from django.db import connection
+    from django.db.migrations.recorder import MigrationRecorder
+
+    from assurance.signals import recompute_decisions_computed_under_another_rule as receiver
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None, decision=Deployment.Decision.AUDIT_INCOMPLETE)
+    MigrationRecorder(connection).migration_qs.filter(
+        app="assurance", name="0033_deployment_decision_keyring"
+    ).delete()
+    receiver(sender=apps.get_app_config("assurance"), using="default")
+    assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
+
+
+def test_the_admin_cannot_write_the_decision():
+    from django.contrib import admin as django_admin
+
+    model_admin = django_admin.site._registry[Deployment]
+    for name in ("decision", "decision_revision", "decision_keyring"):
+        assert name in model_admin.readonly_fields
+
+
+@pytest.mark.parametrize("body", ["[]", "1", '"x"', "null", "true"])
+def test_a_recompute_body_that_is_not_an_object_is_a_400(body):
+    dep = _deployment()
+    client = _client()
+    client.raise_request_exception = False
+    response = client.post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", body, content_type="application/json"
+    )
+    assert response.status_code == 400, response.content
+
+
+@pytest.mark.parametrize("body", [{"a": 1}, {}, {"workflow": []}])
+def test_an_object_without_the_workflow_list_does_not_clear_the_approved_set(body):
+    """``PUT {"a": 1}`` read as "no rows" and emptied the set, lifting every
+    approved workflow's floor. Clearing it is said on purpose."""
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    response = _client().put(_approved_url(dep), body, format="json")
+    assert response.status_code == 400, response.content
+    assert ApprovedWorkflow.objects.filter(deployment=dep).count() == 1
+    assert _client().put(_approved_url(dep), {"workflows": []}, format="json").status_code == 200
+    assert ApprovedWorkflow.objects.filter(deployment=dep).count() == 0

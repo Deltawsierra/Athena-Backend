@@ -571,16 +571,16 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
 
     # A scan culminates in a decision, not just a finding list: refresh the
     # deployment's six-state decision from its now-current findings (Phase 0.5).
-    # A deployment an operator has PAUSED via the failsafe is left paused — an
-    # automated re-ingest must not silently clear a human's stop.
-    if deployment.decision != Deployment.Decision.PAUSED:
-        from .decision import recompute_decision
+    # A deployment an operator has PAUSED via the failsafe stays paused -- an
+    # automated re-ingest must not silently clear a human's stop. That is
+    # `recompute_decision`'s default, judged on the LOCKED row: a guard here read
+    # the pause from the instance loaded when the ingest began, so an unpause
+    # committed meanwhile left the refresh skipped and the decision stale.
+    from .decision import recompute_decision
 
-        with obs.span(
-            obs.PLAN, component="recompute_decision", subject=str(deployment.pk)
-        ) as active:
-            recompute_decision(deployment)
-            if active is not None:
-                active.set_attribute(obs.MYTHOS_VERDICT, str(deployment.decision))
+    with obs.span(obs.PLAN, component="recompute_decision", subject=str(deployment.pk)) as active:
+        recompute_decision(deployment)
+        if active is not None:
+            active.set_attribute(obs.MYTHOS_VERDICT, str(deployment.decision))
 
     return results
