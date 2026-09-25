@@ -111,6 +111,7 @@ class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
         "decision",
         "decision_revision",
         "decision_keyring",
+        "decision_valid_until",
         "decision_in_force",
         "revision_in_force",
     )

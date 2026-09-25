@@ -150,6 +150,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "status",
             "status_label",
             "status_must_not_imply",
+            "risk_accepted_until",
             "owner",
             "assignee",
             "remediation_state",
@@ -177,8 +178,43 @@ class FindingSerializer(serializers.ModelSerializer):
         read_only_fields = [
             f
             for f in fields
-            if f not in ("status", "owner", "business_impact")
+            if f not in ("status", "risk_accepted_until", "owner", "business_impact")
         ]
+
+    def validate(self, attrs):
+        """An accepted risk names when its acceptance ends (owner decision Q6).
+
+        Accepting a risk is a decision to carry it for a stated time. Without an
+        end it was indistinguishable from fixing it -- the decision left the
+        finding out entirely -- so an acceptance must name one, in the future, and
+        any other status clears it: an expiry on a risk nobody accepted would say
+        a decision was made that was not.
+        """
+        status = attrs.get("status", getattr(self.instance, "status", None))
+        if status != Finding.Status.ACCEPTED:
+            if attrs.get("risk_accepted_until") is not None:
+                raise serializers.ValidationError(
+                    {"risk_accepted_until": "Only an accepted risk has an acceptance to end."}
+                )
+            attrs["risk_accepted_until"] = None
+            return attrs
+        if "risk_accepted_until" in attrs:
+            until = attrs["risk_accepted_until"]
+        elif self.instance is not None and self.instance.status == Finding.Status.ACCEPTED:
+            # Already accepted, and this change leaves the acceptance's end alone.
+            until = self.instance.risk_accepted_until
+        else:
+            until = None
+        if until is None:
+            raise serializers.ValidationError(
+                {"risk_accepted_until": "Accepting a risk needs the date its acceptance ends."}
+            )
+        if until <= timezone.now():
+            raise serializers.ValidationError(
+                {"risk_accepted_until": "An acceptance cannot end in the past."}
+            )
+        attrs["risk_accepted_until"] = until
+        return attrs
 
     def _latest_seen(self, obj):
         return (self.context.get("latest_seen") or {}).get(obj.deployment_id)

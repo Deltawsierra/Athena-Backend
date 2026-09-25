@@ -267,7 +267,9 @@ class ProviderAssertion(models.Model):
 #: keyring stamp `assurance.decision.recompute_decision` writes beside it, both
 #: QuerySet updates under the row lock. A model save never writes them to a stored
 #: row -- see `Deployment.save`.
-DECISION_OWNED_FIELDS = frozenset({"decision", "decision_revision", "decision_keyring"})
+DECISION_OWNED_FIELDS = frozenset(
+    {"decision", "decision_revision", "decision_keyring", "decision_valid_until"}
+)
 
 
 class DecisionColumnWriteRefused(ValueError):
@@ -369,6 +371,12 @@ class Deployment(models.Model):
     decision_keyring = models.CharField(
         max_length=64, null=True, blank=True, default=None, editable=False
     )
+    # The first moment the stored decision stops being the one its inputs imply
+    # without any write: the earliest lapse of a risk accepted on it. Like the
+    # keyring, time moves the decision where no write does, so the decision that
+    # wrote this records when it goes stale and `decision.current_decision`
+    # recomputes it at the first read after. NULL when nothing about it expires.
+    decision_valid_until = models.DateTimeField(null=True, blank=True, default=None, editable=False)
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
     # `assurance.decision`: a deployment whose latest evidence is partial cannot
@@ -707,6 +715,12 @@ class Finding(models.Model):
     status = models.CharField(
         max_length=24, choices=Status.choices, default=Status.OPEN, db_index=True
     )
+    # When a person's acceptance of this risk lapses (owner decision Q6). Accepting
+    # a risk is a decision to carry it for a stated time, not a closure: while it
+    # stands it holds the deployment at READY_RESTRICTED at best, and once it
+    # lapses -- or for an acceptance that never named an end -- the decision needs
+    # more evidence. Required to accept, cleared by any other status.
+    risk_accepted_until = models.DateTimeField(null=True, blank=True)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

@@ -168,11 +168,19 @@ def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
             state = apps.get_model("assurance", "Deployment")
         except LookupError:
             return False
-        return any(f.name == "decision_keyring" for f in state._meta.get_fields())
+        names = {f.name for f in state._meta.get_fields()}
+        return _DECISION_COLUMNS_ADDED_LAST <= names
     # `flush` sends post_migrate with no migration state at all, so there is
     # nothing to ask but the database itself -- and a flush of a database left
     # below the stamp crashed on the column here.
-    return _has_column(using, Deployment._meta.db_table, "decision_keyring")
+    return all(_has_column(using, Deployment._meta.db_table, c) for c in _DECISION_COLUMNS_ADDED_LAST)
+
+
+#: The decision columns the refresh writes that later migrations added. A recompute
+#: writes every one of them, so a schema missing any is one it cannot run against --
+#: a staged upgrade stopped between the stamp and the accepted-risk expiry has the
+#: first and not the second, and asking only for the first let the receivers crash.
+_DECISION_COLUMNS_ADDED_LAST = frozenset({"decision_keyring", "decision_valid_until"})
 
 
 @receiver(post_migrate, dispatch_uid="assurance_repair_decisions_behind_their_log")
@@ -259,7 +267,9 @@ DECISION_INPUTS = {
 #: nothing the decision computes. Pinned by
 #: test_the_decision_reads_no_finding_column_but_these.
 DECISION_COLUMNS = {
-    "assurance.Finding": frozenset({"deployment", "deployment_id", "status", "severity"}),
+    "assurance.Finding": frozenset(
+        {"deployment", "deployment_id", "status", "severity", "risk_accepted_until"}
+    ),
 }
 
 #: The Deployment columns that are the refresh's output rather than an input to

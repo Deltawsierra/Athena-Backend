@@ -36,6 +36,13 @@ Two independent signals, combined worst-first:
   workflow set is recorded and every workflow in it reported, so ONE held chain
   cannot make an otherwise-unassessed deployment ready.
 
+- **Accepted risks** (owner decision Q6) cap the decision. A finding a person has
+  accepted is a risk the deployment carries for a stated time, not one that went
+  away: while every acceptance stands the decision is READY_RESTRICTED at best, and
+  an acceptance that has lapsed -- or never named an end -- caps it at
+  NEEDS_MORE_EVIDENCE. Accepted findings used to leave the decision entirely, so an
+  accepted critical finding read READY.
+
 The decision is the **worse** of them. The claim cap can only hold a decision back
 or leave it, never improve it (the same weakest-link discipline the evidence model
 keeps): a green finding set cannot paper over a contradicted claim, and a
@@ -47,9 +54,10 @@ everything.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from django.db import transaction
+from django.utils import timezone
 
 from .coverage import complete_audit_signal, coverage_decision_cap, coverage_manifest
 from .composition import READY as composition_READY
@@ -69,6 +77,7 @@ from .models import (
     AssuranceClaim,
     Deployment,
     EvidenceClass,
+    Finding,
     RetestRequirement,
     severity_rank,
 )
@@ -222,6 +231,51 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     }
 
 
+def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
+    """How the risks a person has accepted bear on the decision (owner decision Q6).
+
+    An accepted finding is resolved for every deriver -- nobody re-opens a risk a
+    person chose to carry -- but it is not resolved for the decision. It used to
+    be: acceptance took the finding out of the decision altogether, so accepting a
+    critical finding read READY, the same answer as fixing it.
+
+    - An acceptance that STANDS (its ``risk_accepted_until`` is after ``now``)
+      caps the decision at READY_RESTRICTED: deployable, with a named risk
+      carried, never a clean READY.
+    - An acceptance that has LAPSED, or never named an end, caps it at
+      NEEDS_MORE_EVIDENCE: the decision to carry the risk no longer stands, and
+      until a person decides again nobody has.
+
+    ``valid_until`` is the earliest moment a standing acceptance lapses, which is
+    when the decision stops being the one its inputs imply without any write --
+    recorded with the decision so the first read after it recomputes
+    (:func:`current_decision`). ``None`` when nothing here expires.
+    """
+    accepted = list(
+        deployment.findings.filter(status=Finding.Status.ACCEPTED).only(
+            "uuid", "title", "severity", "risk_accepted_until"
+        )
+    )
+    standing = [f for f in accepted if f.risk_accepted_until is not None and f.risk_accepted_until > now]
+    lapsed = [f for f in accepted if f not in standing]
+    if lapsed:
+        cap = Deployment.Decision.NEEDS_MORE_EVIDENCE
+    elif standing:
+        cap = Deployment.Decision.READY_RESTRICTED
+    else:
+        cap = None
+    return {
+        "cap": cap,
+        "standing": standing,
+        "lapsed": lapsed,
+        "valid_until": min((f.risk_accepted_until for f in standing), default=None),
+    }
+
+
+def _no_accepted_risk() -> dict:
+    return {"cap": None, "standing": [], "lapsed": [], "valid_until": None}
+
+
 def _completed_scan_signal(deployment: Deployment) -> str | None:
     """READY once a scan has run to completion against this deployment, else ``None``.
 
@@ -286,9 +340,13 @@ class DecisionParts:
     # part in the decision -- `decide` never reads it -- and is carried here
     # only so the payload can report it without a second read.
     chain_provenance: dict
+    # The risks a person has accepted (:func:`accepted_risk_signal`), read at the
+    # same moment as everything else -- including the clock it was read against,
+    # which is what makes an acceptance standing or lapsed.
+    accepted_risk: dict = field(default_factory=_no_accepted_risk)
 
 
-def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING) -> DecisionParts:
+def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING, now=None) -> DecisionParts:
     """Read every decision input, in one pass.
 
     Wrapped in a transaction by callers that need the set to be consistent. The
@@ -310,6 +368,7 @@ def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING) -> Dec
         # is what closes the tear. A census read later would describe a
         # different moment from the composition it is published beside.
         chain_provenance=read_chain_provenance(deployment),
+        accepted_risk=accepted_risk_signal(deployment, now=now or timezone.now()),
     )
 
 
@@ -341,13 +400,22 @@ def decide(parts: DecisionParts) -> str | None:
         composition_decision_signal(parts.composition),
     )
     cap = parts.claim_signal["cap"]
+    accepted_cap = parts.accepted_risk["cap"]
     # Coverage of the system, not strength of the evidence: something the customer
     # declared, or something flagged high risk, was never assessed at all. Every
     # fact gathered can be genuine and the audit still be incomplete.
-    if base is None and cap is None and parts.scan_cap is None and parts.coverage_cap is None:
+    if (
+        base is None
+        and cap is None
+        and parts.scan_cap is None
+        and parts.coverage_cap is None
+        and accepted_cap is None
+    ):
         # Assessed by nothing at all: genuinely no decision.
         return None
-    return _worse(_worse(_worse(base, cap), parts.scan_cap), parts.coverage_cap)
+    # A risk a person accepted is a cap like the others: it holds the decision back,
+    # never lifts it.
+    return _worse(_worse(_worse(_worse(base, cap), parts.scan_cap), parts.coverage_cap), accepted_cap)
 
 
 def compute_decision(
@@ -387,6 +455,18 @@ def _claim_brief(claim: AssuranceClaim) -> dict:
         "claim_type": claim.claim_type,
         "status": claim.status,
         "statement": claim.statement,
+    }
+
+
+def _accepted_brief(finding: Finding) -> dict:
+    """An accepted finding for the decision-support view: what it is, how severe,
+    and when its acceptance ends (``None`` for one that never named an end)."""
+    until = finding.risk_accepted_until
+    return {
+        "uuid": str(finding.uuid),
+        "title": finding.title,
+        "severity": finding.severity,
+        "accepted_until": until.isoformat() if until else None,
     }
 
 
@@ -463,6 +543,12 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
     # one that agrees with a finding that already had.
     without_chains = None if paused else decide(replace(parts, composition=_NO_CHAINS))
     chains_are_binding = not paused and decision != without_chains
+    # The same counterfactual for the risks a person accepted: they are named as
+    # the reason only when they are what holds the decision where it is.
+    accepted = parts.accepted_risk
+    accepted_cap = None if paused else accepted["cap"]
+    without_acceptance = None if paused else decide(replace(parts, accepted_risk=_no_accepted_risk()))
+    acceptance_is_binding = not paused and decision != without_acceptance
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
@@ -483,6 +569,22 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             f"Held at 'audit incomplete': {manifest['summary']}. Parts of the system "
             "were never assessed, so every fact gathered here can be genuine and the "
             "assessment still be short."
+        )
+    elif acceptance_is_binding and accepted["lapsed"]:
+        titles = ", ".join(sorted(f.title for f in accepted["lapsed"]))
+        note = (
+            f"Held at 'needs more evidence' by {len(accepted['lapsed'])} accepted risk(s) "
+            f"whose acceptance has lapsed or never named an end ({titles}). Accepting a "
+            "risk is a decision to carry it for a stated time; past that time nobody "
+            "has decided to carry it."
+        )
+    elif acceptance_is_binding:
+        titles = ", ".join(sorted(f.title for f in accepted["standing"]))
+        note = (
+            f"Ready with restrictions: {len(accepted['standing'])} risk(s) accepted until "
+            f"{accepted['valid_until'].isoformat()} at the earliest ({titles}). An accepted "
+            "risk is carried, not removed; when its acceptance lapses the decision needs "
+            "more evidence."
         )
     elif scan_cap is not None and _worse(from_findings, signal["cap"]) != decision:
         note = (
@@ -539,6 +641,15 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         "from_findings": from_findings,
         "claim_cap": signal["cap"],
         "coverage_cap": coverage_cap,
+        "accepted_risk_cap": accepted_cap,
+        # Every risk a person has accepted, standing or lapsed, with the moment
+        # each acceptance ends. Reported even when it is not what binds the
+        # decision: a carried risk is part of what the decision rests on.
+        "accepted_risk": {
+            "standing": [_accepted_brief(f) for f in accepted["standing"]],
+            "lapsed": [_accepted_brief(f) for f in accepted["lapsed"]],
+            "valid_until": accepted["valid_until"].isoformat() if accepted["valid_until"] else None,
+        },
         # The compositional assurance graph, reported rather than only decided
         # with. Shaped by `workflow_chains.composition_payload` because the ingest
         # routes publish the same block, and two hand-written copies of one shape
@@ -605,12 +716,18 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
         # with it. Three reads (here, inside the composition, and in the
         # fingerprint) could each see a different file mid-rotation, and a READY
         # computed under the old keys was stamped as current under the new ones.
-        decision = compute_decision(locked, paused=hold_pause, keyring=keyring)
+        # Read once, so the decision and the moment it stops holding come from the
+        # same reading. A pause reads nothing, and nothing about it expires.
+        parts = None if hold_pause else read_decision_parts(locked, keyring=keyring)
+        decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
         accept_transition(locked, to_decision=decision, in_force=in_force)
         Deployment.objects.filter(pk=locked.pk).update(
-            decision_keyring=observed_outcomes.keyring_fingerprint(keyring)
+            decision_keyring=observed_outcomes.keyring_fingerprint(keyring),
+            decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
         )
-    deployment.refresh_from_db(fields=["decision", "decision_revision", "decision_keyring"])
+    deployment.refresh_from_db(
+        fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until"]
+    )
     # Level with its transition log -- the move above was made from the log's
     # reading -- so publishing this instance next asks the log nothing.
     deployment.logged_revision = deployment.decision_revision
@@ -664,6 +781,14 @@ def current_decision(deployment: Deployment) -> str | None:
     from .revision import hold_to_its_log
 
     hold_to_its_log(deployment)
+    # Time moves the decision where no write does: a risk accepted until a moment
+    # that has now passed. The stored decision records when that happens, and the
+    # first read after it recomputes -- rather than go on publishing the
+    # READY_RESTRICTED an acceptance that no longer stands was holding up.
+    valid_until = getattr(deployment, "decision_valid_until", None)
+    if valid_until is not None and timezone.now() >= valid_until:
+        recompute_decision(deployment)
+        return deployment.decision
     if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():
         return deployment.decision
     # Stale or never stamped -- but only a deployment with chain outcomes can move
