@@ -38,6 +38,8 @@ from itertools import product
 from pathlib import Path
 
 import pytest
+from django.apps import apps as django_apps
+from django.apps.registry import Apps
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, IntegrityError, connection, transaction
@@ -1034,13 +1036,26 @@ _DEPLOYMENT, _ANOTHER_MODEL, _NOT_A_QUERYSET, _MAY_BE_ANYTHING = (
 
 
 def _class_named(name):
-    """What an unresolved or imported class name is: a Deployment (or a class named
-    for one), a queryset or manager class (which may be anything), or another model."""
+    """What an unresolved class name is: a Deployment (or a class named for one), a
+    queryset or manager class (which may be anything), or another model."""
     if _QUERYSET_CLASS.fullmatch(name):
         return _MAY_BE_ANYTHING
     if "Deployment" in name:
         return _DEPLOYMENT
     return _ANOTHER_MODEL if name[:1].isupper() else _MAY_BE_ANYTHING
+
+
+def _imported(name):
+    """What a name imported as ``name`` is, by the model registry rather than by
+    the name: another model only when the registry holds a model of that name and
+    none of that name is Deployment or a subclass or proxy of it. A re-export
+    (``AISystem = Deployment``) or a proxy of Deployment, imported under a name
+    that does not say Deployment, writes a Deployment all the same; a name the
+    registry does not hold may be anything."""
+    models = [model for model in django_apps.get_models() if model.__name__ == name]
+    if any(issubclass(model, Deployment) for model in models):
+        return _DEPLOYMENT
+    return _ANOTHER_MODEL if models else _MAY_BE_ANYTHING
 
 
 def _apply(op, left, right):
@@ -1171,7 +1186,7 @@ class _Scan(ast.NodeVisitor):
             return self._kind(binding, chain, seen)
         what, node = binding
         if what == "import":
-            return _class_named(node)
+            return _imported(node)
         if what == "class":
             bases = " ".join(ast.unparse(base) for base in node.bases)
             if node.name == "Deployment" or (
@@ -1440,7 +1455,9 @@ def _decision_writes(sources, *, migration=False):
 
     A receiver proven not to be a Deployment's is let through: a dict or other
     container (or a name bound only to one, or a parameter whose name does not say
-    queryset), and another model's queryset reached through queryset steps alone. A
+    queryset), and another model's queryset reached through queryset steps alone --
+    an imported name being another model's only when the model registry holds it
+    and it is not Deployment or a subclass or proxy of it. A
     ``**`` whose keys cannot be read is counted: it cannot be shown not to write. A
     line carrying ``# not-a-decision-writer: <reason>`` is let through -- for a
     proven false positive, with its reason."""
@@ -1873,6 +1890,13 @@ def test_the_one_writer_scan_passes_what_the_review_found_it_flagging(name):
         "from assurance.models import Deployment as D\ndef f():\n    D.objects.update(decision='ready')\n",
         "def f(apps, name):\n    apps.get_model('assurance', name).objects.update(decision='ready')\n",
         "def f(apps):\n    apps.get_model('assurance.Deployment').objects.update(decision='ready')\n",
+        # An import is another model's only if the model registry says so: a
+        # re-export of Deployment (`AISystem = Deployment`), or a name no model
+        # goes by, may be a Deployment whatever it is called.
+        "from assurance.aliases import AISystem\ndef f(pk):\n"
+        "    AISystem.objects.filter(pk=pk).update(decision='ready')\n",
+        "from assurance.proxies import Rollout\ndef f(pk):\n"
+        "    Rollout.objects.filter(pk=pk).update(decision='ready')\n",
         # A name bound to a container in one branch and a queryset in another.
         "def f(x):\n    rows = {} if x else Deployment.objects.all()\n    rows.update(decision=1)\n",
         "def f(x):\n    rows = {}\n    if x:\n        rows = Deployment.objects.all()\n"
@@ -1942,6 +1966,25 @@ def test_the_one_writer_scan_holds_what_it_cannot_prove_is_no_deployment_write(s
 )
 def test_the_one_writer_scan_passes_what_it_proves_is_no_deployment_write(source):
     assert _parsed(source) == [], source
+
+
+def test_an_imported_model_is_what_the_registry_says_it_is_not_what_it_is_called(monkeypatch):
+    """A proxy of Deployment is registered under its own name, which need not say
+    Deployment: imported, it is a Deployment, and its writes are held. Another
+    registered model's are not."""
+
+    class Rollout(Deployment):
+        class Meta:
+            apps = Apps()
+            app_label = "assurance"
+            proxy = True
+
+    registered = django_apps.get_models()
+    monkeypatch.setattr(django_apps, "get_models", lambda: [*registered, Rollout])
+    write = "from assurance.proxies import {model}\ndef f(pk):\n    {model}.objects.update(decision=1)\n"
+
+    assert len(_parsed(write.format(model="Rollout"))) == 1
+    assert _parsed(write.format(model="Finding")) == []
 
 
 def test_the_one_writer_scan_lets_through_a_line_marked_not_a_writer_with_its_reason():
