@@ -311,9 +311,15 @@ class _RefreshAfterCommit:
             # write succeeded -- an API route that already refreshed inside its own
             # transaction would answer 500 for a write that stands, and its client
             # would retry it -- and it would drop every commit hook queued after
-            # this one. Logged, loudly, instead.
+            # this one. Logged at ERROR instead, naming the deployment and what the
+            # failure leaves behind: its stored decision was NOT brought current,
+            # so the receipt and the dispatch fence may be publishing one its
+            # inputs no longer support. An integrity error here is not noise; it
+            # is how a torn revision showed itself, and the only way it did.
             logger.exception(
-                "stored decision refresh failed after commit for deployment %s", self.deployment_id
+                "stored decision refresh failed after commit for deployment %s; its "
+                "stored decision was not refreshed and may no longer match its inputs",
+                self.deployment_id,
             )
 
 

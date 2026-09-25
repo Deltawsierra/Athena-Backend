@@ -11,12 +11,14 @@ receipt published READY over an open critical finding, and every recompute after
 computed revision N+1 again, collided with the transition already recorded there,
 and failed, so nothing could repair it.
 
-Two defences, each pinned here on its own:
+Three defences, each pinned here on its own:
 
 - ``Deployment.save`` never writes the decision columns over a stored row, and
   refuses a save that names one;
 - ``accept_transition`` takes the next revision after both the row and its
-  transition log, and repairs -- loudly -- a row that is behind the log.
+  transition log, and repairs -- loudly -- a row that is behind the log;
+- the after-commit backstop logs a refresh that fails at ERROR, naming the
+  deployment, rather than letting it pass unseen.
 """
 
 from __future__ import annotations
@@ -27,11 +29,12 @@ from datetime import timedelta
 import pytest
 from django.contrib import admin
 from django.contrib.auth import get_user_model
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.test import RequestFactory
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from assurance import signals
 from assurance.admin import DeploymentAdmin
 from assurance.decision import decision_support, recompute_decision
 from assurance.models import (
@@ -354,6 +357,38 @@ def test_a_wedged_deployment_is_repaired_by_the_next_recompute(caplog):
     assert read_decision(dep) == {"decision": D.NOT_RECOMMENDED, "revision": top}
     assert one_decision(dep, client) == D.NOT_RECOMMENDED
     _repair_logged(caplog, dep)
+
+
+# ---------------------------------------------------------------------------
+# A backstop refresh that fails is loud
+# ---------------------------------------------------------------------------
+
+
+def test_an_integrity_error_in_the_backstop_refresh_is_logged_at_error_naming_the_deployment(
+    monkeypatch, caplog
+):
+    """By commit time the write it follows has committed, so the refresh must not
+    raise into the caller. It must not pass unseen either: a torn revision showed
+    itself here and nowhere else."""
+    from assurance import decision as decision_module
+
+    dep = Deployment.objects.create(name="d", owner=_owner())
+
+    def collides(ids):
+        raise IntegrityError(
+            "UNIQUE constraint failed: assurance_decisiontransition.deployment_id, "
+            "assurance_decisiontransition.revision"
+        )
+
+    monkeypatch.setattr(decision_module, "refresh_stored_decisions", collides)
+    with caplog.at_level(logging.ERROR, logger="assurance.signals"):
+        signals._RefreshAfterCommit(dep.pk, None)()  # does not raise
+
+    [record] = [r for r in caplog.records if r.name == "assurance.signals"]
+    assert record.levelno == logging.ERROR
+    assert f"deployment {dep.pk};" in record.getMessage()
+    assert "not refreshed" in record.getMessage()
+    assert record.exc_info and record.exc_info[0] is IntegrityError
 
 
 # ---------------------------------------------------------------------------
