@@ -20,12 +20,21 @@ Three defences, each pinned here on its own:
   keeping the operator's pause as the LOG records it, not as the stale row does;
 - the after-commit backstop logs a refresh that fails at ERROR, naming the
   deployment, rather than letting it pass unseen.
+
+And the one writer is held to by reading the source of every first-party package
+for the writes the model cannot see.
 """
 
 from __future__ import annotations
 
+import ast
 import logging
+import os
+import re
+import textwrap
+from collections import Counter
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from django.contrib import admin
@@ -58,6 +67,7 @@ pytestmark = pytest.mark.django_db
 
 User = get_user_model()
 D = Deployment.Decision
+_REPO = Path(__file__).resolve().parent.parent
 
 
 def _owner():
@@ -639,57 +649,447 @@ def test_an_integrity_error_in_the_backstop_refresh_is_logged_at_error_naming_th
 # ---------------------------------------------------------------------------
 
 
-def _bulk_writes_of_the_decision_columns():
-    """Every QuerySet ``update()`` / ``bulk_update()`` in ``assurance/`` that names a
-    decision column, as (module, enclosing function). The model cannot see these --
-    they send no signal and never reach ``Deployment.save`` -- so they are held
-    here, by reading the source."""
-    import ast
-    from pathlib import Path
+#: Directory names the one-writer scan never enters: the tests, which plant
+#: corrupt rows on purpose, and third-party code a checkout may hold. A virtualenv
+#: under any other name is recognised by its ``pyvenv.cfg``.
+_NOT_FIRST_PARTY = frozenset({"tests", "node_modules", "site-packages", "__pycache__"})
 
-    root = Path(__file__).resolve().parent.parent / "assurance"
-    found = set()
+#: The refresh's own writes of the decision columns -- ONE each. The decision and
+#: its revision, with the transition that records the move; and the keyring stamp,
+#: beside it and under the same lock.
+_THE_REFRESH = Counter(
+    {("assurance/revision.py", "_write"): 1, ("assurance/decision.py", "recompute_decision"): 1}
+)
+
+_OWNED = r"\b(?:%s)\b" % "|".join(sorted(DECISION_OWNED_FIELDS))
+#: A column named anywhere in a string handed to raw SQL.
+_NAMES_AN_OWNED_COLUMN = re.compile(_OWNED, re.IGNORECASE)
+#: SQL that writes a column, naming an owned one -- wherever the string is held,
+#: since ``cursor.execute(SQL)`` runs a statement kept in a module constant.
+_SQL_WRITING_AN_OWNED_COLUMN = re.compile(
+    r"\b(?:UPDATE\b.*?\bSET|(?:INSERT|REPLACE|MERGE)\b.*?\bINTO|ON\s+CONFLICT)\b.*?" + _OWNED,
+    re.IGNORECASE | re.DOTALL,
+)
+_RAW_SQL_CALLS = frozenset({"raw", "execute", "executemany", "executescript", "RawSQL", "RunSQL"})
+#: Neither passed nor determinable: an argument hidden behind ``*args``/``**kwargs``.
+_UNKNOWN = object()
+
+
+def _first_party_python(root=_REPO):
+    """Every first-party Python file, as ``{repo-relative path: source}``: the code,
+    and the migrations apart from it. Every package, not just ``assurance/``: a
+    writer in ``failsafe/views.py`` is a second writer all the same."""
+    code, migrations = {}, {}
+    for directory, subdirectories, files in os.walk(root):
+        here = Path(directory)
+        subdirectories[:] = sorted(
+            name
+            for name in subdirectories
+            if name not in _NOT_FIRST_PARTY
+            and not name.startswith(".")
+            and not (here / name / "pyvenv.cfg").exists()
+        )
+        for name in sorted(files):
+            if name.endswith(".py"):
+                relative = (here / name).relative_to(root)
+                into = migrations if "migrations" in relative.parts else code
+                into[relative.as_posix()] = (here / name).read_text()
+    return code, migrations
+
+
+def _names(node):
+    """The column names a literal list/tuple/set of strings holds; ``None`` if it is
+    anything else, which cannot be read without running it."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)) and all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts
+    ):
+        return {e.value for e in node.elts}
+    return None
+
+
+def _passed_through(function):
+    """The name of ``function``'s own ``**`` parameter, when ``function`` is an
+    ``update`` that only hands it on -- as a view's ``def update(self, request,
+    *args, **kwargs): return super().update(request, *args, **kwargs)`` does. Those
+    keys are its callers', and every caller is an ``update(...)`` call this scan
+    reads for itself. ``None`` otherwise: a mapping the function changes, rebinds
+    or reads for anything else can carry keys of its own."""
+    if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    if function.name != "update" or function.args.kwarg is None:
+        return None
+    name = function.args.kwarg.arg
+    unpacked = {
+        id(node.value)
+        for node in ast.walk(function)
+        if isinstance(node, ast.keyword) and node.arg is None
+    }
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id == name and id(node) not in unpacked:
+            return None
+        if isinstance(node, ast.arg) and node.arg == name and node is not function.args.kwarg:
+            return None
+    return name
+
+
+def _keys(keywords, passed_through=None):
+    """The keyword names a call passes, ``**{...}`` and ``**dict(...)`` literals
+    unpacked; ``None`` if any ``**`` hides keys that cannot be read statically.
+    ``passed_through`` names a ``**`` mapping that adds none (see
+    :func:`_passed_through`)."""
+    names = set()
+    for keyword in keywords:
+        if keyword.arg is not None:
+            names.add(keyword.arg)
+            continue
+        value = keyword.value
+        if passed_through is not None and isinstance(value, ast.Name) and value.id == passed_through:
+            continue
+        if isinstance(value, ast.Dict):
+            for key, item in zip(value.keys, value.values, strict=True):
+                if key is None:  # `**{**other}`
+                    inner = _keys([ast.keyword(arg=None, value=item)])
+                    if inner is None:
+                        return None
+                    names |= inner
+                elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    names.add(key.value)
+                else:
+                    return None
+        elif (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "dict"
+            and not value.args
+        ):
+            inner = _keys(value.keywords)
+            if inner is None:
+                return None
+            names |= inner
+        else:
+            return None
+    return names
+
+
+def _argument(call, index, keyword):
+    """The node passed as parameter ``keyword`` (positional ``index``); ``None`` if
+    not passed, :data:`_UNKNOWN` if it may be hidden in ``*args``/``**kwargs``."""
+    for passed in call.keywords:
+        if passed.arg == keyword:
+            return passed.value
+    ahead = call.args[: index + 1]
+    if any(isinstance(a, ast.Starred) for a in ahead):
+        return _UNKNOWN
+    if len(call.args) > index:
+        return call.args[index]
+    if any(passed.arg is None for passed in call.keywords):
+        return _UNKNOWN
+    return None
+
+
+def _fields_write(call, index, keyword):
+    """Why a ``bulk_update``/``bulk_create`` call's field list writes an owned
+    column, or ``None``."""
+    fields = _argument(call, index, keyword)
+    if fields is None or (isinstance(fields, ast.Constant) and fields.value is None):
+        # bulk_update's fields are required, so a call without them is not a
+        # QuerySet's; bulk_create without update_fields is a plain INSERT.
+        return None
+    names = None if fields is _UNKNOWN else _names(fields)
+    if names is None:
+        return f"{keyword} that cannot be resolved"
+    owned = names & DECISION_OWNED_FIELDS
+    return f"{keyword} naming {sorted(owned)}" if owned else None
+
+
+def _called(call):
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+
+
+def _why_it_writes_a_decision_column(call, *, migration, passed_through=None):
+    """Why ``call`` writes a decision column the model cannot see, or ``None``."""
+    name = _called(call)
+    if name == "update":
+        # The columns a QuerySet's update writes are its keywords. A positional
+        # argument is a dict's, set's or hash's update -- or an unbound
+        # `QuerySet.update(qs, ...)`, whose keywords are read all the same.
+        keys = _keys(call.keywords, passed_through)
+        if keys is None:
+            return "update(**...) with keys that cannot be resolved"
+        owned = keys & DECISION_OWNED_FIELDS
+        return f"update() of {sorted(owned)}" if owned else None
+    if name == "bulk_update":
+        why = _fields_write(call, 1, "fields")
+        return why and f"bulk_update() with {why}"
+    if name == "bulk_create":
+        # An upsert: rows that collide are UPDATEd with `update_fields`.
+        why = _fields_write(call, 4, "update_fields")
+        return why and f"bulk_create() with {why}"
+    if name in _RAW_SQL_CALLS and not migration:
+        # A migration may create or alter these columns in SQL; what it may not do
+        # is write them, which the SQL-shape check below holds it to.
+        strings = [
+            c.value
+            for c in ast.walk(call)
+            if isinstance(c, ast.Constant) and isinstance(c.value, str)
+        ]
+        if any(_NAMES_AN_OWNED_COLUMN.search(s) for s in strings):
+            return f"{name}() of SQL naming a decision column"
+    return None
+
+
+def _decision_writes(sources, *, migration=False):
+    """Every write of a decision column in ``sources`` (``{path: source}``) that the
+    model cannot see, as ``(path, qualified enclosing function, line, why)``.
+
+    QuerySet ``update()``/``bulk_update()``, a ``bulk_create()`` upsert, raw SQL --
+    none sends a signal or reaches ``Deployment.save``, so they are held here, by
+    reading the source. A ``**`` whose keys cannot be read is counted as a write:
+    it cannot be shown not to be one."""
+    found = []
 
     class Visitor(ast.NodeVisitor):
-        def __init__(self, module):
-            self.module, self.stack = module, []
+        def __init__(self, path):
+            self.path, self.scope, self.in_raw_sql = path, [], 0
+            self.passed_through = [None]
 
-        def visit_FunctionDef(self, node):
-            self.stack.append(node.name)
+        def _scoped(self, node):
+            self.scope.append(node.name)
+            self.passed_through.append(_passed_through(node))
             self.generic_visit(node)
-            self.stack.pop()
+            self.passed_through.pop()
+            self.scope.pop()
 
-        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _scoped
+
+        def _found(self, node, why):
+            found.append((self.path, ".".join(self.scope) or "<module>", node.lineno, why))
+
+        def visit_Expr(self, node):
+            # A docstring (or any bare string statement) is prose, not SQL.
+            if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                self.generic_visit(node)
+
+        def visit_Constant(self, node):
+            if (
+                not self.in_raw_sql
+                and isinstance(node.value, str)
+                and _SQL_WRITING_AN_OWNED_COLUMN.search(node.value)
+            ):
+                self._found(node, "SQL writing a decision column")
 
         def visit_Call(self, node):
-            func = node.func
-            if isinstance(func, ast.Attribute) and func.attr in {"update", "bulk_update"}:
-                # A dict's `.update({...})` takes a positional mapping; a QuerySet's
-                # never does.
-                if not (node.args and isinstance(node.args[0], ast.Dict)):
-                    named = {k.arg for k in node.keywords} | {
-                        c.value
-                        for c in ast.walk(node)
-                        if isinstance(c, ast.Constant) and isinstance(c.value, str)
-                    }
-                    if named & DECISION_OWNED_FIELDS:
-                        found.add((self.module, self.stack[-1] if self.stack else "<module>"))
+            why = _why_it_writes_a_decision_column(
+                node, migration=migration, passed_through=self.passed_through[-1]
+            )
+            if why:
+                self._found(node, why)
+            # A string counted as this call's SQL is not counted again on its own.
+            raw_sql = bool(why) and _called(node) in _RAW_SQL_CALLS
+            self.in_raw_sql += raw_sql
             self.generic_visit(node)
+            self.in_raw_sql -= raw_sql
 
-    for path in sorted(root.rglob("*.py")):
-        if "migrations" in path.parts:
-            continue
-        Visitor(path.name).visit(ast.parse(path.read_text()))
+    for path, source in sorted(sources.items()):
+        Visitor(path).visit(ast.parse(source))
     return found
 
 
+def _tally(writes):
+    return Counter((path, scope) for path, scope, _line, _why in writes)
+
+
 def test_the_decision_columns_are_bulk_written_only_by_the_refresh():
-    assert _bulk_writes_of_the_decision_columns() == {
-        # The decision and its revision, with the transition that records the move.
-        ("revision.py", "_write"),
-        # The keyring stamp, beside it and under the same lock.
-        ("decision.py", "recompute_decision"),
+    code, _migrations = _first_party_python()
+    writes = _decision_writes(code)
+    # Exactly one write in each: a second one inside an allowed function is a
+    # second writer as surely as one anywhere else.
+    assert _tally(writes) == _THE_REFRESH, writes
+
+
+def test_no_migration_writes_the_decision_columns():
+    """A migration adds and alters these columns; a data migration that wrote them
+    would move the decision with no transition recorded."""
+    _code, migrations = _first_party_python()
+    assert migrations, "the scan found no migrations to check"
+    assert _decision_writes(migrations, migration=True) == []
+
+
+def test_the_one_writer_scan_reads_every_first_party_package():
+    """Pinned so that narrowing the scan back to one package fails here, not
+    silently: every installed app in this repository, and the project package
+    beside them, which is not an app."""
+    from django.apps import apps
+    from django.conf import settings
+
+    code, _migrations = _first_party_python()
+    scanned = {path.split("/")[0] for path in code}
+    ours = {
+        relative.parts[0]
+        for relative in (
+            Path(app.path).resolve().relative_to(_REPO)
+            for app in apps.get_app_configs()
+            if Path(app.path).resolve().is_relative_to(_REPO)
+        )
+        if "site-packages" not in relative.parts
     }
+    assert {"assurance", "failsafe", "audit"} <= ours <= scanned
+    assert settings.ROOT_URLCONF.replace(".", "/") + ".py" in code
+    assert not any(path.startswith("tests/") for path in code)
+
+
+def test_the_one_writer_scan_leaves_out_tests_and_third_party_code(tmp_path):
+    for path in (
+        "manage.py",
+        "app/models.py",
+        "app/migrations/0001_initial.py",
+        "tests/test_app.py",
+        "node_modules/node-gyp/gyp/pylib/gyp/input.py",
+        ".tox/py311/lib/x.py",
+        "env/bin/activate_this.py",
+        "env/lib/python3.11/site-packages/django/db/models/query.py",
+        "app/vendor/site-packages/x.py",
+    ):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text("x = 1\n")
+    (tmp_path / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+
+    code, migrations = _first_party_python(tmp_path)
+
+    assert sorted(code) == ["app/models.py", "manage.py"]
+    assert sorted(migrations) == ["app/migrations/0001_initial.py"]
+
+
+def _parsed(source, path="failsafe/views.py", **kwargs):
+    return [
+        (scope, why)
+        for _path, scope, _line, why in _decision_writes({path: textwrap.dedent(source)}, **kwargs)
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Outside assurance/ -- the scan used to read one package.
+        "def pause(i):\n    Deployment.objects.filter(pk=i).update(decision='ready')\n",
+        # Keys hidden behind **: a variable, a computed key, a call.
+        "def f(i):\n    fields = {'decision': 'ready'}\n    Deployment.objects.filter(pk=i).update(**fields)\n",
+        "def f(i, k):\n    Deployment.objects.filter(pk=i).update(**{k: 'ready'})\n",
+        "def f(i):\n    Deployment.objects.filter(pk=i).update(**{**base(), 'name': 'x'})\n",
+        "def f(i):\n    Deployment.objects.filter(pk=i).update(*(), **fields())\n",
+        # An unbound call: the queryset is positional, the columns are not.
+        "def f(qs):\n    QuerySet.update(qs, decision='ready')\n",
+        # ** handed on by something that is not itself an update: its callers'
+        # keys are never read, so they are not known.
+        "def set_fields(qs, **kwargs):\n    qs.update(**kwargs)\n",
+        # ... or by an update that adds to it, rebinds it, or hands on more.
+        "def update(self, **kwargs):\n    kwargs['decision'] = 'ready'\n    return super().update(**kwargs)\n",
+        "def update(self, **kwargs):\n    kwargs = {'decision': 1}\n    return super().update(**kwargs)\n",
+        "def update(self, **kwargs):\n    return super().update(**kwargs, **extra())\n",
+        "def update(self, **kw):\n    return (lambda **kw: qs.update(**kw))(decision=1)\n",
+        # Keys written out through ** literals.
+        "def f(i):\n    Deployment.objects.filter(pk=i).update(**{'decision_revision': 9})\n",
+        "def f(i):\n    Deployment.objects.filter(pk=i).update(**dict(decision_keyring='k'))\n",
+        # bulk_update, named or hidden.
+        "def f(rows):\n    Deployment.objects.bulk_update(rows, ['name', 'decision'])\n",
+        "def f(rows):\n    Deployment.objects.bulk_update(rows, fields=('decision_revision',))\n",
+        "def f(rows, cols):\n    Deployment.objects.bulk_update(rows, cols)\n",
+        "def f(rows, opts):\n    Deployment.objects.bulk_update(rows, **opts)\n",
+        "def f(args):\n    Deployment.objects.bulk_update(*args)\n",
+        # bulk_create as an upsert.
+        "def f(rows):\n    Deployment.objects.bulk_create(rows, update_conflicts=True,"
+        " unique_fields=['id'], update_fields=['decision'])\n",
+        "def f(rows, cols):\n    Deployment.objects.bulk_create(rows, update_conflicts=True, update_fields=cols)\n",
+        "def f(rows, opts):\n    Deployment.objects.bulk_create(rows, **opts)\n",
+        "def f(rows):\n    Deployment.objects.bulk_create(rows, None, False, True, ['decision'])\n",
+        # Raw SQL naming the columns.
+        "def f(c):\n    c.execute('UPDATE assurance_deployment SET decision = %s', ['ready'])\n",
+        "def f(c, t):\n    c.cursor().executemany(f'update {t} set decision_revision = 1', [])\n",
+        "def f():\n    return Deployment.objects.raw('SELECT id, decision FROM assurance_deployment')\n",
+        "def f():\n    return Deployment.objects.annotate(d=RawSQL('decision_keyring', []))\n",
+        # SQL kept in a constant and executed elsewhere.
+        "SQL = 'UPDATE assurance_deployment SET decision_keyring = NULL'\ndef f(c):\n    c.execute(SQL)\n",
+        "def f(c):\n    c.execute(Q)\nQ = '''INSERT INTO assurance_deployment (id, decision)\n VALUES (1, 2)'''\n",
+    ],
+)
+def test_the_one_writer_scan_flags_each_way_round_it(source):
+    # Once: a string counted as a raw call's SQL is not counted again.
+    assert len(_parsed(source)) == 1, (source, _parsed(source))
+
+
+def test_the_one_writer_scan_counts_a_second_write_inside_an_allowed_function():
+    source = """
+        def recompute_decision(deployment):
+            accept_transition(deployment, to_decision=None)
+            Deployment.objects.filter(pk=deployment.pk).update(decision_keyring="k")
+            Deployment.objects.filter(pk=deployment.pk).update(decision="ready")
+    """
+    tally = _tally(_decision_writes({"assurance/decision.py": textwrap.dedent(source)}))
+    assert tally == {("assurance/decision.py", "recompute_decision"): 2}
+    assert tally != _THE_REFRESH
+
+
+def test_the_one_writer_scan_names_the_scope_a_write_is_in():
+    """A write in a method or a nested function is not the allowed function's."""
+    source = """
+        class Admin:
+            def save(self, i):
+                Deployment.objects.filter(pk=i).update(decision="ready")
+        def recompute_decision(i):
+            def inner():
+                Deployment.objects.filter(pk=i).update(decision="ready")
+        Deployment.objects.update(decision=None)
+    """
+    assert [scope for scope, _why in _parsed(source)] == [
+        "Admin.save",
+        "recompute_decision.inner",
+        "<module>",
+    ]
+
+
+def test_a_migration_may_alter_the_columns_but_not_write_them():
+    alters = """
+        operations = [
+            migrations.AddField(model_name="deployment", name="decision_keyring", field=None),
+            migrations.RunSQL("ALTER TABLE assurance_deployment ALTER COLUMN decision DROP NOT NULL"),
+        ]
+    """
+    assert _parsed(alters, "assurance/migrations/0099_x.py", migration=True) == []
+    writes = """
+        def backfill(apps, schema_editor):
+            apps.get_model("assurance", "Deployment").objects.update(decision=None)
+        operations = [migrations.RunSQL("UPDATE assurance_deployment SET decision = NULL")]
+    """
+    found = _parsed(writes, "assurance/migrations/0099_x.py", migration=True)
+    assert found == [
+        ("backfill", "update() of ['decision']"),
+        ("<module>", "SQL writing a decision column"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Not a QuerySet's update: dicts, sets and hashes take a positional.
+        "def f(d, x):\n    d.update({'decision': x})\n    d.update(x)\n    h.update(b'decision')\n",
+        # An update handing its own ** on untouched: its callers are read instead.
+        "class V:\n    def update(self, request, *args, **kwargs):\n"
+        "        return super().update(request, *args, **kwargs)\n",
+        # QuerySet writes that name no decision column.
+        "def f(i):\n    Deployment.objects.filter(pk=i).update(name='x', **{'description': 'y'})\n",
+        "def f(i):\n    Deployment.objects.filter(pk=i).update(**dict(name='x'), **{**{'notes': 1}})\n",
+        "def f(rows):\n    Asset.objects.bulk_update(rows, ['last_seen'])\n    Asset.objects.bulk_create(rows)\n",
+        "def f(rows):\n    Asset.objects.bulk_create(rows, update_conflicts=True, update_fields=['name'])\n",
+        "def f(rows):\n    Asset.objects.bulk_create(rows, update_fields=None)\n",
+        # Columns that merely contain the word.
+        "def f(c):\n    c.execute('UPDATE assurance_decisiontransition SET to_decision = %s', [1])\n",
+        # Prose about the SQL, not SQL.
+        'def f():\n    """An UPDATE that would SET the decision column."""\n',
+    ],
+)
+def test_the_one_writer_scan_passes_what_writes_no_decision_column(source):
+    assert _parsed(source) == [], source
 
 
 def test_a_transition_still_touches_updated_at():
