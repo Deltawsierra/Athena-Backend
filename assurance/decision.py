@@ -579,23 +579,31 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
     at the start of its request.
 
     ``paused``: ``True`` pauses, ``False`` computes without a pause (an explicit
-    lift), and ``None`` -- the default -- keeps whatever the LOCKED row says, which
-    is the only reading of "don't change the pause" a concurrent operator cannot
-    slip past.
+    lift), and ``None`` -- the default -- keeps the pause in force under the row
+    LOCK, which is the only reading of "don't change the pause" a concurrent
+    operator cannot slip past. In force, not merely stored: a row written back
+    beneath its transition log holds the decision from before the log's last
+    move, and the log is what was recorded and published
+    (:func:`assurance.revision.decision_in_force`). Reading the pause off such a
+    row recorded, on the repair, a lift -- or a re-pause -- no operator made.
     """
     from . import observed_outcomes
-    from .revision import accept_transition
+    from .revision import accept_transition, decision_in_force
 
     with transaction.atomic():
         locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
-        hold_pause = locked.decision == Deployment.Decision.PAUSED if paused is None else paused
+        # ONE reading of the decision in force, under the lock: the pause is taken
+        # from it and the move is made from it, so the two cannot disagree, and a
+        # row behind its log is repaired -- and reported -- once.
+        in_force = decision_in_force(locked)
+        hold_pause = in_force.decision == Deployment.Decision.PAUSED if paused is None else paused
         keyring = observed_outcomes.trusted_keyring()
         # ONE read of the keyring: the decision is computed under it and stamped
         # with it. Three reads (here, inside the composition, and in the
         # fingerprint) could each see a different file mid-rotation, and a READY
         # computed under the old keys was stamped as current under the new ones.
         decision = compute_decision(locked, paused=hold_pause, keyring=keyring)
-        accept_transition(locked, to_decision=decision)
+        accept_transition(locked, to_decision=decision, in_force=in_force)
         Deployment.objects.filter(pk=locked.pk).update(
             decision_keyring=observed_outcomes.keyring_fingerprint(keyring)
         )
@@ -610,7 +618,7 @@ def refresh_stored_decisions(deployment_ids) -> None:
     them: the Django admin, and the after-commit backstop in
     :mod:`assurance.signals`. A deployment deleted since its input was written has
     no decision left to refresh and is skipped. Each keeps its operator's pause as
-    its LOCKED row holds it, as every refresh does.
+    it is in force under its LOCKED row, as every refresh does.
     """
     ids = {pk for pk in deployment_ids if pk is not None}
     if not ids:

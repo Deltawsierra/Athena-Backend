@@ -37,6 +37,7 @@ about.
 from __future__ import annotations
 
 import logging
+from typing import NamedTuple
 
 from django.db import transaction
 from django.utils import timezone
@@ -53,7 +54,24 @@ class StaleDecisionRead(RuntimeError):
     value. A consumer that asked to be fenced at revision 7 and was handed
     revision 6 has been handed the answer it specifically said it could not use;
     returning it with a flag attached would make ignoring the flag the easy path.
+
+    Also raised by :func:`accept_transition` when it is handed a reading of the
+    decision in force (:class:`InForce`) taken from a row that has moved since.
     """
+
+
+class InForce(NamedTuple):
+    """The decision in force for one deployment and its revision, read under the
+    deployment's row lock by :func:`decision_in_force`.
+
+    ``read_from`` is the row it was read from, ``(pk, decision, revision)``.
+    :func:`accept_transition` checks the row it locks against it, so a reading
+    taken before the row moved is refused rather than moved FROM.
+    """
+
+    decision: str | None
+    revision: int
+    read_from: tuple
 
 
 def read_decision(deployment: Deployment, *, at_least: int | None = None) -> dict:
@@ -83,7 +101,13 @@ def read_decision(deployment: Deployment, *, at_least: int | None = None) -> dic
     return {"decision": row["decision"], "revision": revision}
 
 
-def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str = "") -> dict:
+def accept_transition(
+    deployment: Deployment,
+    *,
+    to_decision,
+    basis_digest: str = "",
+    in_force: InForce | None = None,
+) -> dict:
     """Move the decision and record the move, atomically. Returns the new state.
 
     The accepted-change boundary. Everything inside happens or none of it does:
@@ -105,15 +129,32 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
     The revision issued is the next one after BOTH the locked row and the
     transition log. A row found behind its log was written back over by something
     other than this function; it is repaired from the log and logged at ERROR (see
-    :func:`_in_force`), never crashed on -- a crash here is a deployment no
+    :func:`decision_in_force`), never crashed on -- a crash here is a deployment no
     recompute can bring current again.
+
+    ``in_force``: the caller's own :func:`decision_in_force`, read under this row
+    lock in the transaction this call joins. ``recompute_decision`` passes the one
+    it took the operator's pause from, so the decision computed and the decision
+    it moves FROM are the same reading, and a repair is logged once, not twice. A
+    reading of a row that has moved since (or of another deployment) is refused
+    with :class:`StaleDecisionRead`: moving from it would write the row back
+    beneath its log, which is the wedge the repair exists to undo. Omitted, it is
+    read here.
     """
     with transaction.atomic():
         # Serialises concurrent recomputes on PostgreSQL; a no-op on SQLite, which
         # serialises writers itself. See the module docstring.
         locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
         stored = (locked.decision, locked.decision_revision)
-        current, at = _in_force(locked)
+        if in_force is None:
+            in_force = decision_in_force(locked)
+        elif in_force.read_from != (locked.pk, *stored):
+            raise StaleDecisionRead(
+                f"the decision in force was read from deployment {in_force.read_from[0]} "
+                f"at {in_force.read_from[1:]!r}, but the row locked is deployment "
+                f"{locked.pk} at {stored!r}; read it again under this lock"
+            )
+        current, at = in_force.decision, in_force.revision
 
         if current == to_decision:
             if (current, at) != stored:
@@ -154,7 +195,7 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
     return {"decision": to_decision, "revision": revision, "changed": True}
 
 
-def _in_force(locked: Deployment):
+def decision_in_force(locked: Deployment) -> InForce:
     """The decision in force and its revision: the LOCKED row's, unless the row is
     behind its own transition log -- then the log's, loudly.
 
@@ -165,7 +206,15 @@ def _in_force(locked: Deployment):
     through any recompute; trusting the row would issue a revision the log already
     holds. Repairing from the log keeps the sequence the consumers have seen
     continuous: the next transition runs FROM what the log last recorded.
+
+    The operator's pause is part of that decision (PAUSED is a decision), so it is
+    read from here too, never from the row alone: a row written back beneath a
+    logged pause holds the decision from before the pause, and reading the pause
+    off it recorded a lift no operator made. Call it once per lock and pass the
+    reading on (``accept_transition(in_force=...)``); each call is a query, and on
+    a row behind its log, an ERROR.
     """
+    read_from = (locked.pk, locked.decision, locked.decision_revision)
     latest = (
         DecisionTransition.objects.filter(deployment_id=locked.pk)
         .order_by("-revision")
@@ -173,7 +222,7 @@ def _in_force(locked: Deployment):
         .first()
     )
     if latest is None or latest[0] <= locked.decision_revision:
-        return locked.decision, locked.decision_revision
+        return InForce(locked.decision, locked.decision_revision, read_from)
     logger.error(
         "deployment %s: stored decision %r at revision %s is behind its transition log "
         "(revision %s recorded %r); repairing the row from the log",
@@ -183,7 +232,7 @@ def _in_force(locked: Deployment):
         latest[0],
         latest[1],
     )
-    return latest[1] or None, latest[0]
+    return InForce(latest[1] or None, latest[0], read_from)
 
 
 def _write(locked: Deployment, decision, revision) -> None:

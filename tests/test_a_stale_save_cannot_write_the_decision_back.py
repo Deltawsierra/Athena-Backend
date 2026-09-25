@@ -16,7 +16,8 @@ Three defences, each pinned here on its own:
 - ``Deployment.save`` never writes the decision columns over a stored row, and
   refuses a save that names one;
 - ``accept_transition`` takes the next revision after both the row and its
-  transition log, and repairs -- loudly -- a row that is behind the log;
+  transition log, and repairs -- loudly, once -- a row that is behind the log,
+  keeping the operator's pause as the LOG records it, not as the stale row does;
 - the after-commit backstop logs a refresh that fails at ERROR, naming the
   deployment, rather than letting it pass unseen.
 """
@@ -29,8 +30,9 @@ from datetime import timedelta
 import pytest
 from django.contrib import admin
 from django.contrib.auth import get_user_model
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.test import RequestFactory
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -44,7 +46,12 @@ from assurance.models import (
     Deployment,
     Finding,
 )
-from assurance.revision import accept_transition, read_decision
+from assurance.revision import (
+    StaleDecisionRead,
+    accept_transition,
+    decision_in_force,
+    read_decision,
+)
 from tests.decision_surfaces import one_decision
 
 pytestmark = pytest.mark.django_db
@@ -357,6 +364,200 @@ def test_a_wedged_deployment_is_repaired_by_the_next_recompute(caplog):
     assert read_decision(dep) == {"decision": D.NOT_RECOMMENDED, "revision": top}
     assert one_decision(dep, client) == D.NOT_RECOMMENDED
     _repair_logged(caplog, dep)
+
+
+# ---------------------------------------------------------------------------
+# The operator's pause is read from the decision in force, not the stale row
+# ---------------------------------------------------------------------------
+
+
+def _pause_through_the_route(dep):
+    """An operator pauses a READY deployment through the route: PAUSED at N+1, with
+    the transition recorded. Returns N+1."""
+    response = _client(dep).post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json"
+    )
+    assert response.status_code == 200 and response.json()["decision"] == D.PAUSED
+    paused_at = dep.decision_revision + 1
+    assert _log(dep)[-1] == (paused_at, D.READY, D.PAUSED)
+    return paused_at
+
+
+def _write_back(dep, decision, revision):
+    """The row written back beneath its log -- what an admin form loaded before the
+    pause and saved after it did, before the model refused the decision columns.
+    Planted with a QuerySet update, which the model cannot see."""
+    Deployment.objects.filter(pk=dep.pk).update(decision=decision, decision_revision=revision)
+
+
+def _refresh_by_recompute(dep):
+    recompute_decision(Deployment.objects.get(pk=dep.pk))
+
+
+def _refresh_by_route(dep):
+    response = _client(dep).post(
+        f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json"
+    )
+    assert response.status_code == 200, response.content
+
+
+@pytest.mark.parametrize("refresh", [_refresh_by_recompute, _refresh_by_route])
+def test_a_repair_keeps_the_pause_the_log_records(caplog, refresh):
+    """The refresh that repairs the row keeps "the pause" as the LOG records it. It
+    read it from the row it was repairing, and recorded PAUSED -> READY: every
+    consumer draining the transitions was told to resume a deployment its operator
+    had paused, and no operator had lifted anything."""
+    dep = _scanned_ready()
+    paused_at = _pause_through_the_route(dep)
+    _write_back(dep, D.READY, paused_at - 1)
+    log = _log(dep)
+
+    with caplog.at_level(logging.ERROR):
+        refresh(dep)
+
+    assert read_decision(dep) == {"decision": D.PAUSED, "revision": paused_at}
+    assert _log(dep) == log, "the pause was recorded when it was made; nothing new"
+    _repair_logged(caplog, dep)
+
+
+def test_a_repair_by_the_backstop_keeps_the_pause_over_a_new_critical_finding(
+    caplog, django_capture_on_commit_callbacks
+):
+    """The refresh an input write schedules is the commonest one to meet a wedged
+    row. Computed without the pause, the finding recorded PAUSED -> NOT_RECOMMENDED."""
+    # Committed, so no refresh from the setup is still pending to stand for the
+    # finding's own.
+    with django_capture_on_commit_callbacks(execute=True):
+        dep = _scanned_ready()
+        paused_at = _pause_through_the_route(dep)
+    _write_back(dep, D.READY, paused_at - 1)
+    log = _log(dep)
+
+    with caplog.at_level(logging.ERROR), django_capture_on_commit_callbacks(execute=True) as hooks:
+        _critical(dep)
+
+    assert any(isinstance(hook, signals._RefreshAfterCommit) for hook in hooks)
+    assert read_decision(dep) == {"decision": D.PAUSED, "revision": paused_at}
+    assert _log(dep) == log
+    _repair_logged(caplog, dep)
+
+
+def test_a_repair_keeps_the_lift_the_log_records(caplog):
+    """The mirror: the operator lifted a pause, and a stale PAUSED was written back
+    beneath the lift. The repair re-paused a deployment its operator had released."""
+    dep = _scanned_ready()
+    recompute_decision(dep, paused=True)
+    paused_at = dep.decision_revision
+    recompute_decision(dep, paused=False)
+    assert _log(dep)[-1] == (paused_at + 1, D.PAUSED, D.READY)
+    _write_back(dep, D.PAUSED, paused_at)
+    log = _log(dep)
+
+    with caplog.at_level(logging.ERROR):
+        recompute_decision(Deployment.objects.get(pk=dep.pk))
+
+    assert read_decision(dep) == {"decision": D.READY, "revision": paused_at + 1}
+    assert _log(dep) == log
+    _repair_logged(caplog, dep)
+
+
+@pytest.mark.parametrize(
+    ("stored", "logged", "ahead"),
+    [
+        (D.PAUSED, D.PAUSED, 0),
+        (D.READY, D.READY, 0),
+        # A row ahead of its log is trusted, so its pause is: the log's older
+        # word does not reach back over it.
+        (D.PAUSED, D.READY, 4),
+        (D.READY, D.PAUSED, 4),
+    ],
+)
+def test_a_row_level_with_or_ahead_of_its_log_keeps_its_own_pause(caplog, stored, logged, ahead):
+    dep = _scanned_ready()
+    accept_transition(dep, to_decision=logged)
+    top = _log(dep)[-1][0]
+    Deployment.objects.filter(pk=dep.pk).update(decision=stored, decision_revision=top + ahead)
+    log = _log(dep)
+
+    with caplog.at_level(logging.ERROR):
+        assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == stored
+
+    assert read_decision(dep) == {"decision": stored, "revision": top + ahead}
+    assert _log(dep) == log
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+@pytest.mark.parametrize(
+    ("logged", "paused", "decided"), [(D.PAUSED, False, D.READY), (D.READY, True, D.PAUSED)]
+)
+def test_an_explicit_pause_or_lift_still_wins_over_the_log(caplog, logged, paused, decided):
+    """An operator's explicit word is not "keep the pause", on a repaired row or any
+    other. It is a real move FROM what the log records, with its own revision --
+    even though the stale row happens to hold the decision asked for."""
+    dep = _scanned_ready()
+    recompute_decision(dep, paused=True)
+    if logged == D.READY:
+        recompute_decision(dep, paused=False)
+    top = dep.decision_revision
+    assert _log(dep)[-1][1:] == (decided, logged)
+    _write_back(dep, decided, top - 1)
+
+    with caplog.at_level(logging.ERROR):
+        assert recompute_decision(Deployment.objects.get(pk=dep.pk), paused=paused) == decided
+
+    assert read_decision(dep) == {"decision": decided, "revision": top + 1}
+    assert _log(dep)[-1] == (top + 1, logged, decided)
+    _repair_logged(caplog, dep)
+
+
+def test_a_reading_of_a_row_that_has_moved_is_refused():
+    """``accept_transition(in_force=...)`` trusts the caller's reading. One taken
+    before the row moved would be moved FROM -- and when it already held the
+    decision accepted, written back: the row beneath its log again."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    accept_transition(dep, to_decision=D.READY)
+    reading = decision_in_force(Deployment.objects.get(pk=dep.pk))
+    assert reading[:2] == (D.READY, 1)
+    accept_transition(Deployment.objects.get(pk=dep.pk), to_decision=D.NOT_RECOMMENDED)
+    log = _log(dep)
+
+    for to_decision in (D.READY, D.NEEDS_REMEDIATION):
+        with pytest.raises(StaleDecisionRead), transaction.atomic():
+            accept_transition(dep, to_decision=to_decision, in_force=reading)
+
+    assert read_decision(dep) == {"decision": D.NOT_RECOMMENDED, "revision": 2}
+    assert _log(dep) == log
+
+
+def test_a_reading_of_another_deployment_is_refused():
+    """Two new deployments read the same (decision, revision); the row the reading
+    came from is part of it."""
+    one = Deployment.objects.create(name="one", owner=_owner())
+    other = Deployment.objects.create(name="other", owner=one.owner)
+    reading = decision_in_force(Deployment.objects.get(pk=one.pk))
+
+    with pytest.raises(StaleDecisionRead), transaction.atomic():
+        accept_transition(other, to_decision=D.READY, in_force=reading)
+
+    assert read_decision(other) == {"decision": None, "revision": 0}
+    assert _log(other) == []
+
+
+def test_a_reading_taken_under_the_lock_is_the_one_moved_from():
+    """Passed the reading, the call does not read the log a second time."""
+    dep = _behind_its_log()
+    reading = decision_in_force(Deployment.objects.get(pk=dep.pk))
+    assert reading[:2] == (D.NOT_RECOMMENDED, 2)
+
+    with CaptureQueriesContext(connection) as queries:
+        accept_transition(dep, to_decision=D.NEEDS_REMEDIATION, in_force=reading)
+
+    assert not [
+        q["sql"]
+        for q in queries
+        if "assurance_decisiontransition" in q["sql"] and "SELECT" in q["sql"]
+    ]
+    assert _log(dep)[-1] == (3, D.NOT_RECOMMENDED, D.NEEDS_REMEDIATION)
 
 
 # ---------------------------------------------------------------------------
