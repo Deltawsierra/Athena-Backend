@@ -1692,3 +1692,50 @@ def test_a_key_split_from_its_value_by_a_line_break_is_still_read(text):
 def test_a_split_key_that_holds_no_value_costs_nothing(text, expected):
     assert _outcome(text) == expected
 
+
+# ---- Round 9: shapes a one-line mutant of the round 8 scanner forwarded. ----
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A quote where an element starts -- after `(`, `[`, `&` or `;` -- opens a
+        # string, and a stop inside it is not where the value ends.
+        'token=abc (";\nS3CR3T"',
+        'token=abc x[";\nS3CR3T"]',
+        'pwd: a&",\nS3CR3T"',
+        'pwd: a;",\nS3CR3T"',
+        # An opener exactly where the look for the next one starts is found: the
+        # second `[` opens a group that never closes, and runs to the end.
+        "ssn: n[[\nS3CR3T",
+        # A string opening where an element starts is followed before any key
+        # after it in the value is: `apikey:` inside it does not move the read
+        # past its opening quote.
+        'ApiKey=k:"apikey: x;\nS3CR3T"',
+    ],
+)
+def test_a_quote_or_bracket_where_an_element_starts_opens_something(text):
+    redacted, doubtful = _outcome(text)
+    assert "S3CR3T" not in redacted
+    assert doubtful is True
+
+
+def test_a_quote_after_an_even_run_of_backslashes_closes_its_string():
+    # `\\\\` is two escaped backslashes: the quote after them is the close, and
+    # the field after the value is kept.
+    assert _outcome('{"password": "a\\\\\\\\", "q": "UNION SELECT",}') == (
+        '{"password": [redacted], "q": "UNION SELECT",}',
+        False,
+    )
+
+
+def test_a_string_opened_in_a_value_that_never_closes_is_reported():
+    assert _outcome('api_key=abc, "q UNION SELECT') == ("api_key: [redacted]", True)
+
+
+@pytest.mark.parametrize("text", ["password: a(b,S3CR3T)", "password=a(b;S3CR3T)"])
+def test_a_parenthesis_the_value_opened_casts_doubt_on_the_delimiter_after_it(text):
+    # As a bracket does: the comma or semicolon may be inside the parentheses.
+    redacted, doubtful = _outcome(text)
+    assert "S3CR3T" not in redacted
+    assert doubtful is True
