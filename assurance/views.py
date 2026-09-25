@@ -181,7 +181,7 @@ def _rows_from_body(data, *, key: str, single_allowed: bool):
 
 def _refresh_stored_decision(deployment) -> None:
     """Recompute and persist the deployment's decision after an input to it moved:
-    its chains, or its claims.
+    its findings, its claims, its declared architecture or its chains.
 
     The receipt and the bundle read the STORED decision, and only scan ingest and
     the recompute route refreshed it. So a workflow set or a chain outcome written
@@ -189,6 +189,13 @@ def _refresh_stored_decision(deployment) -> None:
     reporting the decision from before -- a signed violation left a stored READY
     in place, read by every surface that trusts the record. Keeps an operator's
     failsafe pause as the LOCKED row holds it, not as this request first read it.
+
+    Call it INSIDE the transaction that made the write, after the write. Called
+    after that transaction committed, it left a window in which another reader saw
+    the new input beside the old decision under one revision, and a refresh that
+    failed there (a lock timeout) left the write standing and the decision stale
+    for good -- a signed outcome cannot be posted twice to try again. Inside, the
+    two commit together or neither does.
     """
     recompute_decision(deployment)
 
@@ -1611,7 +1618,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 {"envelopes": f"at most {observed_outcomes.BATCH_LIMIT} outcomes per request"}
             )
         try:
-            rows, refusals = observed_outcomes.ingest(deployment, envelopes)
+            # The rows and the decision they move commit together, as on the
+            # operator route. `ingest` commits in its own block, and the refresh
+            # used to run after it: a refresh that failed there left a signed
+            # violation recorded under a stored READY, and the engine's retry of the
+            # same envelope was refused as a replay -- nothing on this route could
+            # bring the two back together.
+            with transaction.atomic():
+                rows, refusals = observed_outcomes.ingest(deployment, envelopes)
+                if not refusals:
+                    _refresh_stored_decision(deployment)
         except observed_outcomes.KeyringUnavailable as exc:
             return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         if refusals:
@@ -1622,7 +1638,6 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        _refresh_stored_decision(deployment)
         return Response(
             {
                 "recorded": len(rows),
@@ -1657,7 +1672,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         REPLACES the whole declared set from a list of components (admin-only — it
         mutates the record) and returns the fresh declaration and drift. Declaring
         an architecture is a separate axis from the running system, so it does not
-        move the system fingerprint."""
+        move the system fingerprint.
+
+        It does move the DECISION: the declared set is the baseline the coverage
+        cap measures against, so a declared component nobody observed holds the
+        deployment at AUDIT_INCOMPLETE. The stored decision is refreshed in the
+        same transaction as the declaration."""
         deployment = self.get_object()
         if request.method == "PUT":
             _require_admin(request)
@@ -1670,6 +1690,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     DeclaredComponent(deployment=deployment, declared_by=request.user, **row)
                     for row in serializer.validated_data
                 )
+                # Without this the receipt went on saying READY while
+                # decision-support, computing live, said AUDIT_INCOMPLETE -- and a
+                # dispatch retry fenced on the stored decision pushed under it.
+                _refresh_stored_decision(deployment)
         components = deployment.declared_components.all()
         assessed = (
             Deployment.objects.prefetch_related("assets__provider", "declared_components").get(
@@ -1704,10 +1728,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         finding whose drift has cleared, re-opens a machine-closed one whose drift
         returned, and never overrides a human's disposition. An undeclared component
         also contradicts the AI-BOM claim (recompute claims to reflect it). Returns
-        ``{created, updated, reopened, resolved, drift_detected}``."""
+        ``{created, updated, reopened, resolved, drift_detected}``.
+
+        The drift findings are findings like any other, so opening or closing one
+        moves the decision; it is refreshed in the same transaction as they are."""
         _require_admin(request)
         deployment = self.get_object()
-        return Response(record_bom_drift_findings(deployment))
+        with transaction.atomic():
+            counts = record_bom_drift_findings(deployment)
+            _refresh_stored_decision(deployment)
+        return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="compliance")
     def compliance(self, request, uuid=None):
@@ -1878,11 +1908,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ``{created, updated, superseded, stale}``."""
         _require_admin(request)
         deployment = self.get_object()
-        counts = derive_claims(deployment)
         # The decision is capped by the claims, so a re-derivation that moves one
         # moves the decision -- and the stored one is what the receipt, the bundle
-        # and decision-support's revision publish.
-        _refresh_stored_decision(deployment)
+        # and decision-support's revision publish. One transaction: the claims
+        # committed first and the refresh ran after, so a reader in between saw
+        # the new claims beside the old decision under one revision.
+        with transaction.atomic():
+            counts = derive_claims(deployment)
+            _refresh_stored_decision(deployment)
         return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="retest-requirements")
@@ -1968,10 +2001,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         retest obligation (attributed) and moves the claim away from a pass to
         stale, and it resolves any obligation a prior rebinding re-derivation has
         already satisfied — never inventing an "invalid but passing" state. Returns
-        the counts ``{invalidated, retests_opened, retests_resolved}``."""
+        the counts ``{invalidated, retests_opened, retests_resolved}``.
+
+        A stale claim and an open obligation each cap the decision, so the stored
+        decision is refreshed in the same transaction as the check."""
         _require_admin(request)
         deployment = self.get_object()
-        counts = run_invalidation_check(deployment, actor=request.user)
+        with transaction.atomic():
+            counts = run_invalidation_check(deployment, actor=request.user)
+            _refresh_stored_decision(deployment)
         return Response(counts)
 
 
@@ -2058,16 +2096,18 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         if to_status not in AssuranceClaim.ClaimStatus.values:
             return Response({"detail": f"Unknown claim status: {to_status!r}."}, status=400)
         try:
-            event = apply_claim_transition(
-                claim, to_status, actor=request.user, note=request.data.get("note", "")
-            )
+            # A claim an operator contradicts caps the decision. Without the
+            # refresh, decision-support computed the capped decision live under the
+            # SAME revision the receipt was still publishing READY under: one
+            # revision, two decisions. And in the same transaction as the move, or
+            # a reader between the two commits saw exactly that.
+            with transaction.atomic():
+                event = apply_claim_transition(
+                    claim, to_status, actor=request.user, note=request.data.get("note", "")
+                )
+                _refresh_stored_decision(claim.deployment)
         except IllegalClaimTransition as exc:
             return Response({"detail": str(exc)}, status=400)
-        # A claim an operator contradicts caps the decision. Without the refresh,
-        # decision-support computed the capped decision live under the SAME
-        # revision the receipt was still publishing READY under: one revision,
-        # two decisions.
-        _refresh_stored_decision(claim.deployment)
         return Response(
             {
                 "status": claim.status,
@@ -2144,6 +2184,17 @@ class FindingViewSet(
         # a raw field write.
         _require_admin(request)
         return super().update(request, *args, **kwargs)
+
+    def perform_update(self, serializer):
+        # `status` is a decision input: re-opening a critical finding makes the
+        # deployment NOT_RECOMMENDED, closing the last one lifts it. The PATCH
+        # used to write the status and leave the stored decision alone, so the
+        # receipt could read READY with a critical finding open while
+        # decision-support, computing live, said otherwise. The finding and the
+        # decision it moves commit together.
+        with transaction.atomic():
+            finding = serializer.save()
+            _refresh_stored_decision(finding.deployment)
 
     @action(detail=True, methods=["get"], url_path="remediation")
     def remediation(self, request, uuid=None):
