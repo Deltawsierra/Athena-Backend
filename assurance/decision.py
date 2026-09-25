@@ -590,6 +590,24 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
     return decision
 
 
+def refresh_stored_decisions(deployment_ids) -> None:
+    """Recompute the stored decision of each deployment named, by pk.
+
+    For writers that know which deployments they touched but hold no instance of
+    them: the Django admin, and the after-commit backstop in
+    :mod:`assurance.signals`. A deployment deleted since its input was written has
+    no decision left to refresh and is skipped. Each keeps its operator's pause as
+    its LOCKED row holds it, as every refresh does.
+    """
+    ids = {pk for pk in deployment_ids if pk is not None}
+    if not ids:
+        return
+    # In pk order, so two writers refreshing the same pair of deployments take
+    # their row locks in the same order rather than each holding the other's.
+    for deployment in Deployment.objects.filter(pk__in=ids).order_by("pk"):
+        recompute_decision(deployment)
+
+
 def current_decision(deployment: Deployment) -> str | None:
     """The stored decision, reconciled first if it was computed under a different
     outcome keyring than the one in force -- or before the signed-outcome rule.

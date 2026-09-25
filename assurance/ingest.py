@@ -31,6 +31,7 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
+from django.db import transaction
 from django.utils import timezone
 
 from . import observability as obs
@@ -424,20 +425,28 @@ def ingest_scan(scan, *, deployment: Deployment | None = None) -> list[Finding]:
     if not reported:
         return []
 
-    deployment = deployment or deployment_for_scan(scan)
+    # ONE transaction, the decision refresh at its end included. Each finding,
+    # evidence row and asset used to commit on its own and the decision was
+    # refreshed only after the last of them, so a reader mid-ingest saw the new
+    # findings beside the decision from before them. And every one of those
+    # writes is a decision input the backstop in `assurance.signals` refreshes on
+    # commit: committed one by one, a scan of a thousand findings would have been
+    # a thousand recomputes. Committed together, it is one.
+    with transaction.atomic():
+        deployment = deployment or deployment_for_scan(scan)
 
-    # The parent of every span below, so an ingest reads as one tree rather than a
-    # pile of timings. Entered after the nothing-reported return above, so an
-    # ingest of a response that carried no result is not recorded as work: a
-    # near-zero sample would drag the p50 down and make the pipeline look faster
-    # than it is. A reported-zero scan DOES do the work below, and is timed.
-    with obs.span(
-        obs.INVOKE_WORKFLOW,
-        component="ingest_scan",
-        subject=str(deployment.pk),
-        attributes={"mythos.raw_findings": len(raw_findings)},
-    ):
-        return _ingest_findings(scan, deployment, raw_findings)
+        # The parent of every span below, so an ingest reads as one tree rather than a
+        # pile of timings. Entered after the nothing-reported return above, so an
+        # ingest of a response that carried no result is not recorded as work: a
+        # near-zero sample would drag the p50 down and make the pipeline look faster
+        # than it is. A reported-zero scan DOES do the work below, and is timed.
+        with obs.span(
+            obs.INVOKE_WORKFLOW,
+            component="ingest_scan",
+            subject=str(deployment.pk),
+            attributes={"mythos.raw_findings": len(raw_findings)},
+        ):
+            return _ingest_findings(scan, deployment, raw_findings)
 
 
 def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:

@@ -1,5 +1,7 @@
 from django.contrib import admin
+from django.db import transaction
 
+from .decision import refresh_stored_decisions
 from .models import (
     Asset,
     ConnectorBinding,
@@ -40,8 +42,58 @@ class RemediationEventInline(admin.TabularInline):
         return False
 
 
+class _RefreshesTheStoredDecision:
+    """A change made here to a decision input refreshes the stored decision, in the
+    admin's own transaction.
+
+    The admin wrote findings, assets and a deployment's own inputs
+    (``evidence_incomplete``, ``last_complete_scan_at``) and recomputed nothing, so
+    an admin who re-opened a critical finding left the receipt reading READY while
+    decision-support, computing live, said NOT_RECOMMENDED. The change form and the
+    delete view each run in a transaction, and the refresh runs inside it -- after
+    the row AND its inlines are saved, since an evidence row edited inline moves its
+    finding's evidence class. The after-commit backstop in :mod:`assurance.signals`
+    would bring the decision current as well, but only once this transaction had
+    committed, leaving a moment in which the new input stood beside the old
+    decision. Here there is none.
+    """
+
+    #: The lookup from a row of this admin's model to its deployment's pk.
+    decision_deployment_lookup = "deployment"
+
+    def _deployments_of(self, queryset) -> set:
+        return set(queryset.values_list(self.decision_deployment_lookup, flat=True))
+
+    def save_model(self, request, obj, form, change):
+        rows = type(obj)._default_manager.filter(pk=obj.pk)
+        # The deployment the row belonged to BEFORE this save as well as after it:
+        # an admin can move a finding or an asset to another deployment, and that
+        # moves both decisions.
+        before = self._deployments_of(rows) if change else set()
+        super().save_model(request, obj, form, change)
+        # On the request, not on this admin: one ModelAdmin serves every request.
+        request._assurance_decision_deployments = before | self._deployments_of(rows)
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        refresh_stored_decisions(getattr(request, "_assurance_decision_deployments", ()))
+
+    def delete_model(self, request, obj):
+        deployments = self._deployments_of(type(obj)._default_manager.filter(pk=obj.pk))
+        super().delete_model(request, obj)
+        refresh_stored_decisions(deployments)
+
+    def delete_queryset(self, request, queryset):
+        # The changelist's bulk delete is not wrapped in a transaction by the admin
+        # the way the change form is, so this one opens its own.
+        with transaction.atomic(using=queryset.db):
+            deployments = self._deployments_of(queryset)
+            super().delete_queryset(request, queryset)
+            refresh_stored_decisions(deployments)
+
+
 @admin.register(Deployment)
-class DeploymentAdmin(admin.ModelAdmin):
+class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     list_display = ("name", "environment", "decision", "updated_at")
     list_filter = ("environment", "decision")
     search_fields = ("name",)
@@ -50,10 +102,13 @@ class DeploymentAdmin(admin.ModelAdmin):
     # would trust, the keyring stamp untouched -- and any save wrote back the
     # decision the form was rendered with over a recompute made meanwhile.
     readonly_fields = ("decision", "decision_revision", "decision_keyring")
+    # The decision cannot be typed in here, and it must not be left behind either:
+    # `evidence_incomplete` and `last_complete_scan_at` are inputs to it.
+    decision_deployment_lookup = "pk"
 
 
 @admin.register(Finding)
-class FindingAdmin(admin.ModelAdmin):
+class FindingAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     list_display = (
         "title",
         "severity",
@@ -78,7 +133,7 @@ class RemediationEventAdmin(admin.ModelAdmin):
 
 
 @admin.register(Asset)
-class AssetAdmin(admin.ModelAdmin):
+class AssetAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     list_display = ("name", "kind", "classification", "classification_source", "deployment")
     list_filter = ("kind", "classification", "classification_source")
     search_fields = ("name", "identifier")
