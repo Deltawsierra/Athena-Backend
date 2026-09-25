@@ -379,55 +379,73 @@ def _files_scan(user):
     )
 
 
-def _graph(dep):
+def _references(dep):
     from assurance import route
 
-    result = route.build_route_map(dep)
-    unresolved = sorted((u["reference"], u["mechanism"], u["reason"]) for u in result["unresolved"])
-    return (
-        sorted(dep.assets.values_list("kind", "identifier")),
-        unresolved,
-        sorted((u["reference"], u["mechanism"], u["reason"])
-               for u in assess_effective_access(dep)["unresolved"]),
-    )
+    access = sorted((u["reference"], u["mechanism"], u["reason"])
+                    for u in assess_effective_access(dep)["unresolved"])
+    assert access == sorted((u["reference"], u["mechanism"], u["reason"])
+                            for u in route.build_route_map(dep)["unresolved"])
+    return access
 
 
-def test_a_deployment_scanned_under_the_old_identities_reads_as_a_fresh_one():
-    """Rescanned, the old server-keyed tool row and the old ``"agent"`` row stayed
-    beside the new ones. The tools' ``server: files-mcp`` then resolved to the old
-    tool row, so the gap a fresh deployment reports -- no such server declared --
-    read as no gap, and the one agent was two."""
+def test_a_deployment_scanned_under_the_old_identities_hides_no_gap():
+    """Rescanned, the old server-keyed tool row answered the tools' ``server:
+    files-mcp`` -- the gap a fresh deployment reports, no such server declared,
+    read as no gap. Every reference to a row no scan has recorded under the
+    current rules is now followed AND reported, so the upgraded deployment names
+    each reference the fresh one does."""
     fresh = _dep("fresh")
     derive_assets(fresh, _files_scan(fresh.owner))
+    assert _references(fresh) == [("files-mcp", "server", "not_found")] * 2
 
     upgraded = _dep("upgraded")
     _old_rows(upgraded, agent_tools=["files-mcp", "files-mcp"])
     derive_assets(upgraded, _files_scan(upgraded.owner))
+    # The two new tools' server, the old row's own server (its own key -- it used
+    # to resolve to itself and say nothing), and the old agent's two tools.
+    assert _references(upgraded) == [("files-mcp", "server", "superseded_identity")] * 3 + [
+        ("files-mcp", "tools", "superseded_identity")
+    ] * 2
 
-    assert _graph(upgraded) == _graph(fresh)
-    assert ("files-mcp", "server", "not_found") in _graph(upgraded)[1]
 
-
-def test_an_old_agent_row_another_agent_still_answers_to_is_kept():
-    """The one ``"agent"`` row was every unnamed agent's. One naming tools this
-    scan does not declare is another agent, not yet rescanned: deleting it would
-    take its powers off the graph until it is."""
+def test_no_scan_deletes_a_row_whatever_rules_wrote_it():
+    """Deciding which old row a new declaration replaces meant guessing from its
+    content, and every guess deleted somebody's row: a named agent called
+    ``agent``, another unnamed agent's row, a server row another agent still
+    invoked, a row a person had classified. A row kept is at worst a power
+    counted twice, and reported; a row deleted wrongly is a power gone."""
     dep = _dep()
-    other = _old_rows(dep, agent_tools=["other-mcp"])
+    _old_rows(dep, agent_tools=["files-mcp", "files-mcp"])
+    human = dep.assets.get(identifier="files-mcp")
+    human.classification = Asset.Classification.HIGH_RISK
+    human.classification_source = Asset.ClassificationSource.HUMAN
+    human.save()
+    before = set(dep.assets.values_list("pk", flat=True))
+
     derive_assets(dep, _files_scan(dep.owner))
+    derive_assets(dep, _scan(dep.owner, "https://b.example/bot", ["files-mcp"]))
 
-    assert dep.assets.filter(pk=other.pk).exists()
+    assert before <= set(dep.assets.values_list("pk", flat=True))
+    human.refresh_from_db()
+    assert human.classification == Asset.Classification.HIGH_RISK
 
 
-def test_an_old_tool_row_the_inventory_no_longer_names_is_kept():
+def test_a_rescan_records_an_unchanged_identity_under_the_current_rules():
+    from assurance.graph_refs import IDENTITY_RULES
+
     dep = _dep()
-    _old_rows(dep, agent_tools=["files-mcp"])
-    scan = _files_scan(dep.owner)
-    scan.target_config = {"tools": [{"name": "run_cmd", "server": "files-mcp", "permissions": ["shell"]}]}
-    scan.save()
-    derive_assets(dep, scan)
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, kind=Kind.AGENT, name="assistant", metadata={**inventory, "tools": ["reader"]})
+    _asset(dep, kind=Kind.TOOL, name="reader", metadata={**inventory, "permissions": ["read"]})
+    assert _references(dep) == [("reader", "tools", "superseded_identity")]
 
-    assert dep.assets.filter(kind=Kind.TOOL, identifier="files-mcp").exists()
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "reader", "identifier": "reader"}]))
+
+    assert {a.metadata["identity_rules"] for a in dep.assets.filter(kind__in=[Kind.AGENT, Kind.TOOL])} == {
+        IDENTITY_RULES
+    }
+    assert _references(dep) == []
 
 
 # ---- Where an unnamed agent is. ----
@@ -496,7 +514,7 @@ def test_an_identity_differing_only_in_case_is_the_account_it_names():
     agent = _principal(result, "assistant")
     assert agent["privilege_level"] == "high"
     assert result["unresolved"] == []
-    assert _gap_types(_principal(result, "svc-admin")) == []
+    assert _gap_types(_principal(result, "svc-admin")) == ["privileged_access"]
     edges = route.build_route_map(dep)["edges"]
     assert [e["kind"] for e in edges if e["target"] == str(account.uuid)] == ["acts_as"]
 
@@ -566,3 +584,60 @@ def test_a_permission_declared_on_two_lines_is_held_once():
         {"name": "db", "identifier": "db", "permissions": ["shell"]},
     ]))
     assert dep.assets.get(kind=Kind.TOOL).metadata["permissions"] == ["shell", "read"]
+
+
+@pytest.mark.parametrize(
+    "identity, identifier, name",
+    [(" SVC-Ops ", "svc-ops", "Operations"), ("BILLING", "sa-9", "billing")],
+)
+def test_an_account_named_in_another_case_is_used_not_orphaned(identity, identifier, name):
+    """An account with no powers of its own is orphaned unless some agent acts as
+    it, so this is where the identity lookup shows: by identifier, and by name."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={"identity": identity})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name=name, identifier=identifier)
+
+    result = assess_effective_access(dep)
+    assert _principal(result, name)["orphaned"] is False
+    assert result["unresolved"] == []
+
+
+def test_an_exact_spelling_beats_a_case_blind_one():
+    """Case-folded first, ``SVC-Admin`` found the account IDENTIFIED ``svc-admin``
+    before the one NAMED ``SVC-Admin`` and gave the agent the wrong account's
+    powers -- none -- with no gap to say so."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={"identity": "SVC-Admin", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="Reporting SA", identifier="svc-admin")
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="SVC-Admin", identifier="sa-b",
+           metadata={"permissions": ["iam:admin"]})
+
+    result = assess_effective_access(dep)
+    assert _principal(result, "bot")["privilege_level"] == "high"
+    assert _references(dep) == []
+
+
+def test_an_anchor_never_carries_the_targets_credentials_or_query():
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, "https://ops:S3cr3t@bots.example.com:99999/agent?token=abc", ["a"]))
+    agent = dep.assets.get(kind=Kind.AGENT)
+    assert (agent.identifier, agent.name) == ("agent@bots.example.com:99999/agent",) * 2
+
+
+def test_two_ipv6_agents_are_two_anchors():
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, "https://[2001:db8::1]:8443/agent", ["exec"]))
+    derive_assets(dep, _scan(dep.owner, "https://[2001:db8::1:8443]/agent", ["search"]))
+    assert sorted(dep.assets.filter(kind=Kind.AGENT).values_list("identifier", flat=True)) == [
+        "agent@[2001:db8::1:8443]/agent",
+        "agent@[2001:db8::1]:8443/agent",
+    ]
+
+
+def test_a_target_with_no_host_anchors_no_agent():
+    """No host is nowhere: no agent node, rather than one named for the raw
+    target. Its tools still count, as powers the deployment holds."""
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, "https:///agent", ["exec"]))
+    assert not dep.assets.filter(kind=Kind.AGENT).exists()
+    assert dep.assets.filter(kind=Kind.TOOL, identifier="exec").exists()

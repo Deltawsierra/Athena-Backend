@@ -63,6 +63,28 @@ UNRESOLVED_AMBIGUOUS = "ambiguous"
 #: service account -- which is neither a backend anything can be wired to nor a
 #: tool anything can invoke.
 UNRESOLVED_NAMES_A_PRINCIPAL = "names_a_principal"
+#: A reference names a component recorded under identity rules this platform no
+#: longer writes, and no scan has recorded it since. Followed -- its powers are
+#: still powers -- and reported, because it may be a row nothing answers to
+#: any more: a tool written under its server's key, one unnamed agent standing
+#: for every unnamed agent. A rescan that still declares it re-records it under
+#: the current rules and the reason goes away; one that does not leaves it here,
+#: which is what it is.
+UNRESOLVED_SUPERSEDED = "superseded_identity"
+
+#: The identity rules the declared inventory is recorded under. Stamped on every
+#: declared-inventory row as it is written, so a row the rules before this one
+#: wrote can be told apart from one written now -- by what wrote it, not by
+#: guessing from its content. Rows are never deleted for carrying an older
+#: stamp: a row deleted wrongly is a power the graph no longer shows.
+IDENTITY_RULES = 2
+
+
+def superseded_identity(asset) -> bool:
+    """Whether ``asset`` is declared inventory no scan has recorded under the
+    current :data:`IDENTITY_RULES`."""
+    metadata = asset.metadata if isinstance(getattr(asset, "metadata", None), dict) else {}
+    return metadata.get("source") == "declared_inventory" and metadata.get("identity_rules") != IDENTITY_RULES
 
 
 def reference_index(assets) -> tuple[dict, dict]:
@@ -87,9 +109,10 @@ def reference_index(assets) -> tuple[dict, dict]:
     return by_identifier, by_name
 
 
-def identity_index(assets) -> tuple[dict, dict]:
-    """:func:`reference_index` over the service accounts alone, keyed the way
-    :func:`component_identity.component_key` keys a component.
+def identity_index(assets) -> tuple[tuple[dict, dict], tuple[dict, dict]]:
+    """``(exact, folded)``: :func:`reference_index` over the service accounts
+    alone, and the same keyed the way :func:`component_identity.component_key`
+    keys a component.
 
     An agent's ``identity`` names the account it acts as, so an account is the
     only thing it can mean. Indexing everything and filtering afterwards would let
@@ -97,24 +120,23 @@ def identity_index(assets) -> tuple[dict, dict]:
     NAME is -- the identifier-first rule is about which key of an account wins,
     not about letting a component that cannot be an identity win.
 
-    Keyed case- and whitespace-blind, because that is what one identity means
-    everywhere else: the drift and coverage readers treat ``SVC-Admin`` and
-    ``svc-admin`` as one component, and this edge treated them as two. An agent
-    declared as ``SVC-Admin`` acting as the account ``svc-admin`` read as holding
-    no power at all, while the account held ``iam:admin``. Two accounts that
-    differ only in case are one identity here and so an ambiguous reference --
-    followed to both and reported -- which is what they are.
+    Two indexes because an exact spelling is the stronger answer. Keyed only
+    case- and whitespace-blind, ``SVC-Admin`` found the account IDENTIFIED
+    ``svc-admin`` before the one NAMED ``SVC-Admin`` -- the account the agent
+    spelled exactly -- and handed the agent the wrong account's powers with no
+    gap to say so. The folded index is the fallback for a spelling nothing
+    carries exactly, which is what one identity means to every other reader:
+    ``SVC-Admin`` acting as the only account ``svc-admin`` is that account.
     """
+    accounts = [a for a in assets if a.kind == SERVICE_ACCOUNT_KIND]
     by_identifier: dict[str, list] = {}
     by_name: dict[str, list] = {}
-    for asset in assets:
-        if asset.kind != SERVICE_ACCOUNT_KIND:
-            continue
+    for asset in accounts:
         identifier = identity_key(asset.identifier)
         if identifier:
             by_identifier.setdefault(identifier, []).append(asset)
         by_name.setdefault(identity_key(asset.name), []).append(asset)
-    return by_identifier, by_name
+    return reference_index(accounts), (by_identifier, by_name)
 
 
 def identity_key(value) -> str:
@@ -128,10 +150,15 @@ def identity_reference(metadata: dict) -> str:
     return str(metadata.get("identity") or "").strip()
 
 
-def resolve_identity(reference, accounts: tuple[dict, dict]):
+def resolve_identity(reference, accounts):
     """:func:`resolve_reference` for an agent's ``identity`` against an
-    :func:`identity_index`: the reference is normalized the way the index is."""
-    return resolve_reference(identity_key(reference), *accounts)
+    :func:`identity_index`: exactly as spelled first, identifier then name, and
+    only when nothing carries that spelling, case- and whitespace-blind."""
+    exact, folded = accounts
+    candidates, why = resolve_reference(reference, *exact)
+    if candidates or why != UNRESOLVED_NOT_FOUND:
+        return candidates, why
+    return resolve_reference(identity_key(reference), *folded)
 
 
 def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kinds=frozenset()):
@@ -173,7 +200,9 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kind
             usable = [m for m in matches if m.kind not in not_kinds]
             if not usable:
                 return [], UNRESOLVED_NAMES_A_PRINCIPAL
-            return usable, (UNRESOLVED_AMBIGUOUS if len(usable) > 1 else None)
+            if len(usable) > 1:
+                return usable, UNRESOLVED_AMBIGUOUS
+            return usable, (UNRESOLVED_SUPERSEDED if superseded_identity(usable[0]) else None)
     return [], UNRESOLVED_NOT_FOUND
 
 
