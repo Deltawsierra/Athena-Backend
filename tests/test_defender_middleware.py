@@ -1841,3 +1841,51 @@ def test_a_value_that_closes_a_key_split_from_its_separator_takes_that_keys_valu
 )
 def test_a_value_that_closes_no_key_across_the_break_ends_where_it_did(text, expected):
     assert _outcome(text) == expected
+
+
+# ---- Round 10: shapes a one-line mutant of the round 9 split-key reading forwarded. ----
+
+
+@pytest.mark.parametrize(
+    ("body", "forwarded"),
+    [
+        # The split key's value is judged by that key's own separator: after an
+        # `=` a `,` or a `]` is part of the value, not a stop, as it is when the
+        # pair stands alone. Judged by a colon's stops, the value looked empty.
+        ("api_key=abc password=\n,S3CR3T\nq: UNION SELECT", "api_key: [redacted]\nq: UNION SELECT"),
+        ("api_key=abc password=\n]S3CR3T", "api_key: [redacted]"),
+        # Any blank before the break, as `\s` reads one -- not only a space or a
+        # tab -- is part of the key's trailing blanks.
+        ("Token: a Password:\xa0\nS3CR3T\nq: UNION SELECT", "Token: [redacted]\nq: UNION SELECT"),
+        ("Token: a Password:\x0c\nS3CR3T", "Token: [redacted]"),
+        # Blanks between the key and a separator before the break.
+        ("Token: a Password :\nS3CR3T\nq: UNION SELECT", "Token: [redacted]\nq: UNION SELECT"),
+        ("api_key=a password\t=\nS3CR3T", "api_key: [redacted]"),
+        # With the separator past the break, every line break and blank line in
+        # between, of either kind: a CRLF, or an empty line.
+        ("Token: a Password\r\n: S3CR3T\r\nq: UNION SELECT", "Token: [redacted]\r\nq: UNION SELECT"),
+        ("Token: a Password\n\n: S3CR3T", "Token: [redacted]"),
+    ],
+)
+def test_a_split_keys_value_never_reaches_the_engine_whatever_its_blanks_or_separator(
+    factory, middleware, caplog, body, forwarded
+):
+    """Each of these is read as a pair when the key stands alone, and each was
+    forwarded, unreported, by a scanner that read the split key one character
+    narrower: the value after the key judged by a colon's stops whatever the
+    key's separator; only a space or a tab taken for a blank before the break;
+    no blanks allowed between the key and its separator; or only one character
+    stepped over after the break. S3CR3T is redacted, is not logged, and the
+    body is reported as not fully inspected."""
+    post = engine_says()
+    with (
+        caplog.at_level(logging.WARNING, logger="audit.middleware"),
+        mock.patch("audit.middleware.requests.post", post),
+    ):
+        middleware()(factory.post("/api/x/", data=body, content_type="text/plain"))
+    assert post.call_args.kwargs["json"]["body"] == forwarded
+    assert "S3CR3T" not in logged(caplog)
+    assert (
+        "request body could not be fully inspected: a value after a sensitive key had "
+        "no certain end and was redacted to the end of its line"
+    ) in logged(caplog)
