@@ -1203,6 +1203,47 @@ def test_a_json_body_labelled_as_a_form_is_still_redacted(middleware, factory, b
     assert middleware()._get_body(request) == (forwarded, None)
 
 
+def test_a_body_is_read_in_the_charset_it_declares(middleware, factory):
+    """Read as UTF-8, a UTF-16 body had a NUL between every character: no key
+    matched, and the password went through one strip away from clear."""
+    import json
+
+    body = json.dumps({"username": "bob", "password": "S3CR3T"}).encode("utf-16")
+    request = factory.generic(
+        "POST", "/api/x/", data=body, content_type="application/json; charset=utf-16"
+    )
+    text, problem = middleware()._get_body(request)
+    assert "S3CR3T" not in text.replace(chr(0), "")
+    assert text == '{"username":"bob","password":"[redacted]"}'
+    assert problem is None
+
+
+def test_a_byte_its_charset_cannot_decode_does_not_stop_the_body_being_read(middleware, factory):
+    request = factory.generic(
+        "POST", "/api/x/", data=b'{"password": "S3CR3T\xff", "q": "UNION SELECT"}', content_type="application/json"
+    )
+    assert middleware()._get_body(request) == ('{"password":"[redacted]","q":"UNION SELECT"}', None)
+
+
+def test_an_unknown_charset_is_read_as_the_default(middleware, factory):
+    request = factory.generic(
+        "POST", "/api/x/", data=b'{"password": "S3CR3T"}', content_type="application/json; charset=no-such"
+    )
+    assert middleware()._get_body(request) == ('{"password":"[redacted]"}', None)
+
+
+@pytest.mark.parametrize("charset", ["base64", "zlib", "punycode"])
+def test_a_charset_that_is_not_read_here_is_reported(middleware, factory, charset):
+    """base64 and zlib are codecs the parser would transform the body with --
+    undone before authentication, a decompression bomb -- and punycode's decoder
+    is slower than linear: a second for 80 KB."""
+    request = factory.generic(
+        "POST", "/api/x/", data=b"eyJwYXNzd29yZCI6ICJ4In0=", content_type=f"application/json; charset={charset}"
+    )
+    _text, problem = middleware()._get_body(request)
+    assert problem == "request body could not be fully inspected: its charset is not one read here"
+
+
 @pytest.mark.parametrize(
     ("query", "forwarded"),
     [

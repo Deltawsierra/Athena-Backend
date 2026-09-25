@@ -1,3 +1,4 @@
+import codecs
 import ipaddress
 import json
 import logging
@@ -684,6 +685,26 @@ def _joined(problem, more):
     return problem or more
 
 
+# Text codecs Python writes in Python, and slower than linear: punycode takes a
+# second for 80 KB, and this runs before authentication. No client sends a body
+# in either.
+_SLOW_CHARSETS = frozenset({"punycode", "idna"})
+
+
+def _decoded(raw, encoding):
+    """``raw`` in ``encoding``, or ``None`` if it is not read here.
+
+    A codec that is not a text encoding -- `charset=base64`, `zlib` -- makes the
+    parser transform the body. Undoing that before authentication is a
+    decompression bomb, so it is refused, not decoded."""
+    try:
+        if codecs.lookup(encoding).name in _SLOW_CHARSETS:
+            return None
+        return raw.decode(encoding, errors="replace")
+    except (LookupError, UnicodeError):
+        return None
+
+
 class DefenderMiddleware:
     """
     Thin enforcement layer.
@@ -891,7 +912,17 @@ class DefenderMiddleware:
         if not raw:
             return "", None
 
-        text = raw.decode("utf-8", errors="ignore")
+        # In the charset the request declares, as the view's parser will read it.
+        # Always decoding UTF-8 read `application/json; charset=utf-16` as text
+        # with a NUL between every character: no key matched, and the password
+        # went through with the NULs, one strip away from clear. Django keeps a
+        # charset only when Python knows it; an unknown one leaves the default,
+        # which is what DRF falls back to as well.
+        problem = None
+        text = _decoded(raw, request.encoding or settings.DEFAULT_CHARSET)
+        if text is None:
+            text = raw.decode("utf-8", errors="replace")
+            problem = "request body could not be fully inspected: its charset is not one read here"
 
         # Redact first, then truncate. The other order let a secret straddling
         # the size limit lose its closing quote, miss the pattern, and be
@@ -903,9 +934,10 @@ class DefenderMiddleware:
         redacted, cut, doubtful = redact_within(
             text, form=content_type == "application/x-www-form-urlencoded", limit=prefix
         )
-        body, problem = self._trim(redacted)
-        if problem is None and cut:
-            problem = f"request body was truncated at {prefix} bytes for inspection"
+        body, trimmed = self._trim(redacted)
+        if trimmed is None and cut:
+            trimmed = f"request body was truncated at {prefix} bytes for inspection"
+        problem = _joined(problem, trimmed)
         if doubtful:
             # Redacting to the end of the line may have taken the attack with
             # the secret. A body that lost more than its secrets is not a clean
