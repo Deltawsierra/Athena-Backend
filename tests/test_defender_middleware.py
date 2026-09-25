@@ -1350,3 +1350,69 @@ def test_the_truncation_reported_is_the_one_applied(middleware, factory):
     text, problem = middleware(DEFENDER_MAX_BODY_BYTES=100)._get_body(request)
     assert len(text) == 100
     assert problem == "request body was truncated at 100 bytes for inspection"
+
+
+# ---- Round 8: a text pass linear for any body. ----
+
+_PREFIX = 4 * 64 * 1024  # what the middleware reads of a body, at the default limit
+
+
+def _fit(unit, size, head="", tail=""):
+    """``head``, ``unit`` repeated, ``tail``: ``size`` characters. A ``tail`` of
+    None closes every unit, a bracket: `[[[...]]]`."""
+    if tail is None:
+        count = (size - len(head)) // 2
+        return head + unit * count + "]" * count
+    return head + unit * ((size - len(head) - len(tail)) // len(unit)) + tail
+
+
+@pytest.mark.parametrize(
+    ("unit", "head", "tail"),
+    [
+        pytest.param("token: a ", "'", "': x", id="pairs-inside-one-quoted-key"),
+        pytest.param("token=a ", "'", "'=x", id="equals-pairs-inside-one-quoted-key"),
+        pytest.param("token: [", "'", "': x", id="lists-inside-one-quoted-key"),
+        pytest.param("x token:", "'", "': x", id="keys-ending-in-their-separator"),
+        pytest.param(' x" token: y', "password=a", ', "z"', id="keys-before-one-string"),
+        pytest.param('"', "", "", id="quotes"),
+        pytest.param("\"'", "", "", id="alternating-quotes"),
+        pytest.param("'a': ", "", "", id="quoted-keys"),
+        pytest.param("password: x ", "", "", id="keys-on-one-line"),
+        pytest.param("[{", "", "", id="deep-brackets"),
+        pytest.param("\\" * 15 + '"', "", "", id="backslash-runs"),
+        pytest.param(', password: "a;b"', "api_key=a", "", id="strings-inside-an-equals-value"),
+        pytest.param("\n", "password:", "", id="a-separator-then-line-breaks"),
+    ],
+)
+def test_the_text_pass_is_linear_in_the_prefix_for_any_shape(unit, head, tail):
+    """One quoted key holding `token: a ` 29,000 times took 27 seconds at the
+    256 KiB the middleware reads, before authentication, on every content type
+    inspected: each pair inside it was read to the end of the line, and the line
+    was the whole body. A list in each pair took minutes.
+
+    Timed at the prefix and at an eighth of it: linear time grows eightfold,
+    quadratic sixty-four-fold. The bound on the ratio is loose for a slow or busy
+    machine, the absolute one generous; both fail by a wide margin on the
+    quadratic pass. A pass already slow at an eighth fails there, rather than
+    spend minutes on the prefix."""
+    import time
+
+    from audit.middleware import redact_within
+
+    def timed(size, runs):
+        body = _fit(unit, size, head, tail)
+        best = None
+        for _ in range(runs):
+            start = time.perf_counter()
+            redact_within(body, limit=_PREFIX)
+            elapsed = time.perf_counter() - start
+            best = elapsed if best is None else min(best, elapsed)
+            if elapsed > 1.0:
+                break
+        return best
+
+    small = timed(_PREFIX // 8, 3)
+    assert small < 1.0, small
+    large = timed(_PREFIX, 1)
+    assert large < 2.0, (small, large)
+    assert large < 20 * max(small, 0.02), (small, large)

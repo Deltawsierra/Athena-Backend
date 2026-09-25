@@ -6,6 +6,8 @@ import re
 import threading
 import time
 import uuid
+from array import array
+from bisect import bisect_left, bisect_right
 from urllib.parse import unquote_plus, urlencode
 
 import requests
@@ -192,24 +194,17 @@ _TEXT_KEY = re.compile(
 _SENSITIVE_TEXT_PART = re.compile(
     "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS), re.I
 )
-# A quoted string, POSSESSIVELY: `"[^"\\]*+(?:\\.[^"\\]*+)*+"`. The alternation it
-# replaces, `"(?:[^"\\]|\\.)*"`, makes Python's engine keep backtracking state for
-# every character it matches -- about 120 bytes each, so one 10 MB string in a
-# request body took 1.3 GB before authentication. The possessive form keeps
-# none: a run of ordinary characters is taken whole and never given back, which
-# is all a string needs, since the only way out of one is its closing quote.
-# DOTALL, so a backslash-newline is an escape like any other and does not end
-# the string early -- a value cut there left the rest of the secret in clear.
-_STRINGS = {
-    '"': re.compile(r'"[^"\\]*+(?:\\.[^"\\]*+)*+"', re.S),
-    "'": re.compile(r"'[^'\\]*+(?:\\.[^'\\]*+)*+'", re.S),
-}
-# A value that is neither quoted nor bracketed runs to the end of its line after
-# a colon, or to the next pair after an equals sign.
-_UNQUOTED = {
-    ":": re.compile(r"[^\r\n,}\]]+"),
-    "=": re.compile(r"[^&;\r\n]+"),
-}
+# Where a quoted string ends: at the first quote of its kind after it that is not
+# escaped, that is, one with an even run of backslashes (or none) in front of it.
+# That is exactly where `"[^"\\]*+(?:\\.[^"\\]*+)*+"` stops, from ANY opening
+# quote: the run in front of a later quote cannot reach back past the quote that
+# opened the string, so which quotes close strings does not depend on where a
+# string opened. They are found once per text (see _Scan) and a string's end is
+# looked up, never read. A backslash-newline is an escape like any other and does
+# not end the string early -- a value cut there left the rest of the secret in
+# clear. And nothing is kept per character: the alternation this once replaced
+# took 1.3 GB for one 10 MB string, before authentication.
+_QUOTES = "\"'"
 _OPENERS = "[{"
 _CLOSERS = "]}"
 # What may follow a value whose end is certain: any closing brackets, then a
@@ -225,17 +220,73 @@ _CLEAN_END = re.compile(
 # stopped at the comma, and `password: x"y,SECRET"` inside a string. A quote as
 # the last thing in the value is the close of a string around the whole pair.
 _DOUBT = re.compile(r"[\[{(]|[\"'](?![ \t]*\Z)")
-_LINE_BREAK = re.compile(r"[\r\n]")
 # Everything in a bracketed value that is neither a quote nor a bracket.
 _GROUP_TEXT = re.compile(r"[^\"'\[\]{}]++")
+# Where an unquoted value stops, after each separator.
+_STOPS = {":": "\r\n,}]", "=": "&;\r\n"}
 
 
-def _line_end(text, index):
-    found = _LINE_BREAK.search(text, index)
-    return len(text) if found is None else found.start()
+class _Scan:
+    """``text``, and where in it the characters the text pass looks for are.
+
+    Every question of the form "where is the next X from here" -- the next line
+    break, the next delimiter of an unquoted value, the next quote or bracket, the
+    quote that closes a string -- is answered by bisecting positions found once
+    per text, never by reading forward from where it is asked. Reading forward was
+    the trap: a value was read to the end of its line from each key on that line,
+    so a line of keys took quadratic time -- 27 seconds for 256 KiB, before
+    authentication, on every content type inspected. A question now costs
+    O(log n) wherever it is asked, and in whatever order.
+    """
+
+    _FIND = {
+        "line": re.compile(r"[\r\n]"),
+        # _STOPS.
+        ":": re.compile(r"[\r\n,}\]]"),
+        "=": re.compile(r"[&;\r\n]"),
+        # A quote that closes strings. The run of backslashes is taken whole,
+        # possessively, so an odd one cannot give one back to the quote.
+        '"': re.compile(r'(?<!\\)(?:\\\\)*+"'),
+        "'": re.compile(r"(?<!\\)(?:\\\\)*+'"),
+    }
+
+    def __init__(self, text):
+        self.text = text
+        self.length = len(text)
+        self._found = {}
+
+    def _positions(self, name):
+        found = self._found.get(name)
+        if found is None:
+            # The last character of each match: the one character, or the quote
+            # after a run of backslashes. Eight bytes a position.
+            found = array("q", (match.end() - 1 for match in self._FIND[name].finditer(self.text)))
+            self._found[name] = found
+        return found
+
+    def next(self, name, index):
+        """Where the first ``name`` at or after ``index`` is, or the length of the text."""
+        found = self._positions(name)
+        at = bisect_left(found, index)
+        return found[at] if at < len(found) else self.length
+
+    def line_end(self, index):
+        return self.next("line", index)
+
+    def line_start(self, index):
+        found = self._positions("line")
+        at = bisect_left(found, index)
+        return found[at - 1] + 1 if at else 0
+
+    def string_end(self, quote):
+        """Just past the quote that closes the string opening at ``quote``, or
+        ``None`` if none does."""
+        found = self._positions(self.text[quote])
+        at = bisect_right(found, quote)
+        return found[at] + 1 if at < len(found) else None
 
 
-def _bracketed_end(text, start):
+def _bracketed_end(scan, start):
     """Where the array or object opening at ``start`` closes, or ``None`` if it
     never does.
 
@@ -245,16 +296,16 @@ def _bracketed_end(text, start):
     whole, so a bracket inside a string does not count: `['a]b', 'SECRET']` is a
     Python list, and skipping only double-quoted strings closed it at the `]`.
     """
+    text = scan.text
     depth = 0
     index = start
-    length = len(text)
+    length = scan.length
     while index < length:
         char = text[index]
-        if char in _STRINGS:
-            string = _STRINGS[char].match(text, index)
-            if string is None:
+        if char in _QUOTES:
+            index = scan.string_end(index)
+            if index is None:
                 return None
-            index = string.end()
             continue
         if char in _OPENERS:
             depth += 1
@@ -269,33 +320,34 @@ def _bracketed_end(text, start):
     return None
 
 
-def _value_end(text, start, separator):
+def _value_end(scan, start, separator):
     """Where the value starting at ``start`` ends, and whether that end is certain;
     ``None`` if there is no value there.
 
     An end that is not certain is the end of the line: the value is redacted
-    through it. A quote or bracket that never closes may span lines, so a value
-    that opens one runs to the end of the text.
+    through it. A quote or bracket that never closes may span
+    lines, so a value that opens one runs to the end of the text.
     """
-    length = len(text)
+    text = scan.text
+    length = scan.length
     if start >= length:
         return None
     char = text[start]
     if char in _OPENERS:
-        end = _bracketed_end(text, start)
-    elif char in _STRINGS:
-        string = _STRINGS[char].match(text, start)
-        end = None if string is None else string.end()
+        end = _bracketed_end(scan, start)
+    elif char in _QUOTES:
+        end = scan.string_end(start)
     else:
-        value = _UNQUOTED[separator].match(text, start)
-        if value is None:
+        # A value that is neither quoted nor bracketed runs to the end of its
+        # line after a colon, or to the next pair after an equals sign.
+        if char in _STOPS[separator]:
             return None
-        end = value.end()
+        end = scan.next(separator, start)
         if end == length or text[end] in "\r\n":
             # The whole rest of the line: nothing is left on it to lose.
             return end, True
         if _DOUBT.search(text, start, end):
-            return _line_end(text, end), False
+            return scan.line_end(end), False
         if text[end] not in _CLOSERS:
             return end, True
         # Stopped at a closing bracket, which ends the value only if a delimiter
@@ -304,15 +356,15 @@ def _value_end(text, start, separator):
         return length, False
     if _CLEAN_END.match(text, end):
         return end, True
-    return _line_end(text, end), False
+    return scan.line_end(end), False
 
 
 # A line break, any blank lines, and the indentation of the next line with text.
-_NEXT_LINE = re.compile(r"(?:\r\n?|\n)(?:[ \t]*+(?:\r\n?|\n))*+([ \t]*+)[^\r\n]*+")
+_NEXT_LINE = re.compile(r"(?:\r\n?|\n)(?:[ \t]*+(?:\r\n?|\n))*+([ \t]*+)")
 _INDENT = re.compile(r"[ \t]*+")
 
 
-def _continued(text, separator_at, end):
+def _continued(scan, separator_at, end):
     """``end`` carried over every following line indented deeper than the line the
     key's separator is on.
 
@@ -321,29 +373,30 @@ def _continued(text, separator_at, end):
     folded header or a YAML scalar continues the same way. Those lines went
     through in clear. Whether the text is YAML cannot be known here, so a value
     carried over is reported as one without a certain end."""
-    line = max(text.rfind("\n", 0, separator_at), text.rfind("\r", 0, separator_at)) + 1
+    text = scan.text
+    line = scan.line_start(separator_at)
     depth = _INDENT.match(text, line).end() - line
     while True:
         following = _NEXT_LINE.match(text, end)
         if following is None or len(following.group(1)) <= depth:
             return end
-        end = following.end()
+        end = scan.line_end(following.end())
 
 
-def _text_value(text, start, separator_at, separator):
+def _text_value(scan, start, separator_at, separator):
     """Where the value after a separator ends, as ``(end, certain)``, or ``None``.
 
     Tried where the whitespace after the separator ends, then -- as the pattern
     this replaces did by backtracking -- at each earlier position back to the
-    separator. Every failed attempt there is at a line break, which fails at its
-    first character, so this stays linear.
+    separator. Every failed attempt there is at a line break, which is a
+    delimiter and fails at once.
     """
     for index in range(start, separator_at, -1):
-        found = _value_end(text, index, separator)
+        found = _value_end(scan, index, separator)
         if found is not None:
             end, certain = found
-            if end < len(text) and text[end] in "\r\n":
-                carried = _continued(text, separator_at, end)
+            if end < scan.length and scan.text[end] in "\r\n":
+                carried = _continued(scan, separator_at, end)
                 if carried != end:
                     return carried, False
             return found
@@ -442,18 +495,18 @@ class _QuotedKeys:
         self.pending = None
 
 
-def _token_pair(text, key):
+def _token_pair(scan, key):
     """``(key_start, key_text, end, certain)`` for a sensitive token key with a
     value, else ``None``."""
     if not _is_sensitive_key(key.group(2)):
         return None
-    value = _text_value(text, key.end(), key.start(4), key.group(4))
+    value = _text_value(scan, key.end(), key.start(4), key.group(4))
     if value is None:
         return None
-    return (key.start(), text[key.start():key.end(3)], *value)
+    return (key.start(), scan.text[key.start():key.end(3)], *value)
 
 
-def _quoted_pair(text, start, close):
+def _quoted_pair(scan, start, close):
     """The same for a quoted key.
 
     A key/value pair can be written INSIDE the quotes -- `'s my token: abc and
@@ -462,41 +515,48 @@ def _quoted_pair(text, start, close):
     too, through whichever reading ends latest. A key that merely ENDS in a
     separator, `{"New Password:": "x"}`, is not one: nothing follows it but the
     closing quote."""
+    text = scan.text
     quote = close.start(1)
     if not _is_sensitive_key(_decoded_name(text[start:quote + 1])):
         return None
+    # This key's own value first: a quoted key with none is no pair, and the pairs
+    # inside it are then read by the main scan as it passes them, once. Reading
+    # them here as well and throwing them away was a second read of every one.
+    value = _text_value(scan, close.end(), close.start(2), close.group(2))
+    if value is None:
+        return None
+    end, certain = value
     # Which reading is right cannot always be told: `{a: "b", user_token: ":"}`
     # reads back from the quote of ":" to the quote that closed "b", and a
     # missing comma puts a real key in the same place. Picking one reading
     # forwarded the other's secret, so every reading's value is redacted, through
     # the latest end, and reported -- unless only one reading parses at all.
     #
-    # Every value read here is redacted -- here, or as the pair's own when the
-    # scan reaches it. A value read and thrown away was read again for the next
-    # key on the line, and a line of them took quadratic time.
-    opens = _opens_a_key(text, start)
+    # The pairs inside are read as the main scan reads pairs: left to right, and
+    # a key inside a value already read is part of that value, not a new pair.
+    # Reading every key inside from scratch read the same text once per key: one
+    # quoted key holding `token: a ` 29,000 times took 27 seconds, since each read
+    # ran to the end of the line.
     first = None
     ends = []
+    reach = start
     for inner in _TEXT_KEY.finditer(text, start + 1, quote):
-        if not _is_sensitive_key(inner.group(2)):
+        if inner.start() < reach or not _is_sensitive_key(inner.group(2)):
             continue
         if inner.end() == quote:
             # A key that ends in its separator, like "New Password:". Read as a
             # pair, its value begins on the closing quote; that reading counts
             # only where the key opens where no key can, and a string on that
             # quote ends cleanly -- looked at no further than the string.
-            found = None if opens else _held(text, quote)
+            found = None if _opens_a_key(text, start) else _held(scan, quote)
         else:
-            found = _text_value(text, inner.end(), inner.start(4), inner.group(4))
+            found = _text_value(scan, inner.end(), inner.start(4), inner.group(4))
         if found is None:
             continue
         if first is None:
             first, first_certain = inner, found[1]
         ends.append(found[0])
-    value = _text_value(text, close.end(), close.start(2), close.group(2))
-    if value is None:
-        return None
-    end, certain = value
+        reach = found[0]
     if first is None:
         return start, text[start:quote + 1], end, certain
     latest = max(end, *ends)
@@ -516,13 +576,13 @@ def _opens_a_key(text, index):
     return index < 0 or text[index] in "{[(,;\r\n"
 
 
-def _held(text, quote):
+def _held(scan, quote):
     """``(end, True)`` for a string opening on ``quote`` that closes and ends
     cleanly -- a value the quote may belong to -- else ``None``."""
-    string = _STRINGS[text[quote]].match(text, quote)
-    if string is None or _CLEAN_END.match(text, string.end()) is None:
+    end = scan.string_end(quote)
+    if end is None or _CLEAN_END.match(scan.text, end) is None:
         return None
-    return string.end(), True
+    return end, True
 
 
 def _text_redaction(text):
@@ -534,11 +594,26 @@ def _text_redaction(text):
     start. Two passes, the second reading what the first had rewritten, let a
     value the first pass redacted pair with a quote after it: the second pass
     then took the next key's opening quote as the end of a bogus value and
-    forwarded that key's secret. Linear in the length of ``text``: each key token
-    starts where a run of key characters does, each quoted key is walked back no
-    further than the one before it, and a value is read only to be redacted, after
-    which the scan is past it.
+    forwarded that key's secret.
+
+    LINEAR in the length of ``text`` (times the log of it for a lookup), for any
+    text, because nothing is read twice but by a constant number of readers:
+
+    - every "where is the next ..." is a lookup, not a read (_Scan);
+    - a key token starts only where a run of key characters does, so each run is
+      tried once, and the position the tokens are searched from only moves on;
+    - a quoted key is walked back no further than the one before it, so each
+      stretch of text is walked once, and decoded and judged once;
+    - a value is read only to be redacted, and the position then moves past
+      everything read for it: the bracket groups a value holds, the pairs inside
+      a quoted key -- which are read one after another, never one inside
+      another's value;
+    - what is looked at past a value's end -- the delimiter or next key after it
+      (_CLEAN_END), the next line's indentation (_continued) -- is either taken
+      into the value or is where the scan goes next, so it is looked at a
+      constant number of times.
     """
+    scan = _Scan(text)
     out = []
     pos = 0
     doubtful = False
@@ -552,11 +627,11 @@ def _text_redaction(text):
             # A quoted key first when both start at the same quote: it is read
             # whole, escapes and spaces included.
             quoted.take()
-            found = _quoted_pair(text, *candidate)
+            found = _quoted_pair(scan, *candidate)
             if found is None:
                 continue
         elif token is not None:
-            found = _token_pair(text, token)
+            found = _token_pair(scan, token)
             if found is None:
                 # Not a secret, or a secret with nothing after it: kept verbatim,
                 # and the scan resumes after the separator, where the next key
