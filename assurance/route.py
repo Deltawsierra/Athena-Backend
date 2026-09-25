@@ -49,6 +49,7 @@ from .graph_refs import (
     resolve_identity,
     reference_index,
     resolve_reference,
+    unresolved_reasons,
     sort_references,
     tool_references,
 )
@@ -192,11 +193,11 @@ def build_route_map(deployment) -> dict:
             )
             for target in targets:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
-            if why:
+            for reason in unresolved_reasons(agent, targets, why):
                 # A tool the agent names but discovery could not place -- or could
                 # place as more than one component: a reference to chase, surfaced
                 # rather than silently dropped.
-                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, why))
+                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, reason))
 
     # The account each agent acts as: a declared edge, and a gap when the
     # identity names no account or more than one.
@@ -209,8 +210,8 @@ def build_route_map(deployment) -> dict:
         targets, why = resolve_identity(identity, accounts)
         for target in targets:
             add_edge(agent, target, "acts_as", "acts as", declared=True)
-        if why:
-            unresolved.append(dangling_reference(agent, identity, MECHANISM_IDENTITY, why))
+        for reason in unresolved_reasons(agent, targets, why):
+            unresolved.append(dangling_reference(agent, identity, MECHANISM_IDENTITY, reason))
 
     def _declare_server_edge(source, host) -> None:
         if (str(source.uuid), str(host.uuid)) in attested_pairs:
@@ -242,12 +243,12 @@ def build_route_map(deployment) -> dict:
         hosts, why = resolve_reference(
             server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
         )
-        if why:
+        for reason in unresolved_reasons(source, hosts, why):
             # The reference names nothing in the inventory, or more than one
             # thing. The first used to vanish: no edge, and no unresolved row
             # either, because only the agent→tool mechanism had a channel for a
             # miss. An ambiguous one is also drawn to every candidate below.
-            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER, why))
+            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER, reason))
         for host in hosts:
             _declare_server_edge(source, host)
 

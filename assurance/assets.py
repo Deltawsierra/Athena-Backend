@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 
 from django.utils import timezone
 
-from .graph_refs import IDENTITY_RULES
+from .graph_refs import IDENTITY_RULES, superseded_identity
 from .ingest import _host
 from .models import Asset, Deployment, Finding, Provider
 
@@ -106,6 +106,8 @@ def _get_or_refresh(
     asset, created = Asset.objects.get_or_create(
         deployment=deployment, kind=kind, identifier=identifier[:IDENTIFIER_MAX], defaults=defaults
     )
+    if not created and metadata and _keeps_what_it_stood_for(asset, name):
+        metadata, classification = _merge_into_legacy_row(asset, metadata, classification)
     if not created:
         fields = ["last_seen", "provider", "metadata"]
         asset.last_seen = now
@@ -124,6 +126,62 @@ def _get_or_refresh(
             asset.metadata = merged
         asset.save(update_fields=fields)
     return asset
+
+
+def _legacy_key(asset: Asset) -> bool:
+    """Whether ``asset``'s key is one the old identity rules gave to more than one
+    declaration at once: the literal ``"agent"`` every unnamed agent was written
+    to, or a server's key every tool on that server was written to."""
+    metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+    if asset.kind == Asset.Kind.AGENT:
+        return asset.identifier == "agent"
+    if asset.kind == Asset.Kind.MCP_SERVER:
+        return False
+    server = str(metadata.get("server") or "").strip()
+    return bool(server) and asset.identifier == server[:IDENTIFIER_MAX]
+
+
+def _keeps_what_it_stood_for(asset: Asset, name: str) -> bool:
+    """Whether a declaration landing on ``asset`` must merge into it rather than
+    replace it: the row carries an older identity-rules stamp, its key is a
+    :func:`_legacy_key`, and the declaration is not demonstrably the same one.
+
+    A different agent's scan could declare a tool under a key an old collapsed
+    row held -- a tool named ``files-mcp``, a nameless ``{server: files-mcp}``
+    -- and the refresh replaced that row's permissions and stamped it current.
+    The agent the old row served, not yet rescanned, lost its ``shell`` with no
+    reason left anywhere to say so. The one declaration that IS the same is a
+    nameless tool on that server: its key and its name were both the server's
+    under the old rules and still are.
+    """
+    if not superseded_identity(asset) or not _legacy_key(asset):
+        return False
+    if asset.kind == Asset.Kind.AGENT:
+        return True
+    return not (asset.name == asset.identifier == name[:255])
+
+
+def _merge_into_legacy_row(asset: Asset, metadata: dict, classification: str) -> tuple[dict, str]:
+    """``(metadata, classification)`` for a declaration merging into a legacy row:
+    its permissions and tools added to the row's, its identity and server only
+    where the row had none, the row's older stamp kept -- so every reference to it is still
+    reported until something that is the same declaration re-records it -- and
+    approved only if the row already was."""
+    old = asset.metadata if isinstance(asset.metadata, dict) else {}
+    merged = {k: v for k, v in metadata.items() if k != "identity_rules"}
+    for key in ("permissions", "tools"):
+        if key in merged:
+            union = [str(v) for v in old.get(key) or [] if isinstance(v, str)]
+            union += [v for v in merged[key] if v not in union]
+            merged[key] = union
+    # What made the row a legacy key stays with it, or the next declaration to
+    # land here would find an ordinary row and replace it after all.
+    for key in ("identity", "server"):
+        if str(old.get(key) or "").strip():
+            merged.pop(key, None)
+    if classification == Asset.Classification.APPROVED and asset.classification != Asset.Classification.APPROVED:
+        classification = Asset.Classification.KNOWN
+    return merged, classification
 
 
 def _llm_provider_and_asset(deployment: Deployment, cfg: dict, now) -> Asset | None:
@@ -182,16 +240,19 @@ def _agent_anchor(target: str) -> str:
 
     Never the raw target: a URL carries credentials in its userinfo and tokens in
     its query, and an anchor is written as the agent's identifier AND its name.
+    A target without a scheme is read as https, the way :func:`ingest._host`
+    reads it, rather than passed through whole; a port is its number, so
+    ``:0443`` is 443.
     An IPv6 host keeps its brackets, or ``[2001:db8::1]:8443`` and
     ``[2001:db8::1:8443]`` are one anchor. A port the URL parser rejects is
     kept as written rather than letting the whole target through. A target with
     no host has nowhere to anchor an agent, and gets no agent node.
     """
     loc = (target or "").strip()
-    if "://" not in loc:
-        return _endpoint_identifier(loc)
+    if not loc or loc.startswith("/"):
+        return ""
     try:
-        parsed = urlparse(loc)
+        parsed = urlparse(loc if "://" in loc else f"https://{loc}")
     except ValueError:
         return ""
     host = (parsed.hostname or "").lower()
@@ -202,6 +263,8 @@ def _agent_anchor(target: str) -> str:
         port = hostport.partition("]")[2].lstrip(":")
     else:
         port = hostport.rpartition(":")[2] if ":" in hostport else ""
+    if port.isdigit():
+        port = str(int(port))
     if not port:
         port = {"http": "80", "https": "443"}.get((parsed.scheme or "").lower(), "")
     where = f"[{host}]" if ":" in host else host

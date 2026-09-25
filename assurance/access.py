@@ -77,6 +77,8 @@ from .graph_refs import (
     resolve_identity,
     reference_index,
     resolve_reference,
+    superseded_identity,
+    unresolved_reasons,
     sort_references,
     tool_references,
 )
@@ -189,15 +191,15 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
                 )
                 for target in targets:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
-                if why:
-                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, why))
+                for reason in unresolved_reasons(asset, targets, why):
+                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, reason))
             identity = identity_reference(metadata)
             if identity:
                 targets, why = resolve_identity(identity, accounts)
                 for target in targets:
                     add(asset, target, "acts as", _kind_cap(target.kind)["key"])
-                if why:
-                    unresolved.append(dangling_reference(asset, identity, MECHANISM_IDENTITY, why))
+                for reason in unresolved_reasons(asset, targets, why):
+                    unresolved.append(dangling_reference(asset, identity, MECHANISM_IDENTITY, reason))
         server = metadata.get("server")
         if server and str(server).strip():
             targets, why = resolve_reference(
@@ -205,8 +207,8 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
             )
             for target in targets:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
-            if why:
-                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER, why))
+            for reason in unresolved_reasons(asset, targets, why):
+                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER, reason))
 
     return edges, unresolved
 
@@ -329,8 +331,13 @@ def _identity_use(agents, service_accounts) -> dict:
         if not identity:
             continue
         candidates, why = resolve_identity(identity, accounts)
+        # An agent row no scan has recorded under the current identity rules --
+        # the old unnamed "agent", standing for every unnamed agent at once --
+        # does not prove anyone acts under the account it names. It kept an
+        # orphaned account reading as used, with nothing anywhere to say why.
+        proven = why is None and not superseded_identity(agent)
         for account in candidates:
-            if why is None:
+            if proven:
                 use[account.pk] = IDENTITY_PROVEN
             else:
                 use.setdefault(account.pk, IDENTITY_AMBIGUOUS)

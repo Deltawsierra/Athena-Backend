@@ -641,3 +641,137 @@ def test_a_target_with_no_host_anchors_no_agent():
     derive_assets(dep, _scan(dep.owner, "https:///agent", ["exec"]))
     assert not dep.assets.filter(kind=Kind.AGENT).exists()
     assert dep.assets.filter(kind=Kind.TOOL, identifier="exec").exists()
+
+
+# ---- A declaration that lands on an old row it is not. ----
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [{"server": "files-mcp", "permissions": ["http:get"]}, {"name": "files-mcp", "permissions": ["http:get"]}],
+    ids=["nameless-on-the-server", "named-for-the-server"],
+)
+def test_another_agents_declaration_merges_into_an_old_row_and_leaves_it_reported(tool):
+    """Both write the key the old collapsed row holds. The refresh replaced its
+    permissions and stamped it current, so the old agent -- not rescanned --
+    lost its shell and the reason naming the row disappeared."""
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    derive_assets(dep, PentestScan.objects.create(
+        user=dep.owner, target_url="https://b.example/bot", consent=True,
+        status=PentestScan.STATUS_COMPLETED, engine_response={"findings": []},
+        target_config={"tools": [tool]},
+    ))
+
+    ghost = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    assert sorted(ghost.metadata["permissions"]) == ["http:get", "shell"]
+    assert "identity_rules" not in ghost.metadata
+    assert ghost.metadata["server"] == "files-mcp"
+    result = assess_effective_access(dep)
+    assert "code_execution" in {c["key"] for c in _principal(result, "agent")["capabilities"]}
+    assert ("files-mcp", "tools", "superseded_identity") in _references(dep)
+
+
+def test_a_nameless_tool_on_its_server_is_the_same_declaration_and_is_re_recorded():
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    _asset(dep, kind=Kind.TOOL, name="files-mcp", identifier="files-mcp",
+           metadata={"source": "declared_inventory", "server": "files-mcp", "permissions": ["read"]})
+    derive_assets(dep, _inventory_scan(dep.owner, [{"server": "files-mcp", "permissions": ["read"]}]))
+    assert dep.assets.get(kind=Kind.TOOL).metadata["identity_rules"] == IDENTITY_RULES
+
+
+# ---- An old agent row is a source too. ----
+
+
+def test_the_old_agent_row_proves_no_use_of_the_account_it_names():
+    """A principal: no reference resolves TO it, so while only targets were
+    checked its identity counted as proven use and the orphaned account read as
+    used, with nothing anywhere to say why."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "identity": "svc-legacy", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-legacy")
+
+    result = assess_effective_access(dep)
+    assert _gap_types(_principal(result, "svc-legacy")) == ["use_unproven"]
+    assert _references(dep) == [("svc-legacy", "identity", "superseded_identity")]
+
+
+def test_an_ambiguous_reference_with_an_old_candidate_says_both():
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={
+        "source": "declared_inventory", "identity_rules": 2, "tools": ["files-mcp"]})
+    _asset(dep, kind=Kind.TOOL, name="read_file", identifier="files-mcp",
+           metadata={"source": "declared_inventory", "server": "", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.MCP_SERVER, name="files-mcp",
+           metadata={"source": "declared_inventory", "identity_rules": 2})
+
+    assert _references(dep) == [
+        ("files-mcp", "tools", "ambiguous"),
+        ("files-mcp", "tools", "superseded_identity"),
+    ]
+
+
+def test_an_older_stamp_is_superseded_too():
+    from assurance.graph_refs import superseded_identity
+
+    dep = _dep()
+    older = _asset(dep, metadata={"source": "declared_inventory", "identity_rules": 1}, name="t")
+    current = _asset(dep, metadata={"source": "declared_inventory", "identity_rules": 2}, name="u")
+    scanned = _asset(dep, metadata={"source": "scan_target"}, name="v")
+    assert [superseded_identity(a) for a in (older, current, scanned)] == [True, False, False]
+
+
+# ---- The identity lookup's order. ----
+
+
+def test_an_identity_is_an_account_before_anything_else_carrying_the_string():
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={"identity": "svc-x", "tools": []})
+    _asset(dep, kind=Kind.TOOL, name="exporter", identifier="svc-x")
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-x", identifier="sa-7",
+           metadata={"permissions": ["iam:admin"]})
+
+    assert _principal(assess_effective_access(dep), "bot")["privilege_level"] == "high"
+
+
+def test_an_exact_spelling_two_accounts_share_is_ambiguous_not_a_folded_third():
+    """Exactly spelled, ``Billing`` is two accounts' name. Falling back to the
+    case-blind index whenever the exact lookup was not a clean single match
+    handed the agent a third account's admin powers as if it were the one."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={"identity": "Billing", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="Billing", identifier="sa-1")
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="Billing", identifier="sa-2")
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="Other", identifier="billing",
+           metadata={"permissions": ["iam:admin"]})
+
+    assert _principal(assess_effective_access(dep), "bot")["privilege_level"] != "high"
+    assert _references(dep) == [("Billing", "identity", "ambiguous")]
+
+
+# ---- More of where an unnamed agent is. ----
+
+
+@pytest.mark.parametrize(
+    "target, anchor",
+    [
+        ("https://u:pw@h.example.com/a", "agent@h.example.com/a"),
+        ("u:p@h.example.com/a?tok=1", "agent@h.example.com/a"),
+        ("h.example.com:8443/a?tok=secret", "agent@h.example.com:8443/a"),
+        ("https://h.example.com:0443/a", "agent@h.example.com/a"),
+        ("http://h.example.com:080/a", "agent@h.example.com:80/a"),
+    ],
+)
+def test_an_anchor_is_host_port_and_path_and_nothing_else(target, anchor):
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, target, ["a"]))
+    assert list(dep.assets.filter(kind=Kind.AGENT).values_list("identifier", flat=True)) == [anchor]
+
+
+def test_a_target_the_parser_rejects_anchors_no_agent():
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, "https://u:pw@[::1/agent?tok=1", ["a"]))
+    assert not dep.assets.filter(kind=Kind.AGENT).exists()

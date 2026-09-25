@@ -301,13 +301,33 @@ def _derive_effective_access(deployment) -> dict:
         # duplicated inventory line said "2 declared reference(s)" above one pair:
         # an operator told to chase two and handed one goes looking for a
         # reference that does not exist. Distinct pairs, counted and listed.
-        pairs = sorted({f"{u['source']} → {u['reference']}" for u in unresolved})
-        supporting += (
-            f" {len(pairs)} declared reference(s) could not be placed, so this is "
-            "the reach over the graph we could read rather than all of it: "
-            + ", ".join(pairs)
-            + "."
+        #
+        # A reference to or from a row no scan has recorded under the current
+        # identity rules WAS placed and followed; saying it "could not be placed"
+        # is false and sends the operator looking for a component that exists.
+        # What it needs is a rescan, and the digest says that instead.
+        pairs = sorted(
+            {f"{u['source']} → {u['reference']}" for u in unresolved if u.get("reason") != "superseded_identity"}
         )
+        stale = sorted(
+            {f"{u['source']} → {u['reference']}" for u in unresolved if u.get("reason") == "superseded_identity"}
+        )
+        if pairs:
+            supporting += (
+                f" {len(pairs)} declared reference(s) could not be placed, so this is "
+                "the reach over the graph we could read rather than all of it: "
+                + ", ".join(pairs)
+                + "."
+            )
+        if stale:
+            supporting += (
+                f" {len(stale)} declared reference(s) were followed to or from a component "
+                "recorded under identity rules this platform no longer writes, which no scan "
+                "has recorded since; the reach through them is counted, and a rescan is what "
+                "confirms it: "
+                + ", ".join(stale)
+                + "."
+            )
     contradicting_bits: list[str] = []
     if principals:
         offenders = sorted(

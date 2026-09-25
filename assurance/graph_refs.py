@@ -200,10 +200,28 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kind
             usable = [m for m in matches if m.kind not in not_kinds]
             if not usable:
                 return [], UNRESOLVED_NAMES_A_PRINCIPAL
-            if len(usable) > 1:
-                return usable, UNRESOLVED_AMBIGUOUS
-            return usable, (UNRESOLVED_SUPERSEDED if superseded_identity(usable[0]) else None)
+            return usable, (UNRESOLVED_AMBIGUOUS if len(usable) > 1 else None)
     return [], UNRESOLVED_NOT_FOUND
+
+
+def unresolved_reasons(source, candidates, why) -> list[str]:
+    """Every reason one declared reference is reported, in the order reported.
+
+    ``why`` from :func:`resolve_reference`, and :data:`UNRESOLVED_SUPERSEDED`
+    beside it when the reference was followed from, or to, a row no scan has
+    recorded under the current :data:`IDENTITY_RULES`. Beside, not instead:
+    one reason per row made an ambiguous reference with a superseded candidate
+    say only "ambiguous", and the power that candidate carried -- a ``shell`` the
+    inventory had since dropped -- reached the agent with nothing naming the row
+    it came from. And the SOURCE counts as much as the target: the old unnamed
+    ``"agent"`` row is a principal, which no reference can resolve to, so while
+    only targets were checked its identity and its tools read as a current
+    agent's -- it could make an orphaned account read as used.
+    """
+    reasons = [why] if why else []
+    if candidates and (superseded_identity(source) or any(superseded_identity(c) for c in candidates)):
+        reasons.append(UNRESOLVED_SUPERSEDED)
+    return reasons
 
 
 #: What a malformed ``tools`` declaration is reported as, in place of the
