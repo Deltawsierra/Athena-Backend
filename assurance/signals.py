@@ -95,10 +95,22 @@ def auto_dispatch_finding(sender, instance, created, update_fields=None, **kwarg
 
 
 def _has_column(using, table, column) -> bool:
-    """Whether ``table`` exists in the database behind ``using`` and has ``column``."""
+    """Whether ``table`` exists in the database behind ``using`` and has ``column``.
+
+    The catalogue is asked whether the table exists BEFORE the table is described.
+    Describing a missing table is a failing query on PostgreSQL (``SELECT * FROM
+    <table> LIMIT 1``), and a failed query aborts the transaction it ran in: a
+    ``flush`` inside ``atomic()`` reached this probe with the assurance tables
+    migrated away, the error was swallowed below, and the whole block -- the flush
+    included -- was silently rolled back at COMMIT. The probe also runs in its own
+    savepoint, so a describe that fails for any other reason takes only the
+    savepoint with it, never the caller's transaction.
+    """
     connection = connections[using or DEFAULT_DB_ALIAS]
     try:
-        with connection.cursor() as cursor:
+        with transaction.atomic(using=connection.alias), connection.cursor() as cursor:
+            if table not in connection.introspection.table_names(cursor):
+                return False
             description = connection.introspection.get_table_description(cursor, table)
     except DatabaseError:
         return False

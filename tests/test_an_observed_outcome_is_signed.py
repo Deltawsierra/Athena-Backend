@@ -1283,10 +1283,14 @@ def test_the_upgrade_recompute_waits_for_the_column_it_reads():
     """``post_migrate`` fires after every migrate, including one that leaves this
     app below 0033 -- where the stamp column does not exist, and every such
     migrate crashed in this receiver. It asks the migration state it is handed,
-    not the recorder table (which a run with no migrations applied never creates)."""
+    not the recorder table (which a run with no migrations applied never creates).
+
+    The state below 0033 is the live one with the column taken out, not one the
+    migration loader builds: under ``--nomigrations`` the loader has no assurance
+    migrations at all, and asking it for 0032 failed the test rather than the
+    receiver."""
     from django.apps import apps as live_apps
-    from django.db import connection
-    from django.db.migrations.executor import MigrationExecutor
+    from django.db.migrations.state import ProjectState
 
     from assurance.signals import recompute_decisions_computed_under_another_rule as receiver
 
@@ -1294,7 +1298,10 @@ def test_the_upgrade_recompute_waits_for_the_column_it_reads():
     _approved(dep, "refund-over-limit")
     _ingested(dep)
     Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None, decision=Deployment.Decision.AUDIT_INCOMPLETE)
-    below = MigrationExecutor(connection).loader.project_state(("assurance", "0032_signed_chain_outcomes")).apps
+    state = ProjectState.from_apps(live_apps)
+    state.remove_field("assurance", "deployment", "decision_keyring")
+    below = state.apps
+    assert not any(f.name == "decision_keyring" for f in below.get_model("assurance", "Deployment")._meta.get_fields())
     receiver(sender=live_apps.get_app_config("assurance"), using="default", apps=below)
     assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
     # And at the state that has the column, it does run.
@@ -1529,3 +1536,141 @@ def test_the_upgrade_recompute_survives_a_flush_below_the_stamp():
     assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
     signals.recompute_decisions_computed_under_another_rule(sender=sender, using="default", apps=None)
     assert _stored(dep) == Deployment.Decision.READY
+
+
+# ---- Round 7: what the migration and mutation review found unpinned. ----
+
+
+def test_the_upgrade_receiver_returns_when_the_state_has_no_assurance_models():
+    """``migrate assurance zero`` hands post_migrate a state without this app's
+    models. The receiver must return -- not fall through to a name the lookup never
+    bound, and not recompute anything."""
+    from django.db.migrations.state import ProjectState
+
+    from assurance.signals import recompute_decisions_computed_under_another_rule as receiver
+
+    dep = _typed_in_ready()
+    receiver(sender=_assurance_app(), using="default", apps=ProjectState().apps)
+    assert _stored(dep) == Deployment.Decision.READY
+
+
+def test_a_missing_table_is_found_missing_without_a_query_against_it():
+    """``flush`` reaches the upgrade receiver with no migration state, and the
+    receiver asks the database whether the stamp column exists. It described the
+    table to find out, and on PostgreSQL describing a missing table is a failing
+    ``SELECT``: the error was swallowed, the caller's transaction was left aborted,
+    and a ``flush`` inside ``atomic()`` was silently rolled back at COMMIT. The
+    catalogue is asked first now, and nothing is sent at the table itself."""
+    from django.db import connection
+
+    from assurance import signals
+
+    sent = []
+
+    def spy(execute, sql, params, many, context):
+        sent.append(sql)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(spy):
+        assert signals._has_column("default", "no_such_table", "decision_keyring") is False
+    assert sent, "nothing was asked at all"
+    assert not [sql for sql in sent if "no_such_table" in sql], sent
+    # And whatever it does send, inside a savepoint of its own: this test runs in
+    # a transaction, as the flush did, and a probe that failed for some other
+    # reason must take only the savepoint with it.
+    assert any(sql.startswith("SAVEPOINT") for sql in sent), sent
+
+
+def test_the_decision_is_computed_from_the_locked_row_not_the_callers_copy():
+    """The caller's instance can be stale: an ingest that marked the evidence
+    incomplete after it was loaded must cap the decision this recompute writes."""
+    from assurance.decision import recompute_decision
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert _stored(dep) == Deployment.Decision.READY
+    stale = Deployment.objects.get(pk=dep.pk)
+    Deployment.objects.filter(pk=dep.pk).update(evidence_incomplete=True)
+    assert recompute_decision(stale) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_a_recompute_leaves_the_callers_instance_holding_the_stamp_it_wrote(django_assert_num_queries):
+    """``recompute_decision`` refreshes the caller's instance, stamp included, so the
+    next ``current_decision`` on it is the read with no query -- not a second
+    recompute under the row lock for a decision that is already current."""
+    from assurance.decision import current_decision, recompute_decision
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None)
+    dep.refresh_from_db()
+    recompute_decision(dep)
+    assert dep.decision_keyring == observed_outcomes.keyring_fingerprint()
+    with django_assert_num_queries(0):
+        assert current_decision(dep) == Deployment.Decision.READY
+
+
+def test_the_bundle_does_not_ask_per_deployment_whether_it_has_chains():
+    """The bundle reconciles every deployment it publishes, and an unstamped one
+    asks whether it has chains. Its one query annotates the answer; without the
+    annotation every row paid an ``exists()``."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from assurance.bundle import assurance_bundle
+
+    for _ in range(6):
+        _deployment()  # unstamped, no chains: the reconcile path runs for each
+    assert Deployment.objects.filter(decision_keyring__isnull=True).count() == 6
+    with CaptureQueriesContext(connection) as queries:
+        assurance_bundle(Deployment.objects.all())
+    per_row = [
+        q["sql"] for q in queries.captured_queries
+        if q["sql"].startswith('SELECT 1 AS "a" FROM "assurance_workflowchainoutcome"')
+    ]
+    assert per_row == []
+
+
+_EDGE_NOW = datetime(2026, 9, 1, 12, 0, 0, tzinfo=dt_timezone.utc)
+
+
+def test_the_age_window_is_the_thirty_days_it_names(keyring):
+    trusted = observed_outcomes.load_keyring(str(keyring))
+    dep = _deployment()
+    late = _signed(dep, observed_at=_EDGE_NOW - observed_outcomes.MAX_AGE - timedelta(hours=1))
+    rows, refusals = observed_outcomes.ingest(dep, [late], keyring=trusted, now=_EDGE_NOW)
+    assert rows == [] and "window" in refusals[0].reason
+    edge = _signed(dep, observed_at=_EDGE_NOW - observed_outcomes.MAX_AGE + timedelta(seconds=1))
+    rows, refusals = observed_outcomes.ingest(dep, [edge], keyring=trusted, now=_EDGE_NOW)
+    assert refusals == [] and len(rows) == 1
+
+
+def test_the_skew_allowance_is_the_five_minutes_it_names(keyring):
+    trusted = observed_outcomes.load_keyring(str(keyring))
+    dep = _deployment()
+    past = _signed(dep, observed_at=_EDGE_NOW + observed_outcomes.MAX_CLOCK_SKEW + timedelta(milliseconds=500))
+    rows, refusals = observed_outcomes.ingest(dep, [past], keyring=trusted, now=_EDGE_NOW)
+    assert rows == [] and "in the future" in refusals[0].reason
+    edge = _signed(dep, observed_at=_EDGE_NOW + observed_outcomes.MAX_CLOCK_SKEW)
+    rows, refusals = observed_outcomes.ingest(dep, [edge], keyring=trusted, now=_EDGE_NOW)
+    assert refusals == [] and len(rows) == 1
+
+
+def test_re_deriving_the_claims_leaves_the_stored_decision_current():
+    """The route test above replaces the refresh with a recorder, so it cannot see
+    WHEN the refresh runs: refreshed before the claims are re-derived, the stored
+    decision is the one the OLD claims implied. This asks the property instead."""
+    from assurance.decision import compute_decision
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert _stored(dep) == Deployment.Decision.READY
+    response = _client().post(f"/api/assurance/deployments/{dep.uuid}/recompute-claims/")
+    assert response.status_code == 200, response.content
+    live = compute_decision(Deployment.objects.get(pk=dep.pk))
+    assert live != Deployment.Decision.READY, "the re-derivation did not move the decision"
+    assert _stored(dep) == live
