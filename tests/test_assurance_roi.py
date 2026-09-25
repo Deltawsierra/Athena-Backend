@@ -32,6 +32,7 @@ from assurance.roi import (
     build_executive_summary,
 )
 from assurance.views import DeploymentViewSet
+from assurance.revision import accept_transition
 
 pytestmark = pytest.mark.django_db
 
@@ -160,8 +161,8 @@ def test_decision_is_reported_none_safe():
     assert result["decision"]["decision"] is None
     assert result["decision"]["decision_label"] is None
 
-    dep.decision = Deployment.Decision.NEEDS_REMEDIATION
-    dep.save(update_fields=["decision"])
+    # Through the boundary: `Deployment.save` refuses the decision columns.
+    accept_transition(dep, to_decision=Deployment.Decision.NEEDS_REMEDIATION)
     result = build_executive_summary(dep)
     assert result["decision"]["decision"] == Deployment.Decision.NEEDS_REMEDIATION
     assert result["decision"]["decision_label"] == "Requires remediation"

@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 
 from django.conf import settings
-from django.db import models
+from django.db import models, router
 from django.db.models import Q
 from django.utils import timezone
 
@@ -262,6 +262,24 @@ class ProviderAssertion(models.Model):
 # Deployment — the AI system under assurance (the sellable unit)
 # ---------------------------------------------------------------------------
 
+#: The Deployment columns the decision refresh owns. They have ONE writer:
+#: `assurance.revision.accept_transition` (the decision and its revision) and the
+#: keyring stamp `assurance.decision.recompute_decision` writes beside it, both
+#: QuerySet updates under the row lock. A model save never writes them to a stored
+#: row -- see `Deployment.save`.
+DECISION_OWNED_FIELDS = frozenset({"decision", "decision_revision", "decision_keyring"})
+
+
+class DecisionColumnWriteRefused(ValueError):
+    """A save named a column only the decision refresh writes.
+
+    Refused rather than quietly dropped: a caller that asked for the decision to be
+    written and got a save that wrote nothing would go on believing it had set it.
+    The decision is moved by recomputing it (`decision.recompute_decision`, which a
+    pause goes through as well) or, for a decision already computed elsewhere, by
+    `revision.accept_transition` -- each of which records the move it makes.
+    """
+
 
 class Deployment(models.Model):
     """One AI system under assurance — the unit a customer contract expands on
@@ -405,6 +423,81 @@ class Deployment(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} [{self.get_environment_display()}]"
+
+    def save(self, *, force_insert=False, force_update=False, using=None, update_fields=None):
+        """Save the row -- and never, over a stored row, its decision columns.
+
+        The stored decision has one writer, the refresh (:data:`DECISION_OWNED_FIELDS`).
+        A plain save writes every column from the instance, and an instance held
+        across a refresh holds the decision from before it. That was reachable by
+        the most ordinary sequence there is: a shell session held a READY
+        deployment at revision N and recorded a critical finding against it; the
+        backstop refreshed a DIFFERENT instance, moving the row to NOT_RECOMMENDED
+        at N+1 and recording that transition; the session then renamed its
+        deployment and saved it, writing READY at revision N back over the row.
+        The receipt published READY over an open critical finding, and every
+        recompute after that computed revision N+1 again, collided with the
+        transition already recorded there, and failed -- for good.
+
+        So a save that UPDATEs a stored row writes every loaded column except the
+        decision's. There is no race to lose: the columns are not in the UPDATE
+        statement, rather than restored from a read taken before it. A save that
+        names one in ``update_fields`` is refused (:class:`DecisionColumnWriteRefused`).
+        An INSERT keeps them -- a new row has no transition log to fall behind, and
+        the backstop refreshes its decision once its transaction commits.
+
+        One consequence, deliberate: a stale instance of a deployment deleted since
+        it was loaded is no longer re-inserted by ``save()`` (Django's UPDATE-else-
+        INSERT); the update names its columns, so it fails with ``DatabaseError``
+        instead of resurrecting a deployment whose findings and transition log were
+        deleted with it, holding the decision they supported.
+
+        ``loaddata`` restores rows through ``save_base`` and is untouched: a fixture
+        comes back as it was dumped, stored decision included.
+        """
+        if update_fields is not None:
+            update_fields = frozenset(update_fields)
+            named = DECISION_OWNED_FIELDS & update_fields
+            if named:
+                raise DecisionColumnWriteRefused(
+                    f"{sorted(named)} are written only by the decision refresh "
+                    "(assurance.decision.recompute_decision / "
+                    "assurance.revision.accept_transition), never by Deployment.save()"
+                )
+        elif not force_insert and self.pk is not None and self._saves_over_a_stored_row(using):
+            update_fields = [
+                field.attname
+                for field in self._meta.concrete_fields
+                if not field.primary_key
+                and not field.generated
+                and field.name not in DECISION_OWNED_FIELDS
+                # Only what was loaded, as Django's own save does for a deferred
+                # instance: a deferred column has nothing to write but the value
+                # it would first have to fetch.
+                and field.attname in self.__dict__
+            ]
+        super().save(
+            force_insert=force_insert,
+            force_update=force_update,
+            using=using,
+            update_fields=update_fields,
+        )
+
+    save.alters_data = True
+
+    def _saves_over_a_stored_row(self, using) -> bool:
+        """Whether a plain save of this instance would UPDATE a stored row.
+
+        Every instance loaded from the database would. So would one BUILT with the
+        pk of a stored row -- ``Deployment(pk=7, name="x").save()`` -- which Django
+        saves as an UPDATE of row 7, every column included, before it falls back to
+        an INSERT; for that rare shape one existence query is the price of not
+        writing its default decision over row 7's.
+        """
+        if not self._state.adding:
+            return True
+        db = using or router.db_for_write(type(self), instance=self)
+        return type(self)._base_manager.using(db).filter(pk=self.pk).exists()
 
 
 # ---------------------------------------------------------------------------

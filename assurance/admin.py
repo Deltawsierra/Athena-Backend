@@ -99,8 +99,10 @@ class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     search_fields = ("name",)
     # Written only through `assurance.revision.accept_transition`. Editable here,
     # an admin could set a READY no rule computed -- and one `current_decision`
-    # would trust, the keyring stamp untouched -- and any save wrote back the
-    # decision the form was rendered with over a recompute made meanwhile.
+    # would trust, the keyring stamp untouched. Read-only in the form is not what
+    # keeps a save from writing them back, though: `save_model` saves the whole
+    # instance, and an instance loaded before a recompute holds the decision from
+    # before it. `Deployment.save` leaves these columns out of every UPDATE.
     readonly_fields = ("decision", "decision_revision", "decision_keyring")
     # The decision cannot be typed in here, and it must not be left behind either:
     # `evidence_incomplete` and `last_complete_scan_at` are inputs to it.

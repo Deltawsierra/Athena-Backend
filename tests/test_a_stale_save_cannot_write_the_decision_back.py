@@ -1,0 +1,322 @@
+"""A Deployment instance held across a refresh cannot write the decision back.
+
+The stored decision has one writer: the refresh (`revision.accept_transition`, and
+the keyring stamp `decision.recompute_decision` writes beside it). A plain
+``Deployment.save()`` wrote every column from the instance, and an instance held
+across a refresh holds the decision from BEFORE it. The ordinary shell sequence --
+hold a READY deployment, record a critical finding (the backstop refreshes a
+DIFFERENT instance: NOT_RECOMMENDED at revision N+1, transition recorded), rename
+the deployment and save it -- wrote READY at revision N back over the row. The
+receipt published READY over an open critical finding, and every recompute after it
+computed revision N+1 again, collided with the transition already recorded there,
+and failed, so nothing could repair it.
+
+The defence: ``Deployment.save`` never writes the decision columns over a stored
+row, and refuses a save that names one. The refresh writes them itself, with a
+QuerySet update under its row lock.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+import pytest
+from django.contrib import admin
+from django.contrib.auth import get_user_model
+from django.db import DatabaseError, transaction
+from django.test import RequestFactory
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from assurance.admin import DeploymentAdmin
+from assurance.decision import decision_support, recompute_decision
+from assurance.models import (
+    DECISION_OWNED_FIELDS,
+    DecisionColumnWriteRefused,
+    DecisionTransition,
+    Deployment,
+    Finding,
+)
+from assurance.revision import accept_transition, read_decision
+from tests.decision_surfaces import one_decision
+
+pytestmark = pytest.mark.django_db
+
+User = get_user_model()
+D = Deployment.Decision
+
+
+def _owner():
+    return User.objects.create_user(
+        username=f"o{User.objects.count()}", password="x", role=User.Roles.ADMIN
+    )
+
+
+def _scanned_ready():
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    Deployment.objects.filter(pk=dep.pk).update(last_complete_scan_at=timezone.now())
+    dep.refresh_from_db()
+    recompute_decision(dep)
+    dep.refresh_from_db()
+    assert dep.decision == D.READY
+    return dep
+
+
+def _critical(dep):
+    return Finding.objects.create(
+        deployment=dep, fingerprint="fp", finding_type="t", title="T", severity="critical"
+    )
+
+
+def _client(dep):
+    client = APIClient()
+    client.force_authenticate(user=dep.owner)
+    client.raise_request_exception = False
+    return client
+
+
+def _log(dep):
+    return list(
+        DecisionTransition.objects.filter(deployment=dep)
+        .order_by("revision")
+        .values_list("revision", "from_decision", "to_decision")
+    )
+
+
+# ---------------------------------------------------------------------------
+# The sequence that wedged a deployment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_shell_writers_stale_full_save_leaves_the_decision_where_the_backstop_put_it(caplog):
+    """Autocommit, as a shell or a management command runs: every write commits on
+    its own, so the backstop refreshes as soon as the finding lands -- on an
+    instance of its own, not the writer's."""
+    dep = _scanned_ready()
+    before = dep.decision_revision
+
+    _critical(dep)
+    assert Deployment.objects.get(pk=dep.pk).decision == D.NOT_RECOMMENDED
+    assert dep.decision == D.READY, "the writer's instance really is stale"
+
+    dep.name = "renamed"
+    with caplog.at_level(logging.ERROR):
+        dep.save()
+
+    stored = Deployment.objects.get(pk=dep.pk)
+    assert stored.name == "renamed", "the save still writes what the writer changed"
+    assert (stored.decision, stored.decision_revision) == (D.NOT_RECOMMENDED, before + 1)
+    assert _log(dep) == [
+        (before, "", D.READY),
+        (before + 1, D.READY, D.NOT_RECOMMENDED),
+    ], "the row and its transition log agree"
+    assert decision_support(stored)["decision"] == D.NOT_RECOMMENDED
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+    client = _client(dep)
+    assert one_decision(dep, client) == D.NOT_RECOMMENDED
+    response = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json")
+    assert response.status_code == 200, response.content
+    assert response.json()["decision"] == D.NOT_RECOMMENDED
+    assert one_decision(dep, client) == D.NOT_RECOMMENDED
+    assert read_decision(dep) == {"decision": D.NOT_RECOMMENDED, "revision": before + 1}
+
+
+# ---------------------------------------------------------------------------
+# Deployment.save never writes the decision columns over a stored row
+# ---------------------------------------------------------------------------
+
+
+def _moved_under(stale):
+    """Move the stored decision on ANOTHER instance, as a refresh does, and stamp a
+    keyring, so all three owned columns differ from what ``stale`` holds."""
+    accept_transition(Deployment.objects.get(pk=stale.pk), to_decision=D.NOT_RECOMMENDED)
+    Deployment.objects.filter(pk=stale.pk).update(decision_keyring="stamped")
+    return Deployment.objects.values(*sorted(DECISION_OWNED_FIELDS)).get(pk=stale.pk)
+
+
+def _owned(dep):
+    return Deployment.objects.values(*sorted(DECISION_OWNED_FIELDS)).get(pk=dep.pk)
+
+
+def test_a_full_save_of_a_stale_instance_writes_everything_but_the_decision():
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    stale = Deployment.objects.get(pk=dep.pk)
+    moved = _moved_under(stale)
+    assert (stale.decision, stale.decision_revision, stale.decision_keyring) == (None, 0, None)
+
+    stale.description = "edited"
+    stale.evidence_incomplete = True
+    stale.save()
+
+    assert _owned(dep) == moved
+    row = Deployment.objects.get(pk=dep.pk)
+    assert row.description == "edited", "every other column is still written"
+    assert row.evidence_incomplete is True, "including the inputs the backstop refreshes on"
+
+
+def test_a_full_save_of_a_deferred_stale_instance_writes_no_decision_either():
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    stale = Deployment.objects.defer("description").get(pk=dep.pk)
+    moved = _moved_under(stale)
+
+    stale.name = "renamed"
+    stale.save()
+
+    assert _owned(dep) == moved
+    assert Deployment.objects.get(pk=dep.pk).name == "renamed"
+
+
+def test_an_instance_built_with_a_stored_pk_does_not_write_its_defaults_over_the_decision():
+    """Django saves ``Deployment(pk=7, ...)`` as an UPDATE of row 7 before it falls
+    back to an INSERT -- every column, the unset decision included."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    moved = _moved_under(dep)
+
+    # The shape a script restoring rows from a dump with `Deployment(**row).save()`
+    # takes -- its dumped decision is exactly the stale one.
+    Deployment(
+        pk=dep.pk, uuid=dep.uuid, name="rebuilt", owner=dep.owner, created_at=dep.created_at
+    ).save()
+
+    assert _owned(dep) == moved
+    assert Deployment.objects.get(pk=dep.pk).name == "rebuilt"
+
+
+def test_a_deferred_instance_writes_only_what_it_loaded(django_assert_num_queries):
+    """As Django's own save does for a deferred instance. Naming every column would
+    make each deferred one a query to fetch the value it then writes back."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    handle = Deployment.objects.only("name").get(pk=dep.pk)
+    handle.name = "renamed"
+
+    with django_assert_num_queries(1):
+        handle.save()
+    assert Deployment.objects.get(pk=dep.pk).name == "renamed"
+
+
+@pytest.mark.parametrize("column", sorted(DECISION_OWNED_FIELDS))
+def test_a_save_that_names_a_decision_column_is_refused(column):
+    """Refused, not dropped: a caller that asked for the decision to be written and
+    got a save that wrote nothing would go on believing it had set it."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    moved = _moved_under(dep)
+    dep.decision, dep.decision_revision, dep.decision_keyring = D.READY, 0, "forged"
+
+    with pytest.raises(DecisionColumnWriteRefused):
+        dep.save(update_fields=[column, "name"])
+    with pytest.raises(DecisionColumnWriteRefused):
+        Deployment.objects.update_or_create(pk=dep.pk, defaults={column: getattr(dep, column)})
+
+    assert _owned(dep) == moved
+
+
+def test_a_new_row_is_still_inserted_with_the_decision_it_was_given():
+    """An INSERT has no transition log to fall behind; the backstop refreshes its
+    decision once the transaction commits. Fixtures create rows this way."""
+    dep = Deployment.objects.create(name="d", owner=_owner(), decision=D.NEEDS_REMEDIATION)
+    assert Deployment.objects.get(pk=dep.pk).decision == D.NEEDS_REMEDIATION
+
+    fresh = Deployment(name="e", owner=dep.owner, decision=D.READY)
+    fresh.save()
+    assert Deployment.objects.get(pk=fresh.pk).decision == D.READY
+
+
+def test_a_stale_instance_of_a_deleted_deployment_is_not_resurrected():
+    """Django's plain save re-inserts a deleted row. This one would come back with
+    the decision its deleted findings and transition log supported."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    accept_transition(dep, to_decision=D.READY)
+    Deployment.objects.filter(pk=dep.pk).delete()
+
+    # In a savepoint: the failed save marks the enclosing transaction for rollback.
+    with pytest.raises(DatabaseError), transaction.atomic():
+        dep.save()
+    assert not Deployment.objects.filter(pk=dep.pk).exists()
+
+
+def test_the_admin_saving_an_instance_loaded_before_a_refresh_leaves_the_decision():
+    """The change form's ``save_model`` is a plain save of the instance the admin
+    loaded; a refresh committed between the load and the save used to be undone."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    stale = Deployment.objects.get(pk=dep.pk)
+    moved = _moved_under(stale)
+
+    stale.name = "admin-edited"
+    request = RequestFactory().post("/admin/")
+    DeploymentAdmin(Deployment, admin.site).save_model(request, stale, form=None, change=True)
+
+    assert _owned(dep) == moved
+    assert Deployment.objects.get(pk=dep.pk).name == "admin-edited"
+
+
+# ---------------------------------------------------------------------------
+# One writer, held to it
+# ---------------------------------------------------------------------------
+
+
+def _bulk_writes_of_the_decision_columns():
+    """Every QuerySet ``update()`` / ``bulk_update()`` in ``assurance/`` that names a
+    decision column, as (module, enclosing function). The model cannot see these --
+    they send no signal and never reach ``Deployment.save`` -- so they are held
+    here, by reading the source."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "assurance"
+    found = set()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self, module):
+            self.module, self.stack = module, []
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in {"update", "bulk_update"}:
+                # A dict's `.update({...})` takes a positional mapping; a QuerySet's
+                # never does.
+                if not (node.args and isinstance(node.args[0], ast.Dict)):
+                    named = {k.arg for k in node.keywords} | {
+                        c.value
+                        for c in ast.walk(node)
+                        if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                    }
+                    if named & DECISION_OWNED_FIELDS:
+                        found.add((self.module, self.stack[-1] if self.stack else "<module>"))
+            self.generic_visit(node)
+
+    for path in sorted(root.rglob("*.py")):
+        if "migrations" in path.parts:
+            continue
+        Visitor(path.name).visit(ast.parse(path.read_text()))
+    return found
+
+
+def test_the_decision_columns_are_bulk_written_only_by_the_refresh():
+    assert _bulk_writes_of_the_decision_columns() == {
+        # The decision and its revision, with the transition that records the move.
+        ("revision.py", "_write"),
+        # The keyring stamp, beside it and under the same lock.
+        ("decision.py", "recompute_decision"),
+    }
+
+
+def test_a_transition_still_touches_updated_at():
+    """The decision is written with a QuerySet update now, which ``auto_now`` does
+    not reach; the list orders by ``updated_at``, so the write sets it itself."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    earlier = timezone.now() - timedelta(hours=1)
+    Deployment.objects.filter(pk=dep.pk).update(updated_at=earlier)
+
+    accept_transition(dep, to_decision=D.READY)
+
+    assert Deployment.objects.get(pk=dep.pk).updated_at > earlier

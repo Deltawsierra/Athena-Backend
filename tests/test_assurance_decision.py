@@ -149,8 +149,7 @@ def test_recompute_preserves_an_operator_pause():
     admin = _user("boss", role=User.Roles.ADMIN)
     dep = _deployment(admin)
     _finding(dep, "medium", n="me")
-    dep.decision = Deployment.Decision.PAUSED
-    dep.save(update_fields=["decision"])
+    recompute_decision(dep, paused=True)  # the operator's pause, as the failsafe sets it
 
     factory = APIRequestFactory()
     view = DeploymentViewSet.as_view({"post": "recompute"})
@@ -182,8 +181,7 @@ def test_recompute_form_encoded_paused_false_lifts_pause():
     admin = _user("boss", role=User.Roles.ADMIN)
     dep = _deployment(admin)
     _finding(dep, "medium", n="me")
-    dep.decision = Deployment.Decision.PAUSED
-    dep.save(update_fields=["decision"])
+    recompute_decision(dep, paused=True)  # the operator's pause, as the failsafe sets it
 
     factory = APIRequestFactory()
     view = DeploymentViewSet.as_view({"post": "recompute"})
@@ -200,8 +198,7 @@ def test_recompute_form_encoded_paused_false_lifts_pause():
     assert dep.decision == Deployment.Decision.READY_RESTRICTED
 
     # A JSON boolean false lifts it too (parity with the form path).
-    dep.decision = Deployment.Decision.PAUSED
-    dep.save(update_fields=["decision"])
+    recompute_decision(dep, paused=True)  # the operator's pause, as the failsafe sets it
     jlift = factory.post(
         f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": False}, format="json"
     )

@@ -33,6 +33,10 @@ from django.db.models import QuerySet
 from django.db.models.signals import post_delete, post_migrate, post_save, pre_save
 from django.dispatch import receiver
 
+# A plain constant; the models module is loaded before `AppConfig.ready` imports
+# this one, so importing it here changes no loading order.
+from .models import DECISION_OWNED_FIELDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -209,10 +213,12 @@ DECISION_COLUMNS = {
     "assurance.Finding": frozenset({"deployment", "deployment_id", "status", "severity"}),
 }
 
-#: The Deployment columns the refresh itself writes. A save touching only these
-#: is the refresh's own (`revision.accept_transition`), and scheduling another
-#: refresh on it would recompute for ever.
-_DECISION_OWN_FIELDS = frozenset({"decision", "decision_revision", "decision_keyring", "updated_at"})
+#: The Deployment columns that are the refresh's output rather than an input to
+#: it. The refresh writes the decision columns with a QuerySet update, which sends
+#: no signal, and `Deployment.save` refuses to write them at all
+#: (`models.DECISION_OWNED_FIELDS`); what remains is a save that touches only
+#: `updated_at`, which moves nothing either.
+_DECISION_OWN_FIELDS = DECISION_OWNED_FIELDS | {"updated_at"}
 
 
 def writes_a_decision_input(instance, update_fields) -> bool:

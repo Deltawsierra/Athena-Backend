@@ -37,6 +37,7 @@ about.
 from __future__ import annotations
 
 from django.db import transaction
+from django.utils import timezone
 
 from .models import DecisionTransition, Deployment
 
@@ -111,10 +112,7 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
 
         from_decision = locked.decision
         revision = locked.decision_revision + 1
-
-        locked.decision = to_decision
-        locked.decision_revision = revision
-        locked.save(update_fields=["decision", "decision_revision", "updated_at"])
+        _write(locked, to_decision, revision)
 
         # In the SAME transaction, which is the whole mechanism: a decision whose
         # transition is missing, or a transition whose decision never landed,
@@ -132,6 +130,21 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
     deployment.decision = to_decision
     deployment.decision_revision = revision
     return {"decision": to_decision, "revision": revision, "changed": True}
+
+
+def _write(locked: Deployment, decision, revision) -> None:
+    """Write the decision columns: the refresh's own write, and the only one.
+
+    A QuerySet update under the row lock the caller holds. ``Deployment.save``
+    refuses these columns (see :data:`~assurance.models.DECISION_OWNED_FIELDS`), so
+    no instance loaded before a transition can write the decision it holds back
+    over this one.
+    """
+    Deployment.objects.filter(pk=locked.pk).update(
+        decision=decision, decision_revision=revision, updated_at=timezone.now()
+    )
+    locked.decision = decision
+    locked.decision_revision = revision
 
 
 def transitions_since(deployment: Deployment, revision: int):
