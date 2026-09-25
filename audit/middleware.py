@@ -702,8 +702,15 @@ def _text_value(scan, start, separator_at, separator):
 # reported. And its value is text the scan used to read on through, where the
 # key after it could open -- `{"otp": "a", session id": ["b"], secret key":
 # "S3CR3T"}` -- so the walk back goes on into the value of each key that opens
-# before where the scan has read to (see _text_redaction).
+# before where the scan has read to (see _text_redaction). The quote a value
+# ends on may have closing brackets, a comma or blanks after it in that value --
+# `{"otp": ["a"], session id": "S3CR3T"}` forwarded S3CR3T as cleanly inspected
+# as well, where `"q"` in place of `"otp"` had it redacted (see _last_quote).
 _KEY_CLOSE = re.compile(r"([\"'])\s*+([:=])\s*+")
+
+
+# What a value may hold after the quote it ends on (see _last_quote).
+_AFTER_LAST_QUOTE = frozenset(" \t\r\n,)]}")
 
 
 def _escaped(text, index, floor):
@@ -880,11 +887,18 @@ def _held(scan, quote):
     return end, True
 
 
-def _ends_on_a_quote(scan, end):
-    """Whether the character before ``end`` is a quote no backslash escapes: one
-    that closes a string, and so may open a key."""
-    quote = scan.text[end - 1]
-    return quote in _QUOTES and scan.next(quote, end - 1) == end - 1
+def _last_quote(scan, end):
+    """Where the quote is that a value ending at ``end`` ends on -- past any closing
+    brackets, commas and blanks after it, as in `["a"]` or `'a',` -- if no
+    backslash escapes it: one that closes a string, and so may open a key. Else
+    ``end``."""
+    text = scan.text
+    index = end
+    while index > 0 and text[index - 1] in _AFTER_LAST_QUOTE:
+        index -= 1
+    if index > 0 and text[index - 1] in _QUOTES and scan.next(text[index - 1], index - 1) == index - 1:
+        return index - 1
+    return end
 
 
 def _text_redaction(text):
@@ -919,8 +933,8 @@ def _text_redaction(text):
     out = []
     pos = 0
     # Where a quoted key may open (see _QuotedKeys): ``pos``, or the quote before
-    # it that the value last redacted ended on -- and there still while each key
-    # read after it opens before ``pos``.
+    # it that the value last redacted ended on (see _last_quote) -- and there
+    # still while each key read after it opens before ``pos``.
     lower = 0
     doubtful = False
     quoted = _QuotedKeys(text)
@@ -957,7 +971,7 @@ def _text_redaction(text):
         out.append(text[pos:key_start])
         out.append(f"{key_text}: {REDACTED}")
         if not reread:
-            lower = end - 1 if _ends_on_a_quote(scan, end) else end
+            lower = _last_quote(scan, end)
         pos = end
         doubtful = doubtful or not certain or reread
     out.append(text[pos:])

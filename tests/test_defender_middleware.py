@@ -2019,3 +2019,56 @@ def test_the_key_after_one_read_from_that_quote_still_opens_in_its_value(text, e
     before the key was read from the quote, and forwarded by a scan that then
     read back no further than the value it had just taken."""
     assert _outcome(text) == (expected, True)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The quote a secret's value ends on, with closing brackets after it in
+        # that value ...
+        (
+            '{"otp": ["a"], session id": "S3CR3T"}',
+            ('{"otp": [redacted], session id": [redacted]}', True),
+        ),
+        (
+            '{"password": {"k": "a"}, secret key": "S3CR3T"}',
+            ('{"password": [redacted], secret key": [redacted]}', True),
+        ),
+        (
+            'otp: ["a"]\nsession id": S3CR3T\nq: UNION SELECT',
+            ('otp: [redacted]\nsession id": [redacted]\nq: UNION SELECT', True),
+        ),
+        ('pwd=("a")\nsession id": S3CR3T', ('pwd: [redacted]\nsession id": [redacted]', True)),
+        # ... and blanks or line breaks before them ...
+        (
+            '{"otp": ["a" ], session id": "S3CR3T"}',
+            ('{"otp": [redacted], session id": [redacted]}', True),
+        ),
+        (
+            '{"otp": ["a"\n], session id": "S3CR3T"}',
+            ('{"otp": [redacted], session id": [redacted]}', True),
+        ),
+        # ... or a comma, in a value that runs to the end of its line ...
+        (
+            "pwd=V1,\"client secret\": 'V2',\r\nsecret key' : \"S3CR3T\"",
+            ("pwd: [redacted]\r\nsecret key': [redacted]", True),
+        ),
+        # ... and after a run of backslashes that escapes none of it.
+        (
+            'pwd=a\\\\"]\nsession id": S3CR3T',
+            ('pwd: [redacted]\nsession id": [redacted]', True),
+        ),
+        # A key read from that quote that names nothing costs nothing, and a quote
+        # a backslash escapes opens no key.
+        (
+            '{"otp": ["a"], name": "UNION SELECT"}',
+            ('{"otp": [redacted], name": "UNION SELECT"}', False),
+        ),
+        ('pwd=a\\"]\nsession id": keep', ('pwd: [redacted]\nsession id": keep', False)),
+    ],
+)
+def test_a_lost_quote_key_opens_on_the_quote_a_secrets_list_ends_on(text, expected):
+    """`{"q": ["a"], session id": "S3CR3T"}` was redacted; with `"otp"` in place of
+    `"q"` the scan had read past the list, and past the quote that closed "a",
+    which the key opens on -- and S3CR3T was forwarded as cleanly inspected."""
+    assert _outcome(text) == expected
