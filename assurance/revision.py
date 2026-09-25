@@ -365,7 +365,8 @@ def bring_up_to_its_log(pk) -> tuple[str | None, int]:
     recorded when it was made.
 
     Not a recompute: it decides nothing, so it reads nothing the decision rule
-    reads -- not the findings, and not the outcome keyring.
+    reads -- not the findings, and not the outcome keyring. The read path and the
+    upgrade repair (``signals.repair_decisions_behind_their_log``) both take it.
     """
     with transaction.atomic():
         locked = Deployment.objects.select_for_update().get(pk=pk)

@@ -621,6 +621,65 @@ def test_the_upgrade_brings_every_row_behind_its_log_level_and_keeps_its_pause(c
     assert _errors(caplog) == []
 
 
+def _a_critical_finding_no_refresh_saw(dep):
+    """An input moved with no refresh behind it: bulk_create sends no signal, so a
+    recompute of ``dep`` WOULD move its decision now."""
+    Finding.objects.bulk_create(
+        [Finding(deployment=dep, fingerprint="fp", finding_type="t", title="T", severity="critical")]
+    )
+
+
+def test_the_upgrade_repair_decides_nothing(monkeypatch):
+    """A migrate brings a row up to the decision its log records and computes
+    none. It runs wherever the schema is upgraded, which need not be where the
+    outcome keyring is installed; a recompute there recorded a decision computed
+    without the keyring as the next transition. Here the keyring cannot be read and
+    the inputs have moved: the row is brought to the READY its log records at 3,
+    and nothing is recorded."""
+    from assurance import decision as decision_module
+    from assurance import observed_outcomes
+
+    dep = _scanned_ready()
+    recompute_decision(dep, paused=True)
+    recompute_decision(dep, paused=False)
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.PAUSED, decision_revision=2)
+    _a_critical_finding_no_refresh_saw(dep)
+    log = _log(dep)
+
+    def decided(*args, **kwargs):
+        raise AssertionError("the upgrade repair computed a decision")
+
+    monkeypatch.setattr(observed_outcomes, "trusted_keyring", decided)
+    monkeypatch.setattr(decision_module, "compute_decision", decided)
+    signals.repair_decisions_behind_their_log(sender=_assurance(), using="default")
+
+    assert _row(dep) == (D.READY, 3)
+    assert _log(dep) == log
+
+
+def test_an_unrelated_migrate_recomputes_no_row_level_with_its_log(django_assert_num_queries):
+    """A row level with or ahead of its log, or with no log at all, is not touched
+    -- not even locked: the one query that finds nothing behind is all a migrate
+    costs, and a level row whose inputs moved without a refresh keeps the decision
+    it holds."""
+    level = _scanned_ready()
+    _a_critical_finding_no_refresh_saw(level)
+    ahead = _scanned_ready()
+    Deployment.objects.filter(pk=ahead.pk).update(decision_revision=7)
+    unlogged = Deployment.objects.create(name="unlogged", owner=_owner())
+    deployments = (level, ahead, unlogged)
+    rows = {dep.pk: _row(dep) for dep in deployments}
+    logs = {dep.pk: _log(dep) for dep in deployments}
+
+    with django_assert_num_queries(1):
+        signals.repair_decisions_behind_their_log(
+            sender=_assurance(), using="default", apps=live_apps
+        )
+
+    assert {dep.pk: _row(dep) for dep in deployments} == rows
+    assert {dep.pk: _log(dep) for dep in deployments} == logs
+
+
 def test_a_migrate_repairs_a_row_behind_its_log():
     """End to end, as an upgrade runs it: ``post_migrate`` after the plan."""
     dep = _paused_beneath_its_log()

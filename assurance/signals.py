@@ -177,8 +177,8 @@ def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
 
 @receiver(post_migrate, dispatch_uid="assurance_repair_decisions_behind_their_log")
 def repair_decisions_behind_their_log(sender, using=None, apps=None, **kwargs):
-    """Recompute every deployment whose stored decision is behind its own
-    transition log (``decision_revision`` below the log's latest revision).
+    """Bring every deployment whose stored decision is behind its own transition
+    log (``decision_revision`` below the log's latest revision) up to it.
 
     Such a row is legacy data only -- the stale full save before ``Deployment.save``
     stopped writing the decision columns, or ``loaddata`` of a fixture dumped
@@ -187,27 +187,32 @@ def repair_decisions_behind_their_log(sender, using=None, apps=None, **kwargs):
     records (``revision.hold_to_its_log``); this brings the rows themselves level
     at the upgrade, so no read is left to do it.
 
-    Through ``recompute_decision``, the one writer: under the row lock, FROM the
-    decision the log records, keeping the operator's pause as the log records it.
-    A row level with or ahead of its log is not touched, so an unrelated
-    ``migrate`` moves no decision. Keyed on the data, like the receiver above, so a
-    re-run after a failed ``migrate`` still finds what it has not repaired.
+    The repair every read makes, ``revision.bring_up_to_its_log``: through the one
+    writer, under the row lock, the no-op move TO the decision the log records --
+    the operator's pause as the log records it -- and nothing new recorded. Not a
+    recompute: a ``migrate`` decides nothing. It runs wherever the schema is
+    upgraded, which need not be where the outcome keyring is installed, and a
+    recompute there recorded a decision computed without the keyring as the next
+    transition. A row level with or ahead of its log is not touched -- not even
+    locked -- so an unrelated ``migrate`` moves no decision. Keyed on the data, like
+    the receiver above, so a re-run after a failed ``migrate`` still finds what it
+    has not repaired.
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
     from django.db.models import F
 
-    from .decision import recompute_decision
     from .models import Deployment
-    from .revision import logged_head
+    from .revision import bring_up_to_its_log, logged_head
 
     behind = (
         Deployment.objects.annotate(**logged_head())
         .filter(logged_revision__gt=F("decision_revision"))
         .order_by("pk")
+        .values_list("pk", flat=True)
     )
-    for deployment in behind:
-        recompute_decision(deployment)
+    for pk in behind:
+        bring_up_to_its_log(pk)
 
 
 # ---------------------------------------------------------------------------
