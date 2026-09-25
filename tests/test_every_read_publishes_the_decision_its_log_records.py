@@ -36,7 +36,7 @@ from django.core.management import call_command
 from django.db import OperationalError, connection
 from django.db.migrations.state import ProjectState
 from django.db.models import QuerySet
-from django.test import RequestFactory
+from django.test import Client, RequestFactory
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -458,6 +458,31 @@ def test_the_admin_list_shows_the_pause_the_log_records_and_writes_nothing():
 
     assert model_admin.decision_in_force(row) == D.PAUSED.label
     assert _row(dep) == (D.READY, 1)
+
+
+def test_the_admin_change_form_shows_the_pause_the_log_records_and_writes_nothing():
+    """The page an operator opens to check a pause shows the decision in force and
+    its revision -- not the stored columns, which on a row behind its log hold the
+    READY beneath the pause at revision 1. A read: it repairs nothing."""
+    dep = _paused_beneath_its_log()
+    web = Client()
+    web.force_login(User.objects.create_superuser(username="root", password="x", email="r@x.io"))
+
+    response = web.get(f"/admin/assurance/deployment/{dep.pk}/change/")
+
+    assert response.status_code == 200
+    shown = {
+        field.field["name"]: field.contents()
+        for fieldset in response.context["adminform"]
+        for line in fieldset
+        for field in line
+        if field.is_readonly
+    }
+    assert (shown["decision_in_force"], shown["revision_in_force"]) == (D.PAUSED.label, "2")
+    assert "decision" not in shown and "decision_revision" not in shown, shown
+    assert _row(dep) == (D.READY, 1)
+    # And the form for a new deployment, which has no log, still renders.
+    assert web.get("/admin/assurance/deployment/add/").status_code == 200
 
 
 # ---------------------------------------------------------------------------

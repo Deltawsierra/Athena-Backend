@@ -107,27 +107,52 @@ class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     # keeps a save from writing them back, though: `save_model` saves the whole
     # instance, and an instance loaded before a recompute holds the decision from
     # before it. `Deployment.save` leaves these columns out of every UPDATE.
-    readonly_fields = ("decision", "decision_revision", "decision_keyring")
+    readonly_fields = (
+        "decision",
+        "decision_revision",
+        "decision_keyring",
+        "decision_in_force",
+        "revision_in_force",
+    )
     # The decision cannot be typed in here, and it must not be left behind either:
     # `evidence_incomplete` and `last_complete_scan_at` are inputs to it.
     decision_deployment_lookup = "pk"
 
     def get_queryset(self, request):
-        # The head of each row's transition log, in the list's one query.
+        # The head of each row's transition log, in the list's one query -- and in
+        # the change form's, which reads its row through this queryset.
         return super().get_queryset(request).annotate(**logged_head())
+
+    def get_fields(self, request, obj=None):
+        # The change form shows the decision IN FORCE and its revision, not the
+        # stored columns: on a row behind its transition log those hold the stale
+        # READY beneath a logged pause, on the page an operator opens to check the
+        # pause. Still read-only above, which keeps them off the form.
+        stored = {"decision", "decision_revision"}
+        return [name for name in super().get_fields(request, obj) if name not in stored]
+
+    @staticmethod
+    def _in_force(obj):
+        return in_force_of(
+            obj.decision,
+            obj.decision_revision,
+            getattr(obj, "logged_revision", None),
+            getattr(obj, "logged_decision", None),
+        )
 
     @admin.display(description="decision", ordering="decision")
     def decision_in_force(self, obj):
         """The decision in force, as every published read has it: a row behind its
         transition log shows what the log records -- a logged pause as the pause,
         not the READY the stale row holds. A read: it repairs nothing."""
-        decision, _revision = in_force_of(
-            obj.decision,
-            obj.decision_revision,
-            getattr(obj, "logged_revision", None),
-            getattr(obj, "logged_decision", None),
-        )
+        decision, _revision = self._in_force(obj)
         return Deployment.Decision(decision).label if decision else "-"
+
+    @admin.display(description="decision revision")
+    def revision_in_force(self, obj):
+        """The revision of the decision in force: the log's, for a row behind it."""
+        _decision, revision = self._in_force(obj)
+        return revision
 
 
 @admin.register(Finding)
