@@ -1383,6 +1383,11 @@ def _fit(unit, size, head="", tail=""):
         pytest.param(', password: "a;b"', "api_key=a", "", id="strings-inside-an-equals-value"),
         pytest.param("[", "password=a, ", None, id="groups-nested-inside-a-value"),
         pytest.param("\n", "password:", "", id="a-separator-then-line-breaks"),
+        # A key the line break splits from its value, on every line of one value.
+        pytest.param("x password:\n", "token: ", "", id="keys-split-from-their-values"),
+        pytest.param("x 'my session id':\n", "token: ", "", id="quoted-keys-split-from-their-values"),
+        pytest.param("a]secret:\n", "session_id: #[", "", id="runs-split-from-their-values"),
+        pytest.param("b password\n: ", "token: a ", "", id="separators-past-the-break"),
     ],
 )
 def test_the_text_pass_is_linear_in_the_prefix_for_any_shape(unit, head, tail):
@@ -1576,3 +1581,114 @@ def test_no_secret_survives_and_no_separate_field_is_dropped_unsaid():
             silent.append((text, out))
     assert leaks == []
     assert silent == []
+
+
+# ---- Round 9: a key the line break splits from its value. ----
+
+
+@pytest.mark.parametrize(
+    ("body", "forwarded"),
+    [
+        ("Token: 9f8e7d6c Password:\nhunter2\nNote: please reset", "Token: [redacted]\nNote: please reset"),
+        ("api_key=abc123 password=\nhunter2", "api_key: [redacted]"),
+    ],
+)
+def test_a_swallowed_keys_value_on_the_next_line_never_reaches_the_engine(
+    factory, middleware, caplog, body, forwarded
+):
+    """Two labels on one line and the second one's value on the next, as pasted
+    credential notes are written. The first value stopped at the line break and
+    swallowed the second key, whose blanks the break cut short; the scan went on
+    after the break and never read that key. hunter2 reached the engine, and the
+    body was called cleanly inspected."""
+    post = engine_says()
+    with (
+        caplog.at_level(logging.WARNING, logger="audit.middleware"),
+        mock.patch("audit.middleware.requests.post", post),
+    ):
+        middleware()(factory.post("/api/x/", data=body, content_type="text/plain"))
+    assert post.call_args.kwargs["json"]["body"] == forwarded
+    assert "hunter2" not in logged(caplog)
+    assert (
+        "request body could not be fully inspected: a value after a sensitive key had "
+        "no certain end and was redacted to the end of its line"
+    ) in logged(caplog)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Blank lines, and blanks that are no line break, between key and value;
+        # and a line break of either kind.
+        "Token: a Password:\n\n  \nS3CR3T\nq: UNION SELECT",
+        "Token: a Password:\n\x0c\nS3CR3T\nq: UNION SELECT",
+        "Token: a Password:\r\nS3CR3T\r\nq: UNION SELECT",
+        "Token: a Password:\rS3CR3T\rq: UNION SELECT",
+        # A string or a group opening the value, over lines -- whatever blank
+        # stands before it.
+        "Token: a Password:\n'S3CR3T\nS3CR3T'\nq: UNION SELECT",
+        "Token: a Password:\n\xa0'x\nS3CR3T'\nq: UNION SELECT",
+        "Token: a Password:\n[\n  'S3CR3T'\n]\nq: UNION SELECT",
+        # A value that is itself such a key.
+        "Token: a Password:\nSecret:\nS3CR3T\nq: UNION SELECT",
+        # A quoted key only the quoted reading finds sensitive, escapes and all.
+        'Cookie: abc "session id":\nS3CR3T\nq: UNION SELECT',
+        'api_key=a "p\\u0061ssword":\nS3CR3T\nq: UNION SELECT',
+        # A key that lost its opening quote.
+        'Token: a secret":\nS3CR3T\nq: UNION SELECT',
+        # The separator after the break, where a key's blanks may put it too.
+        "Token: a password\n: S3CR3T\nq: UNION SELECT",
+        'Cookie: abc "session id"\n= S3CR3T\nq: UNION SELECT',
+        # A key whose run of key characters began before where the value was read
+        # on from: a `]` the value stopped at, or the quote that closed it.
+        "session_id: a#[x]secret:\nS3CR3T\nq: UNION SELECT",
+        "token: a[pass]x:\nS3CR3T\nq: UNION SELECT",
+        "token: [a]pass:\nS3CR3T\nq: UNION SELECT",
+        'token:"session_id":\nS3CR3T\nq: UNION SELECT',
+        # ... and a quoted key the value stopped inside.
+        "token: a 'pass ]x':\nS3CR3T\nq: UNION SELECT",
+        # A closing bracket that does not end cleanly, after a blank on its line:
+        # the scan reads that line as the key's value anywhere. (Indented no
+        # deeper than the key, so it is not carried over as a continuation.)
+        "  Token: a password:\n  ]S3CR3T\n  q: UNION SELECT",
+        # In a value already redacted to the end of its line.
+        "api_key=a, password: b; c pwd:\nS3CR3T\nq: UNION SELECT",
+        # A string that opens before the key, where an element starts, is still
+        # followed to where it closes, past the key's value.
+        "token=a, 'x pass:\nS3CR3T\nS3CR3T'\nq: UNION SELECT",
+    ],
+)
+def test_a_key_split_from_its_value_by_a_line_break_is_still_read(text):
+    """The value runs on through the line the key's value is on, as the scan reads
+    that value anywhere else, and the line after it is kept."""
+    redacted, doubtful = _outcome(text)
+    assert "S3CR3T" not in redacted
+    assert redacted.endswith("q: UNION SELECT")
+    assert doubtful is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A key that names nothing: the next line is its value, and kept.
+        ("Token: a Username:\nbob\nq: UNION SELECT", ("Token: [redacted]\nbob\nq: UNION SELECT", False)),
+        # A sensitive key with nothing after it but blanks or a delimiter has no
+        # value to lose, as the scan reads `password:` anywhere else.
+        ("Token: a password:\n", ("Token: [redacted]\n", False)),
+        ("Token: a password:\n, q: UNION SELECT", ("Token: [redacted]\n, q: UNION SELECT", False)),
+        # ... nor with a closing bracket, unless a blank on its line is before it
+        # and it does not end cleanly -- and not when the break is right before it.
+        ("Token: a password:\n}keep", ("Token: [redacted]\n}keep", False)),
+        ("  token: a password:\n  }\n  q: UNION SELECT", ("  token: [redacted]\n  }\n  q: UNION SELECT", False)),
+        ("token: a password\n:]keep", ("token: [redacted]\n:]keep", False)),
+        # An escaped quote closes no key.
+        ('Token: a \\"session id\\":\nkeep', ("Token: [redacted]\nkeep", False)),
+        ('Token: a "session id\\":\nkeep', ("Token: [redacted]\nkeep", False)),
+        # A quote on an earlier line opens no key: the scan read past it, in the
+        # value before, and never reads a quoted key back to it.
+        ("password: it's\nToken: abc Username':\nbob", ("password: [redacted]\nToken: [redacted]\nbob", False)),
+    ],
+)
+def test_a_split_key_that_holds_no_value_costs_nothing(text, expected):
+    assert _outcome(text) == expected
+

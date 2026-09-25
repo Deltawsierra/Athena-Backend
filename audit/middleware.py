@@ -335,6 +335,107 @@ def _starts_element(text, index):
     return index < 0 or text[index] in ":=[{(,;&\r\n"
 
 
+# What a key's separator is followed by before its value: blanks and line breaks
+# alike, as the trailing `\s*` of _TEXT_KEY and _KEY_CLOSE reads them.
+_BLANKS = re.compile(r"\s*+")
+
+
+def _value_after(text, index, separator):
+    """Where the value of a key whose ``separator`` ends at ``index`` begins, read
+    past blanks and line breaks as the scan reads a key; ``None`` if nothing there
+    can hold more than blanks.
+
+    Mirrors _text_value, which also tries each position back to the separator:
+    after a stop, the only earlier start that holds more than blanks is a blank
+    on the stop's own line before a closing bracket that does not end cleanly --
+    `password:\\n ]SECRET` is redacted to the end of that line."""
+    value = _BLANKS.match(text, index).end()
+    if value == len(text):
+        return None
+    char = text[value]
+    if char not in _STOPS[separator]:
+        return value
+    if (
+        char in _CLOSERS
+        and value > index
+        and text[value - 1] not in "\r\n"
+        and _CLEAN_END.match(text, value) is None
+    ):
+        return value
+    return None
+
+
+# One character of a token key, as _TEXT_KEY reads them.
+_KEY_CHAR = re.compile("[" + _KEY_CHARS + "]", re.I)
+
+
+def _key_across(scan, start, end):
+    """A sensitive key that the line break at ``end`` splits from its value, ending
+    in the text from ``start``: ``(separator, index past it)``, else ``None``.
+
+    The scan reads the key after a value only from where the value ends, so a key
+    split from its own value by the line break the value stops at was read by
+    nothing, and its value -- the next line -- went through, reported as nothing:
+    `Token: 9f8e7d6c Password:\\nhunter2`. Read here as the scan reads a key
+    anywhere else, since nothing else will:
+
+    - its separator in this value, or its last character, with the separator
+      after the break -- the blanks around a separator are the only part of a key
+      a line break can fall in;
+    - a token key as _TEXT_KEY reads one: the whole run of key characters, back
+      to where it began, which may be before ``start``. A value read on from a
+      `]` it stopped at, or from the quote that closed it, begins inside the run:
+      `session_id: a#[x]secret:\\n...`, `token:"session_id":\\n...`;
+    - a quoted key as _QuotedKeys reads one: `Cookie: abc "session id":\\n...`
+      -- only the quoted reading sees a secret in "session id", whose last word
+      names nothing. Its opening quote is looked for on its closing quote's line
+      only: a quote on an earlier line is one the scan has read past, and the
+      scan never reads a quoted key back past where it has read to.
+
+    Linear: it looks back over the blanks before one separator, one run of key
+    characters and one line's stretch back to a quote, and forward over the
+    blanks after one line break. A separator or a line break ends a constant
+    number of values -- the value it is in and the readings of that same line --
+    so each of those is looked at a constant number of times."""
+    text = scan.text
+    before = end
+    while before > start and text[before - 1].isspace():
+        before -= 1
+    if before > start and text[before - 1] in ":=":
+        separator, past = text[before - 1], before
+        last = before - 1
+        while last > 0 and text[last - 1].isspace():
+            last -= 1
+        last -= 1
+    elif before > start:
+        after = _BLANKS.match(text, end).end()
+        if after == scan.length or text[after] not in ":=":
+            return None
+        separator, past = text[after], after + 1
+        last = before - 1
+    else:
+        return None
+    if last < 0:
+        return None
+    # The token reading: the run, and a closing quote after it if there is one.
+    run_end = last if text[last] in _QUOTES else last + 1
+    run_start = run_end
+    while run_start > 0 and _KEY_CHAR.match(text, run_start - 1):
+        run_start -= 1
+    if run_start < run_end and _is_sensitive_key(text[run_start:run_end]):
+        return separator, past
+    # The quoted reading.
+    if text[last] not in _QUOTES:
+        return None
+    line = scan.line_start(last)
+    if _escaped(text, last, line):
+        return None
+    opening = _opening_quote(text, last, line)
+    if opening < 0 or not _is_sensitive_key(_decoded_name(text[opening:last + 1])):
+        return None
+    return separator, past
+
+
 def _unquoted_end(scan, start, stops):
     """Where an unquoted value from ``start`` ends, as ``(end, held)``: at the first
     of ``stops`` -- the delimiters after a separator, or "line" for a line break
@@ -364,6 +465,13 @@ def _unquoted_end(scan, start, stops):
       opened it.
     - A sensitive key inside the value is still a key: if its own value would
       run past this one's end, this one swallowed it.
+    - So is one that the line break ending the value splits from its own value
+      (_key_across): `Token: 9f8e7d6c Password:\\nhunter2` stopped at the line
+      break, where Password's blanks were cut short, and hunter2 -- which the
+      scan reads as Password's value anywhere else -- went through, reported as
+      nothing. Such a value is held, and runs on through the line its key's
+      value starts on, read as the rest of the value is; a quote or bracket
+      where that value starts opens something whatever stands before it.
 
     ``held`` says the value swallowed another pair, so where it stops is not
     certain.
@@ -371,7 +479,9 @@ def _unquoted_end(scan, start, stops):
     Linear: each quote or bracket is looked at once and a string's end is a
     lookup; a group is followed only from outside every group already followed,
     so no text is read by two; keys are searched for from where the last search
-    stopped; and all of it is inside the value returned, which is then redacted.
+    stopped; a key split from its value is read back once for each place the
+    value ends (see _key_across); and all of it is inside the value returned,
+    which is then redacted.
     """
     text = scan.text
     end = scan.next(stops, start)
@@ -379,18 +489,40 @@ def _unquoted_end(scan, start, stops):
     index = start
     at = -1
     grouped = start
+    # Where a swallowed key's value starts on a later line: a quote or bracket
+    # there opens a string or group whatever stands before it, as it does
+    # where the scan reads that value on its own.
+    opens = -1
+    # Where the text a key split from its value can end in begins: the value,
+    # then each such key's value -- so every one found is past the last, and
+    # the read moves on whatever counts as a blank.
+    split = start
     while True:
         # The next quote or bracket that opens something, carried over while the
         # scan has not reached it.
         if at < index:
             at = scan.next("open", index)
-        while at < end and (
+        while at < end and at != opens and (
             not _starts_element(text, at) or (text[at] not in _QUOTES and at < grouped)
         ):
             at = scan.next("open", at + 1)
         key = _TEXT_KEY.search(text, index, min(at, end))
         while key is not None and not _is_sensitive_key(key.group(2)):
             key = _TEXT_KEY.search(text, key.end(), min(at, end))
+        if key is None and at >= end and end < scan.length and text[end] in "\r\n":
+            # No key is left to read before the line break -- but the break may
+            # split one from its value.
+            across = _key_across(scan, split, end)
+            if across is not None:
+                # That value is where the scan would read it: past the break,
+                # on the first line with more than blanks.
+                value = _value_after(text, across[1], across[0])
+                if value is None:
+                    return end, held
+                held = True
+                opens = index = split = value
+                end = scan.line_end(value)
+                continue
         if key is not None:
             # It runs past this value's end if its own would. Then the value is
             # held, and redacted to the end of its line: the key's own value can
