@@ -39,7 +39,7 @@ def write_keyring(path, keys=None) -> None:
 
 
 def record_signed(deployment, workflow, status, observed_at, *, engine="achilles", source="") -> WorkflowChainOutcome:
-    """Record ``status`` for ``workflow`` as a run by ``engine`` observed it, signed."""
+    """Record ``status`` for ``workflow`` as a run by ``engine`` reported it, signed."""
     key = ENGINE_KEYS[engine]
     outcome = oc.build_outcome(
         deployment=str(deployment.uuid),

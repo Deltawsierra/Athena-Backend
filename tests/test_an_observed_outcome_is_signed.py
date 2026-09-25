@@ -3,8 +3,9 @@
 Every chain status claims an exercise, and ``basis: demonstrated`` is the field
 that says a run happened. Until now an operator POST could set it: fifty typed-in
 ``held`` rows marked demonstrated composed to READY with nothing exercised. The
-engines now sign what they observe (Achilles per dispatch, Athena per scan), and
-this suite holds the other half: the only way a demonstrated row reaches the
+engines now sign what they report (Achilles per dispatch, Athena per scan) -- which
+for Achilles is a permit check, not an observed effect; that labelling is pinned in
+``test_a_permit_is_not_an_observation`` -- and this suite holds the other half: the only way a demonstrated row reaches the
 record is a verified envelope, checked for what a signature does NOT prove --
 where it was meant for, whether it was already recorded, and when.
 """
@@ -284,7 +285,9 @@ def test_an_operator_cannot_type_demonstrated():
 
 def test_a_typed_in_held_cannot_make_a_workflow_exercised_and_a_signed_one_can():
     """The case #239 exists for. The same held, twice: typed in, it leaves the
-    workflow unexercised; signed by the engine that observed it, it does not."""
+    workflow unexercised; signed by the engine that reported it, it does not. The
+    signer here is Achilles, so what makes it READY is an authorization check at
+    dispatch, not an observed effect -- the gating the owner has to rule on."""
     dep = _deployment()
     ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="Refund")
     WorkflowChainOutcome.objects.create(

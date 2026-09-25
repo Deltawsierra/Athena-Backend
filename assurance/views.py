@@ -1499,7 +1499,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         APPENDS one or more (admin-only — it writes the shared record).
 
         APPEND, NOT REPLACE, and this is the load-bearing difference from the
-        approved set above. An outcome is an OBSERVATION at an instant.
+        approved set above. An outcome is a REPORT at an instant.
         :mod:`assurance.composition` picks the newest verdict per workflow and
         counts what a re-run superseded; replacing on write would leave exactly one
         outcome per workflow, so supersession would become unreachable and the rule
@@ -1573,7 +1573,13 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         parser_classes=[SafeJSONParser],
     )
     def observed_chain_outcomes(self, request, uuid=None):
-        """Record chain outcomes an engine OBSERVED, from its signed envelopes.
+        """Record chain outcomes from the envelopes an engine SIGNED.
+
+        "Observed" in the path means reported by an engine at an instant, not that
+        an effect was seen: each recorded row is published with its
+        ``evidence_kind``, and one Achilles signed is an ``authorization_check``: a
+        held there means the gate authorized the action at dispatch, which shows the
+        authority chain resolves and not that the effect happened.
 
         The only route that writes ``basis=demonstrated``. The body is one DSSE
         envelope or ``{"envelopes": [...]}``; each is verified against this

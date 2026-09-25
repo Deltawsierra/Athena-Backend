@@ -53,6 +53,8 @@ def _signature(result):
         tuple(sorted(result.basis_census.items())),
         result.unexercised,
         result.held_floored,
+        tuple(sorted(result.evidence_census.items())),
+        result.authorization_checked,
         comp.explain(result),
     )
 

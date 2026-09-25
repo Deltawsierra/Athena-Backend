@@ -473,6 +473,10 @@ def test_the_payload_shapes_are_pinned():
         "basis",
         "basis_label",
         "basis_in_force",
+        # What KIND of evidence the row is, derived from who signed it: a permit
+        # check signed by Achilles must not read as an observed effect.
+        "evidence_kind",
+        "evidence_kind_label",
         "observed_at",
         "recorded_at",
         "source",
@@ -499,6 +503,8 @@ def test_the_payload_shapes_are_pinned():
         "basis_census",
         "workflows_unexercised",
         "unexercised",
+        "evidence_census",
+        "authorization_checked",
         "explanation",
     }
     # All four statuses, always, including the zeros: a census that omits the
@@ -508,6 +514,9 @@ def test_the_payload_shapes_are_pinned():
     # `demonstrated` when nothing was demonstrated reads as a graph that does not
     # track the question rather than one whose answer is none.
     assert set(outcome.data["composition"]["basis_census"]) == set(comp.CHAIN_BASES)
+    # And every evidence kind, `observed_effect` included: its zero is the answer
+    # to "did anything watch an effect happen", and an omitted key is not a zero.
+    assert set(outcome.data["composition"]["evidence_census"]) == set(comp.EVIDENCE_KINDS)
 
 
 def test_the_write_routes_and_the_decision_route_report_one_composition():

@@ -2438,6 +2438,15 @@ class WorkflowChainOutcome(models.Model):
     outcome as unable to supersede anything and impossible to supersede, which is
     the conservative reading; storing a fabricated timestamp to avoid the null
     would hand that rule a fact nobody established.
+
+    WHAT KIND OF EVIDENCE A ROW IS HAS NO COLUMN, deliberately. It follows from
+    who signed the row (:func:`assurance.composition.evidence_kind`, over the
+    basis in force and ``observer_engine``), and a stored copy could disagree with
+    the signature it was copied from. The kind matters because ``held`` does not
+    say it: a row Achilles signed is an authorization check -- the gate authorized
+    the workflow's action at dispatch, which shows the authority chain resolves
+    and does not show the effect happened -- and no row yet records an observed
+    effect. Every route that publishes a row publishes its kind.
     """
 
     #: The four statuses, taken from the rule module rather than re-typed. A
@@ -2499,7 +2508,9 @@ class WorkflowChainOutcome(models.Model):
     # outcome cannot be recorded twice anywhere; the key id says which trusted key
     # signed it, the engine which observer it is bound to, and the digest what the
     # run saw. The envelope is kept whole so the row can be re-verified later
-    # against the bytes that were signed rather than against these columns.
+    # against the bytes that were signed rather than against these columns. The
+    # engine also decides what kind of evidence the row is (see the class
+    # docstring); an Achilles "run" is a dispatch-time permit check, not an effect.
     outcome_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
     observer_engine = models.CharField(max_length=64, blank=True)
     observer_key_id = models.CharField(max_length=64, blank=True)

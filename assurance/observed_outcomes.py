@@ -1,4 +1,4 @@
-"""Chain outcomes an engine observed, taken in only as signed evidence.
+"""Chain outcomes an engine signed, taken in only as signed evidence.
 
 Every chain status in :mod:`assurance.composition` claims an EXERCISE, and until
 now every one of them was written by an operator POST -- including the ones that
@@ -13,6 +13,14 @@ survives with ``basis=demonstrated`` and the evidence that makes it so: the key
 that signed it, the engine it is bound to, the run, and the digest of what the run
 saw. A plain POST can no longer claim ``demonstrated``
 (:class:`~assurance.serializers.WorkflowChainOutcomeSerializer` refuses it).
+
+"OBSERVED" IN THIS MODULE'S NAME AND ROUTE MEANS "REPORTED BY AN ENGINE AT AN
+INSTANT", NOT "AN EFFECT WAS SEEN". What a signed outcome is evidence of depends
+on who signed it (:func:`assurance.composition.evidence_kind`). Achilles signs
+``held`` whenever the gate's dispatch-time permit check passes: the gate
+authorized the workflow's action, which shows the authority chain resolves and
+does not show the effect happened. Nothing that signs outcomes today watches an
+effect, and every surface that publishes a signed outcome says which kind it is.
 
 WHAT A SIGNATURE DOES NOT PROVE, and so what is checked here as well. A valid
 signature says an engine this deployment trusts produced these bytes. It does not
@@ -272,7 +280,9 @@ def basis_in_force(row, keyring, *, deployment_uuid: str | None = None) -> str:
 
     ``demonstrated`` means a run produced the outcome, and the only evidence of a
     run this platform holds is an envelope that verifies now (see
-    :func:`recorded_outcome_is_authentic`). A row that says demonstrated without
+    :func:`recorded_outcome_is_authentic`). What KIND of run -- a permit check, a
+    scan -- is not this function's answer but
+    :func:`assurance.composition.evidence_kind`'s, read from this one. A row that says demonstrated without
     one -- typed in before signed ingest existed, written by any other path, or
     signed by a key since withdrawn -- is read as ``attested``: someone asserted
     it. The column keeps what was written; this is what the rule is told, and
@@ -309,7 +319,7 @@ def _examine(envelope: Any, deployment, keyring, now: datetime) -> tuple[dict | 
     if observed < now - MAX_AGE:
         return None, None, (
             f"observed_at {outcome['observed_at']} is older than the {MAX_AGE.days}-day "
-            "window an observation is accepted in"
+            "window an outcome is accepted in"
         )
     return outcome, verdict.key_id, ""
 

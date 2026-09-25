@@ -13,6 +13,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .change import CHANGE_LABELS, age_days, change_status, is_stale
+from .composition import EVIDENCE_LABELS, evidence_kind
 from .receipt import finding_receipt
 from .models import (
     ApprovedWorkflow,
@@ -479,11 +480,12 @@ class ApprovedWorkflowSerializer(serializers.ModelSerializer):
 class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     """What one exercise of one workflow's authority-to-effect chain established.
 
-    An OBSERVATION, not a declaration, and the difference decides the write shape:
-    outcomes are appended, never replaced. :mod:`assurance.composition` picks the
-    newest verdict per workflow and counts what a re-run superseded, so a
-    replace-on-write would leave exactly one outcome per workflow and make
-    supersession unreachable -- the rule would keep its logic and lose its input.
+    A REPORT AT AN INSTANT, not a standing declaration, and the difference decides
+    the write shape: outcomes are appended, never replaced.
+    :mod:`assurance.composition` picks the newest verdict per workflow and counts
+    what a re-run superseded, so a replace-on-write would leave exactly one outcome
+    per workflow and make supersession unreachable -- the rule would keep its logic
+    and lose its input.
 
     ``workflow`` is a free slug on purpose. It is NOT validated against the
     approved set, because an outcome for a workflow nobody approved is exactly what
@@ -508,6 +510,12 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     attester is a default that invents one, and a poster who did not make that
     claim should not have it made for them. It may not be ``demonstrated``, which
     only a verified signed outcome can establish (see ``validate_basis``).
+
+    ``evidence_kind`` is derived, never posted: what kind of evidence the row is
+    follows from who signed it (:func:`assurance.composition.evidence_kind`). A row
+    Achilles signed is an ``authorization_check`` -- the gate authorized the
+    workflow's action at dispatch, which shows the authority chain resolves and not
+    that the effect happened -- and nothing yet records an ``observed_effect``.
     """
 
     status_label = serializers.CharField(source="get_status_display", read_only=True)
@@ -529,6 +537,12 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     #: row read ``basis: demonstrated, signed: false`` while the graph counted it
     #: attested: two answers about one row, and the more flattering one on it.
     basis_in_force = serializers.SerializerMethodField()
+    #: What kind of evidence the row is, beside what it rests on. ``signed: true``
+    #: with ``basis_in_force: demonstrated`` read as an effect somebody watched
+    #: happen, and for an Achilles row it is a permit check: the reader could not
+    #: tell the two apart from anything on the row.
+    evidence_kind = serializers.SerializerMethodField()
+    evidence_kind_label = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowChainOutcome
@@ -540,6 +554,8 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "basis",
             "basis_label",
             "basis_in_force",
+            "evidence_kind",
+            "evidence_kind_label",
             "observed_at",
             "recorded_at",
             "source",
@@ -577,6 +593,14 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
 
     def get_basis_in_force(self, obj) -> str:
         return self._basis_in_force(obj)
+
+    def get_evidence_kind(self, obj) -> str:
+        # From the basis IN FORCE, never the column: a row whose signature no
+        # longer verifies is attested, and the engine it names vouches for nothing.
+        return evidence_kind(self._basis_in_force(obj), obj.observer_engine)
+
+    def get_evidence_kind_label(self, obj) -> str:
+        return EVIDENCE_LABELS[self.get_evidence_kind(obj)]
 
     def get_signed(self, obj) -> bool:
         return (

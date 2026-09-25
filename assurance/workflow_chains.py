@@ -57,6 +57,11 @@ def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> l
             status=row.status,
             observed_at=row.observed_at,
             basis=_basis_of(row, keyring, deployment_uuid),
+            # Who signed it, so the rule can say what kind of evidence the row is.
+            # Passed whatever the basis: `evidence_kind` reads it only when the
+            # basis in force is demonstrated, i.e. when the signature naming this
+            # engine verifies now.
+            signer=row.observer_engine,
         )
         for row in deployment.chain_outcomes.all()
     ]
@@ -91,13 +96,15 @@ def read_chain_provenance(deployment) -> dict:
     compositional assurance graph assembled entirely by one operator with a REST
     client read exactly like one fed by real campaign runs.
 
-    That is not hypothetical. Across this platform's repositories the only writer
-    of a chain outcome is this app's own admin POST route: no engine, no campaign,
-    no scan and no dispatch writes one. Every composition that exists today rests
-    on hand-entered input, and until now the graph could not say so. A control
-    whose inputs are all typed in is a different control from one that observes,
-    and a reader deciding how much weight to give a `held` needs to be able to
-    tell which they are looking at.
+    That was not hypothetical when this census was written: the only writer of a
+    chain outcome was this app's own admin POST route, and the graph could not say
+    so. Engines now sign outcomes too (:mod:`assurance.observed_outcomes`), and a
+    signed outcome is still not one that watched the effect: Achilles signs the
+    gate's authorization check at dispatch. Typed-in input, permit checks and
+    watched effects make three different controls, and a reader deciding how much
+    weight to give a `held` needs to be able to tell which they are looking at --
+    which ``basis_census`` and ``evidence_census`` say, and a census of free-text
+    sources cannot.
 
     THE CENSUS COUNTS EVERY RECORDED OUTCOME, INCLUDING SUPERSEDED ONES, and that
     is deliberate. The question it answers is "what has ever fed this graph",
@@ -292,6 +299,13 @@ def composition_payload(
         # of the deployment to go and exercise.
         "workflows_unexercised": composition.workflows_unexercised,
         "unexercised": list(composition.unexercised),
+        # What KIND of evidence the standing outcomes are, every kind including the
+        # zeros, and which workflows rest on an authorization check. `demonstrated`
+        # in the basis census says a trusted engine signed; this says what that
+        # engine could see -- and `observed_effect` is always here, at 0 until
+        # something that watches effects signs one.
+        "evidence_census": dict(composition.evidence_census),
+        "authorization_checked": list(composition.authorization_checked),
         "explanation": _explanation(composition, signal),
         # Required rather than defaulted, for the reason this builder exists at
         # all: a default would let a new publisher omit provenance and still
