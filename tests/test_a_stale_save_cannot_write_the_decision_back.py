@@ -11,9 +11,12 @@ receipt published READY over an open critical finding, and every recompute after
 computed revision N+1 again, collided with the transition already recorded there,
 and failed, so nothing could repair it.
 
-The defence: ``Deployment.save`` never writes the decision columns over a stored
-row, and refuses a save that names one. The refresh writes them itself, with a
-QuerySet update under its row lock.
+Two defences, each pinned here on its own:
+
+- ``Deployment.save`` never writes the decision columns over a stored row, and
+  refuses a save that names one;
+- ``accept_transition`` takes the next revision after both the row and its
+  transition log, and repairs -- loudly -- a row that is behind the log.
 """
 
 from __future__ import annotations
@@ -250,6 +253,107 @@ def test_the_admin_saving_an_instance_loaded_before_a_refresh_leaves_the_decisio
 
     assert _owned(dep) == moved
     assert Deployment.objects.get(pk=dep.pk).name == "admin-edited"
+
+
+# ---------------------------------------------------------------------------
+# accept_transition repairs a row behind its transition log
+# ---------------------------------------------------------------------------
+
+
+def _behind_its_log():
+    """READY at 1, then NOT_RECOMMENDED at 2 -- and the row written back to READY at
+    1 beneath the log, the state the stale save left before the model refused it.
+    Planted with a QuerySet update, which the model cannot see."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    accept_transition(dep, to_decision=D.READY)
+    accept_transition(dep, to_decision=D.NOT_RECOMMENDED)
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=1)
+    return dep
+
+
+def _repair_logged(caplog, dep):
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, [r.getMessage() for r in errors]
+    assert errors[0].name == "assurance.revision"
+    message = errors[0].getMessage()
+    assert f"deployment {dep.pk}:" in message and "behind its transition log" in message
+
+
+def test_a_move_from_a_row_behind_its_log_takes_the_revision_after_the_log(caplog):
+    dep = _behind_its_log()
+
+    with caplog.at_level(logging.ERROR):
+        out = accept_transition(dep, to_decision=D.NEEDS_REMEDIATION)
+
+    assert out == {"decision": D.NEEDS_REMEDIATION, "revision": 3, "changed": True}
+    assert read_decision(dep) == {"decision": D.NEEDS_REMEDIATION, "revision": 3}
+    # FROM what the log last recorded, so the sequence consumers drained stays whole.
+    assert _log(dep)[-1] == (3, D.NOT_RECOMMENDED, D.NEEDS_REMEDIATION)
+    _repair_logged(caplog, dep)
+
+
+def test_a_row_behind_a_log_that_already_records_the_decision_is_brought_up_to_it(caplog):
+    dep = _behind_its_log()
+
+    with caplog.at_level(logging.ERROR):
+        out = accept_transition(dep, to_decision=D.NOT_RECOMMENDED)
+
+    assert out == {"decision": D.NOT_RECOMMENDED, "revision": 2, "changed": True}
+    assert read_decision(dep) == {"decision": D.NOT_RECOMMENDED, "revision": 2}
+    assert (dep.decision, dep.decision_revision) == (D.NOT_RECOMMENDED, 2)
+    assert len(_log(dep)) == 2, "the move was recorded when it happened; nothing new"
+    _repair_logged(caplog, dep)
+
+
+def test_a_row_behind_its_log_holding_the_decision_computed_is_not_a_no_op(caplog):
+    """The stale row already says READY and READY is what was computed -- but the
+    log says the decision in force is NOT_RECOMMENDED, and that is what every
+    consumer was told. Returning "unchanged" would leave the row beneath its log
+    for good; the move back to READY is a real one and gets its own revision."""
+    dep = _behind_its_log()
+
+    with caplog.at_level(logging.ERROR):
+        out = accept_transition(dep, to_decision=D.READY)
+
+    assert out == {"decision": D.READY, "revision": 3, "changed": True}
+    assert read_decision(dep) == {"decision": D.READY, "revision": 3}
+    assert _log(dep)[-1] == (3, D.NOT_RECOMMENDED, D.READY)
+    _repair_logged(caplog, dep)
+
+
+def test_a_row_ahead_of_its_log_is_trusted_and_not_reported(caplog):
+    """A row with a revision and no transitions behind it (a deployment decided
+    before the log existed) is not corruption: the next revision follows the row."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=5)
+
+    with caplog.at_level(logging.ERROR):
+        out = accept_transition(dep, to_decision=D.NOT_RECOMMENDED)
+
+    assert out == {"decision": D.NOT_RECOMMENDED, "revision": 6, "changed": True}
+    assert _log(dep) == [(6, D.READY, D.NOT_RECOMMENDED)]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_a_wedged_deployment_is_repaired_by_the_next_recompute(caplog):
+    """The state the stale save produced before the model refused it: stored READY
+    at a revision the log has moved past, with a critical finding open. The recompute
+    route answered 500 on it for ever; it now repairs it."""
+    dep = _scanned_ready()
+    _critical(dep)
+    recompute_decision(dep)
+    top = dep.decision_revision
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=top - 1)
+
+    client = _client(dep)
+    with caplog.at_level(logging.ERROR):
+        response = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json")
+
+    assert response.status_code == 200, response.content
+    assert response.json()["decision"] == D.NOT_RECOMMENDED
+    assert read_decision(dep) == {"decision": D.NOT_RECOMMENDED, "revision": top}
+    assert one_decision(dep, client) == D.NOT_RECOMMENDED
+    _repair_logged(caplog, dep)
 
 
 # ---------------------------------------------------------------------------

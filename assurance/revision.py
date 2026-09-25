@@ -36,10 +36,14 @@ about.
 
 from __future__ import annotations
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
 from .models import DecisionTransition, Deployment
+
+logger = logging.getLogger(__name__)
 
 
 class StaleDecisionRead(RuntimeError):
@@ -97,21 +101,39 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
     claim-state digest). It is recorded on the transition so a later reader can
     tell whether two decisions that agree were computed from the same evidence --
     a question the decision value alone cannot answer.
+
+    The revision issued is the next one after BOTH the locked row and the
+    transition log. A row found behind its log was written back over by something
+    other than this function; it is repaired from the log and logged at ERROR (see
+    :func:`_in_force`), never crashed on -- a crash here is a deployment no
+    recompute can bring current again.
     """
     with transaction.atomic():
         # Serialises concurrent recomputes on PostgreSQL; a no-op on SQLite, which
         # serialises writers itself. See the module docstring.
         locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
+        stored = (locked.decision, locked.decision_revision)
+        current, at = _in_force(locked)
 
-        if locked.decision == to_decision:
+        if current == to_decision:
+            if (current, at) != stored:
+                # The row was behind its log and the log already records this
+                # decision: bring the row up to it, and record nothing new -- the
+                # move was recorded when it happened.
+                _write(locked, to_decision, at)
+                deployment.decision = to_decision
+                deployment.decision_revision = at
             return {
-                "decision": locked.decision,
-                "revision": locked.decision_revision,
-                "changed": False,
+                "decision": to_decision,
+                "revision": at,
+                # What the stored decision did, which is what a caller asks.
+                "changed": stored[0] != to_decision,
             }
 
-        from_decision = locked.decision
-        revision = locked.decision_revision + 1
+        # The next revision after BOTH the row and its log. The row alone was
+        # trusted, and a row written back beneath its log computed a revision that
+        # was already taken, collided with it, and failed on every recompute after.
+        revision = at + 1
         _write(locked, to_decision, revision)
 
         # In the SAME transaction, which is the whole mechanism: a decision whose
@@ -120,7 +142,7 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
         DecisionTransition.objects.create(
             deployment=locked,
             revision=revision,
-            from_decision=from_decision or "",
+            from_decision=current or "",
             to_decision=to_decision or "",
             basis_digest=basis_digest,
         )
@@ -130,6 +152,38 @@ def accept_transition(deployment: Deployment, *, to_decision, basis_digest: str 
     deployment.decision = to_decision
     deployment.decision_revision = revision
     return {"decision": to_decision, "revision": revision, "changed": True}
+
+
+def _in_force(locked: Deployment):
+    """The decision in force and its revision: the LOCKED row's, unless the row is
+    behind its own transition log -- then the log's, loudly.
+
+    The log is what every consumer draining :func:`transitions_since` was told, and
+    a row whose revision is below the log's latest is a row something wrote back
+    over (a stale instance's full save did, before ``Deployment.save`` stopped
+    writing the decision columns). Crashing on it left the deployment unrepairable
+    through any recompute; trusting the row would issue a revision the log already
+    holds. Repairing from the log keeps the sequence the consumers have seen
+    continuous: the next transition runs FROM what the log last recorded.
+    """
+    latest = (
+        DecisionTransition.objects.filter(deployment_id=locked.pk)
+        .order_by("-revision")
+        .values_list("revision", "to_decision")
+        .first()
+    )
+    if latest is None or latest[0] <= locked.decision_revision:
+        return locked.decision, locked.decision_revision
+    logger.error(
+        "deployment %s: stored decision %r at revision %s is behind its transition log "
+        "(revision %s recorded %r); repairing the row from the log",
+        locked.pk,
+        locked.decision,
+        locked.decision_revision,
+        latest[0],
+        latest[1],
+    )
+    return latest[1] or None, latest[0]
 
 
 def _write(locked: Deployment, decision, revision) -> None:
