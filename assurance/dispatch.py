@@ -272,6 +272,14 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
     # created the ticket on the customer's system under an authority that had been
     # withdrawn, and overwrote the epoch in the same save, so nothing recorded that
     # it had moved.
+    # The epoch in force is the RECONCILED decision. A keyring rotation can leave
+    # the stored one stale, and every surface that publishes the decision
+    # reconciles first -- so without this the fence compared against a decision
+    # the receipt no longer reported, and whether a retry was held depended on
+    # whether some reader had happened to come by first.
+    from .decision import current_decision
+
+    current_decision(finding.deployment)
     moved = _epoch_moved(existing, finding)
     if moved is not None and trigger != DispatchAttempt.Trigger.MANUAL:
         authorized, now = moved

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
-from django.db import DEFAULT_DB_ALIAS, transaction
+from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, transaction
 from django.db.models.signals import post_migrate, post_save
 from django.dispatch import receiver
 
@@ -89,6 +89,17 @@ def auto_dispatch_finding(sender, instance, created, update_fields=None, **kwarg
     schedule_finding_dispatch(instance)
 
 
+def _has_column(using, table, column) -> bool:
+    """Whether ``table`` exists in the database behind ``using`` and has ``column``."""
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    try:
+        with connection.cursor() as cursor:
+            description = connection.introspection.get_table_description(cursor, table)
+    except DatabaseError:
+        return False
+    return any(col.name == column for col in description)
+
+
 @receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
 def recompute_decisions_computed_under_another_rule(sender, using=None, apps=None, **kwargs):
     """Recompute every stored decision with chain outcomes under it that was never
@@ -113,6 +124,9 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     # migration state the signal hands over says whether it is -- asked of the
     # model, not of the recorder table, which a run with no migrations applied
     # (`--nomigrations`, a fresh syncdb) never creates.
+    from .decision import recompute_decision
+    from .models import Deployment, WorkflowChainOutcome
+
     if apps is not None:
         try:
             state = apps.get_model("assurance", "Deployment")
@@ -120,8 +134,11 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
             return
         if not any(f.name == "decision_keyring" for f in state._meta.get_fields()):
             return
-    from .decision import recompute_decision
-    from .models import Deployment, WorkflowChainOutcome
+    elif not _has_column(using, Deployment._meta.db_table, "decision_keyring"):
+        # `flush` sends post_migrate with no migration state at all, so there is
+        # nothing to ask but the database itself -- and a flush of a database
+        # left below the stamp crashed on the column here.
+        return
 
     deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
     for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):

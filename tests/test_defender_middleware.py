@@ -776,3 +776,105 @@ def test_the_quoted_key_pass_visits_each_character_once(unit):
     start = time.perf_counter()
     _redact_quoted_keys(body)
     assert time.perf_counter() - start < 1.0
+
+
+# ---- Round 6: memory, a bounded text pass, and keys after a stray quote. ----
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '"' + "a" * 2_000_000,  # one unterminated string
+        'password: "' + "a" * 2_000_000 + '"',  # one enormous quoted secret
+        '{"k": "' + "a" * 2_000_000 + '", "x": [',  # a string inside text that is not JSON
+    ],
+)
+def test_a_long_string_costs_no_memory_beyond_itself(body):
+    """`"(?:[^"\\\\]|\\\\.)*"` kept backtracking state for every character it matched
+    -- about 120 bytes each -- so one 10 MB string took 1.3 GB before
+    authentication. The possessive pattern keeps none."""
+    import tracemalloc
+
+    from audit.middleware import redact
+
+    tracemalloc.start()
+    try:
+        redact(body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 12 * len(body), f"{peak / len(body):.1f} bytes per character"
+
+
+def test_the_text_pass_is_bounded_and_says_the_body_was_cut():
+    """The text fallback ran over the whole body before the caller kept 64 KiB of
+    it: ten seconds for 10 MB of `"":`. It now redacts a prefix, and reports the cut
+    even when what redaction left would have fit."""
+    from audit.middleware import redact_within
+
+    body = "password=" + "x" * 50 + "&" + '"":' * 100_000
+    text, cut = redact_within(body, limit=1_000)
+    assert cut is True
+    assert len(text) <= 1_000 and "xxxx" not in text
+    assert redact_within(body[:900], limit=1_000)[1] is False
+    # A JSON body is read whole by the structured path, and is not cut.
+    assert redact_within('{"a": "' + "y" * 5_000 + '"}', limit=1_000)[1] is False
+
+
+def test_a_body_redaction_shrinks_under_the_limit_is_still_reported_as_truncated(middleware, factory):
+    """A long secret collapses to the marker, so what is left fits -- but the text
+    pass only read the prefix, and a clean-looking body that was cut is the
+    walk-past-inspection this middleware exists to prevent."""
+    mw = middleware(DEFENDER_MAX_BODY_BYTES=100)
+    body = "password=" + "s" * 10_000 + "\nnote: " + "n" * 10_000
+    request = factory.post("/api/x/", data=body, content_type="text/plain")
+    text, problem = mw._get_body(request)
+    assert "sss" not in text
+    assert problem is not None and "truncated" in problem
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"size": 5", "client secret": "S3CR3T",}',
+        '{"description": "set password: x", "client secret": "S3CR3T",}',
+        '{"size": 5", "p\\u0061ssword": "S3CR3T",}',
+        '{"size": 5", "$password": "S3CR3T",}',
+        '{"note": "a password=hunter2 b",\n"client secret": "S3CR3T",}',
+    ],
+)
+def test_a_stray_quote_costs_nothing_after_it(text):
+    """The quoted-key pass paired quotes from the start of the text, and text on
+    this path is not JSON: one stray quote, or a value the token scan cut short,
+    flipped the pairing and every later key it could not read went through."""
+    from audit.middleware import redact
+
+    assert "S3CR3T" not in redact(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"Password:": "S3CR3T",}',  # a key that ends in the separator
+        '{"Password=": "a,S3CR3T",}',
+        '{"tokens": ["t1", "S3CR3T"],}',  # a list of secrets
+        '{"credentials": {"user": "bob", "key": "S3CR3T"},}',
+        "{'password': 'S3CR3T', 'otp': '12,S3CR3T'}",  # single quotes
+        '{"password\t": "S3CR3T",}',  # a literal tab in the key
+        '{"p\\u0061ssword\\x": "S3CR3T",}',  # a key JSON cannot decode at all
+        '{"client secret": [redacted]S3CR3T,}',  # the marker only begins the value
+        '{"client secret" : "S3CR3T",}',  # whitespace before the colon
+        '{"client secret": "abc\\\nS3CR3T",}',  # an escaped newline inside the value
+        '{"note": "a\\\nb", "client secret": "S3CR3T",}',  # ... and before the key
+    ],
+)
+def test_the_text_path_redacts_what_the_structured_path_would(text):
+    from audit.middleware import redact
+
+    assert "S3CR3T" not in redact(text)
+
+
+def test_a_form_key_is_judged_decoded():
+    from audit.middleware import redact
+
+    assert "S3CR3T" not in redact("p%61ssword=S3CR3T&x=1", form=True)

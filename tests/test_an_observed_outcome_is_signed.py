@@ -1375,3 +1375,157 @@ def test_the_deployment_list_does_not_ask_per_row_whether_a_deployment_has_chain
     few = count(2)
     many = count(8)
     assert many == few, (few, many)
+
+
+# ---- Round 6: the fence, the claim writes, and flush. ----
+
+
+def test_the_dispatch_fence_compares_against_the_reconciled_decision(keyring, settings):
+    """A push authorized while the deployment was READY_RESTRICTED, lost, and
+    reconciled to FAILED; then the keyring rotates, which withdraws the chain
+    evidence under that decision. The automatic retry compared against the STORED
+    decision -- still ready_restricted -- and pushed, while the receipt already said
+    needs_more_evidence. Whether it pushed depended on whether a reader had happened
+    to reconcile first."""
+    import requests.exceptions as rex
+    from cryptography.fernet import Fernet
+
+    from assurance.decision import recompute_decision
+    from assurance.dispatch import dispatch_finding, reconcile_attempt
+    from assurance.models import ConnectorBinding, DispatchAttempt, Finding
+
+    settings.ASSURANCE_CREDENTIAL_KEY = Fernet.generate_key().decode()
+    pushes = []
+
+    class _Timeout:
+        def post(self, url, *, headers, json):
+            raise rex.ReadTimeout("the answer never came back")
+
+    class _Accepting:
+        def post(self, url, *, headers, json):
+            pushes.append(url)
+
+            class _Response:
+                status_code = 201
+                text = '{"key": "SEC-1"}'
+
+                @staticmethod
+                def json():
+                    return {"key": "SEC-1", "id": "1"}
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+
+            return _Response()
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    finding = Finding.objects.create(
+        deployment=dep, fingerprint="fp-fence", finding_type="t", title="T", severity="low"
+    )
+    recompute_decision(dep)
+    authorized = _stored(dep)
+    assert authorized in (Deployment.Decision.READY, Deployment.Decision.READY_RESTRICTED)
+    binding = ConnectorBinding(
+        deployment=dep,
+        connector="jira",
+        enabled=True,
+        endpoint={"base_url": "https://jira.example", "project_key": "SEC"},
+    )
+    binding.set_secret("jira-tok")
+    binding.save()
+
+    first = dispatch_finding(finding, trigger=DispatchAttempt.Trigger.MANUAL, transport_factory=_Timeout)[0]
+    assert first.policy_epoch == authorized
+    reconcile_attempt(first, readback=lambda _op: False)
+    first.refresh_from_db()
+    assert not first.blocks_retry
+
+    keyring.write_text(_rotated_to_a_new_achilles_key())
+    retry = dispatch_finding(
+        Finding.objects.get(pk=finding.pk),
+        trigger=DispatchAttempt.Trigger.SEVERITY,
+        transport_factory=_Accepting,
+    )[0]
+
+    assert pushes == [], "a push went out under an authority the receipt had already withdrawn"
+    assert retry.outcome == DispatchAttempt.Outcome.SKIPPED_EPOCH_MOVED
+    assert _receipt_decision(dep) == _stored(dep) != authorized
+
+
+def _ready_claim(dep):
+    from assurance.claims import derive_claims
+    from assurance.models import AssuranceClaim
+
+    derive_claims(dep)
+    return AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).exclude(
+        status=AssuranceClaim.ClaimStatus.CONTRADICTED
+    ).first()
+
+
+def test_an_operators_contradiction_reaches_the_stored_decision_and_every_surface():
+    """A claim an operator contradicts caps the decision. The transition route
+    wrote the claim and left the stored decision alone, so decision-support
+    computed needs_remediation live under the same revision the detail and the
+    receipt were still publishing READY under: one revision, two decisions."""
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert _stored(dep) == Deployment.Decision.READY
+    claim = _ready_claim(dep)
+    assert claim is not None
+
+    client = _client()
+    moved = client.post(
+        f"/api/assurance/claims/{claim.uuid}/transition/", {"to_status": "contradicted"}, format="json"
+    )
+    assert moved.status_code == 200, moved.content
+
+    support = client.get(f"/api/assurance/deployments/{dep.uuid}/decision-support/").json()
+    detail = client.get(f"/api/assurance/deployments/{dep.uuid}/").json()
+    assert support["decision"] != Deployment.Decision.READY
+    assert support["decision"] == detail["decision"] == _receipt_decision(dep) == _stored(dep)
+    assert support["revision"] == detail.get("decision_revision", support["revision"])
+
+
+def test_re_deriving_the_claims_refreshes_the_stored_decision(monkeypatch):
+    """The recompute-claims route re-derives every claim, and the decision is
+    capped by them; it now refreshes the stored decision as the chain routes do."""
+    from assurance import views
+
+    dep = _deployment()
+    refreshed = []
+    monkeypatch.setattr(views, "_refresh_stored_decision", lambda d: refreshed.append(d.pk))
+    response = _client().post(f"/api/assurance/deployments/{dep.uuid}/recompute-claims/")
+    assert response.status_code == 200, response.content
+    assert refreshed == [dep.pk]
+
+
+def test_the_upgrade_recompute_survives_a_flush_below_the_stamp():
+    """``flush`` sends post_migrate with no migration state at all. Below 0033 the
+    receiver queried the missing column and the flush failed; with no state to ask
+    it asks the database, and returns."""
+    from django.apps import apps as live_apps
+
+    from assurance import signals
+
+    sender = live_apps.get_app_config("assurance")
+    real = signals._has_column
+    assert real("default", Deployment._meta.db_table, "decision_keyring") is True
+    assert real("default", Deployment._meta.db_table, "no_such_column") is False
+    assert real("default", "no_such_table", "decision_keyring") is False
+
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None, decision=Deployment.Decision.AUDIT_INCOMPLETE)
+    signals._has_column = lambda *a: False
+    try:
+        signals.recompute_decisions_computed_under_another_rule(sender=sender, using="default", apps=None)
+    finally:
+        signals._has_column = real
+    assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
+    signals.recompute_decisions_computed_under_another_rule(sender=sender, using="default", apps=None)
+    assert _stored(dep) == Deployment.Decision.READY

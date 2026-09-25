@@ -167,10 +167,13 @@ def _redact_structure(value):
 # the separator follows, and the value went through.
 _KEY_CHARS = r"\w.\[\]-"
 _KEY_TOKEN = re.compile(r"[" + _KEY_CHARS + r"]+")
-_TEXT_KEY_BODY = r'("?)([' + _KEY_CHARS + r']+)\1\s*([:=])\s*'
+# A key may be bare, double-quoted, or single-quoted: `{'password': 'x'}` is not
+# JSON, so it reaches this path, and with only `"` allowed around a key it was
+# forwarded untouched.
+_TEXT_KEY_BODY = r'(["\']?)([' + _KEY_CHARS + r']+)\1\s*([:=])\s*'
 # Anywhere a run of key characters starts ...
 _TEXT_KEY = re.compile(
-    r'("?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)\1\s*([:=])\s*', re.I
+    r'(["\']?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)\1\s*([:=])\s*', re.I
 )
 # ... or exactly where the scan resumes, which may be mid-run: a value stops at
 # `]`, and the pattern this replaces let the next key begin on that `]`.
@@ -183,25 +186,74 @@ _TEXT_KEY_HERE = re.compile(_TEXT_KEY_BODY, re.I)
 _SENSITIVE_TEXT_PART = re.compile(
     "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS), re.I
 )
+# A quoted string, POSSESSIVELY: `"[^"\\]*+(?:\\.[^"\\]*+)*+"`. The alternation it
+# replaces, `"(?:[^"\\]|\\.)*"`, makes Python's engine keep backtracking state for
+# every character it matches -- about 120 bytes each, so one 10 MB string in a
+# request body took 1.3 GB before authentication. The possessive form keeps
+# none: a run of ordinary characters is taken whole and never given back, which
+# is all a string needs, since the only way out of one is its closing quote.
+# DOTALL, so a backslash-newline is an escape like any other and does not end
+# the string early -- a value cut there left the rest of the secret in clear.
+_QUOTED = r'"[^"\\]*+(?:\\.[^"\\]*+)*+"'
+_SINGLE_QUOTED = r"'[^'\\]*+(?:\\.[^'\\]*+)*+'"
 _TEXT_VALUE = {
-    ":": re.compile(r'"(?:\\.|[^"\\])*"|[^\r\n,}\]]+'),
-    "=": re.compile(r'"(?:\\.|[^"\\])*"|[^&;\r\n]+'),
+    ":": re.compile(_QUOTED + "|" + _SINGLE_QUOTED + r"|[^\r\n,}\]]+", re.S),
+    "=": re.compile(_QUOTED + "|" + _SINGLE_QUOTED + r"|[^&;\r\n]+", re.S),
 }
+_JSON_STRING = re.compile(_QUOTED, re.S)
+_OPENERS = {"[": "]", "{": "}"}
+
+
+def _bracketed_end(text, start):
+    """Where the array or object opening at ``start`` closes -- or the end of
+    ``text`` if it never does.
+
+    A value under a sensitive key can be a list of secrets. The value patterns
+    stop at the first `,` or `]`, so `"tokens": ["t1", "SECRET"]` lost only
+    `["t1"` and forwarded the rest. One pass, strings skipped whole, so a bracket
+    inside a string does not count.
+    """
+    depth = 0
+    index = start
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == '"':
+            string = _JSON_STRING.match(text, index)
+            if string is None:
+                return length
+            index = string.end()
+            continue
+        if char in _OPENERS:
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return length
+
+
+def _value_end(text, start, separator):
+    """Where the value starting at ``start`` ends, or ``None`` if there is none."""
+    if text.startswith(tuple(_OPENERS), start):
+        return _bracketed_end(text, start)
+    value = _TEXT_VALUE[separator].match(text, start)
+    return None if value is None else value.end()
 
 
 def _text_value(text, key):
-    """The value after a sensitive key, or ``None``.
+    """Where the value after a sensitive key ends, or ``None``.
 
     Tried where the whitespace after the separator ends, then -- as the pattern
     this replaces did by backtracking -- at each earlier position back to the
     separator. Every failed attempt there is at a line break, which fails at its
     first character, so this stays linear.
     """
-    pattern = _TEXT_VALUE[key.group(3)]
     for start in range(key.end(), key.end(3) - 1, -1):
-        value = pattern.match(text, start)
-        if value is not None:
-            return value
+        end = _value_end(text, start, key.group(3))
+        if end is not None:
+            return end
     return None
 
 
@@ -209,51 +261,79 @@ def _text_value(text, key):
 # JSON escapes (`"p\u0061ssword"`), in a body that is not JSON (a trailing comma)
 # and so reaches this path, where the structured path would have redacted it.
 #
-# A TOKENIZER, left to right: find a quote, match the string it opens to its
-# closing quote, and move past it. Each character is visited once, whatever the
-# body. The per-position regex this replaces tried every quote as a key start --
-# a body of `"\` repeated backtracked 128 characters at each, and 10 MB held a
-# worker for 34 s before authentication. An unterminated string runs to the end
-# of the text, so nothing after it can be a key and the pass stops there.
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.S)
-_AFTER_KEY = re.compile(r"\s*:\s*")
+# ANCHORED ON THE COLON, walking back. Every `"` followed by `:` closes a
+# candidate key; its opening quote is the nearest unescaped `"` before it. The
+# left-to-right tokenizer this replaces paired quotes from the start of the
+# text, and text that reaches this path is by definition not JSON: one stray
+# quote -- `{"size": 5", ...}` -- or a value the token scan had cut short flipped
+# the pairing, and every quoted key after it was read as a value. Walking back
+# from each colon needs no pairing at all, so a stray quote costs nothing after
+# it. Each character is scanned once: the walk back never passes the previous
+# candidate's closing quote.
+_KEY_CLOSE = re.compile(r'"\s*+:\s*+')
+
+
+def _escaped(text, index, floor):
+    """Whether the character at ``index`` follows an odd run of backslashes that
+    starts no earlier than ``floor``."""
+    run = 0
+    while index - 1 - run >= floor and text[index - 1 - run] == "\\":
+        run += 1
+    return run % 2 == 1
+
+
+_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_ANY_ESCAPE = re.compile(r"\\(.)", re.S)
 
 
 def _decoded_name(quoted):
+    r"""A quoted key as the structured path would read it. ``strict=False``: a
+    literal tab inside the key is a JSON decode error otherwise.
+
+    A key JSON cannot decode at all -- one bad escape anywhere in it, as in
+    `"p\u0061ssword\x"` -- is decoded leniently rather than judged raw: every
+    `\uXXXX` read as its character and every other backslash dropped. Judged raw
+    it read "p\u0061ssword", which names nothing, and the value went through."""
     try:
-        name = json.loads(quoted)
-    except (ValueError, RecursionError):
-        return quoted[1:-1]
-    return name if isinstance(name, str) else quoted[1:-1]
+        return json.loads(quoted, strict=False)
+    except ValueError:
+        inner = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), quoted[1:-1])
+        return _ANY_ESCAPE.sub(lambda m: m.group(1), inner)
 
 
 def _redact_quoted_keys(text):
     out = []
     pos = 0
-    scan = 0
-    while True:
-        start = text.find('"', scan)
-        if start < 0:
-            break
-        string = _JSON_STRING.match(text, start)
-        if string is None:
-            break
-        end = string.end()
-        scan = end
-        colon = _AFTER_KEY.match(text, end)
-        if colon is None or not _is_sensitive_key(_decoded_name(text[start:end])):
+    floor = 0
+    for close in _KEY_CLOSE.finditer(text):
+        quote = close.start()
+        if quote < pos or _escaped(text, quote, pos):
             continue
-        value_start = colon.end()
+        bound = max(pos, floor)
+        floor = quote + 1
+        start = quote
+        while True:
+            start = text.rfind('"', bound, start)
+            if start < 0 or not _escaped(text, start, bound):
+                break
+        if start < 0 or not _is_sensitive_key(_decoded_name(text[start:quote + 1])):
+            continue
+        value_start = close.end()
         if text.startswith(REDACTED, value_start):
-            # Already redacted by the token scan: judged once, written once.
-            scan = value_start + len(REDACTED)
-            continue
-        value = _TEXT_VALUE[":"].match(text, value_start)
-        if value is None:
-            continue
+            # The token scan wrote this one -- unless the marker only BEGINS the
+            # value. `[redacted]SECRET` is a value a client can send, and skipping
+            # every value that starts with the marker forwarded the rest of it.
+            rest = _value_end(text, value_start + len(REDACTED), ":")
+            if rest is None:
+                continue
+            end = rest
+        else:
+            end = _value_end(text, value_start, ":")
+            if end is None:
+                continue
         out.append(text[pos:start])
-        out.append(f"{text[start:end]}: {REDACTED}")
-        pos = scan = value.end()
+        out.append(f"{text[start:quote + 1]}: {REDACTED}")
+        pos = end
     out.append(text[pos:])
     return "".join(out)
 
@@ -266,6 +346,23 @@ def _redact_text(text):
     return _redact_quoted_keys(_redact_token_keys(text))
 
 
+def _ends_a_quoted_key(text, key):
+    """Whether ``key``'s separator is the last character of a quoted KEY -- as in
+    `{"Password:": "SECRET"}` -- rather than a separator of its own.
+
+    Read as a token, `Password` followed by `:` has a value starting at the key's
+    own closing quote, and the quoted-string branch took `": "` as that value:
+    the marker went in and the secret stayed. That key is the quoted pass's to
+    read, which decodes it whole and redacts what follows its colon."""
+    if key.group(1) or not text.startswith('"', key.end(3)):
+        return False
+    opened = key.start(2) - 1
+    return opened >= 0 and text[opened] == '"' and _AFTER_KEY.match(text, key.end(3) + 1) is not None
+
+
+_AFTER_KEY = re.compile(r"\s*+:")
+
+
 def _redact_token_keys(text):
     out = []
     pos = 0
@@ -273,17 +370,22 @@ def _redact_token_keys(text):
         key = _TEXT_KEY_HERE.match(text, pos) or _TEXT_KEY.search(text, pos)
         if key is None:
             break
-        value = _text_value(text, key) if _is_sensitive_key(key.group(2)) else None
-        if value is None:
-            # Not a secret, or a secret with nothing after it: kept verbatim, and
-            # the scan resumes after the separator, where the next key can start.
+        end = (
+            _text_value(text, key)
+            if _is_sensitive_key(key.group(2)) and not _ends_a_quoted_key(text, key)
+            else None
+        )
+        if end is None:
+            # Not a secret, or a secret with nothing after it, or the tail of a
+            # quoted key the quoted pass reads whole: kept verbatim, and the scan
+            # resumes after the separator, where the next key can start.
             out.append(text[pos:key.end()])
             pos = key.end()
             continue
         quote = key.group(1)
         out.append(text[pos:key.start()])
         out.append(f"{quote}{key.group(2)}{quote}: {REDACTED}")
-        pos = value.end()
+        pos = end
     out.append(text[pos:])
     return "".join(out)
 
@@ -307,7 +409,12 @@ def _redact_form(text):
     return "&".join(out)
 
 
-def redact(text, form=False):
+def redact(text, form=False, limit=None):
+    """See :func:`redact_within`; the text alone."""
+    return redact_within(text, form=form, limit=limit)[0]
+
+
+def redact_within(text, form=False, limit=None):
     """
     The text with credential values removed, whatever shape it is in.
 
@@ -320,21 +427,35 @@ def redact(text, form=False):
     string). It is not guessed: prose containing an "=" was being parsed as a
     form and re-encoded, which destroyed the attack signal the engine is asked
     to look for.
+
+    Returns ``(text, cut)``: ``cut`` is True when the text fallback redacted only
+    the first ``limit`` characters, so the caller can say the body was truncated
+    even when what redaction left happens to fit.
     """
     if not text:
-        return text
+        return text, False
 
     if form:
-        return _redact_form(text)
+        return _redact_form(text), False
 
     stripped = text.lstrip()
     if stripped[:1] in ("{", "["):
         try:
-            return json.dumps(_redact_structure(json.loads(text)), separators=(",", ":"))
+            return (
+                json.dumps(_redact_structure(json.loads(text)), separators=(",", ":")),
+                False,
+            )
         except (ValueError, TypeError, RecursionError):
             pass
 
-    return _redact_text(text)
+    # The text path is Python, and runs before authentication. On a whole 10 MB
+    # body it held a worker for ten seconds, to produce text of which the caller
+    # keeps the first 64 KiB. `limit` is how much the caller can use: the prefix
+    # is redacted, and a value the cut runs through is still redacted, because an
+    # unterminated value runs to the end of what it is given.
+    if limit is not None and len(text) > limit:
+        return _redact_text(text[:limit]), True
+    return _redact_text(text), False
 
 
 class DefenderMiddleware:
@@ -542,9 +663,18 @@ class DefenderMiddleware:
 
         # Redact first, then truncate. The other order let a secret straddling
         # the size limit lose its closing quote, miss the pattern, and be
-        # forwarded in clear.
-        text = redact(text, form=content_type == "application/x-www-form-urlencoded")
-        return self._trim(text)
+        # forwarded in clear. The text fallback redacts only a bounded prefix --
+        # four times what is kept, since redaction can shrink it -- and a body
+        # longer than that prefix is reported as truncated even when what is left
+        # after redaction happens to fit.
+        prefix = 4 * self.max_body_bytes
+        redacted, cut = redact_within(
+            text, form=content_type == "application/x-www-form-urlencoded", limit=prefix
+        )
+        body, problem = self._trim(redacted)
+        if problem is None and cut:
+            problem = f"request body was truncated at {prefix} bytes for inspection"
+        return body, problem
 
     def _trim(self, text):
         if len(text) > self.max_body_bytes:

@@ -180,7 +180,8 @@ def _rows_from_body(data, *, key: str, single_allowed: bool):
 
 
 def _refresh_stored_decision(deployment) -> None:
-    """Recompute and persist the deployment's decision after its chains moved.
+    """Recompute and persist the deployment's decision after an input to it moved:
+    its chains, or its claims.
 
     The receipt and the bundle read the STORED decision, and only scan ingest and
     the recompute route refreshed it. So a workflow set or a chain outcome written
@@ -1878,6 +1879,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         _require_admin(request)
         deployment = self.get_object()
         counts = derive_claims(deployment)
+        # The decision is capped by the claims, so a re-derivation that moves one
+        # moves the decision -- and the stored one is what the receipt, the bundle
+        # and decision-support's revision publish.
+        _refresh_stored_decision(deployment)
         return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="retest-requirements")
@@ -2058,6 +2063,11 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             )
         except IllegalClaimTransition as exc:
             return Response({"detail": str(exc)}, status=400)
+        # A claim an operator contradicts caps the decision. Without the refresh,
+        # decision-support computed the capped decision live under the SAME
+        # revision the receipt was still publishing READY under: one revision,
+        # two decisions.
+        _refresh_stored_decision(claim.deployment)
         return Response(
             {
                 "status": claim.status,
