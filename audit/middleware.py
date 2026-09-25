@@ -176,7 +176,10 @@ _TEXT_KEY = re.compile(
     r'(["\']?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)\1\s*([:=])\s*', re.I
 )
 # ... or exactly where the scan resumes, which may be mid-run: a value stops at
-# `]`, and the pattern this replaces let the next key begin on that `]`.
+# `]`, and the pattern this replaces let the next key begin on that `]`. Only the
+# mid-run start needs this pattern; a key opening with a quote at the resume point
+# is found by the search above as well, and the two share one grammar so they
+# can never disagree about what a key is.
 #
 # Both case-insensitive, as the pattern they replace was: under re.I, [A-Za-z]
 # also matches the letters whose case folds into ASCII (ſ U+017F -> s,
@@ -287,15 +290,15 @@ _ANY_ESCAPE = re.compile(r"\\(.)", re.S)
 
 
 def _decoded_name(quoted):
-    r"""A quoted key as the structured path would read it. ``strict=False``: a
-    literal tab inside the key is a JSON decode error otherwise.
+    r"""A quoted key as the structured path would read it.
 
-    A key JSON cannot decode at all -- one bad escape anywhere in it, as in
-    `"p\u0061ssword\x"` -- is decoded leniently rather than judged raw: every
-    `\uXXXX` read as its character and every other backslash dropped. Judged raw
-    it read "p\u0061ssword", which names nothing, and the value went through."""
+    A key JSON cannot decode -- one bad escape anywhere in it, as in
+    `"p\u0061ssword\x"`, or a literal tab -- is decoded leniently rather than
+    judged raw: every `\uXXXX` read as its character and every other backslash
+    dropped. Judged raw it read "p\u0061ssword", which names nothing, and the
+    value went through."""
     try:
-        return json.loads(quoted, strict=False)
+        return json.loads(quoted)
     except ValueError:
         inner = _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), quoted[1:-1])
         return _ANY_ESCAPE.sub(lambda m: m.group(1), inner)
