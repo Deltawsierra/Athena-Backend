@@ -1388,6 +1388,12 @@ def _fit(unit, size, head="", tail=""):
         pytest.param("x 'my session id':\n", "token: ", "", id="quoted-keys-split-from-their-values"),
         pytest.param("a]secret:\n", "session_id: #[", "", id="runs-split-from-their-values"),
         pytest.param("b password\n: ", "token: a ", "", id="separators-past-the-break"),
+        # A quoted, bracketed or string value that closes such a key itself.
+        pytest.param('"session_id"\n:', "token:", "", id="quoted-values-closing-keys-past-the-break"),
+        pytest.param('token:"abc"\n:x\n', "", "", id="quoted-values-before-separator-lines"),
+        pytest.param("[session_id]\n: ", "token: ", "", id="groups-closing-keys-past-the-break"),
+        pytest.param('"' + "x\n" * 999 + 'session id"\n: ', "token: ", "", id="quoted-keys-over-lines"),
+        pytest.param('password: [x]y, "a\nsession_id" \n: b\n', "", "", id="strings-closing-keys-past-the-break"),
     ],
 )
 def test_the_text_pass_is_linear_in_the_prefix_for_any_shape(unit, head, tail):
@@ -1739,3 +1745,99 @@ def test_a_parenthesis_the_value_opened_casts_doubt_on_the_delimiter_after_it(te
     redacted, doubtful = _outcome(text)
     assert "S3CR3T" not in redacted
     assert doubtful is True
+
+
+# ---- Round 10: a value that closes a key the line break splits from its separator. ----
+
+
+@pytest.mark.parametrize(
+    ("body", "forwarded"),
+    [
+        # The separator after the break ...
+        ('token:"session_id"\n:S3CR3T', "token: [redacted]"),
+        ('password: "x-api-key"\n: S3CR3T', "password: [redacted]"),
+        # ... and, as it already was, before it.
+        ('token:"session_id":\nS3CR3T', "token: [redacted]"),
+        ('password: "x-api-key":\n S3CR3T', "password: [redacted]"),
+    ],
+)
+def test_a_quoted_value_that_closes_a_key_never_forwards_that_keys_value(
+    factory, middleware, caplog, body, forwarded
+):
+    """The string is token's value and, read anywhere else, a sensitive key too:
+    `"session_id"\\n:S3CR3T` is a pair. With the separator on the next line the
+    string was taken to end cleanly at the line break -- which no key was looked
+    for across -- so S3CR3T reached the engine and the body was called cleanly
+    inspected. With the separator before the break it was read already; both
+    are pinned, redacted and reported."""
+    post = engine_says()
+    with (
+        caplog.at_level(logging.WARNING, logger="audit.middleware"),
+        mock.patch("audit.middleware.requests.post", post),
+    ):
+        middleware()(factory.post("/api/x/", data=body, content_type="text/plain"))
+    assert post.call_args.kwargs["json"]["body"] == forwarded
+    assert "S3CR3T" not in logged(caplog)
+    assert (
+        "request body could not be fully inspected: a value after a sensitive key had "
+        "no certain end and was redacted to the end of its line"
+    ) in logged(caplog)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Blanks and blank lines about the break, a line break of either kind,
+        # and either separator.
+        'token: "session_id" \n\n  : S3CR3T\nq: UNION SELECT',
+        'otp="session_id"\r\n=S3CR3T\r\nq: UNION SELECT',
+        # A key only the quoted reading finds sensitive.
+        "Cookie: 'session id'\n= S3CR3T\nq: UNION SELECT",
+        # A group, or an unquoted value that stopped at a `]`, whose closing
+        # bracket ends a run of key characters: `[session_id]` is one token key.
+        "token: [session_id]\n: S3CR3T\nq: UNION SELECT",
+        "token: [a, session_id]\n: S3CR3T\nq: UNION SELECT",
+        "token: xsession_id]\n: S3CR3T\nq: UNION SELECT",
+        # A string over lines is a quoted key over lines, whichever side of the
+        # break its separator is on: its opening quote is the value's own.
+        'token: "a\nsession id"\n: S3CR3T\nq: UNION SELECT',
+        'token: "a\nsession id":\nS3CR3T\nq: UNION SELECT',
+        # A string in a value already redacted to the end of its line, that runs
+        # onto the next and ends cleanly there, blanks and all.
+        'password: [x]y, "a\nsession_id" \n: S3CR3T\nq: UNION SELECT',
+        # That key's value read as it is alone: a string opening it runs over
+        # lines, whatever blank stands before it ...
+        "token:\"session_id\"\n:\xa0'x\nS3CR3T'\nq: UNION SELECT",
+        # ... and it may close such a key itself.
+        'token:"session_id"\n: token:"password"\n:S3CR3T\nq: UNION SELECT',
+    ],
+)
+def test_a_value_that_closes_a_key_split_from_its_separator_takes_that_keys_value(text):
+    """Each of these forwarded S3CR3T and called the body cleanly inspected (the
+    string over lines with the separator before the break, and the string that
+    ends a doubtful value, forwarded it reported). The key's value is redacted
+    through its line, the line after it is kept, and the doubt is said."""
+    redacted, doubtful = _outcome(text)
+    assert "S3CR3T" not in redacted
+    assert redacted.endswith("q: UNION SELECT")
+    assert doubtful is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A string that names nothing ends where it ends, and the line after it
+        # is kept.
+        ('token: "abc"\n: keep\nq: UNION SELECT', ("token: [redacted]\n: keep\nq: UNION SELECT", False)),
+        # A key the value closes, with no value after its separator, costs nothing.
+        ('token:"session_id"\n:\n', ('token: [redacted]\n:\n', False)),
+        ('token:"session_id"\n:\n, q: UNION SELECT', ('token: [redacted]\n:\n, q: UNION SELECT', False)),
+        # A bracket after the closing quote: no reading makes that a key.
+        ('token: "session_id"]\n: keep', ("token: [redacted]]\n: keep", False)),
+        # A string ending a doubtful value that closes no key keeps what follows
+        # it on its line.
+        ('password: [x]y, "a\nb" \nq: UNION SELECT', ("password: [redacted] \nq: UNION SELECT", True)),
+    ],
+)
+def test_a_value_that_closes_no_key_across_the_break_ends_where_it_did(text, expected):
+    assert _outcome(text) == expected

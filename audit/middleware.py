@@ -217,6 +217,10 @@ _CLEAN_END = re.compile(
     _AFTER_CLOSERS + r"[ \t]*+(?:[,&;\r\n]|\Z)"
     + "|" + _AFTER_CLOSERS + r"[ \t]++[\"']?[" + _KEY_CHARS + r"]++[\"']?[ \t]*+[:=]"
 )
+# The clean ends that are a line break: the line break a value ends at, past any
+# closing brackets and blanks after it. The break may split a key from its value
+# (see _key_across).
+_CLEAN_BREAK = re.compile(_AFTER_CLOSERS + r"[ \t]*+[\r\n]")
 # An unquoted value that stopped at a delimiter mid-line is only certain if the
 # delimiter cannot be inside something the value opened: `password: a[b,SECRET]`
 # stopped at the comma, and `password: x"y,SECRET"` inside a string. A quote as
@@ -388,12 +392,16 @@ def _key_across(scan, start, end):
       `session_id: a#[x]secret:\\n...`, `token:"session_id":\\n...`;
     - a quoted key as _QuotedKeys reads one: `Cookie: abc "session id":\\n...`
       -- only the quoted reading sees a secret in "session id", whose last word
-      names nothing. Its opening quote is looked for on its closing quote's line
-      only: a quote on an earlier line is one the scan has read past, and the
-      scan never reads a quoted key back past where it has read to.
+      names nothing. Its opening quote is looked for on its closing quote's line,
+      or back to ``start`` when that is on an earlier line: a quote before both
+      is one the scan has read past, and the scan never reads a quoted key back
+      past where it has read to. A quote in the text from ``start`` is not: a
+      string value can span lines and close a key itself,
+      `token: "a\\nsession id"\\n: ...`, as the scan reads it anywhere else.
 
     Linear: it looks back over the blanks before one separator, one run of key
-    characters and one line's stretch back to a quote, and forward over the
+    characters and one stretch back to a quote -- within its line or the text
+    from ``start``, which the value it is in has read -- and forward over the
     blanks after one line break. A separator or a line break ends a constant
     number of values -- the value it is in and the readings of that same line --
     so each of those is looked at a constant number of times."""
@@ -427,16 +435,16 @@ def _key_across(scan, start, end):
     # The quoted reading.
     if text[last] not in _QUOTES:
         return None
-    line = scan.line_start(last)
-    if _escaped(text, last, line):
+    floor = min(scan.line_start(last), start)
+    if _escaped(text, last, floor):
         return None
-    opening = _opening_quote(text, last, line)
+    opening = _opening_quote(text, last, floor)
     if opening < 0 or not _is_sensitive_key(_decoded_name(text[opening:last + 1])):
         return None
     return separator, past
 
 
-def _unquoted_end(scan, start, stops):
+def _unquoted_end(scan, start, stops, split=None):
     """Where an unquoted value from ``start`` ends, as ``(end, held)``: at the first
     of ``stops`` -- the delimiters after a separator, or "line" for a line break
     -- that no reading of what the value holds puts inside something.
@@ -473,6 +481,11 @@ def _unquoted_end(scan, start, stops):
       value starts on, read as the rest of the value is; a quote or bracket
       where that value starts opens something whatever stands before it.
 
+    ``split`` is where such a key may begin to end, when that is before ``start``:
+    a read that begins after a quoted or bracketed value, whose own closing quote
+    or bracket may close a key the line break splits from its value
+    (_value_end). It defaults to ``start``.
+
     ``held`` says the value swallowed another pair, so where it stops is not
     certain.
 
@@ -496,7 +509,7 @@ def _unquoted_end(scan, start, stops):
     # Where the text a key split from its value can end in begins: the value,
     # then each such key's value -- so every one found is past the last, and
     # the read moves on whatever counts as a blank.
-    split = start
+    split = start if split is None else split
     while True:
         # The next quote or bracket that opens something, carried over while the
         # scan has not reached it.
@@ -509,10 +522,13 @@ def _unquoted_end(scan, start, stops):
         key = _TEXT_KEY.search(text, index, min(at, end))
         while key is not None and not _is_sensitive_key(key.group(2)):
             key = _TEXT_KEY.search(text, key.end(), min(at, end))
-        if key is None and at >= end and end < scan.length and text[end] in "\r\n":
-            # No key is left to read before the line break -- but the break may
-            # split one from its value.
-            across = _key_across(scan, split, end)
+        brk = _CLEAN_BREAK.match(text, end) if key is None and at >= end else None
+        if brk is not None:
+            # No key is left to read before the line break -- the value's end, or
+            # past the closing brackets and blanks after the string or group that
+            # ends it, `"a\nsession_id" \n: SECRET` -- but the break may split one
+            # from its value.
+            across = _key_across(scan, split, brk.end() - 1)
             if across is not None:
                 # That value is where the scan would read it: past the break,
                 # on the first line with more than blanks.
@@ -551,16 +567,17 @@ def _unquoted_end(scan, start, stops):
                 end = scan.next(stops, close)
 
 
-def _rest_of_line(scan, index):
+def _rest_of_line(scan, index, split=None):
     """Where a value with no certain end is redacted to: the end of the line
     ``index`` is on -- read as _unquoted_end reads a value, so a string or group
     that opens on that line and closes on a later one takes that line too.
+    ``split`` is where the value began, if before ``index`` (see _unquoted_end).
 
     The plain end of the line fell inside the next field's string whenever the
     field after a doubtful value held a line break in quotes:
     `pwd= a, 'name' = "b"; "password":'\r\nSECRET'` lost everything up to the
     `\r` and forwarded `SECRET`."""
-    return _unquoted_end(scan, index, "line")[0]
+    return _unquoted_end(scan, index, "line", split)[0]
 
 
 def _value_end(scan, start, separator):
@@ -599,9 +616,22 @@ def _value_end(scan, start, separator):
         # follows it: `password: abc]SECRET` is one value.
     if end is None:
         return length, False
-    if _CLEAN_END.match(text, end):
-        return end, True
-    return _rest_of_line(scan, end), False
+    # What follows the value is read from where it ends, but a key the line
+    # break after it splits from its value can end in the value itself: its own
+    # closing quote or bracket can close one (see _key_across).
+    if _CLEAN_END.match(text, end) is None:
+        return _rest_of_line(scan, end, start), False
+    if _CLEAN_BREAK.match(text, end):
+        # So a clean end at a line break is certain only if the break splits no
+        # key from its value: `token:"session_id"\n:SECRET` forwarded SECRET and
+        # called the body cleanly inspected, where the scan reads "session_id" as
+        # a key anywhere else. The rest of the line is read as a doubtful value's
+        # is; a key the break splits from its value holds this one, which then
+        # runs on through the line that key's value is on, and is reported.
+        across, held = _unquoted_end(scan, end, "line", start)
+        if held:
+            return across, False
+    return end, True
 
 
 # A line break, any blank lines, and the indentation of the next line with text.
