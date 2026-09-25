@@ -35,6 +35,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.db import OperationalError, connection
 from django.db.migrations.state import ProjectState
+from django.db.models import QuerySet
 from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -49,6 +50,7 @@ from assurance.revision import (
     StaleDecisionRead,
     accept_transition,
     in_force_of,
+    logged_head,
     read_decision,
     transitions_since,
 )
@@ -109,6 +111,16 @@ def _paused_beneath_its_log():
     assert _log(dep)[-1] == (2, D.READY, D.PAUSED)
     Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=1)
     assert _row(dep) == (D.READY, 1)
+    return dep
+
+
+def _bare_pause_beneath_its_log():
+    """The same wedge with no finding, paused by a recompute: for a transactional
+    test, where a finding's after-commit refresh would move the decision first."""
+    dep = _scanned_ready()
+    recompute_decision(dep, paused=True)
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=1)
+    assert _log(dep) == [(1, "", D.READY), (2, D.READY, D.PAUSED)]
     return dep
 
 
@@ -254,6 +266,126 @@ def test_a_read_that_cannot_repair_the_row_still_publishes_the_pause(caplog, mon
     ), [r.getMessage() for r in _errors(caplog)]
 
 
+@pytest.mark.parametrize("surface", _SURFACES, ids=lambda s: s.__name__.strip("_"))
+def test_a_repair_the_one_writer_refuses_still_publishes_the_pause(caplog, monkeypatch, surface):
+    """``accept_transition`` refuses a reading of a row that has moved since it was
+    read (``StaleDecisionRead``). A read that met the refusal raised it -- a 500 on
+    a GET -- where it must publish what the log records, as it does when the row
+    cannot be written: never the READY beneath the logged pause."""
+    dep = _paused_beneath_its_log()
+    reading = revision.decision_in_force
+
+    def read_before_the_row_moved(locked):
+        return reading(locked)._replace(read_from=(locked.pk, D.READY, 0))
+
+    monkeypatch.setattr(revision, "decision_in_force", read_before_the_row_moved)
+    with caplog.at_level(logging.ERROR):
+        _published(surface, dep)
+
+    assert _row(dep) == (D.READY, 1), "the refused move wrote nothing"
+    refused = [r for r in _errors(caplog) if "could not be brought up to it" in r.getMessage()]
+    assert refused and refused[0].exc_info[0] is StaleDecisionRead, [
+        r.getMessage() for r in _errors(caplog)
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_read_repairs_the_row_from_a_reading_taken_under_its_lock_in_its_own_transaction(
+    monkeypatch,
+):
+    """The decision in force the repair moves from is read under the row lock, in
+    the transaction the move commits in. SQLite serialises writers itself, so
+    neither shows here unless asked for; on PostgreSQL a GET runs in autocommit,
+    where a row lock outside a transaction is refused (no read would ever repair a
+    row), and a reading off an unlocked row can go stale before the one writer
+    locks it, which refuses it. A transactional test: inside the test's own
+    transaction every read is in an atomic block."""
+    dep = _bare_pause_beneath_its_log()
+    locked, readings = [], []
+    lock = QuerySet.select_for_update
+    reading = revision.decision_in_force
+
+    def select_for_update(self, *args, **kwargs):
+        locked.append(self.model)
+        return lock(self, *args, **kwargs)
+
+    def decision_in_force(row):
+        readings.append((connection.in_atomic_block, list(locked)))
+        return reading(row)
+
+    monkeypatch.setattr(QuerySet, "select_for_update", select_for_update)
+    monkeypatch.setattr(revision, "decision_in_force", decision_in_force)
+    assert _detail(dep) == (D.PAUSED, 2)
+
+    assert _row(dep) == (D.PAUSED, 2), "the read did not repair the row"
+    in_a_transaction, locked_first = readings[0]
+    assert in_a_transaction, "the decision in force was read outside a transaction"
+    assert Deployment in locked_first, "the decision in force was read off an unlocked row"
+
+
+def test_a_repair_that_fails_on_a_deployment_deleted_meanwhile_raises(monkeypatch):
+    """The repair failed, and the fallback finds no row to read what is in force
+    from: the instance held is stale and there is nothing current to publish, so
+    the read fails -- it does not publish the instance as if nothing happened."""
+    dep = _paused_beneath_its_log()
+    held = Deployment.objects.annotate(**logged_head()).get(pk=dep.pk)
+    Deployment.objects.filter(pk=dep.pk).delete()
+
+    def locked_out(pk):
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(revision, "bring_up_to_its_log", locked_out)
+    with pytest.raises(OperationalError):
+        current_decision(held)
+
+
+def test_a_row_behind_its_log_on_the_decision_the_log_records_is_reported(caplog):
+    """Behind is a matter of the revision, not of the decision: a row written back
+    to READY at 1 beneath a log whose head is READY at 3 is as wedged as one
+    beneath a pause, and is reported as the ERROR it is."""
+    dep = _scanned_ready()
+    recompute_decision(dep, paused=True)
+    recompute_decision(dep, paused=False)
+    assert _log(dep)[-1] == (3, D.PAUSED, D.READY)
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=1)
+
+    with caplog.at_level(logging.ERROR):
+        in_force = revision.decision_in_force(Deployment.objects.get(pk=dep.pk))
+
+    assert (in_force.decision, in_force.revision) == (D.READY, 3)
+    [error] = _errors(caplog)
+    assert "behind its transition log" in error.getMessage()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_decision_support_reads_its_parts_and_its_pause_in_one_transaction(monkeypatch):
+    """The parts and the pause and revision published beside them are one moment
+    only inside one transaction. Inside the test's own transaction every read is;
+    a real request runs in autocommit, so this is a transactional test."""
+    from assurance import decision as decision_module
+
+    dep = _bare_pause_beneath_its_log()
+    seen = []
+    parts = decision_module.read_decision_parts
+    published = revision.published_decision
+
+    def read_parts(*args, **kwargs):
+        seen.append(("parts", connection.in_atomic_block))
+        return parts(*args, **kwargs)
+
+    def read_published(pk):
+        seen.append(("published", connection.in_atomic_block))
+        return published(pk)
+
+    monkeypatch.setattr(decision_module, "read_decision_parts", read_parts)
+    monkeypatch.setattr(revision, "published_decision", read_published)
+
+    support = decision_support(Deployment.objects.get(pk=dep.pk))
+
+    assert (support["decision"], support["revision"], support["paused"]) == (D.PAUSED, 2, True)
+    assert seen == [("parts", True), ("published", True)], seen
+
+
 def test_a_consumer_fenced_at_the_logged_pause_is_not_refused():
     """The reproducer's end state: told PAUSED at revision 2 by the log, the
     consumer fenced its next read there and got StaleDecisionRead for good."""
@@ -357,6 +489,32 @@ def test_the_list_and_the_bundle_ask_no_row_for_its_log_head_on_its_own():
 
     assert _standalone_log_reads(listed) == []
     assert _standalone_log_reads(bundled) == []
+
+
+@pytest.mark.parametrize("route", ["executive-summary", "operational-assurance"])
+def test_the_summaries_ask_no_row_for_its_log_head_on_its_own(route):
+    """Each summary reads its deployment with the log head in the query it already
+    makes: asking apart would cost a query, and read a moment the row was not."""
+    dep = _scanned_ready()
+    client = _client(dep)
+    with CaptureQueriesContext(connection) as queries:
+        assert client.get(_base(dep) + route + "/").status_code == 200
+
+    assert _standalone_log_reads(queries) == []
+
+
+def test_read_decision_reads_the_row_and_its_log_head_in_one_statement(
+    django_assert_num_queries,
+):
+    """What ``logged_head`` is for: the row and the head of its log read as one
+    moment -- read apart, a transition committed between them makes a current row
+    look behind. One statement, and nothing else, for a row level with its log."""
+    dep = _scanned_ready()
+
+    with django_assert_num_queries(1) as queries:
+        assert read_decision(dep) == {"decision": D.READY, "revision": 1}
+
+    assert _standalone_log_reads(queries) == []
 
 
 def test_an_instance_read_without_its_log_head_costs_one_query_to_hold_to_it(

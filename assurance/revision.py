@@ -307,14 +307,14 @@ def hold_to_its_log(deployment: Deployment) -> None:
     2, and the detail, the receipt, decision-support and the dispatch fence said
     READY at 1. A pause read as READY.
 
-    The repair goes through the one writer, :func:`accept_transition`, as the no-op
-    move TO the decision the log records, read under the row lock: it writes the
-    row up to the log and records nothing, and it is not a recompute -- a read
-    brings the row to what was decided, it decides nothing. Where the row cannot be
-    written (a lock not granted in time, a read-only connection), the instance is
-    still brought to what the log records, read in one statement, and the failure
-    is logged at ERROR: a read that cannot repair the row must not publish it, and
-    must not fail on the pause the log holds either.
+    The repair is :func:`bring_up_to_its_log`: it writes the row up to the log and
+    records nothing, and it is not a recompute -- a read brings the row to what was
+    decided, it decides nothing. Where the row cannot be written (a lock not granted
+    in time, a read-only connection), or the one writer refuses the reading
+    (:class:`StaleDecisionRead`), the instance is still brought to what the log
+    records, read in one statement, and the failure is logged at ERROR: a read that
+    cannot repair the row must not publish it, and must not fail on the pause the
+    log holds either -- a refusal raised out of here was a 500 on a GET.
 
     ``logged_revision`` on the instance -- the :func:`logged_head` annotation, or
     set by the writer that just brought the row level -- answers "is it behind"
@@ -333,12 +333,8 @@ def hold_to_its_log(deployment: Deployment) -> None:
     if logged is None or logged <= deployment.decision_revision:
         return
     try:
-        with transaction.atomic():
-            locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
-            in_force = decision_in_force(locked)
-            accept_transition(locked, to_decision=in_force.decision, in_force=in_force)
-        decision, revision = locked.decision, locked.decision_revision
-    except DatabaseError:
+        decision, revision = bring_up_to_its_log(deployment.pk)
+    except (DatabaseError, StaleDecisionRead):
         logger.exception(
             "deployment %s: stored decision is behind its transition log and could not "
             "be brought up to it; publishing the decision the log records",
@@ -353,6 +349,29 @@ def hold_to_its_log(deployment: Deployment) -> None:
     # Level with its log, as far as this instance goes: reconciling it again asks
     # nothing.
     deployment.logged_revision = revision
+
+
+def bring_up_to_its_log(pk) -> tuple[str | None, int]:
+    """Bring deployment ``pk``'s row up to its transition log; return the decision
+    in force and its revision.
+
+    Through the one writer, :func:`accept_transition`, as the no-op move TO the
+    decision the log records. That decision is read under the row lock, in the
+    transaction the move commits in -- its own: on PostgreSQL a read runs in
+    autocommit, where a row lock outside a transaction is refused, and a reading
+    taken off an unlocked row can be moved from after the row has moved, which
+    ``accept_transition`` refuses. A row level with its log is left as it stands; a
+    row behind it is written up to it, and nothing new is recorded -- the move was
+    recorded when it was made.
+
+    Not a recompute: it decides nothing, so it reads nothing the decision rule
+    reads -- not the findings, and not the outcome keyring.
+    """
+    with transaction.atomic():
+        locked = Deployment.objects.select_for_update().get(pk=pk)
+        in_force = decision_in_force(locked)
+        accept_transition(locked, to_decision=in_force.decision, in_force=in_force)
+    return locked.decision, locked.decision_revision
 
 
 def _write(locked: Deployment, decision, revision) -> None:
