@@ -128,9 +128,11 @@ def _is_sensitive_key(key):
     redacted another forwarded."""
     text = str(key)
     lowered = text.casefold()
+    # The pattern runs on the raw key: it is compiled re.I, which already matches
+    # ſ, K and İ, and none of its separator-tolerant spellings (private-key,
+    # api-key, client-secret) holds a letter that casefolding expands.
     return (
         any(part in lowered for part in _SENSITIVE_KEY_PARTS)
-        or _SENSITIVE_TEXT_PART.search(lowered) is not None
         or _SENSITIVE_TEXT_PART.search(text) is not None
     )
 
