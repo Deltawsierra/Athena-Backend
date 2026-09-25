@@ -193,8 +193,24 @@ def assurance_bundle(deployments) -> dict:
     anything was actually assessed.
     """
     with obs.span(obs.INVOKE_WORKFLOW, component="assurance_bundle"):
-        scoped = deployments.select_related("data_boundary").prefetch_related(
-            "assets__provider__assertions", "findings", "assurance_claims__asset", "unknowns"
+        from django.db.models import Exists, OuterRef
+
+        from .models import WorkflowChainOutcome
+
+        scoped = (
+            deployments.select_related("data_boundary")
+            .prefetch_related(
+                "assets__provider__assertions", "findings", "assurance_claims__asset", "unknowns"
+            )
+            # Whether each deployment has chain outcomes, in the same query: the
+            # decision row reconciles the stored decision only for those, and
+            # asking per deployment would make the bundle's cost grow with the
+            # portfolio.
+            .annotate(
+                has_chain_outcomes=Exists(
+                    WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))
+                )
+            )
         )
 
         boundary_flows: list[dict] = []

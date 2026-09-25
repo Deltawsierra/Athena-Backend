@@ -580,9 +580,7 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
         Deployment.objects.filter(pk=locked.pk).update(
             decision_keyring=observed_outcomes.keyring_fingerprint(keyring)
         )
-    deployment.decision = locked.decision
-    deployment.decision_revision = locked.decision_revision
-    deployment.decision_keyring = observed_outcomes.keyring_fingerprint(keyring)
+    deployment.refresh_from_db(fields=["decision", "decision_revision", "decision_keyring"])
     return decision
 
 
@@ -597,9 +595,14 @@ def current_decision(deployment: Deployment) -> str | None:
     chain outcomes can move on a keyring change, so only they are reconciled."""
     from . import observed_outcomes
 
-    if deployment.chain_outcomes.exists() and (
-        deployment.decision_keyring is None
-        or deployment.decision_keyring != observed_outcomes.keyring_fingerprint()
-    ):
+    if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():
+        return deployment.decision
+    # Stale or never stamped -- but only a deployment with chain outcomes can move
+    # on a keyring change. A caller that already knows (the bundle annotates it in
+    # its one query) saves the lookup.
+    has_chains = getattr(deployment, "has_chain_outcomes", None)
+    if has_chains is None:
+        has_chains = deployment.chain_outcomes.exists()
+    if has_chains:
         recompute_decision(deployment)
     return deployment.decision
