@@ -28,10 +28,12 @@ for the writes the model cannot see.
 from __future__ import annotations
 
 import ast
+import io
 import logging
 import os
 import re
 import textwrap
+import tokenize
 from collections import Counter
 from datetime import timedelta
 from itertools import product
@@ -711,8 +713,10 @@ _SQL_WRITING_AN_OWNED_COLUMN = re.compile(
     r"\b(?:UPDATE\b.*?\bSET|(?:INSERT|REPLACE|MERGE)\b.*?\bINTO|ON\s+CONFLICT)\b.*?" + _OWNED,
     re.IGNORECASE | re.DOTALL,
 )
-#: The comment that clears ONE line the scan flags, with the reason it is not a
-#: writer. For a proven false positive only; the reason is required.
+#: The comment that clears ONE write the scan flags, with the reason it is not a
+#: writer. For a proven false positive only; the reason is required. A comment,
+#: read as a token -- never text inside a string -- on the write's own line: the
+#: line of the write's method name, or of the end of its call.
 _NOT_A_WRITER = re.compile(r"#\s*not-a-decision-writer:\s*\S")
 #: Neither passed nor determinable: an argument hidden behind ``*args``/``**kwargs``.
 _UNKNOWN = object()
@@ -737,6 +741,10 @@ _BULK_WRITES = {
 _WRITE_METHODS = _UPDATES | _PRIVATE_WRITES | frozenset(_BULK_WRITES) | {"save_base"}
 #: The query classes an UPDATE is built from by hand.
 _UPDATE_QUERIES = frozenset({"UpdateQuery", "SQLUpdateCompiler"})
+#: What hands back objects whose ``save()`` is ``save_base(raw=True)``, past
+#: Deployment.save, for whatever model the data names: held wherever named.
+_RAW_SAVES = frozenset({"deserialize", "DeserializedObject"})
+_RAW_SAVE_WHY = "%s: a deserialized object's save() is save_base(raw=True), past Deployment.save"
 #: SQL run as it stands, and where each call takes its statements: held to what the
 #: statements DO. A SELECT naming the decision reads it.
 _RUN_SQL = {
@@ -750,6 +758,12 @@ _RUN_SQL = {
 #: raw() hands back Deployments carrying whatever decision its SQL says, and a
 #: RawSQL can stand in the value of an update.
 _ORM_SQL = {"raw": ((0, ("raw_query",)),), "RawSQL": ((0, ("sql",)),)}
+#: A method fetched by name -- ``getattr``, ``attrgetter``, ``methodcaller``, a
+#: class's ``__dict__`` -- that writes, or runs SQL, whatever it is handed.
+_FETCHED_WRITES = _WRITE_METHODS | frozenset(_RUN_SQL)
+#: The calls that write, save or run SQL, by name, whatever they write. On a line
+#: holding more than one, an allow comment cannot say which it is for.
+_WRITE_SHAPED = _FETCHED_WRITES | frozenset(_ORM_SQL) | {"save"}
 #: The steps from a model to its rows. A chain of these alone from ANOTHER model is
 #: that model's queryset; any other step -- a relation, a call that hands back an
 #: instance -- may reach a Deployment.
@@ -1085,12 +1099,36 @@ def _strings(values):
             yield from _strings(value)
 
 
+def _allowed_lines(source):
+    """The lines of ``source`` carrying an allow comment with its reason: a COMMENT
+    token, so a string holding the marker is not one."""
+    return {
+        token.start[0]
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT and _NOT_A_WRITER.match(token.string)
+    }
+
+
+def _class_dict_of(node):
+    """What ``node`` is the class dict of -- ``X`` for ``X.__dict__`` or ``vars(X)``
+    -- or ``None``."""
+    if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+        return node.value
+    if isinstance(node, ast.Call) and _called(node) == "vars" and len(node.args) == 1:
+        return node.args[0]
+    return None
+
+
 class _Scan(ast.NodeVisitor):
     """One file's writes of a decision column the model cannot see."""
 
     def __init__(self, path, source, *, migration, found):
         self.path, self.migration, self.found = path, migration, found
-        self.lines = source.splitlines()
+        self.allowed = _allowed_lines(source)
+        # Every write-shaped site, counted on each of its own lines; and the
+        # writes held, as (scope, line, why, own lines), until `finish` clears
+        # the ones an allow comment is for.
+        self.sites, self.held = Counter(), []
         # The qualified scope a write is reported under, and the `**` an `update`
         # hands on untouched (see `_passed_through`).
         self.scope, self.passed_through = [], [None]
@@ -1098,6 +1136,14 @@ class _Scan(ast.NodeVisitor):
         self.chain = []
         self.called = set()
         self._cache = {}
+
+    def finish(self):
+        """The writes held, but for each that is the one write-shaped site on a line
+        carrying an allow comment -- one write per comment: on a line holding more
+        than one site the comment cannot say which it is for, and clears none."""
+        for scope, line, why, own in self.held:
+            if not any(self.sites[mine] == 1 for mine in own & self.allowed):
+                self.found.append((self.path, scope, line, why))
 
     # -- scopes ---------------------------------------------------------------
 
@@ -1205,17 +1251,58 @@ class _Scan(ast.NodeVisitor):
             return _MAY_BE_ANYTHING
         return _NOT_A_QUERYSET
 
-    def _writes_no_deployment(self, receiver, method):
+    def _writes_no_deployment(self, receiver, method, chain=None):
         """Whether ``method`` called on ``receiver`` is proven to write no Deployment:
         a queryset of another model reached through queryset steps alone -- or, for
         an ``update`` (which dicts, sets and hashes have too), a container, a name
         bound only to one, or a parameter whose name does not say queryset. Anything
         else may be a Deployment's -- a relation, a factory, a name this scan cannot
-        follow -- and is held to the write rules."""
+        follow -- and is held to the write rules. ``method`` is ``None`` for one
+        whose name is not known."""
         if receiver is None:
             return False
-        kind = self._kind(receiver, self.chain)
+        kind = self._kind(receiver, self.chain if chain is None else chain)
         return kind == _ANOTHER_MODEL or (method in _UPDATES and kind == _NOT_A_QUERYSET)
+
+    def _fetched(self, via, receiver, name):
+        """Why fetching the method ``name`` names off ``receiver`` writes: ``name``
+        computes -- through the scan's own string values -- to a write method, and
+        ``receiver`` is not proven to write no Deployment. ``None`` when it does
+        not, or cannot be computed (see :meth:`_calls_a_method_it_cannot_name`)."""
+        names = self._values(name, self.chain)
+        written = sorted(
+            method
+            for method in _strings(names or ())
+            if method in _FETCHED_WRITES and not self._writes_no_deployment(receiver, method)
+        )
+        if not written:
+            return None
+        return f"{via} of {written[0]}: what it is called with cannot be read"
+
+    def _calls_a_method_it_cannot_name(self, func, chain):
+        """Whether calling ``func`` calls a method fetched by a name this scan cannot
+        compute -- ``getattr(x, name)`` or ``X.__dict__[name]``, or a name bound to
+        one -- off a receiver not proven to write no Deployment. It may be any write.
+        Fetched and not called, it is only a value, as ``getattr`` mostly is."""
+        if isinstance(func, ast.Name):
+            found = self._lookup(func.id, chain)
+            if found is None:
+                return False
+            depth, bindings = found
+            return any(
+                isinstance(binding, (ast.Call, ast.Subscript))
+                and self._calls_a_method_it_cannot_name(binding, chain[: depth + 1])
+                for binding in bindings
+            )
+        if isinstance(func, ast.Call) and _called(func) == "getattr" and len(func.args) >= 2:
+            receiver, name = func.args[0], func.args[1]
+        elif isinstance(func, ast.Subscript) and _class_dict_of(func.value) is not None:
+            receiver, name = _class_dict_of(func.value), func.slice
+        else:
+            return False
+        return self._values(name, chain) is None and not self._writes_no_deployment(
+            receiver, None, chain
+        )
 
     # -- what a string is -----------------------------------------------------
 
@@ -1301,10 +1388,14 @@ class _Scan(ast.NodeVisitor):
 
     # -- the rules ------------------------------------------------------------
 
-    def _found(self, node, why):
-        if _NOT_A_WRITER.search(self.lines[node.lineno - 1]):
-            return
-        self.found.append((self.path, ".".join(self.scope) or "<module>", node.lineno, why))
+    def _site(self, node, why=None):
+        """Count ``node`` as a write-shaped site on its own lines -- the line its
+        method is named on, and the line its call ends on -- and hold it if ``why``."""
+        own = {getattr(node, "func", node).end_lineno, node.end_lineno}
+        for line in own:
+            self.sites[line] += 1
+        if why:
+            self.held.append((".".join(self.scope) or "<module>", node.lineno, why, own))
 
     def _sql(self, call, name, positions, check):
         """Why the SQL ``call`` runs writes -- or, for ``check`` "names", names -- an
@@ -1387,15 +1478,28 @@ class _Scan(ast.NodeVisitor):
             why = _fields_write(call, 3 + (past == "Model"), "update_fields", absent="every column")
             return why and f"{past}.save() of {why}, past Deployment.save"
         if name == "getattr" and receiver is None and len(call.args) >= 2:
-            attr = call.args[1]
-            if isinstance(attr, ast.Constant) and attr.value in _WRITE_METHODS | set(_RUN_SQL):
-                if self._writes_no_deployment(call.args[0], attr.value):
-                    return None
-                return f"getattr() of {attr.value}: what it is called with cannot be read"
-        if name == "methodcaller" and call.args:
-            attr = call.args[0]
-            if isinstance(attr, ast.Constant) and attr.value in _WRITE_METHODS:
-                return f"methodcaller() of {attr.value}: what it is called on cannot be read"
+            return self._fetched("getattr()", call.args[0], call.args[1])
+        if name in ("methodcaller", "attrgetter") and call.args:
+            # The name of the method called, or of each attribute fetched (dotted:
+            # every step): off what, the call does not say.
+            named = call.args[:1] if name == "methodcaller" else call.args
+            values = [self._values(a, self.chain) for a in named]
+            if None in values:
+                return f"{name}() of a name that cannot be read statically"
+            written = sorted(
+                {
+                    step
+                    for value in values
+                    for text in _strings(value)
+                    for step in text.split(".")
+                    if step in _FETCHED_WRITES
+                }
+            )
+            if not written:
+                return None
+            return f"{name}() of {written[0]}: what it is used on cannot be read"
+        if self._calls_a_method_it_cannot_name(call.func, self.chain):
+            return "a call of a method fetched by a name that cannot be read statically"
         if name in _RUN_SQL:
             # A migration may create or alter these columns in SQL; what no code may
             # do is write them.
@@ -1407,26 +1511,39 @@ class _Scan(ast.NodeVisitor):
     def visit_Call(self, node):
         self.called.add(id(node.func))
         why = self.why(node)
-        if why:
-            self._found(node, why)
+        if why or _called(node) in _WRITE_SHAPED:
+            self._site(node, why)
         self.generic_visit(node)
 
     def visit_Attribute(self, node):
         if isinstance(node.ctx, ast.Load):
             if node.attr in _UPDATE_QUERIES:
-                self._found(node, f"{node.attr}: an UPDATE built by hand")
+                self._site(node, f"{node.attr}: an UPDATE built by hand")
+            elif node.attr in _RAW_SAVES:
+                self._site(node, _RAW_SAVE_WHY % node.attr)
             elif id(node) not in self.called:
                 if node.attr in _WRITE_METHODS and not self._writes_no_deployment(node.value, node.attr):
                     why = "what it is called with cannot be read"
-                    self._found(node, f"{node.attr} referenced, not called: {why}")
+                    self._site(node, f"{node.attr} referenced, not called: {why}")
                 elif node.attr in ("execute", "executemany", "executescript"):
                     why = "the SQL it runs cannot be read"
-                    self._found(node, f"{node.attr} referenced, not called: {why}")
+                    self._site(node, f"{node.attr} referenced, not called: {why}")
         self.generic_visit(node)
 
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Load) and node.id in _UPDATE_QUERIES:
-            self._found(node, f"{node.id}: an UPDATE built by hand")
+            self._site(node, f"{node.id}: an UPDATE built by hand")
+        elif isinstance(node.ctx, ast.Load) and node.id in _RAW_SAVES:
+            self._site(node, _RAW_SAVE_WHY % node.id)
+
+    def visit_Subscript(self, node):
+        # A method fetched from a class's dict: `QuerySet.__dict__["update"]`.
+        owner = _class_dict_of(node.value)
+        if owner is not None:
+            why = self._fetched("__dict__[...]", owner, node.slice)
+            if why:
+                self._site(node, why)
+        self.generic_visit(node)
 
 
 def _decision_writes(sources, *, migration=False):
@@ -1441,8 +1558,14 @@ def _decision_writes(sources, *, migration=False):
       ``bulk_create()``/``abulk_create()`` upsert, naming one or hiding its fields;
       ``_update()``, ``_do_update()``, ``_save_table()``; and an ``UpdateQuery``;
     - any of those methods referenced without being called -- bound to a name,
-      fetched with ``getattr``, handed to ``functools.partial`` -- since what it is
-      finally called with cannot be read;
+      handed to ``functools.partial``, or fetched by a name the scan computes, as
+      it computes SQL text, with ``getattr``, ``attrgetter`` or ``methodcaller`` or
+      out of a class's ``__dict__`` -- since what it is finally called with cannot
+      be read; and a method fetched by a name the scan cannot compute, where it is
+      called, or by ``attrgetter``/``methodcaller`` at all;
+    - ``deserialize`` and ``DeserializedObject``, wherever named: a deserialized
+      object's ``save()`` is ``save_base(raw=True)``, for whatever model its data
+      names;
     - a save that goes round ``Deployment.save``: ``save_base()``,
       ``Model.save(dep, ...)``, ``super(Deployment, dep).save()``, ``super().save()``
       in Deployment's other methods -- unless its ``update_fields`` provably name no
@@ -1458,12 +1581,19 @@ def _decision_writes(sources, *, migration=False):
     queryset), and another model's queryset reached through queryset steps alone --
     an imported name being another model's only when the model registry holds it
     and it is not Deployment or a subclass or proxy of it. A
-    ``**`` whose keys cannot be read is counted: it cannot be shown not to write. A
-    line carrying ``# not-a-decision-writer: <reason>`` is let through -- for a
-    proven false positive, with its reason."""
+    ``**`` whose keys cannot be read is counted: it cannot be shown not to write.
+
+    A write is let through by the comment ``# not-a-decision-writer: <reason>`` --
+    for a proven false positive, with its reason -- on its own line: the line its
+    method is named on, or the line its call ends on. A comment token, never text
+    in a string; and one write per comment: on a line holding more than one call
+    that writes, saves or runs SQL, the comment cannot say which it is for and
+    clears none."""
     found = []
     for path, source in sorted(sources.items()):
-        _Scan(path, source, migration=migration, found=found).visit(ast.parse(source))
+        scan = _Scan(path, source, migration=migration, found=found)
+        scan.visit(ast.parse(source))
+        scan.finish()
     return found
 
 
@@ -1790,6 +1920,60 @@ _WAYS_ROUND_IT_FOUND_IN_REVIEW = {
     """,
 }
 
+#: Ways round the one writer the round-five review found the scan missing. Each
+#: must be flagged, and flagged once.
+_WAYS_ROUND_IT_FOUND_IN_THE_LAST_REVIEW = {
+    # getattr with the method's name held in a name, or assembled.
+    "getattr_name_bound_to_update": """
+        from assurance.models import Deployment
+        def f(pk):
+            method = "update"
+            getattr(Deployment.objects.filter(pk=pk), method)(decision="ready")
+    """,
+    "getattr_assembled_name": """
+        from assurance.models import Deployment
+        def f(pk):
+            getattr(Deployment.objects.filter(pk=pk), "up" + "date")(decision="ready")
+    """,
+    # A name no scan can compute: held where the method it fetches is called.
+    "generic_dispatch_helper": """
+        from assurance.models import Deployment
+        def apply(queryset, op, **fields):
+            return getattr(queryset, op)(**fields)
+        def f(pk):
+            apply(Deployment.objects.filter(pk=pk), "update", decision="ready")
+    """,
+    "operator_attrgetter": """
+        from operator import attrgetter
+        from assurance.models import Deployment
+        def f(pk):
+            attrgetter("update")(Deployment.objects.filter(pk=pk))(decision="ready")
+    """,
+    "class_dict_subscript": """
+        from django.db.models import QuerySet
+        from assurance.models import Deployment
+        def f(pk):
+            QuerySet.__dict__["update"](Deployment.objects.filter(pk=pk), decision="ready")
+    """,
+    "imported_proxy_model": """
+        from assurance.proxies import Rollout  # class Rollout(Deployment): Meta.proxy = True
+        def f(pk):
+            Rollout.objects.filter(pk=pk).update(decision="ready")
+    """,
+    "imported_alias_of_deployment": """
+        from assurance.aliases import AISystem  # aliases.py: AISystem = Deployment
+        def f(pk):
+            AISystem.objects.filter(pk=pk).update(decision="paused" and "ready")
+    """,
+    # DeserializedObject.save() is Model.save_base(raw=True), past Deployment.save.
+    "deserialized_raw_save": """
+        from django.core import serializers
+        def restore(payload):
+            for obj in serializers.deserialize("json", payload):
+                obj.save()
+    """,
+}
+
 #: A second write inside the refresh's own function, however it is dressed: the
 #: tally must not come out as the refresh's one.
 _SECOND_WRITES_IN_THE_REFRESH = {
@@ -1857,6 +2041,12 @@ _FLAGGED_BUT_NO_WRITE_FOUND_IN_REVIEW = {
 @pytest.mark.parametrize("name", sorted(_WAYS_ROUND_IT_FOUND_IN_REVIEW))
 def test_the_one_writer_scan_flags_each_way_round_it_the_review_found(name):
     source = _WAYS_ROUND_IT_FOUND_IN_REVIEW[name]
+    assert len(_parsed(source)) == 1, (name, _parsed(source))
+
+
+@pytest.mark.parametrize("name", sorted(_WAYS_ROUND_IT_FOUND_IN_THE_LAST_REVIEW))
+def test_the_one_writer_scan_flags_each_way_round_it_the_last_review_found(name):
+    source = _WAYS_ROUND_IT_FOUND_IN_THE_LAST_REVIEW[name]
     assert len(_parsed(source)) == 1, (name, _parsed(source))
 
 
@@ -1928,6 +2118,22 @@ def test_the_one_writer_scan_passes_what_the_review_found_it_flagging(name):
         "def f(c):\n    run = c.execute\n",
         "def f(c):\n    getattr(c, 'execute')('SELECT 1')\n",
         "def f(qs):\n    methodcaller('update', decision=1)(qs)\n",
+        # A method fetched by a name the scan cannot compute, called -- through a
+        # name bound to it, or out of a class's dict; methodcaller and attrgetter
+        # of such a name at all; attrgetter of a dotted path to a write.
+        "def f(qs, op):\n    write = getattr(qs, op)\n    write(decision=1)\n",
+        "def f(qs, op):\n    QuerySet.__dict__[op](qs, decision=1)\n",
+        "def f(qs, op):\n    write = QuerySet.__dict__[op]\n    write(qs, decision=1)\n",
+        "def f(qs):\n    vars(QuerySet)['update'](qs, decision=1)\n",
+        "def f(qs, op):\n    methodcaller(op, decision=1)(qs)\n",
+        "def f(qs, op):\n    attrgetter(op)(qs)(decision=1)\n",
+        "def f(model):\n    attrgetter('objects.update')(model)(decision=1)\n",
+        "def f(model):\n    attrgetter('name', 'objects.update')(model)[1](decision=1)\n",
+        # A deserialized object built by hand, and a deserializer imported bare.
+        "from django.core.serializers.base import DeserializedObject\n"
+        "def f(dep):\n    DeserializedObject(dep).save()\n",
+        "from django.core.serializers import deserialize\n"
+        "def f(p):\n    for obj in deserialize('json', p):\n        obj.save()\n",
     ],
 )
 def test_the_one_writer_scan_holds_what_it_cannot_prove_is_no_deployment_write(source):
@@ -1962,6 +2168,19 @@ def test_the_one_writer_scan_holds_what_it_cannot_prove_is_no_deployment_write(s
         "def f(c):\n    c.execute('UPDATE assurance_deployment SET %s = 1' % ('name',))\n",
         "def f(c):\n    c.execute(' '.join(('SELECT', 'decision', 'FROM assurance_deployment')))\n",
         "operations = [RunSQL(['SELECT 1', ('SELECT %s', [1])], reverse_sql=RunSQL.noop)]\n",
+        # A value fetched by a name the scan cannot compute and never called; a
+        # method it computes to be no write; another model's, whatever its name.
+        "def f(claim, field, d):\n    value = getattr(claim, field)\n    return value == d[field]\n",
+        "def f(owner, name):\n    return QuerySet.__dict__[name]\n",
+        "def f(qs):\n    method = 'co' + 'unt'\n    return getattr(qs, method)()\n",
+        "def f(op):\n    getattr(Finding.objects, op)(decision=1)\n",
+        "def f(dep):\n    return attrgetter('name', 'owner.email')(dep)\n",
+        "def f():\n    getattr(Finding.objects.all(), 'update')(decision=1)\n",
+        # A name bound in an enclosing scope is read there, not where it is called.
+        "def f(op):\n    rows = Finding.objects.all()\n    write = getattr(rows, op)\n"
+        "    def g(rows):\n        write(decision=1)\n",
+        "def f(qs):\n    op = 'count'\n    count = getattr(qs, op)\n"
+        "    def g(op):\n        return count()\n",
     ],
 )
 def test_the_one_writer_scan_passes_what_it_proves_is_no_deployment_write(source):
@@ -1998,6 +2217,71 @@ def test_the_one_writer_scan_lets_through_a_line_marked_not_a_writer_with_its_re
     assert len(_parsed(bare)) == 1
     elsewhere = "# not-a-decision-writer: the next line\n" + flagged
     assert len(_parsed(elsewhere)) == 1
+
+
+_CHAIN = """
+    def f(pk):
+        rows = (
+            Deployment.objects{0}
+            .filter(pk=pk)
+            .update({1}
+                decision="ready",
+            ){2}
+        )
+"""
+_ALLOWED = "  # not-a-decision-writer: a probe"
+
+
+@pytest.mark.parametrize(
+    ("where", "cleared"),
+    [
+        # The line a chain starts on names no write: a comment there is not beside it.
+        ((_ALLOWED, "", ""), False),
+        # The line its method is named on, and the line its call ends on, are its own.
+        (("", _ALLOWED, ""), True),
+        (("", "", _ALLOWED), True),
+    ],
+)
+def test_an_allow_comment_clears_only_a_write_on_its_own_line(where, cleared):
+    found = _parsed(_CHAIN.format(*where))
+    assert found == ([] if cleared else [("f", "update() of ['decision']")]), found
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # One write flagged, beside a call that writes nothing it holds: which is
+        # the comment for?
+        "d.update(**{}); Deployment.objects.filter(pk=pk).update(decision='ready')",
+        "d.save(); Deployment.objects.filter(pk=pk).update(decision='ready')",
+        "Finding.objects.raw('SELECT 1'); Deployment.objects.update(decision='ready')",
+        # Two writes flagged.
+        "Deployment.objects.update(decision=1); Deployment.objects.update(decision=2)",
+    ],
+)
+def test_one_allow_comment_clears_one_write_and_no_line_of_them(line):
+    """One write per comment: on a line holding more than one call that writes,
+    saves or runs SQL, the comment cannot say which it is for, and clears none."""
+    bare = f"def f(pk, d):\n    {line}\n"
+    marked = f"def f(pk, d):\n    {line}  # not-a-decision-writer: d is a dict\n"
+    assert _parsed(bare) and _parsed(marked) == _parsed(bare)
+
+
+def test_an_allow_comment_clears_the_write_on_its_line_and_no_other():
+    source = (
+        "def f(x):\n"
+        "    x.bulk_update([], ['decision'])  # not-a-decision-writer: x is a Verdict manager\n"
+        "    Deployment.objects.update(decision=1)\n"
+    )
+    assert _parsed(source) == [("f", "update() of ['decision']")]
+
+
+def test_the_allow_marker_inside_a_string_is_not_an_allow_comment():
+    source = (
+        "def f(pk):\n    Deployment.objects.filter(pk=pk).update(decision='ready',"
+        " decision_keyring='# not-a-decision-writer: x')\n"
+    )
+    assert len(_parsed(source)) == 1
 
 
 def test_a_migration_is_held_to_what_its_sql_does_wherever_the_text_is_kept():
