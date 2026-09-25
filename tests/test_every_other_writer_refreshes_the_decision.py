@@ -165,10 +165,26 @@ def test_an_admin_deleting_a_finding_refreshes_the_decision():
     assert one_decision(dep, _client()) == Deployment.Decision.READY
 
 
-def test_an_admin_bulk_delete_refreshes_the_decision():
+def test_an_admin_bulk_delete_refreshes_the_decision_in_the_deletes_transaction(monkeypatch):
+    """The changelist's bulk delete is not wrapped in a transaction by the admin, as
+    the change form is. Refreshed after the delete had committed, a reader in
+    between would see the finding gone and the decision it held still standing."""
+    from assurance import admin as assurance_admin
+
     dep = _scanned()
     finding = _finding(dep)
     recompute_decision(dep)
+    # The test runs inside pytest-django's transaction, so "in an atomic block" is
+    # always true here and would assert nothing: the depth has to grow.
+    outside = len(connection.atomic_blocks)
+    depths = []
+    real = assurance_admin.refresh_stored_decisions
+
+    def recording(deployment_ids):
+        depths.append(len(connection.atomic_blocks))
+        return real(deployment_ids)
+
+    monkeypatch.setattr(assurance_admin, "refresh_stored_decisions", recording)
     web = _admin_web()
     response = web.post(
         "/admin/assurance/finding/",
@@ -176,6 +192,7 @@ def test_an_admin_bulk_delete_refreshes_the_decision():
     )
     assert response.status_code == 302
     assert not Finding.objects.filter(pk=finding.pk).exists()
+    assert depths and all(depth > outside for depth in depths), (outside, depths)
     assert one_decision(dep, _client()) == Deployment.Decision.READY
 
 
