@@ -15,7 +15,7 @@ import uuid as uuidlib
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Count
+from django.db.models import Count, Exists, OuterRef
 from django.shortcuts import get_object_or_404
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
@@ -24,11 +24,13 @@ from rest_framework.response import Response
 
 from django.db import transaction
 
+from config.parsers import SafeJSONParser
+
 from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import observability
+from . import observability, observed_outcomes
 from .bundle import assurance_bundle
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -37,8 +39,9 @@ from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
-from .decision import decision_support, recompute_decision
+from .decision import current_decision, decision_support, recompute_decision
 from .revalidation import plan_revalidation
+from .revision import logged_head
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
 from .operational import assess_operational
@@ -162,7 +165,10 @@ def _rows_from_body(data, *, key: str, single_allowed: bool):
             return rows, False
         if single_allowed:
             return [data], True
-        return [], False
+        # Not "no rows": an object that does not carry the list is a body this
+        # route cannot read, and a true-replace reading it as empty cleared the
+        # whole set -- `PUT {"a": 1}` lifted every approved workflow's floor. An
+        # empty set is said on purpose, as `[]` or `{key: []}`.
     raise ValidationError(
         {
             key: (
@@ -172,6 +178,27 @@ def _rows_from_body(data, *, key: str, single_allowed: bool):
             )
         }
     )
+
+
+def _refresh_stored_decision(deployment) -> None:
+    """Recompute and persist the deployment's decision after an input to it moved:
+    its findings, its claims, its declared architecture or its chains.
+
+    The receipt and the bundle read the STORED decision, and only scan ingest and
+    the recompute route refreshed it. So a workflow set or a chain outcome written
+    over HTTP changed what decision-support computed live while the receipt kept
+    reporting the decision from before -- a signed violation left a stored READY
+    in place, read by every surface that trusts the record. Keeps an operator's
+    failsafe pause as the LOCKED row holds it, not as this request first read it.
+
+    Call it INSIDE the transaction that made the write, after the write. Called
+    after that transaction committed, it left a window in which another reader saw
+    the new input beside the old decision under one revision, and a refresh that
+    failed there (a lock timeout) left the write standing and the decision stale
+    for good -- a signed outcome cannot be posted twice to try again. Inside, the
+    two commit together or neither does.
+    """
+    recompute_decision(deployment)
 
 
 def _composition_payload(deployment) -> dict:
@@ -392,7 +419,20 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     CANDIDATE_PAGE_SIZE = 50
 
     def get_queryset(self):
-        qs = Deployment.objects.all().annotate(finding_count=Count("findings"))
+        qs = Deployment.objects.all().annotate(
+            finding_count=Count("findings"),
+            # Lets the serializer reconcile the decision it publishes without a
+            # query per row for a deployment whose stamp is current.
+            has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))),
+        )
+        if self.action != "recompute":
+            # The head of each row's transition log, read with the row: what the
+            # serializer holds a row behind its log to (`current_decision`),
+            # without a query per row. Not on the route that pauses: it publishes
+            # nothing off the row it loads -- `recompute_decision` reads the
+            # decision in force under the row lock -- and nothing added for a
+            # read may add a way for a pause to fail.
+            qs = qs.annotate(**logged_head())
         user = self.request.user
         if _is_privileged(user):
             return qs
@@ -488,8 +528,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         this the same way; the manual path used to default to False and clear it.)"""
         _require_admin(request)
         deployment = self.get_object()
-        currently_paused = deployment.decision == Deployment.Decision.PAUSED
-        paused = _parse_paused(request.data.get("paused"), currently_paused)
+        # Absent -> None: keep whatever the LOCKED row says. Reading "currently
+        # paused" here, before the lock, let a pause committed meanwhile be lifted.
+        if not isinstance(request.data, dict):
+            raise ValidationError({"paused": "Send an object, optionally with a boolean 'paused'."})
+        raw_paused = request.data.get("paused")
+        paused = None if raw_paused is None else _parse_paused(raw_paused, False)
         decision = recompute_decision(deployment, paused=paused)
         # Commercial spine: if the decision has entered a blocking state and this
         # deployment's policy opts into it, auto-dispatch its qualifying findings.
@@ -1434,6 +1478,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     )
                     for row in rows
                 )
+                _refresh_stored_decision(deployment)
         # `select_related` because `approved_by` is read per row: without it a
         # thousand-row set issues a thousand extra user queries.
         recorded = deployment.approved_workflows.select_related("approved_by")
@@ -1463,7 +1508,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         APPENDS one or more (admin-only — it writes the shared record).
 
         APPEND, NOT REPLACE, and this is the load-bearing difference from the
-        approved set above. An outcome is an OBSERVATION at an instant.
+        approved set above. An outcome is a REPORT at an instant.
         :mod:`assurance.composition` picks the newest verdict per workflow and
         counts what a re-run superseded; replacing on write would leave exactly one
         outcome per workflow, so supersession would become unreachable and the rule
@@ -1508,12 +1553,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     WorkflowChainOutcome(deployment=deployment, **row)
                     for row in serializer.validated_data
                 )
+                _refresh_stored_decision(deployment)
         recorded = deployment.chain_outcomes.all()
         total = recorded.count()
         page = list(recorded[: self.CHAIN_OUTCOME_PAGE_SIZE])
         return Response(
             {
-                "outcomes": WorkflowChainOutcomeSerializer(page, many=True).data,
+                "outcomes": WorkflowChainOutcomeSerializer(
+                    page, many=True, context={"deployment_uuid": str(deployment.uuid)}
+                ).data,
                 # Returned vs recorded, stated separately and always: `len(outcomes)`
                 # is not the count and must not be usable as one.
                 "returned": len(page),
@@ -1522,6 +1570,98 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "recorded_count": total,
                 "composition": _composition_payload(deployment),
             }
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="chain-outcomes/observed",
+        # JSON only. A signed outcome is a JSON document, and a form or multipart
+        # body is not one: with the default parsers a multipart POST reached a 500,
+        # because the audit middleware had already consumed the stream as a form.
+        parser_classes=[SafeJSONParser],
+    )
+    def observed_chain_outcomes(self, request, uuid=None):
+        """Record chain outcomes from the envelopes an engine SIGNED.
+
+        "Observed" in the path means reported by an engine at an instant, not that
+        an effect was seen: each recorded row is published with its
+        ``evidence_kind``, and one Achilles signed is an ``authorization_check``: a
+        held there means the gate authorized the action at dispatch, which shows the
+        authority chain resolves and not that the effect happened.
+
+        The only route that writes ``basis=demonstrated``. The body is one DSSE
+        envelope or ``{"envelopes": [...]}``; each is verified against this
+        deployment's outcome keyring and against what a signature does not prove
+        (the deployment it names, replay, staleness, clock skew), and the batch is
+        recorded whole or not at all -- a 400 names every refusal by position.
+        Admin-only, like the operator route: it writes the shared record. What
+        makes a row demonstrated is the engine's signature, not who posted it.
+        """
+        deployment = self.get_object()
+        _require_admin(request)
+        # The DECLARED length, read before the body is. Reading ``request.body`` to
+        # measure it answered a body over Django's own upload cap with Django's
+        # generic 400, and raised on a stream the middleware had already consumed;
+        # the header answers every size with this route's own 413.
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > observed_outcomes.MAX_BODY_BYTES:
+            return Response(
+                {"error": "the request is larger than a batch of signed outcomes can be"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        # Refused by name rather than left to the parser: once the audit middleware
+        # has read a form body, DRF hands a non-JSON request back as empty data, and
+        # that read as "one malformed envelope" -- a refusal about the wrong thing.
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": "signed outcomes are posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        data = request.data
+        if isinstance(data, dict) and "envelopes" in data:
+            envelopes = data["envelopes"]
+        else:
+            envelopes = [data]
+        if not isinstance(envelopes, list) or not envelopes:
+            raise ValidationError({"envelopes": "a non-empty list of signed outcomes"})
+        if len(envelopes) > observed_outcomes.BATCH_LIMIT:
+            raise ValidationError(
+                {"envelopes": f"at most {observed_outcomes.BATCH_LIMIT} outcomes per request"}
+            )
+        try:
+            # The rows and the decision they move commit together, as on the
+            # operator route. `ingest` commits in its own block, and the refresh
+            # used to run after it: a refresh that failed there left a signed
+            # violation recorded under a stored READY, and the engine's retry of the
+            # same envelope was refused as a replay -- nothing on this route could
+            # bring the two back together.
+            with transaction.atomic():
+                rows, refusals = observed_outcomes.ingest(deployment, envelopes)
+                if not refusals:
+                    _refresh_stored_decision(deployment)
+        except observed_outcomes.KeyringUnavailable as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if refusals:
+            return Response(
+                {
+                    "recorded": 0,
+                    "refused": [{"index": r.index, "reason": r.reason} for r in refusals],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {
+                "recorded": len(rows),
+                "outcomes": WorkflowChainOutcomeSerializer(
+                    rows, many=True, context={"deployment_uuid": str(deployment.uuid)}
+                ).data,
+                "composition": _composition_payload(deployment),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
     @action(detail=True, methods=["get"], url_path="ai-bom")
@@ -1547,7 +1687,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         REPLACES the whole declared set from a list of components (admin-only — it
         mutates the record) and returns the fresh declaration and drift. Declaring
         an architecture is a separate axis from the running system, so it does not
-        move the system fingerprint."""
+        move the system fingerprint.
+
+        It does move the DECISION: the declared set is the baseline the coverage
+        cap measures against, so a declared component nobody observed holds the
+        deployment at AUDIT_INCOMPLETE. The stored decision is refreshed in the
+        same transaction as the declaration."""
         deployment = self.get_object()
         if request.method == "PUT":
             _require_admin(request)
@@ -1560,6 +1705,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     DeclaredComponent(deployment=deployment, declared_by=request.user, **row)
                     for row in serializer.validated_data
                 )
+                # Without this the receipt went on saying READY while
+                # decision-support, computing live, said AUDIT_INCOMPLETE -- and a
+                # dispatch retry fenced on the stored decision pushed under it.
+                _refresh_stored_decision(deployment)
         components = deployment.declared_components.all()
         assessed = (
             Deployment.objects.prefetch_related("assets__provider", "declared_components").get(
@@ -1594,10 +1743,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         finding whose drift has cleared, re-opens a machine-closed one whose drift
         returned, and never overrides a human's disposition. An undeclared component
         also contradicts the AI-BOM claim (recompute claims to reflect it). Returns
-        ``{created, updated, reopened, resolved, drift_detected}``."""
+        ``{created, updated, reopened, resolved, drift_detected}``.
+
+        The drift findings are findings like any other, so opening or closing one
+        moves the decision; it is refreshed in the same transaction as they are."""
         _require_admin(request)
         deployment = self.get_object()
-        return Response(record_bom_drift_findings(deployment))
+        with transaction.atomic():
+            counts = record_bom_drift_findings(deployment)
+            _refresh_stored_decision(deployment)
+        return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="compliance")
     def compliance(self, request, uuid=None):
@@ -1650,16 +1805,24 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         computed, never stored. Every value is a real count, a true ratio of real
         counts, or an ordinal band: there is no dollar figure, ROI amount, or
         realized-loss number anywhere, and nothing claims the system is secure."""
+        deployment = self.get_object()
         assessed = (
-            Deployment.objects.prefetch_related(
+            Deployment.objects.annotate(**logged_head())
+            .prefetch_related(
                 "findings__evidence",
                 "findings__remediation_events",
                 "findings__owner",
                 "assets__provider__assertions",
             )
             .select_related("data_boundary")
-            .get(pk=self.get_object().pk)
+            .get(pk=deployment.pk)
         )
+        # The summary publishes the standing decision: reconciled with its log and
+        # the keyring in force first, as the receipt is, so the two cannot
+        # disagree. The instance published is the one reconciled: where a row
+        # behind its log cannot be written, only that instance holds the decision
+        # the log records.
+        current_decision(assessed)
         return Response(build_executive_summary(assessed))
 
     @action(detail=True, methods=["get"], url_path="operational-assurance")
@@ -1675,9 +1838,13 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         (None when there is no basis, never a fake 0%), or an ordinal band: there is
         no dollar figure anywhere, and nothing reads "healthy"/"current"/"secure" as
         an unearned fact — an unassessed or stale deployment reads honestly."""
-        assessed = Deployment.objects.prefetch_related(
-            "findings__evidence", "findings__remediation_events"
-        ).get(pk=self.get_object().pk)
+        deployment = self.get_object()
+        assessed = (
+            Deployment.objects.annotate(**logged_head())
+            .prefetch_related("findings__evidence", "findings__remediation_events")
+            .get(pk=deployment.pk)
+        )
+        current_decision(assessed)  # as the executive summary: see there
         return Response(assess_operational(assessed))
 
     @action(detail=True, methods=["get"], url_path="operational-risk")
@@ -1762,7 +1929,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         ``{created, updated, superseded, stale}``."""
         _require_admin(request)
         deployment = self.get_object()
-        counts = derive_claims(deployment)
+        # The decision is capped by the claims, so a re-derivation that moves one
+        # moves the decision -- and the stored one is what the receipt, the bundle
+        # and decision-support's revision publish. One transaction: the claims
+        # committed first and the refresh ran after, so a reader in between saw
+        # the new claims beside the old decision under one revision.
+        with transaction.atomic():
+            counts = derive_claims(deployment)
+            _refresh_stored_decision(deployment)
         return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="retest-requirements")
@@ -1797,8 +1971,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         authenticated operator like the rest of the assurance reads; it computes,
         it does not persist."""
         deployment = self.get_object()
-        paused = deployment.decision == Deployment.Decision.PAUSED
-        return Response(decision_support(deployment, paused=paused))
+        # Reconciled first: it publishes the stored revision beside a decision it
+        # computes live, and after a key rotation those were two different
+        # decisions under one revision number -- a fence that fenced nothing.
+        current_decision(deployment)
+        # No `paused` argument: `decision_support` reads the pause from the row it
+        # reads the revision from. Read here, from this instance, it came from
+        # before that transaction, and an operator's pause landing in between was
+        # published as a live READY under the revision that recorded the pause.
+        return Response(decision_support(deployment))
 
     @action(detail=True, methods=["get"], url_path="coverage-manifest")
     def coverage_manifest_view(self, request, uuid=None):
@@ -1844,10 +2025,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         retest obligation (attributed) and moves the claim away from a pass to
         stale, and it resolves any obligation a prior rebinding re-derivation has
         already satisfied — never inventing an "invalid but passing" state. Returns
-        the counts ``{invalidated, retests_opened, retests_resolved}``."""
+        the counts ``{invalidated, retests_opened, retests_resolved}``.
+
+        A stale claim and an open obligation each cap the decision, so the stored
+        decision is refreshed in the same transaction as the check."""
         _require_admin(request)
         deployment = self.get_object()
-        counts = run_invalidation_check(deployment, actor=request.user)
+        with transaction.atomic():
+            counts = run_invalidation_check(deployment, actor=request.user)
+            _refresh_stored_decision(deployment)
         return Response(counts)
 
 
@@ -1934,9 +2120,16 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         if to_status not in AssuranceClaim.ClaimStatus.values:
             return Response({"detail": f"Unknown claim status: {to_status!r}."}, status=400)
         try:
-            event = apply_claim_transition(
-                claim, to_status, actor=request.user, note=request.data.get("note", "")
-            )
+            # A claim an operator contradicts caps the decision. Without the
+            # refresh, decision-support computed the capped decision live under the
+            # SAME revision the receipt was still publishing READY under: one
+            # revision, two decisions. And in the same transaction as the move, or
+            # a reader between the two commits saw exactly that.
+            with transaction.atomic():
+                event = apply_claim_transition(
+                    claim, to_status, actor=request.user, note=request.data.get("note", "")
+                )
+                _refresh_stored_decision(claim.deployment)
         except IllegalClaimTransition as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response(
@@ -2015,6 +2208,17 @@ class FindingViewSet(
         # a raw field write.
         _require_admin(request)
         return super().update(request, *args, **kwargs)
+
+    def perform_update(self, serializer):
+        # `status` is a decision input: re-opening a critical finding makes the
+        # deployment NOT_RECOMMENDED, closing the last one lifts it. The PATCH
+        # used to write the status and leave the stored decision alone, so the
+        # receipt could read READY with a critical finding open while
+        # decision-support, computing live, said otherwise. The finding and the
+        # decision it moves commit together.
+        with transaction.atomic():
+            finding = serializer.save()
+            _refresh_stored_decision(finding.deployment)
 
     @action(detail=True, methods=["get"], url_path="remediation")
     def remediation(self, request, uuid=None):

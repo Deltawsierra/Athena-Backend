@@ -50,13 +50,18 @@ def _signature(result):
         result.workflows_unapproved,
         result.superseded,
         result.all_held,
+        tuple(sorted(result.basis_census.items())),
+        result.unexercised,
+        result.held_floored,
+        tuple(sorted(result.evidence_census.items())),
+        result.authorization_checked,
         comp.explain(result),
     )
 
 
-def _outcomes(*pairs, at=None):
+def _outcomes(*pairs, at=None, basis=comp.BASIS_UNKNOWN):
     return [
-        ChainOutcome(workflow=name, status=status, observed_at=at)
+        ChainOutcome(workflow=name, status=status, observed_at=at, basis=basis)
         for name, status in pairs
     ]
 
@@ -264,11 +269,71 @@ def test_every_approved_workflow_exercised_and_holding_is_ready() -> None:
     unreachable, the parameter would just be a way to never pass."""
     approved = ["a", "b", "c"]
     result = compose(
-        _outcomes(("a", HELD), ("b", HELD), ("c", HELD)), expected_workflows=approved
+        _outcomes(("a", HELD), ("b", HELD), ("c", HELD), basis=comp.BASIS_DEMONSTRATED),
+        expected_workflows=approved,
     )
     assert result.decision == comp.READY
     assert result.workflows_unreported == 0
     assert result.all_held is True
+
+
+@pytest.mark.parametrize("basis", sorted(comp.UNEXERCISED_BASES))
+def test_every_approved_workflow_held_but_not_exercised_is_not_ready(basis) -> None:
+    """The same approved set, every chain held, and no run behind any of them.
+    "Exercised" is what READY asks for; a held nobody demonstrated floors exactly
+    as an approved workflow that never reported, and the explanation says so."""
+    approved = ["a", "b", "c"]
+    result = compose(
+        _outcomes(("a", HELD), ("b", HELD), ("c", HELD), basis=basis),
+        expected_workflows=approved,
+    )
+    assert result.decision == comp.NEEDS_MORE_EVIDENCE
+    assert result.deciding == ("a", "b", "c")
+    assert result.workflows_unexercised == 3
+    assert "counts as not_demonstrated" in comp.explain(result)
+
+    # Demonstrating two of the three leaves the third deciding.
+    mixed = compose(
+        _outcomes(("a", HELD), ("b", HELD), basis=comp.BASIS_DEMONSTRATED)
+        + _outcomes(("c", HELD), basis=basis),
+        expected_workflows=approved,
+    )
+    assert mixed.decision == comp.NEEDS_MORE_EVIDENCE
+    assert mixed.deciding == ("c",)
+
+    # No approved list: nothing to count it against, and no floor.
+    assert compose(_outcomes(("a", HELD), basis=basis)).decision == comp.READY
+
+
+def test_an_asserted_verdict_cannot_supersede_a_demonstrated_one() -> None:
+    """A later ATTESTED held -- however late; 2099 is as late as any -- does not
+    displace an earlier DEMONSTRATED violated. Evidence may outrank an assertion,
+    not the reverse. And a later demonstrated verdict still supersedes both."""
+    from datetime import datetime, timezone as tz
+
+    early = datetime(2026, 1, 1, tzinfo=tz.utc)
+    late = datetime(2099, 1, 1, tzinfo=tz.utc)
+    demonstrated = ChainOutcome(workflow="w", status=VIOLATED, observed_at=early, basis=comp.BASIS_DEMONSTRATED)
+    asserted = ChainOutcome(workflow="w", status=HELD, observed_at=late, basis=comp.BASIS_ATTESTED)
+    for order in ([demonstrated, asserted], [asserted, demonstrated]):
+        result = compose(order)
+        assert result.decision == comp.NOT_RECOMMENDED
+        assert result.census[VIOLATED] == 1
+        assert result.superseded == 0
+
+    rerun = ChainOutcome(
+        workflow="w", status=HELD, observed_at=datetime(2026, 2, 1, tzinfo=tz.utc), basis=comp.BASIS_DEMONSTRATED
+    )
+    result = compose([demonstrated, asserted, rerun])
+    assert result.census[VIOLATED] == 0
+    assert result.superseded == 1, "the demonstrated re-run displaces the violation; the assertion stands beside it"
+
+    # The other direction is unchanged: a later demonstrated verdict displaces an assertion.
+    earlier_assertion = ChainOutcome(workflow="w", status=VIOLATED, observed_at=early, basis=comp.BASIS_ATTESTED)
+    later_run = ChainOutcome(workflow="w", status=HELD, observed_at=late, basis=comp.BASIS_DEMONSTRATED)
+    result = compose([earlier_assertion, later_run])
+    assert result.census[VIOLATED] == 0
+    assert result.superseded == 1
 
 
 def test_an_outcome_for_a_workflow_nobody_approved_still_counts() -> None:
@@ -837,3 +902,113 @@ def test_an_approved_workflow_is_named_by_a_string() -> None:
 
     with pytest.raises(ValueError):
         compose([], expected_workflows=["a", ""])
+
+
+# --- which basis stands, and when the held clause is said ----------------------
+
+
+def test_the_basis_rank_is_total_over_the_bases() -> None:
+    """Every basis has a rank and no two share one, so a tie between survivors
+    reporting one status never falls to arrival order."""
+    assert set(comp._BASIS_RANK) == comp.CHAIN_BASES
+    assert len(set(comp._BASIS_RANK.values())) == len(comp.CHAIN_BASES)
+    assert comp._BASIS_RANK[comp.BASIS_DEMONSTRATED] < comp._BASIS_RANK[comp.BASIS_ATTESTED]
+    assert comp._BASIS_RANK[comp.BASIS_ATTESTED] < comp._BASIS_RANK[comp.BASIS_UNKNOWN]
+
+
+@pytest.mark.parametrize(
+    ("bases", "stands"),
+    [
+        pytest.param((comp.BASIS_ATTESTED, comp.BASIS_UNKNOWN), comp.BASIS_ATTESTED, id="attested-over-unknown"),
+        pytest.param((comp.BASIS_DEMONSTRATED, comp.BASIS_UNKNOWN), comp.BASIS_DEMONSTRATED, id="demonstrated-over-unknown"),
+        pytest.param(
+            (comp.BASIS_UNKNOWN, comp.BASIS_ATTESTED, comp.BASIS_DEMONSTRATED),
+            comp.BASIS_DEMONSTRATED,
+            id="demonstrated-over-both",
+        ),
+    ],
+)
+def test_a_tie_between_bases_goes_to_the_strongest_in_any_order(bases, stands) -> None:
+    """Survivors at one instant saying one thing: the strongest basis stands,
+    whichever arrived first. Between attested and unknown this used to go to
+    whichever came first, so one set of outcomes had two basis censuses."""
+    outcomes = [ChainOutcome("w", HELD, observed_at=T0, basis=basis) for basis in bases]
+    signatures = set()
+    for order in permutations(outcomes):
+        result = compose(list(order))
+        assert result.basis_census[stands] == 1
+        assert sum(result.basis_census.values()) == 1
+        signatures.add(_signature(result))
+    assert len(signatures) == 1
+
+
+@pytest.mark.parametrize("basis", sorted(comp.UNEXERCISED_BASES))
+def test_the_held_clause_names_the_workflows_it_floored_and_only_those(basis) -> None:
+    approved = ["a", "b"]
+    floored = compose(
+        _outcomes(("a", HELD), basis=basis) + _outcomes(("b", HELD), basis=comp.BASIS_DEMONSTRATED),
+        expected_workflows=approved,
+    )
+    assert floored.held_floored == ("a",)
+    sentence = comp.explain(floored)
+    assert "The held reported for a rests on no demonstrated exercise" in sentence
+    assert "counts as not_demonstrated" in sentence
+
+
+@pytest.mark.parametrize("basis", sorted(comp.UNEXERCISED_BASES))
+def test_no_held_clause_under_a_floor_the_typed_in_held_did_not_set(basis) -> None:
+    """A signed violation sets the floor; an asserted held beside it is floored
+    too, but below the violation, so it decides nothing. The clause explaining
+    why a held decides was printed there anyway, under a decision it had no part
+    in."""
+    result = compose(
+        _outcomes(("a", HELD), basis=basis) + _outcomes(("b", VIOLATED), basis=comp.BASIS_DEMONSTRATED),
+        expected_workflows=["a", "b"],
+    )
+    assert result.decision == comp.NOT_RECOMMENDED
+    assert result.deciding == ("b",)
+    assert result.held_floored == ()
+    assert "counts as not_demonstrated" not in comp.explain(result)
+
+
+@pytest.mark.parametrize("basis", sorted(comp.UNEXERCISED_BASES))
+def test_no_held_clause_without_an_approved_list_or_when_everything_is_demonstrated(basis) -> None:
+    unlisted = compose(_outcomes(("a", HELD), ("b", NOT_DEMONSTRATED), basis=basis))
+    assert unlisted.held_floored == ()
+    assert "counts as not_demonstrated" not in comp.explain(unlisted)
+
+    demonstrated = compose(
+        _outcomes(("a", HELD), ("b", NOT_DEMONSTRATED), basis=comp.BASIS_DEMONSTRATED),
+        expected_workflows=["a", "b"],
+    )
+    assert demonstrated.deciding == ("b",)
+    assert demonstrated.held_floored == ()
+    assert "counts as not_demonstrated" not in comp.explain(demonstrated)
+
+
+def test_an_asserted_not_demonstrated_is_not_named_as_a_floored_held() -> None:
+    """``held_floored`` is the rule's addition only: a not_demonstrated floors by
+    its own status, whoever reported it, and is not a held the rule demoted."""
+    result = compose(
+        _outcomes(("a", HELD), ("b", NOT_DEMONSTRATED), basis=comp.BASIS_ATTESTED),
+        expected_workflows=["a", "b"],
+    )
+    assert result.deciding == ("a", "b")
+    assert result.held_floored == ("a",)
+
+
+def test_the_held_clause_rolls_up_past_the_named_limit() -> None:
+    names = [f"w{i:02d}" for i in range(comp._UNEXERCISED_NAMED + 3)]
+    result = compose(_outcomes(*[(n, HELD) for n in names], basis=comp.BASIS_ATTESTED), expected_workflows=names)
+    assert result.held_floored == tuple(names)
+    assert "and 3 more rests on no demonstrated exercise" in comp.explain(result)
+
+
+@pytest.mark.parametrize("basis", sorted(comp.UNEXERCISED_BASES))
+def test_an_asserted_incomplete_is_audit_incomplete(basis) -> None:
+    """An asserted gap floors by its status, as the docstring of ``_floor_of``
+    says: a claim that something could not be checked is acted on whoever
+    makes it."""
+    result = compose(_outcomes(("a", INCOMPLETE), basis=basis), expected_workflows=["a"])
+    assert result.decision == comp.AUDIT_INCOMPLETE
+    assert result.held_floored == ()

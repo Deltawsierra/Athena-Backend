@@ -15,6 +15,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from assurance import ingest
+from assurance.decision import recompute_decision
 from assurance.models import (
     Deployment,
     Evidence,
@@ -217,8 +218,7 @@ def test_paused_decision_survives_reingest():
     scan = _scan(user, findings=ENGINE_FINDINGS)
     ingest.ingest_scan(scan)
     dep = Deployment.objects.get()
-    dep.decision = Deployment.Decision.PAUSED
-    dep.save(update_fields=["decision"])
+    recompute_decision(dep, paused=True)  # the operator's pause, as the failsafe sets it
 
     ingest.ingest_scan(scan)  # a re-scan lands
     dep.refresh_from_db()

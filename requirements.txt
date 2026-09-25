@@ -135,4 +135,4 @@ zopfli==0.2.3.post1
 # the approved address is never dialled), and the merge used `or`, so a caller
 # dict naming any scheme also suppressed the whole of an operator's mandatory
 # proxy configuration while proxy_summary() went on printing it.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@e2c1cfd614f33c20d6cec9245285e4922677d41c
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@48288659082c37625b6ddf6504d43ae11f0b30e1

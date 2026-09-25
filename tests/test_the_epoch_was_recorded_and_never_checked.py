@@ -54,6 +54,7 @@ import pytest
 import requests.exceptions as rex
 from assurance.dispatch import dispatch_finding, policy_epoch, reconcile_attempt
 from assurance.models import ConnectorBinding, Deployment, DispatchAttempt, Finding
+from assurance.revision import accept_transition
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -171,8 +172,7 @@ def test_an_automatic_retry_after_the_authority_was_withdrawn_does_not_push():
     assert first.policy_epoch == "ready"
 
     # The operator withdraws the authority this dispatch was made under.
-    dep.decision = Deployment.Decision.NOT_RECOMMENDED
-    dep.save(update_fields=["decision"])
+    accept_transition(dep, to_decision=Deployment.Decision.NOT_RECOMMENDED)
 
     retry = dispatch_finding(
         finding, trigger=DispatchAttempt.Trigger.SEVERITY, transport_factory=_Accepting
@@ -194,8 +194,7 @@ def test_the_epoch_it_was_authorized_under_survives_the_retry():
     _binding(dep)
 
     _lost_then_reconciled(dep, finding)
-    dep.decision = Deployment.Decision.NOT_RECOMMENDED
-    dep.save(update_fields=["decision"])
+    accept_transition(dep, to_decision=Deployment.Decision.NOT_RECOMMENDED)
 
     retry = dispatch_finding(
         finding, trigger=DispatchAttempt.Trigger.SEVERITY, transport_factory=_Accepting
@@ -218,8 +217,7 @@ def test_the_refusal_is_recorded_rather_than_silently_skipped():
     _binding(dep)
 
     _lost_then_reconciled(dep, finding)
-    dep.decision = Deployment.Decision.NOT_RECOMMENDED
-    dep.save(update_fields=["decision"])
+    accept_transition(dep, to_decision=Deployment.Decision.NOT_RECOMMENDED)
 
     dispatch_finding(
         finding, trigger=DispatchAttempt.Trigger.SEVERITY, transport_factory=_Accepting
@@ -246,8 +244,7 @@ def test_a_manual_dispatch_is_a_fresh_authorization_under_the_epoch_now():
     _binding(dep)
 
     _lost_then_reconciled(dep, finding)
-    dep.decision = Deployment.Decision.NOT_RECOMMENDED
-    dep.save(update_fields=["decision"])
+    accept_transition(dep, to_decision=Deployment.Decision.NOT_RECOMMENDED)
 
     # First the automatic retry is refused...
     refused = dispatch_finding(

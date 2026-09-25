@@ -1,3 +1,4 @@
+import codecs
 import ipaddress
 import json
 import logging
@@ -5,6 +6,8 @@ import re
 import threading
 import time
 import uuid
+from array import array
+from bisect import bisect_left, bisect_right
 from urllib.parse import unquote_plus, urlencode
 
 import requests
@@ -119,8 +122,22 @@ _BLOCKING_ACTIONS = frozenset({"block", "blocked", "deny", "denied", "refuse", "
 
 
 def _is_sensitive_key(key):
-    lowered = str(key).lower()
-    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+    """Whether ``key`` names a secret -- the ONE judgement every path uses.
+
+    casefold, not lower: "paſſword".lower() keeps the ſ, and "paßword" only
+    becomes "password" when folded. And both spellings of each part: the plain
+    substring ("private_key") and the text path's separator-tolerant pattern
+    ("private-key"). Three predicates had drifted apart, so a key one path
+    redacted another forwarded."""
+    text = str(key)
+    lowered = text.casefold()
+    # The pattern runs on the raw key: it is compiled re.I, which already matches
+    # ſ, K and İ, and none of its separator-tolerant spellings (private-key,
+    # api-key, client-secret) holds a letter that casefolding expands.
+    return (
+        any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+        or _SENSITIVE_TEXT_PART.search(text) is not None
+    )
 
 
 def _redact_structure(value):
@@ -139,12 +156,831 @@ def _redact_structure(value):
 # "key": value pair, or a bare key=value / key: value pair. The value runs to
 # the end of the line for a colon (so `Authorization: Bearer x` loses the whole
 # credential, not just the word "Bearer") and to the next separator otherwise.
-_SENSITIVE_TEXT = re.compile(
-    r'("?)([A-Za-z0-9_.\[\]-]*(?:'
-    + "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS)
-    + r')[A-Za-z0-9_.\[\]-]*)\1\s*(?::\s*(?:"(?:\\.|[^"\\])*"|[^\r\n,}\]]+)|=\s*(?:"(?:\\.|[^"\\])*"|[^&;\r\n]+))',
-    re.I,
+#
+# FAIL CLOSED. Text on this path is by definition not well formed, and seven
+# rounds of point fixes each found another shape whose value the scanner ended
+# too early: a quote the cut left open, `[Summer]2024-S3CR3T`, SQL's `'o''x'`,
+# a key that lost its opening quote. So a value keeps a precise end only when a
+# delimiter plainly follows it -- a comma, `&`, `;`, a line break, the end of the
+# text, or whitespace and then the next key -- and that delimiter is not inside a
+# string, a group or another key's value that the value swallowed. Anything else
+# means the scanner cannot tell where the secret stops, and the value is redacted
+# to the end of its line, and on past any string or group opened on it; that is
+# reported, so a sensitive key planted in front of an attack cannot quietly blind
+# the engine to it.
+#
+# A SCAN, not one regex. The single pattern this replaces put a sensitive-part
+# alternation between two unbounded runs of key characters -- a class that
+# includes `[` and `]` -- and could start at every position inside a run. A body
+# of brackets that is not JSON (so the structured path fails) took quadratic time
+# with a large constant: eight kilobytes held a worker for seven seconds, before
+# authentication, on any route. Here a key token may only START where a run of
+# key characters starts, so each run is tried once; whether it names a secret is
+# decided in Python, and the value is matched once, anchored where the key ends.
+# `\w`, not `A-Za-z0-9_`: a key in any script is one token. With ASCII only,
+# "Passwörter=hunter2" split at the ö into "Passw" and "rter", neither of which
+# the separator follows, and the value went through.
+_KEY_CHARS = r"\w.\[\]-"
+# A key may be bare, double-quoted, or single-quoted: `{'password': 'x'}` is not
+# JSON, so it reaches this path. The closing quote need not match the opening
+# one, or have one at all: `{password": "x"}` -- a key that lost its opening
+# quote -- was read by nothing, and its value went through.
+#
+# Case-insensitive, as the pattern it replaces was: under re.I, [A-Za-z] also
+# matches the letters whose case folds into ASCII (ſ U+017F -> s, K U+212A -> k),
+# so "paſſword=hunter2" was one key token and redacted. Without it the ſ split
+# the token and the secret went through.
+_TEXT_KEY = re.compile(
+    r'(["\']?)(?<![' + _KEY_CHARS + r'])([' + _KEY_CHARS + r']+)(["\']?)\s*([:=])\s*', re.I
 )
+_SENSITIVE_TEXT_PART = re.compile(
+    "|".join(part.replace("_", "[_-]?") for part in _SENSITIVE_KEY_PARTS), re.I
+)
+# Where a quoted string ends: at the first quote of its kind after it that is not
+# escaped, that is, one with an even run of backslashes (or none) in front of it.
+# That is exactly where `"[^"\\]*+(?:\\.[^"\\]*+)*+"` stops, from ANY opening
+# quote: the run in front of a later quote cannot reach back past the quote that
+# opened the string, so which quotes close strings does not depend on where a
+# string opened. They are found once per text (see _Scan) and a string's end is
+# looked up, never read. A backslash-newline is an escape like any other and does
+# not end the string early -- a value cut there left the rest of the secret in
+# clear. And nothing is kept per character: the alternation this once replaced
+# took 1.3 GB for one 10 MB string, before authentication.
+_QUOTES = "\"'"
+_OPENERS = "[{"
+_CLOSERS = "]}"
+# What may follow a value whose end is certain: any closing brackets, then a
+# delimiter or the end of the text -- or whitespace and the next key, as in
+# `password="x" q="UNION SELECT"`.
+_AFTER_CLOSERS = r"(?:[ \t]*+[\]})])*+"
+_CLEAN_END = re.compile(
+    _AFTER_CLOSERS + r"[ \t]*+(?:[,&;\r\n]|\Z)"
+    + "|" + _AFTER_CLOSERS + r"[ \t]++[\"']?[" + _KEY_CHARS + r"]++[\"']?[ \t]*+[:=]"
+)
+# The clean ends that are a line break: the line break a value ends at, past any
+# closing brackets and blanks after it. The break may split a key from its value
+# (see _key_across).
+_CLEAN_BREAK = re.compile(_AFTER_CLOSERS + r"[ \t]*+[\r\n]")
+# An unquoted value that stopped at a delimiter mid-line is only certain if the
+# delimiter cannot be inside something the value opened: `password: a[b,SECRET]`
+# stopped at the comma, and `password: x"y,SECRET"` inside a string. A quote as
+# the last thing in the value, after a character of it, is the close of a string
+# around the whole pair, as in `"token: abc", "q": 1`. (A quote where a value or
+# an element starts is no close: see _unquoted_end, which has followed it by now.)
+_DOUBT = re.compile(r"[\[{(]|[\"'](?![ \t]*\Z)")
+# Everything in a bracketed value that is neither a quote nor a bracket.
+_GROUP_TEXT = re.compile(r"[^\"'\[\]{}]++")
+# Where an unquoted value stops, after each separator.
+_STOPS = {":": "\r\n,}]", "=": "&;\r\n"}
+
+
+class _Scan:
+    """``text``, and where in it the characters the text pass looks for are.
+
+    Every question of the form "where is the next X from here" -- the next line
+    break, the next delimiter of an unquoted value, the next quote or bracket, the
+    quote that closes a string -- is answered by bisecting positions found once
+    per text, never by reading forward from where it is asked. Reading forward was
+    the trap: a value was read to the end of its line from each key on that line,
+    so a line of keys took quadratic time -- 27 seconds for 256 KiB, before
+    authentication, on every content type inspected. A question now costs
+    O(log n) wherever it is asked, and in whatever order.
+    """
+
+    _FIND = {
+        "line": re.compile(r"[\r\n]"),
+        # _STOPS.
+        ":": re.compile(r"[\r\n,}\]]"),
+        "=": re.compile(r"[&;\r\n]"),
+        # What can open a string or a group inside an unquoted value.
+        "open": re.compile(r"[\[{\"']"),
+        # A quote that closes strings. The run of backslashes is taken whole,
+        # possessively, so an odd one cannot give one back to the quote.
+        '"': re.compile(r'(?<!\\)(?:\\\\)*+"'),
+        "'": re.compile(r"(?<!\\)(?:\\\\)*+'"),
+    }
+
+    def __init__(self, text):
+        self.text = text
+        self.length = len(text)
+        self._found = {}
+
+    def _positions(self, name):
+        found = self._found.get(name)
+        if found is None:
+            # The last character of each match: the one character, or the quote
+            # after a run of backslashes. Eight bytes a position.
+            found = array("q", (match.end() - 1 for match in self._FIND[name].finditer(self.text)))
+            self._found[name] = found
+        return found
+
+    def next(self, name, index):
+        """Where the first ``name`` at or after ``index`` is, or the length of the text."""
+        found = self._positions(name)
+        at = bisect_left(found, index)
+        return found[at] if at < len(found) else self.length
+
+    def line_end(self, index):
+        return self.next("line", index)
+
+    def line_start(self, index):
+        found = self._positions("line")
+        at = bisect_left(found, index)
+        return found[at - 1] + 1 if at else 0
+
+    def string_end(self, quote):
+        """Just past the quote that closes the string opening at ``quote``, or
+        ``None`` if none does."""
+        found = self._positions(self.text[quote])
+        at = bisect_right(found, quote)
+        return found[at] + 1 if at < len(found) else None
+
+
+def _bracketed_end(scan, start):
+    """Where the array or object opening at ``start`` closes, or ``None`` if it
+    never does.
+
+    A value under a sensitive key can be a list of secrets. The value patterns
+    stop at the first `,` or `]`, so `"tokens": ["t1", "SECRET"]` lost only
+    `["t1"` and forwarded the rest. One pass, strings of either quote skipped
+    whole, so a bracket inside a string does not count: `['a]b', 'SECRET']` is a
+    Python list, and skipping only double-quoted strings closed it at the `]`.
+    """
+    text = scan.text
+    depth = 0
+    index = start
+    length = scan.length
+    while index < length:
+        char = text[index]
+        if char in _QUOTES:
+            index = scan.string_end(index)
+            if index is None:
+                return None
+            continue
+        if char in _OPENERS:
+            depth += 1
+        elif char in _CLOSERS:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        else:
+            index = _GROUP_TEXT.match(text, index).end()
+            continue
+        index += 1
+    return None
+
+
+def _starts_element(text, index):
+    """Whether the character at ``index`` stands where a value or an element starts:
+    after `:`, `=`, an opening bracket or a delimiter, and any blanks."""
+    index -= 1
+    while index >= 0 and text[index] in " \t":
+        index -= 1
+    return index < 0 or text[index] in ":=[{(,;&\r\n"
+
+
+# What a key's separator is followed by before its value: blanks and line breaks
+# alike, as the trailing `\s*` of _TEXT_KEY and _KEY_CLOSE reads them.
+_BLANKS = re.compile(r"\s*+")
+
+
+def _value_after(text, index, separator):
+    """Where the value of a key whose ``separator`` ends at ``index`` begins, read
+    past blanks and line breaks as the scan reads a key; ``None`` if nothing there
+    can hold more than blanks.
+
+    Mirrors _text_value, which also tries each position back to the separator:
+    after a stop, the only earlier start that holds more than blanks is a blank
+    on the stop's own line before a closing bracket that does not end cleanly --
+    `password:\\n ]SECRET` is redacted to the end of that line."""
+    value = _BLANKS.match(text, index).end()
+    if value == len(text):
+        return None
+    char = text[value]
+    if char not in _STOPS[separator]:
+        return value
+    if (
+        char in _CLOSERS
+        and value > index
+        and text[value - 1] not in "\r\n"
+        and _CLEAN_END.match(text, value) is None
+    ):
+        return value
+    return None
+
+
+# One character of a token key, as _TEXT_KEY reads them.
+_KEY_CHAR = re.compile("[" + _KEY_CHARS + "]", re.I)
+
+
+def _key_across(scan, start, end):
+    """A sensitive key that the line break at ``end`` splits from its value, ending
+    in the text from ``start``: ``(separator, index past it)``, else ``None``.
+
+    The scan reads the key after a value only from where the value ends, so a key
+    split from its own value by the line break the value stops at was read by
+    nothing, and its value -- the next line -- went through, reported as nothing:
+    `Token: 9f8e7d6c Password:\\nhunter2`. Read here as the scan reads a key
+    anywhere else, since nothing else will:
+
+    - its separator in this value, or its last character, with the separator
+      after the break -- the blanks around a separator are the only part of a key
+      a line break can fall in;
+    - a token key as _TEXT_KEY reads one: the whole run of key characters, back
+      to where it began, which may be before ``start``. A value read on from a
+      `]` it stopped at, or from the quote that closed it, begins inside the run:
+      `session_id: a#[x]secret:\\n...`, `token:"session_id":\\n...`;
+    - a quoted key as _QuotedKeys reads one: `Cookie: abc "session id":\\n...`
+      -- only the quoted reading sees a secret in "session id", whose last word
+      names nothing. Its opening quote is looked for on its closing quote's line,
+      or back to ``start`` when that is on an earlier line: a quote before both
+      is one the scan has read past, and only _QuotedKeys reads a quoted key
+      back past where the scan has read to. A quote in the text from ``start``
+      is not: a string value can span lines and close a key itself,
+      `token: "a\\nsession id"\\n: ...`, as the scan reads it anywhere else.
+
+    Linear: it looks back over the blanks before one separator, one run of key
+    characters and one stretch back to a quote -- within its line or the text
+    from ``start``, which the value it is in has read -- and forward over the
+    blanks after one line break. A separator or a line break ends a constant
+    number of values -- the value it is in and the readings of that same line --
+    so each of those is looked at a constant number of times."""
+    text = scan.text
+    before = end
+    while before > start and text[before - 1].isspace():
+        before -= 1
+    if before > start and text[before - 1] in ":=":
+        separator, past = text[before - 1], before
+        last = before - 1
+        while last > 0 and text[last - 1].isspace():
+            last -= 1
+        last -= 1
+    elif before > start:
+        after = _BLANKS.match(text, end).end()
+        if after == scan.length or text[after] not in ":=":
+            return None
+        separator, past = text[after], after + 1
+        last = before - 1
+    else:
+        return None
+    if last < 0:
+        return None
+    # The token reading: the run, and a closing quote after it if there is one.
+    run_end = last if text[last] in _QUOTES else last + 1
+    run_start = run_end
+    while run_start > 0 and _KEY_CHAR.match(text, run_start - 1):
+        run_start -= 1
+    if run_start < run_end and _is_sensitive_key(text[run_start:run_end]):
+        return separator, past
+    # The quoted reading.
+    if text[last] not in _QUOTES:
+        return None
+    floor = min(scan.line_start(last), start)
+    if _escaped(text, last, floor):
+        return None
+    opening = _opening_quote(text, last, floor)
+    if opening < 0 or not _is_sensitive_key(_decoded_name(text[opening:last + 1])):
+        return None
+    return separator, past
+
+
+def _unquoted_end(scan, start, stops, split=None):
+    """Where an unquoted value from ``start`` ends, as ``(end, held)``: at the first
+    of ``stops`` -- the delimiters after a separator, or "line" for a line break
+    -- that no reading of what the value holds puts inside something.
+
+    `api_key=abc123, password: ";SECRETTAIL"` stopped at the `;` INSIDE the next
+    field's string: the quote before it was taken for the close of a string
+    around the pair, the value was called certain, and `;SECRETTAIL"` went
+    through, unreported. `api_key=abc, password: x;SECRET` lost the same tail
+    with no quote at all: an `=` value stops at `;`, but the value of the
+    `password:` it swallowed runs, after a colon, to the end of the line. So:
+
+    - A quote or bracket where a value or an element starts -- after `:`, `=`,
+      an opening bracket or a delimiter -- opens a string or a group, and a stop
+      inside it is not the end. One that never closes runs to the end of the
+      text, as a quoted value does. A quote after a character of the value opens
+      nothing: it closes a string around the pair, or is an apostrophe. Nor does
+      a bracket there: `password: a[b` is a value to the end of its line.
+    - EVERY such quote counts, the ones inside a string included, because which
+      quote opens and which closes cannot be told from inside a string -- and a
+      read can begin inside one: a quoted key read back from a quote in the
+      middle of `'a: b,', "c": 'SECRET\n...'` has a value that begins in
+      `'a: b,'`. Pairing quotes from there took the `'` after `b,` for an opener,
+      paired it with the one that opens 'SECRET, and cut that string at its line
+      break. What is inside a group is read too: a bracket in a string, taken for
+      one, closed at a `}` in the next field's string and hid the quote that
+      opened it.
+    - A sensitive key inside the value is still a key: if its own value would
+      run past this one's end, this one swallowed it.
+    - So is one that the line break ending the value splits from its own value
+      (_key_across): `Token: 9f8e7d6c Password:\\nhunter2` stopped at the line
+      break, where Password's blanks were cut short, and hunter2 -- which the
+      scan reads as Password's value anywhere else -- went through, reported as
+      nothing. Such a value is held, and runs on through the line its key's
+      value starts on, read as the rest of the value is; a quote or bracket
+      where that value starts opens something whatever stands before it.
+
+    ``split`` is where such a key may begin to end, when that is before ``start``:
+    a read that begins after a quoted or bracketed value, whose own closing quote
+    or bracket may close a key the line break splits from its value
+    (_value_end). It defaults to ``start``.
+
+    ``held`` says the value swallowed another pair, so where it stops is not
+    certain.
+
+    Linear: each quote or bracket is looked at once and a string's end is a
+    lookup; a group is followed only from outside every group already followed,
+    so no text is read by two; keys are searched for from where the last search
+    stopped; a key split from its value is read back once for each place the
+    value ends (see _key_across); and all of it is inside the value returned,
+    which is then redacted.
+    """
+    text = scan.text
+    end = scan.next(stops, start)
+    held = False
+    index = start
+    at = -1
+    grouped = start
+    # Where a swallowed key's value starts on a later line: a quote or bracket
+    # there opens a string or group whatever stands before it, as it does
+    # where the scan reads that value on its own.
+    opens = -1
+    # Where the text a key split from its value can end in begins: the value,
+    # then each such key's value -- so every one found is past the last, and
+    # the read moves on whatever counts as a blank.
+    split = start if split is None else split
+    while True:
+        # The next quote or bracket that opens something, carried over while the
+        # scan has not reached it.
+        if at < index:
+            at = scan.next("open", index)
+        while at < end and at != opens and (
+            not _starts_element(text, at) or (text[at] not in _QUOTES and at < grouped)
+        ):
+            at = scan.next("open", at + 1)
+        key = _TEXT_KEY.search(text, index, min(at, end))
+        while key is not None and not _is_sensitive_key(key.group(2)):
+            key = _TEXT_KEY.search(text, key.end(), min(at, end))
+        brk = _CLEAN_BREAK.match(text, end) if key is None and at >= end else None
+        if brk is not None:
+            # No key is left to read before the line break -- the value's end, or
+            # past the closing brackets and blanks after the string or group that
+            # ends it, `"a\nsession_id" \n: SECRET` -- but the break may split one
+            # from its value.
+            across = _key_across(scan, split, brk.end() - 1)
+            if across is not None:
+                # That value is where the scan would read it: past the break,
+                # on the first line with more than blanks.
+                value = _value_after(text, across[1], across[0])
+                if value is None:
+                    return end, held
+                held = True
+                opens = index = split = value
+                end = scan.line_end(value)
+                continue
+        if key is not None:
+            # It runs past this value's end if its own would. Then the value is
+            # held, and redacted to the end of its line: the key's own value can
+            # run no further than that, the end of its line being a stop too.
+            index = key.end()
+            if index < scan.length and text[index] not in _STOPS[key.group(4)]:
+                held = held or scan.next(key.group(4), index) > end
+            continue
+        if at >= end:
+            return end, held
+        if text[at] in _QUOTES:
+            close = scan.string_end(at)
+        else:
+            close = grouped = _bracketed_end(scan, at)
+        if close is None:
+            return scan.length, True
+        index = at + 1
+        if close > end:
+            held = True
+            if stops == "line" and _CLEAN_END.match(text, close):
+                # Read to the end of a line, a string or group that ran onto a
+                # later one and ends cleanly there ends it, as it would end a
+                # bracketed value -- unless something inside it runs further.
+                end = close
+            else:
+                end = scan.next(stops, close)
+
+
+def _rest_of_line(scan, index, split=None):
+    """Where a value with no certain end is redacted to: the end of the line
+    ``index`` is on -- read as _unquoted_end reads a value, so a string or group
+    that opens on that line and closes on a later one takes that line too.
+    ``split`` is where the value began, if before ``index`` (see _unquoted_end).
+
+    The plain end of the line fell inside the next field's string whenever the
+    field after a doubtful value held a line break in quotes:
+    `pwd= a, 'name' = "b"; "password":'\r\nSECRET'` lost everything up to the
+    `\r` and forwarded `SECRET`."""
+    return _unquoted_end(scan, index, "line", split)[0]
+
+
+def _value_end(scan, start, separator):
+    """Where the value starting at ``start`` ends, and whether that end is certain;
+    ``None`` if there is no value there.
+
+    An end that is not certain is the end of the line (see _rest_of_line): the
+    value is redacted through it. A quote or bracket that never closes may span
+    lines, so a value that opens one runs to the end of the text.
+    """
+    text = scan.text
+    length = scan.length
+    if start >= length:
+        return None
+    char = text[start]
+    if char in _OPENERS:
+        end = _bracketed_end(scan, start)
+    elif char in _QUOTES:
+        end = scan.string_end(start)
+    else:
+        # A value that is neither quoted nor bracketed runs to the end of its
+        # line after a colon, or to the next pair after an equals sign.
+        if char in _STOPS[separator]:
+            return None
+        end, held = _unquoted_end(scan, start, separator)
+        if held:
+            return _rest_of_line(scan, end), False
+        if end == length or text[end] in "\r\n":
+            # The whole rest of the line: nothing is left on it to lose.
+            return end, True
+        if _DOUBT.search(text, start, end):
+            return _rest_of_line(scan, end), False
+        if text[end] not in _CLOSERS:
+            return end, True
+        # Stopped at a closing bracket, which ends the value only if a delimiter
+        # follows it: `password: abc]SECRET` is one value.
+    if end is None:
+        return length, False
+    # What follows the value is read from where it ends, but a key the line
+    # break after it splits from its value can end in the value itself: its own
+    # closing quote or bracket can close one (see _key_across).
+    if _CLEAN_END.match(text, end) is None:
+        return _rest_of_line(scan, end, start), False
+    if _CLEAN_BREAK.match(text, end):
+        # So a clean end at a line break is certain only if the break splits no
+        # key from its value: `token:"session_id"\n:SECRET` forwarded SECRET and
+        # called the body cleanly inspected, where the scan reads "session_id" as
+        # a key anywhere else. The rest of the line is read as a doubtful value's
+        # is; a key the break splits from its value holds this one, which then
+        # runs on through the line that key's value is on, and is reported.
+        across, held = _unquoted_end(scan, end, "line", start)
+        if held:
+            return across, False
+    return end, True
+
+
+# A line break, any blank lines, and the indentation of the next line with text.
+_NEXT_LINE = re.compile(r"(?:\r\n?|\n)(?:[ \t]*+(?:\r\n?|\n))*+([ \t]*+)")
+_INDENT = re.compile(r"[ \t]*+")
+
+
+def _continued(scan, separator_at, end):
+    """``end`` carried over every following line indented deeper than the line the
+    key's separator is on.
+
+    A value that runs to the end of its line does not always end there: under
+    `private_key: |` the key itself is on the indented lines after it, and a
+    folded header or a YAML scalar continues the same way. Those lines went
+    through in clear. Whether the text is YAML cannot be known here, so a value
+    carried over is reported as one without a certain end. A line carried over is
+    read to its end as a doubtful value is (_rest_of_line): its end fell inside a
+    quoted value with a line break in it, and the rest of that went through."""
+    text = scan.text
+    line = scan.line_start(separator_at)
+    depth = _INDENT.match(text, line).end() - line
+    while True:
+        following = _NEXT_LINE.match(text, end)
+        if following is None or len(following.group(1)) <= depth:
+            return end
+        end = _rest_of_line(scan, following.end())
+
+
+def _text_value(scan, start, separator_at, separator):
+    """Where the value after a separator ends, as ``(end, certain)``, or ``None``.
+
+    Tried where the whitespace after the separator ends, then -- as the pattern
+    this replaces did by backtracking -- at each earlier position back to the
+    separator. Every failed attempt there is at a line break, which is a
+    delimiter and fails at once.
+    """
+    for index in range(start, separator_at, -1):
+        found = _value_end(scan, index, separator)
+        if found is not None:
+            end, certain = found
+            if end < scan.length and scan.text[end] in "\r\n":
+                carried = _continued(scan, separator_at, end)
+                if carried != end:
+                    return carried, False
+            return found
+    return None
+
+
+# QUOTED keys the token scan cannot read: one with a space (`"client secret"`),
+# JSON escapes (`"p\u0061ssword"`), or single quotes (`'new password'`), in a body
+# that is not JSON (a trailing comma) and so reaches this path, where the
+# structured path would have redacted it.
+#
+# ANCHORED ON THE SEPARATOR, walking back. Every quote followed by `:` or `=`
+# closes a candidate key; its opening quote is the nearest unescaped quote of the
+# same kind before it. Pairing quotes from the start of the text went wrong at
+# the first stray quote -- `{"size": 5", ...}` -- and every quoted key after it
+# was read as a value. Walking back from each separator needs no pairing at all,
+# so a stray quote costs nothing after it. Each character is scanned once: the
+# walk back never passes the previous candidate's closing quote.
+#
+# Nor past where the scan has read to -- but for the quote a redacted value ends
+# on, which may open a key as well as close that value. A key that lost its
+# opening quote opens on the quote that closed the value before it:
+# `{"q": "a", session id": "S3CR3T"}` was redacted, and after `"otp"`, whose
+# value the scan had redacted and read past, the same S3CR3T was forwarded as
+# cleanly inspected. A key read from that quote reads the quote twice, which is
+# reported. And its value is text the scan used to read on through, where the
+# key after it could open -- `{"otp": "a", session id": ["b"], secret key":
+# "S3CR3T"}` -- so the walk back goes on into the value of each key that opens
+# before where the scan has read to (see _text_redaction). The quote a value
+# ends on may have closing brackets, a comma or blanks after it in that value --
+# `{"otp": ["a"], session id": "S3CR3T"}` forwarded S3CR3T as cleanly inspected
+# as well, where `"q"` in place of `"otp"` had it redacted (see _last_quote).
+_KEY_CLOSE = re.compile(r"([\"'])\s*+([:=])\s*+")
+
+
+# What a value may hold after the quote it ends on (see _last_quote).
+_AFTER_LAST_QUOTE = frozenset(" \t\r\n,)]}")
+
+
+def _escaped(text, index, floor):
+    """Whether the character at ``index`` follows an odd run of backslashes that
+    starts no earlier than ``floor``."""
+    run = 0
+    while index - 1 - run >= floor and text[index - 1 - run] == "\\":
+        run += 1
+    return run % 2 == 1
+
+
+def _opening_quote(text, close, bound):
+    """The nearest unescaped quote like the one at ``close`` before it, no earlier
+    than ``bound``; -1 if there is none."""
+    quote = text[close]
+    start = close
+    while True:
+        start = text.rfind(quote, bound, start)
+        if start < 0 or not _escaped(text, start, bound):
+            return start
+
+
+_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.S)
+_ESCAPED_CHARS = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _decoded_name(quoted):
+    r"""A quoted key as the structured path would read it.
+
+    JSON's escapes are read as JSON reads them: `"o\tp"` is o, tab, p, and names
+    nothing. Any other backslash is dropped rather than judged raw:
+    `"p\u0061ssword\x"` is not JSON at all, and judged raw it read
+    "p\u0061ssword", which names nothing, and the value went through. Python's
+    escapes in a single-quoted key are the same ones."""
+    return _ESCAPE.sub(
+        lambda m: chr(int(m.group(1), 16)) if m.group(1) else _ESCAPED_CHARS.get(m.group(2), m.group(2)),
+        quoted[1:-1],
+    )
+
+
+class _QuotedKeys:
+    """The quoted keys of ``text``, in order, each read back from its separator."""
+
+    def __init__(self, text):
+        self.text = text
+        self.closes = _KEY_CLOSE.finditer(text)
+        self.floor = 0
+        self.pending = None
+
+    def peek(self, pos, lower=None):
+        """The next candidate that closes at or after ``pos`` and opens at or after
+        ``lower`` (``pos`` by default), as ``(start, close)``."""
+        text = self.text
+        lower = pos if lower is None else lower
+        while True:
+            if self.pending is not None:
+                if self.pending[0] >= lower:
+                    return self.pending
+                # The scan ran past this key's opening quote. Read back again
+                # from where it stopped, no other quote would open it: the scan
+                # stops only at a delimiter, a line break or just past a
+                # separator, never inside a run of backslashes that could change
+                # which quote is escaped.
+                self.pending = None
+                continue
+            close = next(self.closes, None)
+            if close is None:
+                return None
+            quote = close.start(1)
+            if _escaped(text, quote, lower):
+                continue
+            if quote < pos:
+                # In a value the scan read past: no key closes there, and none
+                # after it opens before it, as when that value is kept.
+                self.floor = quote + 1
+                continue
+            bound = max(lower, self.floor)
+            self.floor = quote + 1
+            start = _opening_quote(text, quote, bound)
+            if start >= 0:
+                self.pending = (start, close)
+
+    def take(self):
+        self.pending = None
+
+
+def _token_pair(scan, key):
+    """``(key_start, key_text, end, certain)`` for a sensitive token key with a
+    value, else ``None``."""
+    if not _is_sensitive_key(key.group(2)):
+        return None
+    value = _text_value(scan, key.end(), key.start(4), key.group(4))
+    if value is None:
+        return None
+    return (key.start(), scan.text[key.start():key.end(3)], *value)
+
+
+def _quoted_pair(scan, start, close, pos):
+    """The same for a quoted key, which may open before ``pos`` (see _QuotedKeys).
+
+    A key/value pair can be written INSIDE the quotes -- `'s my token: abc and
+    the users': x` walks back from the second quote to the first -- and the
+    quoted key is copied out verbatim. So such a pair's own value is redacted
+    too, through whichever reading ends latest. A key that merely ENDS in a
+    separator, `{"New Password:": "x"}`, is not one: nothing follows it but the
+    closing quote. The pairs before ``pos`` are in a value already redacted."""
+    text = scan.text
+    quote = close.start(1)
+    if not _is_sensitive_key(_decoded_name(text[start:quote + 1])):
+        return None
+    # This key's own value first: a quoted key with none is no pair, and the pairs
+    # inside it are then read by the main scan as it passes them, once. Reading
+    # them here as well and throwing them away was a second read of every one.
+    value = _text_value(scan, close.end(), close.start(2), close.group(2))
+    if value is None:
+        return None
+    end, certain = value
+    # Which reading is right cannot always be told: `{a: "b", user_token: ":"}`
+    # reads back from the quote of ":" to the quote that closed "b", and a
+    # missing comma puts a real key in the same place. Picking one reading
+    # forwarded the other's secret, so every reading's value is redacted, through
+    # the latest end, and reported -- unless only one reading parses at all.
+    #
+    # The pairs inside are read as the main scan reads pairs: left to right, and
+    # a key inside a value already read is part of that value, not a new pair.
+    # Reading every key inside from scratch read the same text once per key: one
+    # quoted key holding `token: a ` 29,000 times took 27 seconds, since each read
+    # ran to the end of the line.
+    first = None
+    ends = []
+    reach = start
+    for inner in _TEXT_KEY.finditer(text, max(start + 1, pos), quote):
+        if inner.start() < reach or not _is_sensitive_key(inner.group(2)):
+            continue
+        if inner.end() == quote:
+            # A key that ends in its separator, like "New Password:". Read as a
+            # pair, its value begins on the closing quote; that reading counts
+            # only where the key opens where no key can, and a string on that
+            # quote ends cleanly -- looked at no further than the string.
+            found = None if _opens_a_key(text, start) else _held(scan, quote)
+        else:
+            found = _text_value(scan, inner.end(), inner.start(4), inner.group(4))
+        if found is None:
+            continue
+        if first is None:
+            first, first_certain = inner, found[1]
+        ends.append(found[0])
+        reach = found[0]
+    if first is None:
+        return start, text[start:quote + 1], end, certain
+    latest = max(end, *ends)
+    # Precise only where the first pair's own reading is, reaches furthest, and
+    # this key's reading is no clean parse: then what went is that pair's value
+    # and nothing more, as in a list after an unquoted key that holds a ":".
+    precise = first_certain and ends[0] == latest and not certain
+    return first.start(), text[first.start():first.end(3)], latest, precise
+
+
+def _opens_a_key(text, index):
+    """Whether the quote at ``index`` stands where a key can open: at the start of
+    the text or a line, or after `{`, `[`, `(`, `,` or `;`."""
+    index -= 1
+    while index >= 0 and text[index] in " \t":
+        index -= 1
+    return index < 0 or text[index] in "{[(,;\r\n"
+
+
+def _held(scan, quote):
+    """``(end, True)`` for a string opening on ``quote`` that closes and ends
+    cleanly -- a value the quote may belong to -- else ``None``."""
+    end = scan.string_end(quote)
+    if end is None or _CLEAN_END.match(scan.text, end) is None:
+        return None
+    return end, True
+
+
+def _last_quote(scan, end):
+    """Where the quote is that a value ending at ``end`` ends on -- past any closing
+    brackets, commas and blanks after it, as in `["a"]` or `'a',` -- if no
+    backslash escapes it: one that closes a string, and so may open a key. Else
+    ``end``."""
+    text = scan.text
+    index = end
+    while index > 0 and text[index - 1] in _AFTER_LAST_QUOTE:
+        index -= 1
+    if index > 0 and text[index - 1] in _QUOTES and scan.next(text[index - 1], index - 1) == index - 1:
+        return index - 1
+    return end
+
+
+def _text_redaction(text):
+    """``text`` with the value after every sensitive ``key:`` / ``key=`` replaced,
+    and whether any value had no certain end and was redacted to the end of its
+    line (see _rest_of_line).
+
+    One pass over the ORIGINAL text, quoted and token keys merged by where they
+    start. Two passes, the second reading what the first had rewritten, let a
+    value the first pass redacted pair with a quote after it: the second pass
+    then took the next key's opening quote as the end of a bogus value and
+    forwarded that key's secret.
+
+    LINEAR in the length of ``text`` (times the log of it for a lookup), for any
+    text, because nothing is read twice but by a constant number of readers:
+
+    - every "where is the next ..." is a lookup, not a read (_Scan);
+    - a key token starts only where a run of key characters does, so each run is
+      tried once, and the position the tokens are searched from only moves on;
+    - a quoted key is walked back no further than the one before it, so each
+      stretch of text is walked once, and decoded and judged once;
+    - a value is read only to be redacted, and the position then moves past
+      everything read for it: the bracket groups a value holds, the strings it
+      follows, the pairs inside a quoted key -- which are read one after another,
+      never one inside another's value;
+    - what is looked at past a value's end -- the delimiter or next key after it
+      (_CLEAN_END), the next line's indentation (_continued) -- is either taken
+      into the value or is where the scan goes next, so it is looked at a
+      constant number of times.
+    """
+    scan = _Scan(text)
+    out = []
+    pos = 0
+    # Where a quoted key may open (see _QuotedKeys): ``pos``, or the quote before
+    # it that the value last redacted ended on (see _last_quote) -- and there
+    # still while each key read after it opens before ``pos``.
+    lower = 0
+    doubtful = False
+    quoted = _QuotedKeys(text)
+    token = _TEXT_KEY.search(text)
+    while True:
+        if token is not None and token.start() < pos:
+            token = _TEXT_KEY.search(text, pos)
+        candidate = quoted.peek(pos, lower)
+        if candidate is not None and (token is None or candidate[0] <= token.start()):
+            # A quoted key first when both start at the same quote: it is read
+            # whole, escapes and spaces included.
+            quoted.take()
+            found = _quoted_pair(scan, *candidate, pos)
+            if found is None:
+                continue
+        elif token is not None:
+            found = _token_pair(scan, token)
+            if found is None:
+                # Not a secret, or a secret with nothing after it: kept verbatim,
+                # and the scan resumes after the separator, where the next key
+                # can start.
+                out.append(text[pos:token.end()])
+                pos = lower = token.end()
+                continue
+        else:
+            break
+        key_start, key_text, end, certain = found
+        # A key that opened before ``pos``: what it opened in is not copied out
+        # again, and that text, read twice, is reported.
+        reread = candidate is not None and candidate[0] < pos
+        if key_start < pos:
+            key_text = text[pos:key_start + len(key_text)]
+            key_start = pos
+        out.append(text[pos:key_start])
+        out.append(f"{key_text}: {REDACTED}")
+        if not reread:
+            lower = _last_quote(scan, end)
+        pos = end
+        doubtful = doubtful or not certain or reread
+    out.append(text[pos:])
+    return "".join(out), doubtful
+
+
+def _redact_text(text):
+    """``text`` with the value after every sensitive ``key:`` / ``key=`` replaced."""
+    return _text_redaction(text)[0]
 
 
 def _redact_form(text):
@@ -166,7 +1002,21 @@ def _redact_form(text):
     return "&".join(out)
 
 
-def redact(text, form=False):
+_STRUCTURED = re.compile(r"\s*[\[{]")
+
+
+def _is_form(text):
+    """Whether ``text`` really is ``key=value&...``: every pair has its `=`, and
+    it does not open like JSON."""
+    return not _STRUCTURED.match(text) and all("=" in chunk for chunk in text.split("&") if chunk)
+
+
+def redact(text, form=False, limit=None):
+    """See :func:`redact_within`; the text alone."""
+    return redact_within(text, form=form, limit=limit)[0]
+
+
+def redact_within(text, form=False, limit=None):
     """
     The text with credential values removed, whatever shape it is in.
 
@@ -175,25 +1025,87 @@ def redact(text, form=False):
     a key with an escaped quote in its value, and a body in any encoding other
     than UTF-8 all forwarded the secret verbatim to another service.
 
-    `form` says the caller knows this is urlencoded (a form body, or a query
+    `form` says the caller was told this is urlencoded (a form body, or a query
     string). It is not guessed: prose containing an "=" was being parsed as a
     form and re-encoded, which destroyed the attack signal the engine is asked
-    to look for.
+    to look for. But it is checked: jQuery posts `JSON.stringify(...)` with the
+    form content type by default, and a chunk with no `=` was forwarded verbatim
+    -- in a JSON body, every field. What is not a form is read as JSON or text as
+    well, after its pairs are redacted as a form.
+
+    Returns ``(text, cut, doubtful)``: ``cut`` is True when only the first
+    ``limit`` characters were redacted, so the caller can say the body was
+    truncated even when what redaction left happens to fit; ``doubtful`` when a
+    value had no certain end and was redacted to the end of its line, which may
+    have taken more than that value with it.
     """
     if not text:
-        return text
+        return text, False, False
 
     if form:
-        return _redact_form(text)
+        redacted = _redact_form(text)
+        if _is_form(text):
+            return redacted, False, False
+        text = redacted
 
-    stripped = text.lstrip()
-    if stripped[:1] in ("{", "["):
+    # Both passes run before authentication. On a whole 10 MB body the text pass
+    # held a worker for ten seconds, and the structured one -- parse, rebuild,
+    # serialise -- took four seconds and 180 MB for 9 MB of tiny keys, to produce
+    # text of which the caller keeps the first 64 KiB. `limit` is how much the
+    # caller can use: only that prefix is read, and as text, since a JSON
+    # document cannot be parsed from part of itself. A value the cut runs through
+    # is still redacted, because an unterminated one runs to the end of what it is
+    # given.
+    if limit is not None and len(text) > limit:
+        redacted, doubtful = _text_redaction(text[:limit])
+        return redacted, True, doubtful
+
+    if _STRUCTURED.match(text):
         try:
-            return json.dumps(_redact_structure(json.loads(text)), separators=(",", ":"))
+            return (
+                json.dumps(_redact_structure(json.loads(text)), separators=(",", ":")),
+                False,
+                False,
+            )
         except (ValueError, TypeError, RecursionError):
             pass
 
-    return _SENSITIVE_TEXT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}: {REDACTED}", text)
+    redacted, doubtful = _text_redaction(text)
+    return redacted, False, doubtful
+
+
+# What a body problem says when a value had to be redacted to the end of its line.
+DOUBTFUL_VALUE = (
+    "could not be fully inspected: a value after a sensitive key had no certain end "
+    "and was redacted to the end of its line"
+)
+
+
+def _joined(problem, more):
+    """Both reasons, when a request has two: one is recorded per request."""
+    if problem and more:
+        return f"{problem}; {more}"
+    return problem or more
+
+
+# Text codecs Python writes in Python, and slower than linear: punycode takes a
+# second for 80 KB, and this runs before authentication. No client sends a body
+# in either.
+_SLOW_CHARSETS = frozenset({"punycode", "idna"})
+
+
+def _decoded(raw, encoding):
+    """``raw`` in ``encoding``, or ``None`` if it is not read here.
+
+    A codec that is not a text encoding -- `charset=base64`, `zlib` -- makes the
+    parser transform the body. Undoing that before authentication is a
+    decompression bomb, so it is refused, not decoded."""
+    try:
+        if codecs.lookup(encoding).name in _SLOW_CHARSETS:
+            return None
+        return raw.decode(encoding, errors="replace")
+    except (LookupError, UnicodeError):
+        return None
 
 
 class DefenderMiddleware:
@@ -240,16 +1152,22 @@ class DefenderMiddleware:
 
         meta = getattr(request, "audit_metadata", {})
         body, body_problem = self._get_body(request)
+        # The query string was copied through with no redaction at all, so
+        # ?token=... reached the engine in clear while the same value in the
+        # body was replaced. One that is not a form is read as text too, and a
+        # value that text had to redact to its end is reported like the body's.
+        query, _cut, query_doubtful = redact_within(
+            request.META.get("QUERY_STRING", ""), form=True
+        )
+        if query_doubtful:
+            body_problem = _joined(body_problem, f"query string {DOUBTFUL_VALUE}")
 
         ctx = {
             "ip": meta.get("ip_address") or client_ip(request),
             "path": meta.get("path") or request.path,
             "method": meta.get("method") or request.method,
             "user_agent": request.META.get("HTTP_USER_AGENT", ""),
-            # The query string was copied through with no redaction at all, so
-            # ?token=... reached the engine in clear while the same value in
-            # the body was replaced.
-            "query": redact(request.META.get("QUERY_STRING", ""), form=True),
+            "query": query,
             "body": body,
         }
 
@@ -397,13 +1315,39 @@ class DefenderMiddleware:
         if not raw:
             return "", None
 
-        text = raw.decode("utf-8", errors="ignore")
+        # In the charset the request declares, as the view's parser will read it.
+        # Always decoding UTF-8 read `application/json; charset=utf-16` as text
+        # with a NUL between every character: no key matched, and the password
+        # went through with the NULs, one strip away from clear. Django keeps a
+        # charset only when Python knows it; an unknown one leaves the default,
+        # which is what DRF falls back to as well.
+        problem = None
+        text = _decoded(raw, request.encoding or settings.DEFAULT_CHARSET)
+        if text is None:
+            text = raw.decode("utf-8", errors="replace")
+            problem = "request body could not be fully inspected: its charset is not one read here"
 
         # Redact first, then truncate. The other order let a secret straddling
         # the size limit lose its closing quote, miss the pattern, and be
-        # forwarded in clear.
-        text = redact(text, form=content_type == "application/x-www-form-urlencoded")
-        return self._trim(text)
+        # forwarded in clear. The body is read only in a bounded prefix -- four
+        # times what is kept, since redaction can shrink it -- and a body longer
+        # than that prefix is reported as truncated even when what is left after
+        # redaction happens to fit.
+        prefix = 4 * self.max_body_bytes
+        redacted, cut, doubtful = redact_within(
+            text, form=content_type == "application/x-www-form-urlencoded", limit=prefix
+        )
+        body, trimmed = self._trim(redacted)
+        if trimmed is None and cut:
+            trimmed = f"request body was truncated at {prefix} bytes for inspection"
+        problem = _joined(problem, trimmed)
+        if doubtful:
+            # Redacting to the end of the line may have taken the attack with
+            # the secret. A body that lost more than its secrets is not a clean
+            # inspection, and a sensitive key planted in front of a payload must
+            # not blind the engine in silence.
+            problem = _joined(problem, f"request body {DOUBTFUL_VALUE}")
+        return body, problem
 
     def _trim(self, text):
         if len(text) > self.max_body_bytes:

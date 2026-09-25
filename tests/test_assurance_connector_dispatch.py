@@ -39,6 +39,7 @@ from assurance.models import (
     Finding,
 )
 from assurance.views import DeploymentViewSet
+from assurance.revision import accept_transition
 
 pytestmark = pytest.mark.django_db
 
@@ -358,14 +359,13 @@ def test_blocking_decision_trigger_dispatches_active_qualifying_findings(deploym
         deployment=deployment, enabled=True, min_severity="high", on_blocking_decision=True
     )
     _finding(deployment, severity="high", title="a")
-    deployment.decision = Deployment.Decision.NEEDS_REMEDIATION
-    deployment.save(update_fields=["decision"])
+    # Through the boundary: `Deployment.save` refuses the decision columns.
+    accept_transition(deployment, to_decision=Deployment.Decision.NEEDS_REMEDIATION)
     transport = FakeTransport(FakeResponse(201, {"key": "SEC-3"}))
     attempts = dispatch_for_blocking_decision(deployment, transport_factory=lambda: transport)
     assert len(attempts) == 1 and attempts[0].outcome == DispatchAttempt.Outcome.SENT
     # Not-blocking decision → no-op.
-    deployment.decision = Deployment.Decision.READY
-    deployment.save(update_fields=["decision"])
+    accept_transition(deployment, to_decision=Deployment.Decision.READY)
     assert dispatch_for_blocking_decision(deployment, transport_factory=lambda: FakeTransport()) == []
 
 

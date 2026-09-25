@@ -19,8 +19,13 @@ comes later and calls this.
 
 FOUR CHAIN STATUSES, and each names a different thing:
 
-    held              the chain was exercised and it holds. The authority
-                      covers the effect.
+    held              the chain was exercised and it holds, as far as the
+                      evidence behind it reaches -- which is its own axis (see
+                      `EVIDENCE_KINDS`). Nothing that records a held today
+                      observes the effect itself: the one an engine signs at
+                      dispatch means the gate authorized the workflow's action
+                      (a permit check), which shows the authority chain
+                      resolves and does not show the effect happened.
     violated          the chain was exercised and it does NOT hold: the
                       deployment produced an effect its authority does not
                       cover. A fact, not a doubt.
@@ -90,7 +95,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-#: The chain was exercised and holds.
+#: The chain was exercised and holds -- as far as its evidence reaches, which
+#: :func:`evidence_kind` says and this word does not.
 HELD = "held"
 #: The chain was exercised and does not hold. A fact.
 VIOLATED = "violated"
@@ -148,6 +154,124 @@ CHAIN_BASES: frozenset[str] = frozenset({BASIS_DEMONSTRATED, BASIS_ATTESTED, BAS
 #: than `!= BASIS_DEMONSTRATED`, so a basis added later has to be classified here
 #: on purpose instead of silently joining the supported side.
 UNEXERCISED_BASES: frozenset[str] = frozenset({BASIS_ATTESTED, BASIS_UNKNOWN})
+#: Strongest first, for breaking a tie between survivors that report one status.
+#: Total over :data:`CHAIN_BASES` -- asserted by test -- so the tie never falls to
+#: arrival order.
+_BASIS_RANK: Mapping[str, int] = {BASIS_DEMONSTRATED: 0, BASIS_ATTESTED: 1, BASIS_UNKNOWN: 2}
+
+#: WHAT KIND OF EVIDENCE THE RECORD IS, a third axis, and it follows from WHO
+#: signed it. ``demonstrated`` says an engine this deployment trusts signed the
+#: outcome. It does not say what that engine could see, and the engines see very
+#: different things -- so a signed ``held`` published with nothing beside it read
+#: as an effect somebody watched happen, which no signer here can see.
+#:
+#: Derived, never stored: the signer is already recorded and verified on every
+#: signed row (``observer_engine``, checked against the key that signed it), so a
+#: column would be a second copy of one fact that could disagree with the first.
+#:
+#: Achilles signs at dispatch (``achilles/chain_outcome.py::attach_outcome``):
+#: ``held`` whenever the gate's permit check passes, ``not_demonstrated`` when it
+#: refuses. That is an AUTHORIZATION CHECK. The gate authorized the workflow's
+#: action at dispatch, which shows the authority chain resolves; it does not show
+#: the effect happened. The gate sees the action it is asked about, never the
+#: effect itself.
+EVIDENCE_AUTHORIZATION_CHECK = "authorization_check"
+#: Athena signs per scan (``engine/chain_outcome.py::scan_status``): what its
+#: checks found against the target. They probe the target; they do not watch this
+#: workflow's own effect either.
+EVIDENCE_SCAN = "scan"
+#: Reserved for an outcome signed by an independent collector's key -- one that
+#: watched the effect itself happen, separately from the engine that authorized
+#: it. NOTHING PRODUCES ONE YET: no signer maps to it, and a test pins that, so
+#: the first thing to claim it has to be added on purpose rather than by a typo.
+EVIDENCE_OBSERVED_EFFECT = "observed_effect"
+#: Signed by a key this deployment trusts, for an engine this module has not
+#: classified. Not `observed_effect`: a signer nobody has looked at is read as no
+#: more than a signature, which is the direction this module errs in on purpose.
+EVIDENCE_UNCLASSIFIED = "unclassified"
+#: An unsigned record is exactly as strong as its basis says, so its evidence kind
+#: IS its basis -- the same word, and never a second spelling that could drift.
+EVIDENCE_ATTESTED = BASIS_ATTESTED
+EVIDENCE_UNKNOWN = BASIS_UNKNOWN
+
+#: Every evidence kind this module understands.
+EVIDENCE_KINDS: frozenset[str] = frozenset(
+    {
+        EVIDENCE_AUTHORIZATION_CHECK,
+        EVIDENCE_SCAN,
+        EVIDENCE_OBSERVED_EFFECT,
+        EVIDENCE_UNCLASSIFIED,
+        EVIDENCE_ATTESTED,
+        EVIDENCE_UNKNOWN,
+    }
+)
+
+#: Which signer's outcomes are which kind of evidence, by the engine name a
+#: verified signature binds. Exact names: a signer not listed here is
+#: `unclassified`, never whichever entry it happens to resemble.
+SIGNER_EVIDENCE: Mapping[str, str] = {
+    "achilles": EVIDENCE_AUTHORIZATION_CHECK,
+    "athena": EVIDENCE_SCAN,
+}
+
+#: The kind an UNSIGNED basis names. A basis missing here raises rather than
+#: defaulting, so a basis added later has to be classified on purpose.
+_UNSIGNED_EVIDENCE: Mapping[str, str] = {
+    BASIS_ATTESTED: EVIDENCE_ATTESTED,
+    BASIS_UNKNOWN: EVIDENCE_UNKNOWN,
+}
+
+#: What a reader is told each kind means, published beside it. One place, so the
+#: route and any later surface cannot describe one kind two ways.
+EVIDENCE_LABELS: Mapping[str, str] = {
+    EVIDENCE_AUTHORIZATION_CHECK: (
+        "Authorization check — the action gate authorized (or refused) this "
+        "workflow's action at dispatch, a permit check. It shows whether the "
+        "authority chain resolves; it does not show the effect happened"
+    ),
+    EVIDENCE_SCAN: (
+        "Scan — an engine's checks ran against the target. They did not watch this "
+        "workflow's own effect"
+    ),
+    EVIDENCE_OBSERVED_EFFECT: (
+        "Observed effect — an independent collector saw the effect happen. Nothing "
+        "records this kind yet"
+    ),
+    EVIDENCE_UNCLASSIFIED: (
+        "Unclassified — signed by an engine this deployment trusts, whose evidence "
+        "this platform has not classified"
+    ),
+    EVIDENCE_ATTESTED: "Attested — a person asserted it",
+    EVIDENCE_UNKNOWN: "Unknown — the record does not say",
+}
+
+#: Strongest first, for breaking a tie between survivors that share a status AND
+#: a basis. Total over :data:`EVIDENCE_KINDS` -- asserted by test -- so, as with
+#: the basis, the tie never falls to arrival order. A scan outranks an
+#: authorization check only because it at least sent something to the target; the
+#: order is not a claim that either one observed the effect, and neither did.
+_EVIDENCE_RANK: Mapping[str, int] = {
+    EVIDENCE_OBSERVED_EFFECT: 0,
+    EVIDENCE_SCAN: 1,
+    EVIDENCE_AUTHORIZATION_CHECK: 2,
+    EVIDENCE_UNCLASSIFIED: 3,
+    EVIDENCE_ATTESTED: 4,
+    EVIDENCE_UNKNOWN: 5,
+}
+
+
+def evidence_kind(basis: str, signer: str = "") -> str:
+    """What kind of evidence an outcome resting on ``basis`` is, given who signed it.
+
+    ``basis`` must be the basis IN FORCE (see
+    :func:`assurance.observed_outcomes.basis_in_force`), not the column: a row that
+    says demonstrated with no envelope that verifies now is attested, and the name
+    in its ``observer_engine`` then vouches for nothing. ``signer`` is read only
+    for a demonstrated basis, for that reason.
+    """
+    if basis == BASIS_DEMONSTRATED:
+        return SIGNER_EVIDENCE.get(signer, EVIDENCE_UNCLASSIFIED)
+    return _UNSIGNED_EVIDENCE[basis]
 
 #: How many unexercised workflows `explain` names before rolling the rest into a
 #: count. One sentence naming fifty workflows is a sentence nobody reads, and the
@@ -221,6 +345,44 @@ FLOORS: Mapping[str, str] = {
 }
 
 
+def _floor_of(workflow: str, outcome: ChainOutcome, approved: set[str] | None) -> str | None:
+    """The floor one standing outcome puts under the decision.
+
+    Its status's floor, with ONE addition: a ``held`` on an APPROVED workflow that
+    rests on no demonstrated exercise floors exactly as that workflow would had it
+    never reported at all -- :data:`NOT_DEMONSTRATED`'s floor.
+
+    Without it, a closed approved set whose every chain was typed in composed to
+    READY, and ``composition_decision_signal`` handed that READY to the decision:
+    the deployment was ready on the strength of assertions, with
+    ``workflows_unexercised`` counting every one of them and deciding nothing. An
+    approved workflow is one the deployment says it must be able to do safely; an
+    assertion that it does is not the demonstration READY asks for, and treating
+    it as one would make typing ``held`` a way to skip the run. Typing it now does
+    exactly what not reporting does, which is the honest reading of an outcome no
+    run produced.
+
+    Deliberately NOT applied:
+
+    * to a workflow off the approved list, or with no list at all. There the
+      composition makes no claim about the deployment -- the signal it hands the
+      decision is already ``None`` -- and a floor would make recording an
+      assertion WORSE than recording nothing, a reason to stop recording them.
+    * to any status but ``held``. An asserted violation, gap or thin evidence
+      already carries a floor at least this bad; a claim that something failed is
+      one to act on whoever makes it, which is the conservative direction.
+    """
+    floor = FLOORS.get(outcome.status)
+    if (
+        floor is None
+        and approved is not None
+        and workflow in approved
+        and outcome.basis in UNEXERCISED_BASES
+    ):
+        return FLOORS[NOT_DEMONSTRATED]
+    return floor
+
+
 class UnknownChainBasis(ValueError):
     """A basis outside :data:`CHAIN_BASES`.
 
@@ -271,6 +433,9 @@ class ChainOutcome:
     #: caller that says nothing has made no claim, and the two other values are
     #: both claims.
     basis: str = BASIS_UNKNOWN
+    #: The engine whose verified signature the outcome rests on, or "" when none
+    #: does. Read only through :attr:`evidence`, and only for a demonstrated basis.
+    signer: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in CHAIN_STATUSES:
@@ -324,6 +489,11 @@ class ChainOutcome:
     @property
     def demonstrated(self) -> bool:
         return self.status in DEMONSTRATED
+
+    @property
+    def evidence(self) -> str:
+        """What kind of evidence this outcome is: see :func:`evidence_kind`."""
+        return evidence_kind(self.basis, self.signer)
 
 
 @dataclass(frozen=True)
@@ -382,6 +552,21 @@ class Composition:
     #: says how much of the graph is assertion, and only the names say which part of
     #: the deployment to go and exercise.
     unexercised: tuple[str, ...] = ()
+    #: The deciding workflows whose floor came from the typed-in-``held`` rule in
+    #: :func:`_floor_of` rather than from their status, sorted. ``explain`` keys its
+    #: "an assertion is not the run READY asks for" clause on this and nothing
+    #: looser: the clause is true of exactly these workflows, and a looser trigger
+    #: (any unexercised outcome beside any deciding one) printed it under a floor a
+    #: signed ``violated`` set, where it explained a decision it had no part in.
+    held_floored: tuple[str, ...] = ()
+    #: How many standing outcomes are each kind of evidence, every kind including
+    #: the zeros -- so ``observed_effect: 0`` is always there to be read, rather than
+    #: its absence reading as a kind nobody tracks.
+    evidence_census: Mapping[str, int] = field(default_factory=dict)
+    #: The workflows whose standing outcome is an authorization check, sorted.
+    #: ``explain`` names them, because "every chain held" is a sentence a reader
+    #: takes to mean the effects were seen, and for these nothing saw them.
+    authorization_checked: tuple[str, ...] = ()
 
     @property
     def all_held(self) -> bool:
@@ -401,6 +586,21 @@ def _worse_status(a: str, b: str) -> str:
     make this depend on which one it was handed first.
     """
     return a if _RANK[FLOORS.get(a, READY)] >= _RANK[FLOORS.get(b, READY)] else b
+
+
+def _newest_verdict(attempts: Sequence[ChainOutcome]) -> datetime | None:
+    """The latest instant at which any of ``attempts`` returned a dated verdict."""
+    dated = [
+        attempt.observed_at
+        for attempt in attempts
+        if attempt.observed_at is not None and attempt.status in VERDICTS
+    ]
+    return max(dated) if dated else None
+
+
+def _survives(attempt: ChainOutcome, newest: datetime | None) -> bool:
+    """Is ``attempt`` still standing, given the newest verdict allowed to displace it?"""
+    return attempt.observed_at is None or newest is None or attempt.observed_at >= newest
 
 
 def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome], int]:
@@ -455,31 +655,49 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
     standing: dict[str, ChainOutcome] = {}
     superseded = 0
     for workflow, attempts in history.items():
-        dated = [
-            attempt.observed_at
-            for attempt in attempts
-            if attempt.observed_at is not None and attempt.status in VERDICTS
-        ]
-        newest = max(dated) if dated else None
+        # Two newest instants, because what may supersede depends on what is being
+        # superseded. ANY later verdict displaces an outcome no run produced; only a
+        # later DEMONSTRATED verdict displaces one a run did. Without the split, a
+        # typed-in `held` dated after a signed `violated` -- or dated 2099 -- evicted
+        # it: the violation left the census and the deployment read READY, and every
+        # later signed violation was evicted by the same row. An assertion may be
+        # outranked by evidence; it may not outrank it.
+        newest_verdict = _newest_verdict(attempts)
+        newest_demonstrated = _newest_verdict(
+            [attempt for attempt in attempts if attempt.basis == BASIS_DEMONSTRATED]
+        )
         survivors = [
             attempt
             for attempt in attempts
-            if attempt.observed_at is None or newest is None or attempt.observed_at >= newest
+            if _survives(
+                attempt,
+                newest_demonstrated if attempt.basis == BASIS_DEMONSTRATED else newest_verdict,
+            )
         ]
         superseded += len(attempts) - len(survivors)
         status = survivors[0].status
         for attempt in survivors[1:]:
             status = _worse_status(status, attempt.status)
-        # Among the survivors carrying that status, a DEMONSTRATED one wins the tie.
-        # Two survivors saying the same thing about one chain, one of them from a
-        # run, means a run really did establish it, and reporting the attested row's
-        # basis there would understate what the platform holds. The other direction
-        # is the one that matters more and is already handled by taking the worst
-        # status first: an attested `held` cannot hide a demonstrated `violated`,
-        # because the violated status wins outright.
+        # Among the survivors carrying that status, the strongest basis wins the tie:
+        # demonstrated, then attested, then unknown. Two survivors saying the same
+        # thing about one chain, one of them from a run, means a run really did
+        # establish it, and reporting the weaker row's basis there would understate
+        # what the platform holds. Ranked in full rather than "demonstrated, else
+        # whichever came first": between an attested and an unknown row the answer
+        # used to depend on arrival order, so the same outcomes composed to two
+        # different basis censuses. The other direction is the one that matters
+        # more and is already handled by taking the worst status first: an attested
+        # `held` cannot hide a demonstrated `violated`, because the violated status
+        # wins outright.
+        #
+        # Then the strongest evidence kind among those, for the same reason one step
+        # down: an Achilles and an Athena outcome can both be signed `held` for one
+        # workflow, and without a rank the kind reported would be whichever arrived
+        # first.
         tied = [attempt for attempt in survivors if attempt.status == status]
-        standing[workflow] = next(
-            (attempt for attempt in tied if attempt.basis == BASIS_DEMONSTRATED), tied[0]
+        standing[workflow] = min(
+            tied,
+            key=lambda attempt: (_BASIS_RANK[attempt.basis], _EVIDENCE_RANK[attempt.evidence]),
         )
     return standing, superseded
 
@@ -582,18 +800,26 @@ def compose(
     # consumer to derive, because the two censuses are independent distributions and
     # this number is not in either of them.
     unexercised: list[str] = []
+    evidence_census = dict.fromkeys(sorted(EVIDENCE_KINDS), 0)
+    authorization_checked: list[str] = []
     for workflow, outcome in standing.items():
         census[outcome.status] += 1
         basis_census[outcome.basis] += 1
         if outcome.basis in UNEXERCISED_BASES:
             unexercised.append(workflow)
+        evidence_census[outcome.evidence] += 1
+        if outcome.evidence == EVIDENCE_AUTHORIZATION_CHECK:
+            authorization_checked.append(workflow)
 
     decision: str | None = None
     deciding: list[str] = []
+    floored_by_rule: set[str] = set()
     for workflow, outcome in standing.items():
-        floor = FLOORS.get(outcome.status)
+        floor = _floor_of(workflow, outcome, approved_set if approved is not None else None)
         if floor is None:
             continue
+        if FLOORS.get(outcome.status) is None:
+            floored_by_rule.add(workflow)
         if decision is None or _RANK[floor] > _RANK[decision]:
             decision, deciding = floor, [workflow]
         elif floor == decision:
@@ -616,6 +842,9 @@ def compose(
         basis_census=basis_census,
         workflows_unexercised=len(unexercised),
         unexercised=tuple(sorted(unexercised)),
+        held_floored=tuple(sorted(set(deciding) & floored_by_rule)),
+        evidence_census=evidence_census,
+        authorization_checked=tuple(sorted(authorization_checked)),
     )
 
 
@@ -665,6 +894,40 @@ def explain(composition: Composition) -> str:
         )
     else:
         basis_clause = ""
+    # When an approved workflow's typed-in `held` is what set the floor, the
+    # sentence above names a held workflow as the reason the decision is not ready,
+    # which reads as a contradiction unless it says why -- and only then.
+    if composition.held_floored:
+        floored = ", ".join(composition.held_floored[:_UNEXERCISED_NAMED])
+        if len(composition.held_floored) > _UNEXERCISED_NAMED:
+            floored += f" and {len(composition.held_floored) - _UNEXERCISED_NAMED} more"
+        held_clause = (
+            f" The held reported for {floored} rests on no demonstrated exercise, and"
+            f" on an approved workflow that counts as {NOT_DEMONSTRATED}: an assertion"
+            f" is not the run READY asks for."
+        )
+    else:
+        held_clause = ""
+    # The evidence clause. "Every chain held" reads as "the effects were seen", and
+    # for a workflow whose standing outcome is an authorization check nothing saw
+    # them: the gate checked the action it was asked about, at dispatch, and that
+    # is all it can see. The status, the basis and the decision are left exactly as
+    # they are -- this says what they rest on, it does not re-weigh them. Silent
+    # when no standing outcome is one, for the basis clause's reason;
+    # `evidence_census` carries the zero for anything reading the payload.
+    if composition.authorization_checked:
+        checked = ", ".join(composition.authorization_checked[:_UNEXERCISED_NAMED])
+        if len(composition.authorization_checked) > _UNEXERCISED_NAMED:
+            checked += f" and {len(composition.authorization_checked) - _UNEXERCISED_NAMED} more"
+        evidence_clause = (
+            f" {len(composition.authorization_checked)} of these rest on an"
+            f" authorization check, not an observed effect ({checked}): a held there"
+            f" means the gate authorized the workflow's action at dispatch (a permit"
+            f" check), which shows the authority chain resolves; it does not show the"
+            f" effect happened."
+        )
+    else:
+        evidence_clause = ""
 
     if not composition.deciding:
         # "THE RULE PLACES", not "this signal says". This function knows
@@ -679,9 +942,10 @@ def explain(composition: Composition) -> str:
         # the two differ; this one now only claims what it can see.
         return (
             f"Every chain held across {scope} ({counted}), so the rule places the "
-            f"deployment at {composition.decision}.{basis_clause}"
+            f"deployment at {composition.decision}.{basis_clause}{evidence_clause}"
         )
     return (
-        f"Across {scope} ({counted}), the worst chain status sets the floor: "
+        f"Across {scope} ({counted}), the worst chain sets the floor: "
         f"{composition.decision}, from {', '.join(composition.deciding)}.{basis_clause}"
+        f"{held_clause}{evidence_clause}"
     )

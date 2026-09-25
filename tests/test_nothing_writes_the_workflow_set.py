@@ -53,7 +53,18 @@ from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
 from assurance.views import DeploymentViewSet
 from assurance.workflow_chains import composition_for, composition_signal
 
+from tests.signed_chains import record_signed
+
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _trusted_engines(engine_keyring):
+    """A keyring the signed outcomes below verify against. The routes under test
+    write typed-in (attested) outcomes; READY from chains needs demonstrated ones,
+    so where a test needs a run behind an approved workflow it records a signed
+    outcome directly."""
+    return engine_keyring
 
 User = get_user_model()
 
@@ -160,10 +171,16 @@ def test_recording_every_approved_workflow_held_is_what_closes_the_scope():
     assert composition["workflows_expected"] == 2
     assert composition["workflows_unreported"] == 0
     assert composition["workflows_unapproved"] == 0
-    assert composition["signal"] == comp.READY
-    # And the same answer from the in-process path, so the route is not the only
-    # thing that can see it.
+    # The scope is closed -- and still not READY, because both outcomes were typed
+    # in: an operator's `held` is an assertion, and READY asks for a run (#239).
+    assert composition["workflows_unexercised"] == 2
+    assert composition["signal"] == comp.NEEDS_MORE_EVIDENCE
+
+    # The engine's signed observations of the same two chains close it for real.
+    record_signed(dep, "checkout", comp.HELD, timezone.now())
+    record_signed(dep, "refund", comp.HELD, timezone.now())
     assert composition_signal(dep) == comp.READY
+    assert composition_for(dep).workflows_unexercised == 0
 
 
 def test_one_held_chain_and_a_declared_set_of_fifty_is_not_ready():
@@ -313,7 +330,7 @@ def test_an_outcome_for_an_unapproved_workflow_is_accepted_and_counted():
     dep = _deployment()
     client = _client(dep.owner)
     _declare(client, dep, "checkout")
-    _record(client, dep, "checkout", comp.HELD)
+    record_signed(dep, "checkout", comp.HELD, timezone.now())
     response = _record(client, dep, "undeclared-side-channel", comp.HELD)
 
     assert response.status_code == 200
@@ -455,10 +472,22 @@ def test_the_payload_shapes_are_pinned():
         # pin is for.
         "basis",
         "basis_label",
+        "basis_in_force",
+        # What KIND of evidence the row is, derived from who signed it: a permit
+        # check signed by Achilles must not read as an observed effect.
+        "evidence_kind",
+        "evidence_kind_label",
         "observed_at",
         "recorded_at",
         "source",
         "note",
+        # The evidence a demonstrated row rests on: blank on every row an
+        # operator posts, filled only from a verified signed outcome.
+        "signed",
+        "outcome_id",
+        "observer_engine",
+        "observer_key_id",
+        "evidence_digest",
     }
     assert set(outcome.data["composition"]) == {
         "signal",
@@ -474,6 +503,8 @@ def test_the_payload_shapes_are_pinned():
         "basis_census",
         "workflows_unexercised",
         "unexercised",
+        "evidence_census",
+        "authorization_checked",
         "explanation",
     }
     # All four statuses, always, including the zeros: a census that omits the
@@ -483,6 +514,9 @@ def test_the_payload_shapes_are_pinned():
     # `demonstrated` when nothing was demonstrated reads as a graph that does not
     # track the question rather than one whose answer is none.
     assert set(outcome.data["composition"]["basis_census"]) == set(comp.CHAIN_BASES)
+    # And every evidence kind, `observed_effect` included: its zero is the answer
+    # to "did anything watch an effect happen", and an omitted key is not a zero.
+    assert set(outcome.data["composition"]["evidence_census"]) == set(comp.EVIDENCE_KINDS)
 
 
 def test_the_write_routes_and_the_decision_route_report_one_composition():
@@ -705,7 +739,7 @@ def test_the_explanation_never_contradicts_the_signal_beside_it():
     dep = _deployment()
     client = _client(dep.owner)
     _declare(client, dep, "checkout")
-    _record(client, dep, "checkout", comp.HELD)
+    record_signed(dep, "checkout", comp.HELD, timezone.now())
     response = _record(client, dep, "undeclared-side-channel", comp.HELD)
 
     composition = response.data["composition"]
@@ -723,7 +757,7 @@ def test_a_paused_deployment_is_not_told_its_signal_says_ready():
     dep = _deployment()
     client = _client(dep.owner)
     _declare(client, dep, "checkout")
-    _record(client, dep, "checkout", comp.HELD)
+    record_signed(dep, "checkout", comp.HELD, timezone.now())
 
     support = decision_support(dep, paused=True)
     composition = support["composition"]
@@ -744,8 +778,8 @@ def test_an_agreeing_signal_adds_no_second_sentence():
     would say nothing about whether the scope was closed."""
     dep = _deployment()
     client = _client(dep.owner)
-    _declare(client, dep, "checkout")
-    response = _record(client, dep, "checkout", comp.HELD)
+    record_signed(dep, "checkout", comp.HELD, timezone.now())
+    response = _declare(client, dep, "checkout")
 
     composition = response.data["composition"]
     assert composition["signal"] == composition["rule_decision"] == comp.READY

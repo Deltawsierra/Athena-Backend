@@ -856,6 +856,13 @@ def build_assurance_receipt(deployment) -> dict:
     The returned dict is the **canonical signable payload**: signing (Ed25519) is
     the engine's job, which owns the keys; this backend produces the object to be
     signed, not a signature."""
+    # A stored decision computed under another outcome keyring -- a key withdrawn
+    # since -- or before the signed-outcome rule is reconciled before it is
+    # attested, rather than signed as the state of a record it no longer is.
+    from .decision import current_decision
+
+    current_decision(deployment)
+
     # The evidence set E, reduced to its Merkle-style root. We keep only the
     # stable parts of the deployment receipt — the timestamp inside it is dropped
     # so no clock leaks into our digest.

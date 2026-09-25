@@ -25,10 +25,17 @@ them in a transaction.
 
 from __future__ import annotations
 
-from .composition import READY, ChainOutcome, Composition, compose, explain
+from . import observed_outcomes
+from .composition import (
+    READY,
+    ChainOutcome,
+    Composition,
+    compose,
+    explain,
+)
 
 
-def read_chain_outcomes(deployment) -> list[ChainOutcome]:
+def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> list[ChainOutcome]:
     """Every recorded chain outcome for a deployment, as the rule's own type.
 
     The conversion is deliberately TOTAL: every row becomes a
@@ -38,15 +45,33 @@ def read_chain_outcomes(deployment) -> list[ChainOutcome]:
     no input can reach -- and that counter is how a chain exercising an
     unapproved workflow becomes visible at all.
     """
+    # One keyring read for the whole deployment, not one per row -- or none, when
+    # the caller read it already: a decision stamped with the keyring it was
+    # computed under must have been computed under exactly that one.
+    if keyring is observed_outcomes.READ_KEYRING:
+        keyring = observed_outcomes.trusted_keyring()
+    deployment_uuid = str(deployment.uuid)
     return [
         ChainOutcome(
             workflow=row.workflow,
             status=row.status,
             observed_at=row.observed_at,
-            basis=row.basis,
+            basis=_basis_of(row, keyring, deployment_uuid),
+            # Who signed it, so the rule can say what kind of evidence the row is.
+            # Passed whatever the basis: `evidence_kind` reads it only when the
+            # basis in force is demonstrated, i.e. when the signature naming this
+            # engine verifies now.
+            signer=row.observer_engine,
         )
         for row in deployment.chain_outcomes.all()
     ]
+
+
+def _basis_of(row, keyring, deployment_uuid: str) -> str:
+    """The basis the rule may rely on for ``row``: see
+    :func:`assurance.observed_outcomes.basis_in_force`, which the outcome routes
+    also publish per row, so the graph and the rows it was built from agree."""
+    return observed_outcomes.basis_in_force(row, keyring, deployment_uuid=deployment_uuid)
 
 
 #: How many distinct sources the provenance census names before rolling the rest
@@ -71,13 +96,15 @@ def read_chain_provenance(deployment) -> dict:
     compositional assurance graph assembled entirely by one operator with a REST
     client read exactly like one fed by real campaign runs.
 
-    That is not hypothetical. Across this platform's repositories the only writer
-    of a chain outcome is this app's own admin POST route: no engine, no campaign,
-    no scan and no dispatch writes one. Every composition that exists today rests
-    on hand-entered input, and until now the graph could not say so. A control
-    whose inputs are all typed in is a different control from one that observes,
-    and a reader deciding how much weight to give a `held` needs to be able to
-    tell which they are looking at.
+    That was not hypothetical when this census was written: the only writer of a
+    chain outcome was this app's own admin POST route, and the graph could not say
+    so. Engines now sign outcomes too (:mod:`assurance.observed_outcomes`), and a
+    signed outcome is still not one that watched the effect: Achilles signs the
+    gate's authorization check at dispatch. Typed-in input, permit checks and
+    watched effects make three different controls, and a reader deciding how much
+    weight to give a `held` needs to be able to tell which they are looking at --
+    which ``basis_census`` and ``evidence_census`` say, and a census of free-text
+    sources cannot.
 
     THE CENSUS COUNTS EVERY RECORDED OUTCOME, INCLUDING SUPERSEDED ONES, and that
     is deliberate. The question it answers is "what has ever fed this graph",
@@ -137,10 +164,10 @@ def read_expected_workflows(deployment) -> list[str] | None:
     return slugs or None
 
 
-def composition_for(deployment) -> Composition:
+def composition_for(deployment, keyring=observed_outcomes.READ_KEYRING) -> Composition:
     """The composition of a deployment's recorded chains. Two queries, no writes."""
     return compose(
-        read_chain_outcomes(deployment),
+        read_chain_outcomes(deployment, keyring),
         expected_workflows=read_expected_workflows(deployment),
     )
 
@@ -272,6 +299,13 @@ def composition_payload(
         # of the deployment to go and exercise.
         "workflows_unexercised": composition.workflows_unexercised,
         "unexercised": list(composition.unexercised),
+        # What KIND of evidence the standing outcomes are, every kind including the
+        # zeros, and which workflows rest on an authorization check. `demonstrated`
+        # in the basis census says a trusted engine signed; this says what that
+        # engine could see -- and `observed_effect` is always here, at 0 until
+        # something that watches effects signs one.
+        "evidence_census": dict(composition.evidence_census),
+        "authorization_checked": list(composition.authorization_checked),
         "explanation": _explanation(composition, signal),
         # Required rather than defaulted, for the reason this builder exists at
         # all: a default would let a new publisher omit provenance and still

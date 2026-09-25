@@ -171,9 +171,12 @@ def _decision_row(deployment) -> dict:
     The decision is about the deployment as a whole, so its subject is the bare
     deployment name with nothing appended — the one stream where that is right.
     """
+    from .decision import current_decision
+
     return {
         "subject": _subject(deployment.name),
-        "state": deployment.decision,
+        # Reconciled first: see `decision.current_decision`.
+        "state": current_decision(deployment),
         "environment": deployment.environment,
     }
 
@@ -190,8 +193,29 @@ def assurance_bundle(deployments) -> dict:
     anything was actually assessed.
     """
     with obs.span(obs.INVOKE_WORKFLOW, component="assurance_bundle"):
-        scoped = deployments.select_related("data_boundary").prefetch_related(
-            "assets__provider__assertions", "findings", "assurance_claims__asset", "unknowns"
+        from django.db.models import Exists, OuterRef
+
+        from .models import WorkflowChainOutcome
+        from .revision import logged_head
+
+        scoped = (
+            deployments.select_related("data_boundary")
+            .prefetch_related(
+                "assets__provider__assertions", "findings", "assurance_claims__asset", "unknowns"
+            )
+            # Whether each deployment has chain outcomes, in the same query: the
+            # decision row reconciles the stored decision only for those, and
+            # asking per deployment would make the bundle's cost grow with the
+            # portfolio.
+            .annotate(
+                has_chain_outcomes=Exists(
+                    WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))
+                ),
+                # The head of each one's transition log, for the same reason: the
+                # decision row holds a row behind its log to what the log records,
+                # and asking per deployment would be a query per row.
+                **logged_head(),
+            )
         )
 
         boundary_flows: list[dict] = []

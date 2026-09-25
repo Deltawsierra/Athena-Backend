@@ -9,9 +9,11 @@ responses, and the API surfaces structured columns, not raw target material.
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from .change import CHANGE_LABELS, age_days, change_status, is_stale
+from .composition import EVIDENCE_LABELS, evidence_kind
 from .receipt import finding_receipt
 from .models import (
     ApprovedWorkflow,
@@ -478,11 +480,12 @@ class ApprovedWorkflowSerializer(serializers.ModelSerializer):
 class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     """What one exercise of one workflow's authority-to-effect chain established.
 
-    An OBSERVATION, not a declaration, and the difference decides the write shape:
-    outcomes are appended, never replaced. :mod:`assurance.composition` picks the
-    newest verdict per workflow and counts what a re-run superseded, so a
-    replace-on-write would leave exactly one outcome per workflow and make
-    supersession unreachable -- the rule would keep its logic and lose its input.
+    A REPORT AT AN INSTANT, not a standing declaration, and the difference decides
+    the write shape: outcomes are appended, never replaced.
+    :mod:`assurance.composition` picks the newest verdict per workflow and counts
+    what a re-run superseded, so a replace-on-write would leave exactly one outcome
+    per workflow and make supersession unreachable -- the rule would keep its logic
+    and lose its input.
 
     ``workflow`` is a free slug on purpose. It is NOT validated against the
     approved set, because an outcome for a workflow nobody approved is exactly what
@@ -503,10 +506,16 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
 
     ``basis`` may be omitted, and omitting it means the record does not say what the
     row rests on -- which is exactly what every row written before the column
-    existed says. It is NOT defaulted to ``attested`` even though an operator POST
-    is the only writer today: a default that names an attester is a default that
-    invents one, and a poster who did not make that claim should not have it made
-    for them.
+    existed says. It is NOT defaulted to ``attested``: a default that names an
+    attester is a default that invents one, and a poster who did not make that
+    claim should not have it made for them. It may not be ``demonstrated``, which
+    only a verified signed outcome can establish (see ``validate_basis``).
+
+    ``evidence_kind`` is derived, never posted: what kind of evidence the row is
+    follows from who signed it (:func:`assurance.composition.evidence_kind`). A row
+    Achilles signed is an ``authorization_check`` -- the gate authorized the
+    workflow's action at dispatch, which shows the authority chain resolves and not
+    that the effect happened -- and nothing yet records an ``observed_effect``.
     """
 
     status_label = serializers.CharField(source="get_status_display", read_only=True)
@@ -518,6 +527,23 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     #: fresh measurement from backfill.
     recorded_at = serializers.DateTimeField(source="created_at", read_only=True)
 
+    #: Whether this row's ``demonstrated`` is backed by a verified signed outcome.
+    #: A reader deciding what the graph rests on should not have to infer it from
+    #: which evidence columns happen to be blank.
+    signed = serializers.SerializerMethodField()
+    #: The basis the composition rule relies on for this row, which is ``basis``
+    #: except where ``basis`` says demonstrated and no envelope verifies now --
+    #: then attested. Published beside the column because the column alone let a
+    #: row read ``basis: demonstrated, signed: false`` while the graph counted it
+    #: attested: two answers about one row, and the more flattering one on it.
+    basis_in_force = serializers.SerializerMethodField()
+    #: What kind of evidence the row is, beside what it rests on. ``signed: true``
+    #: with ``basis_in_force: demonstrated`` read as an effect somebody watched
+    #: happen, and for an Achilles row it is a permit check: the reader could not
+    #: tell the two apart from anything on the row.
+    evidence_kind = serializers.SerializerMethodField()
+    evidence_kind_label = serializers.SerializerMethodField()
+
     class Meta:
         model = WorkflowChainOutcome
         fields = [
@@ -527,12 +553,92 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "status_label",
             "basis",
             "basis_label",
+            "basis_in_force",
+            "evidence_kind",
+            "evidence_kind_label",
             "observed_at",
             "recorded_at",
             "source",
             "note",
+            "signed",
+            "outcome_id",
+            "observer_engine",
+            "observer_key_id",
+            "evidence_digest",
         ]
-        read_only_fields = ["uuid", "status_label"]
+        read_only_fields = [
+            "uuid",
+            "status_label",
+            "outcome_id",
+            "observer_engine",
+            "observer_key_id",
+            "evidence_digest",
+        ]
+
+    def _basis_in_force(self, obj) -> str:
+        """One verification per row, whichever field asks first, against one
+        keyring read per serialisation rather than one per row."""
+        cached = getattr(obj, "_basis_in_force", None)
+        if cached is None:
+            from . import observed_outcomes
+
+            context = self.context
+            if "chain_keyring" not in context:
+                context["chain_keyring"] = observed_outcomes.trusted_keyring()
+            cached = observed_outcomes.basis_in_force(
+                obj, context["chain_keyring"], deployment_uuid=context.get("deployment_uuid")
+            )
+            obj._basis_in_force = cached
+        return cached
+
+    def get_basis_in_force(self, obj) -> str:
+        return self._basis_in_force(obj)
+
+    def get_evidence_kind(self, obj) -> str:
+        # From the basis IN FORCE, never the column: a row whose signature no
+        # longer verifies is attested, and the engine it names vouches for nothing.
+        return evidence_kind(self._basis_in_force(obj), obj.observer_engine)
+
+    def get_evidence_kind_label(self, obj) -> str:
+        return EVIDENCE_LABELS[self.get_evidence_kind(obj)]
+
+    def get_signed(self, obj) -> bool:
+        return (
+            obj.basis == WorkflowChainOutcome.Basis.DEMONSTRATED
+            and self._basis_in_force(obj) == WorkflowChainOutcome.Basis.DEMONSTRATED
+        )
+
+    def validate_basis(self, value):
+        """``demonstrated`` means a run produced this outcome, and a POST is not a
+        run. It used to be accepted here, which let the one field built to tell a
+        measurement from an assertion be set by an assertion: fifty typed-in
+        ``held`` rows marked demonstrated composed to READY with nothing exercised.
+        A demonstrated outcome arrives only as a signed envelope an engine produced,
+        through ``chain-outcomes/observed``."""
+        if value == WorkflowChainOutcome.Basis.DEMONSTRATED:
+            raise serializers.ValidationError(
+                "demonstrated is recorded only from a verified signed outcome; post "
+                "the engine's envelope to chain-outcomes/observed. An operator's own "
+                "record is attested."
+            )
+        return value
+
+    def validate_observed_at(self, value):
+        """An observation cannot be dated after the moment it is recorded.
+
+        Signed ingest already refuses a future ``observed_at``; this route did not,
+        and recency is what decides which outcome stands. A typed-in row dated 2099
+        would be the newest thing ever said about its workflow for seventy years.
+        The same skew allowance as signed ingest, so the two doors agree about what
+        "now" means."""
+        from .observed_outcomes import MAX_CLOCK_SKEW
+
+        if value is not None and value > timezone.now() + MAX_CLOCK_SKEW:
+            raise serializers.ValidationError(
+                f"observed_at {value.isoformat()} is in the future; an outcome is "
+                "recorded after it is observed, not before"
+            )
+        return value
 
 
 class ClaimEventSerializer(serializers.ModelSerializer):
@@ -675,6 +781,17 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
 class DeploymentSerializer(serializers.ModelSerializer):
     decision_label = serializers.CharField(source="get_decision_display", read_only=True)
     finding_count = serializers.IntegerField(read_only=True)
+
+    def to_representation(self, instance):
+        # The deployment list and detail publish the stored decision, as the
+        # receipt does; reconciled first with the keyring in force, or a
+        # withdrawn key's READY stood here while the receipt said otherwise.
+        # `current_decision` refreshes `instance`, so the decision, its label and
+        # its revision below are all the reconciled ones.
+        from .decision import current_decision
+
+        current_decision(instance)
+        return super().to_representation(instance)
 
     class Meta:
         model = Deployment

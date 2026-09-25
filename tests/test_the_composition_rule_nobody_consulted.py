@@ -38,6 +38,8 @@ from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from django.utils import timezone
 
+from tests.signed_chains import record_signed
+
 User = get_user_model()
 
 D = Deployment.Decision
@@ -75,11 +77,26 @@ def _approve(dep, *slugs):
         ApprovedWorkflow.objects.create(deployment=dep, slug=slug, name=slug.replace("-", " "))
 
 
-def _outcome(dep, workflow, status, *, observed_at=None):
+@pytest.fixture(autouse=True)
+def _trusted_engines(engine_keyring):
+    """Every outcome in this file is one a run produced: these tests are about the
+    seam between recorded chains and the decision, and READY from chains is only
+    reachable from demonstrated ones. What a typed-in outcome does at the seam is
+    pinned separately, below and in ``test_an_observed_outcome_is_signed``."""
+    return engine_keyring
+
+
+def _outcome(dep, workflow, status, *, observed_at):
+    return record_signed(dep, workflow, status, observed_at)
+
+
+def _typed(dep, workflow, status, *, observed_at):
+    """An outcome an operator recorded: attested, whatever its status says."""
     return WorkflowChainOutcome.objects.create(
         deployment=dep,
         workflow=workflow,
         status=status,
+        basis=comp.BASIS_ATTESTED,
         observed_at=observed_at,
     )
 
@@ -208,6 +225,51 @@ def test_a_held_chain_is_ready_only_when_every_approved_workflow_reported():
     # 'c' was approved and never exercised: `not_demonstrated`, never absent.
     assert composition_signal(open_scope) == comp.NEEDS_MORE_EVIDENCE
     assert compute_decision(open_scope) == D.NEEDS_MORE_EVIDENCE
+
+
+def test_a_closed_scope_of_typed_in_held_chains_is_not_ready():
+    """#239 at the seam. The same closed approved set, every chain held -- once
+    typed in, once signed by the engine that ran it. Only the second is READY; the
+    first counts as the approved workflows never having reported, which is what
+    an assertion no run produced amounts to."""
+    typed = _deployment("typed-in")
+    _approve(typed, "a", "b")
+    _typed(typed, "a", comp.HELD, observed_at=timezone.now())
+    _typed(typed, "b", comp.HELD, observed_at=timezone.now())
+    composed = composition_for(typed)
+    assert composed.decision == comp.NEEDS_MORE_EVIDENCE
+    assert set(composed.deciding) == {"a", "b"}
+    assert composition_signal(typed) == comp.NEEDS_MORE_EVIDENCE
+    assert compute_decision(typed) == D.NEEDS_MORE_EVIDENCE
+    assert "counts as not_demonstrated" in comp.explain(composed)
+
+    # One of the two demonstrated is still not enough: the other is an assertion.
+    _outcome(typed, "a", comp.HELD, observed_at=timezone.now())
+    assert compute_decision(typed) == D.NEEDS_MORE_EVIDENCE
+    assert composition_for(typed).deciding == ("b",)
+
+    signed = _deployment("signed")
+    _approve(signed, "a", "b")
+    _outcome(signed, "a", comp.HELD, observed_at=timezone.now())
+    _outcome(signed, "b", comp.HELD, observed_at=timezone.now())
+    assert compute_decision(signed) == D.READY
+
+
+def test_a_typed_in_held_outside_a_closed_scope_sets_no_floor():
+    """The restraint half. With no approved list, or for a workflow off it, the
+    composition already contributes nothing toward READY -- a floor there would
+    make recording an assertion WORSE than recording nothing."""
+    dep = _deployment()
+    _typed(dep, "unlisted", comp.HELD, observed_at=timezone.now())
+    assert composition_for(dep).decision == comp.READY
+    assert composition_signal(dep) is None
+
+    listed = _deployment("listed")
+    _approve(listed, "a")
+    _outcome(listed, "a", comp.HELD, observed_at=timezone.now())
+    _typed(listed, "shadow", comp.HELD, observed_at=timezone.now())
+    assert composition_for(listed).decision == comp.READY
+    assert composition_signal(listed) is None
 
 
 def test_fifty_approved_workflows_and_one_held_chain_is_not_ready():

@@ -35,6 +35,30 @@ Without a key the gateway allows every request and says so in the log.
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
+## Signed chain outcomes
+
+`POST /api/assurance/deployments/<uuid>/chain-outcomes/observed/` records chain
+outcomes an engine signed, verified against the keyring named by
+`ASSURANCE_OUTCOME_KEYRING`. "Observed" in that path means reported by an engine
+at an instant. It does not mean anyone saw the effect. Every row and composition
+these routes publish says what kind of evidence it is (`evidence_kind`,
+`evidence_census`), and the kind follows from who signed it:
+
+- `authorization_check`: signed by Achilles. The action gate authorized, or
+  refused, the workflow's action at dispatch. A held shows the authority chain
+  resolves. It does not show the effect happened.
+- `scan`: signed by Athena. Its checks ran against the target.
+- `observed_effect`: reserved for an independent collector. Nothing produces it
+  yet.
+- `unclassified`: signed by a trusted key for an engine not listed above.
+- `attested`: typed in by an operator, or signed by a key the keyring no longer
+  trusts.
+- `unknown`: typed in without saying what it rests on.
+
+A held Achilles signed still counts as demonstrated, so trusting an Achilles key
+in the keyring lets a permit check move a deployment to `ready`. Whether it
+should is an open decision, not a settled one.
+
 ## Tests
 
 ```bash
