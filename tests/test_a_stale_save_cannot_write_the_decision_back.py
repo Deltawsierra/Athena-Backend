@@ -198,6 +198,17 @@ def test_an_instance_built_with_a_stored_pk_does_not_write_its_defaults_over_the
     assert Deployment.objects.get(pk=dep.pk).name == "rebuilt"
 
 
+def test_an_instance_built_with_a_pk_no_row_holds_is_inserted():
+    """The existence check is what tells the two apart: with no stored row 4242,
+    ``Deployment(pk=4242, ...)`` is a new deployment, inserted with what it was
+    given -- not an UPDATE of a row that is not there, which fails."""
+    owner = _owner()
+    Deployment(pk=4242, name="restored", owner=owner, decision=D.NEEDS_REMEDIATION).save()
+
+    assert Deployment.objects.filter(pk=4242, name="restored").exists()
+    assert Deployment.objects.get(pk=4242).decision == D.NEEDS_REMEDIATION
+
+
 def test_a_deferred_instance_writes_only_what_it_loaded(django_assert_num_queries):
     """As Django's own save does for a deferred instance. Naming every column would
     make each deferred one a query to fetch the value it then writes back."""
@@ -329,6 +340,37 @@ def test_a_row_behind_its_log_holding_the_decision_computed_is_not_a_no_op(caplo
     assert read_decision(dep) == {"decision": D.READY, "revision": 3}
     assert _log(dep)[-1] == (3, D.NOT_RECOMMENDED, D.READY)
     _repair_logged(caplog, dep)
+
+
+def test_a_row_behind_a_log_that_records_no_decision_is_brought_up_to_it(caplog):
+    """The log stores an unassessed decision as ``""``; the decision is ``None``.
+    Read as ``""``, a recompute to ``None`` was a move, and recorded a transition
+    from nothing to nothing."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    accept_transition(dep, to_decision=D.READY)
+    accept_transition(dep, to_decision=None)
+    assert _log(dep)[-1] == (2, D.READY, "")
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=1)
+
+    with caplog.at_level(logging.ERROR):
+        out = accept_transition(Deployment.objects.get(pk=dep.pk), to_decision=None)
+
+    assert out == {"decision": None, "revision": 2, "changed": True}
+    assert read_decision(dep) == {"decision": None, "revision": 2}
+    assert len(_log(dep)) == 2
+    _repair_logged(caplog, dep)
+
+
+def test_the_callers_own_instance_is_brought_up_by_a_repair_that_records_nothing():
+    """The instance handed in is the stale one -- not one that already holds the
+    values the repair writes."""
+    dep = _behind_its_log()
+    fresh = Deployment.objects.get(pk=dep.pk)
+    assert (fresh.decision, fresh.decision_revision) == (D.READY, 1)
+
+    accept_transition(fresh, to_decision=D.NOT_RECOMMENDED)
+
+    assert (fresh.decision, fresh.decision_revision) == (D.NOT_RECOMMENDED, 2)
 
 
 def test_a_row_ahead_of_its_log_is_trusted_and_not_reported(caplog):
