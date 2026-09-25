@@ -40,9 +40,12 @@ from django.contrib.auth import get_user_model
 from assurance import route
 from assurance.access import assess_effective_access
 from assurance.graph_refs import (
+    MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     MECHANISM_TOOLS,
+    UNRESOLVED_AMBIGUOUS,
     UNRESOLVED_NAMES_A_PRINCIPAL,
+    UNRESOLVED_NOT_FOUND,
 )
 from assurance.models import Asset, Deployment
 
@@ -728,3 +731,66 @@ def test_every_report_built_on_the_reach_graph_carries_its_gaps():
     for report in (assess_ripple(dep), assess_personal_context(dep)):
         assert report["unresolved"] == expected
         assert report["summary"]["unresolved_references"] == 2
+
+
+# ---- The account an agent acts as. ----
+
+
+def test_an_agent_acts_as_the_account_its_identity_names_for_both_readers():
+    """The identity was read by one check -- whether an account was orphaned --
+    and by neither reader of the graph. An agent acting as an account is a hop:
+    whatever the account can do, the agent can do."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", metadata={"identity": "svc-support"})
+    _asset(dep, kind=Asset.Kind.SERVICE_ACCOUNT, name="svc-support")
+
+    assert _unresolved_rows(dep) == ([], [])
+    assert _route_declared_hops(dep) == {("assistant", "svc-support")}
+    assert ("assistant", "svc-support") in _access_hops(dep)
+
+
+def test_an_identity_naming_no_account_is_recorded_by_both_readers():
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", metadata={"identity": "svc-gone"})
+
+    access_rows, route_rows = _unresolved_rows(dep)
+    assert access_rows == route_rows == [{
+        "source": "assistant",
+        "source_kind": Asset.Kind.AGENT,
+        "reference": "svc-gone",
+        "mechanism": MECHANISM_IDENTITY,
+        "reason": UNRESOLVED_NOT_FOUND,
+    }]
+    assert route.build_route_map(dep)["summary"]["unresolved_identity_references"] == 1
+    assert assess_effective_access(dep)["summary"]["unresolved_references"] == 1
+
+
+def test_an_identity_two_accounts_answer_to_is_followed_to_both_and_recorded():
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", metadata={"identity": "billing"})
+    _asset(dep, kind=Asset.Kind.SERVICE_ACCOUNT, name="billing", identifier="sa-1")
+    _asset(dep, kind=Asset.Kind.SERVICE_ACCOUNT, name="billing", identifier="sa-2")
+
+    access_rows, route_rows = _unresolved_rows(dep)
+    assert access_rows == route_rows
+    assert [(r["mechanism"], r["reason"]) for r in access_rows] == [
+        (MECHANISM_IDENTITY, UNRESOLVED_AMBIGUOUS)
+    ]
+    route_targets = [
+        e["target"] for e in route.build_route_map(dep)["edges"] if e["kind"] == "acts_as"
+    ]
+    assert len(route_targets) == 2
+
+
+def test_an_identity_resolves_among_accounts_before_anything_else_carrying_it():
+    """A tool whose IDENTIFIER is the string and an account whose NAME is. The
+    identifier-first rule picks between an account's keys; it does not let a
+    component that cannot be an identity stop resolution, which would have left
+    the agent acting as nobody and the account unused."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", metadata={"identity": "reader"})
+    _asset(dep, kind=Asset.Kind.TOOL, name="Reader tool", identifier="reader")
+    _asset(dep, kind=Asset.Kind.SERVICE_ACCOUNT, name="reader", identifier="sa-reader")
+
+    assert _unresolved_rows(dep) == ([], [])
+    assert _route_declared_hops(dep) == {("assistant", "reader")}

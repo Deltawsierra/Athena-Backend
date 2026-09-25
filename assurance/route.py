@@ -39,10 +39,13 @@ here reaches the network.
 from __future__ import annotations
 
 from .graph_refs import (
+    MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     dangling_reference,
+    identity_index,
+    identity_reference,
     reference_index,
     resolve_reference,
     sort_references,
@@ -194,6 +197,20 @@ def build_route_map(deployment) -> dict:
                 # rather than silently dropped.
                 unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, why))
 
+    # The account each agent acts as: a declared edge, and a gap when the
+    # identity names no account or more than one.
+    accounts = identity_index(assets)
+    for agent in agent_assets:
+        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
+        identity = identity_reference(metadata)
+        if not identity:
+            continue
+        targets, why = resolve_reference(identity, *accounts)
+        for target in targets:
+            add_edge(agent, target, "acts_as", "acts as", declared=True)
+        if why:
+            unresolved.append(dangling_reference(agent, identity, MECHANISM_IDENTITY, why))
+
     def _declare_server_edge(source, host) -> None:
         if (str(source.uuid), str(host.uuid)) in attested_pairs:
             # The same target, already attested through the agent-to-tool
@@ -304,6 +321,9 @@ def build_route_map(deployment) -> dict:
         "unresolved_edges": len(unresolved),
         "unresolved_tool_references": sum(1 for u in unresolved if u["mechanism"] == MECHANISM_TOOLS),
         "unresolved_server_references": sum(1 for u in unresolved if u["mechanism"] == MECHANISM_SERVER),
+        "unresolved_identity_references": sum(
+            1 for u in unresolved if u["mechanism"] == MECHANISM_IDENTITY
+        ),
         "layers_present": [layer for layer in LAYER_ORDER if layer_members[layer]],
         # The honest gap: nobody discovered where this system's logs go.
         "logs_observed": bool(layer_members[LAYER_LOGS]),

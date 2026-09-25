@@ -44,10 +44,13 @@ from __future__ import annotations
 # is not there.
 MECHANISM_TOOLS = "tools"
 MECHANISM_SERVER = "server"
+#: An agent's ``identity``: the service account it acts as.
+MECHANISM_IDENTITY = "identity"
 
 #: The kinds that are principals: something that acts, not something acted on.
 #: Spelled as the ``Asset.Kind`` values so this module stays free of the models.
 PRINCIPAL_KINDS = frozenset({"agent", "service_account"})
+SERVICE_ACCOUNT_KIND = "service_account"
 
 
 #: Why a reference could not be placed. A reference that names nothing and one
@@ -82,6 +85,23 @@ def reference_index(assets) -> tuple[dict, dict]:
             by_identifier.setdefault(asset.identifier, []).append(asset)
         by_name.setdefault(asset.name, []).append(asset)
     return by_identifier, by_name
+
+
+def identity_index(assets) -> tuple[dict, dict]:
+    """:func:`reference_index` over the service accounts alone.
+
+    An agent's ``identity`` names the account it acts as, so an account is the
+    only thing it can mean. Indexing everything and filtering afterwards would let
+    a tool whose IDENTIFIER is the string stop resolution before the account whose
+    NAME is -- the identifier-first rule is about which key of an account wins,
+    not about letting a component that cannot be an identity win.
+    """
+    return reference_index([a for a in assets if a.kind == SERVICE_ACCOUNT_KIND])
+
+
+def identity_reference(metadata: dict) -> str:
+    """The identity an agent declares it acts as, or ``""``."""
+    return str(metadata.get("identity") or "").strip()
 
 
 def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kinds=frozenset()):

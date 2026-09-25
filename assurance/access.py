@@ -67,10 +67,13 @@ from .capability import (
     _permission_specs,
 )
 from .graph_refs import (
+    MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     dangling_reference,
+    identity_index,
+    identity_reference,
     reference_index,
     resolve_reference,
     sort_references,
@@ -149,6 +152,10 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
     Two declared mechanisms, both ground truth:
 
     - an ``agent`` invokes each asset named in its ``metadata.tools``;
+    - an ``agent`` acts as the service account its ``metadata.identity`` names,
+      and so holds every power that account holds. An agent acting as an
+      account with admin rights has admin rights; the reach used to stop at
+      the agent's own tools, so the account's powers were nobody's;
     - any component connects to the backend named in its ``metadata.server``
       (an MCP server that hosts it, a data store it is wired to).
 
@@ -160,6 +167,7 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
     """
     edges: dict[int, list[tuple]] = {}
     unresolved: list[dict] = []
+    accounts = identity_index(assets)
 
     def add(src, tgt, hop: str, cap_key: str) -> None:
         if tgt is None or src.pk == tgt.pk:
@@ -182,6 +190,13 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
                 if why:
                     unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, why))
+            identity = identity_reference(metadata)
+            if identity:
+                targets, why = resolve_reference(identity, *accounts)
+                for target in targets:
+                    add(asset, target, "acts as", _kind_cap(target.kind)["key"])
+                if why:
+                    unresolved.append(dangling_reference(asset, identity, MECHANISM_IDENTITY, why))
         server = metadata.get("server")
         if server and str(server).strip():
             targets, why = resolve_reference(
@@ -305,11 +320,11 @@ def _identity_use(agents, service_accounts) -> dict:
     unless another agent's identity names that account alone: a proven use is
     not undone by an ambiguous one.
     """
-    by_identifier, by_name = reference_index(service_accounts)
+    by_identifier, by_name = identity_index(service_accounts)
     use: dict = {}
     for agent in agents:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
-        identity = str(metadata.get("identity") or "").strip()
+        identity = identity_reference(metadata)
         if not identity:
             continue
         candidates, why = resolve_reference(identity, by_identifier, by_name)
