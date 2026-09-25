@@ -636,9 +636,12 @@ def test_the_text_fallback_is_linear_in_the_body(factory, middleware, body):
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        # A key may begin where a redacted value stopped, on a key character: the
-        # value class stops at `]`, and `]` is a key character.
-        ("apikey:Token]api-keyv=%s" % SECRET, "apikey: [redacted]]api-keyv: [redacted]"),
+        # A key may begin where a redacted value stopped cleanly, just after a `]`
+        # that is itself a key character ...
+        ("apikey:Token] api-keyv=%s" % SECRET, "apikey: [redacted]] api-keyv: [redacted]"),
+        # ... but a value that stops at `]` with more of itself after it has no
+        # certain end, and is redacted to the end of the line, key and all.
+        ("apikey:Token]api-keyv=%s" % SECRET, "apikey: [redacted]"),
         # A quoted key right after other key characters.
         ('ab"password": %s' % SECRET, 'ab"password": [redacted]'),
         # A key after a non-sensitive pair.
@@ -674,9 +677,11 @@ def test_the_text_fallback_redacts_what_the_single_pattern_did(text, expected):
         ("ſession=abc123", "ſession: [redacted]"),
         ("client_secret=x&paſſ=y", "client_secret: [redacted]&paſſ: [redacted]"),
         ("apiKey: v", "apiKey: [redacted]"),
-        # Where the scan resumes mid-run, after a value that stopped at `]`: the
-        # key that starts there folds case too.
-        ("token: x]paſſword=hunter2", "token: [redacted]]paſſword: [redacted]"),
+        # Where the scan resumes after a value that stopped at `]`: the key that
+        # starts there folds case too ...
+        ("token: x] paſſword=hunter2", "token: [redacted]] paſſword: [redacted]"),
+        # ... and with no delimiter after the `]`, the rest of the line is the value.
+        ("token: x]paſſword=hunter2", "token: [redacted]"),
     ],
 )
 def test_the_text_fallback_folds_case_as_the_pattern_it_replaced_did(text, expected):
@@ -741,8 +746,9 @@ def test_the_quoted_key_pass_stays_linear():
         ('{"seßion": "x",}', '{"seßion": [redacted],}'),
         # No length bound on a quoted key any more.
         ('{"' + "billing " * 16 + 'secret": "v",}', '{"' + "billing " * 16 + 'secret": [redacted],}'),
-        # A key written once is redacted once.
-        ('{"a secret": "a secret": "x"', '{"a secret": [redacted]: "x"'),
+        # A key written once is redacted once -- and a value followed by a colon
+        # rather than a delimiter has no certain end, so the line goes with it.
+        ('{"a secret": "a secret": "x"', '{"a secret": [redacted]'),
     ],
 )
 def test_the_text_fallback_judges_keys_as_the_structured_path_does(text, expected):
@@ -767,14 +773,15 @@ def test_one_judgement_for_every_path(key):
 def test_the_quoted_key_pass_visits_each_character_once(unit):
     """A body of `"\\` repeated made the per-position pattern backtrack 128
     characters at every quote: 10 MB took 34 s, before authentication. Bounded in
-    absolute terms, generously, as well as in growth."""
+    absolute terms, generously, as well as in growth. The quoted keys are read in
+    the same pass as the token keys now, so the whole pass is what is timed."""
     import time
 
-    from audit.middleware import _redact_quoted_keys
+    from audit.middleware import _redact_text
 
     body = unit * (1_048_576 // len(unit))
     start = time.perf_counter()
-    _redact_quoted_keys(body)
+    _redact_text(body)
     assert time.perf_counter() - start < 1.0
 
 
@@ -813,24 +820,34 @@ def test_the_text_pass_is_bounded_and_says_the_body_was_cut():
     from audit.middleware import redact_within
 
     body = "password=" + "x" * 50 + "&" + '"":' * 100_000
-    text, cut = redact_within(body, limit=1_000)
+    text, cut, _doubtful = redact_within(body, limit=1_000)
     assert cut is True
     assert len(text) <= 1_000 and "xxxx" not in text
     assert redact_within(body[:900], limit=1_000)[1] is False
-    # A JSON body is read whole by the structured path, and is not cut.
-    assert redact_within('{"a": "' + "y" * 5_000 + '"}', limit=1_000)[1] is False
+    # A JSON body within the limit is read whole by the structured path, and is
+    # not cut; one past it is not parsed whole either -- see the test below.
+    assert redact_within('{"a": "yy", "password": "x"}', limit=1_000) == (
+        '{"a":"yy","password":"[redacted]"}',
+        False,
+        False,
+    )
+    assert redact_within('{"a": "' + "y" * 5_000 + '"}', limit=1_000)[1] is True
 
 
 def test_a_body_redaction_shrinks_under_the_limit_is_still_reported_as_truncated(middleware, factory):
     """A long secret collapses to the marker, so what is left fits -- but the text
     pass only read the prefix, and a clean-looking body that was cut is the
-    walk-past-inspection this middleware exists to prevent."""
+    walk-past-inspection this middleware exists to prevent.
+
+    Here the WHOLE body redacts to 28 characters, under the 100 kept, so only the
+    bounded pass can say it was cut; and the size it names is the prefix it read,
+    four times what is kept."""
     mw = middleware(DEFENDER_MAX_BODY_BYTES=100)
-    body = "password=" + "s" * 10_000 + "\nnote: " + "n" * 10_000
+    body = "password=" + "s" * 10_000 + "\nnote: n"
     request = factory.post("/api/x/", data=body, content_type="text/plain")
     text, problem = mw._get_body(request)
-    assert "sss" not in text
-    assert problem is not None and "truncated" in problem
+    assert text == "password: [redacted]"
+    assert problem == "request body was truncated at 400 bytes for inspection"
 
 
 @pytest.mark.parametrize(
@@ -878,3 +895,417 @@ def test_a_form_key_is_judged_decoded():
     from audit.middleware import redact
 
     assert "S3CR3T" not in redact("p%61ssword=S3CR3T&x=1", form=True)
+
+
+# ---- Round 7: a value whose end is not certain is redacted to the end of its line. ----
+
+
+def _outcome(text):
+    """What the redactor forwards for ``text``, and whether it said a value had no
+    certain end."""
+    from audit.middleware import redact_within
+
+    redacted, _cut, doubtful = redact_within(text)
+    return redacted, doubtful
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A bracketed or quoted value with more of the value after it.
+        "password=[Summer]2024-S3CR3T",
+        "user=bob&password={x}S3CR3T&page=2",
+        "password: [redacted]S3CR3T",
+        '{"password": [a][b]S3CR3T,}',
+        "password: [x] S3CR3T",
+        '{"password": "abc" "S3CR3T",}',
+        # SQL's and YAML's doubled quote, which is an escape, not an end.
+        "UPDATE users SET password = 'o''S3CR3T' WHERE id=1",
+        "password: 'it''s S3CR3T'",
+        # An unquoted value that stopped where it may have opened something.
+        "password: abc]S3CR3T",
+        "password: a[b,S3CR3T]",
+        'password: x"y,S3CR3T"',
+        # A quote or a bracket that never closes.
+        '{"password": "abc,S3CR3T',
+        '{"tokens": ["x", "], S3CR3T}',
+        '{"tokens": ["a", "S3CR3T"',
+    ],
+)
+def test_a_value_without_a_certain_end_is_redacted_to_the_end_of_its_line(text):
+    """Each of these ended the value wherever the scanner could pair a quote or a
+    bracket, and forwarded the rest of the secret after it. Where the end is not
+    certain the value now runs to the end of the line, and that is said."""
+    redacted, doubtful = _outcome(text)
+    assert "S3CR3T" not in redacted
+    assert doubtful is True
+
+
+def test_redacting_to_the_end_of_the_line_leaves_the_next_line_alone():
+    assert _outcome("password: [x] S3CR3T\nq: UNION SELECT") == (
+        "password: [redacted]\nq: UNION SELECT",
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Keys that end in their separator: the pair they look like is the key.
+        '{"New Password:": "S3CR3T", "q": "UNION SELECT",}',
+        '{"Confirm password:": "S3CR3T", "q": "UNION SELECT",}',
+        '{"$token:": "S3CR3T", "q": "UNION SELECT",}',
+        '{"api token=": "S3CR3T", "q": "UNION SELECT",}',
+        "{'Password:': 'S3CR3T', 'q': 'UNION SELECT'}",
+        "{'api_key=': 'S3CR3T', 'q': 'UNION SELECT'}",
+        # Single-quoted keys and strings, as Python writes them.
+        "{'client secret': 'S3CR3T', 'q': 'UNION SELECT'}",
+        "{'new password': 'S3CR3T', 'q': 'UNION SELECT'}",
+        "{'tokens': ['a]b', 'S3CR3T'], 'q': 'UNION SELECT'}",
+        "{'credentials': {'note': '}', 'key': 'S3CR3T'}, 'q': 'UNION SELECT'}",
+        # A string that begins with a colon, after an unquoted key: read back from
+        # that colon, the text before it looked like a quoted key.
+        '{name: "bob", user_token: "abc", sep: ":", "client secret": "S3CR3T", q: "UNION SELECT"}',
+        # A key that lost its opening quote.
+        '{password": "S3CR3T", "q": "UNION SELECT",}',
+        'x password": S3CR3T, q: UNION SELECT',
+        '{"a": 1, client_secret": "S3CR3T", "q": "UNION SELECT",}',
+        # A quoted key whose last word names nothing: only the quoted reading
+        # sees the secret in it -- after an equals sign, where no key is
+        # expected, or after a separator of its own with no value.
+        '"client secret key" = "S3CR3T"\nq = "UNION SELECT"',
+        '{"a": 1 "client secret key": "S3CR3T", "q": "UNION SELECT",}',
+        '{"token:,client secret key": "S3CR3T", "q": "UNION SELECT",}',
+        # A harmless pair written inside a quoted key casts no doubt on it.
+        '{"note: x, client secret": "S3CR3T", "q": "UNION SELECT",}',
+        # A key that ends in its separator, whose value begins with a delimiter --
+        # wherever in the body a key can open.
+        '{"New Password:": ",S3CR3T", "q": "UNION SELECT",}',
+        '{"a": 1, "New Password:": ",S3CR3T", "q": "UNION SELECT",}',
+        '{\n  "New Password:": ",S3CR3T",\n  "q": "UNION SELECT",\n}',
+        # ... and where no key can open, when what follows the closing quote is
+        # not a string that ends cleanly.
+        'x"New Password:": "S3CR3T", "q": "UNION SELECT",',
+    ],
+)
+def test_a_key_is_read_whatever_its_quotes_and_the_field_after_it_is_kept(text):
+    redacted, doubtful = _outcome(text)
+    assert "S3CR3T" not in redacted
+    assert "UNION SELECT" in redacted
+    assert doubtful is False
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Whitespace and the next key end a value, as in logfmt.
+        ('level=info password="x y" q="UNION SELECT"', 'level=info password: [redacted] q="UNION SELECT"'),
+        # So does a closing bracket before a delimiter, of any kind.
+        (
+            'login(user="bob", password="S3CR3T", q="UNION SELECT")',
+            'login(user="bob", password: [redacted], q="UNION SELECT")',
+        ),
+        (
+            '{"a": {"password": "S3CR3T"} , "q": "UNION SELECT",}',
+            '{"a": {"password": [redacted]} , "q": "UNION SELECT",}',
+        ),
+        # A quote that is the last thing in an unquoted value closes a string
+        # around the whole pair; it is not the start of one inside the value.
+        ('{"msg": "token: abc", "q": "UNION SELECT",}', '{"msg": "token: [redacted], "q": "UNION SELECT",}'),
+        ("password: S3CR3T\nq: UNION SELECT", "password: [redacted]\nq: UNION SELECT"),
+        ("user=bob&password=S3CR3T&q=UNION SELECT", "user=bob&password: [redacted]&q=UNION SELECT"),
+        # A quoted value and then any of the delimiters.
+        ('password="S3CR3T"&q=UNION SELECT', "password: [redacted]&q=UNION SELECT"),
+        ('a=1; session="S3CR3T"; q=UNION SELECT', "a=1; session: [redacted]; q=UNION SELECT"),
+        ('login(password="S3CR3T"); q="UNION SELECT"', 'login(password: [redacted]); q="UNION SELECT"'),
+        # A value that runs to the end of its line leaves nothing on it to lose,
+        # whatever it holds.
+        ("password: a[b\nq: UNION SELECT", "password: [redacted]\nq: UNION SELECT"),
+        # The next line at the key's own depth is the next key, not more value.
+        ("db:\n  password: S3CR3T\n  host: UNION SELECT", "db:\n  password: [redacted]\n  host: UNION SELECT"),
+        # A "=" in a list reads back, over three lines, to the string before it:
+        # a quoted key that parses as nothing, inside the list's own value. The
+        # list goes and no more -- its lines are not indented under the q8 line
+        # the read-back began on, but under the line of its separator.
+        (
+            '{\nq8: "UNION SELECT",\ns: {\n  signature: [\n    "=",\n    "S3CR3T"\n  ],\n  q9: "UNION SELECT"\n}\n}',
+            '{\nq8: "UNION SELECT",\ns: {\n  signature: [redacted],\n  q9: "UNION SELECT"\n}\n}',
+        ),
+    ],
+)
+def test_a_value_that_ends_cleanly_keeps_what_follows_it(text, expected):
+    assert _outcome(text) == (expected, False)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("{'a, token: S3CR3T, b': 'S3CR3T', 'q': 'UNION SELECT'}", "{'a, token: [redacted], 'q': 'UNION SELECT'}"),
+        # The pair's value ends inside the key; the key's runs on past it.
+        ("x'a, token: y, b': 'S3CR3T', 'q': 'UNION SELECT'", "x'a, token: [redacted], 'q': 'UNION SELECT'"),
+        # The pair's value holds the key's closing quote; the key's own value is
+        # after that quote. Either reading alone forwarded the other's secret.
+        ('{"a token: \'b": \', S3CR3T\', "q": "UNION SELECT",}', '{"a token: [redacted], "q": "UNION SELECT",}'),
+        # The pair's value ends on its line; the key's runs on to the next.
+        ('x"a token: \'a\'b": [\n"S3CR3T"\n], "q": "UNION SELECT"', 'x"a token: [redacted], "q": "UNION SELECT"'),
+        # Every pair inside, not only the first: the second one's value is the
+        # one that runs furthest.
+        ('{"a token: x, secret: [": 1,\n"S3CR3T"], "q": "UNION SELECT"}', '{"a token: [redacted]'),
+        # A string value that begins with a colon, after a sensitive unquoted key,
+        # reads back as a quoted key; and a missing comma puts a real key in the
+        # same place. Which is which cannot be told, so both values go.
+        ('{a: "b", user_token: ":", "client secret": "S3CR3T", q: "UNION SELECT"}', '{a: "b", user_token: [redacted]'),
+        # Only one reading parses at all here -- but that one has no certain end
+        # either, so the line it took is still said to be lost.
+        ('{a: "b", user_token: [":", "S3CR3T"] y, "q": "UNION SELECT"}', '{a: "b", user_token: [redacted]'),
+        ('{"a": 1 "New Password:": ",S3CR3T", "q": 2,}', '{"a": 1 "New Password: [redacted], "q": 2,}'),
+        ('{"a": 1 "x token: \'b": \', S3CR3T\', "q": 2}', '{"a": 1 "x token: [redacted], "q": 2}'),
+        # An apostrophe in prose reads back as a quote too.
+        ("Here's my token: S3CR3T and the users': list\nq: UNION SELECT", "Here's my token: [redacted]\nq: UNION SELECT"),
+    ],
+)
+def test_a_pair_written_inside_a_quoted_key_is_redacted_with_the_keys_value(text, expected):
+    """The quoted key is copied out as it was written, so a pair inside it would
+    be copied with it. Every value goes -- through the latest end -- and the line
+    is reported, since the readings disagree about where the key was."""
+    assert _outcome(text) == (expected, True)
+
+
+def test_a_key_is_not_read_back_past_the_quote_that_closed_the_last_one():
+    # `"a b "` ends in a space, so no token key closes it and the scan does not
+    # move past it. Read back from `c"` into it, `": token, c"` was a key.
+    text = '{"a b ": token, c": "keep",}'
+    assert _outcome(text) == (text, False)
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        'a: "b", user_token: ":", ',  # a key read back from a string's own quote
+        '"New Password:": "x", ',  # a key that ends in its separator
+        'x"New Password:": 12, ',  # ... opening where no key can
+        'x"a token: 1, b": 2, ',  # a pair inside a quoted key
+    ],
+)
+def test_the_text_pass_stays_linear_when_a_key_is_doubted(unit):
+    """Each of these read a value to the end of the line and then threw it away,
+    and the next key on the line did the same: 128 KB of them took two seconds,
+    before authentication."""
+    import time
+
+    from audit.middleware import _redact_text
+
+    timings = []
+    for size in (16_000, 128_000):
+        body = "{" + unit * (size // len(unit))
+        start = time.perf_counter()
+        _redact_text(body)
+        timings.append(time.perf_counter() - start)
+    assert timings[1] < max(timings[0], 0.005) * 24, timings
+
+
+def test_a_value_carried_onto_indented_lines_is_redacted_with_them():
+    """Under `private_key: |` the key itself is on the indented lines after it,
+    and those went through in clear."""
+    text = "user: bob\nprivate_key: |\n  -----BEGIN KEY-----\n  S3CR3T\n\n  MORE\nq: UNION SELECT"
+    assert _outcome(text) == ("user: bob\nprivate_key: [redacted]\nq: UNION SELECT", True)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"password": "' + "A" * 900 + ",S3CR3T" * 40 + '",}',
+        '{"client secret": "' + "A" * 900 + "\nS3CR3T" * 40 + '",}',
+        'password="' + "A" * 900 + "&S3CR3T" * 40 + '"',
+    ],
+)
+def test_a_cut_inside_a_quoted_value_takes_the_rest_of_the_prefix(body):
+    """The cut left the quote open, the value then stopped at the first comma,
+    line break or `&` inside the secret, and the rest of it was forwarded."""
+    from audit.middleware import redact_within
+
+    text, cut, _doubtful = redact_within(body, limit=1_000)
+    assert cut is True
+    assert "S3CR3T" not in text
+
+
+def test_a_secret_the_prefix_cuts_through_is_not_forwarded(middleware, factory):
+    mw = middleware(DEFENDER_MAX_BODY_BYTES=100)
+    body = '{"note": "hi", "password": "correct horse,' + "S3CR3T-battery" * 50 + '",}'
+    request = factory.post("/api/x/", data=body, content_type="application/json")
+    text, problem = mw._get_body(request)
+    assert text == '{"note": "hi", "password": [redacted]'
+    assert problem.startswith("request body was truncated at 400 bytes for inspection")
+
+
+def test_a_sensitive_key_planted_before_an_attack_is_reported(middleware, factory):
+    """Redacting to the end of the line takes the attack with the secret. That
+    must not look like a clean inspection."""
+    body = "note: hi\npassword: [x] ' UNION SELECT username, pw FROM users --"
+    request = factory.post("/api/x/", data=body, content_type="text/plain")
+    text, problem = middleware()._get_body(request)
+    assert text == "note: hi\npassword: [redacted]"
+    assert problem == (
+        "request body could not be fully inspected: a value after a sensitive key had "
+        "no certain end and was redacted to the end of its line"
+    )
+
+
+def test_a_body_whose_values_all_end_cleanly_is_not_reported(middleware, factory):
+    body = '{"password": "S3CR3T", "q": "UNION SELECT",}'
+    request = factory.post("/api/x/", data=body, content_type="application/json")
+    text, problem = middleware()._get_body(request)
+    assert text == '{"password": [redacted], "q": "UNION SELECT",}'
+    assert problem is None
+
+
+def test_a_json_body_past_the_prefix_is_never_parsed_whole(middleware, factory):
+    """It was parsed, rebuilt and serialised whole before the cut: 9 MB of tiny
+    keys took four seconds and 180 MB, before authentication, to keep 64 KiB."""
+    import json
+
+    from audit import middleware as module
+
+    mw = middleware(DEFENDER_MAX_BODY_BYTES=1_000)
+    body = "{" + ",".join('"k%d":0' % i for i in range(5_000)) + "}"
+    assert len(body) > 10 * 4 * 1_000
+    parsed = []
+    real_loads = json.loads
+
+    def loads(text, *args, **kwargs):
+        parsed.append(len(text))
+        return real_loads(text, *args, **kwargs)
+
+    request = factory.post("/api/x/", data=body, content_type="application/json")
+    with mock.patch.object(module.json, "loads", loads):
+        text, problem = mw._get_body(request)
+    assert max(parsed, default=0) <= 4 * 1_000
+    assert text.startswith('{"k0":0,"k1":0,')
+    assert problem == "request body was truncated at 1000 bytes for inspection"
+
+
+@pytest.mark.parametrize(
+    ("body", "forwarded"),
+    [
+        ({"username": "bob", "password": "S3CR3T"}, '{"username":"bob","password":"[redacted]"}'),
+        # Every `&` chunk has its `=` -- there is only one -- but it opens like JSON.
+        ({"q": "a=b", "password": "S3CR3T"}, '{"q":"a=b","password":"[redacted]"}'),
+    ],
+)
+def test_a_json_body_labelled_as_a_form_is_still_redacted(middleware, factory, body, forwarded):
+    """jQuery posts `JSON.stringify(...)` with the form content type by default. A
+    chunk with no `=` was kept verbatim, and in a JSON body that was all of it."""
+    import json
+
+    request = factory.post(
+        "/api/x/", data=json.dumps(body), content_type="application/x-www-form-urlencoded; charset=UTF-8"
+    )
+    assert middleware()._get_body(request) == (forwarded, None)
+
+
+@pytest.mark.parametrize(
+    ("query", "forwarded"),
+    [
+        ("debug&token=S3CR3T", "debug&token: [redacted]"),
+        ('{"password":"S3CR3T"}', '{"password":"[redacted]"}'),
+    ],
+)
+def test_a_query_string_that_is_not_a_form_is_read_as_text_too(factory, middleware, query, forwarded):
+    post = engine_says()
+    with mock.patch("audit.middleware.requests.post", post):
+        middleware()(factory.get("/api/x/", QUERY_STRING=query))
+    assert post.call_args.kwargs["json"]["query"] == forwarded
+
+
+def test_a_query_string_value_with_no_certain_end_is_reported(factory, middleware, caplog):
+    post = engine_says()
+    with caplog.at_level(logging.WARNING, logger="audit.middleware"):
+        with mock.patch("audit.middleware.requests.post", post):
+            middleware()(factory.get("/api/x/", QUERY_STRING='debug&note=token:"x&q=UNION+SELECT'))
+    assert post.call_args.kwargs["json"]["query"] == "debug&note=token: [redacted]"
+    assert "query string could not be fully inspected" in logged(caplog)
+
+
+# Shapes that a one-line mutant of the scanner forwarded while every test above
+# passed. Each asserts what the mutant broke: no secret leaks, the field after a
+# value survives, or the cut is reported as the size it really was.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"tokens": ["a]", "S3CR3T"],}',  # a closing bracket inside a string in the list
+        '{"tokens": ["x", "], S3CR3T}',  # a string inside the list that never closes
+        '&]:"password"=[}{"S3CR3T"',  # the closing bracket is followed by more value
+        '{"a\\": b password": "S3CR3T",}',  # an escaped quote and a colon inside a key
+        '{"password:"S3CR3T", "a": 1,}',  # a token whose quoted value follows the colon
+        '"Password:": "S3CR3T",',  # a quoted key ending in its separator, at offset 0
+    ],
+)
+def test_no_secret_survives_the_shapes_that_escaped_the_suite(text):
+    from audit.middleware import redact
+
+    assert "S3CR3T" not in redact(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"tokens": ["a\\\nb"], "q": "UNION SELECT",}',  # an escaped line break in a listed string
+        '{"credentials": {"k": "v"}, "q": "UNION SELECT",}',  # an object closes at its brace
+    ],
+)
+def test_a_bracketed_value_does_not_swallow_the_field_after_it(text):
+    redacted, doubtful = _outcome(text)
+    assert '"q": "UNION SELECT"' in redacted
+    assert doubtful is False
+
+
+def test_a_bracketed_value_is_replaced_whole_and_nothing_more():
+    assert _outcome('{"tokens": ["a"], "q": 1,}') == ('{"tokens": [redacted], "q": 1,}', False)
+
+
+def test_the_quote_that_closed_one_key_never_opens_the_next():
+    # The walk back stops short of the previous candidate's closing quote: taken
+    # as an opening quote, it made `": token, b"` a key, and "token" is in it.
+    text = '{"a": token, b": "keep",}'
+    assert _outcome(text) == (text, False)
+
+
+def test_a_key_is_judged_by_how_json_reads_its_escapes():
+    # `"o\tp<TAB>"` is o, tab, p, tab, which names nothing. Dropping the backslash
+    # read "otp", and the value under a harmless key was lost.
+    text = '{"o\\tp\t": "keep",}'
+    assert _outcome(text) == (text, False)
+
+
+def test_a_backslash_at_the_floor_still_escapes_the_quote_after_it():
+    # The quote after the backslash at offset 0 is escaped, so it opens no key and
+    # the 1 is not the value of a "password x".
+    text = '\\"password x": 1, "q": 2'
+    assert _outcome(text) == (text, False)
+
+
+def test_a_body_exactly_at_the_limit_is_not_cut():
+    from audit.middleware import redact_within
+
+    body = "note: " + "x" * 994
+    assert len(body) == 1000
+    assert redact_within(body, limit=1000) == (body, False, False)
+    assert redact_within(body + "x", limit=1000)[1] is True
+
+
+def test_the_text_pass_reads_four_times_what_is_kept(middleware, factory):
+    # 220 raw characters, 31 after redaction: inside the 4x prefix, so read whole.
+    request = factory.post("/api/x/", data="password=" + "s" * 200 + "\nnote: tail", content_type="text/plain")
+    assert middleware(DEFENDER_MAX_BODY_BYTES=100)._get_body(request) == (
+        "password: [redacted]\nnote: tail",
+        None,
+    )
+
+
+def test_the_truncation_reported_is_the_one_applied(middleware, factory):
+    request = factory.post("/api/x/", data="note: " + "n" * 1000, content_type="text/plain")
+    text, problem = middleware(DEFENDER_MAX_BODY_BYTES=100)._get_body(request)
+    assert len(text) == 100
+    assert problem == "request body was truncated at 100 bytes for inspection"
