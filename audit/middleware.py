@@ -162,10 +162,12 @@ def _redact_structure(value):
 # too early: a quote the cut left open, `[Summer]2024-S3CR3T`, SQL's `'o''x'`,
 # a key that lost its opening quote. So a value keeps a precise end only when a
 # delimiter plainly follows it -- a comma, `&`, `;`, a line break, the end of the
-# text, or whitespace and then the next key. Anything else means the scanner
-# cannot tell where the secret stops, and the value is redacted to the end of its
-# line; that is reported, so a sensitive key planted in front of an attack cannot
-# quietly blind the engine to it.
+# text, or whitespace and then the next key -- and that delimiter is not inside a
+# string, a group or another key's value that the value swallowed. Anything else
+# means the scanner cannot tell where the secret stops, and the value is redacted
+# to the end of its line, and on past any string or group opened on it; that is
+# reported, so a sensitive key planted in front of an attack cannot quietly blind
+# the engine to it.
 #
 # A SCAN, not one regex. The single pattern this replaces put a sensitive-part
 # alternation between two unbounded runs of key characters -- a class that
@@ -218,7 +220,9 @@ _CLEAN_END = re.compile(
 # An unquoted value that stopped at a delimiter mid-line is only certain if the
 # delimiter cannot be inside something the value opened: `password: a[b,SECRET]`
 # stopped at the comma, and `password: x"y,SECRET"` inside a string. A quote as
-# the last thing in the value is the close of a string around the whole pair.
+# the last thing in the value, after a character of it, is the close of a string
+# around the whole pair, as in `"token: abc", "q": 1`. (A quote where a value or
+# an element starts is no close: see _unquoted_end, which has followed it by now.)
 _DOUBT = re.compile(r"[\[{(]|[\"'](?![ \t]*\Z)")
 # Everything in a bracketed value that is neither a quote nor a bracket.
 _GROUP_TEXT = re.compile(r"[^\"'\[\]{}]++")
@@ -244,6 +248,8 @@ class _Scan:
         # _STOPS.
         ":": re.compile(r"[\r\n,}\]]"),
         "=": re.compile(r"[&;\r\n]"),
+        # What can open a string or a group inside an unquoted value.
+        "open": re.compile(r"[\[{\"']"),
         # A quote that closes strings. The run of backslashes is taken whole,
         # possessively, so an odd one cannot give one back to the quote.
         '"': re.compile(r'(?<!\\)(?:\\\\)*+"'),
@@ -320,12 +326,117 @@ def _bracketed_end(scan, start):
     return None
 
 
+def _starts_element(text, index):
+    """Whether the character at ``index`` stands where a value or an element starts:
+    after `:`, `=`, an opening bracket or a delimiter, and any blanks."""
+    index -= 1
+    while index >= 0 and text[index] in " \t":
+        index -= 1
+    return index < 0 or text[index] in ":=[{(,;&\r\n"
+
+
+def _unquoted_end(scan, start, stops):
+    """Where an unquoted value from ``start`` ends, as ``(end, held)``: at the first
+    of ``stops`` -- the delimiters after a separator, or "line" for a line break
+    -- that no reading of what the value holds puts inside something.
+
+    `api_key=abc123, password: ";SECRETTAIL"` stopped at the `;` INSIDE the next
+    field's string: the quote before it was taken for the close of a string
+    around the pair, the value was called certain, and `;SECRETTAIL"` went
+    through, unreported. `api_key=abc, password: x;SECRET` lost the same tail
+    with no quote at all: an `=` value stops at `;`, but the value of the
+    `password:` it swallowed runs, after a colon, to the end of the line. So:
+
+    - A quote or bracket where a value or an element starts -- after `:`, `=`,
+      an opening bracket or a delimiter -- opens a string or a group, and a stop
+      inside it is not the end. One that never closes runs to the end of the
+      text, as a quoted value does. A quote after a character of the value opens
+      nothing: it closes a string around the pair, or is an apostrophe. Nor does
+      a bracket there: `password: a[b` is a value to the end of its line.
+    - EVERY such quote counts, the ones inside a string included, because which
+      quote opens and which closes cannot be told from inside a string -- and a
+      read can begin inside one: a quoted key read back from a quote in the
+      middle of `'a: b,', "c": 'SECRET\n...'` has a value that begins in
+      `'a: b,'`. Pairing quotes from there took the `'` after `b,` for an opener,
+      paired it with the one that opens 'SECRET, and cut that string at its line
+      break. What is inside a group is read too: a bracket in a string, taken for
+      one, closed at a `}` in the next field's string and hid the quote that
+      opened it.
+    - A sensitive key inside the value is still a key: if its own value would
+      run past this one's end, this one swallowed it.
+
+    ``held`` says the value swallowed another pair, so where it stops is not
+    certain.
+
+    Linear: each quote or bracket is looked at once and a string's end is a
+    lookup; a group is followed only from outside every group already followed,
+    so no text is read by two; keys are searched for from where the last search
+    stopped; and all of it is inside the value returned, which is then redacted.
+    """
+    text = scan.text
+    end = scan.next(stops, start)
+    held = False
+    index = start
+    at = -1
+    grouped = start
+    while True:
+        # The next quote or bracket that opens something, carried over while the
+        # scan has not reached it.
+        if at < index:
+            at = scan.next("open", index)
+        while at < end and (
+            not _starts_element(text, at) or (text[at] not in _QUOTES and at < grouped)
+        ):
+            at = scan.next("open", at + 1)
+        key = _TEXT_KEY.search(text, index, min(at, end))
+        while key is not None and not _is_sensitive_key(key.group(2)):
+            key = _TEXT_KEY.search(text, key.end(), min(at, end))
+        if key is not None:
+            # It runs past this value's end if its own would. Then the value is
+            # held, and redacted to the end of its line: the key's own value can
+            # run no further than that, the end of its line being a stop too.
+            index = key.end()
+            if index < scan.length and text[index] not in _STOPS[key.group(4)]:
+                held = held or scan.next(key.group(4), index) > end
+            continue
+        if at >= end:
+            return end, held
+        if text[at] in _QUOTES:
+            close = scan.string_end(at)
+        else:
+            close = grouped = _bracketed_end(scan, at)
+        if close is None:
+            return scan.length, True
+        index = at + 1
+        if close > end:
+            held = True
+            if stops == "line" and _CLEAN_END.match(text, close):
+                # Read to the end of a line, a string or group that ran onto a
+                # later one and ends cleanly there ends it, as it would end a
+                # bracketed value -- unless something inside it runs further.
+                end = close
+            else:
+                end = scan.next(stops, close)
+
+
+def _rest_of_line(scan, index):
+    """Where a value with no certain end is redacted to: the end of the line
+    ``index`` is on -- read as _unquoted_end reads a value, so a string or group
+    that opens on that line and closes on a later one takes that line too.
+
+    The plain end of the line fell inside the next field's string whenever the
+    field after a doubtful value held a line break in quotes:
+    `pwd= a, 'name' = "b"; "password":'\r\nSECRET'` lost everything up to the
+    `\r` and forwarded `SECRET`."""
+    return _unquoted_end(scan, index, "line")[0]
+
+
 def _value_end(scan, start, separator):
     """Where the value starting at ``start`` ends, and whether that end is certain;
     ``None`` if there is no value there.
 
-    An end that is not certain is the end of the line: the value is redacted
-    through it. A quote or bracket that never closes may span
+    An end that is not certain is the end of the line (see _rest_of_line): the
+    value is redacted through it. A quote or bracket that never closes may span
     lines, so a value that opens one runs to the end of the text.
     """
     text = scan.text
@@ -342,12 +453,14 @@ def _value_end(scan, start, separator):
         # line after a colon, or to the next pair after an equals sign.
         if char in _STOPS[separator]:
             return None
-        end = scan.next(separator, start)
+        end, held = _unquoted_end(scan, start, separator)
+        if held:
+            return _rest_of_line(scan, end), False
         if end == length or text[end] in "\r\n":
             # The whole rest of the line: nothing is left on it to lose.
             return end, True
         if _DOUBT.search(text, start, end):
-            return scan.line_end(end), False
+            return _rest_of_line(scan, end), False
         if text[end] not in _CLOSERS:
             return end, True
         # Stopped at a closing bracket, which ends the value only if a delimiter
@@ -356,7 +469,7 @@ def _value_end(scan, start, separator):
         return length, False
     if _CLEAN_END.match(text, end):
         return end, True
-    return scan.line_end(end), False
+    return _rest_of_line(scan, end), False
 
 
 # A line break, any blank lines, and the indentation of the next line with text.
@@ -372,7 +485,9 @@ def _continued(scan, separator_at, end):
     `private_key: |` the key itself is on the indented lines after it, and a
     folded header or a YAML scalar continues the same way. Those lines went
     through in clear. Whether the text is YAML cannot be known here, so a value
-    carried over is reported as one without a certain end."""
+    carried over is reported as one without a certain end. A line carried over is
+    read to its end as a doubtful value is (_rest_of_line): its end fell inside a
+    quoted value with a line break in it, and the rest of that went through."""
     text = scan.text
     line = scan.line_start(separator_at)
     depth = _INDENT.match(text, line).end() - line
@@ -380,7 +495,7 @@ def _continued(scan, separator_at, end):
         following = _NEXT_LINE.match(text, end)
         if following is None or len(following.group(1)) <= depth:
             return end
-        end = scan.line_end(following.end())
+        end = _rest_of_line(scan, following.end())
 
 
 def _text_value(scan, start, separator_at, separator):
@@ -588,7 +703,7 @@ def _held(scan, quote):
 def _text_redaction(text):
     """``text`` with the value after every sensitive ``key:`` / ``key=`` replaced,
     and whether any value had no certain end and was redacted to the end of its
-    line.
+    line (see _rest_of_line).
 
     One pass over the ORIGINAL text, quoted and token keys merged by where they
     start. Two passes, the second reading what the first had rewritten, let a
@@ -605,9 +720,9 @@ def _text_redaction(text):
     - a quoted key is walked back no further than the one before it, so each
       stretch of text is walked once, and decoded and judged once;
     - a value is read only to be redacted, and the position then moves past
-      everything read for it: the bracket groups a value holds, the pairs inside
-      a quoted key -- which are read one after another, never one inside
-      another's value;
+      everything read for it: the bracket groups a value holds, the strings it
+      follows, the pairs inside a quoted key -- which are read one after another,
+      never one inside another's value;
     - what is looked at past a value's end -- the delimiter or next key after it
       (_CLEAN_END), the next line's indentation (_continued) -- is either taken
       into the value or is where the scan goes next, so it is looked at a

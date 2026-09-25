@@ -1352,7 +1352,7 @@ def test_the_truncation_reported_is_the_one_applied(middleware, factory):
     assert problem == "request body was truncated at 100 bytes for inspection"
 
 
-# ---- Round 8: a text pass linear for any body. ----
+# ---- Round 8: a text pass linear for any body, and no value ends inside the next field. ----
 
 _PREFIX = 4 * 64 * 1024  # what the middleware reads of a body, at the default limit
 
@@ -1381,6 +1381,7 @@ def _fit(unit, size, head="", tail=""):
         pytest.param("[{", "", "", id="deep-brackets"),
         pytest.param("\\" * 15 + '"', "", "", id="backslash-runs"),
         pytest.param(', password: "a;b"', "api_key=a", "", id="strings-inside-an-equals-value"),
+        pytest.param("[", "password=a, ", None, id="groups-nested-inside-a-value"),
         pytest.param("\n", "password:", "", id="a-separator-then-line-breaks"),
     ],
 )
@@ -1416,3 +1417,162 @@ def test_the_text_pass_is_linear_in_the_prefix_for_any_shape(unit, head, tail):
     large = timed(_PREFIX, 1)
     assert large < 2.0, (small, large)
     assert large < 20 * max(small, 0.02), (small, large)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The reported shapes: an unquoted value runs over the next field and
+        # stops at a delimiter inside that field's string.
+        'api_key=abc123, password: ";SECRETTAIL"',
+        'token=abc password=";SECRETTAIL"',
+        'token=abc, password: "&SECRETTAIL"',
+        # ... at a line break inside it,
+        'api_key=abc123, password: ";SECRET\nSECRETTAIL"',
+        'api_key=a, tokens: ["b;\nSECRETTAIL"]',
+        # ... or, with no quote at all, at a delimiter of its own separator where
+        # the key it swallowed would not stop: after a colon, a value runs on.
+        "api_key=abc, password: x;SECRETTAIL",
+        "token=abc my password: x&SECRETTAIL",
+        # A value with no certain end redacted to the end of its line -- which is
+        # inside the next field's string.
+        "pwd= a, 'name' = \"b\"; \"password\":'\r\nSECRETTAIL'",
+        # A line carried over under a value, likewise.
+        "token: a\n  otp = 'x\rSECRETTAIL'",
+        # ... and so the end of the line after any value with no certain end: one
+        # that swallowed a pair, and one with more after its string.
+        'api_key=a, password: ";SECRETTAIL"; token: \'x\nSECRETTAIL\'',
+        "password: \"a\" b, token: 'x\nSECRETTAIL'",
+        # A read that begins inside a string: the value of the quoted key read
+        # back from the quote that opens session_id's value.
+        "'a'; session_id= ': b[x]c,', \"new password\": 'd\r\nSECRETTAIL'",
+        # A bracket inside a string, read as a group, closed in the next field's
+        # string and hid the quote that opened the secret.
+        "client_secret=x, \"new password\"=\t'y= {= '\n\"otp\": z & 'session_id'='}: w\n\rSECRETTAIL'",
+    ],
+)
+def test_a_value_never_ends_inside_the_next_fields_string(text):
+    """Each of these forwarded SECRETTAIL and called the body cleanly inspected."""
+    redacted, doubtful = _outcome(text)
+    assert "SECRETTAIL" not in redacted
+    assert doubtful is True
+
+
+def test_the_reported_body_is_redacted_and_reported(middleware, factory):
+    request = factory.post(
+        "/api/x/", data='api_key=abc123, password: ";SECRETTAIL"', content_type="text/plain"
+    )
+    text, problem = middleware()._get_body(request)
+    assert text == "api_key: [redacted]"
+    assert problem == (
+        "request body could not be fully inspected: a value after a sensitive key had "
+        "no certain end and was redacted to the end of its line"
+    )
+
+
+def test_a_quote_after_the_value_still_closes_the_string_around_the_pair():
+    # A quote after a character of the value, before the delimiter, is the end of
+    # a string around the whole pair, as before: the field after it is kept.
+    assert _outcome('{"msg": "token: abc", "q": "UNION SELECT",}') == (
+        '{"msg": "token: [redacted], "q": "UNION SELECT",}',
+        False,
+    )
+    # And a key inside an unquoted value that stops no later than the value does
+    # changes nothing: `password: x` ends at the same comma.
+    assert _outcome("api_key: a password: x, q: UNION SELECT") == (
+        "api_key: [redacted], q: UNION SELECT",
+        False,
+    )
+
+
+def test_no_secret_survives_and_no_separate_field_is_dropped_unsaid():
+    """Differential property check (the full run was 56,000 bodies; cf5ec50
+    leaked in 3,246 of them). Pairs under sensitive keys -- bare, quoted with any
+    content, lists -- among cleanly quoted `UNION SELECT` fields, every key
+    spelling, both separators, every joiner, and the reported shape on purpose: a
+    bare value followed by a quoted secret that starts with one of the bare
+    value's own delimiters. No marker under a sensitive key may be forwarded,
+    and a field no bare value swallowed may not be dropped while the body is
+    called cleanly inspected."""
+    import json
+    import random
+    import re
+
+    from audit.middleware import redact_within
+
+    rng = random.Random(8)
+    counter = [0]
+
+    def tag(prefix):
+        counter[0] += 1
+        return f"{prefix}{counter[0]:06d}"
+
+    stops = {":": ",}]\r\n", "=": "&;\r\n"}
+    tricky = [",", ";", "&", "\n", "\r", "]", "}", "[", "{", "(", '"', "'", "\\", ":", "=", " ", "ab", ": ", "= "]
+
+    def content(first=""):
+        parts = [first or (rng.choice(";&,\n]}'\"") if rng.random() < 0.35 else ""), tag("VAL")]
+        for _ in range(rng.randint(0, 2)):
+            parts += ["".join(rng.choice(tricky) for _ in range(rng.randint(0, 3))), tag("VAL")]
+        return "".join(parts)
+
+    def dq(s):
+        return json.dumps(s)
+
+    def sq(s):
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    def key(name):
+        r = rng.random()
+        if re.fullmatch(r"[\w.-]+", name) and r < 0.4:
+            return name
+        return dq(name) if r < 0.75 else sq(name)
+
+    sensitive = ["password", "token", "api_key", "secret", "Authorization", "otp", "client-secret", "new password"]
+    leaks, silent = [], []
+    for _ in range(1500):
+        fields = []
+        for i in range(rng.randint(1, 6)):
+            sep = rng.choice([": ", ":", "=", " = ", "=\t"])
+            if fields and fields[-1][1] == "bare" and rng.random() < 0.5:
+                bare = fields[-1][2]
+                quote = rng.choice([dq, sq])
+                joiner = rng.choice([" ", ", "] if bare == "=" else [" ", "; ", "&"])
+                fields.append(("sens", "quoted", sep.strip(), key(rng.choice(sensitive[:7])) + sep
+                               + quote(content(rng.choice(stops[bare]))), joiner))
+            elif rng.random() < 0.55:
+                r = rng.random()
+                if r < 0.3:
+                    kind, value = "bare", tag("VAL") + rng.choice(["", "-a.b", "/z"])
+                elif r < 0.85:
+                    kind, value = "quoted", rng.choice([dq, sq])(content())
+                else:
+                    items = [rng.choice([dq, sq])(content()) for _ in range(rng.randint(1, 2))]
+                    kind, value = "list", "[" + rng.choice([", ", ",\n  "]).join(items) + "]"
+                fields.append(("sens", kind, sep.strip(), key(rng.choice(sensitive)) + sep + value, None))
+            else:
+                atk = tag("ATK")
+                fields.append(("atk", atk, None, key(rng.choice(["q", "name", "note"])) + sep
+                               + rng.choice([dq, sq])(atk + " UNION SELECT"), None))
+        text, active, separate = "", set(), []
+        for i, (role, kind, sep, rendered, joiner) in enumerate(fields):
+            if i:
+                joiner = joiner or rng.choice([", ", ",", "\n", "\r\n", "&", "; ", " ", "\n  "])
+                if joiner == " " and rendered[0] in "\"'" and " " in rendered.split(sep or ":", 1)[0]:
+                    joiner = ", "  # a space and then a key with a space in it ends nothing
+                active = {s for s in active if not any(c in stops[s] for c in joiner)}
+                text += joiner
+            if role == "atk" and not active:
+                separate.append(kind)
+            text += rendered
+            if kind == "bare":
+                active.add(sep)
+        if rng.random() < 0.3:
+            text = "{" + text + rng.choice(["}", ",}", ""])
+        out, _cut, doubtful = redact_within(text, limit=_PREFIX)
+        if any(marker in out for marker in re.findall(r"VAL\d{6}", text)):
+            leaks.append((text, out))
+        if not doubtful and any(atk not in out for atk in separate):
+            silent.append((text, out))
+    assert leaks == []
+    assert silent == []
