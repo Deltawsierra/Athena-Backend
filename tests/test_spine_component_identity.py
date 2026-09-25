@@ -286,3 +286,69 @@ def test_a_named_agent_keeps_its_own_identity():
     )
     derive_assets(dep, scan)
     assert list(dep.assets.filter(kind=Kind.AGENT).values_list("identifier", flat=True)) == ["Planner"]
+
+
+# ---- A declared tool's own identity. ----
+
+
+def _inventory_scan(user, tools, target_url="https://a.example/bot"):
+    return PentestScan.objects.create(
+        user=user, target_url=target_url, consent=True, status=PentestScan.STATUS_COMPLETED,
+        engine_response={"findings": []},
+        target_config={"agent": {"name": "assistant"}, "tools": tools},
+    )
+
+
+def test_two_tools_on_one_server_are_two_tools_with_their_own_powers():
+    """Both fell back to the server as their identifier, so they were one row with
+    the permissions of whichever came second -- here the agent's shell vanished."""
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "exec", "server": "tools-mcp", "permissions": ["shell"]},
+        {"name": "search", "server": "tools-mcp", "permissions": ["web"]},
+    ]))
+
+    tools = {a.identifier: a.metadata["permissions"] for a in dep.assets.filter(kind=Kind.TOOL)}
+    assert tools == {"exec@tools-mcp": ["shell"], "search@tools-mcp": ["web"]}
+    agent = _principal(assess_effective_access(dep), "assistant")
+    assert "code_execution" in {c["key"] for c in agent["capabilities"]}
+
+
+@pytest.mark.parametrize("shell_first", [True, False])
+def test_a_tool_declared_twice_holds_every_permission_either_line_gave_it(shell_first):
+    lines = [
+        {"name": "db", "identifier": "db", "permissions": ["shell"], "approved": True},
+        {"name": "db", "identifier": "db", "permissions": ["read"]},
+    ]
+    if not shell_first:
+        lines.reverse()
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, lines))
+
+    tool = dep.assets.get(kind=Kind.TOOL)
+    assert sorted(tool.metadata["permissions"]) == ["read", "shell"]
+    # One line calling it approved does not vouch for the line that did not.
+    assert tool.classification == Asset.Classification.KNOWN
+    assert dep.assets.get(kind=Kind.AGENT).metadata["tools"] == ["db"]
+
+
+def test_a_tool_on_a_declared_mcp_server_is_hosted_by_it_not_itself():
+    """Identified by its server, the tool's own ``server`` reference found the
+    tool and the server both -- an ambiguous reference in a fully enumerated
+    inventory."""
+    from assurance import route
+
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "reader", "server": "mcp-prod", "permissions": ["read"]},
+        {"name": "mcp-prod", "kind": "mcp_server"},
+    ]))
+
+    result = route.build_route_map(dep)
+    assert result["unresolved"] == []
+    names = {n["uuid"]: n["name"] for n in result["nodes"]}
+    assert {(names[e["source"]], names[e["target"]], e["kind"]) for e in result["edges"] if e["declared"]} == {
+        ("assistant", "reader", "invokes"),
+        ("assistant", "mcp-prod", "invokes"),
+        ("reader", "mcp-prod", "hosted_by"),
+    }

@@ -167,6 +167,28 @@ def _clean_str_list(value) -> list[str]:
     return []
 
 
+def _tool_identifier(entry: dict, kind: str, name: str) -> str:
+    """The identity a declared tool is written under.
+
+    Its own identifier or endpoint when it gives one. Otherwise its name, and
+    when it also names the server it runs on, its name AT that server. It used to
+    fall back to the server alone, which is the host's identity and not the
+    tool's: every tool on one MCP server became one row, carrying the permissions
+    of whichever was declared last, and a tool named for its server resolved its
+    own ``server`` reference to itself. An MCP server entry is the exception --
+    the server it names is the server it is.
+    """
+    explicit = str(entry.get("identifier") or entry.get("endpoint") or "").strip()
+    if explicit:
+        return explicit
+    server = str(entry.get("server") or "").strip()
+    if kind == Asset.Kind.MCP_SERVER:
+        return server or name
+    if name and server:
+        return f"{name}@{server}"
+    return name or server
+
+
 def _agent_and_tools(
     deployment: Deployment, cfg: dict, now, *, target: str = ""
 ) -> tuple[Asset | None, list[Asset]]:
@@ -185,38 +207,64 @@ def _agent_and_tools(
     touched: list[Asset] = []
 
     # The tools the agent is wired to — each a graph node with its permissions.
-    tool_identifiers: list[str] = []
+    #
+    # Entries that name the same tool are ONE node carrying all of their
+    # permissions. Each used to be written in turn, and a refresh replaces the
+    # metadata, so the last entry's permissions were the tool's permissions:
+    # declare a tool twice, once with ``shell``, and whether the agent could run
+    # code depended on which line came second.
+    declared: dict[tuple[str, str], dict] = {}
     raw_tools = cfg.get("tools")
     if isinstance(raw_tools, list):
         for entry in raw_tools:
             if not isinstance(entry, dict):
                 continue
             name = str(entry.get("name") or "").strip()
-            identifier = str(
-                entry.get("identifier") or entry.get("endpoint") or entry.get("server") or name
-            ).strip()
+            kind = _TOOL_KINDS.get(str(entry.get("kind") or "").strip().lower(), Asset.Kind.TOOL)
+            identifier = _tool_identifier(entry, kind, name)
             if not identifier:
                 continue
-            kind = _TOOL_KINDS.get(str(entry.get("kind") or "").strip().lower(), Asset.Kind.TOOL)
-            approved = bool(entry.get("approved"))
-            asset = _get_or_refresh(
-                deployment,
-                kind=kind,
-                identifier=identifier,
-                name=name or identifier,
-                classification=Asset.Classification.APPROVED if approved else Asset.Classification.KNOWN,
-                now=now,
-                metadata={
-                    "source": "declared_inventory",
-                    "declared": True,
-                    "permissions": _clean_str_list(entry.get("permissions")),
+            tool = declared.setdefault(
+                (kind, identifier),
+                {
+                    "name": name or identifier,
+                    "approved": True,
+                    "permissions": [],
                     "provenance": str(entry.get("provenance") or "").strip(),
                     "server": str(entry.get("server") or "").strip(),
                     "subkind": str(entry.get("kind") or "").strip(),
                 },
             )
-            if asset:
-                touched.append(asset)
+            # Approved only if every entry for it says so: one line calling it
+            # approved does not vouch for a line that did not.
+            tool["approved"] = tool["approved"] and bool(entry.get("approved"))
+            for perm in _clean_str_list(entry.get("permissions")):
+                if perm not in tool["permissions"]:
+                    tool["permissions"].append(perm)
+
+    tool_identifiers: list[str] = []
+    for (kind, identifier), tool in declared.items():
+        asset = _get_or_refresh(
+            deployment,
+            kind=kind,
+            identifier=identifier,
+            name=tool["name"],
+            classification=(
+                Asset.Classification.APPROVED if tool["approved"] else Asset.Classification.KNOWN
+            ),
+            now=now,
+            metadata={
+                "source": "declared_inventory",
+                "declared": True,
+                "permissions": tool["permissions"],
+                "provenance": tool["provenance"],
+                "server": tool["server"],
+                "subkind": tool["subkind"],
+            },
+        )
+        if asset:
+            touched.append(asset)
+            if identifier not in tool_identifiers:
                 tool_identifiers.append(identifier)
 
     # The agent identity itself — the node the tools hang off. It is declared
