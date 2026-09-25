@@ -34,6 +34,7 @@ import re
 import textwrap
 from collections import Counter
 from datetime import timedelta
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -701,17 +702,81 @@ _THE_REFRESH = Counter(
 )
 
 _OWNED = r"\b(?:%s)\b" % "|".join(sorted(DECISION_OWNED_FIELDS))
-#: A column named anywhere in a string handed to raw SQL.
+#: A column named anywhere in SQL the ORM turns into model values.
 _NAMES_AN_OWNED_COLUMN = re.compile(_OWNED, re.IGNORECASE)
-#: SQL that writes a column, naming an owned one -- wherever the string is held,
-#: since ``cursor.execute(SQL)`` runs a statement kept in a module constant.
+#: SQL that writes a column, naming an owned one.
 _SQL_WRITING_AN_OWNED_COLUMN = re.compile(
     r"\b(?:UPDATE\b.*?\bSET|(?:INSERT|REPLACE|MERGE)\b.*?\bINTO|ON\s+CONFLICT)\b.*?" + _OWNED,
     re.IGNORECASE | re.DOTALL,
 )
-_RAW_SQL_CALLS = frozenset({"raw", "execute", "executemany", "executescript", "RawSQL", "RunSQL"})
+#: The comment that clears ONE line the scan flags, with the reason it is not a
+#: writer. For a proven false positive only; the reason is required.
+_NOT_A_WRITER = re.compile(r"#\s*not-a-decision-writer:\s*\S")
 #: Neither passed nor determinable: an argument hidden behind ``*args``/``**kwargs``.
 _UNKNOWN = object()
+
+#: A QuerySet's update, sync and async: its keywords are the columns it writes.
+_UPDATES = frozenset({"update", "aupdate"})
+#: What an update and a model save come down to: whatever they are handed, they
+#: write, and what they are handed is not keywords this scan can read.
+_PRIVATE_WRITES = frozenset({"_update", "_do_update", "_save_table"})
+#: Each bulk write, sync and async, and where its field list is passed:
+#: ``(positional index, keyword)``.
+_BULK_WRITES = {
+    "bulk_update": (1, "fields"),
+    "abulk_update": (1, "fields"),
+    # An upsert: rows that collide are UPDATEd with `update_fields`.
+    "bulk_create": (4, "update_fields"),
+    "abulk_create": (4, "update_fields"),
+}
+#: Every method a call of which writes columns. Referenced without being called --
+#: bound to a name, fetched with getattr, handed to functools.partial -- what it is
+#: finally called with cannot be read where it is called.
+_WRITE_METHODS = _UPDATES | _PRIVATE_WRITES | frozenset(_BULK_WRITES) | {"save_base"}
+#: The query classes an UPDATE is built from by hand.
+_UPDATE_QUERIES = frozenset({"UpdateQuery", "SQLUpdateCompiler"})
+#: SQL run as it stands, and where each call takes its statements: held to what the
+#: statements DO. A SELECT naming the decision reads it.
+_RUN_SQL = {
+    "execute": ((0, ("sql", "query", "operation")),),
+    "executemany": ((0, ("sql", "query", "operation")),),
+    "executescript": ((0, ("sql_script",)),),
+    # Both run: `reverse_sql` on the way back down.
+    "RunSQL": ((0, ("sql",)), (1, ("reverse_sql",))),
+}
+#: SQL the ORM turns into model values, held to naming an owned column at all:
+#: raw() hands back Deployments carrying whatever decision its SQL says, and a
+#: RawSQL can stand in the value of an update.
+_ORM_SQL = {"raw": ((0, ("raw_query",)),), "RawSQL": ((0, ("sql",)),)}
+#: The steps from a model to its rows. A chain of these alone from ANOTHER model is
+#: that model's queryset; any other step -- a relation, a call that hands back an
+#: instance -- may reach a Deployment.
+_QUERYSET_STEPS = frozenset(
+    {
+        "objects", "_default_manager", "_base_manager", "db_manager", "get_queryset",
+        "all", "filter", "exclude", "select_for_update", "using", "order_by", "reverse",
+        "select_related", "prefetch_related", "annotate", "alias", "distinct", "only",
+        "defer", "none", "complex_filter", "extra", "values", "values_list",
+    }
+)
+#: Calls that build a container, which is never a queryset.
+_CONTAINERS = frozenset(
+    {
+        "dict", "set", "list", "tuple", "frozenset",
+        "defaultdict", "OrderedDict", "Counter", "ChainMap", "deque",
+    }
+)
+_LITERALS = (
+    ast.Dict, ast.Set, ast.List, ast.Tuple, ast.Constant, ast.JoinedStr,
+    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+)
+#: What a parameter holding a queryset or a manager is called.
+_QUERYSET_NAME = re.compile(r"(?:\w+_)?(?:qs|queryset|querysets|manager|objects)")
+#: What a queryset or manager class is called.
+_QUERYSET_CLASS = re.compile(r"\w*(?:QuerySet|Manager)\b")
+#: At most this many values are followed through a string's assembly; past it, the
+#: string is one the scan cannot read.
+_MOST_VALUES = 256
 
 
 def _first_party_python(root=_REPO):
@@ -810,11 +875,13 @@ def _keys(keywords, passed_through=None):
     return names
 
 
-def _argument(call, index, keyword):
-    """The node passed as parameter ``keyword`` (positional ``index``); ``None`` if
-    not passed, :data:`_UNKNOWN` if it may be hidden in ``*args``/``**kwargs``."""
+def _argument(call, index, keywords):
+    """The node passed as parameter ``keywords`` (a name, or a tuple of the names it
+    goes by; positional ``index``); ``None`` if not passed, :data:`_UNKNOWN` if it
+    may be hidden in ``*args``/``**kwargs``."""
+    keywords = (keywords,) if isinstance(keywords, str) else keywords
     for passed in call.keywords:
-        if passed.arg == keyword:
+        if passed.arg in keywords:
             return passed.value
     ahead = call.args[: index + 1]
     if any(isinstance(a, ast.Starred) for a in ahead):
@@ -826,14 +893,13 @@ def _argument(call, index, keyword):
     return None
 
 
-def _fields_write(call, index, keyword):
-    """Why a ``bulk_update``/``bulk_create`` call's field list writes an owned
-    column, or ``None``."""
+def _fields_write(call, index, keyword, *, absent=None):
+    """Why the field list a call passes as ``keyword`` (positional ``index``) writes
+    an owned column, or ``None``. ``absent`` is why a call that passes none -- or
+    ``None`` -- does, if it does."""
     fields = _argument(call, index, keyword)
     if fields is None or (isinstance(fields, ast.Constant) and fields.value is None):
-        # bulk_update's fields are required, so a call without them is not a
-        # QuerySet's; bulk_create without update_fields is a plain INSERT.
-        return None
+        return absent
     names = None if fields is _UNKNOWN else _names(fields)
     if names is None:
         return f"{keyword} that cannot be resolved"
@@ -846,92 +912,541 @@ def _called(call):
     return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
 
 
-def _why_it_writes_a_decision_column(call, *, migration, passed_through=None):
-    """Why ``call`` writes a decision column the model cannot see, or ``None``."""
-    name = _called(call)
-    if name == "update":
-        # The columns a QuerySet's update writes are its keywords. A positional
-        # argument is a dict's, set's or hash's update -- or an unbound
-        # `QuerySet.update(qs, ...)`, whose keywords are read all the same.
-        keys = _keys(call.keywords, passed_through)
-        if keys is None:
-            return "update(**...) with keys that cannot be resolved"
-        owned = keys & DECISION_OWNED_FIELDS
-        return f"update() of {sorted(owned)}" if owned else None
-    if name == "bulk_update":
-        why = _fields_write(call, 1, "fields")
-        return why and f"bulk_update() with {why}"
-    if name == "bulk_create":
-        # An upsert: rows that collide are UPDATEd with `update_fields`.
-        why = _fields_write(call, 4, "update_fields")
-        return why and f"bulk_create() with {why}"
-    if name in _RAW_SQL_CALLS and not migration:
-        # A migration may create or alter these columns in SQL; what it may not do
-        # is write them, which the SQL-shape check below holds it to.
-        strings = [
-            c.value
-            for c in ast.walk(call)
-            if isinstance(c, ast.Constant) and isinstance(c.value, str)
-        ]
-        if any(_NAMES_AN_OWNED_COLUMN.search(s) for s in strings):
-            return f"{name}() of SQL naming a decision column"
-    return None
+def _chain(node):
+    """``node`` taken apart as ``(root, steps)``: ``Deployment.objects.filter(pk=1)``
+    is the root ``Deployment`` and the steps ``["objects", "filter"]``. A call of a
+    bare name (``super()``, ``type(x)``) or of ``get_model`` is a root."""
+    steps = []
+    while True:
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr != "get_model":
+                steps.append(func.attr)
+                node = func.value
+                continue
+        elif isinstance(node, ast.Attribute):
+            steps.append(node.attr)
+            node = node.value
+            continue
+        elif isinstance(node, ast.Subscript):
+            steps.append("[]")
+            node = node.value
+            continue
+        return node, steps[::-1]
+
+
+def _bind(found, target, value):
+    if isinstance(target, ast.Name):
+        found.setdefault(target.id, []).append(value)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            _bind(found, element, _OPAQUE)
+    elif isinstance(target, ast.Starred):
+        _bind(found, target.value, _OPAQUE)
+
+
+#: A binding the scan does not follow: a loop target, an augmented assignment, a
+#: name another scope rebinds with ``global``/``nonlocal``, ...
+_OPAQUE = object()
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _bindings(scope):
+    """Every name ``scope`` binds, as ``{name: [what it is bound to, ...]}``: an
+    expression, ``("param", arg)``, ``("import", imported name)``, ``("class",
+    node)``, or :data:`_OPAQUE`. Every binding in the scope, wherever it sits, since
+    a name read anywhere in it may hold any of them. Nested scopes are not entered.
+    """
+    found = {}
+    if isinstance(scope, _COMPREHENSIONS):
+        for generator in scope.generators:
+            _bind(found, generator.target, _OPAQUE)
+        return found
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        arguments = scope.args
+        for arg in (
+            *arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+            arguments.vararg, arguments.kwarg,
+        ):
+            if arg is not None:
+                found.setdefault(arg.arg, []).append(("param", arg))
+        pending = [scope.body] if isinstance(scope, ast.Lambda) else list(scope.body)
+    else:
+        pending = list(scope.body)
+    for node in ast.walk(scope):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                found.setdefault(name, []).append(_OPAQUE)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            # Its decorators, defaults and bases are evaluated here; its body is not.
+            if isinstance(node, ast.ClassDef):
+                found.setdefault(node.name, []).append(("class", node))
+                pending.extend([*node.decorator_list, *node.bases, *(k.value for k in node.keywords)])
+            else:
+                if not isinstance(node, ast.Lambda):
+                    found.setdefault(node.name, []).append(_OPAQUE)
+                    pending.extend(node.decorator_list)
+                pending.extend([*node.args.defaults, *(d for d in node.args.kw_defaults if d)])
+            continue
+        if isinstance(node, _COMPREHENSIONS):
+            # Its targets are its own; a walrus inside it binds here.
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.NamedExpr):
+                    _bind(found, inner.target, inner.value)
+            pending.append(node.generators[0].iter)
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                _bind(found, target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _bind(found, node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            _bind(found, node.target, node.value)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+            _bind(found, node.target, _OPAQUE)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            _bind(found, node.optional_vars, _OPAQUE)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            found.setdefault(node.name, []).append(_OPAQUE)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            found.setdefault(node.name, []).append(_OPAQUE)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            found.setdefault(node.rest, []).append(_OPAQUE)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                found.setdefault(alias.asname or alias.name, []).append(("import", alias.name))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                found.setdefault(alias.asname or alias.name.split(".")[0], []).append(_OPAQUE)
+        pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+#: What a receiver is, as far as a write through it goes.
+_DEPLOYMENT, _ANOTHER_MODEL, _NOT_A_QUERYSET, _MAY_BE_ANYTHING = (
+    "a Deployment",
+    "another model",
+    "not a queryset",
+    "may be anything",
+)
+
+
+def _class_named(name):
+    """What an unresolved or imported class name is: a Deployment (or a class named
+    for one), a queryset or manager class (which may be anything), or another model."""
+    if _QUERYSET_CLASS.fullmatch(name):
+        return _MAY_BE_ANYTHING
+    if "Deployment" in name:
+        return _DEPLOYMENT
+    return _ANOTHER_MODEL if name[:1].isupper() else _MAY_BE_ANYTHING
+
+
+def _apply(op, left, right):
+    return left + right if isinstance(op, ast.Add) else left % right
+
+
+def _bounded(values):
+    """``values`` as a set, or ``None`` past :data:`_MOST_VALUES` or on a value that
+    cannot be computed (a format that does not fit its arguments)."""
+    out = set()
+    try:
+        for value in values:
+            out.add(value)
+            if len(out) > _MOST_VALUES:
+                return None
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+        return None
+    return out
+
+
+def _strings(values):
+    """Every string in ``values``, tuples and lists of statements flattened."""
+    for value in values:
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, tuple):
+            yield from _strings(value)
+
+
+class _Scan(ast.NodeVisitor):
+    """One file's writes of a decision column the model cannot see."""
+
+    def __init__(self, path, source, *, migration, found):
+        self.path, self.migration, self.found = path, migration, found
+        self.lines = source.splitlines()
+        # The qualified scope a write is reported under, and the `**` an `update`
+        # hands on untouched (see `_passed_through`).
+        self.scope, self.passed_through = [], [None]
+        # The scopes names are looked up in, innermost last.
+        self.chain = []
+        self.called = set()
+        self._cache = {}
+
+    # -- scopes ---------------------------------------------------------------
+
+    def _visit_within(self, node):
+        self.chain.append(node)
+        self.generic_visit(node)
+        self.chain.pop()
+
+    visit_Module = visit_Lambda = _visit_within
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _visit_within
+
+    def _scoped(self, node):
+        self.scope.append(node.name)
+        self.passed_through.append(_passed_through(node))
+        self._visit_within(node)
+        self.passed_through.pop()
+        self.scope.pop()
+
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _scoped
+
+    def _lookup(self, name, chain):
+        """``(scope depth, bindings)`` of the innermost scope in ``chain`` binding
+        ``name`` -- a class body only for code directly in it, as Python has it --
+        or ``None`` for a name nothing here binds (a builtin, a star import)."""
+        for depth in range(len(chain) - 1, -1, -1):
+            scope = chain[depth]
+            if isinstance(scope, ast.ClassDef) and depth != len(chain) - 1:
+                continue
+            if id(scope) not in self._cache:
+                self._cache[id(scope)] = _bindings(scope)
+            bindings = self._cache[id(scope)].get(name)
+            if bindings is not None:
+                return depth, bindings
+        return None
+
+    # -- what a receiver is ---------------------------------------------------
+
+    def _kind(self, node, chain, seen=frozenset()):
+        if isinstance(node, _LITERALS) or (isinstance(node, ast.Call) and _called(node) in _CONTAINERS):
+            return _NOT_A_QUERYSET
+        if isinstance(node, ast.IfExp):
+            kinds = {self._kind(node.body, chain, seen), self._kind(node.orelse, chain, seen)}
+            return kinds.pop() if len(kinds) == 1 else _MAY_BE_ANYTHING
+        root, steps = _chain(node)
+        kind = self._root_kind(root, chain, seen)
+        if not steps:
+            return kind
+        if kind == _NOT_A_QUERYSET and set(steps) == {"copy"}:
+            return kind
+        if kind in (_DEPLOYMENT, _ANOTHER_MODEL) and set(steps) <= _QUERYSET_STEPS:
+            return kind
+        return _MAY_BE_ANYTHING
+
+    def _root_kind(self, root, chain, seen):
+        if isinstance(root, _LITERALS):
+            return _NOT_A_QUERYSET
+        if isinstance(root, ast.Call):
+            if _called(root) in _CONTAINERS:
+                return _NOT_A_QUERYSET
+            if _called(root) == "get_model":
+                named = [a.value for a in root.args if isinstance(a, ast.Constant)]
+                if len(named) != len(root.args) or not named or root.keywords:
+                    return _MAY_BE_ANYTHING
+                model = named[-1].rsplit(".", 1)[-1]
+                return _DEPLOYMENT if model.lower() == "deployment" else _ANOTHER_MODEL
+            return _MAY_BE_ANYTHING  # super(), type(x), a factory
+        if not isinstance(root, ast.Name):
+            return _MAY_BE_ANYTHING
+        found = self._lookup(root.id, chain)
+        if found is None:
+            return _class_named(root.id)
+        depth, bindings = found
+        key = (id(chain[depth]), root.id)
+        if key in seen:
+            return _MAY_BE_ANYTHING
+        kinds = {
+            self._binding_kind(root.id, binding, chain[: depth + 1], seen | {key})
+            for binding in bindings
+        }
+        return kinds.pop() if len(kinds) == 1 else _MAY_BE_ANYTHING
+
+    def _binding_kind(self, name, binding, chain, seen):
+        if binding is _OPAQUE:
+            return _MAY_BE_ANYTHING
+        if not isinstance(binding, tuple):
+            return self._kind(binding, chain, seen)
+        what, node = binding
+        if what == "import":
+            return _class_named(node)
+        if what == "class":
+            bases = " ".join(ast.unparse(base) for base in node.bases)
+            if node.name == "Deployment" or (
+                re.search(r"\bDeployment\b", bases) and not _QUERYSET_CLASS.search(bases)
+            ):
+                return _DEPLOYMENT
+            return _MAY_BE_ANYTHING if _QUERYSET_CLASS.search(bases) else _ANOTHER_MODEL
+        # A parameter: a queryset only if it says so -- by its name, its annotation,
+        # or being `self`/`cls`, which may be a queryset's own.
+        annotation = ast.unparse(node.annotation) if node.annotation is not None else ""
+        if (
+            name in ("self", "cls")
+            or _QUERYSET_NAME.fullmatch(name)
+            or re.search(r"QuerySet|Manager|Deployment", annotation)
+        ):
+            return _MAY_BE_ANYTHING
+        return _NOT_A_QUERYSET
+
+    def _writes_no_deployment(self, receiver, method):
+        """Whether ``method`` called on ``receiver`` is proven to write no Deployment:
+        a queryset of another model reached through queryset steps alone -- or, for
+        an ``update`` (which dicts, sets and hashes have too), a container, a name
+        bound only to one, or a parameter whose name does not say queryset. Anything
+        else may be a Deployment's -- a relation, a factory, a name this scan cannot
+        follow -- and is held to the write rules."""
+        if receiver is None:
+            return False
+        kind = self._kind(receiver, self.chain)
+        return kind == _ANOTHER_MODEL or (method in _UPDATES and kind == _NOT_A_QUERYSET)
+
+    # -- what a string is -----------------------------------------------------
+
+    def _values(self, node, chain, seen=frozenset()):
+        """Every value ``node`` can hold, when each is a constant this scan can
+        compute -- through concatenation, ``%``, ``.format``, f-strings, ``join``,
+        conditionals and names bound only to such values, here or at module level.
+        ``None`` for anything else: a parameter, a call, a name bound in a loop."""
+        if isinstance(node, ast.Constant):
+            return {node.value}
+        if isinstance(node, ast.Attribute) and node.attr == "noop":
+            return {""}  # migrations.RunSQL.noop
+        if isinstance(node, ast.Name):
+            found = self._lookup(node.id, chain)
+            if found is None:
+                return None
+            depth, bindings = found
+            key = (id(chain[depth]), node.id)
+            # Only what cannot change once bound: a list can be appended to anywhere
+            # the name reaches, and a parameter, an import or a loop target is not
+            # a value here at all.
+            if key in seen or any(
+                b is _OPAQUE or isinstance(b, (tuple, ast.List)) for b in bindings
+            ):
+                return None
+            out = set()
+            for binding in bindings:
+                values = self._values(binding, chain[: depth + 1], seen | {key})
+                if values is None:
+                    return None
+                out |= values
+            return _bounded(out)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+            left = self._values(node.left, chain, seen)
+            right = self._values(node.right, chain, seen)
+            if left is None or right is None:
+                return None
+            return _bounded(_apply(node.op, a, b) for a, b in product(left, right))
+        if isinstance(node, (ast.Tuple, ast.List)):
+            elements = [self._values(e, chain, seen) for e in node.elts]
+            if any(e is None for e in elements):
+                return None
+            return _bounded(tuple(p) for p in product(*elements))
+        if isinstance(node, ast.IfExp):
+            body = self._values(node.body, chain, seen)
+            orelse = self._values(node.orelse, chain, seen)
+            return None if body is None or orelse is None else _bounded(body | orelse)
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for value in node.values:
+                if isinstance(value, ast.Constant):
+                    parts.append({value.value})
+                    continue
+                inner = self._values(value.value, chain, seen)
+                if inner is None or value.format_spec is not None:
+                    return None
+                convert = {-1: format, 115: str, 114: repr, 97: ascii}[value.conversion]
+                parts.append({convert(v) for v in inner})
+            return _bounded("".join(p) for p in product(*parts))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("format", "join")
+            and not any(isinstance(a, ast.Starred) for a in node.args)
+            and all(k.arg is not None for k in node.keywords)
+        ):
+            receiver = self._values(node.func.value, chain, seen)
+            args = [self._values(a, chain, seen) for a in node.args]
+            kwargs = {k.arg: self._values(k.value, chain, seen) for k in node.keywords}
+            if receiver is None or None in args or None in kwargs.values():
+                return None
+            if node.func.attr == "join":
+                if len(args) != 1 or kwargs:
+                    return None
+                return _bounded(r.join(a) for r in receiver for a in args[0])
+            names = list(kwargs)
+            return _bounded(
+                r.format(*p[: len(args)], **dict(zip(names, p[len(args) :], strict=True)))
+                for r in receiver
+                for p in product(*args, *kwargs.values())
+            )
+        return None
+
+    # -- the rules ------------------------------------------------------------
+
+    def _found(self, node, why):
+        if _NOT_A_WRITER.search(self.lines[node.lineno - 1]):
+            return
+        self.found.append((self.path, ".".join(self.scope) or "<module>", node.lineno, why))
+
+    def _sql(self, call, name, positions, check):
+        """Why the SQL ``call`` runs writes -- or, for ``check`` "names", names -- an
+        owned column; SQL whose text cannot be computed is counted, since it cannot
+        be shown not to."""
+        for index, keywords in positions:
+            sql = _argument(call, index, keywords)
+            if sql is None:
+                continue
+            values = None if sql is _UNKNOWN else self._values(sql, self.chain)
+            if values is None:
+                return f"{name}() of SQL that cannot be read statically"
+            texts = list(_strings(values))
+            if check == "names" and any(_NAMES_AN_OWNED_COLUMN.search(t) for t in texts):
+                return f"{name}() of SQL naming a decision column"
+            if check == "writes" and any(_SQL_WRITING_AN_OWNED_COLUMN.search(t) for t in texts):
+                return "SQL writing a decision column"
+        return None
+
+    def _past_deployment_save(self, target):
+        """What a ``.save()`` called on ``target`` goes round ``Deployment.save``
+        through, or ``None`` for a save that goes through it (an instance's own)."""
+        if isinstance(target, ast.Call) and isinstance(target.func, ast.Name) and target.func.id == "super":
+            if target.args:
+                # super(Deployment, dep): past Deployment's save to Model's.
+                named = self._kind(target.args[0], self.chain)
+                return None if named == _ANOTHER_MODEL else "super(...)"
+            # super() in Deployment's own methods, but for the save itself.
+            classes = [s.name for s in self.chain if isinstance(s, ast.ClassDef)]
+            methods = [
+                s.name for s in self.chain if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            if classes[-1:] == ["Deployment"] and methods and methods[-1] != "save":
+                return "super()"
+            return None
+        # Model.save(dep, ...): the base class's save, called on the instance.
+        if isinstance(target, ast.Attribute):
+            return "Model" if target.attr == "Model" else None
+        if isinstance(target, ast.Name):
+            found = self._lookup(target.id, self.chain)
+            imported = found is not None and ("import", "Model") in found[1]
+            return "Model" if target.id == "Model" or imported else None
+        return None
+
+    def why(self, call):
+        """Why ``call`` writes a decision column the model cannot see, or ``None``."""
+        name = _called(call)
+        receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+        if name in _UPDATES:
+            # The columns a QuerySet's update writes are its keywords. A positional
+            # argument is a dict's, set's or hash's update -- or an unbound
+            # `QuerySet.update(qs, ...)`, whose keywords are read all the same.
+            if self._writes_no_deployment(receiver, name):
+                return None
+            keys = _keys(call.keywords, self.passed_through[-1])
+            if keys is None:
+                return f"{name}(**...) with keys that cannot be resolved"
+            owned = keys & DECISION_OWNED_FIELDS
+            return f"{name}() of {sorted(owned)}" if owned else None
+        if name in _PRIVATE_WRITES:
+            if self._writes_no_deployment(receiver, name):
+                return None
+            return f"{name}(), which writes what it is handed"
+        if name in _BULK_WRITES:
+            if self._writes_no_deployment(receiver, name):
+                return None
+            why = _fields_write(call, *_BULK_WRITES[name])
+            return why and f"{name}() with {why}"
+        if name == "save_base":
+            # Called on an instance, whatever its name: only its update_fields can
+            # show it writes no owned column. Unbound -- `Model.save_base(dep, ...)`
+            # -- the instance is the first argument.
+            unbound = receiver is not None and self._past_deployment_save(receiver) == "Model"
+            why = _fields_write(call, 4 + unbound, "update_fields", absent="every column")
+            return why and f"save_base() of {why}, past Deployment.save"
+        if name == "save" and receiver is not None:
+            past = self._past_deployment_save(receiver)
+            if past is None:
+                return None
+            why = _fields_write(call, 3 + (past == "Model"), "update_fields", absent="every column")
+            return why and f"{past}.save() of {why}, past Deployment.save"
+        if name == "getattr" and receiver is None and len(call.args) >= 2:
+            attr = call.args[1]
+            if isinstance(attr, ast.Constant) and attr.value in _WRITE_METHODS | set(_RUN_SQL):
+                if self._writes_no_deployment(call.args[0], attr.value):
+                    return None
+                return f"getattr() of {attr.value}: what it is called with cannot be read"
+        if name == "methodcaller" and call.args:
+            attr = call.args[0]
+            if isinstance(attr, ast.Constant) and attr.value in _WRITE_METHODS:
+                return f"methodcaller() of {attr.value}: what it is called on cannot be read"
+        if name in _RUN_SQL:
+            # A migration may create or alter these columns in SQL; what no code may
+            # do is write them.
+            return self._sql(call, name, _RUN_SQL[name], "writes")
+        if name in _ORM_SQL:
+            return self._sql(call, name, _ORM_SQL[name], "writes" if self.migration else "names")
+        return None
+
+    def visit_Call(self, node):
+        self.called.add(id(node.func))
+        why = self.why(node)
+        if why:
+            self._found(node, why)
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node):
+        if isinstance(node.ctx, ast.Load):
+            if node.attr in _UPDATE_QUERIES:
+                self._found(node, f"{node.attr}: an UPDATE built by hand")
+            elif id(node) not in self.called:
+                if node.attr in _WRITE_METHODS and not self._writes_no_deployment(node.value, node.attr):
+                    why = "what it is called with cannot be read"
+                    self._found(node, f"{node.attr} referenced, not called: {why}")
+                elif node.attr in ("execute", "executemany", "executescript"):
+                    why = "the SQL it runs cannot be read"
+                    self._found(node, f"{node.attr} referenced, not called: {why}")
+        self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Load) and node.id in _UPDATE_QUERIES:
+            self._found(node, f"{node.id}: an UPDATE built by hand")
 
 
 def _decision_writes(sources, *, migration=False):
     """Every write of a decision column in ``sources`` (``{path: source}``) that the
     model cannot see, as ``(path, qualified enclosing function, line, why)``.
 
-    QuerySet ``update()``/``bulk_update()``, a ``bulk_create()`` upsert, raw SQL --
-    none sends a signal or reaches ``Deployment.save``, so they are held here, by
-    reading the source. A ``**`` whose keys cannot be read is counted as a write:
-    it cannot be shown not to be one."""
+    None of these sends a signal or reaches ``Deployment.save``, so they are held
+    here, by reading the source:
+
+    - ``update()``/``aupdate()`` whose keywords name an owned column, or whose ``**``
+      keys cannot be read; ``bulk_update()``/``abulk_update()``, and a
+      ``bulk_create()``/``abulk_create()`` upsert, naming one or hiding its fields;
+      ``_update()``, ``_do_update()``, ``_save_table()``; and an ``UpdateQuery``;
+    - any of those methods referenced without being called -- bound to a name,
+      fetched with ``getattr``, handed to ``functools.partial`` -- since what it is
+      finally called with cannot be read;
+    - a save that goes round ``Deployment.save``: ``save_base()``,
+      ``Model.save(dep, ...)``, ``super(Deployment, dep).save()``, ``super().save()``
+      in Deployment's other methods -- unless its ``update_fields`` provably name no
+      owned column;
+    - SQL run by ``execute()``/``executemany()``/``executescript()``/``RunSQL()``
+      that writes an owned column, and SQL handed to ``raw()``/``RawSQL()`` that
+      names one. The text is followed through module-level and local string names,
+      concatenation, ``%``, ``.format``, f-strings and ``join``; text that cannot be
+      computed is counted, since it cannot be shown not to write.
+
+    A receiver proven not to be a Deployment's is let through: a dict or other
+    container (or a name bound only to one, or a parameter whose name does not say
+    queryset), and another model's queryset reached through queryset steps alone. A
+    ``**`` whose keys cannot be read is counted: it cannot be shown not to write. A
+    line carrying ``# not-a-decision-writer: <reason>`` is let through -- for a
+    proven false positive, with its reason."""
     found = []
-
-    class Visitor(ast.NodeVisitor):
-        def __init__(self, path):
-            self.path, self.scope, self.in_raw_sql = path, [], 0
-            self.passed_through = [None]
-
-        def _scoped(self, node):
-            self.scope.append(node.name)
-            self.passed_through.append(_passed_through(node))
-            self.generic_visit(node)
-            self.passed_through.pop()
-            self.scope.pop()
-
-        visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _scoped
-
-        def _found(self, node, why):
-            found.append((self.path, ".".join(self.scope) or "<module>", node.lineno, why))
-
-        def visit_Expr(self, node):
-            # A docstring (or any bare string statement) is prose, not SQL.
-            if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
-                self.generic_visit(node)
-
-        def visit_Constant(self, node):
-            if (
-                not self.in_raw_sql
-                and isinstance(node.value, str)
-                and _SQL_WRITING_AN_OWNED_COLUMN.search(node.value)
-            ):
-                self._found(node, "SQL writing a decision column")
-
-        def visit_Call(self, node):
-            why = _why_it_writes_a_decision_column(
-                node, migration=migration, passed_through=self.passed_through[-1]
-            )
-            if why:
-                self._found(node, why)
-            # A string counted as this call's SQL is not counted again on its own.
-            raw_sql = bool(why) and _called(node) in _RAW_SQL_CALLS
-            self.in_raw_sql += raw_sql
-            self.generic_visit(node)
-            self.in_raw_sql -= raw_sql
-
     for path, source in sorted(sources.items()):
-        Visitor(path).visit(ast.parse(source))
+        _Scan(path, source, migration=migration, found=found).visit(ast.parse(source))
     return found
 
 
@@ -1129,6 +1644,338 @@ def test_a_migration_may_alter_the_columns_but_not_write_them():
 )
 def test_the_one_writer_scan_passes_what_writes_no_decision_column(source):
     assert _parsed(source) == [], source
+
+
+#: Ways round the one writer the round-four review found the scan missing -- each
+#: shown against the real ORM to write an owned column with no transition recorded.
+#: Each must be flagged, and flagged once.
+_WAYS_ROUND_IT_FOUND_IN_REVIEW = {
+    "alias_bound_method": """
+        def pause(i):
+            write = Deployment.objects.filter(pk=i).update
+            write(decision="paused")
+    """,
+    "getattr_update": """
+        def pause(i):
+            getattr(Deployment.objects.filter(pk=i), "update")(decision="paused")
+    """,
+    "functools_partial": """
+        from functools import partial
+        def pause(i):
+            partial(Deployment.objects.filter(pk=i).update, decision="paused")()
+    """,
+    "save_base_update_fields": """
+        def pause(dep):
+            dep.decision = "paused"
+            dep.save_base(update_fields=["decision"])
+    """,
+    "model_save_unbound": """
+        from django.db import models
+        def pause(dep):
+            dep.decision = "paused"
+            models.Model.save(dep, update_fields=["decision", "decision_revision"])
+    """,
+    "super_skip_save": """
+        def pause(dep):
+            dep.decision = "paused"
+            super(Deployment, dep).save(update_fields=["decision"])
+    """,
+    "private_do_update": """
+        def pause(i):
+            Deployment.objects.filter(pk=i)._update({Deployment._meta.get_field("decision"): "paused"})
+    """,
+    "sql_concat_outside_call": """
+        from django.db import connection
+        def pause(i):
+            sql = "UPDATE assurance_deployment SET " + "decision = %s WHERE id = %s"
+            with connection.cursor() as c:
+                c.execute(sql, ["paused", i])
+    """,
+    "sql_format_column_var": """
+        from django.db import connection
+        COLUMN = "decision"
+        def pause(i):
+            with connection.cursor() as c:
+                c.execute("UPDATE assurance_deployment SET {} = %s WHERE id = %s".format(COLUMN), ["paused", i])
+    """,
+    "sql_fstring_column_var": """
+        from django.db import connection
+        def pause(i, col="decision"):
+            with connection.cursor() as c:
+                c.execute(f"UPDATE assurance_deployment SET {col} = %s WHERE id = %s", ["paused", i])
+    """,
+    "sql_via_quote_name": """
+        from django.db import connection
+        def pause(i):
+            col = connection.ops.quote_name("decision")
+            with connection.cursor() as c:
+                c.execute("UPDATE assurance_deployment SET " + col + " = %s WHERE id = %s", ["paused", i])
+    """,
+    "helper_module_cursor": """
+        from django.db import connection
+        def run(sql, params):
+            with connection.cursor() as c:
+                c.execute(sql, params)
+        def pause(i):
+            run("UPDATE assurance_deployment SET %s = %%s WHERE id = %%s" % "decision", ["paused", i])
+    """,
+    "cursor_callproc_or_copy": """
+        from django.db import connection
+        def pause(i):
+            with connection.cursor() as c:
+                c.cursor.execute("UPDATE assurance_deployment SET decision='paused' WHERE id=%s" , [i])
+    """,
+    "update_from_setattr_loop": """
+        def pause(i):
+            dep = Deployment.objects.get(pk=i)
+            for name in ("decision",):
+                setattr(dep, name, "paused")
+            Deployment.objects.bulk_update([dep], fields=[*("decision",)])
+    """,
+    "bulk_update_fields_from_constant": """
+        FIELDS = ["decision"]
+        def pause(dep):
+            Deployment.objects.bulk_update([dep], FIELDS)
+    """,
+    "update_or_create_create_defaults": """
+        def pause(i):
+            Deployment.objects.filter(pk=i).update(**{"decision": "paused"})
+    """,
+    "F_expression": """
+        from django.db.models import F, Value
+        def pause(i):
+            Deployment.objects.filter(pk=i).update(decision_revision=F("decision_revision") - 1)
+    """,
+    "case_when": """
+        from django.db.models import Case, When, Value
+        def pause(i):
+            Deployment.objects.filter(pk=i).update(decision=Case(When(pk=i, then=Value("paused"))))
+    """,
+    "asyncio_aupdate": """
+        async def pause(i):
+            await Deployment.objects.filter(pk=i).aupdate(decision="paused")
+    """,
+    "abulk_update": """
+        async def pause(rows):
+            await Deployment.objects.abulk_update(rows, ["decision"])
+    """,
+    "abulk_create_upsert": """
+        async def pause(rows):
+            await Deployment.objects.abulk_create(rows, update_conflicts=True, unique_fields=["id"], update_fields=["decision"])
+    """,
+    "update_query_sql": """
+        from django.db.models.sql import UpdateQuery
+        def pause(i):
+            q = UpdateQuery(Deployment)
+            q.add_update_values({"decision": "paused"})
+            q.add_filter("pk", i)
+            q.get_compiler("default").execute_sql()
+    """,
+}
+
+#: A second write inside the refresh's own function, however it is dressed: the
+#: tally must not come out as the refresh's one.
+_SECOND_WRITES_IN_THE_REFRESH = {
+    "second_write_in_allowed_via_helper": """
+        def recompute_decision(deployment):
+            accept_transition(deployment, to_decision=None)
+            Deployment.objects.filter(pk=deployment.pk).update(decision_keyring="k")
+            _also(deployment)
+        def _also(d):
+            write = Deployment.objects.filter(pk=d.pk).update
+            write(decision="ready")
+    """,
+    "lambda_scope_in_allowed": """
+        def recompute_decision(deployment):
+            Deployment.objects.filter(pk=deployment.pk).update(decision_keyring="k")
+            again = lambda: Deployment.objects.filter(pk=deployment.pk).update(decision="ready")
+            again()
+    """,
+    "comprehension_scope_in_allowed": """
+        def recompute_decision(deployment):
+            Deployment.objects.filter(pk=deployment.pk).update(decision_keyring="k")
+            [Deployment.objects.filter(pk=p).update(decision="ready") for p in (1,)]
+    """,
+}
+
+#: Code the review found the scan flagging that writes no decision column.
+_FLAGGED_BUT_NO_WRITE_FOUND_IN_REVIEW = {
+    "dict_update_kwargs_decision": """
+        def payload(dep):
+            body = {"name": dep.name}
+            body.update(decision=dep.decision, revision=dep.decision_revision)
+            return body
+    """,
+    "dict_update_star_kwargs": """
+        def build(**overrides):
+            body = {"a": 1}
+            body.update(**overrides)
+            return body
+    """,
+    "select_raw_read_only": """
+        def report(c):
+            c.execute("SELECT decision, count(*) FROM assurance_deployment GROUP BY decision")
+    """,
+    "error_message_constant": """
+        def refuse():
+            raise ValueError("never UPDATE assurance_deployment SET decision by hand")
+    """,
+    "logging_constant": """
+        import logging
+        logger = logging.getLogger(__name__)
+        def f():
+            logger.warning("An UPDATE that SET decision directly is refused")
+    """,
+    "other_model_bulk_update": """
+        def f(rows):
+            Verdict.objects.bulk_update(rows, ["decision"])
+    """,
+    "span_update_decision": """
+        def f(span, d):
+            span.update(decision=d)
+    """,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_WAYS_ROUND_IT_FOUND_IN_REVIEW))
+def test_the_one_writer_scan_flags_each_way_round_it_the_review_found(name):
+    source = _WAYS_ROUND_IT_FOUND_IN_REVIEW[name]
+    assert len(_parsed(source)) == 1, (name, _parsed(source))
+
+
+@pytest.mark.parametrize("name", sorted(_SECOND_WRITES_IN_THE_REFRESH))
+def test_the_one_writer_scan_counts_a_second_write_the_refresh_reaches_however_it_is_dressed(name):
+    source = textwrap.dedent(_SECOND_WRITES_IN_THE_REFRESH[name])
+    tally = _tally(_decision_writes({"assurance/decision.py": source}))
+    assert sum(tally.values()) == 2, tally
+    assert tally[("assurance/decision.py", "recompute_decision")] >= 1
+    assert tally != _THE_REFRESH
+
+
+@pytest.mark.parametrize("name", sorted(_FLAGGED_BUT_NO_WRITE_FOUND_IN_REVIEW))
+def test_the_one_writer_scan_passes_what_the_review_found_it_flagging(name):
+    assert _parsed(_FLAGGED_BUT_NO_WRITE_FOUND_IN_REVIEW[name]) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A relation or a call that hands back an instance may reach a Deployment,
+        # whatever the chain started from.
+        "def f(owner):\n    owner.deployments.update(decision='ready')\n",
+        "def f():\n    Finding.objects.get(pk=1).deployment.decision_transitions.update(decision=1)\n",
+        # A parameter going by a queryset's name, or reached through a queryset step.
+        "def f(span):\n    span.filter(pk=1).update(decision='ready')\n",
+        "def f(deployments: QuerySet):\n    deployments.update(decision='ready')\n",
+        # Names bound to a Deployment queryset, a Deployment imported under another
+        # name, a model fetched by a name the scan cannot read.
+        "def f():\n    qs = Deployment.objects.all()\n    qs.update(decision='ready')\n",
+        "from assurance.models import Deployment as D\ndef f():\n    D.objects.update(decision='ready')\n",
+        "def f(apps, name):\n    apps.get_model('assurance', name).objects.update(decision='ready')\n",
+        "def f(apps):\n    apps.get_model('assurance.Deployment').objects.update(decision='ready')\n",
+        # A name bound to a container in one branch and a queryset in another.
+        "def f(x):\n    rows = {} if x else Deployment.objects.all()\n    rows.update(decision=1)\n",
+        "def f(x):\n    rows = {}\n    if x:\n        rows = Deployment.objects.all()\n"
+        "    rows.update(decision=1)\n",
+        # A queryset of the Deployment's own manager, and a private write.
+        "class DeploymentQuerySet(QuerySet):\n"
+        "    def pause(self):\n        return self.update(decision='paused')\n",
+        "def f(x):\n    x._update({'decision': 1})\n",
+        # Saves round Deployment.save.
+        "from django.db.models import Model\ndef f(dep):\n    Model.save(dep)\n",
+        "def f(dep, fields):\n    models.Model.save(dep, update_fields=fields)\n",
+        "def f(dep):\n    super(type(dep), dep).save()\n",
+        "class Deployment:\n    def pause(self):\n        super().save(update_fields=['decision'])\n",
+        "def f(dep):\n    dep.save_base()\n",
+        # SQL whose text the scan follows to a write, or cannot follow at all.
+        "def f(c):\n    sql = 'UPDATE assurance_deployment SET '\n    sql += 'decision = 1'\n    c.execute(sql)\n",
+        "def f(c):\n    c.execute(' '.join(['UPDATE assurance_deployment', 'SET decision = 1']))\n",
+        "def f(c, x):\n    c.execute('SELECT 1' if x else 'UPDATE assurance_deployment SET decision = 1')\n",
+        "def f(c):\n    for col in ('decision',):\n"
+        "        c.execute(f'UPDATE assurance_deployment SET {col} = 1')\n",
+        "from .sql import PAUSE\ndef f(c):\n    c.execute(PAUSE)\n",
+        # A list of statements can be appended to wherever its name reaches.
+        "def f(c):\n    parts = ['SELECT 1']\n    parts.append('UPDATE assurance_deployment SET decision = 1')\n"
+        "    c.execute('; '.join(parts))\n",
+        "def f(c):\n    c.execute(query='UPDATE assurance_deployment SET decision_keyring = NULL')\n",
+        "def f(c, args):\n    c.execute(*args)\n",
+        "operations = [RunSQL('SELECT 1', reverse_sql='UPDATE assurance_deployment SET decision = NULL')]\n",
+        # A cursor's execute handed on, or fetched by name.
+        "def f(c):\n    run = c.execute\n",
+        "def f(c):\n    getattr(c, 'execute')('SELECT 1')\n",
+        "def f(qs):\n    methodcaller('update', decision=1)(qs)\n",
+    ],
+)
+def test_the_one_writer_scan_holds_what_it_cannot_prove_is_no_deployment_write(source):
+    assert len(_parsed(source)) == 1, (source, _parsed(source))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Another model's queryset, however it is reached through queryset steps.
+        "def f():\n    qs = Finding.objects.all()\n    qs.filter(pk=1).update(decision=1)\n",
+        "from assurance.models import Finding\n"
+        "def f():\n    Finding.objects.select_for_update().filter(pk=1).update(decision=1)\n",
+        "def f(apps):\n    apps.get_model('assurance', 'Finding').objects.update(decision=1)\n",
+        "def f(apps):\n    Model = apps.get_model('assurance', 'Finding')\n"
+        "    Model.objects.bulk_update([], ['decision'])\n",
+        # Containers and their copies.
+        "def f(dep):\n    body = dict(name=dep.name)\n    body.copy().update(decision=dep.decision)\n",
+        "def f(x):\n    rows = {} if x else set()\n    rows.update(decision=1)\n",
+        # Saves that go through Deployment.save, or name no owned column.
+        "def f(dep):\n    dep.save(update_fields=['name'])\n    Deployment.save(dep)\n",
+        "class Deployment:\n    def save(self, update_fields=None):\n"
+        "        super().save(update_fields=update_fields)\n",
+        "class Finding:\n    def save(self, *args, **kwargs):\n"
+        "        super(Finding, self).save(*args, **kwargs)\n",
+        "def f(dep):\n    models.Model.save(dep, update_fields=['name'])\n"
+        "    dep.save_base(update_fields=['name'])\n",
+        # SQL the scan reads to the end and finds writing no owned column.
+        "SQL = 'SELECT decision FROM assurance_deployment'\ndef f(c):\n    c.execute(SQL)\n",
+        "def f(c):\n    c.execute('UPDATE assurance_deployment SET {} = 1'.format('name'))\n",
+        "COL = 'name'\ndef f(c):\n    c.execute(f'UPDATE assurance_deployment SET {COL} = %s', [1])\n",
+        "def f(c):\n    c.execute('UPDATE assurance_deployment SET %s = 1' % ('name',))\n",
+        "def f(c):\n    c.execute(' '.join(('SELECT', 'decision', 'FROM assurance_deployment')))\n",
+        "operations = [RunSQL(['SELECT 1', ('SELECT %s', [1])], reverse_sql=RunSQL.noop)]\n",
+    ],
+)
+def test_the_one_writer_scan_passes_what_it_proves_is_no_deployment_write(source):
+    assert _parsed(source) == [], source
+
+
+def test_the_one_writer_scan_lets_through_a_line_marked_not_a_writer_with_its_reason():
+    """For a proven false positive, on the one line, with the reason. A marker with
+    no reason is not one."""
+    flagged = "def f(x):\n    x.bulk_update([], ['decision'])\n"
+    assert len(_parsed(flagged)) == 1
+    marked = flagged.replace("])\n", "])  # not-a-decision-writer: x is a Verdict manager\n")
+    assert _parsed(marked) == []
+    bare = flagged.replace("])\n", "])  # not-a-decision-writer:\n")
+    assert len(_parsed(bare)) == 1
+    elsewhere = "# not-a-decision-writer: the next line\n" + flagged
+    assert len(_parsed(elsewhere)) == 1
+
+
+def test_a_migration_is_held_to_what_its_sql_does_wherever_the_text_is_kept():
+    """A migration may alter the columns in SQL, from a constant or not; it may not
+    write them, however the statement is assembled."""
+    alters = """
+        COLUMN = "decision"
+        operations = [
+            migrations.RunSQL("ALTER TABLE assurance_deployment ALTER COLUMN %s DROP NOT NULL" % COLUMN),
+        ]
+    """
+    assert _parsed(alters, "assurance/migrations/0099_x.py", migration=True) == []
+    writes = """
+        SQL = "UPDATE assurance_deployment SET " + "decision = NULL"
+        def backfill(apps, schema_editor):
+            schema_editor.execute(SQL)
+        operations = [migrations.RunPython(backfill)]
+    """
+    assert _parsed(writes, "assurance/migrations/0099_x.py", migration=True) == [
+        ("backfill", "SQL writing a decision column")
+    ]
 
 
 def test_a_transition_still_touches_updated_at():
