@@ -595,6 +595,45 @@ def test_a_reading_of_another_deployment_is_refused():
     assert _log(other) == []
 
 
+def test_a_reading_of_a_row_that_moved_away_and_back_is_refused():
+    """The row left READY and came back to it at a later revision: the same
+    decision, a different fact. A reading compared on the decision alone accepted
+    the old one and wrote the row back to revision 1, beneath its own log -- the
+    wedge the repair exists to undo. The revision is part of the reading."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    accept_transition(dep, to_decision=D.READY)
+    reading = decision_in_force(Deployment.objects.get(pk=dep.pk))
+    accept_transition(Deployment.objects.get(pk=dep.pk), to_decision=D.NOT_RECOMMENDED)
+    accept_transition(Deployment.objects.get(pk=dep.pk), to_decision=D.READY)
+    log = _log(dep)
+
+    with pytest.raises(StaleDecisionRead), transaction.atomic():
+        accept_transition(dep, to_decision=D.READY, in_force=reading)
+
+    assert read_decision(dep) == {"decision": D.READY, "revision": 3}
+    assert _log(dep) == log
+
+
+def test_a_reading_of_a_row_whose_decision_moved_without_a_revision_is_refused():
+    """The decision moved and the revision did not -- a write the one writer never
+    makes, which is exactly why the reading must not be trusted across it. A reading
+    compared on the revision alone moved FROM a decision the row no longer held.
+    The decision is part of the reading."""
+    dep = Deployment.objects.create(name="d", owner=_owner())
+    accept_transition(dep, to_decision=D.READY)
+    reading = decision_in_force(Deployment.objects.get(pk=dep.pk))
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.NOT_RECOMMENDED)
+
+    with pytest.raises(StaleDecisionRead), transaction.atomic():
+        accept_transition(dep, to_decision=D.READY, in_force=reading)
+
+    assert Deployment.objects.values_list("decision", "decision_revision").get(pk=dep.pk) == (
+        D.NOT_RECOMMENDED,
+        1,
+    )
+    assert _log(dep) == [(1, "", D.READY)]
+
+
 def test_a_reading_taken_under_the_lock_is_the_one_moved_from():
     """Passed the reading, the call does not read the log a second time."""
     dep = _behind_its_log()
