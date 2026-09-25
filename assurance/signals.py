@@ -135,34 +135,78 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     an unrelated ``migrate`` moves no decision; only this app's signal, and only
     for the database the decision rule reads.
     """
-    if getattr(sender, "name", None) != "assurance":
+    if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    if using not in (None, DEFAULT_DB_ALIAS):
-        return
-    # `post_migrate` fires after EVERY migrate, including one that leaves this
-    # app below the migration adding the stamp (a rollback, a staged upgrade):
-    # the column is not there to query, and every such migrate crashed here. The
-    # migration state the signal hands over says whether it is -- asked of the
-    # model, not of the recorder table, which a run with no migrations applied
-    # (`--nomigrations`, a fresh syncdb) never creates.
     from .decision import recompute_decision
     from .models import Deployment, WorkflowChainOutcome
+
+    deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
+    for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):
+        recompute_decision(deployment)
+
+
+def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
+    """Whether a ``post_migrate`` from ``sender`` on ``using`` finds this app's
+    decision columns in place to be read and recomputed: only this app's signal,
+    only the database the decision rule reads, and only a schema at the stamp.
+
+    `post_migrate` fires after EVERY migrate, including one that leaves this app
+    below the migration adding the stamp (a rollback, a staged upgrade): the column
+    is not there to query, and every such migrate crashed in the receivers. The
+    migration state the signal hands over says whether it is -- asked of the model,
+    not of the recorder table, which a run with no migrations applied
+    (`--nomigrations`, a fresh syncdb) never creates.
+    """
+    if getattr(sender, "name", None) != "assurance":
+        return False
+    if using not in (None, DEFAULT_DB_ALIAS):
+        return False
+    from .models import Deployment
 
     if apps is not None:
         try:
             state = apps.get_model("assurance", "Deployment")
         except LookupError:
-            return
-        if not any(f.name == "decision_keyring" for f in state._meta.get_fields()):
-            return
-    elif not _has_column(using, Deployment._meta.db_table, "decision_keyring"):
-        # `flush` sends post_migrate with no migration state at all, so there is
-        # nothing to ask but the database itself -- and a flush of a database
-        # left below the stamp crashed on the column here.
-        return
+            return False
+        return any(f.name == "decision_keyring" for f in state._meta.get_fields())
+    # `flush` sends post_migrate with no migration state at all, so there is
+    # nothing to ask but the database itself -- and a flush of a database left
+    # below the stamp crashed on the column here.
+    return _has_column(using, Deployment._meta.db_table, "decision_keyring")
 
-    deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
-    for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):
+
+@receiver(post_migrate, dispatch_uid="assurance_repair_decisions_behind_their_log")
+def repair_decisions_behind_their_log(sender, using=None, apps=None, **kwargs):
+    """Recompute every deployment whose stored decision is behind its own
+    transition log (``decision_revision`` below the log's latest revision).
+
+    Such a row is legacy data only -- the stale full save before ``Deployment.save``
+    stopped writing the decision columns, or ``loaddata`` of a fixture dumped
+    before its log moved -- and it was repaired only by the next recompute of that
+    deployment, which might never come. Every read now publishes what the log
+    records (``revision.hold_to_its_log``); this brings the rows themselves level
+    at the upgrade, so no read is left to do it.
+
+    Through ``recompute_decision``, the one writer: under the row lock, FROM the
+    decision the log records, keeping the operator's pause as the log records it.
+    A row level with or ahead of its log is not touched, so an unrelated
+    ``migrate`` moves no decision. Keyed on the data, like the receiver above, so a
+    re-run after a failed ``migrate`` still finds what it has not repaired.
+    """
+    if not _the_decision_columns_are_migrated(sender, using, apps):
+        return
+    from django.db.models import F
+
+    from .decision import recompute_decision
+    from .models import Deployment
+    from .revision import logged_head
+
+    behind = (
+        Deployment.objects.annotate(**logged_head())
+        .filter(logged_revision__gt=F("decision_revision"))
+        .order_by("pk")
+    )
+    for deployment in behind:
         recompute_decision(deployment)
 
 

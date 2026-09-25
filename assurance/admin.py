@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.db import transaction
 
 from .decision import refresh_stored_decisions
+from .revision import in_force_of, logged_head
 from .models import (
     Asset,
     ConnectorBinding,
@@ -94,7 +95,10 @@ class _RefreshesTheStoredDecision:
 
 @admin.register(Deployment)
 class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
-    list_display = ("name", "environment", "decision", "updated_at")
+    list_display = ("name", "environment", "decision_in_force", "updated_at")
+    # Over the stored column. A row behind its transition log (legacy data, which
+    # the post_migrate repair and the first published read bring level) is filed
+    # under its stale value until then; the column beside it says what is in force.
     list_filter = ("environment", "decision")
     search_fields = ("name",)
     # Written only through `assurance.revision.accept_transition`. Editable here,
@@ -107,6 +111,23 @@ class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     # The decision cannot be typed in here, and it must not be left behind either:
     # `evidence_incomplete` and `last_complete_scan_at` are inputs to it.
     decision_deployment_lookup = "pk"
+
+    def get_queryset(self, request):
+        # The head of each row's transition log, in the list's one query.
+        return super().get_queryset(request).annotate(**logged_head())
+
+    @admin.display(description="decision", ordering="decision")
+    def decision_in_force(self, obj):
+        """The decision in force, as every published read has it: a row behind its
+        transition log shows what the log records -- a logged pause as the pause,
+        not the READY the stale row holds. A read: it repairs nothing."""
+        decision, _revision = in_force_of(
+            obj.decision,
+            obj.decision_revision,
+            getattr(obj, "logged_revision", None),
+            getattr(obj, "logged_decision", None),
+        )
+        return Deployment.Decision(decision).label if decision else "-"
 
 
 @admin.register(Finding)

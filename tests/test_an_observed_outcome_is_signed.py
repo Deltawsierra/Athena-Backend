@@ -1244,12 +1244,17 @@ def test_a_current_stamp_is_read_without_a_query_or_a_write(django_assert_num_qu
     from django.db.models import Exists, OuterRef
 
     from assurance.decision import current_decision
+    from assurance.revision import logged_head
 
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
+    # Annotated as the list and the bundle read their rows: whether it has chains,
+    # and the head of its transition log, which `current_decision` holds the row
+    # to before it looks at the stamp.
     annotated = Deployment.objects.annotate(
-        has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk")))
+        has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))),
+        **logged_head(),
     ).get(pk=dep.pk)
     revision = annotated.decision_revision
     with django_assert_num_queries(0):

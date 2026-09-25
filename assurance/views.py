@@ -41,6 +41,7 @@ from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
 from .decision import current_decision, decision_support, recompute_decision
 from .revalidation import plan_revalidation
+from .revision import logged_head
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
 from .operational import assess_operational
@@ -424,6 +425,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             # query per row for a deployment whose stamp is current.
             has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))),
         )
+        if self.action != "recompute":
+            # The head of each row's transition log, read with the row: what the
+            # serializer holds a row behind its log to (`current_decision`),
+            # without a query per row. Not on the route that pauses: it publishes
+            # nothing off the row it loads -- `recompute_decision` reads the
+            # decision in force under the row lock -- and nothing added for a
+            # read may add a way for a pause to fail.
+            qs = qs.annotate(**logged_head())
         user = self.request.user
         if _is_privileged(user):
             return qs
@@ -1797,11 +1806,9 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         counts, or an ordinal band: there is no dollar figure, ROI amount, or
         realized-loss number anywhere, and nothing claims the system is secure."""
         deployment = self.get_object()
-        # The summary publishes the standing decision: reconciled with the keyring
-        # in force first, as the receipt is, so the two cannot disagree.
-        current_decision(deployment)
         assessed = (
-            Deployment.objects.prefetch_related(
+            Deployment.objects.annotate(**logged_head())
+            .prefetch_related(
                 "findings__evidence",
                 "findings__remediation_events",
                 "findings__owner",
@@ -1810,6 +1817,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             .select_related("data_boundary")
             .get(pk=deployment.pk)
         )
+        # The summary publishes the standing decision: reconciled with its log and
+        # the keyring in force first, as the receipt is, so the two cannot
+        # disagree. The instance published is the one reconciled: where a row
+        # behind its log cannot be written, only that instance holds the decision
+        # the log records.
+        current_decision(assessed)
         return Response(build_executive_summary(assessed))
 
     @action(detail=True, methods=["get"], url_path="operational-assurance")
@@ -1826,10 +1839,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         no dollar figure anywhere, and nothing reads "healthy"/"current"/"secure" as
         an unearned fact — an unassessed or stale deployment reads honestly."""
         deployment = self.get_object()
-        current_decision(deployment)  # as the executive summary: see there
-        assessed = Deployment.objects.prefetch_related(
-            "findings__evidence", "findings__remediation_events"
-        ).get(pk=deployment.pk)
+        assessed = (
+            Deployment.objects.annotate(**logged_head())
+            .prefetch_related("findings__evidence", "findings__remediation_events")
+            .get(pk=deployment.pk)
+        )
+        current_decision(assessed)  # as the executive summary: see there
         return Response(assess_operational(assessed))
 
     @action(detail=True, methods=["get"], url_path="operational-risk")

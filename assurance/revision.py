@@ -39,7 +39,8 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 
-from django.db import transaction
+from django.db import DatabaseError, transaction
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 
 from .models import DecisionTransition, Deployment
@@ -85,20 +86,28 @@ def read_decision(deployment: Deployment, *, at_least: int | None = None) -> dic
 
     Reads the row fresh. A ``Deployment`` instance held across a transition
     carries the old values, and this is exactly the call where that matters.
+
+    The decision IN FORCE, not merely the row's: a row behind its own transition
+    log (:func:`hold_to_its_log`) is published as the log records it. The row's
+    stale revision was a fence no consumer that had drained the log could pass --
+    told PAUSED at revision 2, it asked for ``at_least=2`` and was refused, for as
+    long as nothing happened to recompute the deployment.
     """
     # Reconciled first, like every surface that publishes the decision: the
     # revision is only a fence if the decision it names is the one in force.
+    # `current_decision` holds the instance to its log and to the keyring, so what
+    # it leaves on the instance is what is published.
     from .decision import current_decision
 
-    current_decision(Deployment.objects.get(pk=deployment.pk))
-    row = Deployment.objects.values("decision", "decision_revision").get(pk=deployment.pk)
-    revision = row["decision_revision"]
+    fresh = Deployment.objects.annotate(**logged_head()).get(pk=deployment.pk)
+    current_decision(fresh)
+    revision = fresh.decision_revision
     if at_least is not None and revision < at_least:
         raise StaleDecisionRead(
             f"decision revision {revision} is older than the required {at_least}; "
             "this read is behind the state the caller has already acted on"
         )
-    return {"decision": row["decision"], "revision": revision}
+    return {"decision": fresh.decision, "revision": revision}
 
 
 def accept_transition(
@@ -221,8 +230,11 @@ def decision_in_force(locked: Deployment) -> InForce:
         .values_list("revision", "to_decision")
         .first()
     )
-    if latest is None or latest[0] <= locked.decision_revision:
-        return InForce(locked.decision, locked.decision_revision, read_from)
+    decision, revision = in_force_of(
+        locked.decision, locked.decision_revision, *(latest or (None, None))
+    )
+    if revision == locked.decision_revision:
+        return InForce(decision, revision, read_from)
     logger.error(
         "deployment %s: stored decision %r at revision %s is behind its transition log "
         "(revision %s recorded %r); repairing the row from the log",
@@ -232,7 +244,115 @@ def decision_in_force(locked: Deployment) -> InForce:
         latest[0],
         latest[1],
     )
-    return InForce(latest[1] or None, latest[0], read_from)
+    return InForce(decision, revision, read_from)
+
+
+def in_force_of(decision, revision, logged_revision, logged_decision) -> tuple[str | None, int]:
+    """``(decision, revision)`` in force for a row and the head of its transition
+    log: the row's, unless the row is behind the log -- then the log's.
+
+    The one rule, for :func:`decision_in_force` under the row lock and for every
+    read that takes no lock and writes nothing (:func:`published_decision`, the
+    admin's list). ``logged_revision`` is ``None`` for a deployment with no
+    transition; ``logged_decision`` is the log's ``to_decision``, which stores an
+    unassessed decision as ``""``.
+    """
+    if logged_revision is not None and logged_revision > revision:
+        return logged_decision or None, logged_revision
+    return decision, revision
+
+
+def logged_head() -> dict:
+    """The head of each deployment's transition log, as annotations to read WITH
+    the row: ``logged_revision`` and ``logged_decision``.
+
+    In the statement that reads the row, so the two are one moment: read apart, a
+    transition committed between them makes a current row look behind its log. And
+    in a list's one query, so reconciling every row the list publishes does not
+    cost a query per row to ask whether it is behind.
+    """
+    latest = DecisionTransition.objects.filter(deployment_id=OuterRef("pk")).order_by("-revision")
+    return {
+        "logged_revision": Subquery(latest.values("revision")[:1]),
+        "logged_decision": Subquery(latest.values("to_decision")[:1]),
+    }
+
+
+def published_decision(pk) -> tuple[str | None, int] | None:
+    """The decision in force for deployment ``pk`` and its revision, as a read
+    publishes it: the row and the head of its log in ONE statement, no lock, no
+    write. ``None`` for no such deployment."""
+    row = (
+        Deployment.objects.filter(pk=pk)
+        .annotate(**logged_head())
+        .values_list("decision", "decision_revision", "logged_revision", "logged_decision")
+        .first()
+    )
+    return None if row is None else in_force_of(*row)
+
+
+#: ``logged_revision`` was not read with this instance.
+_UNREAD = object()
+
+
+def hold_to_its_log(deployment: Deployment) -> None:
+    """Bring a row found behind its transition log up to it -- and ``deployment``,
+    the instance a surface is about to publish, with it.
+
+    A row behind its log (legacy data: the stale full save before
+    ``Deployment.save`` stopped writing the decision columns, or ``loaddata`` of a
+    fixture dumped before its log moved) was repaired only by the next recompute.
+    Until one came, every surface published the stale row: the log -- what every
+    consumer draining :func:`transitions_since` was told -- said PAUSED at revision
+    2, and the detail, the receipt, decision-support and the dispatch fence said
+    READY at 1. A pause read as READY.
+
+    The repair goes through the one writer, :func:`accept_transition`, as the no-op
+    move TO the decision the log records, read under the row lock: it writes the
+    row up to the log and records nothing, and it is not a recompute -- a read
+    brings the row to what was decided, it decides nothing. Where the row cannot be
+    written (a lock not granted in time, a read-only connection), the instance is
+    still brought to what the log records, read in one statement, and the failure
+    is logged at ERROR: a read that cannot repair the row must not publish it, and
+    must not fail on the pause the log holds either.
+
+    ``logged_revision`` on the instance -- the :func:`logged_head` annotation, or
+    set by the writer that just brought the row level -- answers "is it behind"
+    without a query; an instance read without it costs one.
+    """
+    logged = getattr(deployment, "logged_revision", _UNREAD)
+    if logged is _UNREAD:
+        logged = (
+            DecisionTransition.objects.filter(deployment_id=deployment.pk)
+            .order_by("-revision")
+            .values_list("revision", flat=True)
+            .first()
+        )
+        # Kept on the instance, as the annotation would be: asked once per instance.
+        deployment.logged_revision = logged
+    if logged is None or logged <= deployment.decision_revision:
+        return
+    try:
+        with transaction.atomic():
+            locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
+            in_force = decision_in_force(locked)
+            accept_transition(locked, to_decision=in_force.decision, in_force=in_force)
+        decision, revision = locked.decision, locked.decision_revision
+    except DatabaseError:
+        logger.exception(
+            "deployment %s: stored decision is behind its transition log and could not "
+            "be brought up to it; publishing the decision the log records",
+            deployment.pk,
+        )
+        in_force = published_decision(deployment.pk)
+        if in_force is None:
+            raise
+        decision, revision = in_force
+    deployment.decision = decision
+    deployment.decision_revision = revision
+    # Level with its log, as far as this instance goes: reconciling it again asks
+    # nothing.
+    deployment.logged_revision = revision
 
 
 def _write(locked: Deployment, decision, revision) -> None:

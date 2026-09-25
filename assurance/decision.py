@@ -424,10 +424,17 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
     revision. ``True``/``False`` impose one instead, which is a what-if: the
     revision in the payload is still the row's, so it no longer names the pause
     the body was computed under.
+
+    The row's decision IN FORCE: a row behind its own transition log is read as
+    the log records it (:func:`assurance.revision.published_decision`), and that
+    is where the pause comes from. Read off the stale row, a pause the log holds
+    was published as ``paused: False`` and a live READY. Nothing is written here
+    to repair it -- that is :func:`current_decision`'s, through the one writer.
     """
     # Lazy import: assurance.policy imports the decision rules from THIS module, so
     # a top-level import here would be circular.
     from .policy import policy_pin
+    from .revision import published_decision
 
     with transaction.atomic():
         parts = read_decision_parts(deployment)
@@ -437,11 +444,7 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         # to take it from the instance it loaded BEFORE this transaction, and a
         # pause committed in between was published as a live READY under the
         # revision that records the pause.
-        row = (
-            Deployment.objects.values_list("decision", "decision_revision")
-            .filter(pk=deployment.pk)
-            .first()
-        )
+        row = published_decision(deployment.pk)
     stored, revision = row if row is not None else (None, None)
     if paused is None:
         paused = stored == Deployment.Decision.PAUSED
@@ -608,6 +611,9 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
             decision_keyring=observed_outcomes.keyring_fingerprint(keyring)
         )
     deployment.refresh_from_db(fields=["decision", "decision_revision", "decision_keyring"])
+    # Level with its transition log -- the move above was made from the log's
+    # reading -- so publishing this instance next asks the log nothing.
+    deployment.logged_revision = deployment.decision_revision
     return decision
 
 
@@ -639,6 +645,15 @@ def current_decision(deployment: Deployment) -> str | None:
     stored READY behind that the receipt went on reporting. Only deployments with
     chain outcomes can move on a keyring change, so only they are reconciled.
 
+    Before the keyring, the row is held to its own transition log
+    (:func:`assurance.revision.hold_to_its_log`): a row behind its log is brought
+    up to it through the one writer, and ``deployment`` holds the decision the log
+    records even where the row cannot be written. A logged pause the stale row
+    does not hold is published as the pause it is, never as the READY beneath it.
+    Asking costs nothing for an instance read with the log head
+    (:func:`assurance.revision.logged_head`), as the list and the bundle read
+    theirs, and one query otherwise.
+
     The cost is paid by the first read after a rotation: one recompute, under the
     row lock, per stale deployment it publishes -- about twenty queries each -- and
     a read that meets a writer holding that lock waits for it. If the wait outlasts
@@ -646,7 +661,9 @@ def current_decision(deployment: Deployment) -> str | None:
     under the withdrawn keys. The eager path is ``manage.py recompute_chain_decisions``,
     run when the keyring changes, after which every read is the two-query one."""
     from . import observed_outcomes
+    from .revision import hold_to_its_log
 
+    hold_to_its_log(deployment)
     if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():
         return deployment.decision
     # Stale or never stamped -- but only a deployment with chain outcomes can move

@@ -196,6 +196,7 @@ def assurance_bundle(deployments) -> dict:
         from django.db.models import Exists, OuterRef
 
         from .models import WorkflowChainOutcome
+        from .revision import logged_head
 
         scoped = (
             deployments.select_related("data_boundary")
@@ -209,7 +210,11 @@ def assurance_bundle(deployments) -> dict:
             .annotate(
                 has_chain_outcomes=Exists(
                     WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))
-                )
+                ),
+                # The head of each one's transition log, for the same reason: the
+                # decision row holds a row behind its log to what the log records,
+                # and asking per deployment would be a query per row.
+                **logged_head(),
             )
         )
 
