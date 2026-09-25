@@ -88,20 +88,50 @@ def reference_index(assets) -> tuple[dict, dict]:
 
 
 def identity_index(assets) -> tuple[dict, dict]:
-    """:func:`reference_index` over the service accounts alone.
+    """:func:`reference_index` over the service accounts alone, keyed the way
+    :func:`component_identity.component_key` keys a component.
 
     An agent's ``identity`` names the account it acts as, so an account is the
     only thing it can mean. Indexing everything and filtering afterwards would let
     a tool whose IDENTIFIER is the string stop resolution before the account whose
     NAME is -- the identifier-first rule is about which key of an account wins,
     not about letting a component that cannot be an identity win.
+
+    Keyed case- and whitespace-blind, because that is what one identity means
+    everywhere else: the drift and coverage readers treat ``SVC-Admin`` and
+    ``svc-admin`` as one component, and this edge treated them as two. An agent
+    declared as ``SVC-Admin`` acting as the account ``svc-admin`` read as holding
+    no power at all, while the account held ``iam:admin``. Two accounts that
+    differ only in case are one identity here and so an ambiguous reference --
+    followed to both and reported -- which is what they are.
     """
-    return reference_index([a for a in assets if a.kind == SERVICE_ACCOUNT_KIND])
+    by_identifier: dict[str, list] = {}
+    by_name: dict[str, list] = {}
+    for asset in assets:
+        if asset.kind != SERVICE_ACCOUNT_KIND:
+            continue
+        identifier = identity_key(asset.identifier)
+        if identifier:
+            by_identifier.setdefault(identifier, []).append(asset)
+        by_name.setdefault(identity_key(asset.name), []).append(asset)
+    return by_identifier, by_name
+
+
+def identity_key(value) -> str:
+    """An identity as :func:`identity_index` keys it: stripped and lowercased,
+    the normalization :func:`component_identity.component_key` applies."""
+    return str(value or "").strip().lower()
 
 
 def identity_reference(metadata: dict) -> str:
     """The identity an agent declares it acts as, or ``""``."""
     return str(metadata.get("identity") or "").strip()
+
+
+def resolve_identity(reference, accounts: tuple[dict, dict]):
+    """:func:`resolve_reference` for an agent's ``identity`` against an
+    :func:`identity_index`: the reference is normalized the way the index is."""
+    return resolve_reference(identity_key(reference), *accounts)
 
 
 def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kinds=frozenset()):

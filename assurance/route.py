@@ -46,6 +46,7 @@ from .graph_refs import (
     dangling_reference,
     identity_index,
     identity_reference,
+    resolve_identity,
     reference_index,
     resolve_reference,
     sort_references,
@@ -205,7 +206,7 @@ def build_route_map(deployment) -> dict:
         identity = identity_reference(metadata)
         if not identity:
             continue
-        targets, why = resolve_reference(identity, *accounts)
+        targets, why = resolve_identity(identity, accounts)
         for target in targets:
             add_edge(agent, target, "acts_as", "acts as", declared=True)
         if why:

@@ -60,6 +60,16 @@ def _endpoint_identifier(location: str) -> str:
     return loc
 
 
+#: The longest identifier an ``Asset`` row holds. Applied ONCE, where an identity
+#: is formed, and never again downstream: the row used to be written under
+#: ``identifier[:1024]`` while the merge that grouped declarations, and the
+#: agent's ``tools`` edge, both kept the full string. Two tools that differed
+#: only after character 1024 were two groups written to one row -- the second
+#: replacing the first's permissions -- and the agent's edges named strings no
+#: row carried, so a declared ``shell`` appeared nowhere.
+IDENTIFIER_MAX = 1024
+
+
 def _get_or_refresh(
     deployment: Deployment,
     *,
@@ -93,7 +103,7 @@ def _get_or_refresh(
         "last_seen": now,
     }
     asset, created = Asset.objects.get_or_create(
-        deployment=deployment, kind=kind, identifier=identifier[:1024], defaults=defaults
+        deployment=deployment, kind=kind, identifier=identifier[:IDENTIFIER_MAX], defaults=defaults
     )
     if not created:
         fields = ["last_seen", "provider", "metadata"]
@@ -155,6 +165,36 @@ _TOOL_KINDS = {
     "mcp_server": Asset.Kind.MCP_SERVER,
     "skill": Asset.Kind.SKILL,
 }
+
+
+def _agent_anchor(target: str) -> str:
+    """Where an unnamed agent is: host, port and path of the scan's target.
+
+    Not :func:`_endpoint_identifier`, which drops the port on purpose -- an
+    endpoint found at two ports is one endpoint to a finding. Two agents are not:
+    ``bots.example.com:8443/agent`` and ``:9443/agent`` are two services, and an
+    anchor without the port wrote them to one row, the second scan replacing the
+    first's tools and the first agent's powers falling to the deployment as
+    powers nobody owned. The port is the effective one, so ``http://h/a`` (80)
+    and ``https://h/a`` (443) are two anchors too; https's default is left
+    unwritten, so the common anchor reads ``host/path``.
+    """
+    loc = (target or "").strip()
+    if "://" not in loc:
+        return _endpoint_identifier(loc)
+    try:
+        parsed = urlparse(loc)
+        port = parsed.port
+    except ValueError:
+        return loc
+    scheme = (parsed.scheme or "").lower()
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return loc
+    where = host if port in (None, 443) else f"{host}:{port}"
+    return f"{where}{parsed.path or ''}".rstrip("/") or loc
 
 
 def _clean_str_list(value) -> list[str]:
@@ -221,7 +261,7 @@ def _agent_and_tools(
                 continue
             name = str(entry.get("name") or "").strip()
             kind = _TOOL_KINDS.get(str(entry.get("kind") or "").strip().lower(), Asset.Kind.TOOL)
-            identifier = _tool_identifier(entry, kind, name)
+            identifier = _tool_identifier(entry, kind, name)[:IDENTIFIER_MAX]
             if not identifier:
                 continue
             tool = declared.setdefault(
@@ -267,6 +307,8 @@ def _agent_and_tools(
             if identifier not in tool_identifiers:
                 tool_identifiers.append(identifier)
 
+    _retire_superseded_tools(deployment, declared)
+
     # The agent identity itself — the node the tools hang off. It is declared
     # explicitly (an ``agent`` block) or implied by a scan that declares tools.
     raw_agent = cfg.get("agent")
@@ -274,7 +316,7 @@ def _agent_and_tools(
     agent_declared = isinstance(raw_agent, dict) or cfg.get("kind") == "agent"
     if agent_declared or tool_identifiers:
         agent = raw_agent if isinstance(raw_agent, dict) else {}
-        identifier = str(agent.get("identifier") or agent.get("name") or "").strip()
+        identifier = str(agent.get("identifier") or agent.get("name") or "").strip()[:IDENTIFIER_MAX]
         if not identifier:
             # An agent the scan implies but does not name is the agent at the
             # scan's target, and is identified by it. It used to be the literal
@@ -283,8 +325,8 @@ def _agent_and_tools(
             # first agent's tools fell to the deployment as powers nobody owned.
             # No target, no identity to give it: better no node than one
             # invented for every unnamed agent at once.
-            anchor = _endpoint_identifier(target)
-            identifier = f"agent@{anchor}" if anchor else ""
+            anchor = _agent_anchor(target)
+            identifier = f"agent@{anchor}"[:IDENTIFIER_MAX] if anchor else ""
         name = str(agent.get("name") or identifier).strip()
         agent_asset = _get_or_refresh(
             deployment,
@@ -303,8 +345,89 @@ def _agent_and_tools(
         )
         if agent_asset:
             touched.append(agent_asset)
+            if not str(agent.get("identifier") or agent.get("name") or "").strip():
+                _retire_superseded_agent(deployment, agent_asset, raw_tools)
 
     return agent_asset, touched
+
+
+def _declared_inventory_row(deployment: Deployment, kind: str, identifier: str) -> Asset | None:
+    """The declared-inventory row at ``(kind, identifier)``, or ``None``. A row a
+    person or another source wrote is never a superseded identity."""
+    row = Asset.objects.filter(deployment=deployment, kind=kind, identifier=identifier).first()
+    metadata = row.metadata if row is not None and isinstance(row.metadata, dict) else {}
+    if metadata.get("source") != "declared_inventory":
+        return None
+    return row
+
+
+def _retire_superseded_tools(deployment: Deployment, declared: dict) -> None:
+    """Delete the row this declaration used to be written under, once it is written
+    under the identity it has now.
+
+    A named tool on a server was the server's row until :func:`_tool_identifier`
+    gave it its own. A deployment scanned before that keeps the old row, and the
+    new code resolves references to it: a ``server: files-mcp`` that names no
+    declared server resolved to the old tool row keyed ``files-mcp`` -- the gap a
+    fresh deployment reports, hidden -- and the old row's permissions stood beside
+    the new rows'.
+
+    Only a row this same declaration demonstrably wrote is deleted: declared
+    inventory, at the server's key, recording that server, and named for a tool
+    this scan declares on it under the same kind (a row's name is set when it is
+    created, so an old collapsed row carries the name of the first tool written
+    to it). A row that answers to anything else -- a tool the inventory has since
+    dropped, a nameless tool that really is keyed by its server -- stays: a row
+    kept is at worst a power counted twice, a row deleted wrongly is a power the
+    graph no longer shows.
+    """
+    names_on: dict[tuple[str, str], set[str]] = {}
+    for (kind, identifier), tool in declared.items():
+        server = tool["server"]
+        if kind == Asset.Kind.MCP_SERVER or not server or identifier != f"{tool['name']}@{server}":
+            continue
+        names_on.setdefault((kind, server[:IDENTIFIER_MAX]), set()).add(tool["name"])
+    for (kind, server), names in names_on.items():
+        if (kind, server) in declared:
+            continue
+        row = _declared_inventory_row(deployment, kind, server)
+        if row is None or row.name == row.identifier or row.name not in names:
+            continue
+        if str((row.metadata or {}).get("server") or "").strip() != server:
+            continue
+        row.delete()
+
+
+def _retire_superseded_agent(deployment: Deployment, agent_asset: Asset, raw_tools) -> None:
+    """Delete the literal ``"agent"`` row an unnamed agent used to be written to,
+    once this agent is written under its own anchor.
+
+    Only when that row is this agent's: its ``tools`` edge is exactly what the
+    old rules would have written for this declaration. Every unnamed agent in a
+    deployment shared that row, each scan replacing the last one's tools, so a
+    row naming some OTHER tool set is another unnamed agent that has not been
+    rescanned -- and deleting it would take its powers off the graph until it is.
+    """
+    if agent_asset.identifier == "agent":
+        return
+    row = _declared_inventory_row(deployment, Asset.Kind.AGENT, "agent")
+    if row is None or row.name != "agent":
+        return
+    old_tools: list[str] = []
+    if isinstance(raw_tools, list):
+        for entry in raw_tools:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            old = str(
+                entry.get("identifier") or entry.get("endpoint") or entry.get("server") or name
+            ).strip()
+            if old:
+                old_tools.append(old[:IDENTIFIER_MAX])
+    recorded = (row.metadata or {}).get("tools")
+    if not isinstance(recorded, list) or sorted(map(str, recorded)) != sorted(old_tools):
+        return
+    row.delete()
 
 
 def derive_assets(deployment: Deployment, scan) -> list[Asset]:

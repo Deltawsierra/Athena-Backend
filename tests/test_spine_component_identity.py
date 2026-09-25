@@ -352,3 +352,217 @@ def test_a_tool_on_a_declared_mcp_server_is_hosted_by_it_not_itself():
         ("assistant", "mcp-prod", "invokes"),
         ("reader", "mcp-prod", "hosted_by"),
     }
+
+
+# ---- Rows written under the identities this module replaced. ----
+
+
+def _old_rows(dep, *, agent_tools):
+    """What the rules before one-identity-per-component wrote for two tools on
+    ``files-mcp``: one row at the server's key, named for the first tool and
+    holding the last one's permissions, and the unnamed agent at ``"agent"``."""
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, kind=Kind.TOOL, name="read_file", identifier="files-mcp",
+           metadata={**inventory, "server": "files-mcp", "permissions": ["shell"]})
+    return _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+                  metadata={**inventory, "identity": "", "tools": agent_tools})
+
+
+def _files_scan(user):
+    return PentestScan.objects.create(
+        user=user, target_url="https://app.example.com", consent=True,
+        status=PentestScan.STATUS_COMPLETED, engine_response={"findings": []},
+        target_config={"tools": [
+            {"name": "read_file", "server": "files-mcp", "permissions": ["read"]},
+            {"name": "run_cmd", "server": "files-mcp", "permissions": ["shell"]},
+        ]},
+    )
+
+
+def _graph(dep):
+    from assurance import route
+
+    result = route.build_route_map(dep)
+    unresolved = sorted((u["reference"], u["mechanism"], u["reason"]) for u in result["unresolved"])
+    return (
+        sorted(dep.assets.values_list("kind", "identifier")),
+        unresolved,
+        sorted((u["reference"], u["mechanism"], u["reason"])
+               for u in assess_effective_access(dep)["unresolved"]),
+    )
+
+
+def test_a_deployment_scanned_under_the_old_identities_reads_as_a_fresh_one():
+    """Rescanned, the old server-keyed tool row and the old ``"agent"`` row stayed
+    beside the new ones. The tools' ``server: files-mcp`` then resolved to the old
+    tool row, so the gap a fresh deployment reports -- no such server declared --
+    read as no gap, and the one agent was two."""
+    fresh = _dep("fresh")
+    derive_assets(fresh, _files_scan(fresh.owner))
+
+    upgraded = _dep("upgraded")
+    _old_rows(upgraded, agent_tools=["files-mcp", "files-mcp"])
+    derive_assets(upgraded, _files_scan(upgraded.owner))
+
+    assert _graph(upgraded) == _graph(fresh)
+    assert ("files-mcp", "server", "not_found") in _graph(upgraded)[1]
+
+
+def test_an_old_agent_row_another_agent_still_answers_to_is_kept():
+    """The one ``"agent"`` row was every unnamed agent's. One naming tools this
+    scan does not declare is another agent, not yet rescanned: deleting it would
+    take its powers off the graph until it is."""
+    dep = _dep()
+    other = _old_rows(dep, agent_tools=["other-mcp"])
+    derive_assets(dep, _files_scan(dep.owner))
+
+    assert dep.assets.filter(pk=other.pk).exists()
+
+
+def test_an_old_tool_row_the_inventory_no_longer_names_is_kept():
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    scan = _files_scan(dep.owner)
+    scan.target_config = {"tools": [{"name": "run_cmd", "server": "files-mcp", "permissions": ["shell"]}]}
+    scan.save()
+    derive_assets(dep, scan)
+
+    assert dep.assets.filter(kind=Kind.TOOL, identifier="files-mcp").exists()
+
+
+# ---- Where an unnamed agent is. ----
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("https://bots.example.com:8443/agent", "https://bots.example.com:9443/agent"),
+        ("http://bots.example.com/agent", "https://bots.example.com/agent"),
+    ],
+)
+def test_two_unnamed_agents_on_one_host_at_two_ports_are_two_agents(first, second):
+    """The anchor was host and path. Two services on one host were one row, and
+    the first one's ``exec`` fell to the deployment as a power nobody owned."""
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, first, ["exec"]))
+    derive_assets(dep, _scan(dep.owner, second, ["search"]))
+
+    agents = sorted(a.metadata["tools"] for a in dep.assets.filter(kind=Kind.AGENT))
+    assert agents == [["exec"], ["search"]]
+
+
+def test_the_common_https_anchor_reads_host_and_path():
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, "https://a.example:443/bot/", ["search"]))
+    assert list(dep.assets.filter(kind=Kind.AGENT).values_list("identifier", flat=True)) == [
+        "agent@a.example/bot"
+    ]
+
+
+# ---- An identity is cut to the row's length once. ----
+
+
+def test_two_tools_that_differ_past_the_identifier_limit_keep_both_powers():
+    """They were two merge groups written to one row -- the second replacing the
+    first's permissions -- and the agent's edges named strings no row carried."""
+    from assurance.assets import IDENTIFIER_MAX
+
+    stem = "x" * IDENTIFIER_MAX
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "run", "identifier": stem + "-a", "permissions": ["shell"]},
+        {"name": "fetch", "identifier": stem + "-b", "permissions": ["http:get"]},
+    ]))
+
+    tool = dep.assets.get(kind=Kind.TOOL)
+    assert sorted(tool.metadata["permissions"]) == ["http:get", "shell"]
+    result = assess_effective_access(dep)
+    assert result["unresolved"] == []
+    assert "code_execution" in {c["key"] for c in _principal(result, "assistant")["capabilities"]}
+
+
+# ---- An agent's identity is one identity, as every other reader keys it. ----
+
+
+def test_an_identity_differing_only_in_case_is_the_account_it_names():
+    from assurance import route
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="assistant", metadata={"identity": " SVC-Admin ", "tools": []})
+    account = _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-admin",
+                     metadata={"permissions": ["iam:admin"]})
+
+    result = assess_effective_access(dep)
+    agent = _principal(result, "assistant")
+    assert agent["privilege_level"] == "high"
+    assert result["unresolved"] == []
+    assert _gap_types(_principal(result, "svc-admin")) == []
+    edges = route.build_route_map(dep)["edges"]
+    assert [e["kind"] for e in edges if e["target"] == str(account.uuid)] == ["acts_as"]
+
+
+# ---- The lines the mutants could change with every test still passing. ----
+
+
+def test_an_mcp_server_named_apart_from_its_key_is_the_server_its_tools_run_on():
+    from assurance import route
+
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "Production MCP", "kind": "mcp_server", "server": "mcp-prod"},
+        {"name": "reader", "server": "mcp-prod", "permissions": ["read"]},
+    ]))
+
+    assert list(dep.assets.filter(kind=Kind.MCP_SERVER).values_list("identifier", flat=True)) == ["mcp-prod"]
+    result = route.build_route_map(dep)
+    assert result["unresolved"] == []
+    names = {n["uuid"]: n["name"] for n in result["nodes"]}
+    assert ("reader", "Production MCP", "hosted_by") in {
+        (names[e["source"]], names[e["target"]], e["kind"]) for e in result["edges"]
+    }
+
+
+def test_a_tool_that_names_its_endpoint_is_that_endpoint_wherever_it_runs():
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "reader", "endpoint": "https://files.example/read", "server": "mcp-prod"},
+    ]))
+    assert list(dep.assets.filter(kind=Kind.TOOL).values_list("identifier", flat=True)) == [
+        "https://files.example/read"
+    ]
+
+
+def test_a_proven_use_is_not_undone_by_an_ambiguous_one_in_either_order():
+    """The first version of this held only because ``bot`` sorts before
+    ``payer``: the proven agent is read first here."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="alpha", metadata={"identity": "sa-1"})
+    _asset(dep, kind=Kind.AGENT, name="zulu", metadata={"identity": "billing"})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="billing", identifier="sa-1")
+    second = _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="billing", identifier="sa-2")
+
+    result = assess_effective_access(dep)
+    gaps = {p["key"]: _gap_types(p) for p in result["principals"] if p["kind"] == Kind.SERVICE_ACCOUNT}
+    assert sorted(gaps.values()) == [[], ["use_unproven"]]
+    assert gaps[f"asset:{second.uuid}"] == ["use_unproven"]
+
+
+def test_an_unproven_use_is_an_elevated_gap():
+    from assurance.capability import RISK_ELEVATED
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={"identity": "billing"})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="billing", identifier="sa-1")
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="billing", identifier="sa-2")
+
+    for account in (p for p in assess_effective_access(dep)["principals"] if p["kind"] == Kind.SERVICE_ACCOUNT):
+        assert [(g["type"], g["risk"]) for g in account["gaps"]] == [("use_unproven", RISK_ELEVATED)]
+
+
+def test_a_permission_declared_on_two_lines_is_held_once():
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "db", "identifier": "db", "permissions": ["shell", "read"]},
+        {"name": "db", "identifier": "db", "permissions": ["shell"]},
+    ]))
+    assert dep.assets.get(kind=Kind.TOOL).metadata["permissions"] == ["shell", "read"]

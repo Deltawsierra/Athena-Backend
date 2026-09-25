@@ -74,6 +74,7 @@ from .graph_refs import (
     dangling_reference,
     identity_index,
     identity_reference,
+    resolve_identity,
     reference_index,
     resolve_reference,
     sort_references,
@@ -192,7 +193,7 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
                     unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, why))
             identity = identity_reference(metadata)
             if identity:
-                targets, why = resolve_reference(identity, *accounts)
+                targets, why = resolve_identity(identity, accounts)
                 for target in targets:
                     add(asset, target, "acts as", _kind_cap(target.kind)["key"])
                 if why:
@@ -320,14 +321,14 @@ def _identity_use(agents, service_accounts) -> dict:
     unless another agent's identity names that account alone: a proven use is
     not undone by an ambiguous one.
     """
-    by_identifier, by_name = identity_index(service_accounts)
+    accounts = identity_index(service_accounts)
     use: dict = {}
     for agent in agents:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
         identity = identity_reference(metadata)
         if not identity:
             continue
-        candidates, why = resolve_reference(identity, by_identifier, by_name)
+        candidates, why = resolve_identity(identity, accounts)
         for account in candidates:
             if why is None:
                 use[account.pk] = IDENTITY_PROVEN
