@@ -900,6 +900,28 @@ def test_a_recompute_that_does_not_name_the_pause_keeps_it_and_one_that_does_lif
     assert _stored(dep) == Deployment.Decision.READY
 
 
+def test_a_recompute_that_does_not_name_the_pause_leaves_it_to_the_lock(monkeypatch):
+    """The route must not read the pause itself: a pause read before the row lock
+    is one an operator can change in between, and the recompute would then write
+    the state it read over the one they set. ``None`` defers to the locked row."""
+    from assurance import views
+
+    dep = _deployment()
+    seen = []
+    real = views.recompute_decision
+
+    def recording(deployment, **kw):
+        seen.append(kw.get("paused", "absent"))
+        return real(deployment, **kw)
+
+    monkeypatch.setattr(views, "recompute_decision", recording)
+    url = f"/api/assurance/deployments/{dep.uuid}/recompute/"
+    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.PAUSED)
+    assert _client().post(url, {}, format="json").status_code == 200
+    assert _client().post(url, {"paused": False}, format="json").status_code == 200
+    assert seen == [None, False]
+
+
 def test_the_decision_is_computed_from_inside_the_transaction_that_writes_it(monkeypatch):
     """Computed first and written after, a signed violation recorded between the
     two was overwritten by the READY computed before it arrived. The inputs are now
@@ -974,6 +996,54 @@ def test_a_reformatted_keyring_that_trusts_the_same_keys_is_not_a_rotation(keyri
     assert observed_outcomes.keyring_fingerprint() == before
     keyring.write_text(_athena_only())
     assert observed_outcomes.keyring_fingerprint() != before
+
+
+def _rotated_to_a_new_achilles_key():
+    """A keyring that parses and trusts keys -- just not the one the stored
+    outcomes were signed with. ``_athena_only`` is not this: its engine name is
+    not a token, so it reads as no keyring at all, and a fingerprint that saw only
+    "some keys" against "none" passed every test written against it."""
+    return json.dumps(
+        [
+            {"engine": "achilles", "public_key": base64.b64encode(oc.raw_public_key(Ed25519PrivateKey.generate())).decode()},
+            {"engine": "athena", "public_key": base64.b64encode(oc.raw_public_key(ATHENA)).decode()},
+        ]
+    )
+
+
+def test_the_fingerprint_names_which_keys_are_trusted_not_only_whether_any_are(keyring):
+    before = observed_outcomes.keyring_fingerprint()
+    assert before != ""
+    keyring.write_text(_rotated_to_a_new_achilles_key())
+    rotated = observed_outcomes.keyring_fingerprint()
+    assert rotated not in ("", before)
+    # The same keys bound to other engines is a different keyring too.
+    entries = json.loads(_rotated_to_a_new_achilles_key())
+    swapped = [dict(e, engine={"achilles": "athena", "athena": "achilles"}[e["engine"]]) for e in entries]
+    assert observed_outcomes.keyring_fingerprint(observed_outcomes._parse_keyring(json.dumps(entries).encode())) != (
+        observed_outcomes.keyring_fingerprint(observed_outcomes._parse_keyring(json.dumps(swapped).encode()))
+    )
+
+
+@pytest.mark.parametrize("surface", ["receipt", "bundle", "incident"])
+def test_a_rotation_to_other_keys_reaches_the_stored_decision_on_every_surface(keyring, surface):
+    """A withdrawal where keys are still trusted: the stamp moves, so every read
+    surface reconciles, and what it reads is the decision the new keyring gives."""
+    from assurance.bundle import _decision_row
+    from assurance.incident import _decision
+
+    read = {
+        "receipt": _receipt_decision,
+        "bundle": lambda d: _decision_row(Deployment.objects.get(pk=d.pk))["state"],
+        "incident": lambda d: _decision(Deployment.objects.get(pk=d.pk))["decision"],
+    }[surface]
+    dep = _deployment()
+    _approved(dep, "refund-over-limit")
+    _ingested(dep)
+    assert _stored(dep) == Deployment.Decision.READY
+    keyring.write_text(_rotated_to_a_new_achilles_key())
+    assert read(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
 
 
 def test_a_deployment_without_chains_is_not_reconciled_on_read():

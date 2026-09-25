@@ -674,6 +674,9 @@ def test_the_text_fallback_redacts_what_the_single_pattern_did(text, expected):
         ("ſession=abc123", "ſession: [redacted]"),
         ("client_secret=x&paſſ=y", "client_secret: [redacted]&paſſ: [redacted]"),
         ("apiKey: v", "apiKey: [redacted]"),
+        # Where the scan resumes mid-run, after a value that stopped at `]`: the
+        # key that starts there folds case too.
+        ("token: x]paſſword=hunter2", "token: [redacted]]paſſword: [redacted]"),
     ],
 )
 def test_the_text_fallback_folds_case_as_the_pattern_it_replaced_did(text, expected):
