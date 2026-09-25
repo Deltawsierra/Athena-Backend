@@ -175,7 +175,9 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
             for ident in tool_references(metadata):
                 if not str(ident or "").strip():
                     continue
-                targets, why = resolve_reference(ident, by_identifier, by_name)
+                targets, why = resolve_reference(
+                    ident, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+                )
                 for target in targets:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
                 if why:
@@ -283,6 +285,42 @@ def _power_entry(asset, via_to_asset: list, via_keys_to_asset: list, perm: str, 
     }
 
 
+#: How an agent's declared identity names a service account it did not name
+#: alone. See :func:`_identity_use`.
+IDENTITY_PROVEN = "proven"
+IDENTITY_AMBIGUOUS = "ambiguous"
+
+
+def _identity_use(agents, service_accounts) -> dict:
+    """``{service_account_pk: IDENTITY_PROVEN | IDENTITY_AMBIGUOUS}`` for every
+    service account some agent's declared ``identity`` resolves to.
+
+    Resolved the way every other reference in the graph is
+    (:func:`graph_refs.resolve_reference`): identifier first, then name, and an
+    identifier that matches never falls through to a name. Only service accounts
+    are candidates -- an identity is the account an agent acts as, so a tool or
+    a store that happens to share the string is not one.
+
+    One candidate is a proven use. More than one is ambiguous for each of them,
+    unless another agent's identity names that account alone: a proven use is
+    not undone by an ambiguous one.
+    """
+    by_identifier, by_name = reference_index(service_accounts)
+    use: dict = {}
+    for agent in agents:
+        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
+        identity = str(metadata.get("identity") or "").strip()
+        if not identity:
+            continue
+        candidates, why = resolve_reference(identity, by_identifier, by_name)
+        for account in candidates:
+            if why is None:
+                use[account.pk] = IDENTITY_PROVEN
+            else:
+                use.setdefault(account.pk, IDENTITY_AMBIGUOUS)
+    return use
+
+
 def _principal_dict(
     *,
     key: str,
@@ -296,7 +334,7 @@ def _principal_dict(
     own_asset,
     reaches_raw: list,
     is_service_account: bool,
-    referenced_identities: set,
+    acted_under: str | None = None,
 ) -> dict:
     """Assemble one principal from its own asset and the assets it transitively
     reaches: its held sensitive capabilities, its effective reach (concrete
@@ -423,13 +461,13 @@ def _principal_dict(
     # Orphaned: a service account with no dependent or declared use — no agent
     # acts under it, and it grants no reach or power. A standing credential nobody
     # uses is a gap, not a clean bill.
-    is_orphaned = (
-        is_service_account
-        and not reach
-        and not capabilities
-        and name not in referenced_identities
-        and (own_asset is None or own_asset.identifier not in referenced_identities)
-    )
+    #
+    # ``acted_under`` is how an agent's declared identity resolved to THIS
+    # account (see ``_identity_use``), never a string compared to its name: a
+    # second account that merely shared the name used to count as used, so the
+    # real orphan hid behind its namesake.
+    unused = is_service_account and not reach and not capabilities
+    is_orphaned = unused and acted_under is None
     if is_orphaned:
         gaps.append(
             {
@@ -437,6 +475,19 @@ def _principal_dict(
                 "risk": RISK_ELEVATED,
                 "detail": "Service account with no dependent or declared use — no principal acts "
                 "under it.",
+            }
+        )
+    elif unused and acted_under == IDENTITY_AMBIGUOUS:
+        # Neither orphaned nor used: an agent acts under an identity this account
+        # and another both answer to. Calling it orphaned says nobody acts under
+        # it; calling it used says someone does. The inventory says neither.
+        gaps.append(
+            {
+                "type": "use_unproven",
+                "risk": RISK_ELEVATED,
+                "detail": "An agent acts under an identity more than one service account answers "
+                "to, and the inventory does not say which — no principal is proven to act "
+                "under this one.",
             }
         )
 
@@ -486,14 +537,7 @@ def assess_effective_access(deployment) -> dict:
     service_accounts = [a for a in assets if a.kind == Asset.Kind.SERVICE_ACCOUNT]
     tools = [a for a in assets if a.kind in _TOOL_KINDS]
 
-    # Identities that something acts under: an agent's declared ``identity``. Used
-    # to tell an orphaned service account (nobody acts under it) from a used one.
-    referenced_identities: set[str] = set()
-    for agent in agents:
-        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
-        identity = str(metadata.get("identity") or "").strip()
-        if identity:
-            referenced_identities.add(identity)
+    identity_use = _identity_use(agents, service_accounts)
 
     principals: list[dict] = []
 
@@ -530,7 +574,6 @@ def assess_effective_access(deployment) -> dict:
                 own_asset=agent,
                 reaches_raw=reaches_raw,
                 is_service_account=False,
-                referenced_identities=referenced_identities,
             )
         )
 
@@ -549,7 +592,7 @@ def assess_effective_access(deployment) -> dict:
                 own_asset=sa,
                 reaches_raw=reaches_raw,
                 is_service_account=True,
-                referenced_identities=referenced_identities,
+                acted_under=identity_use.get(sa.pk),
             )
         )
 
@@ -572,7 +615,6 @@ def assess_effective_access(deployment) -> dict:
                 own_asset=None,
                 reaches_raw=base_reaches,
                 is_service_account=False,
-                referenced_identities=referenced_identities,
             )
         )
 

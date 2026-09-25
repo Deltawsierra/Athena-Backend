@@ -183,7 +183,9 @@ def build_route_map(deployment) -> dict:
         for ident in tool_references(metadata):
             if not str(ident or "").strip():
                 continue
-            targets, why = resolve_reference(ident, by_identifier, by_name)
+            targets, why = resolve_reference(
+                ident, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+            )
             for target in targets:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
             if why:

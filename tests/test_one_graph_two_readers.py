@@ -39,7 +39,11 @@ from django.contrib.auth import get_user_model
 
 from assurance import route
 from assurance.access import assess_effective_access
-from assurance.graph_refs import MECHANISM_SERVER, MECHANISM_TOOLS
+from assurance.graph_refs import (
+    MECHANISM_SERVER,
+    MECHANISM_TOOLS,
+    UNRESOLVED_NAMES_A_PRINCIPAL,
+)
 from assurance.models import Asset, Deployment
 
 pytestmark = pytest.mark.django_db
@@ -304,16 +308,55 @@ def test_a_reference_cannot_reach_another_deployment():
 
 
 def test_a_self_reference_is_neither_an_edge_nor_a_gap_for_either_reader():
-    """A component naming itself resolves — so it is not a dangling reference —
-    but a self-loop is not a hop. Both readers must land on the same answer, which
-    is that there is nothing here to report in either channel."""
+    """A component naming itself as its backend resolves — so it is not a
+    dangling reference — but a self-loop is not a hop. Both readers must land on
+    the same answer, which is that there is nothing here to report in either
+    channel."""
     dep = _dep()
-    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
-           metadata={"tools": ["assistant"]})
+    _asset(dep, kind=Asset.Kind.DATA_STORE, name="warehouse", identifier="warehouse",
+           metadata={"server": "warehouse"})
 
     assert _unresolved_rows(dep) == ([], [])
     assert _route_declared_hops(dep) == set()
     assert _access_hops(dep) == set()
+
+
+def test_an_agent_listing_itself_as_a_tool_is_a_gap_both_readers_report():
+    """An agent's ``tools`` name tools; an agent is not one. So an agent whose
+    tool list names only itself names no tool at all -- it used to resolve to
+    itself and vanish as a self-loop, reading as a clean declaration. It is still
+    no edge, and now both readers say the reference names a principal."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"tools": ["assistant"]})
+
+    access_rows, route_rows = _unresolved_rows(dep)
+    assert access_rows == route_rows
+    assert [(r["reference"], r["mechanism"], r["reason"]) for r in access_rows] == [
+        ("assistant", MECHANISM_TOOLS, UNRESOLVED_NAMES_A_PRINCIPAL)
+    ]
+    assert _route_declared_hops(dep) == set()
+    assert _access_hops(dep) == set()
+
+
+def test_a_tool_reference_a_principal_shares_is_the_tool_alone_for_both_readers():
+    """A tool and another agent carrying the same identifier. The reference
+    was followed to both and filed as ambiguous, so the calling agent was handed
+    every power the namesake agent held -- here, its shell -- through a tool entry
+    that only ever meant the tool. A ``tools`` entry cannot mean an agent, so it
+    is one hop, to the tool, and nothing is unresolved."""
+    dep = _dep()
+    _asset(dep, kind=Asset.Kind.AGENT, name="caller", identifier="caller",
+           metadata={"tools": ["planner"]})
+    _asset(dep, kind=Asset.Kind.TOOL, name="planner", identifier="planner")
+    _asset(dep, kind=Asset.Kind.AGENT, name="planner", identifier="planner",
+           metadata={"tools": ["shell"]})
+    _asset(dep, kind=Asset.Kind.TOOL, name="shell", identifier="shell",
+           metadata={"permissions": ["code_execution"]})
+
+    assert _unresolved_rows(dep) == ([], [])
+    assert _route_declared_hops(dep) == {("caller", "planner"), ("planner", "shell")}
+    assert {target for principal, target in _access_hops(dep) if principal == "caller"} == {"planner"}
 
 
 # ---- What the hole means for the claim built on top of it. ----

@@ -56,8 +56,9 @@ PRINCIPAL_KINDS = frozenset({"agent", "service_account"})
 #: an inventory that does not say which of two components it means.
 UNRESOLVED_NOT_FOUND = "not_found"
 UNRESOLVED_AMBIGUOUS = "ambiguous"
-#: A ``server`` names something that exists but is a principal -- an agent, a
-#: service account -- not a backend anything can be wired to.
+#: A reference names something that exists but is a principal -- an agent, a
+#: service account -- which is neither a backend anything can be wired to nor a
+#: tool anything can invoke.
 UNRESOLVED_NAMES_A_PRINCIPAL = "names_a_principal"
 
 
@@ -103,9 +104,12 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kind
     something is wired to; it is never an agent or a service account, and
     resolving it to one made that principal a hop -- so a data store that shared
     its name with an agent put the agent's tools inside another agent's reach and
-    named an agent that gained no power as privileged. Candidates of those kinds
-    are dropped before the rest are followed; a reference that names only such a
-    thing is unresolved and says so.
+    named an agent that gained no power as privileged. The same holds for an
+    agent's ``tools``: every entry is a tool the declaration itself wrote as a
+    tool row, so a principal carrying the same key is a collision, not a callee,
+    and following it handed one agent every power of another. Candidates of those
+    kinds are dropped before the rest are followed; a reference that names only
+    such a thing is unresolved and says so.
 
     An empty list is not permission to invent a node, and it is not permission to
     say nothing either: the caller records the reason.

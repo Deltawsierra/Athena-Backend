@@ -167,7 +167,9 @@ def _clean_str_list(value) -> list[str]:
     return []
 
 
-def _agent_and_tools(deployment: Deployment, cfg: dict, now) -> tuple[Asset | None, list[Asset]]:
+def _agent_and_tools(
+    deployment: Deployment, cfg: dict, now, *, target: str = ""
+) -> tuple[Asset | None, list[Asset]]:
     """Register a declared agent and the tools / MCP servers / skills it can call
     (roadmap 1.2 — MCP & Agent-Skill Assurance).
 
@@ -224,7 +226,17 @@ def _agent_and_tools(deployment: Deployment, cfg: dict, now) -> tuple[Asset | No
     agent_declared = isinstance(raw_agent, dict) or cfg.get("kind") == "agent"
     if agent_declared or tool_identifiers:
         agent = raw_agent if isinstance(raw_agent, dict) else {}
-        identifier = str(agent.get("identifier") or agent.get("name") or "agent").strip() or "agent"
+        identifier = str(agent.get("identifier") or agent.get("name") or "").strip()
+        if not identifier:
+            # An agent the scan implies but does not name is the agent at the
+            # scan's target, and is identified by it. It used to be the literal
+            # "agent" -- one row per deployment -- so two scans of two different
+            # agents wrote the same row, each replacing the other's tools, and the
+            # first agent's tools fell to the deployment as powers nobody owned.
+            # No target, no identity to give it: better no node than one
+            # invented for every unnamed agent at once.
+            anchor = _endpoint_identifier(target)
+            identifier = f"agent@{anchor}" if anchor else ""
         name = str(agent.get("name") or identifier).strip()
         agent_asset = _get_or_refresh(
             deployment,
@@ -309,7 +321,9 @@ def derive_assets(deployment: Deployment, scan) -> list[Asset]:
     #     target above.
     agent_asset = None
     if isinstance(cfg, dict):
-        agent_asset, inventory_assets = _agent_and_tools(deployment, cfg, now)
+        agent_asset, inventory_assets = _agent_and_tools(
+            deployment, cfg, now, target=getattr(scan, "target_url", "") or ""
+        )
         for a in inventory_assets:
             if a not in touched:
                 touched.append(a)

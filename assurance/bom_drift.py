@@ -43,6 +43,7 @@ import hashlib
 
 from django.utils import timezone
 
+from .component_identity import by_identity, component_key
 from .models import RESOLVED_FINDING_STATUSES, Asset, Deployment, Finding
 
 # The severity an UNDECLARED (shadow) observed component carries, by kind. A
@@ -83,16 +84,26 @@ def _norm(value: str) -> str:
     return (value or "").strip().lower()
 
 
-def _match_key(kind: str, identifier: str, name: str) -> tuple[str, str]:
-    """The identity a declared and an observed component match on: kind plus the
-    normalized identifier, falling back to the normalized name when no identifier
-    was given. The same rule for both sides, so they line up."""
-    return (kind, _norm(identifier) or _norm(name))
+def _identity(component: dict) -> str:
+    """The normalized identity a drift entry is about -- what its finding is keyed
+    on. Read through :func:`component_key` so the finding and the match agree about
+    what one identity is."""
+    return component_key(component["kind"], identifier=component["identifier"], name=component["name"])[1]
 
 
 def _fp(*parts: str) -> str:
     """A stable drift-finding fingerprint (deployment-scoped dedup key)."""
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _by_fingerprint(finding_type: str, components: list[dict]) -> dict[str, list[dict]]:
+    """The assessment's entries grouped by the finding each one belongs to, in the
+    assessment's own order."""
+    groups: dict[str, list[dict]] = {}
+    for comp in components:
+        groups.setdefault(_fp(finding_type, comp["kind"], _identity(comp)), []).append(comp)
+    return groups
+
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +133,17 @@ def assess_bom_drift(deployment) -> dict:
     declared = list(deployment.declared_components.all())
     assets = list(deployment.assets.all())
 
-    declared_index = {_match_key(d.kind, d.identifier, d.name): d for d in declared}
-    observed_index = {_match_key(a.kind, a.identifier, a.name): a for a in assets}
+    # Every row under an identity, not the last one: a dict keyed on the identity
+    # kept one row per key, so a second undeclared component answering to the same
+    # identity was missing from the list and from the count, and ``observed``
+    # stopped equalling ``matched + undeclared``.
+    declared_groups = by_identity(declared)
+    observed_groups = by_identity(assets)
 
     # Observed components with no matching declaration — the shadow supply chain.
     undeclared = []
-    for key, asset in observed_index.items():
-        if key in declared_index:
+    for asset in assets:
+        if component_key(asset.kind, identifier=asset.identifier, name=asset.name) in declared_groups:
             continue
         undeclared.append(
             {
@@ -141,12 +156,12 @@ def assess_bom_drift(deployment) -> dict:
                 "severity": _UNDECLARED_SEVERITY_BY_KIND.get(asset.kind, "low"),
             }
         )
-    undeclared.sort(key=lambda c: (c["kind"], c["name"]))
+    undeclared.sort(key=lambda c: (c["kind"], c["name"], c["identifier"], c["asset_uuid"]))
 
     # Declarations with no matching observed component.
     missing = []
-    for key, comp in declared_index.items():
-        if key in observed_index:
+    for comp in declared:
+        if component_key(comp.kind, identifier=comp.identifier, name=comp.name) in observed_groups:
             continue
         missing.append(
             {
@@ -158,7 +173,7 @@ def assess_bom_drift(deployment) -> dict:
                 "provider_name": comp.provider_name or None,
             }
         )
-    missing.sort(key=lambda c: (c["kind"], c["name"]))
+    missing.sort(key=lambda c: (c["kind"], c["name"], c["identifier"], c["declared_uuid"]))
 
     # Provider-level drift: vendors behind observed components that were never
     # declared. Declared provider names come from the declarations' provider_name.
@@ -175,7 +190,9 @@ def assess_bom_drift(deployment) -> dict:
     if not declared_providers:
         undeclared_providers = []
 
-    matched_count = sum(1 for key in observed_index if key in declared_index)
+    # Observed components whose identity is declared, counted as rows so the
+    # summary adds up: observed == matched + undeclared.
+    matched_count = sum(len(rows) for key, rows in observed_groups.items() if key in declared_groups)
     has_declared = bool(declared)
     drift_detected = has_declared and bool(undeclared or undeclared_providers)
 
@@ -307,8 +324,14 @@ def record_bom_drift_findings(deployment) -> dict:
     # Assets by uuid, so an undeclared-component finding can attach to the real row.
     assets_by_uuid = {str(a.uuid): a for a in dep.assets.all()}
 
-    for comp in assessment["undeclared"]:
-        fingerprint = _fp(_UNDECLARED_COMPONENT, comp["kind"], _norm(comp["identifier"]) or _norm(comp["name"]))
+    # One finding per identity. The assessment lists every row, and more than one
+    # row can answer to an identity; reconciling each would write the same
+    # finding twice and count the second write as an update nothing made. The
+    # finding names the first row in the assessment's order and carries them all;
+    # the kind is part of the identity, so every row shares its severity.
+    for comps in _by_fingerprint(_UNDECLARED_COMPONENT, assessment["undeclared"]).values():
+        comp = comps[0]
+        fingerprint = _fp(_UNDECLARED_COMPONENT, comp["kind"], _identity(comp))
         live.add(fingerprint)
         outcome = _reconcile_finding(
             dep,
@@ -318,7 +341,7 @@ def record_bom_drift_findings(deployment) -> dict:
             severity=comp["severity"],
             location=comp["identifier"] or comp["name"],
             asset=assets_by_uuid.get(comp["asset_uuid"]),
-            drift={"undeclared_component": comp},
+            drift={"undeclared_component": comp, "components": comps},
             now=now,
         )
         counts[outcome] += 1
@@ -339,8 +362,9 @@ def record_bom_drift_findings(deployment) -> dict:
         )
         counts[outcome] += 1
 
-    for comp in assessment["missing"]:
-        fingerprint = _fp(_DECLARED_NOT_OBSERVED, comp["kind"], _norm(comp["identifier"]) or _norm(comp["name"]))
+    for comps in _by_fingerprint(_DECLARED_NOT_OBSERVED, assessment["missing"]).values():
+        comp = comps[0]
+        fingerprint = _fp(_DECLARED_NOT_OBSERVED, comp["kind"], _identity(comp))
         live.add(fingerprint)
         outcome = _reconcile_finding(
             dep,
@@ -350,7 +374,7 @@ def record_bom_drift_findings(deployment) -> dict:
             severity=_MISSING_SEVERITY,
             location=comp["identifier"] or comp["name"],
             asset=None,
-            drift={"declared_not_observed": comp},
+            drift={"declared_not_observed": comp, "components": comps},
             now=now,
         )
         counts[outcome] += 1

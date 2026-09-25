@@ -256,19 +256,20 @@ def _reported_coverage(engine_response: Any) -> tuple[list[dict], str]:
 
 def _record_reported_coverage(scan, deployment) -> int:
     """Stamp the deployment's assets that this scan reported assessing."""
-    from .coverage import _component_key, record_assessment
+    from .component_identity import component_key
+    from .coverage import record_assessment
 
     reported, engine = _reported_coverage(scan.engine_response)
     if not reported:
         return 0
     wanted = {
-        _component_key(row.get("kind", ""), row.get("name", ""), row.get("identifier", ""))
+        component_key(row.get("kind", ""), identifier=row.get("identifier", ""), name=row.get("name", ""))
         for row in reported
     }
     matched = [
         asset
         for asset in deployment.assets.all()
-        if _component_key(asset.kind, asset.name, asset.identifier) in wanted
+        if component_key(asset.kind, identifier=asset.identifier, name=asset.name) in wanted
     ]
     # An engine that does not name itself still assessed something, and recording
     # the coverage without the assessor is better than dropping it -- but the

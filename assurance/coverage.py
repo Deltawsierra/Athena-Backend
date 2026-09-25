@@ -66,6 +66,7 @@ from typing import Any
 
 from django.utils import timezone
 
+from .component_identity import by_identity, component_key
 from .models import Asset, DeclaredComponent, Deployment
 
 # The coverage verdicts. Deliberately three, not two: "nothing to compare against"
@@ -74,14 +75,6 @@ from .models import Asset, DeclaredComponent, Deployment
 COMPLETE = "complete"
 INCOMPLETE = "incomplete"
 UNDECLARED = "undeclared"
-
-
-def _component_key(kind: str, name: str, identifier: str) -> tuple[str, str]:
-    """The identity two records are matched on: kind plus identifier, or kind plus
-    name when no identifier was given. Mirrors :mod:`assurance.bom_drift` so the
-    drift assessment and the manifest never disagree about what is the same thing.
-    """
-    return (str(kind or ""), str(identifier or name or "").strip().lower())
 
 
 def _entity(asset: Asset) -> dict[str, Any]:
@@ -223,10 +216,8 @@ def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
     declared = list(deployment.declared_components.all())
     assets = list(deployment.assets.all())
 
-    declared_index = {
-        _component_key(c.kind, c.name, c.identifier): c for c in declared
-    }
-    asset_index = {_component_key(a.kind, a.name, a.identifier): a for a in assets}
+    declared_groups = by_identity(declared)
+    observed_groups = by_identity(assets)
 
     assessed = [a for a in assets if a.assessed_at is not None]
     unassessed = [a for a in assets if a.assessed_at is None]
@@ -236,18 +227,21 @@ def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
     # list. `bom_drift` reports the same gap from the drift side.
     never_observed = [
         _declared_entity(c)
-        for key, c in declared_index.items()
-        if key not in asset_index
+        for c in declared
+        if component_key(c.kind, identifier=c.identifier, name=c.name) not in observed_groups
     ]
-    never_observed.sort(key=lambda c: (c["kind"], c["name"]))
+    never_observed.sort(key=lambda c: (c["kind"], c["name"], c["identifier"], c["declared_uuid"]))
 
     # Declared AND observed, but never assessed: the case this manifest exists for.
+    # EVERY observed row under a declared identity, not one of them. When two rows
+    # answer to one identity and only one was assessed, the declared component was
+    # not assessed as a whole -- and which row a dict kept decided the verdict.
     declared_unassessed = [
         _entity(asset)
-        for key, asset in asset_index.items()
-        if key in declared_index and asset.assessed_at is None
+        for asset in unassessed
+        if component_key(asset.kind, identifier=asset.identifier, name=asset.name) in declared_groups
     ]
-    declared_unassessed.sort(key=lambda c: (c["kind"], c["name"]))
+    declared_unassessed.sort(key=lambda c: (c["kind"], c["name"], c["identifier"], c["asset_uuid"]))
 
     high_risk_unassessed = [
         _entity(asset)
