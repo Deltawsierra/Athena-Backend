@@ -18,11 +18,12 @@ def _same_key_under_both_rules(asset) -> bool:
     rescan -- a gap with nothing behind it, holding the access claim off
     VERIFIED on every existing deployment.
 
-    Left unstamped: a non-MCP tool row keyed by its own server, which is either a
-    nameless tool (the same key under both rules) or the collapse of every tool on
-    that server (not), and the literal ``"agent"`` row. Those cannot be told apart
-    from the row, so they stay reported until a scan that declares them says
-    which they are.
+    Left unstamped: a non-MCP tool row keyed by its own server, and the literal
+    ``"agent"`` row. The current rules write neither key -- a named tool on a server
+    is ``name@server`` and a nameless one ``@server``; an unnamed agent is keyed by
+    where it is -- and each was where the old rules collapsed several declarations
+    into one row, so what such a row stands for cannot be read off it. They stay
+    reported until a declaration that covers everything they hold lands on them.
     """
     metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
     if asset.kind == "agent":

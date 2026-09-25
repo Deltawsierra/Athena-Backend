@@ -43,13 +43,12 @@ from .graph_refs import (
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
-    dangling_reference,
     identity_index,
-    identity_reference,
+    identity_references,
     resolve_identity,
     reference_index,
     resolve_reference,
-    unresolved_reasons,
+    unresolved_row,
     sort_references,
     tool_references,
 )
@@ -193,25 +192,25 @@ def build_route_map(deployment) -> dict:
             )
             for target in targets:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
-            for reason in unresolved_reasons(agent, targets, why):
-                # A tool the agent names but discovery could not place -- or could
-                # place as more than one component: a reference to chase, surfaced
-                # rather than silently dropped.
-                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, reason))
+            # A tool the agent names but discovery could not place -- or could
+            # place as more than one component: a reference to chase, surfaced
+            # rather than silently dropped.
+            row = unresolved_row(agent, ident, MECHANISM_TOOLS, targets, why)
+            if row is not None:
+                unresolved.append(row)
 
     # The account each agent acts as: a declared edge, and a gap when the
     # identity names no account or more than one.
     accounts = identity_index(assets)
     for agent in agent_assets:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
-        identity = identity_reference(metadata)
-        if not identity:
-            continue
-        targets, why = resolve_identity(identity, accounts)
-        for target in targets:
-            add_edge(agent, target, "acts_as", "acts as", declared=True)
-        for reason in unresolved_reasons(agent, targets, why):
-            unresolved.append(dangling_reference(agent, identity, MECHANISM_IDENTITY, reason))
+        for identity in identity_references(metadata):
+            targets, why = resolve_identity(identity, accounts)
+            for target in targets:
+                add_edge(agent, target, "acts_as", "acts as", declared=True)
+            row = unresolved_row(agent, identity, MECHANISM_IDENTITY, targets, why)
+            if row is not None:
+                unresolved.append(row)
 
     def _declare_server_edge(source, host) -> None:
         if (str(source.uuid), str(host.uuid)) in attested_pairs:
@@ -243,12 +242,13 @@ def build_route_map(deployment) -> dict:
         hosts, why = resolve_reference(
             server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
         )
-        for reason in unresolved_reasons(source, hosts, why):
-            # The reference names nothing in the inventory, or more than one
-            # thing. The first used to vanish: no edge, and no unresolved row
-            # either, because only the agent→tool mechanism had a channel for a
-            # miss. An ambiguous one is also drawn to every candidate below.
-            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER, reason))
+        # The reference names nothing in the inventory, or more than one
+        # thing. The first used to vanish: no edge, and no unresolved row
+        # either, because only the agent→tool mechanism had a channel for a
+        # miss. An ambiguous one is also drawn to every candidate below.
+        row = unresolved_row(source, server, MECHANISM_SERVER, hosts, why)
+        if row is not None:
+            unresolved.append(row)
         for host in hosts:
             _declare_server_edge(source, host)
 

@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 
 from django.utils import timezone
 
-from .graph_refs import IDENTITY_RULES, superseded_identity
+from .graph_refs import IDENTITY_RULES, MERGED_IDENTITIES, identity_references, superseded_identity
 from .ingest import _host
 from .models import Asset, Deployment, Finding, Provider
 
@@ -106,7 +106,7 @@ def _get_or_refresh(
     asset, created = Asset.objects.get_or_create(
         deployment=deployment, kind=kind, identifier=identifier[:IDENTIFIER_MAX], defaults=defaults
     )
-    if not created and metadata and _keeps_what_it_stood_for(asset, name):
+    if not created and metadata and _keeps_what_it_stood_for(asset, metadata):
         metadata, classification = _merge_into_legacy_row(asset, metadata, classification)
     if not created:
         fields = ["last_seen", "provider", "metadata"]
@@ -141,30 +141,52 @@ def _legacy_key(asset: Asset) -> bool:
     return bool(server) and asset.identifier == server[:IDENTIFIER_MAX]
 
 
-def _keeps_what_it_stood_for(asset: Asset, name: str) -> bool:
+def _keeps_what_it_stood_for(asset: Asset, metadata: dict) -> bool:
     """Whether a declaration landing on ``asset`` must merge into it rather than
     replace it: the row carries an older identity-rules stamp, its key is a
-    :func:`_legacy_key`, and the declaration is not demonstrably the same one.
+    :func:`_legacy_key`, and the declaration does not cover everything the row
+    holds.
 
     A different agent's scan could declare a tool under a key an old collapsed
-    row held -- a tool named ``files-mcp``, a nameless ``{server: files-mcp}``
-    -- and the refresh replaced that row's permissions and stamped it current.
-    The agent the old row served, not yet rescanned, lost its ``shell`` with no
-    reason left anywhere to say so. The one declaration that IS the same is a
-    nameless tool on that server: its key and its name were both the server's
-    under the old rules and still are.
+    row held, and the refresh replaced that row's permissions and stamped it
+    current: the agent the old row served, not yet rescanned, lost its ``shell``
+    with no reason left anywhere to say so.
+
+    Covering is the test, not the row's name. The name is written once, when the
+    row is created, and the old rules went on replacing the permissions under it
+    -- so a row can carry the name of one declaration and the powers of another,
+    and a name that matched let a scan stamp such a row and drop the powers it
+    did not know about. A declaration that holds every permission and tool the
+    row holds, and names the same identity and server where the row names one,
+    replaces nothing anyone depended on; anything less merges, and the row stays
+    reported until something that covers it is declared.
     """
     if not superseded_identity(asset) or not _legacy_key(asset):
         return False
-    if asset.kind == Asset.Kind.AGENT:
-        return True
-    return not (asset.name == asset.identifier == name[:255])
+    return not _covers(metadata, asset.metadata if isinstance(asset.metadata, dict) else {})
+
+
+def _covers(declared: dict, held: dict) -> bool:
+    """Whether ``declared`` holds everything ``held`` does: every permission and
+    tool, and the same identity and server wherever ``held`` names one. A row that
+    already merged a second identity stands for two declarations, and no single
+    declaration covers two."""
+    for key in ("permissions", "tools"):
+        have = {str(v) for v in held.get(key) or [] if isinstance(v, str)}
+        if not have <= {str(v) for v in declared.get(key) or [] if isinstance(v, str)}:
+            return False
+    for key in ("identity", "server"):
+        was = str(held.get(key) or "").strip()
+        if was and was != str(declared.get(key) or "").strip():
+            return False
+    return not held.get(MERGED_IDENTITIES)
 
 
 def _merge_into_legacy_row(asset: Asset, metadata: dict, classification: str) -> tuple[dict, str]:
     """``(metadata, classification)`` for a declaration merging into a legacy row:
-    its permissions and tools added to the row's, its identity and server only
-    where the row had none, the row's older stamp kept -- so every reference to it is still
+    its permissions and tools added to the row's, its identity beside the row's
+    own (:data:`graph_refs.MERGED_IDENTITIES`), its server only where the row had
+    none, the row's older stamp kept -- so every reference to it is still
     reported until something that is the same declaration re-records it -- and
     approved only if the row already was."""
     old = asset.metadata if isinstance(asset.metadata, dict) else {}
@@ -176,9 +198,20 @@ def _merge_into_legacy_row(asset: Asset, metadata: dict, classification: str) ->
             merged[key] = union
     # What made the row a legacy key stays with it, or the next declaration to
     # land here would find an ordinary row and replace it after all.
-    for key in ("identity", "server"):
-        if str(old.get(key) or "").strip():
-            merged.pop(key, None)
+    if str(old.get("server") or "").strip():
+        merged.pop("server", None)
+    # Every identity it was declared with stays. The literal "agent" row stood for
+    # every unnamed agent, so the one landing now can name another account --
+    # keeping only the first dropped that account's powers from the agent, and
+    # keeping only the last dropped the first's. Both readers follow each one.
+    identities = identity_references(old)
+    arriving = str(merged.get("identity") or "").strip()
+    if identities:
+        merged["identity"] = identities[0]
+        extra = [i for i in [*identities[1:], arriving] if i and i != identities[0]]
+        merged[MERGED_IDENTITIES] = list(dict.fromkeys(extra))
+        if not merged[MERGED_IDENTITIES]:
+            merged.pop(MERGED_IDENTITIES)
     if classification == Asset.Classification.APPROVED and asset.classification != Asset.Classification.APPROVED:
         classification = Asset.Classification.KNOWN
     return merged, classification
@@ -263,7 +296,10 @@ def _agent_anchor(target: str) -> str:
         port = hostport.partition("]")[2].lstrip(":")
     else:
         port = hostport.rpartition(":")[2] if ":" in hostport else ""
-    if port.isdigit():
+    # ASCII digits only: `str.isdigit` accepts "²" and "①", which `int` refuses,
+    # and the anchor raised out of the scan's derivation instead of keeping the
+    # port as written.
+    if port.isascii() and port.isdigit():
         port = str(int(port))
     if not port:
         port = {"http": "80", "https": "443"}.get((parsed.scheme or "").lower(), "")
@@ -302,7 +338,14 @@ def _tool_identifier(entry: dict, kind: str, name: str) -> str:
         return server or name
     if name and server:
         return f"{name}@{server}"
-    return name or server
+    if server:
+        # A tool with no name, on a server: `@server`, never the server's bare
+        # name. As the bare name it was the same key as a tool NAMED for that
+        # server and declared without one -- two components, one row, and the
+        # second agent's scan replaced the first one's `shell` on a fresh
+        # deployment with nothing to say it had.
+        return f"@{server}"
+    return name
 
 
 def _agent_and_tools(

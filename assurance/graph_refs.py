@@ -150,6 +150,25 @@ def identity_reference(metadata: dict) -> str:
     return str(metadata.get("identity") or "").strip()
 
 
+#: Identities a legacy agent row was declared with beyond its first. The old
+#: literal ``"agent"`` row stood for every unnamed agent at once, so two
+#: declarations landing on it can name two accounts; keeping only one dropped the
+#: other account's powers from the agent without a word.
+MERGED_IDENTITIES = "merged_identities"
+
+
+def identity_references(metadata: dict) -> list[str]:
+    """Every identity an agent row names, its own first: :func:`identity_reference`
+    and each of :data:`MERGED_IDENTITIES`, once each, blanks left out."""
+    names: list[str] = []
+    extra = metadata.get(MERGED_IDENTITIES)
+    for value in [metadata.get("identity"), *(extra if isinstance(extra, list) else [])]:
+        name = str(value or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def resolve_identity(reference, accounts):
     """:func:`resolve_reference` for an agent's ``identity`` against an
     :func:`identity_index`: exactly as spelled first, identifier then name, and
@@ -267,13 +286,18 @@ def sort_references(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: (r["source"], r["mechanism"], r["reference"]))
 
 
-def dangling_reference(source, reference, mechanism: str, reason: str = UNRESOLVED_NOT_FOUND) -> dict:
+def dangling_reference(
+    source, reference, mechanism: str, reason: str = UNRESOLVED_NOT_FOUND, reasons=None
+) -> dict:
     """One unresolved reference, in the shape both readers report.
 
     Names what declared it as well as what it named: an operator chasing a
     dangling edge needs the source to know where to look, and the source's kind
     to know what kind of declaration to fix. ``reason`` says whether the
-    reference named nothing or named more than one thing.
+    reference named nothing or named more than one thing; ``reasons`` is every
+    reason it is reported for, ``reason`` first. One row per reference, however
+    many reasons: a row per reason counted one reference twice in every summary
+    built on the list.
     """
     return {
         "source": source.name,
@@ -281,4 +305,14 @@ def dangling_reference(source, reference, mechanism: str, reason: str = UNRESOLV
         "reference": str(reference or "").strip(),
         "mechanism": mechanism,
         "reason": reason,
+        "reasons": list(reasons) if reasons else [reason],
     }
+
+
+def unresolved_row(source, reference, mechanism: str, candidates, why) -> dict | None:
+    """The row one declared reference is reported as, or ``None`` when it
+    resolved cleanly: :func:`unresolved_reasons`, the first of them as ``reason``."""
+    reasons = unresolved_reasons(source, candidates, why)
+    if not reasons:
+        return None
+    return dangling_reference(source, reference, mechanism, reasons[0], reasons)

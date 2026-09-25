@@ -199,6 +199,7 @@ def test_a_server_reference_naming_nothing_is_recorded_by_both_readers():
         "reference": "mcp-ghost",
         "mechanism": MECHANISM_SERVER,
         "reason": "not_found",
+        "reasons": ["not_found"],
     }
     assert access_rows == [expected]
     assert route_rows == [expected]
@@ -237,6 +238,7 @@ def test_an_unresolvable_tool_reference_is_recorded_identically_by_both_readers(
         "reference": "ghost-tool",
         "mechanism": MECHANISM_TOOLS,
         "reason": "not_found",
+        "reasons": ["not_found"],
     }
     assert access_rows == [expected]
     assert route_rows == [expected]
@@ -760,6 +762,7 @@ def test_an_identity_naming_no_account_is_recorded_by_both_readers():
         "reference": "svc-gone",
         "mechanism": MECHANISM_IDENTITY,
         "reason": UNRESOLVED_NOT_FOUND,
+        "reasons": [UNRESOLVED_NOT_FOUND],
     }]
     assert route.build_route_map(dep)["summary"]["unresolved_identity_references"] == 1
     assert assess_effective_access(dep)["summary"]["unresolved_references"] == 1

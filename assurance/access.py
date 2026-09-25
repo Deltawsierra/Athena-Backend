@@ -71,14 +71,13 @@ from .graph_refs import (
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
-    dangling_reference,
     identity_index,
-    identity_reference,
+    identity_references,
     resolve_identity,
     reference_index,
     resolve_reference,
     superseded_identity,
-    unresolved_reasons,
+    unresolved_row,
     sort_references,
     tool_references,
 )
@@ -191,15 +190,16 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
                 )
                 for target in targets:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
-                for reason in unresolved_reasons(asset, targets, why):
-                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, reason))
-            identity = identity_reference(metadata)
-            if identity:
+                row = unresolved_row(asset, ident, MECHANISM_TOOLS, targets, why)
+                if row is not None:
+                    unresolved.append(row)
+            for identity in identity_references(metadata):
                 targets, why = resolve_identity(identity, accounts)
                 for target in targets:
                     add(asset, target, "acts as", _kind_cap(target.kind)["key"])
-                for reason in unresolved_reasons(asset, targets, why):
-                    unresolved.append(dangling_reference(asset, identity, MECHANISM_IDENTITY, reason))
+                row = unresolved_row(asset, identity, MECHANISM_IDENTITY, targets, why)
+                if row is not None:
+                    unresolved.append(row)
         server = metadata.get("server")
         if server and str(server).strip():
             targets, why = resolve_reference(
@@ -207,8 +207,9 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
             )
             for target in targets:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
-            for reason in unresolved_reasons(asset, targets, why):
-                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER, reason))
+            row = unresolved_row(asset, server, MECHANISM_SERVER, targets, why)
+            if row is not None:
+                unresolved.append(row)
 
     return edges, unresolved
 
@@ -307,6 +308,8 @@ def _power_entry(asset, via_to_asset: list, via_keys_to_asset: list, perm: str, 
 #: alone. See :func:`_identity_use`.
 IDENTITY_PROVEN = "proven"
 IDENTITY_AMBIGUOUS = "ambiguous"
+#: Named by an agent row no scan has recorded under the current identity rules.
+IDENTITY_UNRECORDED = "unrecorded"
 
 
 def _identity_use(agents, service_accounts) -> dict:
@@ -327,20 +330,20 @@ def _identity_use(agents, service_accounts) -> dict:
     use: dict = {}
     for agent in agents:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
-        identity = identity_reference(metadata)
-        if not identity:
-            continue
-        candidates, why = resolve_identity(identity, accounts)
         # An agent row no scan has recorded under the current identity rules --
         # the old unnamed "agent", standing for every unnamed agent at once --
         # does not prove anyone acts under the account it names. It kept an
         # orphaned account reading as used, with nothing anywhere to say why.
-        proven = why is None and not superseded_identity(agent)
-        for account in candidates:
-            if proven:
-                use[account.pk] = IDENTITY_PROVEN
-            else:
-                use.setdefault(account.pk, IDENTITY_AMBIGUOUS)
+        unrecorded = superseded_identity(agent)
+        for identity in identity_references(metadata):
+            candidates, why = resolve_identity(identity, accounts)
+            for account in candidates:
+                if why is None and not unrecorded:
+                    use[account.pk] = IDENTITY_PROVEN
+                elif why is None:
+                    use.setdefault(account.pk, IDENTITY_UNRECORDED)
+                else:
+                    use.setdefault(account.pk, IDENTITY_AMBIGUOUS)
     return use
 
 
@@ -500,19 +503,25 @@ def _principal_dict(
                 "under it.",
             }
         )
-    elif unused and acted_under == IDENTITY_AMBIGUOUS:
+    elif unused and acted_under in (IDENTITY_AMBIGUOUS, IDENTITY_UNRECORDED):
         # Neither orphaned nor used: an agent acts under an identity this account
-        # and another both answer to. Calling it orphaned says nobody acts under
-        # it; calling it used says someone does. The inventory says neither.
-        gaps.append(
-            {
-                "type": "use_unproven",
-                "risk": RISK_ELEVATED,
-                "detail": "An agent acts under an identity more than one service account answers "
+        # and another both answer to, or an agent row no scan has re-recorded names
+        # it. Calling it orphaned says nobody acts under it; calling it used says
+        # someone does. The inventory says neither -- and says which of the two
+        # it is, because they are fixed differently.
+        if acted_under == IDENTITY_AMBIGUOUS:
+            detail = (
+                "An agent acts under an identity more than one service account answers "
                 "to, and the inventory does not say which — no principal is proven to act "
-                "under this one.",
-            }
-        )
+                "under this one."
+            )
+        else:
+            detail = (
+                "The only agent naming this account is recorded under identity rules no "
+                "scan has re-recorded it under since — no principal is proven to act under "
+                "it until that agent is scanned again."
+            )
+        gaps.append({"type": "use_unproven", "risk": RISK_ELEVATED, "detail": detail})
 
     # Principal risk: the worst of its base risk and any gap it carries.
     risk = base_risk

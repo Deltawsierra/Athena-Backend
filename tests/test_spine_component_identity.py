@@ -646,22 +646,21 @@ def test_a_target_with_no_host_anchors_no_agent():
 # ---- A declaration that lands on an old row it is not. ----
 
 
-@pytest.mark.parametrize(
-    "tool",
-    [{"server": "files-mcp", "permissions": ["http:get"]}, {"name": "files-mcp", "permissions": ["http:get"]}],
-    ids=["nameless-on-the-server", "named-for-the-server"],
-)
-def test_another_agents_declaration_merges_into_an_old_row_and_leaves_it_reported(tool):
-    """Both write the key the old collapsed row holds. The refresh replaced its
-    permissions and stamped it current, so the old agent -- not rescanned --
-    lost its shell and the reason naming the row disappeared."""
-    dep = _dep()
-    _old_rows(dep, agent_tools=["files-mcp"])
-    derive_assets(dep, PentestScan.objects.create(
-        user=dep.owner, target_url="https://b.example/bot", consent=True,
+def _landing_scan(user, tool):
+    return PentestScan.objects.create(
+        user=user, target_url="https://b.example/bot", consent=True,
         status=PentestScan.STATUS_COMPLETED, engine_response={"findings": []},
         target_config={"tools": [tool]},
-    ))
+    )
+
+
+def test_another_agents_declaration_merges_into_an_old_row_and_leaves_it_reported():
+    """A tool named for the server writes the key the old collapsed row holds. The
+    refresh replaced its permissions and stamped it current, so the old agent --
+    not rescanned -- lost its shell and the reason naming the row disappeared."""
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["http:get"]}))
 
     ghost = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
     assert sorted(ghost.metadata["permissions"]) == ["http:get", "shell"]
@@ -672,14 +671,113 @@ def test_another_agents_declaration_merges_into_an_old_row_and_leaves_it_reporte
     assert ("files-mcp", "tools", "superseded_identity") in _references(dep)
 
 
-def test_a_nameless_tool_on_its_server_is_the_same_declaration_and_is_re_recorded():
+def test_a_nameless_tool_on_a_server_has_its_own_key_and_leaves_the_old_row_alone():
+    """As the server's bare name it landed on the old collapsed row. It is
+    ``@server`` now, which no old row holds."""
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    derive_assets(dep, _landing_scan(dep.owner, {"server": "files-mcp", "permissions": ["http:get"]}))
+
+    assert dep.assets.get(kind=Kind.TOOL, identifier="files-mcp").metadata["permissions"] == ["shell"]
+    assert dep.assets.get(kind=Kind.TOOL, identifier="@files-mcp").metadata["permissions"] == ["http:get"]
+
+
+def test_a_declaration_that_does_not_cover_an_old_row_cannot_stamp_it():
+    """The row's NAME was the test, and the name is written once, at creation:
+    the old rules went on replacing the permissions under it. Created by a nameless
+    tool and then overwritten by a named one, the row matched a new declaration's
+    name, was stamped current, and the agent it still served lost its shell with
+    nothing left reporting it -- the agent itself stamped by 0034."""
     from assurance.graph_refs import IDENTITY_RULES
 
     dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
     _asset(dep, kind=Kind.TOOL, name="files-mcp", identifier="files-mcp",
-           metadata={"source": "declared_inventory", "server": "files-mcp", "permissions": ["read"]})
-    derive_assets(dep, _inventory_scan(dep.owner, [{"server": "files-mcp", "permissions": ["read"]}]))
-    assert dep.assets.get(kind=Kind.TOOL).metadata["identity_rules"] == IDENTITY_RULES
+           metadata={**inventory, "server": "files-mcp", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.AGENT, name="beta", identifier="beta",
+           metadata={**inventory, "identity_rules": IDENTITY_RULES, "identity": "", "tools": ["files-mcp"]})
+    derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["http:get"]}))
+
+    row = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    assert sorted(row.metadata["permissions"]) == ["http:get", "shell"]
+    assert "identity_rules" not in row.metadata
+    result = assess_effective_access(dep)
+    assert "code_execution" in {c["key"] for c in _principal(result, "beta")["capabilities"]}
+    assert ("files-mcp", "tools", "superseded_identity") in _references(dep)
+
+
+def test_a_declaration_that_covers_the_old_agent_row_re_records_it():
+    """An agent named "agent" re-declaring what the old row holds is that row.
+    Matched on the name alone it could never be stamped, and the claim stayed
+    partially verified however many times it was rescanned."""
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "declared": True, "identity": "", "tools": ["search"]})
+    scan = _inventory_scan(dep.owner, [{"name": "search", "identifier": "search"}])
+    scan.target_config = {**scan.target_config, "agent": {"name": "agent"}}
+    scan.save()
+    derive_assets(dep, scan)
+
+    assert dep.assets.get(kind=Kind.AGENT, identifier="agent").metadata["identity_rules"] == IDENTITY_RULES
+    assert _references(dep) == []
+
+    # Recorded under the current rules now, it is replaced like any other row: a
+    # declaration dropping the tool drops it.
+    scan.target_config = {"agent": {"name": "agent"}, "tools": []}
+    scan.save()
+    derive_assets(dep, scan)
+    assert dep.assets.get(kind=Kind.AGENT, identifier="agent").metadata["tools"] == []
+
+
+def test_a_row_the_current_rules_wrote_is_replaced_not_merged():
+    """Only a row carrying an older stamp merges: once stamped, a re-declaration
+    that drops a permission drops it."""
+    dep = _dep()
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "db", "server": "files-mcp", "permissions": ["shell", "read"]}]))
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "db", "server": "files-mcp", "permissions": ["read"]}]))
+    assert dep.assets.get(kind=Kind.TOOL, identifier="db@files-mcp").metadata["permissions"] == ["read"]
+
+
+def test_an_old_row_whose_key_the_rules_never_collapsed_is_replaced_not_merged():
+    """A named tool with no server was one row under both rules; an older stamp on
+    it is no sign of a collapse, and a re-declaration replaces it."""
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    _asset(dep, kind=Kind.TOOL, name="db", identifier="db",
+           metadata={"source": "declared_inventory", "declared": True, "permissions": ["shell", "read"]})
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "db", "identifier": "db", "permissions": ["read"]}]))
+    row = dep.assets.get(kind=Kind.TOOL, identifier="db")
+    assert (row.metadata["permissions"], row.metadata["identity_rules"]) == (["read"], IDENTITY_RULES)
+
+
+def test_an_mcp_server_row_is_never_a_collapse():
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    _asset(dep, kind=Kind.MCP_SERVER, name="files-mcp", identifier="files-mcp",
+           metadata={"source": "declared_inventory", "declared": True, "server": "files-mcp",
+                     "permissions": ["shell"]})
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "files-mcp", "kind": "mcp_server", "server": "files-mcp"}]))
+    row = dep.assets.get(kind=Kind.MCP_SERVER)
+    assert (row.metadata["permissions"], row.metadata["identity_rules"]) == ([], IDENTITY_RULES)
+
+
+@pytest.mark.parametrize("row_approved, approved, expected", [
+    (False, True, Asset.Classification.KNOWN),
+    (True, True, Asset.Classification.APPROVED),
+    (True, False, Asset.Classification.KNOWN),
+])
+def test_a_merge_is_approved_only_if_the_row_and_the_declaration_both_are(row_approved, approved, expected):
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    ghost = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    ghost.classification = Asset.Classification.APPROVED if row_approved else Asset.Classification.KNOWN
+    ghost.save()
+    derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["http:get"], "approved": approved}))
+    assert dep.assets.get(pk=ghost.pk).classification == expected
 
 
 # ---- An old agent row is a source too. ----
@@ -708,10 +806,29 @@ def test_an_ambiguous_reference_with_an_old_candidate_says_both():
     _asset(dep, kind=Kind.MCP_SERVER, name="files-mcp",
            metadata={"source": "declared_inventory", "identity_rules": 2})
 
-    assert _references(dep) == [
-        ("files-mcp", "tools", "ambiguous"),
-        ("files-mcp", "tools", "superseded_identity"),
-    ]
+    assert _reasons(dep) == [("files-mcp", "tools", ("ambiguous", "superseded_identity"))]
+
+
+def test_the_old_candidate_is_named_wherever_it_stands_among_the_candidates():
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={
+        "source": "declared_inventory", "identity_rules": 2, "tools": ["files-mcp"]})
+    _asset(dep, kind=Kind.MCP_SERVER, name="files-mcp",
+           metadata={"source": "declared_inventory", "identity_rules": 2})
+    _asset(dep, kind=Kind.TOOL, name="read_file", identifier="files-mcp",
+           metadata={"source": "declared_inventory", "server": "", "permissions": ["shell"]})
+
+    assert _reasons(dep) == [("files-mcp", "tools", ("ambiguous", "superseded_identity"))]
+
+
+def _reasons(dep):
+    from assurance import route
+
+    access = sorted((u["reference"], u["mechanism"], tuple(u["reasons"]))
+                    for u in assess_effective_access(dep)["unresolved"])
+    assert access == sorted((u["reference"], u["mechanism"], tuple(u["reasons"]))
+                            for u in route.build_route_map(dep)["unresolved"])
+    return access
 
 
 def test_an_older_stamp_is_superseded_too():
@@ -775,3 +892,172 @@ def test_a_target_the_parser_rejects_anchors_no_agent():
     dep = _dep()
     derive_assets(dep, _scan(dep.owner, "https://u:pw@[::1/agent?tok=1", ["a"]))
     assert not dep.assets.filter(kind=Kind.AGENT).exists()
+
+
+
+# ---- Round 4. ----
+
+
+def test_a_nameless_tool_and_a_tool_named_for_its_server_are_two_tools():
+    """One key, `github`, for both: on a fresh deployment the second agent's scan
+    replaced the first one's shell, with nothing to say it had."""
+    dep = _dep()
+    derive_assets(dep, _landing_scan(dep.owner, {"server": "github", "permissions": ["shell"]}))
+    scan = _inventory_scan(dep.owner, [{"name": "github", "permissions": ["http:get"]}])
+    derive_assets(dep, scan)
+
+    tools = {a.identifier: a.metadata["permissions"] for a in dep.assets.filter(kind=Kind.TOOL)}
+    assert tools == {"@github": ["shell"], "github": ["http:get"]}
+    agents = {a.identifier: a for a in dep.assets.filter(kind=Kind.AGENT)}
+    unnamed = next(a for k, a in agents.items() if k.startswith("agent@"))
+    assert unnamed.metadata["tools"] == ["@github"]
+
+
+def test_the_old_agent_row_keeps_every_identity_it_was_declared_with():
+    """The literal "agent" row stood for every unnamed agent. Merging kept its
+    first identity and dropped the one arriving, so an agent named "agent" that
+    acts as an admin account read as holding nothing."""
+    from assurance import route
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "declared": True, "identity": "svc-read", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-read")
+    admin = _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-admin", metadata={"permissions": ["iam:admin"]})
+    scan = _inventory_scan(dep.owner, [])
+    scan.target_config = {"agent": {"name": "agent", "identity": "svc-admin"}, "tools": []}
+    scan.save()
+    derive_assets(dep, scan)
+    derive_assets(dep, scan)
+
+    row = dep.assets.get(kind=Kind.AGENT, identifier="agent")
+    assert (row.metadata["identity"], row.metadata["merged_identities"]) == ("svc-read", ["svc-admin"])
+    assert _principal(assess_effective_access(dep), "agent")["privilege_level"] == "high"
+    edges = route.build_route_map(dep)["edges"]
+    assert str(admin.uuid) in {e["target"] for e in edges if e["kind"] == "acts_as"}
+
+
+def test_the_old_agent_row_merges_its_tools_rather_than_losing_them():
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "declared": True, "identity": "", "tools": ["old-tool"]})
+    scan = _inventory_scan(dep.owner, [{"name": "search", "identifier": "search"}])
+    scan.target_config = {**scan.target_config, "agent": {"name": "agent"}}
+    scan.save()
+    derive_assets(dep, scan)
+    assert dep.assets.get(kind=Kind.AGENT, identifier="agent").metadata["tools"] == ["old-tool", "search"]
+
+
+def test_an_account_only_an_unrecorded_agent_names_says_so():
+    """The gap claimed more than one service account answered to the identity. The
+    deployment had one; the cause was an agent row no scan had re-recorded."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "identity": "svc-legacy", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-legacy")
+
+    (gap,) = _principal(assess_effective_access(dep), "svc-legacy")["gaps"]
+    assert gap["type"] == "use_unproven"
+    assert "re-recorded" in gap["detail"]
+    assert "more than one service account" not in gap["detail"]
+
+
+def test_one_reference_is_one_row_however_many_reasons():
+    """A row per reason counted one reference twice in every summary built on the
+    list, and the claim digest named it twice, once as unplaceable and once as
+    followed."""
+    from assurance import route
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={
+        "source": "declared_inventory", "identity_rules": 2, "tools": ["files-mcp"]})
+    _asset(dep, kind=Kind.TOOL, name="read_file", identifier="files-mcp",
+           metadata={"source": "declared_inventory", "server": "", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.MCP_SERVER, name="files-mcp",
+           metadata={"source": "declared_inventory", "identity_rules": 2})
+
+    assert assess_effective_access(dep)["summary"]["unresolved_references"] == 1
+    summary = route.build_route_map(dep)["summary"]
+    assert (summary["unresolved_edges"], summary["unresolved_tool_references"]) == (1, 1)
+    digest = _derive_effective_access(dep)["supporting_summary"]
+    assert digest.count("bot → files-mcp") == 1
+    assert "could not be placed" in digest
+
+
+def test_a_reference_only_an_old_row_answers_is_named_as_followed_not_unplaced():
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={
+        "source": "declared_inventory", "identity_rules": 2, "tools": ["reader"]})
+    _asset(dep, kind=Kind.TOOL, name="reader", metadata={"source": "declared_inventory", "permissions": ["read"]})
+
+    digest = _derive_effective_access(dep)["supporting_summary"]
+    assert "could not be placed" not in digest
+    assert "a rescan is what confirms it: bot → reader." in digest
+
+
+def test_an_old_source_whose_reference_names_nothing_is_not_found_only():
+    """"Followed" would say the reference led somewhere. It led nowhere."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "tools": ["gone"]})
+    assert _reasons(dep) == [("gone", "tools", ("not_found",))]
+
+
+def test_an_old_source_is_named_on_its_server_reference_too():
+    dep = _dep()
+    _asset(dep, kind=Kind.TOOL, name="read_file", identifier="files-mcp",
+           metadata={"source": "declared_inventory", "server": "mcp-prod", "permissions": ["read"]})
+    _asset(dep, kind=Kind.MCP_SERVER, name="mcp-prod",
+           metadata={"source": "declared_inventory", "identity_rules": 2})
+    assert _reasons(dep) == [("mcp-prod", "server", ("superseded_identity",))]
+
+
+@pytest.mark.parametrize("target, anchor", [
+    ("https://bots.example.com:\u00b2/agent", "agent@bots.example.com:\u00b2/agent"),
+    ("https://h.example.com:0/a", "agent@h.example.com:0/a"),
+])
+def test_a_port_is_its_number_only_when_it_is_ascii_digits(target, anchor):
+    """`str.isdigit` accepts "²", which `int` refuses: the anchor raised out of the
+    scan's derivation instead of keeping the port as written."""
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, target, ["a"]))
+    assert list(dep.assets.filter(kind=Kind.AGENT).values_list("identifier", flat=True)) == [anchor]
+
+
+def test_a_bare_path_target_anchors_no_agent():
+    dep = _dep()
+    derive_assets(dep, _scan(dep.owner, "/agent", ["a"]))
+    assert not dep.assets.filter(kind=Kind.AGENT).exists()
+
+
+# ---- 0034: which rows it records under the current rules. ----
+
+
+def test_0034_stamps_exactly_the_rows_both_rules_key_alike():
+    from importlib import import_module
+
+    from django.apps import apps
+
+    migration = import_module("assurance.migrations.0034_stamp_unchanged_identities")
+    dep = _dep()
+    inv = {"source": "declared_inventory"}
+    rows = {
+        "named agent": _asset(dep, kind=Kind.AGENT, name="bot", metadata={**inv}),
+        "the literal agent": _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent", metadata={**inv}),
+        "tool keyed by its server": _asset(dep, name="read_file", identifier="files-mcp",
+                                           metadata={**inv, "server": "files-mcp"}),
+        "tool with its own identifier": _asset(dep, name="reader", identifier="https://x/read",
+                                               metadata={**inv, "server": "files-mcp"}),
+        "tool with no server": _asset(dep, name="search", metadata={**inv}),
+        "mcp server": _asset(dep, kind=Kind.MCP_SERVER, name="mcp-prod", metadata={**inv, "server": "mcp-prod"}),
+        "not declared inventory": _asset(dep, name="scanned", metadata={"source": "scan_target"}),
+        "an older stamp": _asset(dep, name="older", metadata={**inv, "identity_rules": 1}),
+    }
+    for _ in range(2):  # the second pass changes nothing
+        migration.stamp(apps, None)
+        stamped = {k for k, a in rows.items() if Asset.objects.get(pk=a.pk).metadata.get("identity_rules") == 2}
+        assert stamped == {"named agent", "tool with its own identifier", "tool with no server", "mcp server"}
+    assert Asset.objects.get(pk=rows["an older stamp"].pk).metadata["identity_rules"] == 1
