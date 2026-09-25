@@ -6,7 +6,7 @@ that never refreshed the stored decision and write routes that refreshed it in a
 second transaction after the write had committed. Every route is held to both by
 tests/test_every_write_route_keeps_the_decision_current.py; this file holds the
 consequences one at a time -- the dispatch fence, a signed outcome's retry, a
-reader in between.
+reader in between -- and the pause decision-support publishes beside its revision.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from django.utils import timezone
 from mythos_core import outcome as oc
 from rest_framework.test import APIClient
 
-from assurance.decision import compute_decision, recompute_decision
+from assurance.decision import compute_decision, decision_support, recompute_decision
 from assurance.models import (
     ApprovedWorkflow,
     AssuranceClaim,
@@ -243,3 +243,42 @@ def test_a_reader_while_a_claim_moves_sees_one_decision(monkeypatch):
     assert response.status_code == 200, response.content
     assert seen == {"live": Deployment.Decision.READY, "stored": Deployment.Decision.READY}, seen
     assert one_decision(dep, client) == Deployment.Decision.NEEDS_REMEDIATION
+
+
+# ------------------------------------------------ the pause decision-support publishes
+
+
+def test_decision_support_reads_the_pause_from_the_row_it_reads_the_revision_from():
+    """An instance loaded before the operator paused still says READY. The revision
+    in the payload is the pause's, so the decision beside it must be the pause."""
+    dep = _scanned()
+    loaded = Deployment.objects.get(pk=dep.pk)
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk), paused=True) == Deployment.Decision.PAUSED
+    assert loaded.decision == Deployment.Decision.READY
+    support = decision_support(loaded)
+    row = Deployment.objects.values("decision", "decision_revision").get(pk=dep.pk)
+    assert support["paused"] is True
+    assert (support["decision"], support["revision"]) == (row["decision"], row["decision_revision"])
+
+
+def test_a_pause_landing_before_the_decision_support_read_is_published_as_the_pause(monkeypatch):
+    """The route read `paused` from the instance it loaded, before the transaction
+    that read the revision. An operator's pause committed in between was published
+    as a live READY under the revision that records the pause."""
+    from assurance import views
+
+    dep = _scanned()
+    real = views.current_decision
+
+    def then_an_operator_pauses(deployment):
+        answer = real(deployment)
+        # Another instance, as another request would hold: the route's own copy
+        # keeps the READY it loaded.
+        recompute_decision(Deployment.objects.get(pk=dep.pk), paused=True)
+        return answer
+
+    monkeypatch.setattr(views, "current_decision", then_an_operator_pauses)
+    support = _client().get(_base(dep) + "decision-support/").json()
+    row = Deployment.objects.values("decision", "decision_revision").get(pk=dep.pk)
+    assert row["decision"] == Deployment.Decision.PAUSED
+    assert (support["decision"], support["revision"]) == (row["decision"], row["decision_revision"])

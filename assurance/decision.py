@@ -399,7 +399,7 @@ def _claim_brief(claim: AssuranceClaim) -> dict:
 _NO_CHAINS: Composition = compose_chains([])
 
 
-def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
+def decision_support(deployment: Deployment, *, paused: bool | None = None) -> dict:
     """The deployment's decision with *why* — the honest decision-support artifact
     (Stage 1C). Shows the final decision, the finding-based signal and the claim cap
     that combined into it, and exactly which current claims support or undermine it,
@@ -418,6 +418,12 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     fence its own next read (``assurance.revision.read_decision(at_least=...)``).
     Before this, the fence existed only for in-process Python callers: nothing over
     HTTP could tell a fresh answer from a stale one.
+
+    ``paused``: ``None`` -- the default, and the only reading fit to publish --
+    takes the operator's pause from the same row, in the same statement, as the
+    revision. ``True``/``False`` impose one instead, which is a what-if: the
+    revision in the payload is still the row's, so it no longer names the pause
+    the body was computed under.
     """
     # Lazy import: assurance.policy imports the decision rules from THIS module, so
     # a top-level import here would be circular.
@@ -426,12 +432,19 @@ def decision_support(deployment: Deployment, *, paused: bool = False) -> dict:
     with transaction.atomic():
         parts = read_decision_parts(deployment)
         # Read inside the same transaction as the parts, so the revision names the
-        # moment the parts describe rather than a later one.
-        revision = (
-            Deployment.objects.values_list("decision_revision", flat=True)
+        # moment the parts describe rather than a later one. The pause is the
+        # stored decision, so it comes from this same row read too: the route used
+        # to take it from the instance it loaded BEFORE this transaction, and a
+        # pause committed in between was published as a live READY under the
+        # revision that records the pause.
+        row = (
+            Deployment.objects.values_list("decision", "decision_revision")
             .filter(pk=deployment.pk)
             .first()
         )
+    stored, revision = row if row is not None else (None, None)
+    if paused is None:
+        paused = stored == Deployment.Decision.PAUSED
     signal = parts.claim_signal
     from_findings = None if paused else parts.from_findings
     scan_cap = None if paused else parts.scan_cap

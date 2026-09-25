@@ -1954,8 +1954,11 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # computes live, and after a key rotation those were two different
         # decisions under one revision number -- a fence that fenced nothing.
         current_decision(deployment)
-        paused = deployment.decision == Deployment.Decision.PAUSED
-        return Response(decision_support(deployment, paused=paused))
+        # No `paused` argument: `decision_support` reads the pause from the row it
+        # reads the revision from. Read here, from this instance, it came from
+        # before that transaction, and an operator's pause landing in between was
+        # published as a live READY under the revision that recorded the pause.
+        return Response(decision_support(deployment))
 
     @action(detail=True, methods=["get"], url_path="coverage-manifest")
     def coverage_manifest_view(self, request, uuid=None):
