@@ -63,6 +63,11 @@ def read_decision(deployment: Deployment, *, at_least: int | None = None) -> dic
     Reads the row fresh. A ``Deployment`` instance held across a transition
     carries the old values, and this is exactly the call where that matters.
     """
+    # Reconciled first, like every surface that publishes the decision: the
+    # revision is only a fence if the decision it names is the one in force.
+    from .decision import current_decision
+
+    current_decision(Deployment.objects.get(pk=deployment.pk))
     row = Deployment.objects.values("decision", "decision_revision").get(pk=deployment.pk)
     revision = row["decision_revision"]
     if at_least is not None and revision < at_least:

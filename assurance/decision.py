@@ -598,7 +598,14 @@ def current_decision(deployment: Deployment) -> str | None:
     incident pack). Every other input reaches the decision through a write that
     recomputes it; the keyring is a file, and a withdrawn key used to leave a
     stored READY behind that the receipt went on reporting. Only deployments with
-    chain outcomes can move on a keyring change, so only they are reconciled."""
+    chain outcomes can move on a keyring change, so only they are reconciled.
+
+    The cost is paid by the first read after a rotation: one recompute, under the
+    row lock, per stale deployment it publishes -- about twenty queries each -- and
+    a read that meets a writer holding that lock waits for it. If the wait outlasts
+    the database timeout the read fails rather than publish a decision computed
+    under the withdrawn keys. The eager path is ``manage.py recompute_chain_decisions``,
+    run when the keyring changes, after which every read is the two-query one."""
     from . import observed_outcomes
 
     if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():

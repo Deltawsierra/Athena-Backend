@@ -119,10 +119,20 @@ _BLOCKING_ACTIONS = frozenset({"block", "blocked", "deny", "denied", "refuse", "
 
 
 def _is_sensitive_key(key):
-    # casefold, not lower: "paſſword".lower() keeps the ſ and matched no part, so
-    # the JSON and form paths forwarded that value while the text path redacted it.
-    lowered = str(key).casefold()
-    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+    """Whether ``key`` names a secret -- the ONE judgement every path uses.
+
+    casefold, not lower: "paſſword".lower() keeps the ſ, and "paßword" only
+    becomes "password" when folded. And both spellings of each part: the plain
+    substring ("private_key") and the text path's separator-tolerant pattern
+    ("private-key"). Three predicates had drifted apart, so a key one path
+    redacted another forwarded."""
+    text = str(key)
+    lowered = text.casefold()
+    return (
+        any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+        or _SENSITIVE_TEXT_PART.search(lowered) is not None
+        or _SENSITIVE_TEXT_PART.search(text) is not None
+    )
 
 
 def _redact_structure(value):
@@ -193,30 +203,55 @@ def _text_value(text, key):
     return None
 
 
-# A QUOTED key the scan above cannot tokenise -- one with a space or any other
-# character outside the key class: `{"client secret": "hunter2",}` is not JSON
-# (the trailing comma), so it reaches this path, and the structured path would
-# have redacted it. Bounded, so every attempt stops within 128 characters of the
-# quote it starts at, and the pass stays linear.
-_QUOTED_KEY = re.compile(r'"((?:[^"\\\r\n]|\\.){1,128})"\s*:\s*')
+# QUOTED keys the token scan cannot read: one with a space (`"client secret"`), or
+# JSON escapes (`"p\u0061ssword"`), in a body that is not JSON (a trailing comma)
+# and so reaches this path, where the structured path would have redacted it.
+#
+# A TOKENIZER, left to right: find a quote, match the string it opens to its
+# closing quote, and move past it. Each character is visited once, whatever the
+# body. The per-position regex this replaces tried every quote as a key start --
+# a body of `"\` repeated backtracked 128 characters at each, and 10 MB held a
+# worker for 34 s before authentication. An unterminated string runs to the end
+# of the text, so nothing after it can be a key and the pass stops there.
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.S)
+_AFTER_KEY = re.compile(r"\s*:\s*")
+
+
+def _decoded_name(quoted):
+    try:
+        name = json.loads(quoted)
+    except (ValueError, RecursionError):
+        return quoted[1:-1]
+    return name if isinstance(name, str) else quoted[1:-1]
 
 
 def _redact_quoted_keys(text):
     out = []
     pos = 0
-    for key in _QUOTED_KEY.finditer(text):
-        if key.start() < pos:
+    scan = 0
+    while True:
+        start = text.find('"', scan)
+        if start < 0:
+            break
+        string = _JSON_STRING.match(text, start)
+        if string is None:
+            break
+        end = string.end()
+        scan = end
+        colon = _AFTER_KEY.match(text, end)
+        if colon is None or not _is_sensitive_key(_decoded_name(text[start:end])):
             continue
-        name = key.group(1)
-        # Keys the scan could tokenise it has already judged; only the others here.
-        if _KEY_TOKEN.fullmatch(name) or not _is_sensitive_key(name):
+        value_start = colon.end()
+        if text.startswith(REDACTED, value_start):
+            # Already redacted by the token scan: judged once, written once.
+            scan = value_start + len(REDACTED)
             continue
-        value = _TEXT_VALUE[":"].match(text, key.end())
+        value = _TEXT_VALUE[":"].match(text, value_start)
         if value is None:
             continue
-        out.append(text[pos:key.start()])
-        out.append(f'"{name}": {REDACTED}')
-        pos = value.end()
+        out.append(text[pos:start])
+        out.append(f"{text[start:end]}: {REDACTED}")
+        pos = scan = value.end()
     out.append(text[pos:])
     return "".join(out)
 
@@ -236,7 +271,7 @@ def _redact_token_keys(text):
         key = _TEXT_KEY_HERE.match(text, pos) or _TEXT_KEY.search(text, pos)
         if key is None:
             break
-        value = _text_value(text, key) if _SENSITIVE_TEXT_PART.search(key.group(2)) else None
+        value = _text_value(text, key) if _is_sensitive_key(key.group(2)) else None
         if value is None:
             # Not a secret, or a secret with nothing after it: kept verbatim, and
             # the scan resumes after the separator, where the next key can start.

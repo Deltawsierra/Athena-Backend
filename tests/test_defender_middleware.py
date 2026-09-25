@@ -729,3 +729,50 @@ def test_the_quoted_key_pass_stays_linear():
         _redact_text(large)
         t_large = time.perf_counter() - start
         assert t_large < max(t_small, 0.002) * 12, (unit[:4], t_small, t_large)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # JSON escapes in a quoted key: judged as the structured path would read it.
+        ('{"p\\u0061ssword": "HUNTER2Z",}', '{"p\\u0061ssword": [redacted],}'),
+        # ß folds to ss only under casefold -- on every path.
+        ("paßword=abc", "paßword: [redacted]"),
+        ('{"seßion": "x",}', '{"seßion": [redacted],}'),
+        # No length bound on a quoted key any more.
+        ('{"' + "billing " * 16 + 'secret": "v",}', '{"' + "billing " * 16 + 'secret": [redacted],}'),
+        # A key written once is redacted once.
+        ('{"a secret": "a secret": "x"', '{"a secret": [redacted]: "x"'),
+    ],
+)
+def test_the_text_fallback_judges_keys_as_the_structured_path_does(text, expected):
+    from audit.middleware import _redact_text
+
+    assert _redact_text(text) == expected
+
+
+@pytest.mark.parametrize("key", ["private-key", "SESSİON", "paßword", "Api-Key"])
+def test_one_judgement_for_every_path(key):
+    """The structured path forwarded `private-key` and `SESSİON`, which the text
+    path redacted; the text path forwarded `paßword`, which the structured path
+    redacted. One predicate now answers for all three."""
+    from audit.middleware import _is_sensitive_key, _redact_structure, _redact_text
+
+    assert _is_sensitive_key(key)
+    assert _redact_structure({key: "S3CR3T"}) == {key: "[redacted]"}
+    assert "S3CR3T" not in _redact_text(f'{{"{key}": "S3CR3T",}}')
+
+
+@pytest.mark.parametrize("unit", ['"\\', '"a', '\\"', '"x' + "a" * 127])
+def test_the_quoted_key_pass_visits_each_character_once(unit):
+    """A body of `"\\` repeated made the per-position pattern backtrack 128
+    characters at every quote: 10 MB took 34 s, before authentication. Bounded in
+    absolute terms, generously, as well as in growth."""
+    import time
+
+    from audit.middleware import _redact_quoted_keys
+
+    body = unit * (1_048_576 // len(unit))
+    start = time.perf_counter()
+    _redact_quoted_keys(body)
+    assert time.perf_counter() - start < 1.0

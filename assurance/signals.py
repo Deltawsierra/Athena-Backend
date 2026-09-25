@@ -90,7 +90,7 @@ def auto_dispatch_finding(sender, instance, created, update_fields=None, **kwarg
 
 
 @receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
-def recompute_decisions_computed_under_another_rule(sender, using=None, **kwargs):
+def recompute_decisions_computed_under_another_rule(sender, using=None, apps=None, **kwargs):
     """Recompute every stored decision with chain outcomes under it that was never
     computed under the signed-outcome rule (``decision_keyring`` NULL).
 
@@ -109,15 +109,17 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, **kwargs
         return
     # `post_migrate` fires after EVERY migrate, including one that leaves this
     # app below the migration adding the stamp (a rollback, a staged upgrade):
-    # the column is not there to query, and every such migrate crashed here.
-    from django.db import connections
-    from django.db.migrations.recorder import MigrationRecorder
-
-    applied = MigrationRecorder(connections[using or DEFAULT_DB_ALIAS]).migration_qs.filter(
-        app="assurance", name="0033_deployment_decision_keyring"
-    )
-    if not applied.exists():
-        return
+    # the column is not there to query, and every such migrate crashed here. The
+    # migration state the signal hands over says whether it is -- asked of the
+    # model, not of the recorder table, which a run with no migrations applied
+    # (`--nomigrations`, a fresh syncdb) never creates.
+    if apps is not None:
+        try:
+            state = apps.get_model("assurance", "Deployment")
+        except LookupError:
+            return
+        if not any(f.name == "decision_keyring" for f in state._meta.get_fields()):
+            return
     from .decision import recompute_decision
     from .models import Deployment, WorkflowChainOutcome
 

@@ -1282,10 +1282,11 @@ def test_the_rotation_command_counts_only_the_decisions_that_moved(keyring):
 def test_the_upgrade_recompute_waits_for_the_column_it_reads():
     """``post_migrate`` fires after every migrate, including one that leaves this
     app below 0033 -- where the stamp column does not exist, and every such
-    migrate crashed in this receiver."""
-    from django.apps import apps
+    migrate crashed in this receiver. It asks the migration state it is handed,
+    not the recorder table (which a run with no migrations applied never creates)."""
+    from django.apps import apps as live_apps
     from django.db import connection
-    from django.db.migrations.recorder import MigrationRecorder
+    from django.db.migrations.executor import MigrationExecutor
 
     from assurance.signals import recompute_decisions_computed_under_another_rule as receiver
 
@@ -1293,11 +1294,12 @@ def test_the_upgrade_recompute_waits_for_the_column_it_reads():
     _approved(dep, "refund-over-limit")
     _ingested(dep)
     Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None, decision=Deployment.Decision.AUDIT_INCOMPLETE)
-    MigrationRecorder(connection).migration_qs.filter(
-        app="assurance", name="0033_deployment_decision_keyring"
-    ).delete()
-    receiver(sender=apps.get_app_config("assurance"), using="default")
+    below = MigrationExecutor(connection).loader.project_state(("assurance", "0032_signed_chain_outcomes")).apps
+    receiver(sender=live_apps.get_app_config("assurance"), using="default", apps=below)
     assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
+    # And at the state that has the column, it does run.
+    receiver(sender=live_apps.get_app_config("assurance"), using="default", apps=live_apps)
+    assert _stored(dep) == Deployment.Decision.READY
 
 
 def test_the_admin_cannot_write_the_decision():
@@ -1330,3 +1332,46 @@ def test_an_object_without_the_workflow_list_does_not_clear_the_approved_set(bod
     assert ApprovedWorkflow.objects.filter(deployment=dep).count() == 1
     assert _client().put(_approved_url(dep), {"workflows": []}, format="json").status_code == 200
     assert ApprovedWorkflow.objects.filter(deployment=dep).count() == 0
+
+
+# ------------------------------------------------ the gaps round five found
+
+
+def test_decision_support_publishes_the_reconciled_decision_under_its_own_revision(keyring):
+    """It computed the decision live and published the stored revision beside it:
+    after a rotation, revision 1 named READY in the store and NEEDS_MORE_EVIDENCE
+    here -- one revision, two decisions, and a fence that fenced nothing."""
+    from assurance.revision import read_decision
+
+    dep = _ready_then_rotated(keyring)
+    body = _client().get(f"/api/assurance/deployments/{dep.uuid}/decision-support/").json()
+    stored = read_decision(Deployment.objects.get(pk=dep.pk))
+    assert body["decision"] == stored["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert body["revision"] == stored["revision"]
+
+
+def test_read_decision_reconciles_before_it_fences(keyring):
+    from assurance.revision import read_decision
+
+    dep = _ready_then_rotated(keyring)
+    assert read_decision(dep)["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_the_deployment_list_does_not_ask_per_row_whether_a_deployment_has_chains():
+    """The list reconciles each row; the annotation answers "has chains?" in the
+    list query. Without it every unstamped row without chains paid an `exists()`
+    on every read."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    def count(n):
+        for _ in range(n):
+            _deployment()
+        client = _client()
+        with CaptureQueriesContext(connection) as queries:
+            assert client.get("/api/assurance/deployments/").status_code == 200
+        return len(queries)
+
+    few = count(2)
+    many = count(8)
+    assert many == few, (few, many)

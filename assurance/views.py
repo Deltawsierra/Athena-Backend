@@ -1912,6 +1912,10 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         authenticated operator like the rest of the assurance reads; it computes,
         it does not persist."""
         deployment = self.get_object()
+        # Reconciled first: it publishes the stored revision beside a decision it
+        # computes live, and after a key rotation those were two different
+        # decisions under one revision number -- a fence that fenced nothing.
+        current_decision(deployment)
         paused = deployment.decision == Deployment.Decision.PAUSED
         return Response(decision_support(deployment, paused=paused))
 
