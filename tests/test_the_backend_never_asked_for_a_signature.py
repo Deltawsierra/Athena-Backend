@@ -43,6 +43,7 @@ from assurance.models import (
     ProviderAssertion,
 )
 from assurance.views import DeploymentViewSet
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -91,7 +92,9 @@ def _deployment(owner):
         provider=provider,
         classification=Asset.Classification.APPROVED,
     )
-    return dep
+    # The hand-written decision stands for one the rules computed: stamped as such,
+    # or the receipt recomputes it (decision.current_decision).
+    return stamped_under_the_rules_in_force(dep)
 
 
 def _fetch(dep, user):
