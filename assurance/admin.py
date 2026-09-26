@@ -8,6 +8,7 @@ from .models import (
     Asset,
     ConnectorBinding,
     DataBoundary,
+    DecisionDispatchDue,
     Deployment,
     DispatchAttempt,
     DispatchPolicy,
@@ -295,6 +296,21 @@ class DispatchPolicyAdmin(admin.ModelAdmin):
     list_filter = ("enabled", "min_severity", "on_blocking_decision")
     search_fields = ("deployment__name",)
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(DecisionDispatchDue)
+class DecisionDispatchDueAdmin(admin.ModelAdmin):
+    # Written and cleared only by the background dispatch; shown so a dispatch that
+    # has not finished is seen. `manage.py retry_blocking_dispatches` retries it.
+    list_display = ("deployment", "owed_since", "runs", "last_run_at")
+    search_fields = ("deployment__name",)
+    readonly_fields = ("deployment", "owed_since", "runs", "last_run_at", "last_error")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(DispatchAttempt)
