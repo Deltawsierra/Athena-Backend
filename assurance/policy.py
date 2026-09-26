@@ -81,6 +81,9 @@ def _policy_document() -> dict:
                 "stale": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
                 "unknown": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
                 "open_retest": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
+                # A person's recorded judgment that a moved obligation is material
+                # (assurance.legal); a review merely pending caps nothing.
+                "legally_stale": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
             },
         },
         # Required-evidence rules (assurance.claims / assurance.change).

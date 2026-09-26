@@ -475,3 +475,80 @@ for _label in DECISION_INPUTS:
     post_delete.connect(
         _decision_input_deleted, sender=_label, dispatch_uid=f"assurance_decision_backstop_delete:{_label}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Latent conditions (Phase 2 item 9): what the decision does not read, but a
+# declared condition does.
+# ---------------------------------------------------------------------------
+#
+# The data boundary and a provider's profile reach the decision only through the
+# claims re-derived from them -- until someone declares a latent condition on one.
+# Then a write to it is the change the condition watches for, and the deployment
+# it is declared on is brought current after the write commits: the refresh above
+# fires the conditions first (`decision.refresh_stored_decisions`). The API routes
+# that write these fire them inside their own transaction; this is the net under
+# the admin, a shell, a management command.
+
+_PRIOR_PROVIDER_NAME = "_assurance_latent_prior_provider_name"
+
+
+def _provider_name_as_stored(instance):
+    """The provider name ``instance`` carried as last saved: a Provider's own, or
+    the provider a ProviderAssertion belonged to."""
+    if instance._state.adding or instance.pk is None:
+        return None
+    if instance._meta.label == "assurance.Provider":
+        field = "name"
+    else:
+        field = "provider__name"
+    return type(instance)._default_manager.filter(pk=instance.pk).values_list(field, flat=True).first()
+
+
+def _provider_name(instance):
+    if instance._meta.label == "assurance.Provider":
+        return instance.name
+    provider = getattr(instance, "provider", None)
+    return None if provider is None else provider.name
+
+
+def _remember_prior_provider_name(sender, instance, raw=False, **kwargs):
+    if raw:
+        return
+    instance.__dict__[_PRIOR_PROVIDER_NAME] = _provider_name_as_stored(instance)
+
+
+def _schedule_watching(deployment_ids, using) -> None:
+    for deployment_id in deployment_ids:
+        schedule_decision_refresh(deployment_id, using=using)
+
+
+def _provider_profile_written(sender, instance, raw=False, using=None, **kwargs):
+    from .latent import deployments_watching_provider
+
+    before = instance.__dict__.pop(_PRIOR_PROVIDER_NAME, None)
+    if raw:
+        return
+    _schedule_watching(deployments_watching_provider(before, _provider_name(instance)), using)
+
+
+def _data_boundary_written(sender, instance, raw=False, using=None, **kwargs):
+    from .latent import deployments_watching_boundary
+
+    if raw:
+        return
+    _schedule_watching(deployments_watching_boundary(instance.deployment_id), using)
+
+
+for _label in ("assurance.Provider", "assurance.ProviderAssertion"):
+    pre_save.connect(
+        _remember_prior_provider_name, sender=_label, dispatch_uid=f"assurance_latent_pre:{_label}"
+    )
+    post_save.connect(_provider_profile_written, sender=_label, dispatch_uid=f"assurance_latent_save:{_label}")
+    post_delete.connect(_provider_profile_written, sender=_label, dispatch_uid=f"assurance_latent_delete:{_label}")
+post_save.connect(
+    _data_boundary_written, sender="assurance.DataBoundary", dispatch_uid="assurance_latent_save:DataBoundary"
+)
+post_delete.connect(
+    _data_boundary_written, sender="assurance.DataBoundary", dispatch_uid="assurance_latent_delete:DataBoundary"
+)

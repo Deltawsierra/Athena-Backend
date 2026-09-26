@@ -587,7 +587,11 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
     # the pause from the instance loaded when the ingest began, so an unpause
     # committed meanwhile left the refresh skipped and the decision stale.
     from .decision import recompute_decision
+    from .latent import fire_due_conditions
 
+    # A declared latent condition this scan made true -- a capability granted, an
+    # asset appearing -- fires before the decision is refreshed, so it reads it.
+    fire_due_conditions(deployment)
     with obs.span(obs.PLAN, component="recompute_decision", subject=str(deployment.pk)) as active:
         recompute_decision(deployment)
         if active is not None:

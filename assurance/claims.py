@@ -64,7 +64,8 @@ from .fingerprint import (
     compute_system_fingerprint,
     policy_version,
 )
-from .models import AssuranceClaim, ClaimEvent, Deployment, EvidenceClass, evidence_strength
+from .models import AssuranceClaim, ClaimEvent, Deployment, EvidenceClass, LatentCondition, evidence_strength
+from .legal import ruling_for_next_version
 from .receipt import build_assurance_receipt
 
 Status = AssuranceClaim.ClaimStatus
@@ -509,10 +510,15 @@ def _prefetched(deployment) -> Deployment:
     )
 
 
-def _make_claim(deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now, human_owner=None) -> AssuranceClaim:
+def _make_claim(
+    deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now,
+    human_owner=None, legal_status=None,
+) -> AssuranceClaim:
     """Create a new CURRENT claim version from a deriver's output, and seed its
-    lifecycle with a ``∅ → status`` :class:`ClaimEvent`."""
+    lifecycle with a ``∅ → status`` :class:`ClaimEvent`. ``legal_status`` is the
+    version it replaces' (see :func:`_supersede`); a first version is not assessed."""
     status = derived["status"]
+    legal = {} if legal_status is None else {"legal_status": legal_status}
     claim = AssuranceClaim.objects.create(
         deployment=deployment,
         asset=derived["subject"],
@@ -533,6 +539,7 @@ def _make_claim(deployment, *, identity_fp, system_fp, input_fp, pol_version, re
         invalidation_conditions=derived["invalidation_conditions"],
         receipt_digest=receipt_digest,
         human_owner=human_owner,
+        **legal,
         valid_from=now,
         first_seen=now,
         last_seen=now,
@@ -731,9 +738,19 @@ def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, i
         derived=derived,
         now=now,
         human_owner=current.human_owner,
+        # The legal axis is not re-judged by a re-derive (assurance.legal decides
+        # what the new version starts with). Dropped here, every re-derive erased a
+        # person's materiality ruling and any review still pending.
+        legal_status=ruling_for_next_version(current),
     )
     current.superseded_by = new_claim
     current.save(update_fields=["superseded_by", "updated_at"])
+    # And the watches declared on it: a latent condition is about the claim, not one
+    # version of it. Left on the closed version, it was evaluated never again -- only
+    # current versions are -- while the posture went on counting it as watched.
+    LatentCondition.objects.filter(
+        claim=current, state__in=(LatentCondition.State.PENDING, LatentCondition.State.UNOBSERVABLE)
+    ).update(claim=new_claim, updated_at=now)
 
 
 def _mark_stale(deployment, now) -> int:

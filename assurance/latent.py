@@ -38,6 +38,8 @@ a dashboard reads as "safe" unless something stops it.
 
 from __future__ import annotations
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -48,6 +50,11 @@ from .governance import is_shadow
 
 Kind = LatentCondition.Kind
 State = LatentCondition.State
+
+logger = logging.getLogger(__name__)
+
+#: The kinds a write to the deployment's data boundary can make true.
+BOUNDARY_KINDS = frozenset({Kind.BOUNDARY_ALLOWS, Kind.BOUNDARY_REGION_ADDED})
 
 # What a boundary practice name means. Closed, so "training" cannot silently be
 # spelled three ways and match none of them.
@@ -199,9 +206,19 @@ def _changed_since_baseline(condition, reading: str) -> bool:
 
 
 def _observe_provider_posture_changes(condition, deployment) -> tuple[bool, str]:
-    provider = Provider.objects.filter(name=condition.subject).first()
-    if provider is None:
+    providers = list(Provider.objects.filter(name=condition.subject).order_by("kind", "pk")[:2])
+    if not providers:
         raise Unobservable(f"no provider named {condition.subject!r}")
+    if len(providers) > 1:
+        # A name is unique only within a kind. The baseline was read off one of them,
+        # and `.first()` picked one by an ordering the name ties in -- so a second
+        # provider by that name could turn the reading into the other one's and fire
+        # on a change nobody made, or hide the one that was made.
+        raise Unobservable(
+            f"more than one provider is named {condition.subject!r}; which one this "
+            "condition watches cannot be told"
+        )
+    provider = providers[0]
     assertion = provider.assertions.filter(field=condition.expected).first()
     if assertion is None:
         raise Unobservable(
@@ -503,38 +520,114 @@ def latent_posture(deployment) -> dict:
     by_state = {value: 0 for value, _ in State.choices}
     for condition in conditions:
         by_state[condition.state] = by_state.get(condition.state, 0) + 1
+    # Pending on a claim nothing evaluates -- a closed version, or one a person
+    # revoked -- is not watched. :func:`evaluate_conditions` reads only current,
+    # unrevoked claims, and counting these as "watching" said a precondition was
+    # under watch that nothing would ever read again.
+    unwatched = [
+        c for c in conditions if c.state == State.PENDING and not _evaluated_claim(c.claim)
+    ]
 
     return {
         "deployment": str(deployment.uuid),
         "declared": len(conditions),
         "by_state": by_state,
-        "watching": by_state.get(State.PENDING, 0),
+        "watching": by_state.get(State.PENDING, 0) - len(unwatched),
         "fired": by_state.get(State.FIRED, 0),
         # Surfaced at the top level, not buried in by_state, because this is the
         # number that silently turns into "nothing wrong" if nobody looks.
         "coverage_lost": by_state.get(State.UNOBSERVABLE, 0),
-        "conditions": [
-            {
-                "uuid": str(c.uuid),
-                "claim": str(c.claim.uuid),
-                "kind": c.kind,
-                "kind_label": c.get_kind_display(),
-                "subject": c.subject,
-                "expected": c.expected,
-                "description": c.description,
-                "state": c.state,
-                "baseline_observation": c.baseline_observation,
-                "fired_observation": c.fired_observation,
-                "last_evaluated_at": (
-                    c.last_evaluated_at.isoformat() if c.last_evaluated_at else None
-                ),
-            }
-            for c in conditions
-        ],
+        "unwatched": len(unwatched),
+        "conditions": [condition_view(c) for c in conditions],
         "note": (
             "Watching counts named preconditions that have not happened as of each "
             "one's last evaluation. It is not a prediction and not an all-clear. "
             "coverage_lost counts conditions whose subject can no longer be read: "
-            "those are unwatched, not safe."
+            "those are unwatched, not safe. So are the ones counted as unwatched, "
+            "declared on a claim nothing evaluates any more (a closed version, or one "
+            "a person revoked)."
         ),
     }
+
+
+def _evaluated_claim(claim) -> bool:
+    """Whether :func:`evaluate_conditions` reads conditions declared on ``claim``."""
+    return claim.valid_to is None and claim.status != AssuranceClaim.ClaimStatus.REVOKED
+
+
+def condition_view(c: LatentCondition) -> dict:
+    """One condition as the posture and the API report it."""
+    return {
+        "uuid": str(c.uuid),
+        "claim": str(c.claim.uuid),
+        "kind": c.kind,
+        "kind_label": c.get_kind_display(),
+        "subject": c.subject,
+        "expected": c.expected,
+        "description": c.description,
+        "state": c.state,
+        "baseline_observation": c.baseline_observation,
+        "fired_observation": c.fired_observation,
+        "last_evaluated_at": (
+            c.last_evaluated_at.isoformat() if c.last_evaluated_at else None
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# In production: when a write could make a declared condition true
+# ---------------------------------------------------------------------------
+
+
+def fire_due_conditions(deployment, *, actor=None, now=None) -> int:
+    """Evaluate ``deployment``'s pending conditions now; the number that fired.
+
+    Called wherever the deployment's stored decision is brought current -- every
+    write to what the decision reads refreshes it (:mod:`assurance.signals`, the
+    API routes, scan ingest, the admin) -- and after a write to the data boundary
+    or a provider's profile a pending condition names. :func:`evaluate_conditions`
+    had no caller outside the tests, so a declared precondition that came true
+    fired never: the claim it was declared on stayed a pass, and no retest opened.
+
+    A condition firing marks its claim STALE and opens a retest, and the decision
+    is refreshed after this, so it reads them. Never raises: it runs inside writes
+    that must not fail for it -- a claim a person is revoking among them -- so a
+    failure is logged, rolled back to before the evaluation, and leaves every
+    condition PENDING with the ``last_evaluated_at`` of the last evaluation that
+    completed, which the posture reports. Returns 0 at once, with one query, for a
+    deployment nobody declared a condition on.
+    """
+    if not LatentCondition.objects.filter(deployment=deployment, state=State.PENDING).exists():
+        return 0
+    try:
+        with transaction.atomic():
+            return evaluate_conditions(deployment, actor=actor, now=now)["fired_count"]
+    except Exception:
+        logger.exception(
+            "latent conditions on deployment %s were not evaluated; each keeps the "
+            "last_evaluated_at of the last evaluation that completed",
+            deployment.pk,
+        )
+        return 0
+
+
+def deployments_watching_boundary(deployment_id) -> set:
+    """``{deployment_id}`` if a pending condition there reads its data boundary."""
+    watched = LatentCondition.objects.filter(
+        deployment_id=deployment_id, state=State.PENDING, kind__in=BOUNDARY_KINDS
+    ).exists()
+    return {deployment_id} if watched else set()
+
+
+def deployments_watching_provider(*names) -> set:
+    """The deployments where a pending condition reads the profile of a provider
+    called any of ``names`` -- every name the write touched, the one it had before
+    a rename included, since a condition naming that one now names nothing."""
+    wanted = {str(n) for n in names if n}
+    if not wanted:
+        return set()
+    return set(
+        LatentCondition.objects.filter(
+            state=State.PENDING, kind=Kind.PROVIDER_POSTURE_CHANGES, subject__in=wanted
+        ).values_list("deployment_id", flat=True)
+    )

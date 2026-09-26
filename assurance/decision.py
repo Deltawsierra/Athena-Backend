@@ -81,6 +81,7 @@ from .models import (
     Deployment,
     EvidenceClass,
     Finding,
+    LegalStatus,
     RetestRequirement,
     severity_rank,
 )
@@ -179,6 +180,11 @@ def _decision_from_findings(deployment: Deployment) -> str | None:
     return Deployment.Decision.READY
 
 
+#: The legal-axis value a person's recorded materiality judgment leaves a claim in
+#: (:func:`assurance.legal.record_materiality_decision`), and the only one that caps.
+_LEGALLY_STALE = frozenset({LegalStatus.STALE})
+
+
 def claim_decision_signal(deployment: Deployment) -> dict:
     """How the deployment's CURRENT assurance claims bear on its decision (Stage 1C).
 
@@ -192,6 +198,11 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     - a **STALE** or **UNKNOWN** claim, or any **open retest obligation**, caps at
       NEEDS_MORE_EVIDENCE — the supporting evidence is expired, unproven, or pending
       a retest, so a clean pass is not earned;
+    - a claim a person has judged **legally STALE** (:mod:`assurance.legal`) caps at
+      NEEDS_MORE_EVIDENCE too, whatever its technical status: an obligation beneath
+      it moved and a person recorded that the move is material here, so it needs
+      re-assessing on legal grounds. Only that recorded judgment caps -- a review
+      merely PENDING is the trigger flagging, and the trigger never judges;
     - SUPPORTED / VERIFIED / PARTIALLY_VERIFIED claims (and DRAFT, which is not yet
       an assessment) impose no cap.
 
@@ -210,6 +221,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     contradicted = [c for c in current if c.status == Status.CONTRADICTED]
     stale = [c for c in current if c.status == Status.STALE]
     unknown = [c for c in current if c.status == Status.UNKNOWN]
+    legally_stale = [c for c in current if c.legal_status in _LEGALLY_STALE]
     supporting = [
         c
         for c in current
@@ -218,7 +230,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
 
     if contradicted:
         cap = Deployment.Decision.NEEDS_REMEDIATION
-    elif stale or unknown or retest_pending:
+    elif stale or unknown or retest_pending or legally_stale:
         cap = Deployment.Decision.NEEDS_MORE_EVIDENCE
     else:
         cap = None
@@ -230,6 +242,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         "contradicted": contradicted,
         "stale": stale,
         "unknown": unknown,
+        "legally_stale": legally_stale,
         "supporting": supporting,
     }
 
@@ -616,6 +629,12 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         held = ", ".join(sorted({c.claim_type for c in signal["contradicted"] + signal["stale"] + signal["unknown"]}))
         if signal["contradicted"]:
             note = f"Held at 'needs remediation' by a contradicted assurance claim ({held}); a current claim's boundary does not hold."
+        elif not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
+            legal = ", ".join(sorted({c.claim_type for c in signal["legally_stale"]}))
+            note = (
+                f"Held at 'needs more evidence' by a claim a person judged legally stale ({legal}); "
+                "an obligation beneath it moved materially, and it needs re-assessing on legal grounds."
+            )
         else:
             reason = "an open retest obligation" if signal["retest_pending"] and not (signal["stale"] or signal["unknown"]) else f"a stale or unproven claim ({held})"
             note = f"Held at 'needs more evidence' by {reason}; supporting evidence is not current."
@@ -689,6 +708,7 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             "contradicted": [_claim_brief(c) for c in signal["contradicted"]],
             "stale": [_claim_brief(c) for c in signal["stale"]],
             "unknown": [_claim_brief(c) for c in signal["unknown"]],
+            "legally_stale": [_claim_brief(c) for c in signal["legally_stale"]],
             "supporting": [_claim_brief(c) for c in signal["supporting"]],
         },
         "note": note,
@@ -766,9 +786,14 @@ def refresh_stored_decisions(deployment_ids) -> None:
     ids = {pk for pk in deployment_ids if pk is not None}
     if not ids:
         return
+    from .latent import fire_due_conditions
+
     # In pk order, so two writers refreshing the same pair of deployments take
     # their row locks in the same order rather than each holding the other's.
     for deployment in Deployment.objects.filter(pk__in=ids).order_by("pk"):
+        # A declared latent condition the write made true fires first, so the
+        # decision refreshed here reads the claim it marked STALE.
+        fire_due_conditions(deployment)
         recompute_decision(deployment)
 
 

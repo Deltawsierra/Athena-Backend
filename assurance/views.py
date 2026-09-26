@@ -34,6 +34,16 @@ from . import observability, observed_outcomes
 from .bundle import assurance_bundle
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
+from .latent import (
+    LatentConditionRefused,
+    condition_view,
+    declare_condition,
+    deployments_watching_boundary,
+    deployments_watching_provider,
+    fire_due_conditions,
+    latent_posture,
+    withdraw_condition,
+)
 from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
@@ -62,6 +72,7 @@ from .models import (
     DispatchAttempt,
     DispatchPolicy,
     Finding,
+    LatentCondition,
     PostureBinding,
     Provider,
     ProviderAssertion,
@@ -197,8 +208,22 @@ def _refresh_stored_decision(deployment) -> None:
     failed there (a lock timeout) left the write standing and the decision stale
     for good -- a signed outcome cannot be posted twice to try again. Inside, the
     two commit together or neither does.
+
+    A declared latent condition the write made true fires first (it marks its claim
+    STALE and opens a retest), so the decision refreshed here reads it.
     """
+    fire_due_conditions(deployment)
     recompute_decision(deployment)
+
+
+def _fire_conditions(deployment_ids, actor) -> None:
+    """Fire the declared latent conditions a write to something outside the
+    decision's own inputs made true -- the data boundary, a provider's profile --
+    on each deployment named, and refresh the decision of each where one fired.
+    Call it inside the write's transaction."""
+    for deployment in Deployment.objects.filter(pk__in=set(deployment_ids)).order_by("pk"):
+        if fire_due_conditions(deployment, actor=actor):
+            _refresh_stored_decision(deployment)
 
 
 def _composition_payload(deployment) -> dict:
@@ -1151,10 +1176,17 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     name: DataBoundary._meta.get_field(name).get_default()
                     for name in DataBoundarySerializer.Meta.fields
                 } | fields
-            DataBoundary.objects.update_or_create(
-                deployment=deployment,
-                defaults={**fields, "updated_by": request.user},
-            )
+            with transaction.atomic():
+                DataBoundary.objects.update_or_create(
+                    deployment=deployment,
+                    defaults={**fields, "updated_by": request.user},
+                )
+                # A condition declared on this boundary -- "training stays denied",
+                # "no region beyond these" -- that the write made true fires here,
+                # in the write's transaction, and the decision is refreshed with it.
+                # The boundary otherwise reaches the decision only through claims
+                # re-derived from it.
+                _fire_conditions(deployments_watching_boundary(deployment.pk), request.user)
         assessed = (
             Deployment.objects.prefetch_related("assets__provider__assertions")
             .select_related("data_boundary")
@@ -2033,8 +2065,19 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         deployment = self.get_object()
         with transaction.atomic():
             counts = run_invalidation_check(deployment, actor=request.user)
+            # And every declared latent condition, attributed to whoever asked: the
+            # named preconditions are the other half of "what invalidates a claim".
+            counts["conditions_fired"] = fire_due_conditions(deployment, actor=request.user)
             _refresh_stored_decision(deployment)
         return Response(counts)
+
+    @action(detail=True, methods=["get"], url_path="latent-conditions")
+    def latent_conditions(self, request, uuid=None):
+        """What is watched for on this deployment (Phase 2 item 9): every declared
+        latent condition, and three counts never blended -- watching, fired, and
+        coverage lost -- plus the conditions on a claim nothing evaluates any more.
+        A read; pending is not an all-clear, and the payload says so."""
+        return Response(latent_posture(self.get_object()))
 
 
 class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -2139,6 +2182,77 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
                 "event": ClaimEventSerializer(event).data,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="latent-conditions")
+    def declare_latent_condition(self, request, uuid=None):
+        """Declare the exact future change that would falsify this claim (Phase 2
+        item 9). Admin-only, attributed to the caller.
+
+        Body: ``{"kind", "subject", "description", "expected"?}`` -- ``kind`` one of
+        the closed vocabulary of :class:`LatentCondition.Kind`. Refused with a 400
+        naming why (:func:`assurance.latent.declare_condition`): a condition that
+        already holds is a present fact, not a latent one, and one nothing can read
+        today cannot be called latent. Declared only on the claim's current,
+        unrevoked version: nothing evaluates a condition on any other.
+
+        From then on it is evaluated whenever the deployment's decision is brought
+        current -- every write to what the decision reads, scan ingest, the admin,
+        the invalidation check -- and on every write to the data boundary or a
+        provider profile it names. The instant it holds, the claim goes STALE and a
+        retest opens whose reason names it."""
+        _require_admin(request)
+        claim = self.get_object()
+        if claim.valid_to is not None or claim.status == AssuranceClaim.ClaimStatus.REVOKED:
+            return Response(
+                {"detail": "Declare a latent condition on the claim's current, unrevoked version; "
+                           "nothing evaluates a condition declared on any other."},
+                status=400,
+            )
+        body = request.data if isinstance(request.data, dict) else {}
+        try:
+            condition = declare_condition(
+                claim,
+                kind=str(body.get("kind") or ""),
+                subject=str(body.get("subject") or ""),
+                description=str(body.get("description") or ""),
+                expected=str(body.get("expected") or ""),
+                declared_by=request.user,
+            )
+        except LatentConditionRefused as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(condition_view(condition), status=201)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"latent-conditions/(?P<condition_uuid>[^/.]+)/withdraw",
+    )
+    def withdraw_latent_condition(self, request, uuid=None, condition_uuid=None):
+        """Stop watching a declared condition, visibly: kept as WITHDRAWN with the
+        caller's note, never deleted. Admin-only. Only a condition still watched
+        (pending, or unobservable) can be withdrawn -- a fired one is the record of a
+        precondition that came true, and withdrawing it would overwrite what was
+        observed when it did."""
+        _require_admin(request)
+        claim = self.get_object()
+        valid = _valid_uuid(condition_uuid)
+        condition = (
+            LatentCondition.objects.filter(claim=claim, uuid=valid).first()
+            if valid
+            else None
+        )
+        if condition is None:
+            return Response({"detail": "No such latent condition on this claim."}, status=404)
+        watched = (LatentCondition.State.PENDING, LatentCondition.State.UNOBSERVABLE)
+        if condition.state not in watched:
+            return Response(
+                {"detail": f"This condition is {condition.state}, not watched; only a pending or "
+                           "unobservable condition can be withdrawn."},
+                status=409,
+            )
+        body = request.data if isinstance(request.data, dict) else {}
+        withdraw_condition(condition, note=str(body.get("note") or ""))
+        return Response(condition_view(condition))
 
 
 class RetestRequirementViewSet(
@@ -2524,11 +2638,28 @@ class ProviderViewSet(
 
     def create(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().create(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().update(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
+
+    # A posture condition reads a provider's assertions, never its own fields, so a
+    # write here fires none. It can leave one unable to read -- a rename away from
+    # the name it watches, or a second provider by that name -- and the conditions
+    # naming either name are evaluated now, so the posture says so at once.
+    def perform_create(self, serializer):
+        serializer.save()
+        _fire_conditions(deployments_watching_provider(serializer.instance.name), self.request.user)
+
+    def perform_update(self, serializer):
+        before = serializer.instance.name
+        serializer.save()
+        _fire_conditions(
+            deployments_watching_provider(before, serializer.instance.name), self.request.user
+        )
 
 
 class ProviderAssertionViewSet(viewsets.ModelViewSet):
@@ -2554,21 +2685,37 @@ class ProviderAssertionViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().create(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().update(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().destroy(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().destroy(request, *args, **kwargs)
 
+    # A provider-posture condition names a provider and a field; a write to one of
+    # its assertions is the change it watches for, so the conditions naming that
+    # provider -- before the write and after, if the assertion moved -- fire here.
     def perform_create(self, serializer):
         serializer.save(updated_by=self.request.user)
+        _fire_conditions(deployments_watching_provider(serializer.instance.provider.name), self.request.user)
 
     def perform_update(self, serializer):
+        before = serializer.instance.provider.name
         serializer.save(updated_by=self.request.user)
+        _fire_conditions(
+            deployments_watching_provider(before, serializer.instance.provider.name), self.request.user
+        )
+
+    def perform_destroy(self, instance):
+        name = instance.provider.name
+        instance.delete()
+        _fire_conditions(deployments_watching_provider(name), self.request.user)
 
 
 class UnknownViewSet(

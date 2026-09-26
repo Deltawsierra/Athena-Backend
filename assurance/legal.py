@@ -264,6 +264,21 @@ def record_materiality_decision(
     return decision
 
 
+def ruling_for_next_version(previous: AssuranceClaim) -> str:
+    """The legal axis a claim's next version starts with: the one its predecessor is
+    in, unchanged.
+
+    A re-derive is technical -- the system moved, or the claim was re-read -- and the
+    rule beneath the claim did not move because of it. So a person's ruling stands
+    for the new version exactly as recorded, and a review still pending stays
+    pending. The new version used to start "not assessed", which erased a legally
+    STALE ruling with no person behind the erasure and dropped a pending review
+    unreviewed: a legal judgment made by code, the thing this module's gate exists
+    to prevent. Decided here, beside the gate, so nothing outside this module
+    chooses what the legal axis is."""
+    return previous.legal_status
+
+
 def legal_posture(deployment) -> dict:
     """What the deployment's claims look like on the legal axis, counted honestly.
 

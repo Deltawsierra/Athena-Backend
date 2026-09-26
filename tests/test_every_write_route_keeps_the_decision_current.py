@@ -38,6 +38,7 @@ from assurance.models import (
     Asset,
     AssuranceClaim,
     ConnectorBinding,
+    DataBoundary,
     DeclaredComponent,
     Deployment,
     EvidenceClass,
@@ -216,7 +217,47 @@ def _reopen_a_critical_finding():
     return dep, lambda c: c.patch(f"/api/assurance/findings/{finding.uuid}/", {"status": "open"}, format="json")
 
 
+def _watched(dep, **condition):
+    """Passing claims on ``dep``, and a latent condition declared on one of them."""
+    from assurance.latent import declare_condition
+
+    _passing_claims(dep)
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    declare_condition(claim, description="declared by the meta-test", **condition)
+    recompute_decision(dep)
+
+
+def _allow_training_a_condition_watches(method):
+    """A condition watches for the boundary to start allowing training; the write
+    allows it, the condition fires, its claim goes stale."""
+
+    def scenario():
+        dep = _scanned()
+        DataBoundary.objects.create(
+            deployment=dep, allowed_regions=["eu-west-1"],
+            training_allowed=False, third_party_sharing_allowed=False,
+        )
+        _watched(dep, kind="boundary_allows", subject="training")
+        return dep, lambda c: getattr(c, method)(
+            _base(dep) + "data-boundary/", {"training_allowed": True}, format="json"
+        )
+
+    return scenario
+
+
+def _change_a_posture_a_condition_watches():
+    dep = _scanned()
+    assertion = _assertion()
+    _watched(dep, kind="provider_posture_changes", subject=assertion.provider.name, expected="region")
+    return dep, lambda c: c.patch(
+        f"/api/assurance/provider-assertions/{assertion.uuid}/", {"value": "us"}, format="json"
+    )
+
+
 MOVES = {
+    ("DeploymentViewSet", "data_boundary", "put"): _allow_training_a_condition_watches("put"),
+    ("DeploymentViewSet", "data_boundary", "patch"): _allow_training_a_condition_watches("patch"),
+    ("ProviderAssertionViewSet", "partial_update", "patch"): _change_a_posture_a_condition_watches,
     ("DeploymentViewSet", "recompute", "post"): _pause,
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
@@ -289,14 +330,6 @@ def _dispatch_policy():
     return dep, lambda c: c.put(_base(dep) + "dispatch-policy/", {"enabled": False}, format="json")
 
 
-def _data_boundary_put():
-    dep = _scanned()
-    return dep, lambda c: c.put(_base(dep) + "data-boundary/", {"training_allowed": False}, format="json")
-
-
-def _data_boundary_patch():
-    dep = _scanned()
-    return dep, lambda c: c.patch(_base(dep) + "data-boundary/", {"notes": "reviewed"}, format="json")
 
 
 def _remediation_transition():
@@ -351,18 +384,39 @@ def _assertion():
     )
 
 
-def _assertion_patch():
-    dep = _scanned()
-    assertion = _assertion()
-    return dep, lambda c: c.patch(
-        f"/api/assurance/provider-assertions/{assertion.uuid}/", {"value": "us"}, format="json"
-    )
-
 
 def _assertion_delete():
     dep = _scanned()
     assertion = _assertion()
     return dep, lambda c: c.delete(f"/api/assurance/provider-assertions/{assertion.uuid}/")
+
+
+def _a_passing_claim():
+    dep = _scanned()
+    _passing_claims(dep)
+    recompute_decision(dep)
+    return dep, AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+
+
+def _declare_a_condition():
+    dep, claim = _a_passing_claim()
+    return dep, lambda c: c.post(
+        f"/api/assurance/claims/{claim.uuid}/latent-conditions/",
+        {"kind": "asset_appears", "subject": "shadow-exporter", "description": "watched"},
+        format="json",
+    )
+
+
+def _withdraw_a_condition():
+    from assurance.latent import declare_condition
+
+    dep, claim = _a_passing_claim()
+    condition = declare_condition(claim, kind="asset_appears", subject="shadow-exporter", description="watched")
+    return dep, lambda c: c.post(
+        f"/api/assurance/claims/{claim.uuid}/latent-conditions/{condition.uuid}/withdraw/",
+        {"note": "no longer needed"},
+        format="json",
+    )
 
 
 def _unknown_patch():
@@ -373,7 +427,10 @@ def _unknown_patch():
 
 _PROFILE = (
     "a provider's profile reaches the decision only through the claims derived from "
-    "it, and those move on recompute-claims, which is accounted for above"
+    "it, and those move on recompute-claims, which is accounted for above -- or "
+    "through a latent condition on a posture, which only a change to an assertion's "
+    "value makes true (accounted for above); this write can at most leave one unable "
+    "to read, which marks no claim"
 )
 
 CANNOT_MOVE = {
@@ -398,15 +455,6 @@ CANNOT_MOVE = {
         "says when findings are pushed out, never what they say",
         _dispatch_policy,
     ),
-    ("DeploymentViewSet", "data_boundary", "put"): (
-        "the approved boundary reaches the decision only through the claims derived "
-        "from it, which move on recompute-claims, accounted for above",
-        _data_boundary_put,
-    ),
-    ("DeploymentViewSet", "data_boundary", "patch"): (
-        "as the PUT: through the claims, never directly",
-        _data_boundary_patch,
-    ),
     ("FindingViewSet", "remediation_transition", "post"): (
         "the remediation workflow is the human process of fixing a finding, never the "
         "security status the decision reads",
@@ -419,8 +467,17 @@ CANNOT_MOVE = {
     ("ProviderViewSet", "create", "post"): (_PROFILE, _provider_create),
     ("ProviderViewSet", "partial_update", "patch"): (_PROFILE, _provider_patch),
     ("ProviderAssertionViewSet", "create", "post"): (_PROFILE, _assertion_create),
-    ("ProviderAssertionViewSet", "partial_update", "patch"): (_PROFILE, _assertion_patch),
     ("ProviderAssertionViewSet", "destroy", "delete"): (_PROFILE, _assertion_delete),
+    ("ClaimViewSet", "declare_latent_condition", "post"): (
+        "declaring a condition refuses one that already holds, so it writes only the "
+        "watch; the claim moves when the condition later fires, through the refresh of "
+        "whatever write made it true",
+        _declare_a_condition,
+    ),
+    ("ClaimViewSet", "withdraw_latent_condition", "post"): (
+        "stops a watch and keeps the record of it; the claim it was about is untouched",
+        _withdraw_a_condition,
+    ),
     ("UnknownViewSet", "partial_update", "patch"): (
         "the Unknowns register is reported beside the decision, never computed into it",
         _unknown_patch,
