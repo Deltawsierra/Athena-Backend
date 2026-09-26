@@ -17,10 +17,19 @@ it is the only outside view of it.
 
 A route that CANNOT move the decision says why, and is performed with every model
 the decision is computed from watched: it must write none of them.
+
+A route that moves the decision only AFTER it commits says why too: it writes
+nothing any decision is computed from, but it can make a latent condition on some
+deployment fire or lose sight of its subject -- a provider's profile belongs to no
+deployment, and evaluating every deployment that watches it inside the write held
+all their row locks until it committed. It must write no decision input in its own
+transaction, schedule the refresh of the deployment it moves, and leave every
+surface on the new decision once it commits.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 import pytest
@@ -38,6 +47,7 @@ from assurance.models import (
     Asset,
     AssuranceClaim,
     ConnectorBinding,
+    DataBoundary,
     DeclaredComponent,
     Deployment,
     EvidenceClass,
@@ -216,7 +226,60 @@ def _reopen_a_critical_finding():
     return dep, lambda c: c.patch(f"/api/assurance/findings/{finding.uuid}/", {"status": "open"}, format="json")
 
 
+def _watched(dep, **condition):
+    """Passing claims on ``dep``, and a latent condition declared on one of them."""
+    from assurance.latent import declare_condition
+
+    _passing_claims(dep)
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    declare_condition(claim, description="declared by the meta-test", **condition)
+    recompute_decision(dep)
+
+
+def _allow_training_a_condition_watches(method):
+    """A condition watches for the boundary to start allowing training; the write
+    allows it, the condition fires, its claim goes stale."""
+
+    def scenario():
+        dep = _scanned()
+        DataBoundary.objects.create(
+            deployment=dep, allowed_regions=["eu-west-1"],
+            training_allowed=False, third_party_sharing_allowed=False,
+        )
+        _watched(dep, kind="boundary_allows", subject="training")
+        return dep, lambda c: getattr(c, method)(
+            _base(dep) + "data-boundary/", {"training_allowed": True}, format="json"
+        )
+
+    return scenario
+
+
+def _withdraw_a_condition_nobody_can_read():
+    """A condition on the boundary, which is then deleted: it cannot be read, and
+    holds the decision at 'needs more evidence' until it is withdrawn."""
+    from assurance.latent import declare_condition, fire_due_conditions
+    from assurance.models import LatentCondition
+
+    dep = _scanned()
+    DataBoundary.objects.create(
+        deployment=dep, allowed_regions=["eu-west-1"], training_allowed=False, third_party_sharing_allowed=False
+    )
+    _passing_claims(dep)
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    condition = declare_condition(claim, kind="boundary_allows", subject="training", description="training stays denied")
+    DataBoundary.objects.filter(deployment=dep).delete()
+    fire_due_conditions(Deployment.objects.get(pk=dep.pk))
+    assert LatentCondition.objects.get(pk=condition.pk).state == LatentCondition.State.UNOBSERVABLE
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        f"/api/assurance/claims/{claim.uuid}/latent-conditions/{condition.uuid}/withdraw/",
+        {"note": "the boundary is declared elsewhere now"},
+        format="json",
+    )
+
+
 MOVES = {
+    ("ClaimViewSet", "withdraw_latent_condition", "post"): _withdraw_a_condition_nobody_can_read,
     ("DeploymentViewSet", "recompute", "post"): _pause,
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
@@ -289,14 +352,6 @@ def _dispatch_policy():
     return dep, lambda c: c.put(_base(dep) + "dispatch-policy/", {"enabled": False}, format="json")
 
 
-def _data_boundary_put():
-    dep = _scanned()
-    return dep, lambda c: c.put(_base(dep) + "data-boundary/", {"training_allowed": False}, format="json")
-
-
-def _data_boundary_patch():
-    dep = _scanned()
-    return dep, lambda c: c.patch(_base(dep) + "data-boundary/", {"notes": "reviewed"}, format="json")
 
 
 def _remediation_transition():
@@ -318,31 +373,8 @@ def _remediation_assign():
     )
 
 
-def _provider_create():
-    dep = _scanned()
-    return dep, lambda c: c.post(
-        "/api/assurance/providers/", {"name": "Anthropic", "kind": "model_provider"}, format="json"
-    )
-
-
 def _provider():
     return Provider.objects.create(name="OpenAI", kind=Provider.Kind.MODEL_PROVIDER)
-
-
-def _provider_patch():
-    dep = _scanned()
-    provider = _provider()
-    return dep, lambda c: c.patch(f"/api/assurance/providers/{provider.uuid}/", {"notes": "x"}, format="json")
-
-
-def _assertion_create():
-    dep = _scanned()
-    provider = _provider()
-    return dep, lambda c: c.post(
-        "/api/assurance/provider-assertions/",
-        {"provider": str(provider.uuid), "field": "region", "value": "eu", "evidence_class": "vendor_asserted"},
-        format="json",
-    )
 
 
 def _assertion():
@@ -351,18 +383,20 @@ def _assertion():
     )
 
 
-def _assertion_patch():
+def _a_passing_claim():
     dep = _scanned()
-    assertion = _assertion()
-    return dep, lambda c: c.patch(
-        f"/api/assurance/provider-assertions/{assertion.uuid}/", {"value": "us"}, format="json"
+    _passing_claims(dep)
+    recompute_decision(dep)
+    return dep, AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+
+
+def _declare_a_condition():
+    dep, claim = _a_passing_claim()
+    return dep, lambda c: c.post(
+        f"/api/assurance/claims/{claim.uuid}/latent-conditions/",
+        {"kind": "asset_appears", "subject": "shadow-exporter", "description": "watched"},
+        format="json",
     )
-
-
-def _assertion_delete():
-    dep = _scanned()
-    assertion = _assertion()
-    return dep, lambda c: c.delete(f"/api/assurance/provider-assertions/{assertion.uuid}/")
 
 
 def _unknown_patch():
@@ -370,11 +404,6 @@ def _unknown_patch():
     unknown = Unknown.objects.create(deployment=dep, fingerprint="u-1", question="Is it?")
     return dep, lambda c: c.patch(f"/api/assurance/unknowns/{unknown.uuid}/", {"notes": "asked"}, format="json")
 
-
-_PROFILE = (
-    "a provider's profile reaches the decision only through the claims derived from "
-    "it, and those move on recompute-claims, which is accounted for above"
-)
 
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
@@ -398,15 +427,6 @@ CANNOT_MOVE = {
         "says when findings are pushed out, never what they say",
         _dispatch_policy,
     ),
-    ("DeploymentViewSet", "data_boundary", "put"): (
-        "the approved boundary reaches the decision only through the claims derived "
-        "from it, which move on recompute-claims, accounted for above",
-        _data_boundary_put,
-    ),
-    ("DeploymentViewSet", "data_boundary", "patch"): (
-        "as the PUT: through the claims, never directly",
-        _data_boundary_patch,
-    ),
     ("FindingViewSet", "remediation_transition", "post"): (
         "the remediation workflow is the human process of fixing a finding, never the "
         "security status the decision reads",
@@ -416,15 +436,102 @@ CANNOT_MOVE = {
         "who does the remediation work, not whether the risk is live",
         _remediation_assign,
     ),
-    ("ProviderViewSet", "create", "post"): (_PROFILE, _provider_create),
-    ("ProviderViewSet", "partial_update", "patch"): (_PROFILE, _provider_patch),
-    ("ProviderAssertionViewSet", "create", "post"): (_PROFILE, _assertion_create),
-    ("ProviderAssertionViewSet", "partial_update", "patch"): (_PROFILE, _assertion_patch),
-    ("ProviderAssertionViewSet", "destroy", "delete"): (_PROFILE, _assertion_delete),
+    ("ClaimViewSet", "declare_latent_condition", "post"): (
+        "declaring a condition refuses one that already holds and one it cannot read, "
+        "so it writes only a PENDING watch, which the decision does not read; the claim "
+        "moves when the condition later fires, through the refresh of whatever write "
+        "made it true",
+        _declare_a_condition,
+    ),
     ("UnknownViewSet", "partial_update", "patch"): (
         "the Unknowns register is reported beside the decision, never computed into it",
         _unknown_patch,
     ),
+}
+
+
+# ------------------------------------ the routes that move it once they commit
+#
+# Each says WHY, and returns a deployment whose declared latent condition reads the
+# provider profile the write changes -- set up, and committed, before the write.
+
+
+def _watching_a_posture():
+    """A deployment with a condition on the 'region' OpenAI asserts, and that assertion."""
+    dep = _scanned()
+    assertion = _assertion()
+    _watched(dep, kind="provider_posture_changes", subject=assertion.provider.name, expected="region")
+    return dep, assertion
+
+
+def _change_a_posture_a_condition_watches():
+    dep, assertion = _watching_a_posture()
+    return dep, lambda c: c.patch(
+        f"/api/assurance/provider-assertions/{assertion.uuid}/", {"value": "us"}, format="json"
+    )
+
+
+def _name_a_second_provider_as_a_condition_does():
+    dep, assertion = _watching_a_posture()
+    other = next(k for k in Provider.Kind.values if k != assertion.provider.kind)
+    return dep, lambda c: c.post(
+        "/api/assurance/providers/", {"name": assertion.provider.name, "kind": other}, format="json"
+    )
+
+
+def _rename_a_provider_a_condition_watches():
+    dep, assertion = _watching_a_posture()
+    return dep, lambda c: c.patch(
+        f"/api/assurance/providers/{assertion.provider.uuid}/", {"name": "OpenAI, renamed"}, format="json"
+    )
+
+
+def _delete_an_assertion_a_condition_watches():
+    dep, assertion = _watching_a_posture()
+    return dep, lambda c: c.delete(f"/api/assurance/provider-assertions/{assertion.uuid}/")
+
+
+def _declare_the_assertion_a_condition_lost_sight_of():
+    """The watched assertion was deleted, so the condition cannot be read and holds
+    the decision back; declaring it again, as it was, lets it be read -- PENDING."""
+    from assurance.latent import fire_due_conditions
+
+    dep, assertion = _watching_a_posture()
+    provider = assertion.provider
+    assertion.delete()
+    fire_due_conditions(Deployment.objects.get(pk=dep.pk))
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        "/api/assurance/provider-assertions/",
+        {"provider": str(provider.uuid), "field": "region", "value": "eu", "evidence_class": "vendor_asserted"},
+        format="json",
+    )
+
+
+_PROFILE = (
+    "a provider belongs to no deployment: this write changes nothing any decision is "
+    "computed from, but it can make a posture condition on any deployment fire, lose "
+    "sight of its subject or read it again, and a condition nobody can read holds the "
+    "decision back. Every deployment watching it is evaluated and refreshed once the "
+    "write commits, each in its own transaction, never all of them inside this one"
+)
+
+_BOUNDARY = (
+    "a data boundary reaches the decision only through the claims re-derived from it "
+    "and through a latent condition that watches it. The condition is evaluated once "
+    "the write commits -- before the response is sent -- and never inside the write: "
+    "read there, every condition was read under the write lock this transaction holds, "
+    "which a stop of any other deployment waits on"
+)
+
+MOVES_AFTER_COMMIT = {
+    ("DeploymentViewSet", "data_boundary", "put"): (_BOUNDARY, _allow_training_a_condition_watches("put")),
+    ("DeploymentViewSet", "data_boundary", "patch"): (_BOUNDARY, _allow_training_a_condition_watches("patch")),
+    ("ProviderAssertionViewSet", "partial_update", "patch"): (_PROFILE, _change_a_posture_a_condition_watches),
+    ("ProviderAssertionViewSet", "create", "post"): (_PROFILE, _declare_the_assertion_a_condition_lost_sight_of),
+    ("ProviderAssertionViewSet", "destroy", "delete"): (_PROFILE, _delete_an_assertion_a_condition_watches),
+    ("ProviderViewSet", "create", "post"): (_PROFILE, _name_a_second_provider_as_a_condition_does),
+    ("ProviderViewSet", "partial_update", "patch"): (_PROFILE, _rename_a_provider_a_condition_watches),
 }
 
 
@@ -459,14 +566,16 @@ def test_every_mutating_route_is_accounted_for():
     routes = _mutating_routes()
     assert routes, "the resolver walk found no assurance routes at all"
     assert not set(MOVES) & set(CANNOT_MOVE)
-    unaccounted = routes - set(MOVES) - set(CANNOT_MOVE)
+    assert not set(MOVES_AFTER_COMMIT) & (set(MOVES) | set(CANNOT_MOVE))
+    unaccounted = routes - set(MOVES) - set(CANNOT_MOVE) - set(MOVES_AFTER_COMMIT)
     assert not unaccounted, (
         f"{sorted(unaccounted)}: a mutating route this file does not know. If it can "
         "change what the decision is computed from, it must refresh the stored decision "
         "inside its own transaction and be added to MOVES; if it cannot, add it to "
-        "CANNOT_MOVE and say why."
+        "CANNOT_MOVE and say why; if it writes no input but a deployment's latent "
+        "condition reads what it writes, add it to MOVES_AFTER_COMMIT and say why."
     )
-    gone = (set(MOVES) | set(CANNOT_MOVE)) - routes
+    gone = (set(MOVES) | set(CANNOT_MOVE) | set(MOVES_AFTER_COMMIT)) - routes
     assert not gone, f"{sorted(gone)}: listed here but no longer routed"
 
 
@@ -513,6 +622,16 @@ def test_a_route_that_cannot_move_the_decision_writes_none_of_its_inputs(route):
     dep, write = scenario()
     client = _client()
     before = one_decision(dep, client)
+    with _decision_inputs_written() as written:
+        response = write(client)
+    assert response.status_code < 300, response.content
+    assert written == [], f"{route} wrote a decision input: {written}"
+    assert one_decision(dep, client) == before
+
+
+@contextmanager
+def _decision_inputs_written():
+    """Every write, while the block runs, to a model the decision is computed from."""
     written = []
 
     def watch(sender, instance, **kwargs):
@@ -531,11 +650,36 @@ def test_a_route_that_cannot_move_the_decision_writes_none_of_its_inputs(route):
         post_save.connect(watch, sender=label, dispatch_uid=f"meta-save:{label}")
         post_delete.connect(watch, sender=label, dispatch_uid=f"meta-delete:{label}")
     try:
-        response = write(client)
+        yield written
     finally:
         for label in labels:
             post_save.disconnect(sender=label, dispatch_uid=f"meta-save:{label}")
             post_delete.disconnect(sender=label, dispatch_uid=f"meta-delete:{label}")
-    assert response.status_code < 300, response.content
-    assert written == [], f"{route} wrote a decision input: {written}"
-    assert one_decision(dep, client) == before
+
+
+@pytest.mark.parametrize("route", sorted(MOVES_AFTER_COMMIT), ids=lambda r: f"{r[0]}.{r[1]}.{r[2]}")
+def test_a_route_that_moves_the_decision_once_it_commits_writes_no_input_until_then(
+    route, django_capture_on_commit_callbacks
+):
+    """In its own transaction the write touches nothing any decision is computed
+    from, and no surface moves; it schedules the watching deployment's refresh for
+    its commit; and once it commits, every surface publishes one new decision."""
+    why, scenario = MOVES_AFTER_COMMIT[route]
+    assert why
+    # The set-up commits first, so the refresh it scheduled is not still pending --
+    # and standing in for the write's own -- when the write is made.
+    with django_capture_on_commit_callbacks(execute=True):
+        dep, write = scenario()
+    client = _client()
+    before = one_decision(dep, client)
+    with django_capture_on_commit_callbacks(execute=True) as hooks:
+        with _decision_inputs_written() as written:
+            response = write(client)
+        assert response.status_code < 300, response.content
+        assert written == [], f"{route} wrote a decision input in its own transaction: {written}"
+        assert one_decision(dep, client) == before
+    assert any(
+        isinstance(hook, signals._RefreshAfterCommit) and hook.deployment_id == dep.pk for hook in hooks
+    ), f"{route} scheduled no refresh of the deployment whose condition reads what it wrote"
+    after = one_decision(dep, client)
+    assert after != before, f"the write did not move the decision ({before}), so this proved nothing"

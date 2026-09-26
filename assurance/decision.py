@@ -21,13 +21,17 @@ Two independent signals, combined worst-first:
   evidence" rather than as either a live severity or a clean pass.
 - **Claims** (Stage 1C) cap the decision by claim health. A live CONTRADICTED claim
   (an assurance statement the current state falsifies) caps at NEEDS_REMEDIATION; a
-  STALE or UNKNOWN claim, or any open retest obligation, caps at
-  NEEDS_MORE_EVIDENCE. Supported/verified claims and a deployment with no claims add
-  no cap.
+  STALE or UNKNOWN claim, any open retest obligation, a declared precondition of a
+  claim that cannot be read now, or one that fired and still holds its claim, caps
+  at NEEDS_MORE_EVIDENCE. Supported/verified claims and a deployment with no claims
+  add no cap.
 - **Workflow chains** (the compositional assurance graph) place the deployment by
   the worst status among its approved business workflows' authority-to-effect
   chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
-  a NOT_DEMONSTRATED one → NEEDS_MORE_EVIDENCE, all held → READY. Worst-of-N, never
+  a NOT_DEMONSTRATED one → NEEDS_MORE_EVIDENCE, all held → READY -- or
+  READY_RESTRICTED when any of them holds on an authorization check alone (an
+  Achilles permit check shows the gate authorized the action, not that the
+  effect happened; owner default, #278). Worst-of-N, never
   coverage-weighted: forty-nine of fifty workflows holding does not make a
   deployment that can move customer records to an unauthorised destination 98%
   safe. :mod:`assurance.composition` is the rule and argues for itself at length;
@@ -35,6 +39,13 @@ Two independent signals, combined worst-first:
   pure rule cannot — that this signal may contribute READY only when the approved
   workflow set is recorded and every workflow in it reported, so ONE held chain
   cannot make an otherwise-unassessed deployment ready.
+
+- **Accepted risks** (owner decision Q6) cap the decision. A finding a person has
+  accepted is a risk the deployment carries for a stated time, not one that went
+  away: while every acceptance stands the decision is READY_RESTRICTED at best, and
+  an acceptance that has lapsed -- or never named an end -- caps it at
+  NEEDS_MORE_EVIDENCE. Accepted findings used to leave the decision entirely, so an
+  accepted critical finding read READY.
 
 The decision is the **worse** of them. The claim cap can only hold a decision back
 or leave it, never improve it (the same weakest-link discipline the evidence model
@@ -47,9 +58,13 @@ everything.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import logging
+import uuid
+from dataclasses import dataclass, field, replace
 
 from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 
 from .coverage import complete_audit_signal, coverage_decision_cap, coverage_manifest
 from .composition import READY as composition_READY
@@ -63,15 +78,23 @@ from .workflow_chains import (
     composition_payload,
     read_chain_provenance,
 )
+from . import models as _models
 from .models import (
+    LATENT_HOLDING_STATES,
+    LATENT_UNREAD_STATES,
     UNTRUSTED_SEVERITY_STATUSES,
     RESOLVED_FINDING_STATUSES,
     AssuranceClaim,
     Deployment,
     EvidenceClass,
+    Finding,
+    LatentCondition,
+    LegalStatus,
     RetestRequirement,
     severity_rank,
 )
+
+logger = logging.getLogger(__name__)
 
 # Findings in these states no longer count against a deployment's readiness.
 # The one definition lives in ``assurance.models`` beside the statuses themselves.
@@ -121,6 +144,58 @@ def _worse(a: str | None, b: str | None) -> str | None:
     return a if _READINESS_RANK[a] >= _READINESS_RANK[b] else b
 
 
+# ---------------------------------------------------------------------------
+# The rules, as values. Each is read by the code below that applies it, at the
+# moment it applies it, and each is named in the policy document
+# (:mod:`assurance.policy`) -- read from here, at the moment the pin is taken -- so
+# a change to any one of them moves the policy pin, and every decision stored under
+# the pin before is recomputed rather than published under rules that no longer
+# hold (``Deployment.decision_policy``).
+# ---------------------------------------------------------------------------
+
+#: The worst active finding severity that reaches each threshold, most severe first,
+#: places the deployment here (Phase 0.5): the first threshold it reaches decides.
+FINDING_SEVERITY_DECISIONS: tuple[tuple[str, str], ...] = (
+    ("critical", Deployment.Decision.NOT_RECOMMENDED),
+    ("high", Deployment.Decision.NEEDS_REMEDIATION),
+    # A medium or low active finding is deployable with named restrictions.
+    ("low", Deployment.Decision.READY_RESTRICTED),
+)
+#: Nothing of low+ severity open, and what remains is unverified or untrusted.
+FINDING_UNVERIFIED_ONLY = Deployment.Decision.NEEDS_MORE_EVIDENCE
+#: Findings on record, none of them open.
+FINDING_CLEAN = Deployment.Decision.READY
+#: A scan that ran to completion is an assessment, even one that found nothing.
+COMPLETED_SCAN_SIGNAL = Deployment.Decision.READY
+#: The latest scan stopped before it finished.
+SCAN_INCOMPLETE_CAP = Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+#: How the deployment's current claims cap it (:func:`claim_decision_signal`), by
+#: what holds it back. The worst of those that apply is the cap.
+CLAIM_CAPS: dict[str, str] = {
+    # The current state falsifies an assurance statement.
+    "contradicted": Deployment.Decision.NEEDS_REMEDIATION,
+    "stale": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    "unknown": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    "open_retest": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A person's recorded judgment that a moved obligation is material
+    # (assurance.legal); a review merely pending caps nothing.
+    "legally_stale": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A declared precondition of a current claim that cannot be read now --
+    # unobservable, or its evaluation failed (assurance.latent).
+    "unread_latent_condition": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A declared precondition that fired and still holds its claim, whatever the
+    # claim row reads (assurance.latent).
+    "held_by_fired_latent_condition": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+}
+
+#: How a risk a person accepted caps the decision (owner decision Q6).
+ACCEPTED_RISK_CAPS: dict[str, str] = {
+    "standing": Deployment.Decision.READY_RESTRICTED,
+    "lapsed_undated_or_outgrown": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+}
+
+
 def _decision_from_findings(deployment: Deployment) -> str | None:
     """The six-state decision implied by a deployment's active findings (Phase 0.5).
 
@@ -152,19 +227,20 @@ def _decision_from_findings(deployment: Deployment) -> str | None:
         if f.evidence_class in _UNVERIFIED:
             has_unverified = True
 
-    if worst_rank >= severity_rank("critical"):
-        return Deployment.Decision.NOT_RECOMMENDED
-    if worst_rank >= severity_rank("high"):
-        return Deployment.Decision.NEEDS_REMEDIATION
-    if worst_rank >= severity_rank("low"):
-        # A medium or low active finding is deployable with named restrictions.
-        return Deployment.Decision.READY_RESTRICTED
+    for threshold, placed in FINDING_SEVERITY_DECISIONS:
+        if worst_rank >= severity_rank(threshold):
+            return placed
     # Nothing of low+ severity is open. If what remains is only unverified
     # (info-severity but unknown evidence), the honest answer is "need more
     # evidence", not a clean pass.
     if has_unverified:
-        return Deployment.Decision.NEEDS_MORE_EVIDENCE
-    return Deployment.Decision.READY
+        return FINDING_UNVERIFIED_ONLY
+    return FINDING_CLEAN
+
+
+#: The legal-axis value a person's recorded materiality judgment leaves a claim in
+#: (:func:`assurance.legal.record_materiality_decision`), and the only one that caps.
+_LEGALLY_STALE = frozenset({LegalStatus.STALE})
 
 
 def claim_decision_signal(deployment: Deployment) -> dict:
@@ -180,13 +256,38 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     - a **STALE** or **UNKNOWN** claim, or any **open retest obligation**, caps at
       NEEDS_MORE_EVIDENCE — the supporting evidence is expired, unproven, or pending
       a retest, so a clean pass is not earned;
+    - a claim a person has judged **legally STALE** (:mod:`assurance.legal`) caps at
+      NEEDS_MORE_EVIDENCE too, whatever its technical status: an obligation beneath
+      it moved and a person recorded that the move is material here, so it needs
+      re-assessing on legal grounds. Only that recorded judgment caps -- a review
+      merely PENDING is the trigger flagging, and the trigger never judges. Read as
+      the carry leaves it (:func:`assurance.legal.carried_legal_statuses`): a ruling
+      a re-derive of a release that did not carry the legal axis dropped still caps,
+      before and after anything writes it back onto the row;
+    - a declared **latent condition** on a current claim -- on any version of it --
+      that nobody can read now -- UNOBSERVABLE, or its evaluation failed
+      (:mod:`assurance.latent`), or PENDING on a version a re-derive closed, where
+      nothing evaluates it until it is carried (:mod:`assurance.carry`) -- caps at
+      NEEDS_MORE_EVIDENCE: the precondition the claim rests on is not being
+      checked, and what cannot be established is not read as holding;
+    - a current claim a **FIRED** latent condition holds -- on this version or on
+      any earlier version of the claim -- caps at NEEDS_MORE_EVIDENCE whatever its
+      row reads (``held``). The firing marks the claim STALE and opens a retest,
+      and either can be undone by anything that writes a claim row or a retest: a
+      re-derive from before the hold was carried read the claim back to VERIFIED
+      and resolved its retest, and the upgrade from that release left the claim
+      reading a pass under a condition still FIRED. The hold is read here, off the
+      condition, so no such write can lift it;
     - SUPPORTED / VERIFIED / PARTIALLY_VERIFIED claims (and DRAFT, which is not yet
-      an assessment) impose no cap.
+      an assessment) impose no cap -- and a held one is not counted as supporting.
 
+    The caps are :data:`CLAIM_CAPS`, and the cap is the worst of those that apply.
     ``cap`` is ``None`` when no current claim holds the decision back — including a
     deployment with no claims at all, so the finding-based decision governs
     unchanged. The cap never *improves* a decision.
     """
+    from .legal import carried_legal_statuses
+
     Status = AssuranceClaim.ClaimStatus
     current = list(
         deployment.assurance_claims.current().exclude(status=Status.REVOKED)
@@ -195,21 +296,44 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         deployment=deployment, resolved_at__isnull=True
     ).exists()
 
+    # One read of the conditions the decision reads, on ANY version of a claim: the
+    # unread ones -- of a current, unrevoked claim only, since a condition on a claim
+    # a person took out of scope is no more a mark against readiness than the claim
+    # is -- and the ones that hold a claim. Both are about the claim, not one version
+    # of it: a release that did not carry them left them on the version its
+    # re-derive closed, and read there they still stand until they are carried
+    # (assurance.carry).
+    identities = {c.fingerprint for c in current}
+    watched = conditions_the_decision_reads(deployment, identities)
+    unread_conditions = [w for w in watched if not_read(w)]
+    holding = {w.claim.fingerprint for w in watched if w.state in LATENT_HOLDING_STATES}
+    held = [c for c in current if c.fingerprint in holding]
+
     contradicted = [c for c in current if c.status == Status.CONTRADICTED]
     stale = [c for c in current if c.status == Status.STALE]
     unknown = [c for c in current if c.status == Status.UNKNOWN]
+    # The legal axis as the carry leaves it, whatever wrote the row: a ruling a
+    # re-derive of a release that did not carry it dropped still caps.
+    carried = carried_legal_statuses(deployment.pk, current)
+    legally_stale = [c for c in current if carried.get(c.pk, c.legal_status) in _LEGALLY_STALE]
     supporting = [
         c
         for c in current
         if c.status in (Status.SUPPORTED, Status.VERIFIED, Status.PARTIALLY_VERIFIED)
+        and c.fingerprint not in holding
     ]
 
-    if contradicted:
-        cap = Deployment.Decision.NEEDS_REMEDIATION
-    elif stale or unknown or retest_pending:
-        cap = Deployment.Decision.NEEDS_MORE_EVIDENCE
-    else:
-        cap = None
+    cap = _claim_cap(
+        {
+            "contradicted": contradicted,
+            "stale": stale,
+            "unknown": unknown,
+            "open_retest": [True] if retest_pending else [],
+            "legally_stale": legally_stale,
+            "unread_latent_condition": unread_conditions,
+            "held_by_fired_latent_condition": held,
+        }
+    )
 
     return {
         "cap": cap,
@@ -218,8 +342,124 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         "contradicted": contradicted,
         "stale": stale,
         "unknown": unknown,
+        "legally_stale": legally_stale,
+        "unread_conditions": unread_conditions,
+        "held": held,
         "supporting": supporting,
     }
+
+
+def conditions_the_decision_reads(deployment, identities) -> list:
+    """The latent conditions on ``deployment`` the decision reads, on any version of a
+    claim, in pk order: every one that holds its claim (FIRED), and on the claims
+    whose identity is in ``identities`` -- the current, unrevoked ones -- every one
+    nobody reads (:func:`not_read`). One query; the plan reads the same
+    (:func:`assurance.revalidation.plan_revalidation`)."""
+    return list(
+        LatentCondition.objects.filter(deployment=deployment)
+        .filter(
+            Q(claim__fingerprint__in=identities, state__in=LATENT_UNREAD_STATES)
+            # Left pending on a version a re-derive closed, by a release that did not
+            # carry it, and not carried since (a carry refused): no evaluation reads a
+            # closed version, so it is not watched -- counted as watched, the decision
+            # published READY over a watch whose subject had come true.
+            | Q(
+                claim__fingerprint__in=identities,
+                claim__in=AssuranceClaim.objects.closed(),
+                state=LatentCondition.State.PENDING,
+            )
+            | Q(state__in=LATENT_HOLDING_STATES)
+        )
+        .select_related("claim")
+        .order_by("pk")
+    )
+
+
+def not_read(condition) -> bool:
+    """Whether nobody can say, now, whether ``condition`` holds: its subject cannot be
+    read, its evaluation failed, or it is pending where nothing evaluates it -- on a
+    version a re-derive closed."""
+    return condition.state in LATENT_UNREAD_STATES or (
+        condition.state == LatentCondition.State.PENDING and condition.claim.valid_to is not None
+    )
+
+
+def _claim_cap(applying: dict) -> str | None:
+    """The worst of :data:`CLAIM_CAPS` over the kinds in ``applying`` that have
+    anything in them; ``None`` when none has. Pure."""
+    cap = None
+    for kind, members in applying.items():
+        if members:
+            cap = _worse(cap, CLAIM_CAPS[kind])
+    return cap
+
+
+def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
+    """How the risks a person has accepted bear on the decision (owner decision Q6).
+
+    An accepted finding is resolved for every deriver -- nobody re-opens a risk a
+    person chose to carry -- but it is not resolved for the decision. It used to
+    be: acceptance took the finding out of the decision altogether, so accepting a
+    critical finding read READY, the same answer as fixing it.
+
+    - An acceptance that STANDS (its ``risk_accepted_until`` is after ``now``)
+      caps the decision at READY_RESTRICTED: deployable, with a named risk
+      carried, never a clean READY.
+    - An acceptance that has LAPSED, or never named an end, caps it at
+      NEEDS_MORE_EVIDENCE: the decision to carry the risk no longer stands, and
+      until a person decides again nobody has.
+    - So does an acceptance OUTGROWN: the finding is now more severe than the
+      severity it was accepted at (``risk_accepted_severity``), or the acceptance
+      does not say what severity it covered. A next scan reporting the same
+      signature as critical refreshes the severity and leaves the status alone,
+      and a medium someone chose to carry is not a critical they chose to carry.
+
+    ``valid_until`` is the earliest moment a standing acceptance lapses, which is
+    when the decision stops being the one its inputs imply without any write --
+    recorded with the decision so the first read after it recomputes
+    (:func:`current_decision`). ``None`` when nothing here expires.
+    """
+    accepted = list(
+        deployment.findings.filter(status=Finding.Status.ACCEPTED).only(
+            "uuid", "title", "severity", "risk_accepted_until", "risk_accepted_severity"
+        )
+    )
+    standing = [
+        f
+        for f in accepted
+        if f.risk_accepted_until is not None
+        and f.risk_accepted_until > now
+        and _acceptance_covers(f)
+    ]
+    lapsed = [f for f in accepted if f not in standing]
+    cap = None
+    if standing:
+        cap = _worse(cap, ACCEPTED_RISK_CAPS["standing"])
+    if lapsed:
+        cap = _worse(cap, ACCEPTED_RISK_CAPS["lapsed_undated_or_outgrown"])
+    return {
+        "cap": cap,
+        "standing": standing,
+        "lapsed": lapsed,
+        "valid_until": min((f.risk_accepted_until for f in standing), default=None),
+    }
+
+
+def _acceptance_covers(finding: Finding) -> bool:
+    """Whether the severity accepted covers the finding's severity now. An
+    acceptance that recorded none covers nothing, and a severity this platform does
+    not rank is not shown to be within one it does."""
+    accepted_at = (finding.risk_accepted_severity or "").strip().lower()
+    current = (finding.severity or "").strip().lower()
+    # Off the module, as `severity_rank` reads it: one order, the one the policy pins.
+    ranked = _models.SEVERITY_ORDER
+    if accepted_at not in ranked or current not in ranked:
+        return False
+    return severity_rank(current) <= severity_rank(accepted_at)
+
+
+def _no_accepted_risk() -> dict:
+    return {"cap": None, "standing": [], "lapsed": [], "valid_until": None}
 
 
 def _completed_scan_signal(deployment: Deployment) -> str | None:
@@ -231,7 +471,7 @@ def _completed_scan_signal(deployment: Deployment) -> str | None:
     "a scan finished and found nothing" versus "nothing has ever been scanned"."""
     if deployment.last_complete_scan_at is None:
         return None
-    return Deployment.Decision.READY
+    return COMPLETED_SCAN_SIGNAL
 
 
 def incomplete_evidence_cap(deployment: Deployment) -> str | None:
@@ -244,7 +484,7 @@ def incomplete_evidence_cap(deployment: Deployment) -> str | None:
     never improve one. Nothing about it is a finding, which is why the finding
     signal alone could read a stopped scan as READY."""
     if deployment.evidence_incomplete:
-        return Deployment.Decision.NEEDS_MORE_EVIDENCE
+        return SCAN_INCOMPLETE_CAP
     return None
 
 
@@ -286,9 +526,13 @@ class DecisionParts:
     # part in the decision -- `decide` never reads it -- and is carried here
     # only so the payload can report it without a second read.
     chain_provenance: dict
+    # The risks a person has accepted (:func:`accepted_risk_signal`), read at the
+    # same moment as everything else -- including the clock it was read against,
+    # which is what makes an acceptance standing or lapsed.
+    accepted_risk: dict = field(default_factory=_no_accepted_risk)
 
 
-def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING) -> DecisionParts:
+def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING, now=None) -> DecisionParts:
     """Read every decision input, in one pass.
 
     Wrapped in a transaction by callers that need the set to be consistent. The
@@ -310,6 +554,7 @@ def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING) -> Dec
         # is what closes the tear. A census read later would describe a
         # different moment from the composition it is published beside.
         chain_provenance=read_chain_provenance(deployment),
+        accepted_risk=accepted_risk_signal(deployment, now=now or timezone.now()),
     )
 
 
@@ -341,13 +586,22 @@ def decide(parts: DecisionParts) -> str | None:
         composition_decision_signal(parts.composition),
     )
     cap = parts.claim_signal["cap"]
+    accepted_cap = parts.accepted_risk["cap"]
     # Coverage of the system, not strength of the evidence: something the customer
     # declared, or something flagged high risk, was never assessed at all. Every
     # fact gathered can be genuine and the audit still be incomplete.
-    if base is None and cap is None and parts.scan_cap is None and parts.coverage_cap is None:
+    if (
+        base is None
+        and cap is None
+        and parts.scan_cap is None
+        and parts.coverage_cap is None
+        and accepted_cap is None
+    ):
         # Assessed by nothing at all: genuinely no decision.
         return None
-    return _worse(_worse(_worse(base, cap), parts.scan_cap), parts.coverage_cap)
+    # A risk a person accepted is a cap like the others: it holds the decision back,
+    # never lifts it.
+    return _worse(_worse(_worse(_worse(base, cap), parts.scan_cap), parts.coverage_cap), accepted_cap)
 
 
 def compute_decision(
@@ -387,6 +641,50 @@ def _claim_brief(claim: AssuranceClaim) -> dict:
         "claim_type": claim.claim_type,
         "status": claim.status,
         "statement": claim.statement,
+    }
+
+
+def _unread_conditions_note(conditions) -> str:
+    """Why the decision is held when the only thing holding it is a declared
+    precondition nobody can read -- naming each claim and what it rests on."""
+    named = "; ".join(
+        f"the {c.claim.claim_type} claim rests on {c.subject!r} ({c.get_kind_display().lower()}), "
+        + (
+            "which cannot be read"
+            if c.state == LatentCondition.State.UNOBSERVABLE
+            else "whose evaluation failed"
+            if c.state == LatentCondition.State.EVALUATION_FAILED
+            else "watched on a version a re-derive closed and not yet carried to the current one"
+        )
+        for c in conditions
+    )
+    return (
+        f"Held at 'needs more evidence' by {len(conditions)} declared precondition(s) that "
+        f"cannot be checked now: {named}. What cannot be established is not read as holding."
+    )
+
+
+def _held_by_fired_note(claims) -> str:
+    """Why the decision is held when what holds it is a declared condition that
+    fired on a claim whose row does not say so -- naming each claim."""
+    named = ", ".join(sorted({c.claim_type for c in claims}))
+    return (
+        f"Held at 'needs more evidence' by a declared condition that fired on {len(claims)} "
+        f"claim(s) ({named}) and still holds: the precondition each rests on gave way, and "
+        "nothing has found it back at its baseline or accepted it. The claim reads no better "
+        "than stale until the condition re-arms or a person withdraws it."
+    )
+
+
+def _accepted_brief(finding: Finding) -> dict:
+    """An accepted finding for the decision-support view: what it is, how severe,
+    and when its acceptance ends (``None`` for one that never named an end)."""
+    until = finding.risk_accepted_until
+    return {
+        "uuid": str(finding.uuid),
+        "title": finding.title,
+        "severity": finding.severity,
+        "accepted_until": until.isoformat() if until else None,
     }
 
 
@@ -463,9 +761,32 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
     # one that agrees with a finding that already had.
     without_chains = None if paused else decide(replace(parts, composition=_NO_CHAINS))
     chains_are_binding = not paused and decision != without_chains
+    # The same counterfactual for the risks a person accepted: they are named as
+    # the reason only when they are what holds the decision where it is.
+    accepted = parts.accepted_risk
+    accepted_cap = None if paused else accepted["cap"]
+    without_acceptance = None if paused else decide(replace(parts, accepted_risk=_no_accepted_risk()))
+    acceptance_is_binding = not paused and decision != without_acceptance
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
+    elif (
+        chain_signal == Deployment.Decision.READY_RESTRICTED
+        and parts.composition.decision == composition_READY
+        and parts.composition.authorization_checked
+        and chains_are_binding
+    ):
+        # Every approved workflow holds, and the chains alone place the deployment
+        # here -- restricted, because some of what holds is a permit check. Its own
+        # sentence: the generic one below says the chains "place it there" without
+        # saying why a composition whose every chain held is not READY.
+        note = (
+            f"Ready with restrictions: every one of the {parts.composition.workflows_expected} "
+            f"approved workflow(s) has a chain outcome and all of them hold, but "
+            f"{len(parts.composition.authorization_checked)} hold on an authorization check "
+            "alone -- the gate authorized the action at dispatch, and no record shows the "
+            f"effect happened within that authority. {explain_composition(parts.composition)}"
+        )
     elif chain_signal is not None and chain_signal != composition_READY and chains_are_binding:
         # The per-workflow chains, and nothing else, place the deployment here --
         # `chains_are_binding` is what earns the "not" in the sentence. Without the
@@ -484,6 +805,22 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             "were never assessed, so every fact gathered here can be genuine and the "
             "assessment still be short."
         )
+    elif acceptance_is_binding and accepted["lapsed"]:
+        titles = ", ".join(sorted(f.title for f in accepted["lapsed"]))
+        note = (
+            f"Held at 'needs more evidence' by {len(accepted['lapsed'])} accepted risk(s) "
+            f"whose acceptance has lapsed or never named an end ({titles}). Accepting a "
+            "risk is a decision to carry it for a stated time; past that time nobody "
+            "has decided to carry it."
+        )
+    elif acceptance_is_binding:
+        titles = ", ".join(sorted(f.title for f in accepted["standing"]))
+        note = (
+            f"Ready with restrictions: {len(accepted['standing'])} risk(s) accepted until "
+            f"{accepted['valid_until'].isoformat()} at the earliest ({titles}). An accepted "
+            "risk is carried, not removed; when its acceptance lapses the decision needs "
+            "more evidence."
+        )
     elif scan_cap is not None and _worse(from_findings, signal["cap"]) != decision:
         note = (
             "Held at 'needs more evidence' because the latest scan stopped before "
@@ -494,6 +831,18 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         held = ", ".join(sorted({c.claim_type for c in signal["contradicted"] + signal["stale"] + signal["unknown"]}))
         if signal["contradicted"]:
             note = f"Held at 'needs remediation' by a contradicted assurance claim ({held}); a current claim's boundary does not hold."
+        elif signal["held"] and not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
+            note = _held_by_fired_note(signal["held"])
+        elif signal["unread_conditions"] and not (
+            signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
+        ):
+            note = _unread_conditions_note(signal["unread_conditions"])
+        elif not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
+            legal = ", ".join(sorted({c.claim_type for c in signal["legally_stale"]}))
+            note = (
+                f"Held at 'needs more evidence' by a claim a person judged legally stale ({legal}); "
+                "an obligation beneath it moved materially, and it needs re-assessing on legal grounds."
+            )
         else:
             reason = "an open retest obligation" if signal["retest_pending"] and not (signal["stale"] or signal["unknown"]) else f"a stale or unproven claim ({held})"
             note = f"Held at 'needs more evidence' by {reason}; supporting evidence is not current."
@@ -539,6 +888,15 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         "from_findings": from_findings,
         "claim_cap": signal["cap"],
         "coverage_cap": coverage_cap,
+        "accepted_risk_cap": accepted_cap,
+        # Every risk a person has accepted, standing or lapsed, with the moment
+        # each acceptance ends. Reported even when it is not what binds the
+        # decision: a carried risk is part of what the decision rests on.
+        "accepted_risk": {
+            "standing": [_accepted_brief(f) for f in accepted["standing"]],
+            "lapsed": [_accepted_brief(f) for f in accepted["lapsed"]],
+            "valid_until": accepted["valid_until"].isoformat() if accepted["valid_until"] else None,
+        },
         # The compositional assurance graph, reported rather than only decided
         # with. Shaped by `workflow_chains.composition_payload` because the ingest
         # routes publish the same block, and two hand-written copies of one shape
@@ -558,13 +916,28 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             "contradicted": [_claim_brief(c) for c in signal["contradicted"]],
             "stale": [_claim_brief(c) for c in signal["stale"]],
             "unknown": [_claim_brief(c) for c in signal["unknown"]],
+            "legally_stale": [_claim_brief(c) for c in signal["legally_stale"]],
+            "unread_conditions": [
+                {"uuid": str(c.uuid), "state": c.state, "kind": c.kind, "subject": c.subject,
+                 "claim": _claim_brief(c.claim)}
+                for c in signal["unread_conditions"]
+            ],
+            # The current claims a fired condition holds, whatever their rows read.
+            "held": [_claim_brief(c) for c in signal["held"]],
             "supporting": [_claim_brief(c) for c in signal["supporting"]],
         },
         "note": note,
     }
 
 
-def recompute_decision(deployment: Deployment, *, paused: bool | None = None) -> str | None:
+def recompute_decision(
+    deployment: Deployment,
+    *,
+    paused: bool | None = None,
+    brought_current: bool = False,
+    claim: str | None = None,
+    after_claim: str | None = None,
+) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
 
@@ -589,12 +962,31 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
     move, and the log is what was recorded and published
     (:func:`assurance.revision.decision_in_force`). Reading the pause off such a
     row recorded, on the repair, a lift -- or a re-pause -- no operator made.
+
+    ``brought_current``: the caller carried what the release before left and read
+    every watch (or there was none to read). Any other recompute of a decision
+    another writer left keeps it recognisable -- the policy stamp cleared -- so the
+    next publishing read still brings it current. ``claim``: what
+    :func:`_claim_for_this_release` leaves in the policy column of such a decision in
+    place of the stamp, a token of that claim's own. ``after_claim``: the token the
+    caller's claim left before the watches were read. The row is brought current only
+    if it still holds that token -- every recompute since, by anyone, rewrote the
+    column: another refresh's claim, a revoke, the recompute route -- and its keyring
+    column is still marked: a recompute of the release before since rewrote that
+    bare. Either way a recompute the watches did not see landed after they were read,
+    and the row is left recognisable.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
 
     with transaction.atomic():
         locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
+        # Another writer's decision stays recognisable unless this caller brought it
+        # current, and no recompute of that writer's has landed since it did.
+        foreign = locked.decision is not None and not stamped_in_force(locked)
+        if after_claim is not None:
+            brought_current = brought_current and _still_claimed(locked, after_claim)
+        keep_foreign = foreign and not brought_current
         # ONE reading of the decision in force, under the lock: the pause is taken
         # from it and the move is made from it, so the two cannot disagree, and a
         # row behind its log is repaired -- and reported -- once.
@@ -605,16 +997,160 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
         # with it. Three reads (here, inside the composition, and in the
         # fingerprint) could each see a different file mid-rotation, and a READY
         # computed under the old keys was stamped as current under the new ones.
-        decision = compute_decision(locked, paused=hold_pause, keyring=keyring)
-        accept_transition(locked, to_decision=decision, in_force=in_force)
+        # Read once, so the decision and the moment it stops holding come from the
+        # same reading. A pause reads nothing, and nothing about it expires.
+        parts = None if hold_pause else read_decision_parts(locked, keyring=keyring)
+        decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
+        moved = accept_transition(locked, to_decision=decision, in_force=in_force)
         Deployment.objects.filter(pk=locked.pk).update(
-            decision_keyring=observed_outcomes.keyring_fingerprint(keyring)
+            # Marked as this release's (`keyring_stamp`): the release before rewrites
+            # this column bare on every recompute of its own, one that moves nothing
+            # included, and that is how such a recompute is told apart.
+            decision_keyring=keyring_stamp(observed_outcomes.keyring_fingerprint(keyring)),
+            decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
+            # The rules this was computed under, AND the revision it stands at. Kept
+            # recognisable, no stamp: the claim's token for a claim, else nothing --
+            # which takes any claim's token away with it.
+            decision_policy=claim if keep_foreign else policy_stamp(moved["revision"]),
         )
-    deployment.refresh_from_db(fields=["decision", "decision_revision", "decision_keyring"])
+    deployment.refresh_from_db(
+        fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
+    )
     # Level with its transition log -- the move above was made from the log's
     # reading -- so publishing this instance next asks the log nothing.
     deployment.logged_revision = deployment.decision_revision
     return decision
+
+
+def _current_policy_pin() -> str:
+    """The pin of the rules in force (see Deployment.decision_policy). Imported
+    here because assurance.policy reads this module's constants."""
+    from .policy import policy_pin
+
+    return policy_pin()
+
+
+def policy_stamp(revision, *, pin=None) -> str:
+    """What ``Deployment.decision_policy`` holds for a decision this release's rules
+    computed and that stands at ``revision``: the pin of the rules, and the revision.
+
+    The revision is the half that tells another writer's decision apart. The release
+    before this one, still writing mid-rollout, computes under its own rules and
+    moves the decision -- and the revision -- without touching the stamp, which it
+    does not know. Stamped with the pin alone, its decision read as stamped under the
+    rules in force and was published: a fired condition's hold read by this release,
+    and a READY from that one (``current_decision``). Stamped with the revision too,
+    its move leaves the stamp naming a revision the row has left, and the first
+    publishing read recomputes it. ``pin``: the pin in force, read once by a caller
+    stamping many."""
+    return f"{pin or _current_policy_pin()}@r{revision}"
+
+
+#: What marks ``Deployment.decision_keyring`` as written by this release's recompute.
+#: The release before it writes the column BARE -- the keyring fingerprint, 64 hex
+#: characters, or "" for no keyring -- on EVERY recompute, one whose decision did not
+#: move included. That recompute leaves the revision where it was and the policy stamp
+#: with it, so by the stamp alone a READY it re-read under its own rules, after it
+#: wrote an input this release reads more strictly (a legal ruling, an accepted
+#: finding), was published as this release's -- with no bound on how long. A bare
+#: value is that recompute; this release never writes one.
+_KEYRING_MARK = "~"
+
+
+def keyring_stamp(fingerprint: str) -> str:
+    """``decision_keyring`` as this release writes it: the keyring fingerprint behind
+    :data:`_KEYRING_MARK`, cut to the column's 64 characters.
+
+    The cut drops the fingerprint's last hex digit. Whether the column is this
+    release's is read off the mark alone, which no bare value carries, so the cut
+    cannot make another writer's value read as this one's; two keyrings read as the
+    same one only if their SHA-256 fingerprints agree in the first 252 bits."""
+    return (_KEYRING_MARK + (fingerprint or ""))[:64]
+
+
+def _stamped(policy, keyring, revision) -> bool:
+    """Whether a row with this policy stamp, keyring column and revision holds a
+    decision this release's rules computed, at that revision, and that no writer that
+    does not stamp has recomputed since (see :func:`stamped_in_force`)."""
+    if policy != policy_stamp(revision):
+        return False
+    # NULL predates the signed-outcome rule; the keyring branch of `current_decision`
+    # and the upgrade receiver reconcile it.
+    return keyring is None or keyring.startswith(_KEYRING_MARK)
+
+
+def stamped_in_force(deployment) -> bool:
+    """Whether ``deployment``'s stored decision (as the instance holds it) is one the
+    rules in force computed, at the revision it stands at -- and one the release
+    before has not recomputed since, even to the same decision: its recompute
+    rewrites the keyring column bare (:data:`_KEYRING_MARK`)."""
+    return _stamped(
+        getattr(deployment, "decision_policy", None),
+        getattr(deployment, "decision_keyring", None),
+        deployment.decision_revision,
+    )
+
+
+#: What the policy column of a decision another writer left holds while a refresh of
+#: this release reads its watches (:func:`_claim_for_this_release`), before the
+#: claim's own token. Never a policy stamp: one reads ``<pin>@r<revision>``.
+_CLAIM_PREFIX = "claim:"
+
+
+def _claim_for_this_release(deployment) -> str | None:
+    """Before the watches are read for a decision another writer left: recompute it
+    as not yet brought current (:func:`recompute_decision`), which marks its keyring
+    column as this release's and leaves, in place of the policy stamp, a token of
+    this claim's own. The token of the claim made; ``None`` -- one query, no lock and
+    no write -- for a row that is this release's.
+
+    The recompute that follows the watches brings the row current only if it still
+    holds both (``after_claim``). Every other recompute of the row takes the token
+    away -- another release's, a revoke, a contradict, the recompute route, a pause
+    or its lift, ``recompute_chain_decisions``, the first read, another refresh's
+    claim -- and a recompute of the release before rewrites the keyring column bare.
+    Only the token says which: the release before's column comes back marked after
+    any recompute of this release's, and another refresh's claim marks it too."""
+    row = Deployment.objects.filter(pk=deployment.pk).only(
+        "decision", "decision_policy", "decision_keyring", "decision_revision"
+    ).first()
+    if row is None or row.decision is None or stamped_in_force(row):
+        return None
+    token = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}"
+    recompute_decision(deployment, claim=token)
+    return token
+
+
+def _still_claimed(locked, token) -> bool:
+    """Whether the locked row is as the claim that left ``token`` left it: the token
+    still in the policy column, and the keyring column still marked."""
+    keyring = locked.decision_keyring
+    return locked.decision_policy == token and keyring is not None and keyring.startswith(_KEYRING_MARK)
+
+
+def _watches_read_since(deployment_id, since) -> bool:
+    """Whether every watch on ``deployment_id`` the decision could read as not true
+    was read at or after ``since``: none left on a closed version with a current one
+    (a carry refused), and every PENDING one on a current, unrevoked claim read since.
+    A refused evaluation that wrote nothing leaves them as they stood."""
+    from django.db.models import Exists, OuterRef
+
+    pending = LatentCondition.objects.filter(deployment_id=deployment_id, state=LatentCondition.State.PENDING)
+    left_behind = pending.filter(claim__in=AssuranceClaim.objects.closed()).filter(
+        Exists(
+            AssuranceClaim.objects.current().filter(
+                deployment_id=OuterRef("deployment_id"), fingerprint=OuterRef("claim__fingerprint")
+            )
+        )
+    )
+    if left_behind.exists():
+        return False
+    return not (
+        pending.filter(claim__in=AssuranceClaim.objects.current())
+        .exclude(claim__status=AssuranceClaim.ClaimStatus.REVOKED)
+        .filter(Q(last_evaluated_at__isnull=True) | Q(last_evaluated_at__lt=since))
+        .exists()
+    )
 
 
 def refresh_stored_decisions(deployment_ids) -> None:
@@ -625,14 +1161,92 @@ def refresh_stored_decisions(deployment_ids) -> None:
     :mod:`assurance.signals`. A deployment deleted since its input was written has
     no decision left to refresh and is skipped. Each keeps its operator's pause as
     it is in force under its LOCKED row, as every refresh does.
+
+    Before the recompute: what a release that did not carry left is carried
+    (:func:`assurance.carry.converge`), the declared latent conditions are evaluated,
+    and the served route is noted -- each writing in its own short transactions and
+    scheduling no other refresh of this deployment, since this one follows. Call it
+    outside any transaction, as the backstop does after the commit: inside one, those
+    reads run under the lock that transaction holds.
     """
     ids = {pk for pk in deployment_ids if pk is not None}
     if not ids:
         return
+    from .carry import converge
+    from .latent import fire_due_conditions
+    from .served_route import note_route_quietly
+    from .signals import refresh_deferred
+
     # In pk order, so two writers refreshing the same pair of deployments take
     # their row locks in the same order rather than each holding the other's.
     for deployment in Deployment.objects.filter(pk__in=ids).order_by("pk"):
-        recompute_decision(deployment)
+        since = timezone.now()
+        claim = _claim_for_this_release(deployment)
+        with refresh_deferred(deployment.pk):
+            # Whatever a release that did not carry left on a closed version, first,
+            # so it is evaluated below with the rest.
+            try:
+                converge(deployment)
+            except Exception:  # the decision still reads it (claim_decision_signal)
+                logger.exception(
+                    "what a release that did not carry left on deployment %s was not carried; "
+                    "its decision reads it where it is, and the next refresh tries again",
+                    deployment.pk,
+                )
+            # A declared latent condition the write made true fires, so the decision
+            # refreshed here reads the claim it marked STALE.
+            fire_due_conditions(deployment, schedule_refresh=False)
+            # And the route the write left serving is noted, so a run after it binds.
+            note_route_quietly(deployment)
+        # Brought current only under the claim made here, still standing: a row this
+        # release's before the watches were read is left recognisable if another
+        # writer's recompute made it not, whoever recomputed after.
+        recompute_decision(
+            deployment,
+            brought_current=claim is not None and _watches_read_since(deployment.pk, since),
+            after_claim=claim,
+        )
+
+
+def _bring_current_after_another_writer(deployment: Deployment) -> None:
+    """Recompute a stored decision this release's rules did not compute, after
+    carrying what a release that did not carry left behind (``assurance.carry``).
+
+    Where the deployment has a live watch, the deployment's refresh -- which
+    evaluates the watches -- is scheduled for once this read's transaction commits,
+    or runs now outside one. A watch it carried has not been read against the
+    claim's current version. And the release before never evaluates a watch: a write
+    of its that made one true -- a tool that appeared, recomputed after under its own
+    rules -- left the watch pending, and recomputed here alone the decision read it
+    as still not true. The decision published here already reads every hold and
+    unread condition on any version of the claim, so it does not wait for that."""
+    from .carry import converge
+    from .models import LATENT_LIVE_STATES
+    from .signals import schedule_decision_refresh
+
+    try:
+        carried = converge(deployment)
+    except Exception:  # the decision still reads it where it is
+        logger.exception(
+            "what a release that did not carry left on deployment %s was not carried at "
+            "its read; its decision reads it where it is",
+            deployment.pk,
+        )
+        carried = None
+    watches = bool(
+        carried is None
+        or carried.get("watches_carried")
+        or LatentCondition.objects.filter(deployment_id=deployment.pk, state__in=LATENT_LIVE_STATES).exists()
+    )
+    # Stamped here only with no watch to read; else the refresh stamps it once it has
+    # read them, and until then the next read tries again.
+    recompute_decision(deployment, brought_current=not watches)
+    if watches:
+        schedule_decision_refresh(deployment.pk)
+        deployment.refresh_from_db(
+            fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
+        )
+        deployment.logged_revision = deployment.decision_revision
 
 
 def current_decision(deployment: Deployment) -> str | None:
@@ -660,11 +1274,72 @@ def current_decision(deployment: Deployment) -> str | None:
     the database timeout the read fails rather than publish a decision computed
     under the withdrawn keys. The eager path is ``manage.py recompute_chain_decisions``,
     run when the keyring changes, after which every read is the two-query one."""
-    from . import observed_outcomes
-    from .revision import hold_to_its_log
+    from django.db import DatabaseError
 
+    from . import observed_outcomes
+    from .revision import StaleDecisionRead, hold_to_its_log
+
+    # The row as read, before the log moves the instance: a row `loaddata` restored
+    # beneath its log carries the stamp of its OWN revision, which is this release's
+    # decision at that revision -- not another writer's move.
+    as_read = (
+        getattr(deployment, "decision_policy", None),
+        getattr(deployment, "decision_keyring", None),
+        deployment.decision_revision,
+        deployment.decision,
+    )
     hold_to_its_log(deployment)
-    if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():
+    # Rules move the decision where no write does too: a release that adds a cap
+    # changes what the same stored inputs imply. A decision stamped under other
+    # rules is recomputed rather than published under rules that no longer hold.
+    # Any deployment: every rule is a rule of every decision. So is a stored
+    # decision with NO stamp: nothing says which rules it was computed under. The
+    # post-migrate receiver recomputes every such decision at the migrate that adds
+    # the column, but a row can arrive unstamped after it -- `loaddata` of a fixture
+    # dumped before the stamp, which the receiver ran before -- and it was published
+    # as stored. And so is one a writer that does not stamp moved since: the release
+    # before this one, still writing mid-rollout, computed it under ITS rules -- a
+    # READY over a claim a fired condition holds, a ruling its re-derive dropped --
+    # and it was published while decision-support, computing afresh, said otherwise.
+    # What that release's re-derive left behind is carried first, so the recompute
+    # and the record agree. A deployment nothing has decided has no stamp and
+    # nothing to redo. That release's recompute that moved nothing is recognised by
+    # the keyring column it rewrote bare (`_KEYRING_MARK`).
+    if deployment.decision is not None and not stamped_in_force(deployment):
+        if deployment.decision == Deployment.Decision.PAUSED and as_read[3] == Deployment.Decision.PAUSED:
+            # A pause the row itself holds reads nothing -- no rule, keyring, lapse or
+            # watch moves it -- and the dispatch fence a pause's response runs reads it
+            # here: left recognisable by the pause, it is brought current by the read
+            # after the lift, and the pause's response waits on no watch.
+            return deployment.decision
+        try:
+            _bring_current_after_another_writer(deployment)
+        except (DatabaseError, StaleDecisionRead):
+            policy, keyring, revision, decision = as_read
+            beneath_its_log = revision != deployment.decision_revision
+            if not (beneath_its_log and (decision is None or _stamped(policy, keyring, revision))):
+                raise  # another writer's decision is never published unrecomputed
+            # A row restored beneath its log with this release's own stamp, and the
+            # row cannot be written now: publish what the log records, as
+            # `hold_to_its_log` does when it cannot bring the row up to it. Raised,
+            # every surface answered 500 -- a pause the log records included.
+            logger.exception(
+                "deployment %s: stored decision is behind its transition log and could not be "
+                "recomputed; publishing the decision the log records",
+                deployment.pk,
+            )
+        return deployment.decision
+    # Time moves the decision where no write does: a risk accepted until a moment
+    # that has now passed. The stored decision records when that happens, and the
+    # first read after it recomputes -- rather than go on publishing the
+    # READY_RESTRICTED an acceptance that no longer stands was holding up. Read after
+    # the stamp: read first, a decision another writer left was recomputed here --
+    # and stamped -- without the watches that writer made true being read.
+    valid_until = getattr(deployment, "decision_valid_until", None)
+    if valid_until is not None and timezone.now() >= valid_until:
+        recompute_decision(deployment)
+        return deployment.decision
+    if deployment.decision_keyring == keyring_stamp(observed_outcomes.keyring_fingerprint()):
         return deployment.decision
     # Stale or never stamped -- but only a deployment with chain outcomes can move
     # on a keyring change. A caller that already knows (the bundle annotates it in

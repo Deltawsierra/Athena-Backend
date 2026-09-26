@@ -44,6 +44,7 @@ from assurance.revision import (
     read_decision,
     transitions_since,
 )
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -63,7 +64,9 @@ def _deployment(name="checkout-assistant"):
         password="x",
         role=User.Roles.ANALYST,
     )
-    return Deployment.objects.create(name=name, owner=owner)
+    # The decisions written here through the one writer stand for ones the rules
+    # computed, so they are stamped as such: unstamped, the first read recomputes them.
+    return stamped_under_the_rules_in_force(Deployment.objects.create(name=name, owner=owner))
 
 
 # ---------------------------------------------------------------------------

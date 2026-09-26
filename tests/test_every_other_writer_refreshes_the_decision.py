@@ -393,6 +393,32 @@ def test_a_backstop_refresh_that_fails_is_logged_not_raised(commit, monkeypatch,
     assert "stored decision refresh failed after commit" in caplog.text
 
 
+def test_a_provider_write_refreshes_every_deployment_serving_through_it(commit):
+    """A provider's name and region are fields of the served route every chain
+    outcome is compared with (P2.2), and a provider is shared: renaming it moves the
+    route -- and the decision -- of each deployment with a component resolving to
+    it, with no write to any of them. Deleting it moves them too."""
+    from assurance.models import Provider
+
+    with commit():
+        serving, other, unrelated = _scanned("serving"), _scanned("other"), _scanned("unrelated")
+        provider = Provider.objects.create(name="VendorX", kind=Provider.Kind.MODEL_PROVIDER)
+        for dep in (serving, other):
+            Asset.objects.create(
+                deployment=dep, kind=Asset.Kind.MODEL, name="m", identifier="m", provider=provider,
+                metadata={"model": "x"},
+            )
+    with commit() as callbacks:
+        provider.name = "VendorY"
+        provider.save()
+    assert _refreshes(callbacks) == sorted([serving.pk, other.pk])
+    assert unrelated.pk not in _refreshes(callbacks)
+
+    with commit() as callbacks:
+        provider.delete()
+    assert _refreshes(callbacks) == sorted([serving.pk, other.pk])
+
+
 def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
     """The backstop is only as good as its list of inputs. Every table the decision
     rule queries must be the deployment's own or one the backstop watches, so an
@@ -420,27 +446,69 @@ def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
         for query in queries.captured_queries
         for table in re.findall(r'(?:FROM|JOIN)\s+"(\w+)"', query["sql"])
     }
-    watched = set(signals.DECISION_INPUTS) | {"assurance.Deployment"}
+    # A fan-out input -- a provider, which a deployment's served route names -- is
+    # watched too: a write to it refreshes every deployment it reaches.
+    inputs = set(signals.DECISION_INPUTS) | set(signals.DECISION_FANOUT_INPUTS)
+    watched = inputs | {"assurance.Deployment"}
     assert read - watched == set(), f"the decision reads {sorted(read - watched)}, which nothing refreshes it on"
     # And the list names nothing the rule has stopped reading, which would only
     # cost refreshes. (The deployment's own row is read by the refresh under its
     # lock, not by the rule.)
-    assert set(signals.DECISION_INPUTS) - read == set(), sorted(set(signals.DECISION_INPUTS) - read)
+    assert inputs - read == set(), sorted(inputs - read)
 
 
 def test_the_decision_reads_no_finding_column_but_these():
     """A finding saved on a column outside `DECISION_COLUMNS` schedules no refresh,
     so no such column may move the decision. Each one is changed here, alone, on a
     finding that places the deployment, and the decision must not move."""
+    dep = _scanned()
+    finding = _finding(dep, severity="high")
+    changed = _no_other_finding_column_moves(dep, finding, Deployment.Decision.NEEDS_REMEDIATION)
+    assert "remediation_state" in changed and "assignee" in changed
+
+
+def test_the_decision_reads_no_finding_column_but_these_on_an_accepted_finding_either():
+    """An accepted finding is read through more columns than an open one: when its
+    acceptance ends, and what severity it was given at. A save naming only the
+    second scheduled no refresh, so narrowing an acceptance left the stored decision
+    READY_RESTRICTED while a fresh one needed more evidence."""
+    dep = _scanned()
+    finding = Finding.objects.create(
+        deployment=dep, fingerprint="fp-accepted", finding_type="t", title="T", severity="high",
+        status=Finding.Status.ACCEPTED, risk_accepted_until=timezone.now() + timedelta(days=30),
+        risk_accepted_severity="high",
+    )
+    changed = _no_other_finding_column_moves(dep, finding, Deployment.Decision.READY_RESTRICTED)
+    assert "remediation_state" in changed and "assignee" in changed
+
+
+def test_narrowing_an_acceptance_refreshes_the_decision(django_capture_on_commit_callbacks):
+    with django_capture_on_commit_callbacks(execute=True):
+        dep = _scanned()
+        finding = Finding.objects.create(
+            deployment=dep, fingerprint="fp-accepted", finding_type="t", title="T", severity="high",
+            status=Finding.Status.ACCEPTED, risk_accepted_until=timezone.now() + timedelta(days=30),
+            risk_accepted_severity="high",
+        )
+    assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
+
+    with django_capture_on_commit_callbacks(execute=True) as callbacks:
+        finding.risk_accepted_severity = "low"
+        finding.save(update_fields=["risk_accepted_severity"])
+
+    assert _refreshes(callbacks) == [dep.pk]
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def _no_other_finding_column_moves(dep, finding, decided):
+    """Change every Finding column outside `DECISION_COLUMNS`, one at a time, and
+    hold the decision to ``decided`` throughout. The columns changed, by name."""
     from django.db import models as dj_models
 
     columns = signals.DECISION_COLUMNS["assurance.Finding"]
-    dep = _scanned()
     other = _scanned("other")
-    finding = _finding(dep, severity="high")
     asset = Asset.objects.create(deployment=dep, kind=Asset.Kind.MODEL, name="m", identifier="m")
-    decided = compute_decision(Deployment.objects.get(pk=dep.pk))
-    assert decided == Deployment.Decision.NEEDS_REMEDIATION
+    assert compute_decision(Deployment.objects.get(pk=dep.pk)) == decided
     changed = []
     for field in Finding._meta.concrete_fields:
         if field.primary_key or field.name in columns or field.attname in columns:
@@ -473,7 +541,7 @@ def test_the_decision_reads_no_finding_column_but_these():
         assert compute_decision(Deployment.objects.get(pk=dep.pk)) == decided, field.name
         Finding.objects.filter(pk=finding.pk).update(**{field.attname: before[field.attname]})
         changed.append(field.name)
-    assert "remediation_state" in changed and "assignee" in changed
+    return changed
 
 
 # ------------------------------------------------ an ingest is one transaction

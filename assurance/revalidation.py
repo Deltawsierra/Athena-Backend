@@ -33,7 +33,8 @@ from __future__ import annotations
 
 from . import observability as obs
 from .fingerprint import compute_system_fingerprint
-from .models import AssuranceClaim, RetestRequirement
+from .models import LATENT_HOLDING_STATES, AssuranceClaim, LatentCondition, RetestRequirement
+from .workflow_chains import composition_for, read_expected_workflows
 
 ClaimType = AssuranceClaim.ClaimType
 Status = AssuranceClaim.ClaimStatus
@@ -59,27 +60,64 @@ _ACHILLES_CAPABILITIES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _reason_for(claim: AssuranceClaim, requirement: RetestRequirement | None) -> str:
+def _reason_for(
+    claim: AssuranceClaim, requirement: RetestRequirement | None, holding=None, *, unread=None,
+    legally_stale: bool = False,
+) -> str:
     """Why this claim needs revalidating: the open retest obligation's own reason
-    when a change opened one, else the honest reason its status implies."""
+    when a change opened one, else the declared condition that fired on it and holds
+    it (``holding``), else the honest reason its status implies -- else a declared
+    condition on it nobody can read now (``unread``), else a person's ruling that it
+    is legally stale (``legally_stale``)."""
     if requirement is not None:
         return requirement.reason
+    if holding is not None:
+        return (
+            f"A declared condition fired on this claim and still holds it: {holding.description} "
+            f"({holding.get_kind_display()}; subject {holding.subject!r}). Observed when it fired: "
+            f"{holding.fired_observation or '(not recorded)'}. It is held at stale until the "
+            "condition is found back at its baseline or a person withdraws it."
+        )
     if claim.status == Status.CONTRADICTED:
         return "The current state contradicts this claim; fresh evidence is required to restore or retire it."
     if claim.status == Status.STALE:
         return "The claim's evidence has expired; a retest is due before it can be read as current."
+    if unread is not None and unread.state == LatentCondition.State.PENDING:
+        return (
+            f"A declared condition on this claim was left on a version a re-derive closed, and has not "
+            f"been carried to the current one, where it would be evaluated: {unread.description} "
+            f"({unread.get_kind_display()}; subject {unread.subject!r}). Nothing reads it there, so the "
+            "claim is not read as holding until it is carried and read, or a person withdraws it."
+        )
+    if unread is not None:
+        return (
+            f"A declared condition on this claim cannot be read now ({unread.get_state_display()}): "
+            f"{unread.description} ({unread.get_kind_display()}; subject {unread.subject!r}). What it "
+            "watches is not being checked, so the claim is not read as holding until the condition "
+            "is read again or a person withdraws it."
+        )
+    if legally_stale:
+        return (
+            "A person judged this claim legally stale: an obligation beneath it moved, and the move "
+            "is material here. It needs re-assessing against the obligation as it stands, and a new "
+            "ruling recorded; a re-derive alone carries the ruling to the next version."
+        )
     return "The claim requires fresh evidence."
 
 
-def _claim_work(claim: AssuranceClaim, requirement: RetestRequirement | None) -> dict:
-    """The minimal revalidation work for one drifted/stale/contradicted claim."""
+def _claim_work(
+    claim: AssuranceClaim, requirement: RetestRequirement | None, holding=None, *, unread=None,
+    legally_stale: bool = False,
+) -> dict:
+    """The minimal revalidation work for one drifted/stale/contradicted/held claim,
+    or one a watch nobody can read or a legal ruling holds back."""
     reassessment = _ATHENA_REASSESSMENT.get(claim.claim_type)
     return {
         "claim_uuid": str(claim.uuid),
         "claim_type": claim.claim_type,
         "statement": claim.statement,
         "status": claim.status,
-        "reason": _reason_for(claim, requirement),
+        "reason": _reason_for(claim, requirement, holding, unread=unread, legally_stale=legally_stale),
         "retest_requirement_uuid": str(requirement.uuid) if requirement is not None else None,
         # The minimal Athena work: re-derive exactly this claim's assessment.
         "athena_reassessments": [reassessment] if reassessment else [],
@@ -101,9 +139,15 @@ def plan_revalidation(deployment) -> dict:
 
     For each CURRENT claim (``valid_to`` null, excluding human REVOKED withdrawals):
 
-    - **required** — the claim has an open retest obligation, is STALE, or is
-      CONTRADICTED: name the exact Athena reassessment and Achilles capability areas
-      to re-run. This is the change-driven minimal set.
+    - **required** — the claim has an open retest obligation, is STALE, is
+      CONTRADICTED, or a FIRED latent condition holds it (whatever its row reads) --
+      or a condition declared on it cannot be read now (one left pending on a version a
+      re-derive closed among them), or a person judged it legally
+      stale (the legal axis as the carry leaves it): name the exact Athena
+      reassessment and Achilles capability areas to re-run. This is the change-driven
+      minimal set. The last three are read as the decision reads them, on any
+      version of the claim (:func:`assurance.decision.claim_decision_signal`), so the
+      plan never calls a claim current that the decision is held back by.
     - **outstanding_unknowns** — the claim is UNKNOWN or PARTIALLY_VERIFIED: a
       pre-existing gap in what could be established, surfaced as work to reach
       assurance but distinct from what *this* change invalidated. Each entry
@@ -112,6 +156,10 @@ def plan_revalidation(deployment) -> dict:
       of which could not be read.
     - **still_current** — the claim is SUPPORTED or VERIFIED with no open
       obligation: explicitly NOT re-run.
+    - **open_retests_without_a_current_claim** — an open retest on a claim a person
+      revoked, or on one with no current version. No current claim is required by
+      it, but the decision reads every open retest, so the note never says there is
+      nothing to re-run beside one.
 
     PARTIALLY_VERIFIED belongs in the second bucket, not the third. It used to
     fall through to ``still_current`` — whose contract, two lines up, is
@@ -138,22 +186,69 @@ def plan_revalidation(deployment) -> dict:
         # opened against the version that drifted; its identity fingerprint matches the
         # current version, so a re-derivation that rebinds resolves it (Phase 2).
         open_reqs: dict[str, RetestRequirement] = {}
-        for req in (
+        all_open = list(
             RetestRequirement.objects.filter(deployment=deployment, resolved_at__isnull=True)
             .select_related("claim")
             .order_by("opened_at")
-        ):
+        )
+        for req in all_open:
             open_reqs.setdefault(req.claim.fingerprint, req)
 
         required: list[dict] = []
         outstanding_unknowns: list[dict] = []
         still_current: list[dict] = []
 
+        # And each claim a FIRED latent condition holds, on any version of it: it is
+        # work until the condition re-arms or a person withdraws it, whatever the
+        # claim row reads -- the decision reads it the same way. So is a claim with a
+        # condition nobody can read now, on any version of it, and one a person
+        # judged legally stale as the carry leaves it: the other two things the
+        # decision reads through whatever wrote the rows. The plan read only the
+        # first, and said "No claim needs revalidation" while decision support said
+        # needs more evidence.
+        from .decision import _LEGALLY_STALE, conditions_the_decision_reads
+        from .legal import carried_legal_statuses
+
+        identities = {c.fingerprint for c in current}
+        # An open retest no current, unrevoked claim carries -- on a claim a person
+        # revoked, or one with no current version. No claim below is required by it,
+        # and the decision still reads it: ANY open retest holds the decision back
+        # (`decision.claim_decision_signal`). The plan said "no open retest obligation
+        # ... Nothing needs to be re-run" beside a decision held at needs more evidence.
+        unowned = [
+            {
+                "retest_requirement_uuid": str(req.uuid),
+                "claim_uuid": str(req.claim.uuid),
+                "claim_type": req.claim.claim_type,
+                "claim_status": req.claim.status,
+                "reason": req.reason,
+            }
+            for req in all_open
+            if req.claim.fingerprint not in identities
+        ]
+        holding: dict[str, LatentCondition] = {}
+        unread: dict[str, LatentCondition] = {}
+        for condition in conditions_the_decision_reads(deployment, identities):
+            into = holding if condition.state in LATENT_HOLDING_STATES else unread
+            into.setdefault(condition.claim.fingerprint, condition)
+        carried = carried_legal_statuses(deployment.pk, current)
+
         for claim in current:
             requirement = open_reqs.get(claim.fingerprint)
-            drifted = requirement is not None or claim.status in (Status.CONTRADICTED, Status.STALE)
+            held = holding.get(claim.fingerprint)
+            unreadable = unread.get(claim.fingerprint)
+            legally_stale = carried.get(claim.pk, claim.legal_status) in _LEGALLY_STALE
+            drifted = (
+                requirement is not None
+                or held is not None
+                or claim.status in (Status.CONTRADICTED, Status.STALE)
+                or unreadable is not None
+                or legally_stale
+            )
             if drifted:
-                required.append(_claim_work(claim, requirement))
+                required.append(
+                    _claim_work(claim, requirement, held, unread=unreadable, legally_stale=legally_stale)
+                )
             elif claim.status in _NOT_ESTABLISHED:
                 outstanding_unknowns.append(
                     {
@@ -174,10 +269,34 @@ def plan_revalidation(deployment) -> dict:
 
         required.sort(key=lambda w: (w["claim_type"], w["claim_uuid"]))
 
+        # THE CHAINS A ROUTE CHANGE LEFT UNEXERCISED. No claim reads the served
+        # route, so the claim loop above cannot see a model swap or a tokenizer
+        # change -- and the evidence such a change does invalidate is the chain
+        # outcomes, each an exercise of the route that served it. Each standing
+        # `held` taken against another route (or one nothing recorded) is work: run
+        # that workflow's chain again against what serves now.
+        composition = composition_for(deployment)
+        approved = set(read_expected_workflows(deployment) or ())
+        workflows = [
+            {
+                "workflow": workflow,
+                # Only an approved workflow's chain holds the decision back; the
+                # others are still evidence gone stale, and are listed as such.
+                "approved": workflow in approved,
+                "reason": (
+                    "a held for it was taken against a served route that is not the one "
+                    "serving now, or one nothing recorded, and nothing as strong has been "
+                    "taken against the route that serves; exercise the chain again against it"
+                ),
+            }
+            for workflow in composition.off_route
+        ]
+
         if required:
             note = (
-                f"{len(required)} claim(s) need revalidation because of a change, an expiry, or a "
-                f"contradiction; {len(still_current)} remain current and need not be re-run. Re-run "
+                f"{len(required)} claim(s) need revalidation because of a change, an expiry, a "
+                f"contradiction, a condition nobody can read, or a legal ruling; {len(still_current)} "
+                "remain current and need not be re-run. Re-run "
                 "only the named Athena reassessment(s) and Achilles capability area(s), then recompute "
                 "claims to rebind the deployment to its current state."
             )
@@ -195,8 +314,34 @@ def plan_revalidation(deployment) -> dict:
         else:
             note = (
                 "No claim needs revalidation: every current claim is supported or verified with no open "
-                "retest obligation. Nothing needs to be re-run."
+                "retest obligation, no condition nobody can read, and no legal ruling holding it back. "
+                "Nothing needs to be re-run."
             )
+        if unowned:
+            # Never "nothing to re-run" beside an open retest the decision reads: it
+            # holds the decision back whether or not a current claim carries it.
+            orphaned = (
+                f"{len(unowned)} open retest obligation(s) stand on a claim no current claim carries -- "
+                "one a person revoked, or one with no current version -- and hold the decision back as "
+                "every open retest does. Re-deriving does not answer them: nothing re-derives that claim."
+            )
+            if required or outstanding_unknowns:
+                note = f"{note} Separately, {orphaned}"
+            else:
+                note = orphaned
+        if workflows:
+            # Never "nothing to re-run" beside a chain that ran against another
+            # route: every claim can be current while the chains are not, because no
+            # claim reads the route and every chain exercised one.
+            chains = (
+                f"{len(workflows)} workflow chain(s) were exercised against a served route "
+                "that no longer serves, or one nothing recorded: exercise each named chain "
+                "again against the route that serves."
+            )
+            if required or outstanding_unknowns or unowned:
+                note = f"{note} Separately, {chains}"
+            else:
+                note = f"No claim needs revalidation, but {chains} Nothing else needs re-running."
 
         return {
             "deployment_uuid": str(deployment.uuid),
@@ -205,10 +350,14 @@ def plan_revalidation(deployment) -> dict:
                 "required": len(required),
                 "still_current": len(still_current),
                 "outstanding_unknowns": len(outstanding_unknowns),
+                "workflows_to_exercise": len(workflows),
             },
             "recompute_action": "POST deployments/{uuid}/recompute-claims to re-derive after the named retests run.",
             "required": required,
             "outstanding_unknowns": outstanding_unknowns,
             "still_current": still_current,
+            "workflows_to_exercise": workflows,
+            # Open retests no current claim carries: each holds the decision back.
+            "open_retests_without_a_current_claim": unowned,
             "note": note,
         }

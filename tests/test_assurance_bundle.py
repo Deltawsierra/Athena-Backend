@@ -37,6 +37,7 @@ from assurance.models import (
 )
 from assurance.unknowns import derive_unknowns
 from assurance.views import DeploymentViewSet
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -81,7 +82,9 @@ def test_every_stream_is_present_and_subject_scoped_by_deployment():
     """One request, five streams, each row named by what it accuses."""
     admin = _admin()
     provider = _provider("OpenAI EU", region="us-east-1", trains_on_data="No", subprocessors="None")
-    deployment = Deployment.objects.create(name="payments-agent", decision=Deployment.Decision.NOT_RECOMMENDED)
+    deployment = stamped_under_the_rules_in_force(
+        Deployment.objects.create(name="payments-agent", decision=Deployment.Decision.NOT_RECOMMENDED)
+    )
     Asset.objects.create(
         deployment=deployment, provider=provider, kind=Asset.Kind.MODEL,
         classification=Asset.Classification.KNOWN, name="gpt-x", identifier="gpt-x",
@@ -129,7 +132,9 @@ def test_a_benign_reading_is_reported_rather_than_omitted():
     """'Assessed and fine' must be distinguishable from 'not assessed'."""
     admin = _admin()
     provider = _provider("Anthropic", region="eu-west-1", trains_on_data="No", subprocessors="None")
-    deployment = Deployment.objects.create(name="clean-agent", decision=Deployment.Decision.READY)
+    deployment = stamped_under_the_rules_in_force(
+        Deployment.objects.create(name="clean-agent", decision=Deployment.Decision.READY)
+    )
     Asset.objects.create(
         deployment=deployment, provider=provider, kind=Asset.Kind.MODEL,
         classification=Asset.Classification.KNOWN, name="claude", identifier="claude",

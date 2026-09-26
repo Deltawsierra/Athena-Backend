@@ -312,6 +312,15 @@ def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
     }
 
 
+#: What a complete audit that found nothing contributes: an assessment
+#: (:func:`complete_audit_signal`). Named in the policy document, as every rule of the
+#: decision is (:mod:`assurance.policy`).
+COMPLETE_AUDIT_SIGNAL = Deployment.Decision.READY
+#: The cap a coverage gap on the critical path, or a check a scan fell short of,
+#: imposes (:func:`coverage_decision_cap`). Named in the policy document too.
+COVERAGE_CAP = Deployment.Decision.AUDIT_INCOMPLETE
+
+
 def complete_audit_signal(deployment: Deployment) -> str | None:
     """READY when a complete audit found nothing, else ``None``.
 
@@ -333,7 +342,7 @@ def complete_audit_signal(deployment: Deployment) -> str | None:
     # test_the_verdict_is_never_complete_while_a_check_fell_short.
     manifest = coverage_manifest(deployment)
     if manifest["verdict"] == COMPLETE:
-        return Deployment.Decision.READY
+        return COMPLETE_AUDIT_SIGNAL
     return None
 
 
@@ -358,12 +367,12 @@ def coverage_decision_cap(deployment: Deployment) -> str | None:
     # it, so this is the one coverage cap that applies to a deployment whose
     # architecture nobody declared -- which, in practice, is most of them early on.
     if checks_gap(deployment):
-        return Deployment.Decision.AUDIT_INCOMPLETE
+        return COVERAGE_CAP
     if not deployment.declared_components.exists():
         return None
     manifest = coverage_manifest(deployment)
     if manifest["critical_gap"]:
-        return Deployment.Decision.AUDIT_INCOMPLETE
+        return COVERAGE_CAP
     return None
 
 

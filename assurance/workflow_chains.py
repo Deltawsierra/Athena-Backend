@@ -17,22 +17,30 @@ load-bearing rather than tidy: `compose` stays exercisable from a plain Python
 prompt with four hand-made outcomes, so its tests cannot be made vacuous by a
 database fixture, and everything that needs a deployment lives here.
 
-Three queries, no writes, no clock. It was two until the provenance census
-below; the count is stated rather than left stale, because a docstring that
-undercounts its own reads is how a caller ends up fencing the wrong number of
-them in a transaction.
+Four queries, no writes, no clock: the outcomes, the approved set, the
+provenance census below, and the assets the route serving now is read from. The
+count is stated rather than left stale, because a docstring that undercounts its
+own reads is how a caller ends up fencing the wrong number of them in a
+transaction.
 """
 
 from __future__ import annotations
 
 from . import observed_outcomes
 from .composition import (
+    EVIDENCE_UNCLASSIFIED,
+    READINESS_ORDER,
     READY,
+    READY_RESTRICTED,
+    ROUTE_CURRENT,
+    ROUTE_MOVED,
+    ROUTE_UNRECORDED,
     ChainOutcome,
     Composition,
     compose,
     explain,
 )
+from .served_route import serving_route_now
 
 
 def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> list[ChainOutcome]:
@@ -51,6 +59,10 @@ def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> l
     if keyring is observed_outcomes.READ_KEYRING:
         keyring = observed_outcomes.trusted_keyring()
     deployment_uuid = str(deployment.uuid)
+    rows = list(deployment.chain_outcomes.all())
+    # The route serving now, read once, and only when there is an outcome to compare
+    # with it: a deployment with no chains reads no assets here.
+    serving = serving_route_now(deployment) if rows else ""
     return [
         ChainOutcome(
             workflow=row.workflow,
@@ -62,9 +74,25 @@ def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> l
             # basis in force is demonstrated, i.e. when the signature naming this
             # engine verifies now.
             signer=row.observer_engine,
+            route=route_of(row, serving),
         )
-        for row in deployment.chain_outcomes.all()
+        for row in rows
     ]
+
+
+def route_of(row, serving: str) -> str:
+    """Whether ``row`` was taken against ``serving``, the route serving now.
+
+    Compared with the route computed from the graph NOW, not with the one noted
+    when the row was written: the note says what served then, and the question is
+    whether that is what serves. A blank binding is
+    :data:`~assurance.composition.ROUTE_UNRECORDED` -- the row cannot say which
+    route it exercised, and "current" would be the one guess this axis refuses.
+    """
+    bound = row.route_fingerprint or ""
+    if not bound:
+        return ROUTE_UNRECORDED
+    return ROUTE_CURRENT if bound == serving else ROUTE_MOVED
 
 
 def _basis_of(row, keyring, deployment_uuid: str) -> str:
@@ -192,6 +220,20 @@ def closed_scope(composition: Composition) -> bool:
     )
 
 
+#: What an approved workflow set whose every chain holds contributes, where some of
+#: what holds is weaker evidence than an exercise of the effect (owner default,
+#: #278). The worst of those that apply. Named in the policy document, as every rule
+#: of the decision is (:mod:`assurance.policy`).
+CHAIN_CAPS: dict[str, str] = {
+    # A held resting on an authorization check alone: the gate authorized the
+    # action at dispatch, and nothing shows the effect happened within it.
+    "held_on_authorization_check": READY_RESTRICTED,
+    # A held signed by an engine this platform has not classified: at best a
+    # permit check's worth.
+    "held_on_unclassified_signer": READY_RESTRICTED,
+}
+
+
 def composition_decision_signal(composition: Composition) -> str | None:
     """What a composition contributes to the deployment decision. Pure.
 
@@ -217,7 +259,9 @@ def composition_decision_signal(composition: Composition) -> str | None:
       scope -- the approved set is recorded, every approved workflow reported, and
       no outcome arrived for a workflow off the list. Then "these chains hold" is
       a statement about the deployment and enters as an assessment, exactly as a
-      completed clean scan does;
+      completed clean scan does -- as ``READY_RESTRICTED`` when any workflow holds
+      on an authorization check alone, which shows the gate authorized the action
+      and not that the effect happened;
     * otherwise ``None``: this signal assessed nothing, which
       :func:`assurance.decision._worse` already knows never to treat as good news.
 
@@ -249,7 +293,35 @@ def composition_decision_signal(composition: Composition) -> str | None:
     # written down here and pinned by
     # `test_ready_already_implies_every_approved_workflow_reported`, so the
     # simplification stays sound if the rule's flooring ever changes.
-    return READY if closed_scope(composition) else None
+    if not closed_scope(composition):
+        return None
+    # A workflow held on an authorization check alone makes the deployment READY
+    # _RESTRICTED at best (owner default, #278). Achilles signs `held` when its
+    # permit check passes at dispatch: the authority chain resolves, and nothing in
+    # the record shows the effect happened inside it. Counted as READY, a permit
+    # check stood in for the exercise the status names. Restricted rather than
+    # refused: a chain that resolves is evidence, and nothing here found a fault.
+    # Any one such workflow is enough -- the others' effects being seen says
+    # nothing about this one's. Only reachable with every approved workflow held,
+    # so every name in `authorization_checked` here is a held.
+    #
+    # And so does one signed by an engine this platform has not classified. Its
+    # signature verifies, and nothing says what the signer could see -- which is
+    # at best a permit check's worth. Left at READY it outranked the permit check
+    # it cannot be shown to exceed: weaker evidence, the better decision. Every
+    # standing outcome is an approved `held` here, so the census counts exactly
+    # the held chains resting on such a signer.
+    signal = READY
+    if composition.authorization_checked:
+        signal = _worse_state(signal, CHAIN_CAPS["held_on_authorization_check"])
+    if composition.evidence_census.get(EVIDENCE_UNCLASSIFIED, 0):
+        signal = _worse_state(signal, CHAIN_CAPS["held_on_unclassified_signer"])
+    return signal
+
+
+def _worse_state(a: str, b: str) -> str:
+    """The worse of two decision states, in the order the composition rule ranks them."""
+    return a if READINESS_ORDER.index(a) >= READINESS_ORDER.index(b) else b
 
 
 def composition_payload(
@@ -306,6 +378,12 @@ def composition_payload(
         # something that watches effects signs one.
         "evidence_census": dict(composition.evidence_census),
         "authorization_checked": list(composition.authorization_checked),
+        # Which standing outcomes were taken against the route serving now, every
+        # reading including the zeros, and which `held`s were not: the chains a
+        # route change left to be exercised again, named so a reader can go and do
+        # it rather than infer it from a count.
+        "route_census": dict(composition.route_census),
+        "off_route": list(composition.off_route),
         "explanation": _explanation(composition, signal),
         # Required rather than defaulted, for the reason this builder exists at
         # all: a default would let a new publisher omit provenance and still
@@ -354,6 +432,21 @@ def _explanation(composition: Composition, signal: str | None) -> str:
             f"{sentence} That verdict did NOT reach the deployment decision, which "
             "was placed by something outside the chains -- the operator failsafe "
             "nulls every signal."
+        )
+    if signal == READY_RESTRICTED and composition.decision == READY and composition.authorization_checked:
+        return (
+            f"{sentence} What reached the deployment decision was ready with "
+            f"restrictions: {len(composition.authorization_checked)} workflow(s) hold on an "
+            "authorization check alone -- the gate authorized the action at dispatch, "
+            "and no record shows the effect happened within that authority."
+        )
+    unclassified = composition.evidence_census.get(EVIDENCE_UNCLASSIFIED, 0)
+    if signal == READY_RESTRICTED and composition.decision == READY and unclassified:
+        return (
+            f"{sentence} What reached the deployment decision was ready with "
+            f"restrictions: {unclassified} workflow(s) hold on the signature of an engine "
+            "this platform has not classified, which says who reported the chain and "
+            "not what that engine could see."
         )
     return (
         f"{sentence} What reached the deployment decision was {signal}, not the "

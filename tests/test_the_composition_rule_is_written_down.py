@@ -59,9 +59,9 @@ def _signature(result):
     )
 
 
-def _outcomes(*pairs, at=None, basis=comp.BASIS_UNKNOWN):
+def _outcomes(*pairs, at=None, basis=comp.BASIS_UNKNOWN, route=comp.ROUTE_UNRECORDED):
     return [
-        ChainOutcome(workflow=name, status=status, observed_at=at, basis=basis)
+        ChainOutcome(workflow=name, status=status, observed_at=at, basis=basis, route=route)
         for name, status in pairs
     ]
 
@@ -269,7 +269,10 @@ def test_every_approved_workflow_exercised_and_holding_is_ready() -> None:
     unreachable, the parameter would just be a way to never pass."""
     approved = ["a", "b", "c"]
     result = compose(
-        _outcomes(("a", HELD), ("b", HELD), ("c", HELD), basis=comp.BASIS_DEMONSTRATED),
+        _outcomes(
+            ("a", HELD), ("b", HELD), ("c", HELD),
+            basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT,
+        ),
         expected_workflows=approved,
     )
     assert result.decision == comp.READY
@@ -294,7 +297,7 @@ def test_every_approved_workflow_held_but_not_exercised_is_not_ready(basis) -> N
 
     # Demonstrating two of the three leaves the third deciding.
     mixed = compose(
-        _outcomes(("a", HELD), ("b", HELD), basis=comp.BASIS_DEMONSTRATED)
+        _outcomes(("a", HELD), ("b", HELD), basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT)
         + _outcomes(("c", HELD), basis=basis),
         expected_workflows=approved,
     )
@@ -946,7 +949,7 @@ def test_a_tie_between_bases_goes_to_the_strongest_in_any_order(bases, stands) -
 def test_the_held_clause_names_the_workflows_it_floored_and_only_those(basis) -> None:
     approved = ["a", "b"]
     floored = compose(
-        _outcomes(("a", HELD), basis=basis) + _outcomes(("b", HELD), basis=comp.BASIS_DEMONSTRATED),
+        _outcomes(("a", HELD), basis=basis) + _outcomes(("b", HELD), basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT),
         expected_workflows=approved,
     )
     assert floored.held_floored == ("a",)
@@ -962,7 +965,7 @@ def test_no_held_clause_under_a_floor_the_typed_in_held_did_not_set(basis) -> No
     why a held decides was printed there anyway, under a decision it had no part
     in."""
     result = compose(
-        _outcomes(("a", HELD), basis=basis) + _outcomes(("b", VIOLATED), basis=comp.BASIS_DEMONSTRATED),
+        _outcomes(("a", HELD), basis=basis) + _outcomes(("b", VIOLATED), basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT),
         expected_workflows=["a", "b"],
     )
     assert result.decision == comp.NOT_RECOMMENDED
@@ -978,7 +981,7 @@ def test_no_held_clause_without_an_approved_list_or_when_everything_is_demonstra
     assert "counts as not_demonstrated" not in comp.explain(unlisted)
 
     demonstrated = compose(
-        _outcomes(("a", HELD), ("b", NOT_DEMONSTRATED), basis=comp.BASIS_DEMONSTRATED),
+        _outcomes(("a", HELD), ("b", NOT_DEMONSTRATED), basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT),
         expected_workflows=["a", "b"],
     )
     assert demonstrated.deciding == ("b",)

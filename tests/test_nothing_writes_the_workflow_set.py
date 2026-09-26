@@ -176,9 +176,11 @@ def test_recording_every_approved_workflow_held_is_what_closes_the_scope():
     assert composition["workflows_unexercised"] == 2
     assert composition["signal"] == comp.NEEDS_MORE_EVIDENCE
 
-    # The engine's signed observations of the same two chains close it for real.
-    record_signed(dep, "checkout", comp.HELD, timezone.now())
-    record_signed(dep, "refund", comp.HELD, timezone.now())
+    # The engine's signed observations of the same two chains close it for real --
+    # a scan's, which is READY; an Achilles permit check alone is ready with
+    # restrictions at best (test_an_observed_outcome_is_signed).
+    record_signed(dep, "checkout", comp.HELD, timezone.now(), engine="athena")
+    record_signed(dep, "refund", comp.HELD, timezone.now(), engine="athena")
     assert composition_signal(dep) == comp.READY
     assert composition_for(dep).workflows_unexercised == 0
 
@@ -477,6 +479,9 @@ def test_the_payload_shapes_are_pinned():
         # check signed by Achilles must not read as an observed effect.
         "evidence_kind",
         "evidence_kind_label",
+        # Whether the row was taken against the route serving now (P2.2): a held
+        # of a route that no longer serves is not evidence about this one.
+        "route",
         "observed_at",
         "recorded_at",
         "source",
@@ -505,6 +510,10 @@ def test_the_payload_shapes_are_pinned():
         "unexercised",
         "evidence_census",
         "authorization_checked",
+        # The route axis (P2.2): every reading counted, and the held chains a route
+        # change left to be exercised again, by name.
+        "route_census",
+        "off_route",
         "explanation",
     }
     # All four statuses, always, including the zeros: a census that omits the
@@ -517,6 +526,8 @@ def test_the_payload_shapes_are_pinned():
     # And every evidence kind, `observed_effect` included: its zero is the answer
     # to "did anything watch an effect happen", and an omitted key is not a zero.
     assert set(outcome.data["composition"]["evidence_census"]) == set(comp.EVIDENCE_KINDS)
+    # And every route reading, `unrecorded` included.
+    assert set(outcome.data["composition"]["route_census"]) == set(comp.CHAIN_ROUTES)
 
 
 def test_the_write_routes_and_the_decision_route_report_one_composition():
@@ -778,7 +789,7 @@ def test_an_agreeing_signal_adds_no_second_sentence():
     would say nothing about whether the scope was closed."""
     dep = _deployment()
     client = _client(dep.owner)
-    record_signed(dep, "checkout", comp.HELD, timezone.now())
+    record_signed(dep, "checkout", comp.HELD, timezone.now(), engine="athena")
     response = _declare(client, dep, "checkout")
 
     composition = response.data["composition"]

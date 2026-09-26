@@ -50,6 +50,8 @@ would be making exactly the call the materiality gate exists to keep with a huma
 
 from __future__ import annotations
 
+import re
+
 from django.db import transaction
 
 from . import observability as obs
@@ -262,6 +264,254 @@ def record_materiality_decision(
         )
 
     return decision
+
+
+def ruling_for_next_version(previous: AssuranceClaim) -> str:
+    """The legal axis a claim's next version starts with: the one its predecessor is
+    in, unchanged.
+
+    A re-derive is technical -- the system moved, or the claim was re-read -- and the
+    rule beneath the claim did not move because of it. So a person's ruling stands
+    for the new version exactly as recorded, and a review still pending stays
+    pending. The new version used to start "not assessed", which erased a legally
+    STALE ruling with no person behind the erasure and dropped a pending review
+    unreviewed: a legal judgment made by code, the thing this module's gate exists
+    to prevent. Decided here, beside the gate, so nothing outside this module
+    chooses what the legal axis is.
+
+    The status AS IT STANDS WHEN THE VERSION CLOSES, and nothing after: a ruling
+    recorded on a version after a re-derive closed it applies to that version, which
+    is what the person ruled on, and is not carried to the one that replaced it.
+    :func:`carried_legal_statuses` and migration 0037 replay the record by this same
+    rule."""
+    return previous.legal_status
+
+
+# ---------------------------------------------------------------------------
+# The carry, replayed from the record: what a release that did not carry left
+# ---------------------------------------------------------------------------
+#
+# A re-derive by the release before this one opened every new version "not
+# assessed". Mid-rollout that release is still writing, after 0037 has run, so the
+# ruling it drops is dropped after the one-shot repair: nothing brought it back, and
+# the claim a person judged legally stale read unjudged -- capping nothing -- for
+# good. The decision therefore reads the legal axis as the carry leaves it
+# (:func:`carried_legal_statuses`), whatever wrote the rows, and
+# :func:`carry_rulings_to_current` writes it back where it was dropped, wherever
+# that release's writes are next seen (``assurance.carry``).
+
+#: The prefix of the event :func:`carry_rulings_to_current` writes for each status it
+#: moves, read back as the move it records so a second pass finds it explained.
+CARRIED_NOTE = "Legal axis carried forward to this version: "
+_CARRIED = re.compile(
+    r"^Legal axis carried forward (?:by migration 0037|to this version): (\S+) -> (\S+)\."
+)
+#: The event :func:`flag_for_materiality_review` writes when it flags a claim.
+_FLAGGED = re.compile(r"^Legal axis \S+ -> legal_review_pending: ")
+
+# One moment's moves are replayed in this order: a person's ruling, then an event.
+_RULING, _EVENT = 0, 1
+_SET, _FLAG = "set", "flag"
+
+
+def _replay(start: str, moves) -> str:
+    """The legal status ``moves`` leave a version in, from ``start``: a ruling (or a
+    carry the record names) sets it; a review flag moves it to pending unless it is
+    already stale or pending, as :func:`flag_for_materiality_review` does."""
+    carried = start
+    for kind, status in moves:
+        if kind == _FLAG:
+            if carried not in (_legal("STALE"), _legal("REVIEW_PENDING")):
+                carried = _legal("REVIEW_PENDING")
+        else:
+            carried = status
+    return carried
+
+
+def _as_left(status: str) -> list:
+    """A stored status the record does not explain -- set by hand, or its ruling's
+    obligation since deleted -- as the move that would leave it: "not assessed" is
+    how a version opens and says nothing happened, a pending review reads as a flag,
+    a ruling sets the axis."""
+    if status == _legal("NOT_ASSESSED"):
+        return []
+    if status == _legal("REVIEW_PENDING"):
+        return [(_FLAG, None)]
+    return [(_SET, status)]
+
+
+def replay_lineage(versions) -> str:
+    """The legal status the carry leaves the LAST of ``versions`` in.
+
+    ``versions`` are one claim's, oldest first, each ``(stored_status, closed_at,
+    moves)``: ``closed_at`` is ``None`` for the current version, and ``moves`` are
+    ``(moment, kind, status)`` in the order they happened. Pure.
+
+    Each version starts from what its predecessor stood at WHEN IT CLOSED, and moves
+    by what was recorded on it. A move recorded on a version after it closed applies
+    to that version only: the carry happens at the close (:func:`ruling_for_next_version`).
+    A stored status is explained if its version's own moves lead to it from what was
+    carried in -- or from "not assessed", which is how a release that did not carry
+    opened it. One the record does not explain stands as the version left it, at its
+    close.
+    """
+    carried = _legal("NOT_ASSESSED")
+    for stored, closed_at, moves in versions:
+        steps = [(kind, status) for _at, kind, status in moves]
+        explained = stored in (_replay(carried, steps), _replay(_legal("NOT_ASSESSED"), steps))
+        standing = _replay(
+            carried, [(kind, status) for at, kind, status in moves if closed_at is None or at <= closed_at]
+        )
+        if not explained:
+            standing = _replay(standing, _as_left(stored))
+        carried = standing
+    return carried
+
+
+def _recorded_moves(claim_pks) -> dict:
+    """What the record says happened on the legal axis of each claim version named:
+    ``{pk: [(moment, kind, status), ...]}``, in the order it happened. Two queries."""
+    moves: dict = {pk: [] for pk in claim_pks}
+    for claim_id, decided_at, pk, material in MaterialityDecision.objects.filter(
+        claim_id__in=claim_pks
+    ).values_list("claim_id", "decided_at", "pk", "material"):
+        status = _legal("STALE") if material else _legal("CURRENT")
+        moves[claim_id].append((decided_at, _RULING, pk, _SET, status))
+    for claim_id, created_at, pk, note in ClaimEvent.objects.filter(
+        claim_id__in=claim_pks, note__startswith="Legal axis "
+    ).values_list("claim_id", "created_at", "pk", "note"):
+        carried = _CARRIED.match(note)
+        if carried is not None:
+            moves[claim_id].append((created_at, _EVENT, pk, _SET, carried.group(2)))
+        elif _FLAGGED.match(note):
+            moves[claim_id].append((created_at, _EVENT, pk, _FLAG, None))
+    return {
+        pk: [(at, kind, status) for at, _order, _pk, kind, status in sorted(recorded, key=lambda m: m[:3])]
+        for pk, recorded in moves.items()
+    }
+
+
+def _lineages(deployment_id, fingerprints) -> dict:
+    """Every version of each claim identity named, oldest first, with what was
+    recorded on each: ``{fingerprint: [(claim, moves), ...]}``. Three queries.
+
+    Oldest first in the order the re-derives made them: back from the current version
+    along ``superseded_by``, as 0037 reads a lineage -- not by ``valid_from``, which a
+    clock that stepped back between two re-derives (two hosts mid-rollout) reorders,
+    and the ruling a person made on the first version was then replayed onto no
+    current version at all. A version no re-derive links to the current one is not in
+    its lineage; an identity with no current version keeps the ``valid_from`` order,
+    and nothing reads its carry (``carried_legal_statuses``)."""
+    versions = list(
+        AssuranceClaim.objects.filter(deployment_id=deployment_id, fingerprint__in=fingerprints)
+        .filter(effective_to__isnull=True)
+        .only("pk", "fingerprint", "legal_status", "valid_from", "valid_to", "status", "superseded_by_id")
+        .order_by("valid_from", "pk")
+    )
+    moves = _recorded_moves([v.pk for v in versions])
+    by_identity: dict = {}
+    for version in versions:
+        by_identity.setdefault(version.fingerprint, []).append(version)
+    lineages: dict = {}
+    for fingerprint, chain in by_identity.items():
+        head = next((v for v in chain if v.valid_to is None), None)
+        if head is not None:
+            previous = {v.superseded_by_id: v for v in chain if v.superseded_by_id is not None}
+            walked, seen = [head], {head.pk}
+            while walked[-1].pk in previous and previous[walked[-1].pk].pk not in seen:
+                walked.append(previous[walked[-1].pk])
+                seen.add(walked[-1].pk)
+            chain = walked[::-1]
+        lineages[fingerprint] = [(v, moves[v.pk]) for v in chain]
+    return lineages
+
+
+def _carry_candidates(deployment_id, current) -> set:
+    """The identities among ``current`` whose legal axis the carry may have left
+    somewhere other than where the row stands: a current version still "not assessed"
+    or "pending", with a closed version of the same claim that is neither. One query,
+    none when there is no such current version."""
+    open_axis = {_legal("NOT_ASSESSED"), _legal("REVIEW_PENDING")}
+    wanted = {c.fingerprint for c in current if c.legal_status in open_axis}
+    if not wanted:
+        return set()
+    return set(
+        AssuranceClaim.objects.closed()
+        .filter(deployment_id=deployment_id, fingerprint__in=wanted)
+        .exclude(legal_status=_legal("NOT_ASSESSED"))
+        .values_list("fingerprint", flat=True)
+        .distinct()
+    )
+
+
+def carried_legal_statuses(deployment_id, current) -> dict:
+    """The legal status each claim in ``current`` (current versions of one deployment)
+    stands at as the carry leaves it: ``{claim_pk: status}``, for the ones where
+    that is not what the row holds.
+
+    What the decision reads, so a ruling a release that did not carry dropped still
+    caps it -- whatever wrote the rows and whether or not anything has repaired them
+    yet. Only a version "not assessed" or "pending" can differ: one a person ruled on
+    is theirs. One query when nothing can differ; four when something might."""
+    candidates = _carry_candidates(deployment_id, current)
+    if not candidates:
+        return {}
+    by_pk = {c.pk: c for c in current if c.fingerprint in candidates}
+    carried = {}
+    for fingerprint, lineage in _lineages(deployment_id, candidates).items():
+        head, _moves = lineage[-1]
+        if head.pk not in by_pk:
+            continue  # the lineage ends on a version that is not current
+        status = replay_lineage([(v.legal_status, v.valid_to, moves) for v, moves in lineage])
+        if status != by_pk[head.pk].legal_status:
+            carried[head.pk] = status
+    return carried
+
+
+def carry_rulings_to_current(deployment, *, now=None) -> int:
+    """Write the legal axis back onto each current version of ``deployment``'s claims
+    where a release that did not carry dropped it; the number of versions moved.
+
+    What :func:`carried_legal_statuses` reads, made the row: each status moved in its
+    own short transaction, only if the row still holds what was read (a person's
+    ruling landing meanwhile stands), with an event on the claim's lifecycle naming
+    the move. Idempotent: the event is read back as the move it records. No
+    materiality judgment is made here, and no refresh is scheduled -- the caller
+    brings the decision current (``assurance.carry``)."""
+    from django.utils import timezone
+
+    now = now or timezone.now()
+    current = list(
+        AssuranceClaim.objects.filter(deployment=deployment)
+        .current()
+        .exclude(status=AssuranceClaim.ClaimStatus.REVOKED)
+        .only("pk", "fingerprint", "legal_status", "status")
+    )
+    carried = carried_legal_statuses(deployment.pk, current)
+    moved = 0
+    for claim in current:
+        status = carried.get(claim.pk)
+        if status is None:
+            continue
+        with transaction.atomic():
+            if not AssuranceClaim.objects.filter(pk=claim.pk, legal_status=claim.legal_status).update(
+                legal_status=status, updated_at=now
+            ):
+                continue
+            ClaimEvent.objects.create(
+                claim_id=claim.pk,
+                from_status=claim.status,
+                to_status=claim.status,
+                actor=None,
+                note=(
+                    f"{CARRIED_NOTE}{claim.legal_status} -> {status}. A re-derive by a release "
+                    "that did not carry the legal axis opened this version without it; replayed "
+                    "from the rulings and review flags on record across the claim's versions, it "
+                    f"stands at {status}. No materiality judgment was made here."
+                ),
+            )
+        moved += 1
+    return moved
 
 
 def legal_posture(deployment) -> dict:

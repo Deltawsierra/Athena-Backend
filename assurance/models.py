@@ -267,7 +267,9 @@ class ProviderAssertion(models.Model):
 #: keyring stamp `assurance.decision.recompute_decision` writes beside it, both
 #: QuerySet updates under the row lock. A model save never writes them to a stored
 #: row -- see `Deployment.save`.
-DECISION_OWNED_FIELDS = frozenset({"decision", "decision_revision", "decision_keyring"})
+DECISION_OWNED_FIELDS = frozenset(
+    {"decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"}
+)
 
 
 class DecisionColumnWriteRefused(ValueError):
@@ -369,6 +371,29 @@ class Deployment(models.Model):
     decision_keyring = models.CharField(
         max_length=64, null=True, blank=True, default=None, editable=False
     )
+    # The first moment the stored decision stops being the one its inputs imply
+    # without any write: the earliest lapse of a risk accepted on it. Like the
+    # keyring, time moves the decision where no write does, so the decision that
+    # wrote this records when it goes stale and `decision.current_decision`
+    # recomputes it at the first read after. NULL when nothing about it expires.
+    decision_valid_until = models.DateTimeField(null=True, blank=True, default=None, editable=False)
+    # Which rules the stored decision was computed under, and at which revision:
+    # the policy pin (`assurance.policy.policy_pin`), whose document names every cap
+    # the decision applies, then `@r` and the revision the decision stood at when
+    # they computed it (`decision.policy_stamp`). NULL when the stored decision
+    # predates the stamp. A release that changes a rule moves the pin, and the stored
+    # decisions computed under the old one are recomputed -- at migrate (the
+    # post-migrate receiver) and at the first publishing read
+    # (`decision.current_decision`) -- rather than published under rules that no
+    # longer hold. The revision tells apart a decision a writer that does not stamp
+    # moved since: the release before this one, still writing mid-rollout, moves the
+    # revision and not the stamp, and what it computed under its rules is recomputed
+    # the same way. Without it every rule change needed a migration that wrote a
+    # decision column behind the transition log, which nothing but the refresh may do.
+    # While a refresh reads the watches of a decision another writer left, it holds
+    # that refresh's claim instead (`decision._claim_for_this_release`): a token no
+    # stamp reads as, which every other recompute replaces.
+    decision_policy = models.CharField(max_length=80, null=True, blank=True, default=None, editable=False)
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
     # `assurance.decision`: a deployment whose latest evidence is partial cannot
@@ -707,6 +732,23 @@ class Finding(models.Model):
     status = models.CharField(
         max_length=24, choices=Status.choices, default=Status.OPEN, db_index=True
     )
+    # When a person's acceptance of this risk lapses (owner decision Q6). Accepting
+    # a risk is a decision to carry it for a stated time, not a closure: while it
+    # stands it holds the deployment at READY_RESTRICTED at best, and once it
+    # lapses -- or for an acceptance that never named an end -- the decision needs
+    # more evidence. Required to accept, cleared by any other status.
+    risk_accepted_until = models.DateTimeField(null=True, blank=True)
+    # The severity the acceptance was given at. A person who accepted a medium did
+    # not accept the critical the next scan reported under the same signature --
+    # ingest refreshes the severity and leaves the status alone -- so an acceptance
+    # stands only while the finding is no more severe than this. Blank on an
+    # acceptance that does not say (one set before this was recorded, or outside
+    # the route that records it), which reads as lapsed: an acceptance of an
+    # unknown severity is not one anybody can be shown to have made.
+    # Defaulted in the database too, so a writer that predates the column -- the
+    # release before this one, mid-rollout -- can still insert a finding: blank,
+    # which covers nothing, the conservative reading.
+    risk_accepted_severity = models.CharField(max_length=16, blank=True, default="", db_default="")
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1329,6 +1371,12 @@ class AssuranceClaimQuerySet(models.QuerySet):
         """
         return self.filter(valid_to__isnull=True)
 
+    def closed(self):
+        """Every version no longer believed: one a re-derive superseded. What a
+        release that did not carry a claim's watches and legal ruling left them on
+        (``assurance.carry``) -- history, never a current reading."""
+        return self.filter(valid_to__isnull=False)
+
     def effective_at(self, when):
         """Every version whose EFFECTIVE window contains ``when`` -- what was true
         of the world at that moment, whenever we happened to learn it."""
@@ -1700,9 +1748,17 @@ class LatentCondition(models.Model):
         # It does NOT mean "will not happen" and it does not mean "safe" -- it
         # means this one named thing has not happened yet.
         PENDING = "pending", "Declared, not yet true"
+        # Holds its claim at STALE, with a retest open, until a re-evaluation
+        # finds the subject back at its baseline (it re-arms to PENDING) or a
+        # person withdraws it. A re-derive does not clear it.
         FIRED = "fired", "Became true; claim invalidated"
-        # We can no longer see the subject. Not safe, not fired: uncovered.
+        # We can no longer see the subject. Not safe, not fired: uncovered. Read
+        # again on every evaluation, so a subject that comes back is watched again.
         UNOBSERVABLE = "unobservable", "Subject can no longer be observed"
+        # The evaluator raised on it. Not safe, not pending: unwatched until an
+        # evaluation completes. What was raised is kept by its type only, in
+        # `last_error`; an exception's text can carry what it read.
+        EVALUATION_FAILED = "evaluation_failed", "Its evaluation failed; not watched"
         # Withdrawn by a person -- kept rather than deleted so the record shows
         # that somebody decided to stop watching, and who.
         WITHDRAWN = "withdrawn", "Withdrawn"
@@ -1758,6 +1814,13 @@ class LatentCondition(models.Model):
         related_name="fired_by_conditions",
     )
 
+    # When the evaluator last raised on this condition, and the type of what it
+    # raised -- never its text. Cleared by the next evaluation that completes.
+    last_error_at = models.DateTimeField(null=True, blank=True)
+    # Defaulted in the database, as is `withdrawn_note`: a writer that predates the
+    # column can still declare a condition.
+    last_error = models.CharField(max_length=200, blank=True, default="", db_default="")
+
     declared_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1766,22 +1829,62 @@ class LatentCondition(models.Model):
         related_name="latent_conditions",
     )
     declared_at = models.DateTimeField(auto_now_add=True)
+    # Who stopped watching, when, and why. Kept apart from `fired_observation`: a
+    # fired condition can be withdrawn -- a person accepting the state it fired
+    # on -- and the reason must not overwrite what was observed when it fired.
+    withdrawn_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="withdrawn_latent_conditions",
+    )
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_note = models.TextField(blank=True, default="", db_default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-declared_at"]
         indexes = [models.Index(fields=["deployment", "state"])]
         constraints = [
-            # One live declaration per (claim, kind, subject, expected). A second
-            # identical declaration is not a second risk.
+            # One LIVE declaration per (claim, kind, subject, expected). A second
+            # identical declaration is not a second risk. Live, not every row: a
+            # watch a person withdrew is kept as a record, and it was unconditional,
+            # so the same watch could never be declared again on that claim -- the
+            # attempt was an IntegrityError, and the route answered 500. Spelled
+            # out rather than read off `State`: Meta cannot see the class body.
             models.UniqueConstraint(
                 fields=["claim", "kind", "subject", "expected"],
+                condition=Q(state__in=["pending", "fired", "unobservable", "evaluation_failed"]),
                 name="uq_latent_condition_declaration",
             ),
         ]
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()}: {self.subject} ({self.state})"
+
+
+#: The states a latent condition is live in: re-read by every evaluation, carried to
+#: its claim's next version, and unique per declaration. Everything but WITHDRAWN.
+#: Pinned against the constraint above, which has to spell them out.
+LATENT_LIVE_STATES = frozenset(
+    {
+        LatentCondition.State.PENDING,
+        LatentCondition.State.FIRED,
+        LatentCondition.State.UNOBSERVABLE,
+        LatentCondition.State.EVALUATION_FAILED,
+    }
+)
+#: The live states in which nobody can say, now, whether the precondition holds: the
+#: subject cannot be read, or the evaluator raised. The decision reads these.
+LATENT_UNREAD_STATES = frozenset(
+    {LatentCondition.State.UNOBSERVABLE, LatentCondition.State.EVALUATION_FAILED}
+)
+#: The state in which a condition holds its claim: no better than STALE, with a retest
+#: open, on every version of the claim, until it re-arms or a person withdraws it. The
+#: decision reads this too -- on the claim, not only through the STALE mark and the
+#: retest, which anything that writes a claim row or a retest can undo.
+LATENT_HOLDING_STATES = frozenset({LatentCondition.State.FIRED})
 
 
 class ChainBirth(models.Model):
@@ -1989,6 +2092,40 @@ class RetestRequirement(models.Model):
 # ---------------------------------------------------------------------------
 # DeclaredComponent — the customer's declared architecture (SPINE Stage 3)
 # ---------------------------------------------------------------------------
+
+
+class ServedRouteNote(models.Model):
+    """The served route the platform last noted for a deployment, and since when.
+
+    A chain outcome is evidence about the route that served when it was observed
+    (:mod:`assurance.served_route`), and the stored graph is a record of the route
+    serving NOW -- it keeps no history. This row is the one piece of history the
+    binding needs: the route last noted and the instant it was first noted. An
+    outcome observed at or after ``since`` was observed while that route served, as
+    far as the record shows; one observed before it cannot be bound to it.
+
+    ``since`` is when the platform NOTICED, which is at or after the change it
+    records. So a late notice only ever errs one way: an outcome from between the
+    change and the notice reads as unbound, and floors, rather than as evidence
+    about a route it may not have exercised.
+
+    Its own row rather than two columns on :class:`Deployment`, whose ``save()``
+    writes every loaded column: an instance held across a change would write the
+    old route back with the old instant, and the next outcome would be bound to a
+    route that no longer serves.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.OneToOneField(
+        Deployment, on_delete=models.CASCADE, related_name="served_route_note"
+    )
+    # `served_route.served_route_fingerprint` as last noted.
+    fingerprint = models.CharField(max_length=64)
+    # When that fingerprint was first noted: moved only when the fingerprint does.
+    since = models.DateTimeField()
+
+    def __str__(self) -> str:
+        return f"route {self.fingerprint[:12]} since {self.since.isoformat()}"
 
 
 class DeclaredComponent(models.Model):
@@ -2605,6 +2742,17 @@ class WorkflowChainOutcome(models.Model):
     # engine also decides what kind of evidence the row is (see the class
     # docstring); an Achilles "run" is a dispatch-time permit check, not an effect.
     outcome_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
+    # THE SERVED ROUTE THE OUTCOME WAS TAKEN AGAINST, as the platform had noted it
+    # serving at ``observed_at`` (assurance.served_route.route_for_outcome), bound
+    # when the row is written and never after. Blank when nothing can say which:
+    # a row written before routes were bound, one with no instant, or one observed
+    # before the platform noted the route that serves now. Blank reads as
+    # "unrecorded", which floors a held exactly as a moved route does -- the
+    # conservative reading, and the one a migration cannot improve on without
+    # inventing the route a past run exercised.
+    # Defaulted in the database too, so a writer that predates the column can still
+    # record an outcome -- as unrecorded, which floors a held.
+    route_fingerprint = models.CharField(max_length=64, blank=True, default="", db_default="")
     observer_engine = models.CharField(max_length=64, blank=True)
     observer_key_id = models.CharField(max_length=64, blank=True)
     evidence_digest = models.CharField(max_length=71, blank=True)

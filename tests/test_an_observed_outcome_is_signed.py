@@ -27,6 +27,7 @@ from assurance import composition as comp
 from assurance import observed_outcomes
 from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
 from assurance.workflow_chains import composition_for, composition_signal
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -85,7 +86,10 @@ def _signed(dep, *, workflow="refund-over-limit", status=oc.HELD, key=ACHILLES, 
         engine_version="1.0.0",
         run_id="run-1",
         evidence_digest="sha256:" + "ab" * 32,
-        observed_at=observed_at or (_now() - timedelta(minutes=1)),
+        # Now by default: signed after the deployment exists, as a run against it
+        # is. One from before the route serving it was noted is bound to no route
+        # (P2.2) and floors like one nobody ran, which is not what these test.
+        observed_at=observed_at or _now(),
         reason=reason or ("" if status == oc.HELD else "the gate refused the dispatch"),
         outcome_id=outcome_id,
     )
@@ -286,8 +290,9 @@ def test_an_operator_cannot_type_demonstrated():
 def test_a_typed_in_held_cannot_make_a_workflow_exercised_and_a_signed_one_can():
     """The case #239 exists for. The same held, twice: typed in, it leaves the
     workflow unexercised; signed by the engine that reported it, it does not. The
-    signer here is Achilles, so what makes it READY is an authorization check at
-    dispatch, not an observed effect -- the gating the owner has to rule on."""
+    signer here is Achilles, so what it rests on is an authorization check at
+    dispatch, not an observed effect -- and the owner's ruling (#278) holds that
+    at ready with restrictions, never plain READY."""
     dep = _deployment()
     ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="Refund")
     WorkflowChainOutcome.objects.create(
@@ -303,7 +308,7 @@ def test_a_typed_in_held_cannot_make_a_workflow_exercised_and_a_signed_one_can()
     assert _client().post(_url(dep), _signed(dep), format="json").status_code == 201
     signed = composition_for(dep)
     assert signed.workflows_unexercised == 0
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
 
 # ------------------------------------------------ what a recorded row rests on
@@ -332,7 +337,7 @@ def test_a_row_is_demonstrated_only_while_its_envelope_verifies_and_says_what_th
     _approved(dep, "refund-over-limit")
     row = _ingested(dep)
     assert row.rests_on_signed_evidence
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
     tampered = {
         "an empty envelope": {"envelope": {}},
@@ -408,7 +413,7 @@ def test_withdrawing_a_key_withdraws_what_it_vouched_for(tmp_path, monkeypatch):
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
     only_athena = tmp_path / "rotated.json"
     only_athena.write_text(json.dumps(
@@ -707,7 +712,7 @@ def test_a_same_size_in_place_rewrite_of_the_keyring_is_read_not_trusted_stale(k
     achilles, athena = _achilles_only(), _athena_only()
     assert len(achilles) == len(athena), "the test needs a same-length rotation"
     keyring.write_text(achilles)
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
     stat = os.stat(keyring)
     keyring.write_text(athena)
@@ -717,7 +722,7 @@ def test_a_same_size_in_place_rewrite_of_the_keyring_is_read_not_trusted_stale(k
 
     assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE
     keyring.write_text(achilles)
-    assert composition_signal(dep) == comp.READY, "and rotating back is seen too"
+    assert composition_signal(dep) == comp.READY_RESTRICTED, "and rotating back is seen too"
 
 
 @pytest.mark.parametrize("damage", ["deleted", "corrupted", "not-utf8", "nested"])
@@ -725,7 +730,7 @@ def test_a_keyring_gone_or_damaged_after_a_good_read_trusts_nothing(keyring, dam
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert composition_signal(dep) == comp.READY, "a good read first, so a cache exists"
+    assert composition_signal(dep) == comp.READY_RESTRICTED, "a good read first, so a cache exists"
 
     if damage == "deleted":
         keyring.unlink()
@@ -747,6 +752,14 @@ def _stored(dep):
     return dep.decision
 
 
+#: What one Achilles-signed held on the only approved workflow reads: an
+#: authorization check -- the gate authorized the action at dispatch, and nothing
+#: shows the effect happened within that authority -- so ready with restrictions at
+#: best (the chain caps in the policy document). The tests below move a decision
+#: off it; that it starts short of READY is not what they test.
+ACHILLES_HELD = Deployment.Decision.READY_RESTRICTED
+
+
 def _approved_url(dep):
     return f"/api/assurance/deployments/{dep.uuid}/approved-workflows/"
 
@@ -761,8 +774,9 @@ def test_every_chain_write_route_refreshes_the_stored_decision():
     # Approved and never reported: not demonstrated, and the stored decision says so.
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
 
-    assert client.post(_url(dep), _signed(dep, observed_at=_now() - timedelta(minutes=2)), format="json").status_code == 201
-    assert _stored(dep) == Deployment.Decision.READY
+    # Signed after the deployment exists (see `_signed`); the violation below later still.
+    assert client.post(_url(dep), _signed(dep), format="json").status_code == 201
+    assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
 
     # Widening the approved set moves it: the new workflow never reported.
     payout = {"slug": "payout", "name": "Payout"}
@@ -770,9 +784,9 @@ def test_every_chain_write_route_refreshes_the_stored_decision():
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
     # And narrowing it back moves it back.
     assert client.put(_approved_url(dep), {"workflows": [refund]}, format="json").status_code == 200
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
 
-    violated = _signed(dep, status=oc.VIOLATED, observed_at=_now() - timedelta(seconds=10))
+    violated = _signed(dep, status=oc.VIOLATED)
     assert client.post(_url(dep), violated, format="json").status_code == 201
     assert _stored(dep) == Deployment.Decision.NOT_RECOMMENDED
 
@@ -824,7 +838,12 @@ def test_the_upgrade_recomputes_every_decision_the_old_rule_made_and_only_those(
 
     dep = _typed_in_ready()
     untouched = _deployment()
-    Deployment.objects.filter(pk=untouched.pk).update(decision=Deployment.Decision.READY)
+    # Stamped under the rules in force: what is under test is the keyring upgrade's
+    # reach, not the policy stamp's (test_an_accepted_risk_is_carried_not_removed).
+    Deployment.objects.filter(pk=untouched.pk).update(
+        decision=Deployment.Decision.READY
+    )
+    stamped_under_the_rules_in_force(untouched)
 
     receiver(sender=object(), using="default")
     receiver(sender=_assurance_app(), using="other")
@@ -900,7 +919,7 @@ def test_a_recompute_that_does_not_name_the_pause_keeps_it_and_one_that_does_lif
     assert _client().post(url, {}, format="json").status_code == 200
     assert _stored(dep) == Deployment.Decision.PAUSED
     assert _client().post(url, {"paused": False}, format="json").status_code == 200
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
 
 
 def test_a_recompute_that_does_not_name_the_pause_leaves_it_to_the_lock(monkeypatch):
@@ -964,7 +983,7 @@ def test_withdrawing_a_key_reaches_the_stored_decision_and_the_receipt(tmp_path,
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
 
     only_athena = tmp_path / "rotated.json"
     only_athena.write_text(_athena_only())
@@ -988,7 +1007,7 @@ def test_the_bundle_and_the_incident_pack_reconcile_too(keyring, tmp_path, monke
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
     rotated = tmp_path / "rotated.json"
     rotated.write_text(_athena_only())
     monkeypatch.setenv(observed_outcomes.KEYRING_ENV, str(rotated))
@@ -1046,7 +1065,7 @@ def test_a_rotation_to_other_keys_reaches_the_stored_decision_on_every_surface(k
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
     keyring.write_text(_rotated_to_a_new_achilles_key())
     assert read(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
@@ -1056,7 +1075,13 @@ def test_a_deployment_without_chains_is_not_reconciled_on_read():
     from assurance.decision import current_decision
 
     dep = _deployment()
-    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.READY, decision_keyring=None)
+    # Stamped under the rules in force: what is under test is the keyring's reach on
+    # read, not the policy stamp's (a decision with no stamp is recomputed on read,
+    # test_an_accepted_risk_is_carried_not_removed).
+    Deployment.objects.filter(pk=dep.pk).update(
+        decision=Deployment.Decision.READY, decision_keyring=None
+    )
+    stamped_under_the_rules_in_force(dep)
     assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.READY
     assert Deployment.objects.get(pk=dep.pk).decision_revision == 0
 
@@ -1138,7 +1163,7 @@ def _ready_then_rotated(keyring):
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
     keyring.write_text(_rotated_to_a_new_achilles_key())
     return dep
 
@@ -1258,7 +1283,7 @@ def test_a_current_stamp_is_read_without_a_query_or_a_write(django_assert_num_qu
     ).get(pk=dep.pk)
     revision = annotated.decision_revision
     with django_assert_num_queries(0):
-        assert current_decision(annotated) == Deployment.Decision.READY
+        assert current_decision(annotated) == ACHILLES_HELD
     assert Deployment.objects.get(pk=dep.pk).decision_revision == revision
 
 
@@ -1314,7 +1339,7 @@ def test_the_upgrade_recompute_waits_for_the_column_it_reads():
     assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
     # And at the state that has the column, it does run.
     receiver(sender=live_apps.get_app_config("assurance"), using="default", apps=live_apps)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
 
 
 def test_the_admin_cannot_write_the_decision():
@@ -1488,7 +1513,7 @@ def test_an_operators_contradiction_reaches_the_stored_decision_and_every_surfac
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
     claim = _ready_claim(dep)
     assert claim is not None
 
@@ -1500,7 +1525,7 @@ def test_an_operators_contradiction_reaches_the_stored_decision_and_every_surfac
 
     support = client.get(f"/api/assurance/deployments/{dep.uuid}/decision-support/").json()
     detail = client.get(f"/api/assurance/deployments/{dep.uuid}/").json()
-    assert support["decision"] != Deployment.Decision.READY
+    assert support["decision"] != ACHILLES_HELD
     assert support["decision"] == detail["decision"] == _receipt_decision(dep) == _stored(dep)
     assert support["revision"] == detail.get("decision_revision", support["revision"])
 
@@ -1543,7 +1568,7 @@ def test_the_upgrade_recompute_survives_a_flush_below_the_stamp():
         signals._has_column = real
     assert _stored(dep) == Deployment.Decision.AUDIT_INCOMPLETE, "it ran as though the column were there"
     signals.recompute_decisions_computed_under_another_rule(sender=sender, using="default", apps=None)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
 
 
 # ---- Round 7: what the migration and mutation review found unpinned. ----
@@ -1597,7 +1622,7 @@ def test_the_decision_is_computed_from_the_locked_row_not_the_callers_copy():
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
     stale = Deployment.objects.get(pk=dep.pk)
     Deployment.objects.filter(pk=dep.pk).update(evidence_incomplete=True)
     assert recompute_decision(stale) == Deployment.Decision.NEEDS_MORE_EVIDENCE
@@ -1608,7 +1633,7 @@ def test_a_recompute_leaves_the_callers_instance_holding_the_stamp_it_wrote(djan
     """``recompute_decision`` refreshes the caller's instance, stamp included, so the
     next ``current_decision`` on it is the read with no query -- not a second
     recompute under the row lock for a decision that is already current."""
-    from assurance.decision import current_decision, recompute_decision
+    from assurance.decision import current_decision, keyring_stamp, recompute_decision
 
     dep = _deployment()
     _approved(dep, "refund-over-limit")
@@ -1616,9 +1641,10 @@ def test_a_recompute_leaves_the_callers_instance_holding_the_stamp_it_wrote(djan
     Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None)
     dep.refresh_from_db()
     recompute_decision(dep)
-    assert dep.decision_keyring == observed_outcomes.keyring_fingerprint()
+    # Written marked as this release's (#105 round 4): bare, it is the release before's.
+    assert dep.decision_keyring == keyring_stamp(observed_outcomes.keyring_fingerprint())
     with django_assert_num_queries(0):
-        assert current_decision(dep) == Deployment.Decision.READY
+        assert current_decision(dep) == ACHILLES_HELD
 
 
 def test_the_bundle_does_not_ask_per_deployment_whether_it_has_chains():
@@ -1676,9 +1702,9 @@ def test_re_deriving_the_claims_leaves_the_stored_decision_current():
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == ACHILLES_HELD
     response = _client().post(f"/api/assurance/deployments/{dep.uuid}/recompute-claims/")
     assert response.status_code == 200, response.content
     live = compute_decision(Deployment.objects.get(pk=dep.pk))
-    assert live != Deployment.Decision.READY, "the re-derivation did not move the decision"
+    assert live != ACHILLES_HELD, "the re-derivation did not move the decision"
     assert _stored(dep) == live

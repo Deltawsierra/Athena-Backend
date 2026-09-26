@@ -150,6 +150,8 @@ class FindingSerializer(serializers.ModelSerializer):
             "status",
             "status_label",
             "status_must_not_imply",
+            "risk_accepted_until",
+            "risk_accepted_severity",
             "owner",
             "assignee",
             "remediation_state",
@@ -177,8 +179,52 @@ class FindingSerializer(serializers.ModelSerializer):
         read_only_fields = [
             f
             for f in fields
-            if f not in ("status", "owner", "business_impact")
+            if f not in ("status", "risk_accepted_until", "owner", "business_impact")
         ]
+
+    def validate(self, attrs):
+        """An accepted risk names when its acceptance ends (owner decision Q6).
+
+        Accepting a risk is a decision to carry it for a stated time. Without an
+        end it was indistinguishable from fixing it -- the decision left the
+        finding out entirely -- so an acceptance must name one, in the future, and
+        any other status clears it: an expiry on a risk nobody accepted would say
+        a decision was made that was not.
+        """
+        status = attrs.get("status", getattr(self.instance, "status", None))
+        if status != Finding.Status.ACCEPTED:
+            if attrs.get("risk_accepted_until") is not None:
+                raise serializers.ValidationError(
+                    {"risk_accepted_until": "Only an accepted risk has an acceptance to end."}
+                )
+            attrs["risk_accepted_until"] = None
+            attrs["risk_accepted_severity"] = ""
+            return attrs
+        if (
+            "risk_accepted_until" not in attrs
+            and self.instance is not None
+            and self.instance.status == Finding.Status.ACCEPTED
+        ):
+            # Already accepted, and this change leaves the acceptance alone: an
+            # owner or impact edit is not a new acceptance, so it is not judged as
+            # one. Judging it refused reassigning a finding whose acceptance had
+            # lapsed or never named an end -- which the decision already holds at
+            # NEEDS_MORE_EVIDENCE until someone accepts it again with an end.
+            return attrs
+        until = attrs.get("risk_accepted_until")
+        if until is None:
+            raise serializers.ValidationError(
+                {"risk_accepted_until": "Accepting a risk needs the date its acceptance ends."}
+            )
+        if until <= timezone.now():
+            raise serializers.ValidationError(
+                {"risk_accepted_until": "An acceptance cannot end in the past."}
+            )
+        attrs["risk_accepted_until"] = until
+        # What was accepted, as it reads now: the acceptance covers this severity
+        # and no higher (see Finding.risk_accepted_severity).
+        attrs["risk_accepted_severity"] = getattr(self.instance, "severity", "") or ""
+        return attrs
 
     def _latest_seen(self, obj):
         return (self.context.get("latest_seen") or {}).get(obj.deployment_id)
@@ -543,6 +589,11 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     #: tell the two apart from anything on the row.
     evidence_kind = serializers.SerializerMethodField()
     evidence_kind_label = serializers.SerializerMethodField()
+    # Whether the row was taken against the route serving now: `current`, `moved`
+    # or `unrecorded` (assurance.composition.CHAIN_ROUTES). Read-only, and never
+    # the stored binding itself: that is a fingerprint, and what a reader needs is
+    # whether it is the one serving.
+    route = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowChainOutcome
@@ -556,6 +607,7 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "basis_in_force",
             "evidence_kind",
             "evidence_kind_label",
+            "route",
             "observed_at",
             "recorded_at",
             "source",
@@ -601,6 +653,17 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
 
     def get_evidence_kind_label(self, obj) -> str:
         return EVIDENCE_LABELS[self.get_evidence_kind(obj)]
+
+    def get_route(self, obj) -> str:
+        """Compared with the route serving now, read once per serialisation and
+        deployment rather than once per row."""
+        from .served_route import serving_route_now
+        from .workflow_chains import route_of
+
+        serving = self.context.setdefault("serving_routes", {})
+        if obj.deployment_id not in serving:
+            serving[obj.deployment_id] = serving_route_now(obj.deployment)
+        return route_of(obj, serving[obj.deployment_id])
 
     def get_signed(self, obj) -> bool:
         return (

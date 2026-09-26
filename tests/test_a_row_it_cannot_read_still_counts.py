@@ -213,8 +213,9 @@ def test_the_same_gap_signs_identically():
 
 
 def test_the_receipt_version_moved_when_the_coverage_block_gained_required_fields():
-    assert RECEIPT_VERSION == "mythos.assurance.receipt/3.1"
+    assert RECEIPT_VERSION == "mythos.assurance.receipt/4.0"
     assert "mythos.assurance.receipt/2.0" in SUPERSEDED_VERSIONS
+    assert "mythos.assurance.receipt/3.1" in SUPERSEDED_VERSIONS
     # 3.0 is superseded too now: 3.1 added signed/signature/unsigned_reason. Those
     # are UNHASHED, so this one is a MINOR step -- a 3.0 digest and a 3.1 digest of
     # the same state are identical, and a major bump would have announced a digest

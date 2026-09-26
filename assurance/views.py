@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import logging
 import uuid as uuidlib
+from contextlib import nullcontext
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Exists, OuterRef
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -34,6 +36,18 @@ from . import observability, observed_outcomes
 from .bundle import assurance_bundle
 from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
+from .latent import (
+    LatentConditionDuplicate,
+    LatentConditionRefused,
+    condition_view,
+    declare_condition,
+    deployments_watching_boundary,
+    deployments_watching_provider,
+    fire_due_conditions,
+    latent_posture,
+    withdraw_condition,
+)
+from .signals import refresh_deferred, schedule_decision_refresh
 from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
@@ -51,6 +65,7 @@ from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
 from .roi import build_executive_summary
 from .route import build_route_map
+from .served_route import routes_for_outcomes
 from .models import (
     ApprovedWorkflow,
     Asset,
@@ -62,6 +77,7 @@ from .models import (
     DispatchAttempt,
     DispatchPolicy,
     Finding,
+    LatentCondition,
     PostureBinding,
     Provider,
     ProviderAssertion,
@@ -197,8 +213,50 @@ def _refresh_stored_decision(deployment) -> None:
     failed there (a lock timeout) left the write standing and the decision stale
     for good -- a signed outcome cannot be posted twice to try again. Inside, the
     two commit together or neither does.
+
+    The deployment's declared latent conditions are NOT evaluated here, nor inside
+    any write's transaction. They are evaluated once the write commits, by the
+    backstop (`signals.schedule_decision_refresh`, which evaluates them and refreshes
+    the decision again). Evaluated here, they ran inside every write that refreshes
+    the decision -- a claim revoke among them -- before it could commit: 2.3 seconds
+    on a deployment with a hundred conditions over three hundred tools, spent holding
+    back a revoke. And evaluated after the commit in one transaction, they held the
+    database-wide write lock SQLite takes at BEGIN IMMEDIATE for the whole
+    evaluation: a pause of any other deployment waited 1.5 seconds on a hundred
+    conditions, and past the twenty-second busy timeout failed. So the evaluation
+    holds no transaction while it reads a condition, and writes each outcome in its
+    own short one (`latent.evaluate_conditions`): a stop waits on it for at most one
+    condition's write -- milliseconds -- and never for a reading
+    (tests/test_nothing_that_watches_holds_back_a_stop.py measures it). The
+    invalidation check evaluates the conditions it reports outside its transaction.
+    A claim revoke schedules no backstop at all (the transition route defers it): a
+    stop's response must not wait on one, and a revoke changes nothing a watch reads.
+
+    The served route is NOT noted here. This runs inside writes a stop must not wait
+    on -- a revoke among them -- and the note reads the whole asset graph. Every
+    write that can move the route reaches the after-commit backstop
+    (:func:`assurance.decision.refresh_stored_decisions`), which notes it, and an
+    outcome's binding notes it first in any case.
     """
     recompute_decision(deployment)
+    schedule_decision_refresh(deployment.pk)
+
+
+def _fire_conditions(deployment_ids) -> None:
+    """Bring current the deployments whose declared latent conditions read something
+    a write just changed that the decision does not read itself -- the data boundary,
+    a provider's profile: each is scheduled for after the write commits, through the
+    backstop, which evaluates its conditions and refreshes its decision.
+
+    None of them is evaluated inside the write's transaction. They were each
+    evaluated and refreshed here, in turn, each under its row lock -- a provider
+    twenty deployments watch held all twenty locks until its PATCH committed -- and
+    the data boundary's own deployment was, until this round: every condition read
+    under the write lock the boundary write held, which a stop of any other
+    deployment waited on (see `_refresh_stored_decision`).
+    """
+    for deployment_id in sorted(set(deployment_ids)):
+        schedule_decision_refresh(deployment_id)
 
 
 def _composition_payload(deployment) -> dict:
@@ -1151,10 +1209,19 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     name: DataBoundary._meta.get_field(name).get_default()
                     for name in DataBoundarySerializer.Meta.fields
                 } | fields
-            DataBoundary.objects.update_or_create(
-                deployment=deployment,
-                defaults={**fields, "updated_by": request.user},
-            )
+            with transaction.atomic():
+                DataBoundary.objects.update_or_create(
+                    deployment=deployment,
+                    defaults={**fields, "updated_by": request.user},
+                )
+                # A condition declared on this boundary -- "training stays denied",
+                # "no region beyond these" -- that the write made true fires once
+                # the write commits, before this response is sent, and the decision
+                # is refreshed with it. The boundary otherwise reaches the decision
+                # only through claims re-derived from it. Not inside this
+                # transaction: every condition would be read under the write lock it
+                # holds, which a stop of any other deployment waits on.
+                _fire_conditions(deployments_watching_boundary(deployment.pk))
         assessed = (
             Deployment.objects.prefetch_related("assets__provider__assertions")
             .select_related("data_boundary")
@@ -1549,9 +1616,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     serializer.errors[0] if single else serializer.errors
                 )
             with transaction.atomic():
+                rows = list(serializer.validated_data)
+                # Bound like a signed row, so the record says which route each
+                # outcome was reported against whoever reported it. A typed-in held
+                # floors on its basis either way; the binding is not what gates it.
+                routes = routes_for_outcomes(
+                    deployment, [row.get("observed_at") for row in rows], now=timezone.now()
+                )
                 WorkflowChainOutcome.objects.bulk_create(
-                    WorkflowChainOutcome(deployment=deployment, **row)
-                    for row in serializer.validated_data
+                    WorkflowChainOutcome(deployment=deployment, route_fingerprint=route, **row)
+                    for row, route in zip(rows, routes, strict=True)
                 )
                 _refresh_stored_decision(deployment)
         recorded = deployment.chain_outcomes.all()
@@ -2028,13 +2102,30 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         the counts ``{invalidated, retests_opened, retests_resolved}``.
 
         A stale claim and an open obligation each cap the decision, so the stored
-        decision is refreshed in the same transaction as the check."""
+        decision is refreshed in the same transaction as the check.
+
+        And every declared latent condition, attributed to whoever asked: the named
+        preconditions are the other half of "what invalidates a claim". Evaluated
+        BEFORE that transaction and outside it -- each condition read with no lock
+        held, each outcome written in its own short transaction -- so the check's
+        own transaction reads what fired and no stop waits on the evaluation."""
         _require_admin(request)
         deployment = self.get_object()
+        # The refresh the transaction below makes brings the decision current.
+        fired = fire_due_conditions(deployment, actor=request.user, schedule_refresh=False)
         with transaction.atomic():
             counts = run_invalidation_check(deployment, actor=request.user)
+            counts["conditions_fired"] = fired
             _refresh_stored_decision(deployment)
         return Response(counts)
+
+    @action(detail=True, methods=["get"], url_path="latent-conditions")
+    def latent_conditions(self, request, uuid=None):
+        """What is watched for on this deployment (Phase 2 item 9): every declared
+        latent condition, and three counts never blended -- watching, fired, and
+        coverage lost -- plus the conditions on a claim nothing evaluates any more.
+        A read; pending is not an all-clear, and the payload says so."""
+        return Response(latent_posture(self.get_object()))
 
 
 class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -2125,7 +2216,18 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             # SAME revision the receipt was still publishing READY under: one
             # revision, two decisions. And in the same transaction as the move, or
             # a reader between the two commits saw exactly that.
-            with transaction.atomic():
+            #
+            # A revoke is a stop, and its response waited on the after-commit
+            # backstop the claim's write scheduled -- the carry, every watch on the
+            # deployment evaluated (up to ten seconds), the route noted: 0.7 s with
+            # 5,000 watches. It schedules none. A revoke changes nothing a watch
+            # reads, the carry and the route are brought current by the next refresh
+            # of any other write, and the decision the revoke moves is recomputed in
+            # its own transaction here, so it is current when the revoke commits.
+            # A contradiction takes a READY down as a revoke does, and waits on no hook
+            # either.
+            revoke = to_status in (AssuranceClaim.ClaimStatus.REVOKED, AssuranceClaim.ClaimStatus.CONTRADICTED)
+            with refresh_deferred(claim.deployment_id) if revoke else nullcontext(), transaction.atomic():
                 event = apply_claim_transition(
                     claim, to_status, actor=request.user, note=request.data.get("note", "")
                 )
@@ -2139,6 +2241,99 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
                 "event": ClaimEventSerializer(event).data,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="latent-conditions")
+    def declare_latent_condition(self, request, uuid=None):
+        """Declare the exact future change that would falsify this claim (Phase 2
+        item 9). Admin-only, attributed to the caller.
+
+        Body: ``{"kind", "subject", "description", "expected"?}`` -- ``kind`` one of
+        the closed vocabulary of :class:`LatentCondition.Kind`. Refused with a 400
+        naming why (:func:`assurance.latent.declare_condition`): a condition that
+        already holds is a present fact, not a latent one, and one nothing can read
+        today cannot be called latent. Declared only on the claim's current,
+        unrevoked version: nothing evaluates a condition on any other.
+
+        From then on it is evaluated whenever the deployment's decision is brought
+        current -- after every write to what the decision reads commits, scan
+        ingest, the admin, the invalidation check -- and on every write to the data
+        boundary or a provider profile it names. The instant it holds, the claim
+        goes STALE and a retest opens whose reason names it.
+
+        The same watch already live on this claim is refused with a 409 naming the
+        one in force; one that was withdrawn can be declared again."""
+        _require_admin(request)
+        claim = self.get_object()
+        if claim.valid_to is not None or claim.status == AssuranceClaim.ClaimStatus.REVOKED:
+            return Response(
+                {"detail": "Declare a latent condition on the claim's current, unrevoked version; "
+                           "nothing evaluates a condition declared on any other."},
+                status=400,
+            )
+        body = request.data if isinstance(request.data, dict) else {}
+        try:
+            condition = declare_condition(
+                claim,
+                kind=str(body.get("kind") or ""),
+                subject=str(body.get("subject") or ""),
+                description=str(body.get("description") or ""),
+                expected=str(body.get("expected") or ""),
+                declared_by=request.user,
+            )
+        except LatentConditionDuplicate as exc:
+            existing = exc.existing
+            return Response(
+                {"detail": str(exc), "existing": condition_view(existing) if existing is not None else None},
+                status=409,
+            )
+        except LatentConditionRefused as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(condition_view(condition), status=201)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"latent-conditions/(?P<condition_uuid>[^/.]+)/withdraw",
+    )
+    def withdraw_latent_condition(self, request, uuid=None, condition_uuid=None):
+        """Stop watching a declared condition, visibly: kept as WITHDRAWN with who
+        withdrew it, when, and the caller's note, never deleted. Admin-only.
+
+        A FIRED condition can be withdrawn: that is a person accepting the state it
+        fired on, so it needs a ``note`` saying why (400 without one). It releases
+        the hold the condition had on its claim, and the retest it opened is then
+        resolved the ordinary way, by the next re-derivation. What was observed when
+        it fired is kept. Only an already-withdrawn condition is refused (409).
+
+        Withdrawing a condition nobody could read lifts the cap it put on the
+        decision, so the stored decision is refreshed in the same transaction."""
+        _require_admin(request)
+        claim = self.get_object()
+        valid = _valid_uuid(condition_uuid)
+        condition = (
+            LatentCondition.objects.filter(claim=claim, uuid=valid).first()
+            if valid
+            else None
+        )
+        if condition is None:
+            return Response({"detail": "No such latent condition on this claim."}, status=404)
+        if condition.state == LatentCondition.State.WITHDRAWN:
+            return Response(
+                {"detail": "This condition is already withdrawn; a withdrawal is recorded once."},
+                status=409,
+            )
+        body = request.data if isinstance(request.data, dict) else {}
+        note = str(body.get("note") or "").strip()
+        if condition.state == LatentCondition.State.FIRED and not note:
+            return Response(
+                {"detail": "This condition fired: withdrawing it accepts the state it fired on "
+                           f"({condition.fired_observation}). Say why in 'note'."},
+                status=400,
+            )
+        with transaction.atomic():
+            withdraw_condition(condition, note=note, withdrawn_by=request.user)
+            _refresh_stored_decision(claim.deployment)
+        return Response(condition_view(condition))
 
 
 class RetestRequirementViewSet(
@@ -2524,11 +2719,28 @@ class ProviderViewSet(
 
     def create(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().create(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().update(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
+
+    # A posture condition reads a provider's assertions, never its own fields, so a
+    # write here fires none. It can leave one unable to read -- a rename away from
+    # the name it watches, or a second provider by that name -- or let one that
+    # could not read its subject read it again; the deployments whose conditions
+    # name either name are brought current once this commits. A provider belongs to
+    # no deployment, so none of them is evaluated inside this write.
+    def perform_create(self, serializer):
+        serializer.save()
+        _fire_conditions(deployments_watching_provider(serializer.instance.name))
+
+    def perform_update(self, serializer):
+        before = serializer.instance.name
+        serializer.save()
+        _fire_conditions(deployments_watching_provider(before, serializer.instance.name))
 
 
 class ProviderAssertionViewSet(viewsets.ModelViewSet):
@@ -2554,21 +2766,37 @@ class ProviderAssertionViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().create(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().update(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         _require_admin(request)
-        return super().destroy(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().destroy(request, *args, **kwargs)
 
+    # A provider-posture condition names a provider and a field; a write to one of
+    # its assertions is the change it watches for, so the deployments whose
+    # conditions name that provider -- before the write and after, if the assertion
+    # moved -- are evaluated and refreshed once this commits, through the backstop,
+    # each in its own transaction, never all of them inside this one.
     def perform_create(self, serializer):
         serializer.save(updated_by=self.request.user)
+        _fire_conditions(deployments_watching_provider(serializer.instance.provider.name))
 
     def perform_update(self, serializer):
+        before = serializer.instance.provider.name
         serializer.save(updated_by=self.request.user)
+        _fire_conditions(deployments_watching_provider(before, serializer.instance.provider.name))
+
+    def perform_destroy(self, instance):
+        name = instance.provider.name
+        instance.delete()
+        _fire_conditions(deployments_watching_provider(name))
 
 
 class UnknownViewSet(

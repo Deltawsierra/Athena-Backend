@@ -25,17 +25,19 @@ management command (see :func:`schedule_decision_refresh`).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 
 from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, transaction
 from django.db.models import QuerySet
-from django.db.models.signals import post_delete, post_migrate, post_save, pre_save
+from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete, pre_migrate, pre_save
 from django.dispatch import receiver
 
-# A plain constant; the models module is loaded before `AppConfig.ready` imports
-# this one, so importing it here changes no loading order.
-from .models import DECISION_OWNED_FIELDS
+# Plain constants; the models module is loaded before `AppConfig.ready` imports
+# this one, so importing them here changes no loading order.
+from .models import DECISION_OWNED_FIELDS, LATENT_HOLDING_STATES, LATENT_UNREAD_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,71 @@ def _has_column(using, table, column) -> bool:
     return any(col.name == column for col in description)
 
 
+@receiver(pre_migrate, dispatch_uid="assurance_refuse_a_reverse_past_an_irreversible_step")
+def refuse_a_reverse_past_an_irreversible_step(sender, plan=None, **kwargs):
+    """Refuse a ``migrate`` whose plan unapplies an irreversible migration -- BEFORE
+    it unapplies anything.
+
+    Django checks reversibility one migration at a time, as it reaches each, and each
+    is unapplied and committed on its own. So ``migrate assurance 0036`` on a database
+    at 0039 unapplied 0039 -- dropping the decision stamp, the served-route notes, the
+    accepted severity and every outcome's route binding -- committed that, and only
+    then raised IrreversibleError at 0038: the refusal came after the data was gone,
+    and the database was left between releases. Now the whole plan is read first,
+    and a backwards step no reverse exists for refuses it with nothing touched.
+
+    Every app's plan, not only this one's: the loss is the same whoever owns the
+    step. Sent once per app with models; the plan is the same, so it is read on
+    this app's signal only.
+    """
+    if getattr(sender, "name", None) != "assurance" or not plan:
+        return
+    from django.db.migrations.exceptions import IrreversibleError
+
+    for migration, backwards in plan:
+        if not backwards:
+            continue
+        for operation in migration.operations:
+            if not operation.reversible:
+                raise IrreversibleError(
+                    f"{migration.app_label}.{migration.name} cannot be reversed "
+                    f"({operation.describe()}), and this migrate would reverse it: it is "
+                    "refused before anything is unapplied, so the database stays where it "
+                    "is. Stop at the migration after it."
+                )
+
+
+@receiver(post_migrate, dispatch_uid="assurance_restore_fired_holds")
+def carry_what_a_release_that_did_not_carry_left(sender, using=None, apps=None, **kwargs):
+    """Carry every watch and legal ruling a re-derive of an earlier release left on a
+    closed version to the claim's current version, put back every hold a FIRED
+    condition keeps, and bring each deployment it touched current
+    (:func:`assurance.carry.converge`).
+
+    0037 and 0038 do this once, at the migration. A release before this one still
+    writing mid-rollout does it again after them, and a later ``migrate`` -- the step
+    after a rollout -- finds and repairs what it left, and evaluates the watches it
+    carried. Connected BEFORE the recompute below, so the decisions it recomputes
+    read the record as repaired.
+
+    Keyed on the data, like the receivers below: a deployment with nothing to carry
+    or put back is not touched, so an unrelated ``migrate`` writes nothing. It writes
+    no decision column itself; each deployment it touched is refreshed through the
+    one refresh (:func:`assurance.decision.refresh_stored_decisions`).
+    """
+    if not _the_decision_columns_are_migrated(sender, using, apps):
+        return
+    from .carry import converge, deployments_to_converge
+    from .decision import refresh_stored_decisions
+    from .models import Deployment
+
+    touched = []
+    for deployment in Deployment.objects.filter(pk__in=deployments_to_converge()).order_by("pk"):
+        if any(converge(deployment).values()):
+            touched.append(deployment.pk)
+    refresh_stored_decisions(touched)
+
+
 @receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
 def recompute_decisions_computed_under_another_rule(sender, using=None, apps=None, **kwargs):
     """Recompute every stored decision with chain outcomes under it that was never
@@ -137,12 +204,49 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    from .decision import recompute_decision
+    from django.utils import timezone
+
+    from .decision import (
+        _KEYRING_MARK,
+        _claim_for_this_release,
+        _current_policy_pin,
+        _watches_read_since,
+        policy_stamp,
+        recompute_decision,
+    )
+    from .latent import fire_due_conditions
     from .models import Deployment, WorkflowChainOutcome
 
     deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
     for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):
         recompute_decision(deployment)
+    # And every stored decision this release's rules did not compute: stamped under
+    # another pin -- a release that moved the policy pin moved what the same inputs
+    # imply -- or moved since it was stamped by a writer that does not stamp, the
+    # release before this one mid-rollout (Deployment.decision_policy), or recomputed
+    # by that writer to the same decision, which rewrote the keyring column bare
+    # (decision._KEYRING_MARK). Keyed on the data like the keyring stamp, so a
+    # migrate that failed part-way leaves them marked for the next.
+    pin = _current_policy_pin()
+    stale = [
+        pk
+        for pk, stamp, revision, keyring in Deployment.objects.filter(decision__isnull=False)
+        .order_by("pk")
+        .values_list("pk", "decision_policy", "decision_revision", "decision_keyring")
+        if stamp != policy_stamp(revision, pin=pin) or (keyring is not None and not keyring.startswith(_KEYRING_MARK))
+    ]
+    for deployment in Deployment.objects.filter(pk__in=stale).order_by("pk"):
+        # The watches first: the release before never evaluates one, so a write of
+        # its -- to the data boundary, a provider's profile, a component -- that made
+        # one true is read here before the decision is. One query where none is live.
+        since = timezone.now()
+        claim = _claim_for_this_release(deployment)
+        fire_due_conditions(deployment, schedule_refresh=False)
+        recompute_decision(
+            deployment,
+            brought_current=claim is not None and _watches_read_since(deployment.pk, since),
+            after_claim=claim,
+        )
 
 
 def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
@@ -168,11 +272,19 @@ def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
             state = apps.get_model("assurance", "Deployment")
         except LookupError:
             return False
-        return any(f.name == "decision_keyring" for f in state._meta.get_fields())
+        names = {f.name for f in state._meta.get_fields()}
+        return _DECISION_COLUMNS_ADDED_LAST <= names
     # `flush` sends post_migrate with no migration state at all, so there is
     # nothing to ask but the database itself -- and a flush of a database left
     # below the stamp crashed on the column here.
-    return _has_column(using, Deployment._meta.db_table, "decision_keyring")
+    return all(_has_column(using, Deployment._meta.db_table, c) for c in _DECISION_COLUMNS_ADDED_LAST)
+
+
+#: The decision columns the refresh writes that later migrations added. A recompute
+#: writes every one of them, so a schema missing any is one it cannot run against --
+#: a staged upgrade stopped between the stamp and the accepted-risk expiry has the
+#: first and not the second, and asking only for the first let the receivers crash.
+_DECISION_COLUMNS_ADDED_LAST = frozenset({"decision_keyring", "decision_valid_until", "decision_policy"})
 
 
 @receiver(post_migrate, dispatch_uid="assurance_repair_decisions_behind_their_log")
@@ -251,7 +363,52 @@ DECISION_INPUTS = {
     "assurance.DeclaredComponent": ("deployment",),
     "assurance.ApprovedWorkflow": ("deployment",),
     "assurance.WorkflowChainOutcome": ("deployment",),
+    # A declared precondition a current claim rests on that nobody can read now --
+    # unobservable, or its evaluation failed -- holds the decision back.
+    "assurance.LatentCondition": ("deployment",),
 }
+
+def _deployments_serving_through(instance) -> set:
+    """The deployments with a component that resolves to this provider: the route
+    each serves names the provider and reads its region (assurance.served_route)."""
+    from .models import Asset
+
+    if instance.pk is None:
+        return set()
+    return set(
+        Asset.objects.filter(provider_id=instance.pk).values_list("deployment_id", flat=True).distinct()
+    )
+
+
+#: Inputs the decision reads that belong to no one deployment, and how to find the
+#: deployments a write to one reaches. A provider is shared: its name and region are
+#: fields of the served route (P2.2), which every chain outcome is compared with, so
+#: renaming it moves the route of every deployment serving through it -- and the
+#: decision of each, with no write to any of them.
+DECISION_FANOUT_INPUTS = {
+    "assurance.Provider": _deployments_serving_through,
+}
+
+#: Where a fan-out row's deployments are kept between pre_delete and post_delete:
+#: by post_delete the components that resolved to it have been set to none.
+_PRIOR_FANOUT = "_assurance_decision_prior_fanout"
+
+
+def _fanout_input_saved(sender, instance, raw=False, using=None, **kwargs):
+    if raw:
+        return
+    for deployment_id in DECISION_FANOUT_INPUTS[instance._meta.label](instance):
+        schedule_decision_refresh(deployment_id, using=using)
+
+
+def _fanout_input_deleting(sender, instance, **kwargs):
+    instance.__dict__[_PRIOR_FANOUT] = DECISION_FANOUT_INPUTS[instance._meta.label](instance)
+
+
+def _fanout_input_deleted(sender, instance, using=None, **kwargs):
+    for deployment_id in instance.__dict__.pop(_PRIOR_FANOUT, set()):
+        schedule_decision_refresh(deployment_id, using=using)
+
 
 #: For a model the decision reads only some columns of: those columns. A save that
 #: names none of them in ``update_fields`` cannot move the decision -- a finding's
@@ -259,7 +416,27 @@ DECISION_INPUTS = {
 #: nothing the decision computes. Pinned by
 #: test_the_decision_reads_no_finding_column_but_these.
 DECISION_COLUMNS = {
-    "assurance.Finding": frozenset({"deployment", "deployment_id", "status", "severity"}),
+    # An accepted finding is read for when its acceptance ends and the severity it
+    # was given at (`decision.accepted_risk_signal`): narrowing that severity alone
+    # took an acceptance from standing to outgrown and scheduled nothing.
+    "assurance.Finding": frozenset(
+        {"deployment", "deployment_id", "status", "severity", "risk_accepted_until", "risk_accepted_severity"}
+    ),
+    # Not `last_evaluated_at`, which every evaluation writes: a refresh it scheduled
+    # would evaluate again, and write it again.
+    "assurance.LatentCondition": frozenset(
+        {"deployment", "deployment_id", "claim", "claim_id", "state"}
+    ),
+}
+
+#: For a model the decision reads only some ROWS of: the column that says which, and
+#: the values it reads. A row written whole in none of them cannot move the decision
+#: when it is first written -- declaring a watch writes a PENDING one. A whole save of
+#: an existing row is refreshed whatever it holds (`_remember_prior_deployment`
+#: notes the row's deployment first), so a row moved OUT of such a state is too. A
+#: condition is read unread, and FIRED, which holds its claim whatever the claim reads.
+DECISION_ROWS = {
+    "assurance.LatentCondition": ("state", LATENT_UNREAD_STATES | LATENT_HOLDING_STATES),
 }
 
 #: The Deployment columns that are the refresh's output rather than an input to
@@ -273,7 +450,8 @@ _DECISION_OWN_FIELDS = DECISION_OWNED_FIELDS | {"updated_at"}
 def writes_a_decision_input(instance, update_fields) -> bool:
     """Whether saving ``instance`` with ``update_fields`` can change what its
     deployment's decision is computed from. A save that names no field
-    (``update_fields=None``) writes every column, so it can."""
+    (``update_fields=None``) writes every column, so it can -- unless the row is
+    one the decision does not read (`DECISION_ROWS`)."""
     label = instance._meta.label
     if label == "assurance.Deployment":
         # `evidence_incomplete`, `last_complete_scan_at` and the reported
@@ -282,8 +460,11 @@ def writes_a_decision_input(instance, update_fields) -> bool:
         return update_fields is None or not set(update_fields) <= _DECISION_OWN_FIELDS
     if label not in DECISION_INPUTS:
         return False
+    if update_fields is None:
+        rows = DECISION_ROWS.get(label)
+        return rows is None or getattr(instance, rows[0]) in rows[1]
     columns = DECISION_COLUMNS.get(label)
-    return columns is None or update_fields is None or bool(columns & set(update_fields))
+    return columns is None or bool(columns & set(update_fields))
 
 
 #: Where a row's deployment is kept between pre_save and post_save when the save
@@ -372,6 +553,28 @@ class _RefreshAfterCommit:
             )
 
 
+#: The deployments whose refresh -- or a step of it: the watches' evaluation, the
+#: carry -- is running in this context, and brings the decision current itself once
+#: it is done. A write it makes schedules no other refresh of the same deployment.
+#: Outside a transaction every write commits at once and its refresh ran at once:
+#: each condition an evaluation wrote, in its own short transaction, evaluated every
+#: condition again, and each of THOSE writes did the same.
+_REFRESH_DEFERRED: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
+    "assurance_refresh_deferred", default=frozenset()
+)
+
+
+@contextlib.contextmanager
+def refresh_deferred(deployment_id):
+    """While this runs, a write to ``deployment_id``'s decision inputs schedules no
+    refresh: the caller refreshes it once, after (see :data:`_REFRESH_DEFERRED`)."""
+    token = _REFRESH_DEFERRED.set(_REFRESH_DEFERRED.get() | {deployment_id})
+    try:
+        yield
+    finally:
+        _REFRESH_DEFERRED.reset(token)
+
+
 def schedule_decision_refresh(deployment_id, *, using=None) -> None:
     """Refresh ``deployment_id``'s stored decision once the current transaction
     commits -- once, however many of its inputs the transaction wrote.
@@ -389,6 +592,10 @@ def schedule_decision_refresh(deployment_id, *, using=None) -> None:
     """
     using = using or DEFAULT_DB_ALIAS
     if deployment_id is None or using != DEFAULT_DB_ALIAS:
+        return
+    if deployment_id in _REFRESH_DEFERRED.get():
+        # Written by a step of this deployment's own refresh, which brings its decision
+        # current once it is done (`refresh_deferred`).
         return
     connection = connections[using]
     pending = None
@@ -455,6 +662,19 @@ def _deployment_saved(sender, instance, raw=False, using=None, update_fields=Non
     schedule_decision_refresh(instance.pk, using=using)
 
 
+@receiver(post_save, sender="assurance.Deployment", dispatch_uid="assurance_route_noted_at_creation")
+def _note_the_route_a_new_deployment_starts_with(sender, instance, created=False, raw=False, **kwargs):
+    """A deployment starts with the route nothing serves, and the record says so from
+    the moment it exists -- so a run against it before any component is recorded binds
+    to that, rather than to nothing because no note was ever taken. Never raises
+    (:func:`assurance.served_route.note_route_quietly`), and no stop path creates one."""
+    if raw or not created:
+        return
+    from .served_route import note_route_quietly
+
+    note_route_quietly(instance, now=instance.created_at)
+
+
 for _label in DECISION_INPUTS:
     pre_save.connect(
         _remember_prior_deployment, sender=_label, dispatch_uid=f"assurance_decision_backstop_pre:{_label}"
@@ -465,3 +685,94 @@ for _label in DECISION_INPUTS:
     post_delete.connect(
         _decision_input_deleted, sender=_label, dispatch_uid=f"assurance_decision_backstop_delete:{_label}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Latent conditions (Phase 2 item 9): what the decision does not read, but a
+# declared condition does.
+# ---------------------------------------------------------------------------
+#
+# The data boundary and a provider's profile reach the decision only through the
+# claims re-derived from them -- until someone declares a latent condition on one.
+# Then a write to it is the change the condition watches for, and the deployment
+# it is declared on is brought current after the write commits: the refresh above
+# evaluates the conditions first (`decision.refresh_stored_decisions`). This is how
+# every writer brings them current -- the API routes schedule it too, the data
+# boundary route for its own deployment included -- so no write evaluates a
+# condition inside its own transaction: a write to a provider that twenty
+# deployments watch no longer evaluates and locks all twenty, and no condition is
+# read under a write lock a stop waits on. Every live condition counts, not only a
+# pending one: a fired or unobservable condition is read again by the refresh.
+
+_PRIOR_PROVIDER_NAME = "_assurance_latent_prior_provider_name"
+
+
+def _provider_name_as_stored(instance):
+    """The provider name ``instance`` carried as last saved: a Provider's own, or
+    the provider a ProviderAssertion belonged to."""
+    if instance._state.adding or instance.pk is None:
+        return None
+    if instance._meta.label == "assurance.Provider":
+        field = "name"
+    else:
+        field = "provider__name"
+    return type(instance)._default_manager.filter(pk=instance.pk).values_list(field, flat=True).first()
+
+
+def _provider_name(instance):
+    if instance._meta.label == "assurance.Provider":
+        return instance.name
+    provider = getattr(instance, "provider", None)
+    return None if provider is None else provider.name
+
+
+def _remember_prior_provider_name(sender, instance, raw=False, **kwargs):
+    if raw:
+        return
+    instance.__dict__[_PRIOR_PROVIDER_NAME] = _provider_name_as_stored(instance)
+
+
+def _schedule_watching(deployment_ids, using) -> None:
+    for deployment_id in deployment_ids:
+        schedule_decision_refresh(deployment_id, using=using)
+
+
+def _provider_profile_written(sender, instance, raw=False, using=None, **kwargs):
+    from .latent import deployments_watching_provider
+
+    before = instance.__dict__.pop(_PRIOR_PROVIDER_NAME, None)
+    if raw:
+        return
+    _schedule_watching(deployments_watching_provider(before, _provider_name(instance)), using)
+
+
+def _data_boundary_written(sender, instance, raw=False, using=None, **kwargs):
+    from .latent import deployments_watching_boundary
+
+    if raw:
+        return
+    _schedule_watching(deployments_watching_boundary(instance.deployment_id), using)
+
+
+for _label in DECISION_FANOUT_INPUTS:
+    post_save.connect(_fanout_input_saved, sender=_label, dispatch_uid=f"assurance_decision_fanout_save:{_label}")
+    pre_delete.connect(
+        _fanout_input_deleting, sender=_label, dispatch_uid=f"assurance_decision_fanout_pre_delete:{_label}"
+    )
+    post_delete.connect(
+        _fanout_input_deleted, sender=_label, dispatch_uid=f"assurance_decision_fanout_delete:{_label}"
+    )
+
+
+for _label in ("assurance.Provider", "assurance.ProviderAssertion"):
+    pre_save.connect(
+        _remember_prior_provider_name, sender=_label, dispatch_uid=f"assurance_latent_pre:{_label}"
+    )
+    post_save.connect(_provider_profile_written, sender=_label, dispatch_uid=f"assurance_latent_save:{_label}")
+    post_delete.connect(_provider_profile_written, sender=_label, dispatch_uid=f"assurance_latent_delete:{_label}")
+post_save.connect(
+    _data_boundary_written, sender="assurance.DataBoundary", dispatch_uid="assurance_latent_save:DataBoundary"
+)
+post_delete.connect(
+    _data_boundary_written, sender="assurance.DataBoundary", dispatch_uid="assurance_latent_delete:DataBoundary"
+)

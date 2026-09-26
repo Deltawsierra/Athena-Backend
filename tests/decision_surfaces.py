@@ -28,6 +28,31 @@ def surfaces(dep, client) -> dict:
     }
 
 
+def stamped_under_the_rules_in_force(dep):
+    """Stamp ``dep``'s stored decision as one the rules in force computed at the
+    revision it stands at, and return it.
+
+    For a test that writes a decision by hand -- through the one writer, or a
+    QuerySet update -- to stand for one the rules computed. A stored decision with no
+    stamp names no rules it was computed under, and every publishing read recomputes
+    it (``decision.current_decision``); stamped here, the hand-written decision is
+    published as written, which is what such a test is about. A later move through
+    the one writer keeps the stamp (``revision._write``); a QuerySet update of the
+    revision does not, as a writer that does not stamp would not. A keyring column
+    written bare -- by hand -- is marked as this release's recompute writes it
+    (``decision.keyring_stamp``): bare, it is the release before's recompute."""
+    from assurance.decision import _KEYRING_MARK, keyring_stamp, policy_stamp
+
+    revision, keyring = Deployment.objects.values_list("decision_revision", "decision_keyring").get(pk=dep.pk)
+    if keyring is not None and not keyring.startswith(_KEYRING_MARK):
+        keyring = keyring_stamp(keyring)
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_stamp(revision), decision_keyring=keyring)
+    dep.decision_policy = policy_stamp(revision)
+    dep.decision_keyring = keyring
+    dep.decision_revision = revision
+    return dep
+
+
 def one_decision(dep, client) -> str | None:
     """The decision every surface publishes, asserting they publish ONE -- the same
     decision under the same revision."""

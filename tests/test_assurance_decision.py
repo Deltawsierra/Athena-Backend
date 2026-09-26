@@ -70,10 +70,20 @@ def test_resolved_findings_do_not_count():
     user = _user()
     dep = _deployment(user)
     _finding(dep, "critical", status=Finding.Status.CLOSED, n="cl")
-    _finding(dep, "high", status=Finding.Status.ACCEPTED, n="ac")
     _finding(dep, "high", status=Finding.Status.FALSE_POSITIVE, n="fp")
-    # All resolved → nothing active → READY.
+    # Closed and false positive are gone → nothing active → READY.
     assert compute_decision(dep) == Deployment.Decision.READY
+
+
+def test_an_accepted_finding_is_carried_not_resolved():
+    """It used to count as resolved like the other two, so accepting a high
+    finding read READY. An acceptance that names no end has lapsed (owner
+    decision Q6): see tests/test_an_accepted_risk_is_carried_not_removed.py."""
+    user = _user()
+    dep = _deployment(user)
+    _finding(dep, "critical", status=Finding.Status.CLOSED, n="cl")
+    _finding(dep, "high", status=Finding.Status.ACCEPTED, n="ac")
+    assert compute_decision(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
 
 
 def test_unverified_only_needs_more_evidence():

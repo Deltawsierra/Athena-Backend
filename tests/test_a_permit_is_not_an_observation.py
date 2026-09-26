@@ -30,7 +30,11 @@ from assurance import composition as comp
 from assurance import observed_outcomes
 from assurance.composition import HELD, NOT_DEMONSTRATED, VIOLATED, ChainOutcome, compose
 from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
-from assurance.workflow_chains import composition_for
+from assurance.workflow_chains import (
+    composition_decision_signal,
+    composition_for,
+    composition_payload,
+)
 from tests import signed_chains
 from tests.signed_chains import record_signed, write_keyring
 
@@ -40,8 +44,10 @@ AUTHORIZATION_CLAUSE = "rest on an authorization check, not an observed effect"
 WHAT_IT_DOES_NOT_SHOW = "it does not show the effect happened"
 
 
-def _held(workflow, signer, *, at=None, basis=comp.BASIS_DEMONSTRATED):
-    return ChainOutcome(workflow, HELD, observed_at=at, basis=basis, signer=signer)
+def _held(workflow, signer, *, at=None, basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT):
+    # Taken against the route serving now unless a test says otherwise: these are
+    # about who signed, and a held of another route floors whoever signed it.
+    return ChainOutcome(workflow, HELD, observed_at=at, basis=basis, signer=signer, route=route)
 
 
 # --- the rule: which kind of evidence each signer is ---------------------------
@@ -199,9 +205,10 @@ def test_a_tie_between_signers_is_broken_the_same_way_in_any_order():
     assert checked == ()
 
 
-def test_who_signed_moves_the_labelling_and_never_the_decision():
-    """Gating is unchanged: the same held, demonstrated, composes to the same
-    decision, census and basis census whoever signed it."""
+def test_who_signed_moves_the_labelling_and_never_the_rules_decision():
+    """The RULE is unchanged: the same held, demonstrated, composes to the same
+    decision, census and basis census whoever signed it. What that decision
+    contributes to the deployment's is capped for a permit check alone -- below."""
     results = [
         compose([_held("refund", signer)], expected_workflows=["refund"])
         for signer in ("achilles", "athena", "hermes", "")
@@ -302,7 +309,9 @@ def test_the_signed_route_answers_with_the_kind_and_the_composition_names_it(eng
         oc.build_outcome(
             deployment=str(dep.uuid), workflow="refund", status=oc.HELD, engine="achilles",
             engine_version="1.0.0", run_id="run-1", evidence_digest="sha256:" + "ab" * 32,
-            observed_at=_recently(),
+            # Now, after the deployment exists: a run from before it was registered
+            # cannot be bound to the route it serves (P2.2), and is not about it.
+            observed_at=timezone.now(),
         ),
         signed_chains.ENGINE_KEYS["achilles"],
     )
@@ -322,15 +331,109 @@ def test_the_signed_route_answers_with_the_kind_and_the_composition_names_it(eng
 
 @pytest.mark.django_db
 def test_decision_support_names_the_permit_check_behind_its_ready(engine_keyring):
-    """The decision is READY -- unchanged -- and the note that explains it now says
-    the held it rests on is an authorization check, not an effect anyone saw."""
+    """Held on a permit check alone, the decision is ready WITH RESTRICTIONS (owner
+    default, #278), and the note says why: the held it rests on is an authorization
+    check, not an effect anyone saw."""
     dep = _deployment("refund")
     record_signed(dep, "refund", HELD, _recently(), engine="achilles")
 
     support = _client().get(f"/api/assurance/deployments/{dep.uuid}/decision-support/").json()
-    assert support["decision"] == comp.READY
-    assert support["note"].startswith("Ready: every one of the 1 approved workflow(s)")
+    assert support["decision"] == comp.READY_RESTRICTED
+    assert support["note"].startswith(
+        "Ready with restrictions: every one of the 1 approved workflow(s) has a chain outcome "
+        "and all of them hold, but 1 hold on an authorization check alone"
+    )
     assert f"1 of these {AUTHORIZATION_CLAUSE} (refund)" in support["note"]
     assert WHAT_IT_DOES_NOT_SHOW in support["note"]
     assert support["composition"]["authorization_checked"] == ["refund"]
     assert f"1 of these {AUTHORIZATION_CLAUSE} (refund)" in support["composition"]["explanation"]
+
+
+# --- what a permit check alone contributes to the deployment decision (#278) ----
+
+
+def _signal(outcomes, expected):
+    return composition_decision_signal(compose(outcomes, expected_workflows=expected))
+
+
+def test_a_workflow_held_on_a_permit_check_alone_is_ready_with_restrictions():
+    """Owner default (#278): Achilles signs held when its permit check passes at
+    dispatch. That shows the authority chain resolves and not that the effect
+    happened, so the deployment it speaks for is ready WITH RESTRICTIONS at best."""
+    assert _signal([_held("refund", "achilles")], ["refund"]) == comp.READY_RESTRICTED
+
+
+def test_a_scan_is_not_restricted_by_the_permit_check_cap():
+    """The cap is about what the signer could see, not about who else signs: a scan
+    contributes what the rule decided."""
+    assert _signal([_held("refund", "athena")], ["refund"]) == comp.READY
+
+
+@pytest.mark.parametrize("signer", ["hermes", ""], ids=["unclassified", "unnamed"])
+def test_a_held_on_an_unclassified_signer_is_restricted_like_a_permit_check(signer):
+    """A signer this platform has not classified verifies as a signature and says
+    nothing about what its engine could see -- at best a permit check's worth. It
+    used to contribute READY, outranking the permit check it cannot be shown to
+    exceed: weaker evidence, the better decision."""
+    assert _signal([_held("refund", signer)], ["refund"]) == comp.READY_RESTRICTED
+    # And the published sentence says why, rather than the rule's bare READY.
+    result = compose([_held("refund", signer)], expected_workflows=["refund"])
+    payload = composition_payload(result, signal=comp.READY_RESTRICTED, provenance={})
+    assert "not classified" in payload["explanation"]
+
+
+def test_one_permit_check_restricts_a_deployment_whose_other_workflows_were_scanned():
+    """Worst-of-N: another workflow's scan says nothing about this one's effect."""
+    outcomes = [_held("refund", "achilles"), _held("export", "athena"), _held("notify", "athena")]
+    assert _signal(outcomes, ["refund", "export", "notify"]) == comp.READY_RESTRICTED
+
+
+def test_a_later_scan_that_displaces_the_permit_check_lifts_the_restriction():
+    t0 = timezone.now() - timedelta(hours=2)
+    outcomes = [_held("refund", "achilles", at=t0), _held("refund", "athena", at=t0 + timedelta(hours=1))]
+    assert _signal(outcomes, ["refund"]) == comp.READY
+    # And the other way round: the permit check is what stands, so it restricts.
+    outcomes = [_held("refund", "athena", at=t0), _held("refund", "achilles", at=t0 + timedelta(hours=1))]
+    assert _signal(outcomes, ["refund"]) == comp.READY_RESTRICTED
+
+
+def test_the_restriction_never_softens_a_floor():
+    """A violated or undemonstrated chain places the deployment where the rule
+    floors it, whoever signed it: the cap only ever applies to READY."""
+    violated = ChainOutcome("refund", VIOLATED, basis=comp.BASIS_DEMONSTRATED, signer="achilles")
+    assert _signal([violated, _held("export", "achilles")], ["refund", "export"]) == comp.NOT_RECOMMENDED
+    missing = ChainOutcome("refund", NOT_DEMONSTRATED, basis=comp.BASIS_DEMONSTRATED, signer="achilles")
+    assert _signal([missing, _held("export", "achilles")], ["refund", "export"]) == comp.NEEDS_MORE_EVIDENCE
+
+
+def test_a_permit_check_in_an_open_scope_contributes_nothing_either_way():
+    """No approved set recorded: the chains do not speak for the deployment, so
+    they contribute neither READY nor its restricted form."""
+    assert _signal([_held("refund", "achilles")], None) is None
+
+
+def test_the_restriction_follows_the_standing_outcome_in_any_order():
+    t0 = timezone.now() - timedelta(hours=2)
+    outcomes = [
+        _held("refund", "achilles", at=t0),
+        _held("refund", "athena", at=t0 + timedelta(hours=1)),
+        _held("export", "achilles", at=t0),
+    ]
+    seen = {_signal(list(order), ["refund", "export"]) for order in permutations(outcomes)}
+    assert seen == {comp.READY_RESTRICTED}
+
+
+@pytest.mark.django_db
+def test_the_decision_is_restricted_until_a_scan_displaces_the_permit_check(engine_keyring):
+    """End to end, through decision support."""
+    dep = _deployment("refund")
+    url = f"/api/assurance/deployments/{dep.uuid}/decision-support/"
+    record_signed(dep, "refund", HELD, timezone.now() - timedelta(minutes=10), engine="achilles")
+    support = _client().get(url).json()
+    assert support["decision"] == comp.READY_RESTRICTED
+    assert support["composition"]["authorization_checked"] == ["refund"]
+    record_signed(dep, "refund", HELD, timezone.now() - timedelta(minutes=5), engine="athena")
+    support = _client().get(url).json()
+    assert support["decision"] == comp.READY
+    assert support["composition"]["authorization_checked"] == []
+
