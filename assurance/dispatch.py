@@ -39,6 +39,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import queue
+import sys
 import threading
 import time
 import uuid
@@ -234,20 +237,25 @@ def _record(finding, binding, *, trigger, outcome, detail, external_ref=None, re
         # re-authorization.
         if reauthorize or not obj.policy_epoch:
             obj.policy_epoch = policy_epoch(finding.deployment)
-        obj.save(
-            update_fields=[
-                "deployment",
-                "binding",
-                "outcome",
-                "trigger",
-                "detail",
-                "external_ref",
-                "operation_id",
-                "policy_epoch",
-                "attempts",
-                "updated_at",
-            ]
-        )
+        fields = [
+            "deployment",
+            "binding",
+            "outcome",
+            "trigger",
+            "detail",
+            "external_ref",
+            "operation_id",
+            "policy_epoch",
+            "attempts",
+            "updated_at",
+        ]
+        if outcome == DispatchAttempt.Outcome.SENDING:
+            # A new request, whose end nobody has reconciled: an earlier
+            # reconciliation of this attempt says nothing about it. In the same
+            # statement, so no crash can leave SENDING beside a stale one.
+            obj.reconciled_at, obj.reconciled_detail = None, ""
+            fields += ["reconciled_at", "reconciled_detail"]
+        obj.save(update_fields=fields)
     return obj
 
 
@@ -257,8 +265,11 @@ def _resolve_uncertain(attempt, connector, transport, finding):
     recorded how it ended -- by looking for the issue itself. Returns the attempt,
     SENT with the issue it found, FAILED when the provider certainly has none, or
     unchanged when the look could not tell."""
-    look = connector.find_existing(finding, transport=transport)
+    look = connector.find_existing(finding, transport=transport, known_ref=attempt.external_ref or None)
     if look.state == look.FOUND:
+        # Ours (the marker is this installation's and this finding's), open or
+        # closed: the push landed. Several issues with the marker are AMBIGUOUS,
+        # and held below, never adopted.
         attempt.outcome = DispatchAttempt.Outcome.SENT
         attempt.external_ref = look.external_ref or attempt.external_ref
     elif look.state == look.ABSENT and timezone.now() - attempt.updated_at > timedelta(seconds=CLAIM_SECONDS):
@@ -391,6 +402,7 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
 
     # Operational: build the real (or injected) transport and push. push_finding
     # never raises — a transport error comes back as ok=False.
+    closed_issue = None
     if transport is None:
         transport = (transport_factory or _default_transport_factory)()
         connector = binding.build_connector()
@@ -398,8 +410,8 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
             # Before creating anything, look: an issue made for this finding by a
             # push nobody recorded (a manual push, a restored database) is reused,
             # not duplicated. A look that cannot tell does not stop a first push.
-            look = connector.find_existing(finding, transport=transport)
-            if look.state == look.FOUND:
+            look = connector.find_existing(finding, transport=transport, known_ref=existing and existing.external_ref)
+            if look.state == look.FOUND and not look.closed:
                 return _record(
                     finding,
                     binding,
@@ -409,6 +421,22 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
                     reauthorize=moved is not None,
                     external_ref=look.external_ref,
                 )
+            if look.state == look.AMBIGUOUS:
+                # A label copied onto other issues: which is this finding's cannot
+                # be told, and creating one more would not settle it. Held.
+                return _record(
+                    finding,
+                    binding,
+                    trigger=trigger,
+                    outcome=DispatchAttempt.Outcome.UNKNOWN,
+                    detail=f"held, not pushed: {look.detail}; reconcile it (manage.py reconcile_dispatch_attempt)",
+                    reauthorize=moved is not None,
+                )
+            if look.state == look.FOUND:
+                # The finding's issue exists and is closed. It is not reopened (that
+                # is a person's call) and no second issue is filed: it is told, by a
+                # comment, that the finding is blocking a deployment again.
+                closed_issue = look.external_ref
 
     op = operation_id(finding, binding.connector)
     prior = None
@@ -431,11 +459,6 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
         # advance.
         reauthorize=moved is not None,
     )
-    if sending.reconciled_at is not None:
-        # A new request, whose end nobody has reconciled: an earlier reconciliation
-        # of this attempt says nothing about it.
-        DispatchAttempt.objects.filter(pk=sending.pk).update(reconciled_at=None, reconciled_detail="")
-        sending.reconciled_at, sending.reconciled_detail = None, ""
     # The last check, as close to the request as it can be: the decision that
     # asked for this push still holds. Made after every step that can wait -- the
     # reconciled decision above, the look, the record just written -- so a lift
@@ -454,7 +477,27 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
         # moved): that is the authority this push is made under.
         sending.policy_epoch = policy_epoch(finding.deployment)
         fields.append("policy_epoch")
-    result = connector.push_finding(finding, transport=transport, operation_id=op)
+    if closed_issue is not None:
+        from .connectors import ConnectorResult
+
+        text = (
+            f"Athena: finding {finding.uuid} ({getattr(finding, 'title', '')}) is part of a blocking "
+            f"decision again on deployment {finding.deployment.name} ({policy_epoch(finding.deployment)}). "
+            "This issue is closed; it is not reopened automatically."
+        )
+        result = connector.comment_on(closed_issue, text, transport=transport)
+        if result is None:
+            result = ConnectorResult(
+                ok=True, external_ref=closed_issue, connector=binding.connector,
+                detail=f"existing issue {closed_issue} is closed; {binding.connector} takes no comment here",
+            )
+        elif result.ok:
+            result = ConnectorResult(
+                ok=True, external_ref=closed_issue, connector=binding.connector,
+                detail=f"existing issue {closed_issue} is closed; commented on it (not reopened)",
+            )
+    else:
+        result = connector.push_finding(finding, transport=transport, operation_id=op)
     if result.ok:
         outcome = DispatchAttempt.Outcome.SENT
     elif result.uncertain:
@@ -511,6 +554,14 @@ def dispatch_finding(finding, *, trigger, transport_factory=None, before_push=No
                 binding.connector,
             )
             try:
+                current = DispatchAttempt.objects.filter(finding=finding, connector=binding.connector).first()
+                if current is not None and current.outcome in DispatchAttempt.UNCERTAIN_OUTCOMES:
+                    # SENDING (the request may have gone out -- the error came from
+                    # recording how it ended) or UNKNOWN: never rewritten as FAILED,
+                    # which would license a push nobody knows did not land. It stays
+                    # uncertain, to be settled by looking.
+                    attempts.append(current)
+                    continue
                 attempts.append(
                     _record(
                         finding,
@@ -708,13 +759,84 @@ _SLOTS: dict[int, threading.BoundedSemaphore] = {}
 _SLOTS_LOCK = threading.Lock()
 
 #: Seconds between two sweeps of owed dispatches no runner holds
-#: (``ASSURANCE_DISPATCH_SWEEP_SECONDS``; 0 turns the sweeper off).
+#: (``ASSURANCE_DISPATCH_SWEEP_SECONDS``; 0 turns the sweeper off), and before the
+#: first one after a process starts serving.
 DEFAULT_SWEEP_SECONDS = 300.0
+FIRST_SWEEP_AFTER = 5.0
 SWEEPER_THREAD = "assurance-sweeper"
+#: This process's sweeper, as ``[(pid, thread)]``.
 _SWEEPER: list = []
+_SWEEP_STOP = threading.Event()
+#: Most owed rows one sweep reads; it claims and starts as many as the bound allows.
+_SWEEP_BATCH = 1000
+
+#: Dispatches a stop could not start because the bound was full: counted, never
+#: logged in the stop's request, and reported by the next sweep.
+_NOT_STARTED = [0]
+
+#: What :func:`start_blocking_decision_dispatch` did.
+STARTED = "started"
+COALESCED = "coalesced"  #: one was running here; it runs once more
+FULL = "full"  #: the bound was full; nothing started
+NOT_STARTED = "not started"  #: the thread could not start; logged at ERROR
+
+#: Log records emitted on a stop's path are handed to this thread instead: a slow
+#: or stalled log sink never holds a stop, or a lock a stop needs.
+_LOG_QUEUE: queue.SimpleQueue = queue.SimpleQueue()
+_LOG_THREAD: list = []
+_LOG_LOCK = threading.Lock()
 
 #: The longest ``last_error`` kept on a row.
 _ERROR_LIMIT = 2000
+
+
+def _log_pump(q) -> None:
+    while True:
+        level, msg, args, exc_info = q.get()
+        try:
+            logger.log(level, msg, *args, exc_info=exc_info)
+        except Exception:  # noqa: BLE001, S110 - a log that cannot be written is dropped
+            pass
+
+
+def log_later(level, msg, *args, exc=False) -> None:
+    """Log from a background thread, never here: for the stop's path, which must
+    not wait on a log sink. ``exc``: include the exception being handled."""
+    exc_info = sys.exc_info() if exc else None
+    _LOG_QUEUE.put((level, msg, args, exc_info))
+    pid = os.getpid()
+    if _LOG_THREAD and _LOG_THREAD[0] == pid:
+        return
+    try:
+        with _LOG_LOCK:
+            if not (_LOG_THREAD and _LOG_THREAD[0] == pid):
+                threading.Thread(target=_log_pump, args=(_LOG_QUEUE,), name="assurance-log", daemon=True).start()
+                _LOG_THREAD[:] = [pid]
+    except Exception:  # noqa: BLE001, S110 - never raised into a stop
+        pass
+
+
+def _after_fork_in_child() -> None:
+    """A forked child (a pre-forking server's worker) inherits this module's state
+    as it was at the fork: locks another thread may have held -- held for ever in
+    the child, where that thread does not exist -- run slots others had taken, the
+    parent's jobs and the parent's sweeper, which are not running here. All of it
+    starts afresh."""
+    global _JOBS, _JOBS_LOCK, _SLOTS, _SLOTS_LOCK, _SWEEP_STOP, _LOG_QUEUE, _LOG_LOCK
+    _JOBS = {}
+    _JOBS_LOCK = threading.Lock()
+    _SLOTS = {}
+    _SLOTS_LOCK = threading.Lock()
+    _SWEEPER.clear()
+    _SWEEP_STOP = threading.Event()
+    _NOT_STARTED[0] = 0
+    _LOG_QUEUE = queue.SimpleQueue()
+    _LOG_LOCK = threading.Lock()
+    _LOG_THREAD.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 def _auto_dispatch_enabled() -> bool:
@@ -786,10 +908,14 @@ def record_blocking_dispatch_owed(deployment, decision):
             # off) is still there for a run to settle.
             return DecisionDispatchDue.objects.filter(deployment_id=deployment.pk).exists()
     except Exception:  # noqa: BLE001 - a stop never fails on its dispatch's record
-        logger.exception(
+        # Logged later, elsewhere: this is inside the stop's transaction, which
+        # holds the database's write lock.
+        log_later(
+            logging.ERROR,
             "could not record the blocking-decision dispatch for deployment %s in its stop's "
             "transaction; the background run records it",
             getattr(deployment, "pk", "?"),
+            exc=True,
         )
         return None
 
@@ -1049,12 +1175,28 @@ def _run_until_settled(deployment_id, token) -> None:
     _log_still_owed(deployment_id, runs)
 
 
-def _blocking_dispatch_job(deployment_id) -> None:
+def _record_owed_if_missing(deployment_id) -> None:
+    """The first thing a run does for a dispatch its stop could not record: record
+    it -- before waiting for a run slot -- so that from here on it is owed on the
+    record, whatever becomes of this process."""
+    try:
+        deployment = Deployment.objects.filter(pk=deployment_id).first()
+        if deployment is not None and _blocking_decision_policy(deployment) is not None:
+            DecisionDispatchDue.objects.get_or_create(
+                deployment_id=deployment_id, defaults={"owed_since": timezone.now(), "requests": 1}
+            )
+    except Exception:  # noqa: BLE001 - the run itself writes it too, and says so if it cannot
+        logger.exception("could not record the blocking-decision dispatch for deployment %s", deployment_id)
+
+
+def _blocking_dispatch_job(deployment_id, unrecorded=False, token=None) -> None:
     """The background thread: run until settled, and once more for every stop that
     asked while it ran."""
-    token = uuid.uuid4().hex
+    token = token or uuid.uuid4().hex
     finished = False
     try:
+        if unrecorded:
+            _record_owed_if_missing(deployment_id)
         while True:
             _run_until_settled(deployment_id, token)
             with _JOBS_LOCK:
@@ -1071,48 +1213,52 @@ def _blocking_dispatch_job(deployment_id) -> None:
         connections.close_all()
 
 
-def start_blocking_decision_dispatch(deployment_id) -> None:
+def start_blocking_decision_dispatch(deployment_id, *, unrecorded=False, token=None) -> str:
     """Start the background run for ``deployment_id`` -- or, when one is running,
     ask it to run once more. Returns at once and never raises: it is called in a
-    stop's request, after the stop has committed.
+    stop's request, after the stop has committed. Returns :data:`STARTED`,
+    :data:`COALESCED`, :data:`FULL` or :data:`NOT_STARTED`. Logs nothing itself.
 
     A daemon thread, on purpose: it never holds a worker's exit, and it need not,
     because the stop has already recorded the dispatch as owed. A process that exits
     mid-run leaves the row, and the sweeper or the command runs it once the claim
     lapses. No more than the run slots plus ``ASSURANCE_DISPATCH_MAX_WAITING_RUNS``
-    threads exist at once: past that none is started -- what is owed is recorded,
-    and the sweeper or the command runs it."""
+    threads exist at once for dispatches that are recorded: past that none is
+    started (they are counted, and the next sweep reports and runs them).
+    ``unrecorded``: the stop could not record this one, so no sweep would ever find
+    it -- it is started past the bound, and its run records it first. ``token``: a
+    claim the caller already holds for it (the sweeper)."""
     try:
         with _JOBS_LOCK:
             if deployment_id in _JOBS:
                 _JOBS[deployment_id] = True
-                return
-            if len(_JOBS) >= _max_concurrent_runs() + _max_waiting_runs():
-                logger.warning(
-                    "blocking-decision dispatch for deployment %s not started now: %d runs are running "
-                    "or waiting in this process; it stays owed for the sweeper and "
-                    "`manage.py retry_blocking_dispatches`",
-                    deployment_id,
-                    len(_JOBS),
-                )
-                return
+                return COALESCED
+            if not unrecorded and len(_JOBS) >= _max_concurrent_runs() + _max_waiting_runs():
+                _NOT_STARTED[0] += 1
+                return FULL
             _JOBS[deployment_id] = False
         thread = threading.Thread(
             target=_blocking_dispatch_job,
             args=(deployment_id,),
+            kwargs={"unrecorded": unrecorded, "token": token},
             name=f"{THREAD_PREFIX}{deployment_id}",
             daemon=True,
         )
         thread.start()
+        return STARTED
     except Exception:  # noqa: BLE001 - a stop has committed; it must still answer
         with _JOBS_LOCK:
             _JOBS.pop(deployment_id, None)
-        logger.exception(
-            "could not start the blocking-decision dispatch for deployment %s; it did not run -- "
+        log_later(
+            logging.ERROR,
+            "could not start the blocking-decision dispatch for deployment %s; it did not run%s -- "
             "`manage.py retry_blocking_dispatches --deployment %s` runs it",
             deployment_id,
+            " and it is NOT recorded as owed" if unrecorded else "",
             deployment_id,
+            exc=True,
         )
+        return NOT_STARTED
 
 
 class _BlockingDispatchAfterCommit:
@@ -1122,32 +1268,39 @@ class _BlockingDispatchAfterCommit:
     ask which deployment it is for.
     """
 
-    __slots__ = ("deployment_id",)
+    __slots__ = ("deployment_id", "unrecorded")
 
-    def __init__(self, deployment_id):
+    def __init__(self, deployment_id, unrecorded=False):
         self.deployment_id = deployment_id
+        self.unrecorded = unrecorded
 
     def __call__(self):
-        start_blocking_decision_dispatch(self.deployment_id)
+        if self.unrecorded:
+            start_blocking_decision_dispatch(self.deployment_id, unrecorded=True)
+        else:
+            start_blocking_decision_dispatch(self.deployment_id)
 
 
-def schedule_blocking_decision_dispatch(deployment_id) -> None:
+def schedule_blocking_decision_dispatch(deployment_id, *, unrecorded=False) -> None:
     """Run the decision trigger for ``deployment_id`` after the current transaction
     commits, in the background: the caller never waits on a connector.
 
     Called by the recompute route -- pause, lift, or a plain recompute -- after its
-    decision has committed, when something is (or may be) owed. Nothing with
-    auto-dispatch switched off. Never raises."""
+    decision has committed, when something is (or may be) owed; ``unrecorded`` when
+    the stop could not record it. Nothing with auto-dispatch switched off. Never
+    raises, and logs nothing in the caller's thread."""
     if not _auto_dispatch_enabled():
         return
     try:
-        transaction.on_commit(_BlockingDispatchAfterCommit(deployment_id))
+        transaction.on_commit(_BlockingDispatchAfterCommit(deployment_id, unrecorded))
     except Exception:  # noqa: BLE001 - a stop has committed; it must still answer
-        logger.exception(
+        log_later(
+            logging.ERROR,
             "could not schedule the blocking-decision dispatch for deployment %s -- "
             "`manage.py retry_blocking_dispatches --deployment %s` runs it",
             deployment_id,
             deployment_id,
+            exc=True,
         )
 
 
@@ -1176,60 +1329,110 @@ def retry_owed_blocking_dispatches(deployment_ids=None, *, transport_factory=Non
 
 
 def sweep_owed_blocking_dispatches() -> list:
-    """Start a background run for every owed dispatch no live runner holds -- one a
-    process left behind when it exited, or one whose runs all failed. Returns the
-    deployment ids it started (or asked to run again). Never raises."""
+    """Claim and start the owed dispatches no live runner holds -- ones a process
+    left behind when it exited, whose runs all failed, or that a full bound kept a
+    stop from starting -- up to this process's bound. Returns the deployment ids it
+    started, and only those.
+
+    Each row is claimed before it is started (the claim a run takes, conditional on
+    no live claim), so sweepers in N processes start N different sets of rows
+    rather than all the oldest ones. One summary line, at most, per sweep. Never
+    raises, and never logs while holding a lock."""
     if not _auto_dispatch_enabled():
         return []
+    started, left = [], 0
     try:
         now = timezone.now()
         due = list(
             DecisionDispatchDue.objects.filter(Q(running_until__isnull=True) | Q(running_until__lte=now))
             .order_by("owed_since")
-            .values_list("deployment_id", flat=True)
+            .values_list("deployment_id", flat=True)[:_SWEEP_BATCH]
         )
+        bound = _max_concurrent_runs() + _max_waiting_runs()
+        for i, deployment_id in enumerate(due):
+            with _JOBS_LOCK:
+                full = len(_JOBS) >= bound
+                here = deployment_id in _JOBS
+            if full:
+                left = len(due) - i
+                break
+            if here:
+                continue
+            token = uuid.uuid4().hex
+            now = timezone.now()
+            claimed = (
+                _owed_row(deployment_id)
+                .filter(Q(running_until__isnull=True) | Q(running_until__lte=now))
+                .update(running_until=now + timedelta(seconds=CLAIM_SECONDS), run_token=token)
+            )
+            if not claimed:
+                continue  # another process's sweeper, or a run, has it
+            if start_blocking_decision_dispatch(deployment_id, token=token) == STARTED:
+                started.append(deployment_id)
+            else:
+                _owed_row(deployment_id).filter(run_token=token).update(running_until=None, run_token="")
     except Exception:  # noqa: BLE001 - the next sweep tries again
-        logger.exception("the sweep of owed blocking-decision dispatches could not read them")
-        return []
-    for deployment_id in due:
-        start_blocking_decision_dispatch(deployment_id)
-    return due
+        logger.exception("the sweep of owed blocking-decision dispatches did not complete")
+    not_started, _NOT_STARTED[0] = _NOT_STARTED[0], 0
+    if left or not_started:
+        logger.warning(
+            "owed blocking-decision dispatches: %d started by this sweep, %d left for the next (this "
+            "process's %d-run bound is full), %d not started by stops since the last sweep",
+            len(started),
+            left,
+            _max_concurrent_runs() + _max_waiting_runs(),
+            not_started,
+        )
+    return started
 
 
-#: Set to stop this process's sweeper (tests; a process that exits needs nothing).
-_SWEEP_STOP = threading.Event()
-
-
-def _sweeper(interval: float) -> None:
+def _sweeper(interval: float, stop) -> None:
     # A first sweep shortly after start, then every `interval` seconds, for the
-    # life of the process. Its own connection is closed after each sweep.
-    if _SWEEP_STOP.wait(min(interval, 5.0)):
+    # life of the process. Its own connection is closed after each sweep; nothing
+    # in the loop can end it.
+    if stop.wait(min(interval, FIRST_SWEEP_AFTER)):
         return
     while True:
         try:
             sweep_owed_blocking_dispatches()
-        finally:
+        except Exception:  # noqa: BLE001 - it never raises; if it did, sweep again next time
+            logger.exception("the sweeper's sweep raised")
+        try:
             connections.close_all()
-        if _SWEEP_STOP.wait(interval):
+        except Exception:  # noqa: BLE001 - a connection that will not close is not a reason to stop sweeping
+            logger.exception("the sweeper could not close its database connection")
+        if stop.wait(interval):
             return
 
 
 def start_owed_sweeper() -> bool:
-    """Start this process's sweeper, once: a daemon thread that runs
-    :func:`sweep_owed_blocking_dispatches` a few seconds after start and then every
-    ``ASSURANCE_DISPATCH_SWEEP_SECONDS`` (default 300; 0 turns it off). Called by
-    the WSGI and ASGI entry points, so every serving process retries what is owed
-    without any scheduler; ``manage.py retry_blocking_dispatches`` on a schedule
-    stays available and reports what is owed. Never blocks and never raises."""
+    """Start this process's sweeper, once per process: a daemon thread that runs
+    :func:`sweep_owed_blocking_dispatches` :data:`FIRST_SWEEP_AFTER` seconds after
+    it starts and then every ``ASSURANCE_DISPATCH_SWEEP_SECONDS`` (default 300; 0
+    turns it off). Keyed on the process id, so a process forked from one that
+    started it starts its own. Never blocks and never raises."""
     try:
         interval = float(getattr(settings, "ASSURANCE_DISPATCH_SWEEP_SECONDS", DEFAULT_SWEEP_SECONDS))
+        pid = os.getpid()
         with _JOBS_LOCK:
-            if interval <= 0 or _SWEEPER:
+            if interval <= 0 or (_SWEEPER and _SWEEPER[0][0] == pid):
                 return False
-            thread = threading.Thread(target=_sweeper, args=(interval,), name=SWEEPER_THREAD, daemon=True)
-            _SWEEPER.append(thread)
+            thread = threading.Thread(
+                target=_sweeper, args=(interval, _SWEEP_STOP), name=SWEEPER_THREAD, daemon=True
+            )
+            _SWEEPER[:] = [(pid, thread)]
         thread.start()
         return True
     except Exception:  # noqa: BLE001 - serving never waits on the sweeper
-        logger.exception("could not start the sweeper of owed blocking-decision dispatches")
+        log_later(logging.ERROR, "could not start the sweeper of owed blocking-decision dispatches", exc=True)
         return False
+
+
+def ensure_owed_sweeper() -> None:
+    """Start this process's sweeper if it has none: called on every request by the
+    WSGI and ASGI entry points, so it starts in the process that serves -- a
+    pre-forking server's worker, never its master -- on that process's first
+    request. Costs a comparison after that."""
+    if _SWEEPER and _SWEEPER[0][0] == os.getpid():
+        return
+    start_owed_sweeper()

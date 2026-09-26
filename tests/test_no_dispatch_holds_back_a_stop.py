@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import threading
 import time
 from datetime import timedelta
@@ -121,47 +122,108 @@ class Crash(BaseException):
 
 class FakeRemote:
     """A system the findings are pushed to, as each connector's API sees it: a
-    create by POST, and a look-up by GET -- Jira's search, GitHub's issues list,
-    ServiceNow's table query. The webhook's receiver drops a second delivery of one
-    ``Idempotency-Key``. ``crash`` makes the runner die right after the system has
-    committed the next create, before the answer is back."""
+    create by POST, and a look-up by GET.
 
-    def __init__(self):
+    - Jira: ``jira = "cloud"`` serves ``/rest/api/3/search/jql`` and answers 410
+      on the retired ``/rest/api/2/search``; ``"dc"`` (Data Center / Server) serves
+      only the latter and answers 404 on the former. Both honour the JQL's project
+      and label, and report each issue's status category.
+    - GitHub: the issues list by label (``state`` open/closed/all), and the search
+      by the marker in the body. ``drop_labels`` models a token without push
+      access, whose labels GitHub silently drops.
+    - ServiceNow: the table query on ``correlation_id`` and ``correlation_display``.
+    - The webhook's receiver drops a second delivery of one ``Idempotency-Key``.
+    - Comments are recorded. ``crash`` makes the runner die right after the system
+      committed the next create, before the answer is back."""
+
+    def __init__(self, jira="cloud"):
         self.issues = []
         self.creates = 0
+        self.comments = []
+        self.gets = []
         self.crash = False
+        self.jira = jira
+        self.drop_labels = False
 
     def factory(self):
         return self
 
+    def add(self, ref, marker, *, closed=False, project="SEC", kind="jira"):
+        """An issue already there, carrying ``marker``."""
+        self.issues.append({
+            "labels": [marker], "correlation_id": None, "display": None, "idem": None, "key": ref,
+            "event": None, "closed": closed, "project": project, "kind": kind, "body": f"Athena marker: {marker}",
+        })
+
     def post(self, url, *, headers, json):
+        if url.endswith("/comment") or url.endswith("/comments"):
+            self.comments.append((url, json.get("body")))
+            return _Json(201, {"id": len(self.comments)})
         key = headers.get("Idempotency-Key")
         if key and any(i.get("idem") == key for i in self.issues):
             return _Json(200, {})
         self.creates += 1
-        labels = (json.get("fields") or {}).get("labels") or json.get("labels") or []
+        fields = json.get("fields") or {}
+        labels = list(fields.get("labels") or json.get("labels") or [])
+        if self.drop_labels and "/repos/" in url:
+            labels = []
         n = len(self.issues) + 1
+        kind = "jira" if "/rest/api/" in url else "github" if "/repos/" in url else "other"
         self.issues.append({
-            "labels": list(labels), "correlation_id": json.get("correlation_id"), "idem": key,
-            "key": f"SEC-{n}", "event": json.get("event"),
+            "labels": labels, "correlation_id": json.get("correlation_id"), "display": json.get("correlation_display"),
+            "idem": key, "key": f"SEC-{n}" if kind == "jira" else str(n), "event": json.get("event"), "closed": False,
+            "project": (fields.get("project") or {}).get("key"), "kind": kind,
+            "body": json.get("body") or fields.get("description") or "",
         })
         if self.crash:
             self.crash = False
             raise Crash()
-        return _Json(201, {"key": f"SEC-{n}", "number": n, "result": {"sys_id": f"sys{n}"}, "code": 0})
+        return _Json(201, {
+            "key": f"SEC-{n}", "number": n, "result": {"sys_id": f"sys{n}"}, "code": 0,
+            "labels": [{"name": label} for label in labels],
+        })
 
     def get(self, url, *, headers, params=None):
         params = params or {}
-        if url.endswith("/rest/api/2/search"):
-            label = params["jql"].split('labels = "')[1].rstrip('"')
-            return _Json(200, {"issues": [{"key": i["key"]} for i in self.issues if label in i["labels"]][:1]})
-        if url.endswith("/issues"):
-            hits = [i for i in self.issues if params["labels"] in i["labels"]]
-            return _Json(200, [{"number": int(i["key"].split("-")[1])} for i in hits][:1])
+        self.gets.append(url)
+        if url.endswith("/rest/api/3/search/jql") or url.endswith("/rest/api/2/search"):
+            modern = url.endswith("/search/jql")
+            if modern and self.jira == "dc":
+                return _Json(404, {"errorMessages": ["null for uri"]})
+            if not modern and self.jira == "cloud":
+                return _Json(410, {"errorMessages": ["The requested API has been removed. Migrate to /rest/api/3/search/jql."]})
+            jql = params["jql"]
+            label = jql.split('labels = "')[1].split('"')[0]
+            project = jql.split('project = "')[1].split('"')[0] if 'project = "' in jql else None
+            hits = [
+                {"key": i["key"], "fields": {"status": {"statusCategory": {"key": "done" if i["closed"] else "new"}}}}
+                for i in self.issues
+                if i["kind"] == "jira" and label in i["labels"] and (project is None or i["project"] == project)
+            ]
+            return _Json(200, {"issues": hits[: int(params.get("maxResults", 50))]})
+        if url.endswith("/repos/acme/app/issues"):
+            state = params.get("state", "open")
+            hits = [
+                i for i in self.issues
+                if i["kind"] == "github" and params["labels"] in i["labels"]
+                and (state == "all" or (state == "closed") == i["closed"])
+            ]
+            return _Json(200, [{"number": int(i["key"]), "state": "closed" if i["closed"] else "open"} for i in hits][
+                : int(params.get("per_page", 30))
+            ])
+        if url.endswith("/search/issues"):
+            marker = params["q"].split('"')[1]
+            hits = [i for i in self.issues if i["kind"] == "github" and marker in (i["body"] or "")]
+            items = [{"number": int(i["key"]), "state": "closed" if i["closed"] else "open"} for i in hits]
+            return _Json(200, {"total_count": len(items), "items": items[: int(params.get("per_page", 30))]})
         if "/api/now/table/" in url:
-            field, wanted = params["sysparm_query"].split("=", 1)
-            hits = [i for i in self.issues if field == "correlation_id" and i["correlation_id"] == wanted]
-            return _Json(200, {"result": [{"sys_id": "sys" + i["key"].split("-")[1]} for i in hits][:1]})
+            wanted = dict(part.split("=", 1) for part in params["sysparm_query"].split("^"))
+            hits = [
+                i for i in self.issues
+                if i["correlation_id"] == wanted.get("correlation_id")
+                and i["display"] == wanted.get("correlation_display")
+            ]
+            return _Json(200, {"result": [{"sys_id": "sys" + i["key"].split("-")[-1], "active": "true"} for i in hits]})
         return _Json(404, {})
 
     def per_finding(self):
@@ -172,6 +234,32 @@ class FakeRemote:
             ).get("uuid") or i["idem"]
             counts[ident] = counts.get(ident, 0) + 1
         return sorted(counts.values())
+
+
+class _Calls(list):
+    """Stands in for start_blocking_decision_dispatch: records each deployment."""
+
+    def __init__(self):
+        super().__init__()
+        self.kwargs = []
+
+    def __call__(self, deployment_id, **kwargs):
+        self.append(deployment_id)
+        self.kwargs.append(kwargs)
+        return dispatch.STARTED
+
+
+def _marker(dep):
+    from assurance.connectors.base import finding_marker
+
+    return finding_marker(Finding.objects.get(deployment=dep))
+
+
+def _logged(caplog, text, timeout=5.0):
+    """Whether ``text`` was logged -- waiting for it: what a stop's path logs is
+    written by another thread (dispatch.log_later), so no stop waits on a sink."""
+    dispatch.log_later(logging.DEBUG, "(wakes the log thread)")
+    return _wait_for(lambda: text in caplog.text, timeout=timeout)
 
 
 def _background():
@@ -520,8 +608,8 @@ def test_the_retry_command_runs_what_is_owed_and_fails_while_anything_still_is(m
 def test_the_route_only_schedules_the_dispatch_for_after_its_commit(django_capture_on_commit_callbacks, monkeypatch):
     """Inside a transaction nothing starts: one hook, for this deployment, and no
     thread until the transaction commits."""
-    started = []
-    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started.append)
+    started = _Calls()
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started)
     admin = _admin()
     dep = _scanned(admin)
     _opted_in(dep)
@@ -592,9 +680,10 @@ def test_a_background_dispatch_that_cannot_start_does_not_fail_the_stop(
             response = _client(admin).post(
                 f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json"
             )
-    assert response.status_code == 200
-    assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.PAUSED
-    assert f"retry_blocking_dispatches --deployment {dep.pk}" in caplog.text
+        assert response.status_code == 200
+        assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.PAUSED
+        monkeypatch.undo()
+        assert _logged(caplog, f"retry_blocking_dispatches --deployment {dep.pk}")
     # Nothing is left claiming a run is in progress.
     assert dep.pk not in dispatch._JOBS
 
@@ -616,9 +705,9 @@ def test_a_process_that_exits_right_after_the_stop_leaves_the_dispatch_owed(monk
     connector = HeldConnector()
     connector.release.set()
     monkeypatch.setattr(dispatch, "_default_transport_factory", connector.factory)
-    exited_with = []
+    exited_with = _Calls()
     # The process is gone before the thread runs: it never starts.
-    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", exited_with.append)
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", exited_with)
     admin = _admin()
     dep = _scanned(admin)
     _findings(dep)
@@ -677,8 +766,8 @@ def test_a_stop_whose_owed_record_cannot_be_written_still_stops_and_the_run_writ
         raise DatabaseError("disk I/O error")
 
     monkeypatch.setattr(DecisionDispatchDue.objects, "create", broken)
-    started = []
-    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started.append)
+    started = _Calls()
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started)
     admin = _admin()
     dep = _scanned(admin)
     _findings(dep, count=1)
@@ -686,14 +775,14 @@ def test_a_stop_whose_owed_record_cannot_be_written_still_stops_and_the_run_writ
     client = _client(admin)
     _warm(client, dep)
     with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+        began = time.monotonic()
         with django_capture_on_commit_callbacks(execute=True):
-            began = time.monotonic()
             response = _paused_via_route(client, dep)
-            took = time.monotonic() - began
+        took = time.monotonic() - began
     assert response.status_code == 200 and response.json()["decision"] == Deployment.Decision.PAUSED
     assert took < PROMPT
     assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.PAUSED
-    assert "could not record the blocking-decision dispatch" in caplog.text
+    assert _logged(caplog, "could not record the blocking-decision dispatch")
     assert not DecisionDispatchDue.objects.filter(deployment=dep).exists()
     assert started == [dep.pk]
     monkeypatch.undo()
@@ -1090,7 +1179,7 @@ def test_a_push_whose_answer_was_lost_stays_owed_until_it_is_looked_for(monkeypa
 
     # One that can, and the system has it: recorded SENT with its key, not sent again.
     remote = FakeRemote()
-    remote.issues.append({"labels": [f"athena-{Finding.objects.get(deployment=dep).uuid}"], "key": "SEC-77"})
+    remote.add("SEC-77", _marker(dep))
     assert dispatch.retry_owed_blocking_dispatches(transport_factory=remote.factory) == {dep.pk: dispatch.SETTLED}
     attempt.refresh_from_db()
     assert (attempt.outcome, attempt.external_ref, remote.creates) == (DispatchAttempt.Outcome.SENT, "SEC-77", 0)
@@ -1368,8 +1457,8 @@ def test_a_record_that_ends_the_stops_transaction_does_not_undo_the_stop(monkeyp
     committed anyway -- again, without the record -- and the answer is the stored
     decision. It used to answer 200 "paused" over a decision that stayed as it was."""
     monkeypatch.setattr(DecisionDispatchDue.objects, "create", _ends_the_transaction)
-    started = []
-    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started.append)
+    started = _Calls()
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started)
     admin = _admin()
     dep = _scanned(admin)
     _findings(dep, count=1)
@@ -1381,12 +1470,12 @@ def test_a_record_that_ends_the_stops_transaction_does_not_undo_the_stop(monkeyp
 
     with caplog.at_level(logging.ERROR):
         response, took, _ = _timed(lambda: _paused_via_route(client, dep), HeldConnector())
+        assert _logged(caplog, "the stop is committed again without the record")
 
     assert response.status_code == 200, response.content
     assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.PAUSED
     assert response.json() == {"decision": "paused", "decision_label": "Deployment paused"}
     assert took < PROMPT
-    assert "the stop is committed again without the record" in caplog.text
     # Not recorded, so the background run is started to record and run it.
     assert not DecisionDispatchDue.objects.filter(deployment=dep).exists()
     assert started == [dep.pk]
@@ -1495,7 +1584,7 @@ def test_a_splunk_push_whose_end_is_unknown_is_held_until_a_person_reconciles_it
     attempt = DispatchAttempt.objects.get(deployment=dep)
     assert attempt.outcome == DispatchAttempt.Outcome.SENDING
     out = io.StringIO()
-    call_command("reconcile_dispatch_attempt", str(attempt.uuid), "--provider-has-it", stdout=out)
+    call_command("reconcile_dispatch_attempt", str(attempt.uuid), "--provider-has-it", "--by", "ops", stdout=out)
     assert "is now sent" in out.getvalue()
     assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
     assert remote.creates == 1
@@ -1691,8 +1780,8 @@ def test_what_settles_a_row_and_what_keeps_it_owed():
 def test_a_stop_that_owes_nothing_starts_nothing_and_a_lift_settles_what_was_owed(
     django_capture_on_commit_callbacks, monkeypatch
 ):
-    started = []
-    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started.append)
+    started = _Calls()
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started)
     admin = _admin()
     client = _client(admin)
     plain = _scanned(admin)
@@ -1738,10 +1827,10 @@ def test_a_stop_never_waits_on_the_run_cap_and_the_waiting_threads_are_bounded(
     with override_settings(ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS=2, ASSURANCE_DISPATCH_MAX_WAITING_RUNS=3):
         took = []
         for dep in deps:
+            began = time.monotonic()
             with django_capture_on_commit_callbacks(execute=True):
-                began = time.monotonic()
                 assert _paused_via_route(client, dep).status_code == 200
-                took.append(time.monotonic() - began)
+            took.append(time.monotonic() - began)
         assert max(took) < PROMPT, took
         # Two running, three waiting; the other three were not started -- they are
         # recorded as owed, for the sweeper.
@@ -1755,8 +1844,8 @@ def test_a_stop_never_waits_on_the_run_cap_and_the_waiting_threads_are_bounded(
 
 
 def test_the_sweeper_starts_what_no_live_runner_holds(monkeypatch):
-    started = []
-    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started.append)
+    started = _Calls()
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started)
     admin = _admin()
     free, lapsed, held = _scanned(admin), _scanned(admin), _scanned(admin)
     now = timezone.now()
@@ -1771,33 +1860,111 @@ def test_the_sweeper_starts_what_no_live_runner_holds(monkeypatch):
     )
     assert dispatch.sweep_owed_blocking_dispatches() == [free.pk, lapsed.pk]
     assert started == [free.pk, lapsed.pk]
+    DecisionDispatchDue.objects.filter(deployment__in=[free, lapsed]).update(running_until=None, run_token="")
     with override_settings(ASSURANCE_AUTO_DISPATCH_ENABLED=False):
         assert dispatch.sweep_owed_blocking_dispatches() == []
+    assert started == [free.pk, lapsed.pk]
 
 
-def test_every_serving_process_starts_one_sweeper(monkeypatch):
-    import pathlib
+def test_the_sweeper_starts_in_the_serving_process_on_its_first_request_and_never_at_import(monkeypatch):
+    """Never at import: a pre-forking server imports the WSGI module in its master
+    and forks the workers from it. On the first request of each process instead,
+    once per process id."""
+    import importlib
 
+    ensured = []
+    monkeypatch.setattr(dispatch, "ensure_owed_sweeper", lambda: ensured.append(1))
+    wsgi = importlib.import_module("config.wsgi")
+    assert ensured == [], "importing the WSGI entry point started something"
+    monkeypatch.setattr(wsgi, "_application", lambda environ, start_response: ["ok"])
+    assert wsgi.application({}, None) == ["ok"] and ensured == [1]
+    asgi = importlib.import_module("config.asgi")
+    assert ensured == [1]
+
+    async def inner(scope, receive, send):
+        return "ok"
+
+    monkeypatch.setattr(asgi, "_application", inner)
+    import asyncio
+
+    assert asyncio.run(asgi.application({"type": "http"}, None, None)) == "ok" and ensured == [1, 1]
+
+
+def test_one_sweeper_per_process_that_sweeps_soon_after_it_starts(monkeypatch):
     ran = threading.Event()
+    waits = []
     monkeypatch.setattr(dispatch, "sweep_owed_blocking_dispatches", lambda: ran.set() or [])
-    monkeypatch.setattr(dispatch, "_SWEEPER", [])
+    # The sweeper of the process this one was forked from: not this process's.
+    monkeypatch.setattr(dispatch, "_SWEEPER", [(-1, None)])
+
+    class Stop:
+        def __init__(self):
+            self.event = threading.Event()
+
+        def wait(self, seconds):
+            waits.append(seconds)
+            return self.event.wait(0.01 if len(waits) == 1 else 5)
+
+        def set(self):
+            self.event.set()
+
+    stop = Stop()
+    monkeypatch.setattr(dispatch, "_SWEEP_STOP", stop)
     with override_settings(ASSURANCE_DISPATCH_SWEEP_SECONDS=0):
         assert dispatch.start_owed_sweeper() is False
     try:
-        with override_settings(ASSURANCE_DISPATCH_SWEEP_SECONDS=0.01):
+        with override_settings(ASSURANCE_DISPATCH_SWEEP_SECONDS=300):
             assert dispatch.start_owed_sweeper() is True
             assert dispatch.start_owed_sweeper() is False
+            dispatch.ensure_owed_sweeper()
+            assert len(dispatch._SWEEPER) == 1
         assert ran.wait(5), "the sweeper never swept"
-        sweeper = dispatch._SWEEPER[0]
-        assert sweeper.daemon and sweeper.name == dispatch.SWEEPER_THREAD
+        pid, sweeper = dispatch._SWEEPER[0]
+        assert pid == os.getpid() and sweeper.daemon and sweeper.name == dispatch.SWEEPER_THREAD
+        # The first sweep comes a few seconds after the start, not a whole interval.
+        assert waits[0] == dispatch.FIRST_SWEEP_AFTER == 5.0
+        assert waits[1] == 300
     finally:
-        dispatch._SWEEP_STOP.set()
-        for thread in dispatch._SWEEPER:
+        stop.set()
+        for _pid, thread in dispatch._SWEEPER:
             thread.join(5)
-        dispatch._SWEEP_STOP.clear()
-    root = pathlib.Path(__file__).resolve().parent.parent
-    for entry in ("config/wsgi.py", "config/asgi.py"):
-        assert "start_owed_sweeper()" in (root / entry).read_text(), entry
+
+
+def test_the_sweeper_survives_a_connection_that_will_not_close(monkeypatch):
+    sweeps = []
+    monkeypatch.setattr(dispatch, "sweep_owed_blocking_dispatches", lambda: sweeps.append(1) or [])
+
+    def broken():
+        raise OperationalError("cannot close")
+
+    monkeypatch.setattr(dispatch.connections, "close_all", broken)
+
+    class Stop:
+        def wait(self, seconds):
+            return len(sweeps) >= 3
+
+    dispatch._sweeper(0.01, Stop())
+    assert len(sweeps) == 3
+
+
+def test_the_sweeper_closes_its_own_connection(monkeypatch):
+    used = []
+
+    def sweep():
+        Deployment.objects.exists()
+        used.append(connections["default"])
+        return []
+
+    monkeypatch.setattr(dispatch, "sweep_owed_blocking_dispatches", sweep)
+
+    class Stop:
+        def wait(self, seconds):
+            return bool(used)
+
+    thread = threading.Thread(target=dispatch._sweeper, args=(0.01, Stop()))
+    thread.start()
+    thread.join(10)
+    assert used and used[0].connection is None, "the sweeper left its connection open"
 
 
 @with_key
@@ -1812,7 +1979,7 @@ def test_an_issue_the_system_already_has_is_reused_not_created_again():
         Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
     )
     remote = FakeRemote()
-    remote.issues.append({"labels": [f"athena-{Finding.objects.get(deployment=dep).uuid}"], "key": "GH-12"})
+    remote.add("12", _marker(dep), kind="github")
     assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
     attempt = DispatchAttempt.objects.get(deployment=dep)
     assert (attempt.outcome, attempt.external_ref, remote.creates) == (DispatchAttempt.Outcome.SENT, "12", 0)
@@ -1877,3 +2044,603 @@ def test_a_look_that_fails_is_not_taken_for_absent():
     assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
     assert remote.creates == 0
     assert DispatchAttempt.objects.get(deployment=dep).outcome == DispatchAttempt.Outcome.UNKNOWN
+
+
+# ============================================================ round 3
+
+# ------------------------------------------------------------------ fork safety
+
+
+def test_a_forked_child_starts_afresh_whatever_the_parent_held():
+    """A pre-forking server forks workers while this process's threads may hold
+    its locks and run slots. The child gets fresh ones -- a lock held at the fork
+    would be held for ever there, and every stop that starts a dispatch would hang
+    on it -- no jobs, and no sweeper: it starts its own."""
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with dispatch._JOBS_LOCK:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held.wait(5)
+    slots = dispatch._run_slots()
+    taken = [slots.acquire(timeout=1) for _ in range(dispatch._max_concurrent_runs())]
+    dispatch._JOBS[777] = False
+    dispatch._SWEEPER[:] = [(os.getpid(), holder)]
+    read, write = os.pipe()
+    try:
+        pid = os.fork()
+        if pid == 0:  # the child: no database, no Django request -- only this module's state
+            try:
+                ok = [
+                    dispatch._JOBS_LOCK.acquire(timeout=2),
+                    dispatch._JOBS == {},
+                    dispatch._run_slots().acquire(timeout=2),
+                    dispatch._SWEEPER == [],
+                    not dispatch._SWEEP_STOP.is_set(),
+                ]
+                os.write(write, ("".join("1" if x else "0" for x in ok)).encode())
+            finally:
+                os._exit(0)
+        os.close(write)
+        answer = os.read(read, 16).decode()
+        os.waitpid(pid, 0)
+    finally:
+        release.set()
+        holder.join(5)
+        for got in taken:
+            if got:
+                slots.release()
+        dispatch._JOBS.pop(777, None)
+        dispatch._SWEEPER.clear()
+        os.close(read)
+    assert answer == "11111", answer
+
+
+# ------------------------------------------- a stop that could not record it
+
+
+@with_key
+def test_a_dispatch_its_stop_could_not_record_is_started_past_the_bound_and_recorded_first(
+    django_capture_on_commit_callbacks, monkeypatch
+):
+    """The bound on waiting runs is full, and the stop could not write its record:
+    nothing else will ever know this dispatch is owed. It is started anyway, and
+    its thread records it before it waits for a slot."""
+    released = threading.Event()
+
+    def run(deployment_id, *, transport_factory=None, token=None):
+        released.wait(HOLD)
+        return dispatch.SETTLED
+
+    monkeypatch.setattr(dispatch, "run_blocking_decision_dispatch", run)
+    monkeypatch.setattr(dispatch, "_record_owed_if_missing", lambda pk: seen_record.append(pk))
+    seen_record = []
+    admin = _admin()
+    client = _client(admin)
+    lost = _scanned(admin)
+    _findings(lost, count=1)
+    _opted_in(lost)
+    hog = 4848
+    with override_settings(ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS=1, ASSURANCE_DISPATCH_MAX_WAITING_RUNS=0):
+        assert dispatch.start_blocking_decision_dispatch(hog) == dispatch.STARTED
+        # A recorded one past the bound: not started, counted, nothing logged.
+        assert dispatch.start_blocking_decision_dispatch(4849) == dispatch.FULL
+        def broken(**kwargs):
+            raise DatabaseError("disk I/O error")
+
+        monkeypatch.setattr(DecisionDispatchDue.objects, "create", broken)
+        with django_capture_on_commit_callbacks(execute=True):
+            assert _paused_via_route(client, lost).status_code == 200
+        assert lost.pk in dispatch._JOBS, "an unrecorded dispatch was not started"
+        assert seen_record == [lost.pk]
+        released.set()
+        _settle()
+
+
+@with_key
+def test_an_unrecorded_dispatch_whose_thread_cannot_start_names_the_command(monkeypatch, caplog):
+    def refuse(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+        assert dispatch.start_blocking_decision_dispatch(4950, unrecorded=True) == dispatch.NOT_STARTED
+        monkeypatch.undo()
+        assert _logged(caplog, "retry_blocking_dispatches --deployment 4950")
+    assert "NOT recorded as owed" in caplog.text
+
+
+@with_key
+def test_the_thread_of_an_unrecorded_dispatch_records_it_before_it_waits(monkeypatch):
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep)
+    recompute_decision(Deployment.objects.get(pk=dep.pk), paused=True)
+    assert not DecisionDispatchDue.objects.filter(deployment=dep).exists()
+    dispatch._record_owed_if_missing(dep.pk)
+    assert DecisionDispatchDue.objects.filter(deployment=dep).exists()
+
+
+# ------------------------------------------------------------------ Jira Cloud
+
+
+@with_key
+@pytest.mark.parametrize("flavour", ["cloud", "dc"])
+def test_the_jira_look_works_on_cloud_and_on_data_center(flavour):
+    """Jira Cloud retired /rest/api/2/search (410); Data Center has no
+    /rest/api/3/search/jql (404). Found means SENT, and absent -- long enough
+    after -- means FAILED and pushed once, on both."""
+    admin = _admin()
+    for found in (True, False):
+        dep = _scanned(admin)
+        _findings(dep, count=1)
+        _opted_in(dep)
+        recompute_decision(
+            Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+        )
+        finding = Finding.objects.get(deployment=dep)
+        DispatchAttempt.objects.create(
+            deployment=dep, finding=finding, connector="jira", outcome=DispatchAttempt.Outcome.UNKNOWN,
+            trigger=DispatchAttempt.Trigger.BLOCKING_DECISION, operation_id=dispatch.operation_id(finding, "jira"),
+            policy_epoch=Deployment.Decision.PAUSED,
+        )
+        DispatchAttempt.objects.filter(deployment=dep).update(
+            updated_at=timezone.now() - timedelta(seconds=dispatch.CLAIM_SECONDS + 1)
+        )
+        remote = FakeRemote(jira=flavour)
+        if found:
+            remote.add("SEC-9", _marker(dep))
+        assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+        attempt = DispatchAttempt.objects.get(deployment=dep)
+        assert attempt.outcome == DispatchAttempt.Outcome.SENT
+        assert (attempt.external_ref, remote.creates) == (("SEC-9", 0) if found else ("SEC-1", 1))
+        if found:
+            assert "reconciled by looking" in attempt.reconciled_detail
+        if flavour == "cloud":
+            assert all(url.endswith("/rest/api/3/search/jql") for url in remote.gets)
+
+
+@with_key
+@pytest.mark.parametrize("status", [410, 500, 403])
+def test_an_error_answer_to_a_look_is_never_read_as_absent(status):
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    finding = Finding.objects.get(deployment=dep)
+    DispatchAttempt.objects.create(
+        deployment=dep, finding=finding, connector="jira", outcome=DispatchAttempt.Outcome.UNKNOWN,
+        trigger=DispatchAttempt.Trigger.BLOCKING_DECISION, operation_id=dispatch.operation_id(finding, "jira"),
+        policy_epoch=Deployment.Decision.PAUSED,
+    )
+    DispatchAttempt.objects.filter(deployment=dep).update(
+        updated_at=timezone.now() - timedelta(seconds=dispatch.CLAIM_SECONDS + 1)
+    )
+
+    class Refusing(FakeRemote):
+        def get(self, url, *, headers, params=None):
+            return _Json(status, {"errorMessages": ["no"]})
+
+    remote = Refusing()
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
+    assert remote.creates == 0
+    assert DispatchAttempt.objects.get(deployment=dep).outcome == DispatchAttempt.Outcome.UNKNOWN
+
+
+@with_key
+def test_absent_is_trusted_only_once_the_attempt_is_older_than_the_claim():
+    """An answer the transport stopped waiting for can still arrive for as long as
+    a live runner could still be inside that step: not before the claim is up."""
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    finding = Finding.objects.get(deployment=dep)
+    DispatchAttempt.objects.create(
+        deployment=dep, finding=finding, connector="jira", outcome=DispatchAttempt.Outcome.UNKNOWN,
+        trigger=DispatchAttempt.Trigger.BLOCKING_DECISION, operation_id=dispatch.operation_id(finding, "jira"),
+        policy_epoch=Deployment.Decision.PAUSED,
+    )
+    remote = FakeRemote()
+    for age, pushed in ((dispatch.CLAIM_SECONDS - 10, 0), (dispatch.CLAIM_SECONDS + 10, 1)):
+        DispatchAttempt.objects.filter(deployment=dep).update(updated_at=timezone.now() - timedelta(seconds=age))
+        dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory)
+        assert remote.creates == pushed, (age, remote.creates)
+
+
+def test_the_look_has_a_total_deadline_too(monkeypatch):
+    import requests
+
+    from assurance.connectors.base import DeadlineExceeded, RequestsTransport
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: time.sleep(3))
+    began = time.monotonic()
+    with pytest.raises(DeadlineExceeded):
+        RequestsTransport(deadline=0.2).get("https://jira.example/x", headers={}, params={})
+    assert time.monotonic() - began < 1.0
+
+
+# ------------------------------------------- a record that fails after the push
+
+
+@with_key
+@pytest.mark.parametrize("connector_name", ["jira", "splunk"])
+def test_a_push_whose_end_could_not_be_recorded_stays_uncertain_and_is_not_pushed_again(connector_name, monkeypatch):
+    """The push landed; recording how it ended failed (the database was locked).
+    It must not become FAILED, which would license a second push: it stays SENDING,
+    and is settled by looking (Jira) or held (Splunk). One issue, one event."""
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep, connector=connector_name)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    real_save = DispatchAttempt.save
+    armed = [1]
+
+    def flaky(self, *args, **kwargs):
+        fields = kwargs.get("update_fields") or []
+        if armed[0] and "outcome" in fields and self.outcome != DispatchAttempt.Outcome.SENDING:
+            armed[0] = 0
+            raise OperationalError("database is locked")
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(DispatchAttempt, "save", flaky)
+    remote = FakeRemote()
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
+    assert DispatchAttempt.objects.get(deployment=dep).outcome == DispatchAttempt.Outcome.SENDING
+    DecisionDispatchDue.objects.filter(deployment=dep).update(running_until=None, run_token="")
+    DispatchAttempt.objects.filter(deployment=dep).update(
+        updated_at=timezone.now() - timedelta(seconds=dispatch.CLAIM_SECONDS + 1)
+    )
+    outcome = dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory)
+    assert remote.creates == 1
+    if connector_name == "jira":
+        assert outcome == dispatch.SETTLED
+        assert DispatchAttempt.objects.get(deployment=dep).outcome == DispatchAttempt.Outcome.SENT
+    else:
+        assert outcome == dispatch.OWED
+
+
+# ---------------------------------------------------------------------- markers
+
+
+@with_key
+def test_github_without_push_access_is_found_again_by_the_marker_in_the_body():
+    """GitHub silently drops the labels of a token without push access. The create
+    says so, and when an answer is lost the issue is found by its body instead of
+    being created twice."""
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep, connector="github_issues")
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    remote = FakeRemote()
+    remote.drop_labels = True
+    remote.crash = True
+    with pytest.raises(Crash):
+        dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory, token="dead")
+    DecisionDispatchDue.objects.filter(deployment=dep).update(running_until=timezone.now() - timedelta(seconds=1))
+    DispatchAttempt.objects.filter(deployment=dep).update(
+        updated_at=timezone.now() - timedelta(seconds=dispatch.CLAIM_SECONDS + 1)
+    )
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    assert remote.creates == 1
+    assert DispatchAttempt.objects.get(deployment=dep).external_ref == "1"
+
+    # And a create whose labels were dropped says so, with the number recorded.
+    other = _scanned(admin)
+    _findings(other, count=1)
+    _opted_in(other, connector="github_issues")
+    recompute_decision(
+        Deployment.objects.get(pk=other.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    assert dispatch.run_blocking_decision_dispatch(other.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    attempt = DispatchAttempt.objects.get(deployment=other)
+    assert attempt.external_ref == "2" and "marker label did not stick" in attempt.detail
+
+
+@with_key
+@pytest.mark.parametrize("connector_name", ["github_issues", "jira"])
+def test_a_closed_issue_for_the_finding_is_commented_on_not_adopted_silently_or_duplicated(connector_name):
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep, connector=connector_name)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    remote = FakeRemote()
+    ref = "99" if connector_name == "github_issues" else "SEC-99"
+    remote.add(ref, _marker(dep), closed=True, kind="github" if connector_name == "github_issues" else "jira")
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    attempt = DispatchAttempt.objects.get(deployment=dep)
+    assert attempt.outcome == DispatchAttempt.Outcome.SENT and attempt.external_ref == ref
+    assert "is closed; commented on it (not reopened)" in attempt.detail
+    assert remote.creates == 0 and len(remote.comments) == 1 and ref in remote.comments[0][0]
+    # Found where it is read from the repository at once -- the issues list, all
+    # states -- not only by the search, whose index lags.
+    assert not any(url.endswith("/search/issues") for url in remote.gets)
+
+
+@with_key
+def test_several_issues_carrying_one_marker_are_held_never_adopted():
+    """A label copied onto another issue (Jira's Clone copies labels): which is this
+    finding's cannot be told. Nothing is adopted and nothing more is created."""
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    remote = FakeRemote()
+    remote.add("SEC-1", _marker(dep))
+    remote.add("OPS-77", _marker(dep))
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
+    attempt = DispatchAttempt.objects.get(deployment=dep)
+    assert attempt.outcome == DispatchAttempt.Outcome.UNKNOWN and "2 issues carry" in attempt.detail
+    assert remote.creates == 0
+    # The one already recorded for it is preferred.
+    DispatchAttempt.objects.filter(pk=attempt.pk).update(external_ref="SEC-1")
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    assert DispatchAttempt.objects.get(pk=attempt.pk).outcome == DispatchAttempt.Outcome.SENT
+
+
+@with_key
+def test_the_marker_belongs_to_this_installation():
+    """A database restored into another environment, pointed at the same tracker,
+    does not adopt the first environment's issues."""
+    from assurance.connectors.base import finding_marker
+
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    finding = Finding.objects.get(deployment=dep)
+    here = finding_marker(finding)
+    assert len(here) == 50 and here.endswith(str(finding.uuid))
+    with override_settings(ASSURANCE_INSTALLATION_ID="staging"):
+        there = finding_marker(finding)
+    assert there != here and there.endswith(str(finding.uuid))
+    _opted_in(dep)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    remote = FakeRemote()
+    remote.add("SEC-5", there)
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    assert remote.creates == 1 and DispatchAttempt.objects.get(deployment=dep).external_ref != "SEC-5"
+
+
+# ------------------------------------------------------ a halted push is undone
+
+
+@with_key
+def test_a_halted_push_restores_the_attempt_it_found():
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1, severity="low")
+    _opted_in(dep, min_severity="low")
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk), paused=True, also_in_transaction=dispatch.record_blocking_dispatch_owed
+    )
+    down = HeldConnector(status=503)
+    down.release.set()
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=down.factory) == dispatch.OWED
+    before = DispatchAttempt.objects.values("outcome", "attempts", "detail").get(deployment=dep)
+
+    class LiftedDuringTheLook(FakeRemote):
+        def get(self, url, *, headers, params=None):
+            recompute_decision(Deployment.objects.get(pk=dep.pk), paused=False)
+            return super().get(url, headers=headers, params=params)
+
+    remote = LiftedDuringTheLook()
+    dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory)
+    assert remote.creates == 0
+    assert DispatchAttempt.objects.values("outcome", "attempts", "detail").get(deployment=dep) == before
+
+
+# --------------------------------------------------- no logging on a stop's path
+
+
+@with_key
+def test_a_stop_never_waits_on_a_slow_log_sink(django_capture_on_commit_callbacks, monkeypatch):
+    """Past the bound, with a log sink that takes 2 s a record: the stop answers
+    at once. It logs nothing itself; the sweep reports what was not started."""
+    import logging as _logging
+
+    class Slow(_logging.Handler):
+        def emit(self, record):
+            time.sleep(2.0)
+
+    released = threading.Event()
+    monkeypatch.setattr(
+        dispatch, "run_blocking_decision_dispatch", lambda pk, **kw: released.wait(HOLD) and dispatch.SETTLED
+    )
+    admin = _admin()
+    client = _client(admin)
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep)
+    _warm(client, dep)
+    monkeypatch.setattr(dispatch, "_NOT_STARTED", [0])
+    sink = Slow()
+    log = _logging.getLogger("assurance")
+    log.addHandler(sink)
+    try:
+        with override_settings(ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS=1, ASSURANCE_DISPATCH_MAX_WAITING_RUNS=0):
+            assert dispatch.start_blocking_decision_dispatch(5151) == dispatch.STARTED
+            began = time.monotonic()
+            with django_capture_on_commit_callbacks(execute=True):
+                assert _paused_via_route(client, dep).status_code == 200
+            took = time.monotonic() - began
+            assert took < 0.1, took
+            assert dispatch._NOT_STARTED[0] == 1
+            # And a stop whose record fails, which logs at ERROR: from another thread.
+            other = _scanned(admin)
+            _findings(other, count=1)
+            _opted_in(other)
+
+            def broken(**kwargs):
+                raise DatabaseError("disk I/O error")
+
+            monkeypatch.setattr(DecisionDispatchDue.objects, "create", broken)
+            began = time.monotonic()
+            with django_capture_on_commit_callbacks(execute=True):
+                assert _paused_via_route(client, other).status_code == 200
+            took = time.monotonic() - began
+            assert took < 0.1, took
+    finally:
+        log.removeHandler(sink)
+        released.set()
+        _settle()
+
+
+# ------------------------------------------------ sweepers in many processes
+
+
+def test_a_sweep_claims_what_it_starts_so_other_processes_start_other_rows(monkeypatch, caplog):
+    started = _Calls()
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", started)
+    admin = _admin()
+    deps = [_scanned(admin) for _ in range(6)]
+    now = timezone.now()
+    for n, dep in enumerate(deps):
+        DecisionDispatchDue.objects.create(deployment=dep, owed_since=now - timedelta(minutes=10 - n))
+    with override_settings(ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS=1, ASSURANCE_DISPATCH_MAX_WAITING_RUNS=1):
+        monkeypatch.setattr(dispatch, "_JOBS", {})
+
+        def fill(pk, **kwargs):
+            started(pk, **kwargs)
+            dispatch._JOBS[pk] = False
+            return dispatch.STARTED
+
+        monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", fill)
+        with caplog.at_level(logging.WARNING, logger="assurance.dispatch"):
+            caplog.clear()
+            first = dispatch.sweep_owed_blocking_dispatches()
+            # One summary line for the sweep, not one per row.
+            assert caplog.text.count("left for the next") == 1
+        # "Another process": its own jobs; the rows the first one claimed are live claims.
+        monkeypatch.setattr(dispatch, "_JOBS", {})
+        second = dispatch.sweep_owed_blocking_dispatches()
+    assert first == [deps[0].pk, deps[1].pk]
+    assert second == [deps[2].pk, deps[3].pk]
+    tokens = dict(DecisionDispatchDue.objects.values_list("deployment_id", "run_token"))
+    assert all(tokens[pk] for pk in first + second) and not tokens[deps[5].pk]
+    assert [kw.get("token") for kw in started.kwargs] == [tokens[pk] for pk in first + second]
+
+
+def test_a_sweep_that_could_not_start_a_claimed_row_lets_it_go(monkeypatch):
+    monkeypatch.setattr(dispatch, "start_blocking_decision_dispatch", lambda pk, **kw: dispatch.COALESCED)
+    admin = _admin()
+    dep = _scanned(admin)
+    DecisionDispatchDue.objects.create(deployment=dep, owed_since=timezone.now())
+    assert dispatch.sweep_owed_blocking_dispatches() == []
+    assert DecisionDispatchDue.objects.get(deployment=dep).run_token == ""
+
+
+# ---------------------------------------------------------- rolling back 0042
+
+
+@with_key
+def test_migrating_back_past_0042_is_refused_while_an_attempt_is_sending():
+    import importlib
+
+    from django.apps import apps
+
+    guard = importlib.import_module("assurance.migrations.0042_dispatch_attempt_sending")._no_sending_attempts
+    guard(apps, None)  # nothing SENDING: allowed
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    finding = Finding.objects.get(deployment=dep)
+    DispatchAttempt.objects.create(
+        deployment=dep, finding=finding, connector="jira", outcome=DispatchAttempt.Outcome.SENDING,
+        trigger=DispatchAttempt.Trigger.BLOCKING_DECISION,
+    )
+    with pytest.raises(RuntimeError, match="would push them again blind"):
+        guard(apps, None)
+
+
+# ------------------------------------------------------- the reconcile command
+
+
+@with_key
+def test_the_reconcile_command_is_strict_attributed_and_never_overwrites_a_settled_attempt(monkeypatch):
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    finding = Finding.objects.get(deployment=dep)
+    attempt = DispatchAttempt.objects.create(
+        deployment=dep, finding=finding, connector="splunk", outcome=DispatchAttempt.Outcome.UNKNOWN,
+        trigger=DispatchAttempt.Trigger.BLOCKING_DECISION,
+    )
+    cmd = "reconcile_dispatch_attempt"
+    with pytest.raises(CommandError, match="not an attempt uuid"):
+        call_command(cmd, "nope", "--provider-has-it", "--by", "ops", stdout=io.StringIO())
+    with pytest.raises(CommandError, match="cannot go with --provider-lacks-it"):
+        call_command(cmd, str(attempt.uuid), "--provider-lacks-it", "--external-ref", "X", "--by", "ops")
+    with pytest.raises(CommandError):
+        call_command(cmd, str(attempt.uuid), "--provider-has-it", "--by", " ")
+    # A runner settles it while the command runs: the command changes nothing.
+    real = DispatchAttempt.objects.filter
+
+    def settled_meanwhile(*args, **kwargs):
+        if "reconciled_at__isnull" in kwargs:
+            DispatchAttempt.objects.all().filter(pk=attempt.pk).update(outcome=DispatchAttempt.Outcome.SENT)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(DispatchAttempt.objects, "filter", settled_meanwhile)
+    with pytest.raises(CommandError, match="changed while this ran"):
+        call_command(cmd, str(attempt.uuid), "--provider-lacks-it", "--by", "ops", stdout=io.StringIO())
+    monkeypatch.undo()
+    assert DispatchAttempt.objects.get(pk=attempt.pk).outcome == DispatchAttempt.Outcome.SENT
+    with pytest.raises(CommandError, match="not uncertain"):
+        call_command(cmd, str(attempt.uuid), "--provider-has-it", "--by", "ops", stdout=io.StringIO())
+    DispatchAttempt.objects.filter(pk=attempt.pk).update(outcome=DispatchAttempt.Outcome.UNKNOWN)
+    out = io.StringIO()
+    call_command(cmd, str(attempt.uuid), "--provider-has-it", "--external-ref", "EVT-1", "--by", "ops", stdout=out)
+    attempt.refresh_from_db()
+    assert (attempt.outcome, attempt.external_ref) == (DispatchAttempt.Outcome.SENT, "EVT-1")
+    assert attempt.reconciled_detail.startswith("operator-attested by ops")
+
+
+@with_key
+def test_a_sending_record_and_the_clearing_of_a_reconciliation_are_one_write():
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    _opted_in(dep)
+    finding = Finding.objects.get(deployment=dep)
+    DispatchAttempt.objects.create(
+        deployment=dep, finding=finding, connector="jira", outcome=DispatchAttempt.Outcome.FAILED,
+        trigger=DispatchAttempt.Trigger.BLOCKING_DECISION, reconciled_at=timezone.now(), reconciled_detail="absent",
+    )
+    binding = ConnectorBinding.objects.get(deployment=dep)
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    with CaptureQueriesContext(connection) as queries:
+        row = dispatch._record(
+            finding, binding, trigger=DispatchAttempt.Trigger.BLOCKING_DECISION,
+            outcome=DispatchAttempt.Outcome.SENDING, detail="sending",
+        )
+    writes = [q["sql"] for q in queries.captured_queries if q["sql"].startswith("UPDATE")]
+    assert len(writes) == 1 and "reconciled_at" in writes[0]
+    row.refresh_from_db()
+    assert row.reconciled_at is None and row.is_uncertain

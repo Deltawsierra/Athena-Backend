@@ -54,7 +54,7 @@ from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
 from .decision import TransactionLostInHook, current_decision, decision_support, recompute_decision
-from .dispatch import OwedRecorder, schedule_blocking_decision_dispatch
+from .dispatch import OwedRecorder, log_later, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
 from .incident import assemble_incident_pack
@@ -610,7 +610,9 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             # Writing the record ended the stop's transaction, so nothing committed.
             # The stop lands anyway, without it: the background run records what is
             # owed, and says so at ERROR if it cannot either.
-            logging.getLogger(__name__).error(
+            # Logged from another thread: a stop never waits on a log sink.
+            log_later(
+                logging.ERROR,
                 "deployment %s: recording its blocking-decision dispatch ended the stop's transaction; "
                 "the stop is committed again without the record, and the background run writes it",
                 deployment.pk,
@@ -623,14 +625,19 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # not paused is the failure this read exists to make impossible.
         stored = deployment.decision
         if stored != decision:
-            logging.getLogger(__name__).error(
+            log_later(
+                logging.ERROR,
                 "deployment %s: the recompute computed %r but the stored decision is %r; answering what is stored",
                 deployment.pk,
                 decision,
                 stored,
             )
         if recorder is None or recorder.owed is not False:
-            schedule_blocking_decision_dispatch(deployment.pk)
+            # Not recorded (the record failed, or took the transaction down): then
+            # nothing but this run will ever know it is owed, so it is started even
+            # past the bound on waiting runs, and it records the dispatch first.
+            unrecorded = recorder is None or recorder.owed is None
+            schedule_blocking_decision_dispatch(deployment.pk, unrecorded=unrecorded)
         return Response({"decision": stored, "decision_label": deployment.get_decision_display()})
 
     @action(detail=True, methods=["get"])

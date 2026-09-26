@@ -20,8 +20,9 @@ from .base import (
     ConnectorResult,
     Response,
     error_detail,
-    Lookup,
+    LookupRequest,
     finding_body,
+    finding_marker,
     finding_summary,
     is_success,
 )
@@ -79,27 +80,29 @@ class ServiceNowConnector(Connector):
             # A stable correlation id so re-pushing the same finding reconciles to
             # the same record rather than opening a duplicate.
             "correlation_id": summary["uuid"],
+            # This installation's marker beside it, so a database restored into
+            # another environment never adopts this one's records.
+            "correlation_display": finding_marker(finding),
         }
         return url, headers, payload
 
-    def _lookup_request(self, finding: Any):
+    def _lookup_requests(self, finding: Any):
         cfg: ServiceNowConfig = self.config  # type: ignore[assignment]
         url = f"{cfg.base_url.rstrip('/')}/api/now/table/{cfg.table}"
         headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
-        return url, headers, {
-            "sysparm_query": f"correlation_id={finding.uuid}",
-            "sysparm_fields": "sys_id",
-            "sysparm_limit": 1,
-        }
+        return [
+            LookupRequest(url, headers, {
+                "sysparm_query": f"correlation_id={finding.uuid}^correlation_display={finding_marker(finding)}",
+                "sysparm_fields": "sys_id,active",
+                "sysparm_limit": 2,
+            }, "table"),
+        ]
 
-    def _parse_lookup(self, body: Any) -> Lookup:
-        rows = body.get("result")
+    def _parse_lookup(self, body: Any, kind: str):
+        rows = body.get("result") if isinstance(body, dict) else None
         if not isinstance(rows, list):
-            return Lookup.unknown("servicenow answer has no result list")
-        if rows:
-            sys_id = rows[0].get("sys_id")
-            return Lookup(Lookup.FOUND, sys_id, f"servicenow record {sys_id} already exists")
-        return Lookup(Lookup.ABSENT, None, "servicenow has no record for this finding")
+            return None
+        return [(row.get("sys_id"), str(row.get("active", "true")).lower() == "false") for row in rows]
 
     def _parse(self, response: Response) -> ConnectorResult:
         if is_success(response.status_code):

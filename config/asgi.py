@@ -13,12 +13,13 @@ from django.core.asgi import get_asgi_application
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
-application = get_asgi_application()
+_application = get_asgi_application()
 
-# A serving process retries the blocking-decision dispatches still owed -- ones a
-# process left behind when it exited, or whose runs all failed -- a few seconds
-# after start and then every ASSURANCE_DISPATCH_SWEEP_SECONDS, on a daemon thread
-# that never blocks startup or any request (#303).
-from assurance.dispatch import start_owed_sweeper  # noqa: E402
+# The sweeper of owed blocking-decision dispatches (#303) is started by the process
+# that SERVES, on its first request -- never here, at import (see config/wsgi.py).
+from assurance import dispatch as _dispatch  # noqa: E402
 
-start_owed_sweeper()
+
+async def application(scope, receive, send):
+    _dispatch.ensure_owed_sweeper()
+    return await _application(scope, receive, send)

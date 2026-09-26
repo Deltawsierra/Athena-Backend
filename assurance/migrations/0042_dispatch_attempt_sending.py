@@ -3,6 +3,23 @@
 from django.db import migrations, models
 
 
+def _no_sending_attempts(apps, schema_editor):
+    """Refuse to go back past this migration while any attempt is SENDING.
+
+    Code from before it does not know SENDING: it reads such an attempt as neither
+    sent nor uncertain, and pushes it again -- blind, though the request may have
+    landed. Settle them first: let a run finish (they resolve by looking, or by
+    `manage.py reconcile_dispatch_attempt`), then roll back."""
+    DispatchAttempt = apps.get_model("assurance", "DispatchAttempt")
+    sending = DispatchAttempt.objects.filter(outcome="sending").count()
+    if sending:
+        raise RuntimeError(
+            f"{sending} dispatch attempt(s) are 'sending': code before 0042 would push them again blind. "
+            "Settle them first (manage.py retry_blocking_dispatches, or reconcile_dispatch_attempt), "
+            "then migrate back."
+        )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -30,4 +47,6 @@ class Migration(migrations.Migration):
                 max_length=32,
             ),
         ),
+        # Backwards, this runs first: nothing is unapplied while an attempt is SENDING.
+        migrations.RunPython(migrations.RunPython.noop, _no_sending_attempts),
     ]

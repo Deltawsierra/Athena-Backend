@@ -210,15 +210,25 @@ class RequestsTransport:
 @dataclass(frozen=True)
 class Lookup:
     """What an adapter found when it looked for the issue a finding may already
-    have: ``state`` is ``"found"`` (with ``external_ref``), ``"absent"``, or
-    ``"unknown"`` -- it could not look, or the answer did not say."""
+    have. ``state`` is:
+
+    - ``"found"`` -- exactly one issue carries the finding's marker (or one of
+      several is the issue already recorded for it); ``external_ref`` names it and
+      ``closed`` says whether it is closed;
+    - ``"absent"`` -- none does;
+    - ``"ambiguous"`` -- more than one does, none of them the one recorded (a
+      label copied onto another issue): never adopted, and never a license to
+      create another;
+    - ``"unknown"`` -- it could not look, or the answer did not say."""
 
     state: str
     external_ref: str | None = None
     detail: str = ""
+    closed: bool = False
 
     FOUND = "found"
     ABSENT = "absent"
+    AMBIGUOUS = "ambiguous"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -226,10 +236,43 @@ class Lookup:
         return cls(cls.UNKNOWN, None, detail)
 
 
+@dataclass(frozen=True)
+class LookupRequest:
+    """One read an adapter makes to look for a finding's issue. ``kind`` tells its
+    ``_parse_lookup`` which answer shape to expect. ``missing_means_next``: a 404
+    or 410 answer means this system does not serve this read (Jira Cloud has
+    retired ``/rest/api/2/search``; Data Center has no ``/rest/api/3/search/jql``),
+    so the next request is tried. ``absent_means_next``: "none here" is not the
+    last word -- the next request looks another way."""
+
+    url: str
+    headers: dict
+    params: dict
+    kind: str = ""
+    missing_means_next: bool = False
+    absent_means_next: bool = False
+
+
+def installation_id() -> str:
+    """This installation's id: ``ASSURANCE_INSTALLATION_ID`` when set -- set it, so
+    it survives a secret-key rotation -- or else one derived from the secret key.
+    Part of every marker, so a database restored into another environment (staging
+    from production, say) never adopts the first environment's issues."""
+    import hashlib
+
+    from django.conf import settings
+
+    configured = getattr(settings, "ASSURANCE_INSTALLATION_ID", "") or ""
+    if configured:
+        return hashlib.sha256(f"athena-installation\x1f{configured}".encode()).hexdigest()
+    return hashlib.sha256(f"athena-installation\x1f{settings.SECRET_KEY}".encode()).hexdigest()
+
+
 def finding_marker(finding: Any) -> str:
     """The label an adapter tags a created issue with, so it can find it again:
-    ``athena-<finding uuid>`` (43 characters; within Jira's and GitHub's limits)."""
-    return f"athena-{finding.uuid}"
+    ``athena-<installation>-<finding uuid>``, 50 characters -- GitHub's limit for a
+    label name."""
+    return f"athena-{installation_id()[:6]}-{finding.uuid}"
 
 
 # ---------------------------------------------------------------------------
@@ -427,38 +470,87 @@ class Connector(ABC):
             )
         return self._parse(response)
 
-    def find_existing(self, finding: Any, *, transport: Any) -> Lookup:
+    def find_existing(self, finding: Any, *, transport: Any, known_ref: str | None = None) -> Lookup:
         """Look for the issue this finding was already pushed as, so a push whose
         answer was lost, or a second runner, reuses it instead of creating another.
 
         The base cannot look: ``unknown``. An adapter that can overrides
-        :meth:`_lookup_request` and :meth:`_parse_lookup`. A transport without
-        ``get`` cannot look either, and any error while looking is ``unknown`` --
-        never ``absent``, which would license a second create."""
+        :meth:`_lookup_requests` and :meth:`_parse_lookup`. A transport without
+        ``get`` cannot look either, and any error while looking -- a raised error or
+        an error answer -- is ``unknown``, never ``absent``, which would license a
+        second create. ``known_ref``: the issue already recorded for this finding;
+        among several carrying the marker, that one is found, and otherwise
+        several are ``ambiguous``."""
         if not self.configured:
             return Lookup.unknown(f"{self.name} not configured")
-        request = self._lookup_request(finding)
-        if request is None:
+        requests = self._lookup_requests(finding)
+        if not requests:
             return Lookup.unknown(f"{self.name} offers no read-back of what it was sent")
         get = getattr(transport, "get", None)
         if get is None:
             return Lookup.unknown("the transport cannot read")
-        url, headers, params = request
-        try:
-            response = get(url, headers=headers, params=params)
-            if not is_success(response.status_code):
-                return Lookup.unknown(error_detail(self.name, response))
-            return self._parse_lookup(response.json())
-        except Exception as exc:  # noqa: BLE001 - a failed or unreadable look says nothing
-            return Lookup.unknown(f"{self.name} look-up failed: {type(exc).__name__}: {exc}")
+        for i, request in enumerate(requests):
+            last = i == len(requests) - 1
+            try:
+                response = get(request.url, headers=request.headers, params=request.params)
+                status = response.status_code
+                if status in (404, 410) and request.missing_means_next and not last:
+                    continue
+                if not is_success(status):
+                    return Lookup.unknown(error_detail(self.name, response))
+                hits = self._parse_lookup(response.json(), request.kind)
+            except Exception as exc:  # noqa: BLE001 - a failed or unreadable look says nothing
+                return Lookup.unknown(f"{self.name} look-up failed: {type(exc).__name__}: {exc}")
+            if hits is None:
+                return Lookup.unknown(f"{self.name} look-up answer had no list of issues")
+            if not hits:
+                if request.absent_means_next and not last:
+                    continue
+                return Lookup(Lookup.ABSENT, None, f"{self.name} has no issue for this finding")
+            chosen = [h for h in hits if known_ref and str(h[0]) == str(known_ref)]
+            if chosen or len(hits) == 1:
+                ref, closed = (chosen or hits)[0]
+                state = "closed" if closed else "open"
+                return Lookup(
+                    Lookup.FOUND, str(ref), f"{self.name} issue {ref} already exists ({state})", closed=closed
+                )
+            refs = ", ".join(str(h[0]) for h in hits)
+            return Lookup(
+                Lookup.AMBIGUOUS, None, f"{self.name}: {len(hits)} issues carry this finding's marker ({refs})"
+            )
+        return Lookup.unknown(f"{self.name} look-up was not answered")
 
-    def _lookup_request(self, finding: Any) -> tuple[str, dict, dict] | None:
-        """``(url, headers, params)`` of the read that finds this finding's issue,
-        or ``None`` when this system offers none."""
+    def _lookup_requests(self, finding: Any) -> list[LookupRequest]:
+        """The reads that find this finding's issue, in order; empty when this
+        system offers none."""
+        return []
+
+    def _parse_lookup(self, body: Any, kind: str) -> list[tuple[str, bool]] | None:  # pragma: no cover
+        """``[(ref, closed), ...]`` from one look's answer, or ``None`` when the
+        answer does not have the shape expected."""
         return None
 
-    def _parse_lookup(self, body: Any) -> Lookup:  # pragma: no cover - only with _lookup_request
-        return Lookup.unknown(f"{self.name} look-up not implemented")
+    def comment_on(self, ref: str, text: str, *, transport: Any) -> ConnectorResult | None:
+        """Add ``text`` as a comment on issue ``ref``, or ``None`` when this system
+        takes no comments here."""
+        request = self._comment_request(ref, text) if self.configured else None
+        if request is None:
+            return None
+        url, headers, payload = request
+        try:
+            response = transport.post(url, headers=headers, json=payload)
+        except Exception as exc:  # noqa: BLE001 - as push_finding: never raises
+            certain = classify_transport_error(exc) is NotSent
+            return ConnectorResult(
+                ok=False, external_ref=None, detail=f"{self.name} comment transport error: {exc}",
+                connector=self.name, certain=certain,
+            )
+        if is_success(response.status_code):
+            return ConnectorResult(ok=True, external_ref=str(ref), detail=f"commented on {ref}", connector=self.name)
+        return ConnectorResult(ok=False, external_ref=None, detail=error_detail(self.name, response), connector=self.name)
+
+    def _comment_request(self, ref: str, text: str) -> tuple[str, dict, dict] | None:
+        return None
 
     @abstractmethod
     def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:

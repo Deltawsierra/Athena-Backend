@@ -85,11 +85,17 @@ A pause, or any recompute that leaves a blocking decision, never waits on a
 connector. When the deployment's dispatch policy opts into the decision trigger,
 the stop records the dispatch as owed (a `DecisionDispatchDue` row, in the stop's
 own transaction) and a background thread pushes the findings after the stop has
-answered. What is not finished stays recorded, and three things retry it:
+answered. If the stop could not write that record, its thread is started anyway
+(past any bound) and writes the record before anything else. What is not finished
+stays recorded, and three things retry it:
 
 - the thread itself, 2 s and then 8 s later;
-- every serving process (WSGI or ASGI), a few seconds after it starts and then
-  every `ASSURANCE_DISPATCH_SWEEP_SECONDS` (default 300; `0` turns it off);
+- a sweeper in every serving process. The WSGI and ASGI entry points start it on
+  the process's first request -- never at import, so under a pre-forking server
+  (`gunicorn --preload` included) each worker has its own and the master none --
+  5 s after that and then every `ASSURANCE_DISPATCH_SWEEP_SECONDS` (default 300;
+  `0` turns it off). A sweep claims each row it starts, so several processes share
+  the backlog instead of racing for the same rows;
 - `python manage.py retry_blocking_dispatches`, which you should also run on a
   schedule. It exits non-zero while anything is owed, so the scheduler reports
   it. For example, cron every five minutes:
@@ -102,18 +108,40 @@ answered. What is not finished stays recorded, and three things retry it:
 
 Only one runner pushes for a deployment at a time, in any process: a run claims
 the row first, and a claim left by a process that died lapses after five minutes.
-A push whose answer was lost is looked for in Jira, GitHub or ServiceNow before
-anything is sent again. Where it cannot be looked for (Splunk HEC), it stays owed
-until someone records what happened:
-`python manage.py reconcile_dispatch_attempt <attempt uuid> --provider-has-it` (or
-`--provider-lacks-it`). The deployment's `dispatch-attempts` read shows what is owed.
+Every push is recorded as `sending` before the request goes out. A push whose
+answer was lost is looked for before anything is sent again:
+
+- **Jira** by the label `athena-<installation>-<finding uuid>`, through
+  `/rest/api/3/search/jql` (Jira Cloud), falling back to `/rest/api/2/search`
+  (Data Center and Server) when the first is missing;
+- **GitHub** by the same label, and by the marker in the issue body (GitHub drops
+  the labels of a token without push access; the create then says so);
+- **ServiceNow** by `correlation_id` and `correlation_display`.
+
+A closed issue that already carries the marker is commented on, not reopened and
+not duplicated. Several issues carrying one marker (a copied label) are never
+adopted: the push is held. Where a push cannot be looked for (Splunk HEC), or is
+held, it stays owed until someone records what happened:
+`python manage.py reconcile_dispatch_attempt <attempt uuid> --provider-has-it --by <you>`
+(or `--provider-lacks-it`). The deployment's `dispatch-attempts` read shows what is owed.
+
+Set `ASSURANCE_INSTALLATION_ID` to a stable, per-environment value: it is part of
+every marker, so a database restored into another environment never adopts this
+one's issues. Unset, it is derived from `DJANGO_SECRET_KEY`, and rotating that key
+changes the markers (issues created before cannot then be found by the look).
 
 Settings: `ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS` (default 4) runs push at once
 per process, with at most `ASSURANCE_DISPATCH_MAX_WAITING_RUNS` (default 32) more
-threads waiting; past that nothing is started and the sweeper picks the dispatch
-up. `ASSURANCE_CONNECTOR_DEADLINE_SECONDS` (default 30) bounds each connector
-request in total, including name resolution. `ASSURANCE_AUTO_DISPATCH_ENABLED=False`
-stops all of it without dropping anything owed.
+threads waiting; past that nothing recorded is started now, and the next sweep
+starts it. `ASSURANCE_CONNECTOR_DEADLINE_SECONDS` (default 30) bounds each
+connector request in total, including name resolution.
+`ASSURANCE_AUTO_DISPATCH_ENABLED=False` stops all of it without dropping anything owed.
+
+**Rolling back past migration `assurance.0042`** is refused while any dispatch
+attempt is `sending`, because code from before it would push those again blind.
+Check with
+`python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome='sending').count())"`,
+and settle them first (let a run finish, or use `reconcile_dispatch_attempt`).
 
 ## Secrets
 

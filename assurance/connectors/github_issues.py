@@ -12,6 +12,8 @@ committed hostname.
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,12 +25,16 @@ from .base import (
     ConnectorResult,
     Response,
     error_detail,
-    Lookup,
+    LookupRequest,
     finding_body,
     finding_marker,
     finding_summary,
     is_success,
 )
+
+
+logger = logging.getLogger(__name__)
+_MARKER = re.compile(r"^athena-[0-9a-f]{6}-")
 
 
 @dataclass(frozen=True)
@@ -68,42 +74,74 @@ class GitHubIssuesConnector(Connector):
         }
         payload = {
             "title": summary["title"][:256],
-            "body": finding_body(summary),
+            # The marker in the body as well: a token without push access has its
+            # labels dropped, and the body is where the look then finds it.
+            "body": finding_body(summary) + f"\nAthena marker: {finding_marker(finding)}",
             # The marker label is how a lost answer or a second runner finds this
             # issue again instead of opening another (find_existing).
             "labels": ["athena", f"severity:{summary['severity']}", finding_marker(finding)],
         }
         return url, headers, payload
 
-    def _lookup_request(self, finding: Any):
-        # The issues LIST filtered by label: read from the repository itself, so an
-        # issue is there the moment it is created (the search index lags).
+    def _lookup_requests(self, finding: Any):
+        # First the issues LIST filtered by the marker label: read from the
+        # repository itself, so an issue is there the moment it is created. A
+        # token without push access has its labels silently dropped on create
+        # (GitHub's documented behaviour), so "no labelled issue" is not the last
+        # word: the marker is in the body too, and the search finds it there. The
+        # search index lags a create by seconds; an uncertain push is only taken
+        # as absent long after (see the dispatcher's age rule).
         cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
-        url = f"{cfg.base_url.rstrip('/')}/repos/{cfg.owner}/{cfg.repo}/issues"
+        base = cfg.base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/vnd.github+json"}
-        return url, headers, {"labels": finding_marker(finding), "state": "all", "per_page": 1}
+        marker = finding_marker(finding)
+        return [
+            LookupRequest(
+                f"{base}/repos/{cfg.owner}/{cfg.repo}/issues", headers,
+                {"labels": marker, "state": "all", "per_page": 2}, "list", absent_means_next=True,
+            ),
+            LookupRequest(
+                f"{base}/search/issues", headers,
+                {"q": f'repo:{cfg.owner}/{cfg.repo} "{marker}" in:body type:issue', "per_page": 2}, "search",
+            ),
+        ]
 
-    def _parse_lookup(self, body: Any) -> Lookup:
-        if not isinstance(body, list):
-            return Lookup.unknown("github issues answer is not a list")
-        if body:
-            number = body[0].get("number")
-            return Lookup(Lookup.FOUND, str(number), f"github issue #{number} already exists")
-        return Lookup(Lookup.ABSENT, None, "github has no issue for this finding")
+    def _parse_lookup(self, body: Any, kind: str):
+        items = body.get("items") if kind == "search" and isinstance(body, dict) else body
+        if not isinstance(items, list):
+            return None
+        return [(str(item.get("number")), item.get("state") == "closed") for item in items]
+
+    def _comment_request(self, ref: str, text: str):
+        cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
+        url = f"{cfg.base_url.rstrip('/')}/repos/{cfg.owner}/{cfg.repo}/issues/{ref}/comments"
+        headers = {
+            "Authorization": f"Bearer {cfg.token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        }
+        return url, headers, {"body": text}
 
     def _parse(self, response: Response) -> ConnectorResult:
         if is_success(response.status_code):
             try:
-                number = response.json().get("number")
+                body = response.json()
+                number = body.get("number")
+                labels = [label.get("name", "") for label in body.get("labels") or [] if isinstance(label, dict)]
             except Exception:  # noqa: BLE001
-                number = None
+                number, labels = None, None
             ref = str(number) if number is not None else None
-            return ConnectorResult(
-                ok=True,
-                external_ref=ref,
-                detail=f"github issue #{number} created" if number is not None else "github issue created",
-                connector=self.name,
-            )
+            detail = f"github issue #{number} created" if number is not None else "github issue created"
+            if labels is not None and not any(_MARKER.match(name) for name in labels):
+                # GitHub drops the labels of a token without push access, silently.
+                # The number is recorded now, with this push; a later look finds the
+                # issue by the marker in its body.
+                detail += (
+                    " -- WARNING: its marker label did not stick (does the token lack push access?); "
+                    "it is recorded by number and found again by the marker in its body"
+                )
+                logger.warning("github issue #%s was created without its marker label", number)
+            return ConnectorResult(ok=True, external_ref=ref, detail=detail, connector=self.name)
         return ConnectorResult(
             ok=False,
             external_ref=None,

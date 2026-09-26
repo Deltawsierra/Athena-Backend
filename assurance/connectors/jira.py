@@ -19,7 +19,7 @@ from .base import (
     ConnectorResult,
     Response,
     error_detail,
-    Lookup,
+    LookupRequest,
     finding_body,
     finding_marker,
     finding_summary,
@@ -88,21 +88,42 @@ class JiraConnector(Connector):
         }
         return url, headers, payload
 
-    def _lookup_request(self, finding: Any):
+    def _lookup_requests(self, finding: Any):
+        # Jira Cloud retired GET /rest/api/2/search (410 Gone, CHANGE-2046) for
+        # /rest/api/3/search/jql; Data Center and Server have only the former
+        # (404 on the new one). The new one first, the old one when it is missing.
         cfg: JiraConfig = self.config  # type: ignore[assignment]
-        url = f"{cfg.base_url.rstrip('/')}/rest/api/2/search"
+        base = cfg.base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
-        jql = f'project = "{cfg.project_key}" AND labels = "{finding_marker(finding)}"'
-        return url, headers, {"jql": jql, "fields": "key", "maxResults": 1}
+        params = {
+            "jql": f'project = "{cfg.project_key}" AND labels = "{finding_marker(finding)}"',
+            "fields": "status",
+            "maxResults": 2,
+        }
+        return [
+            LookupRequest(f"{base}/rest/api/3/search/jql", headers, dict(params), "jira", missing_means_next=True),
+            LookupRequest(f"{base}/rest/api/2/search", headers, dict(params), "jira"),
+        ]
 
-    def _parse_lookup(self, body: Any) -> Lookup:
-        issues = body.get("issues")
+    def _parse_lookup(self, body: Any, kind: str):
+        issues = body.get("issues") if isinstance(body, dict) else None
         if not isinstance(issues, list):
-            return Lookup.unknown("jira search answer has no issues list")
-        if issues:
-            key = issues[0].get("key")
-            return Lookup(Lookup.FOUND, key, f"jira issue {key} already exists")
-        return Lookup(Lookup.ABSENT, None, "jira has no issue for this finding")
+            return None
+        hits = []
+        for issue in issues:
+            category = (((issue.get("fields") or {}).get("status") or {}).get("statusCategory") or {}).get("key")
+            hits.append((issue.get("key") or issue.get("id"), category == "done"))
+        return hits
+
+    def _comment_request(self, ref: str, text: str):
+        cfg: JiraConfig = self.config  # type: ignore[assignment]
+        url = f"{cfg.base_url.rstrip('/')}/rest/api/2/issue/{ref}/comment"
+        headers = {
+            "Authorization": f"Bearer {cfg.token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        return url, headers, {"body": text}
 
     def _parse(self, response: Response) -> ConnectorResult:
         if is_success(response.status_code):
