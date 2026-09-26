@@ -393,6 +393,32 @@ def test_a_backstop_refresh_that_fails_is_logged_not_raised(commit, monkeypatch,
     assert "stored decision refresh failed after commit" in caplog.text
 
 
+def test_a_provider_write_refreshes_every_deployment_serving_through_it(commit):
+    """A provider's name and region are fields of the served route every chain
+    outcome is compared with (P2.2), and a provider is shared: renaming it moves the
+    route -- and the decision -- of each deployment with a component resolving to
+    it, with no write to any of them. Deleting it moves them too."""
+    from assurance.models import Provider
+
+    with commit():
+        serving, other, unrelated = _scanned("serving"), _scanned("other"), _scanned("unrelated")
+        provider = Provider.objects.create(name="VendorX", kind=Provider.Kind.MODEL_PROVIDER)
+        for dep in (serving, other):
+            Asset.objects.create(
+                deployment=dep, kind=Asset.Kind.MODEL, name="m", identifier="m", provider=provider,
+                metadata={"model": "x"},
+            )
+    with commit() as callbacks:
+        provider.name = "VendorY"
+        provider.save()
+    assert _refreshes(callbacks) == sorted([serving.pk, other.pk])
+    assert unrelated.pk not in _refreshes(callbacks)
+
+    with commit() as callbacks:
+        provider.delete()
+    assert _refreshes(callbacks) == sorted([serving.pk, other.pk])
+
+
 def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
     """The backstop is only as good as its list of inputs. Every table the decision
     rule queries must be the deployment's own or one the backstop watches, so an
@@ -420,12 +446,15 @@ def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
         for query in queries.captured_queries
         for table in re.findall(r'(?:FROM|JOIN)\s+"(\w+)"', query["sql"])
     }
-    watched = set(signals.DECISION_INPUTS) | {"assurance.Deployment"}
+    # A fan-out input -- a provider, which a deployment's served route names -- is
+    # watched too: a write to it refreshes every deployment it reaches.
+    inputs = set(signals.DECISION_INPUTS) | set(signals.DECISION_FANOUT_INPUTS)
+    watched = inputs | {"assurance.Deployment"}
     assert read - watched == set(), f"the decision reads {sorted(read - watched)}, which nothing refreshes it on"
     # And the list names nothing the rule has stopped reading, which would only
     # cost refreshes. (The deployment's own row is read by the refresh under its
     # lock, not by the rule.)
-    assert set(signals.DECISION_INPUTS) - read == set(), sorted(set(signals.DECISION_INPUTS) - read)
+    assert inputs - read == set(), sorted(inputs - read)
 
 
 def test_the_decision_reads_no_finding_column_but_these():

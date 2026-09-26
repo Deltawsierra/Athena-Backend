@@ -30,7 +30,7 @@ import logging
 from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, transaction
 from django.db.models import QuerySet
-from django.db.models.signals import post_delete, post_migrate, post_save, pre_save
+from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete, pre_save
 from django.dispatch import receiver
 
 # A plain constant; the models module is loaded before `AppConfig.ready` imports
@@ -261,6 +261,48 @@ DECISION_INPUTS = {
     "assurance.WorkflowChainOutcome": ("deployment",),
 }
 
+def _deployments_serving_through(instance) -> set:
+    """The deployments with a component that resolves to this provider: the route
+    each serves names the provider and reads its region (assurance.served_route)."""
+    from .models import Asset
+
+    if instance.pk is None:
+        return set()
+    return set(
+        Asset.objects.filter(provider_id=instance.pk).values_list("deployment_id", flat=True).distinct()
+    )
+
+
+#: Inputs the decision reads that belong to no one deployment, and how to find the
+#: deployments a write to one reaches. A provider is shared: its name and region are
+#: fields of the served route (P2.2), which every chain outcome is compared with, so
+#: renaming it moves the route of every deployment serving through it -- and the
+#: decision of each, with no write to any of them.
+DECISION_FANOUT_INPUTS = {
+    "assurance.Provider": _deployments_serving_through,
+}
+
+#: Where a fan-out row's deployments are kept between pre_delete and post_delete:
+#: by post_delete the components that resolved to it have been set to none.
+_PRIOR_FANOUT = "_assurance_decision_prior_fanout"
+
+
+def _fanout_input_saved(sender, instance, raw=False, using=None, **kwargs):
+    if raw:
+        return
+    for deployment_id in DECISION_FANOUT_INPUTS[instance._meta.label](instance):
+        schedule_decision_refresh(deployment_id, using=using)
+
+
+def _fanout_input_deleting(sender, instance, **kwargs):
+    instance.__dict__[_PRIOR_FANOUT] = DECISION_FANOUT_INPUTS[instance._meta.label](instance)
+
+
+def _fanout_input_deleted(sender, instance, using=None, **kwargs):
+    for deployment_id in instance.__dict__.pop(_PRIOR_FANOUT, set()):
+        schedule_decision_refresh(deployment_id, using=using)
+
+
 #: For a model the decision reads only some columns of: those columns. A save that
 #: names none of them in ``update_fields`` cannot move the decision -- a finding's
 #: remediation workflow and its assignee are saved on every move and read by
@@ -465,6 +507,19 @@ def _deployment_saved(sender, instance, raw=False, using=None, update_fields=Non
     schedule_decision_refresh(instance.pk, using=using)
 
 
+@receiver(post_save, sender="assurance.Deployment", dispatch_uid="assurance_route_noted_at_creation")
+def _note_the_route_a_new_deployment_starts_with(sender, instance, created=False, raw=False, **kwargs):
+    """A deployment starts with the route nothing serves, and the record says so from
+    the moment it exists -- so a run against it before any component is recorded binds
+    to that, rather than to nothing because no note was ever taken. Never raises
+    (:func:`assurance.served_route.note_route_quietly`), and no stop path creates one."""
+    if raw or not created:
+        return
+    from .served_route import note_route_quietly
+
+    note_route_quietly(instance, now=instance.created_at)
+
+
 for _label in DECISION_INPUTS:
     pre_save.connect(
         _remember_prior_deployment, sender=_label, dispatch_uid=f"assurance_decision_backstop_pre:{_label}"
@@ -538,6 +593,16 @@ def _data_boundary_written(sender, instance, raw=False, using=None, **kwargs):
     if raw:
         return
     _schedule_watching(deployments_watching_boundary(instance.deployment_id), using)
+
+
+for _label in DECISION_FANOUT_INPUTS:
+    post_save.connect(_fanout_input_saved, sender=_label, dispatch_uid=f"assurance_decision_fanout_save:{_label}")
+    pre_delete.connect(
+        _fanout_input_deleting, sender=_label, dispatch_uid=f"assurance_decision_fanout_pre_delete:{_label}"
+    )
+    post_delete.connect(
+        _fanout_input_deleted, sender=_label, dispatch_uid=f"assurance_decision_fanout_delete:{_label}"
+    )
 
 
 for _label in ("assurance.Provider", "assurance.ProviderAssertion"):

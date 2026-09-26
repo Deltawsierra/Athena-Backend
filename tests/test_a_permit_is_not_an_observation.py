@@ -30,7 +30,11 @@ from assurance import composition as comp
 from assurance import observed_outcomes
 from assurance.composition import HELD, NOT_DEMONSTRATED, VIOLATED, ChainOutcome, compose
 from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
-from assurance.workflow_chains import composition_decision_signal, composition_for
+from assurance.workflow_chains import (
+    composition_decision_signal,
+    composition_for,
+    composition_payload,
+)
 from tests import signed_chains
 from tests.signed_chains import record_signed, write_keyring
 
@@ -40,8 +44,10 @@ AUTHORIZATION_CLAUSE = "rest on an authorization check, not an observed effect"
 WHAT_IT_DOES_NOT_SHOW = "it does not show the effect happened"
 
 
-def _held(workflow, signer, *, at=None, basis=comp.BASIS_DEMONSTRATED):
-    return ChainOutcome(workflow, HELD, observed_at=at, basis=basis, signer=signer)
+def _held(workflow, signer, *, at=None, basis=comp.BASIS_DEMONSTRATED, route=comp.ROUTE_CURRENT):
+    # Taken against the route serving now unless a test says otherwise: these are
+    # about who signed, and a held of another route floors whoever signed it.
+    return ChainOutcome(workflow, HELD, observed_at=at, basis=basis, signer=signer, route=route)
 
 
 # --- the rule: which kind of evidence each signer is ---------------------------
@@ -303,7 +309,9 @@ def test_the_signed_route_answers_with_the_kind_and_the_composition_names_it(eng
         oc.build_outcome(
             deployment=str(dep.uuid), workflow="refund", status=oc.HELD, engine="achilles",
             engine_version="1.0.0", run_id="run-1", evidence_digest="sha256:" + "ab" * 32,
-            observed_at=_recently(),
+            # Now, after the deployment exists: a run from before it was registered
+            # cannot be bound to the route it serves (P2.2), and is not about it.
+            observed_at=timezone.now(),
         ),
         signed_chains.ENGINE_KEYS["achilles"],
     )
@@ -355,11 +363,23 @@ def test_a_workflow_held_on_a_permit_check_alone_is_ready_with_restrictions():
     assert _signal([_held("refund", "achilles")], ["refund"]) == comp.READY_RESTRICTED
 
 
-@pytest.mark.parametrize("signer", ["athena", "hermes", ""], ids=["scan", "unclassified", "unnamed"])
-def test_a_held_that_is_not_a_permit_check_is_not_restricted_by_it(signer):
-    """The cap is about the permit check, not about who else signs: a scan, or a
-    signer this platform has not classified, contributes what the rule decided."""
-    assert _signal([_held("refund", signer)], ["refund"]) == comp.READY
+def test_a_scan_is_not_restricted_by_the_permit_check_cap():
+    """The cap is about what the signer could see, not about who else signs: a scan
+    contributes what the rule decided."""
+    assert _signal([_held("refund", "athena")], ["refund"]) == comp.READY
+
+
+@pytest.mark.parametrize("signer", ["hermes", ""], ids=["unclassified", "unnamed"])
+def test_a_held_on_an_unclassified_signer_is_restricted_like_a_permit_check(signer):
+    """A signer this platform has not classified verifies as a signature and says
+    nothing about what its engine could see -- at best a permit check's worth. It
+    used to contribute READY, outranking the permit check it cannot be shown to
+    exceed: weaker evidence, the better decision."""
+    assert _signal([_held("refund", signer)], ["refund"]) == comp.READY_RESTRICTED
+    # And the published sentence says why, rather than the rule's bare READY.
+    result = compose([_held("refund", signer)], expected_workflows=["refund"])
+    payload = composition_payload(result, signal=comp.READY_RESTRICTED, provenance={})
+    assert "not classified" in payload["explanation"]
 
 
 def test_one_permit_check_restricts_a_deployment_whose_other_workflows_were_scanned():

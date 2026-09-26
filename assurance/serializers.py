@@ -657,12 +657,12 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     def get_route(self, obj) -> str:
         """Compared with the route serving now, read once per serialisation and
         deployment rather than once per row."""
-        from .served_route import served_route_fingerprint
+        from .served_route import serving_route_now
         from .workflow_chains import route_of
 
         serving = self.context.setdefault("serving_routes", {})
         if obj.deployment_id not in serving:
-            serving[obj.deployment_id] = served_route_fingerprint(obj.deployment)
+            serving[obj.deployment_id] = serving_route_now(obj.deployment)
         return route_of(obj, serving[obj.deployment_id])
 
     def get_signed(self, obj) -> bool:

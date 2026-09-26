@@ -338,18 +338,26 @@ def deployment_route_fingerprint(routes) -> str:
     )
 
 
-def served_route_fingerprint(deployment) -> str:
+def served_route_fingerprint(deployment, assets=None) -> str:
     """The deployment's served-route fingerprint, computed from the graph.
 
     The value :func:`assurance.fingerprint.compute_system_fingerprint` folds in,
     and the value every chain outcome is bound to (:func:`route_for_outcome`) and
     compared with (:func:`assurance.workflow_chains.read_chain_outcomes`).
     """
+    assets = deployment.assets.all() if assets is None else assets
     routes = sorted(
-        (_route_entry(a) for a in deployment.assets.all() if serves_inference(a)),
+        (_route_entry(a) for a in assets if serves_inference(a)),
         key=lambda r: (r["kind"], r["name"], r["identifier"]),
     )
     return deployment_route_fingerprint(routes)
+
+
+def serving_route_now(deployment) -> str:
+    """:func:`served_route_fingerprint` in one query, providers joined -- the same
+    value, for the reads that compare against it and the notes that record it,
+    which must never read it two different ways."""
+    return served_route_fingerprint(deployment, deployment.assets.select_related("provider"))
 
 
 def note_route(deployment, *, now):
@@ -369,7 +377,7 @@ def note_route(deployment, *, now):
 
     from .models import ServedRouteNote
 
-    fingerprint = served_route_fingerprint(deployment)
+    fingerprint = serving_route_now(deployment)
     note = ServedRouteNote.objects.filter(deployment=deployment).first()
     if note is None:
         try:

@@ -493,10 +493,12 @@ def test_the_unassessed_note_now_mentions_the_chains_it_also_checked():
 
 
 def test_reading_the_composition_does_not_scale_with_the_number_of_workflows():
-    """Two queries regardless: the outcomes and the approved slugs. A decision
-    input that fanned out per workflow would make every decision read -- and the
-    decision is read on a page load -- proportional to how much assurance a
-    customer has recorded, which is backwards."""
+    """Three queries regardless: the outcomes, the approved slugs, and the
+    components the route serving now is read from (P2.2 -- each outcome is compared
+    with it, so it is read once for all of them, providers joined). A decision input
+    that fanned out per workflow would make every decision read -- and the decision
+    is read on a page load -- proportional to how much assurance a customer has
+    recorded, which is backwards."""
     dep = _deployment()
     _approve(dep, *[f"w{i}" for i in range(40)])
     for i in range(40):
@@ -504,7 +506,7 @@ def test_reading_the_composition_does_not_scale_with_the_number_of_workflows():
 
     with CaptureQueriesContext(connection) as captured:
         composition_for(dep)
-    assert len(captured) == 2, [q["sql"] for q in captured]
+    assert len(captured) == 3, [q["sql"] for q in captured]
 
 
 def test_the_decision_read_gains_exactly_the_two_queries():

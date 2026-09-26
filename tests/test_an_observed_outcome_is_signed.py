@@ -85,7 +85,10 @@ def _signed(dep, *, workflow="refund-over-limit", status=oc.HELD, key=ACHILLES, 
         engine_version="1.0.0",
         run_id="run-1",
         evidence_digest="sha256:" + "ab" * 32,
-        observed_at=observed_at or (_now() - timedelta(minutes=1)),
+        # Now by default: signed after the deployment exists, as a run against it
+        # is. One from before the route serving it was noted is bound to no route
+        # (P2.2) and floors like one nobody ran, which is not what these test.
+        observed_at=observed_at or _now(),
         reason=reason or ("" if status == oc.HELD else "the gate refused the dispatch"),
         outcome_id=outcome_id,
     )
@@ -762,7 +765,8 @@ def test_every_chain_write_route_refreshes_the_stored_decision():
     # Approved and never reported: not demonstrated, and the stored decision says so.
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
 
-    assert client.post(_url(dep), _signed(dep, observed_at=_now() - timedelta(minutes=2)), format="json").status_code == 201
+    # Signed after the deployment exists (see `_signed`); the violation below later still.
+    assert client.post(_url(dep), _signed(dep), format="json").status_code == 201
     assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
 
     # Widening the approved set moves it: the new workflow never reported.
@@ -773,7 +777,7 @@ def test_every_chain_write_route_refreshes_the_stored_decision():
     assert client.put(_approved_url(dep), {"workflows": [refund]}, format="json").status_code == 200
     assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
 
-    violated = _signed(dep, status=oc.VIOLATED, observed_at=_now() - timedelta(seconds=10))
+    violated = _signed(dep, status=oc.VIOLATED)
     assert client.post(_url(dep), violated, format="json").status_code == 201
     assert _stored(dep) == Deployment.Decision.NOT_RECOMMENDED
 

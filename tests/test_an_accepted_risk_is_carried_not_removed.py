@@ -51,10 +51,15 @@ def _scanned():
     return dep
 
 
-def _finding(dep, severity="critical", *, status=Finding.Status.OPEN, until=None, n="1"):
+def _finding(dep, severity="critical", *, status=Finding.Status.OPEN, until=None, n="1", accepted_at=None):
+    # An acceptance written here covers the severity the finding has, as the
+    # acceptance route records it (Finding.risk_accepted_severity), unless a test
+    # says it was given at another.
+    accepted = severity if accepted_at is None else accepted_at
     return Finding.objects.create(
         deployment=dep, fingerprint=f"fp-{severity}-{n}", finding_type="t", title=f"T{n}",
         severity=severity, status=status, risk_accepted_until=until,
+        risk_accepted_severity=accepted if status == Finding.Status.ACCEPTED else "",
     )
 
 

@@ -39,7 +39,7 @@ from .composition import (
     compose,
     explain,
 )
-from .served_route import served_route_fingerprint
+from .served_route import serving_route_now
 
 
 def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> list[ChainOutcome]:
@@ -61,7 +61,7 @@ def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> l
     rows = list(deployment.chain_outcomes.all())
     # The route serving now, read once, and only when there is an outcome to compare
     # with it: a deployment with no chains reads no assets here.
-    serving = served_route_fingerprint(deployment) if rows else ""
+    serving = serving_route_now(deployment) if rows else ""
     return [
         ChainOutcome(
             workflow=row.workflow,

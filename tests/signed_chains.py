@@ -8,6 +8,11 @@ needs rows like that -- a typed-in ``held`` floors at NEEDS_MORE_EVIDENCE now.
 The rows are written directly rather than through ``ingest``: many of these tests
 use fixed historic instants that ingest's 30-day window would refuse, and what is
 under test is the read path, which re-verifies every row whichever way it arrived.
+
+Each row is bound to the served route the deployment has as it is written -- a run
+of the system as it stands, which is what a test asserting READY from chains is
+asserting. A test about a route that changed after the run changes the graph after
+recording (see ``test_a_route_change_reopens_what_ran_on_it``).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from mythos_core import outcome as oc
 from assurance import composition as comp
 from assurance import observed_outcomes
 from assurance.models import WorkflowChainOutcome
+from assurance.served_route import served_route_fingerprint
 
 ENGINE_KEYS = {"achilles": Ed25519PrivateKey.generate(), "athena": Ed25519PrivateKey.generate()}
 
@@ -65,6 +71,7 @@ def record_signed(deployment, workflow, status, observed_at, *, engine="achilles
         observer_key_id=oc.key_id_for(oc.raw_public_key(key)),
         evidence_digest=outcome["evidence_digest"],
         envelope=envelope,
+        route_fingerprint=served_route_fingerprint(deployment),
     )
 
 
