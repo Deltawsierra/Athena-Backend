@@ -60,6 +60,7 @@ from mythos_core import outcome as oc
 
 from . import composition
 from .models import WorkflowChainOutcome
+from .served_route import routes_for_outcomes
 
 #: Where the keyring lives: a JSON file listing the engines this deployment
 #: trusts, ``[{"engine": "achilles", "public_key": "<base64 raw Ed25519>"}, ...]``.
@@ -412,6 +413,12 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 )
         if refusals:
             return [], sorted(refusals, key=lambda refusal: refusal.index)
+        # The route each run exercised, as far as the record shows it: bound now,
+        # while the row is written, and never after (see
+        # assurance.served_route.route_for_outcome).
+        routes = routes_for_outcomes(
+            deployment, [_instant(outcome["observed_at"]) for _, outcome, _, _ in accepted], now=now
+        )
         rows = [
             WorkflowChainOutcome(
                 deployment=deployment,
@@ -429,8 +436,9 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 observer_key_id=key_id,
                 evidence_digest=outcome["evidence_digest"],
                 envelope=envelope,
+                route_fingerprint=route,
             )
-            for _, outcome, key_id, envelope in accepted
+            for (_, outcome, key_id, envelope), route in zip(accepted, routes, strict=True)
         ]
         WorkflowChainOutcome.objects.bulk_create(rows)
     return rows, []

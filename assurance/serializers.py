@@ -584,6 +584,11 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     #: tell the two apart from anything on the row.
     evidence_kind = serializers.SerializerMethodField()
     evidence_kind_label = serializers.SerializerMethodField()
+    # Whether the row was taken against the route serving now: `current`, `moved`
+    # or `unrecorded` (assurance.composition.CHAIN_ROUTES). Read-only, and never
+    # the stored binding itself: that is a fingerprint, and what a reader needs is
+    # whether it is the one serving.
+    route = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowChainOutcome
@@ -597,6 +602,7 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
             "basis_in_force",
             "evidence_kind",
             "evidence_kind_label",
+            "route",
             "observed_at",
             "recorded_at",
             "source",
@@ -642,6 +648,17 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
 
     def get_evidence_kind_label(self, obj) -> str:
         return EVIDENCE_LABELS[self.get_evidence_kind(obj)]
+
+    def get_route(self, obj) -> str:
+        """Compared with the route serving now, read once per serialisation and
+        deployment rather than once per row."""
+        from .served_route import served_route_fingerprint
+        from .workflow_chains import route_of
+
+        serving = self.context.setdefault("serving_routes", {})
+        if obj.deployment_id not in serving:
+            serving[obj.deployment_id] = served_route_fingerprint(obj.deployment)
+        return route_of(obj, serving[obj.deployment_id])
 
     def get_signed(self, obj) -> bool:
         return (

@@ -787,6 +787,7 @@ def refresh_stored_decisions(deployment_ids) -> None:
     if not ids:
         return
     from .latent import fire_due_conditions
+    from .served_route import note_route_quietly
 
     # In pk order, so two writers refreshing the same pair of deployments take
     # their row locks in the same order rather than each holding the other's.
@@ -794,6 +795,8 @@ def refresh_stored_decisions(deployment_ids) -> None:
         # A declared latent condition the write made true fires first, so the
         # decision refreshed here reads the claim it marked STALE.
         fire_due_conditions(deployment)
+        # And the route the write left serving is noted, so a run after it binds.
+        note_route_quietly(deployment)
         recompute_decision(deployment)
 
 

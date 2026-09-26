@@ -34,6 +34,7 @@ from __future__ import annotations
 from . import observability as obs
 from .fingerprint import compute_system_fingerprint
 from .models import AssuranceClaim, RetestRequirement
+from .workflow_chains import composition_for, read_expected_workflows
 
 ClaimType = AssuranceClaim.ClaimType
 Status = AssuranceClaim.ClaimStatus
@@ -174,6 +175,29 @@ def plan_revalidation(deployment) -> dict:
 
         required.sort(key=lambda w: (w["claim_type"], w["claim_uuid"]))
 
+        # THE CHAINS A ROUTE CHANGE LEFT UNEXERCISED. No claim reads the served
+        # route, so the claim loop above cannot see a model swap or a tokenizer
+        # change -- and the evidence such a change does invalidate is the chain
+        # outcomes, each an exercise of the route that served it. Each standing
+        # `held` taken against another route (or one nothing recorded) is work: run
+        # that workflow's chain again against what serves now.
+        composition = composition_for(deployment)
+        approved = set(read_expected_workflows(deployment) or ())
+        workflows = [
+            {
+                "workflow": workflow,
+                # Only an approved workflow's chain holds the decision back; the
+                # others are still evidence gone stale, and are listed as such.
+                "approved": workflow in approved,
+                "reason": (
+                    "its standing held was taken against a served route that is not "
+                    "the one serving now, or one nothing recorded; exercise the chain "
+                    "again against the route that serves"
+                ),
+            }
+            for workflow in composition.off_route
+        ]
+
         if required:
             note = (
                 f"{len(required)} claim(s) need revalidation because of a change, an expiry, or a "
@@ -197,6 +221,19 @@ def plan_revalidation(deployment) -> dict:
                 "No claim needs revalidation: every current claim is supported or verified with no open "
                 "retest obligation. Nothing needs to be re-run."
             )
+        if workflows:
+            # Never "nothing to re-run" beside a chain that ran against another
+            # route: every claim can be current while the chains are not, because no
+            # claim reads the route and every chain exercised one.
+            chains = (
+                f"{len(workflows)} workflow chain(s) were exercised against a served route "
+                "that no longer serves, or one nothing recorded: exercise each named chain "
+                "again against the route that serves."
+            )
+            if required or outstanding_unknowns:
+                note = f"{note} Separately, {chains}"
+            else:
+                note = f"No claim needs revalidation, but {chains} Nothing else needs re-running."
 
         return {
             "deployment_uuid": str(deployment.uuid),
@@ -205,10 +242,12 @@ def plan_revalidation(deployment) -> dict:
                 "required": len(required),
                 "still_current": len(still_current),
                 "outstanding_unknowns": len(outstanding_unknowns),
+                "workflows_to_exercise": len(workflows),
             },
             "recompute_action": "POST deployments/{uuid}/recompute-claims to re-derive after the named retests run.",
             "required": required,
             "outstanding_unknowns": outstanding_unknowns,
             "still_current": still_current,
+            "workflows_to_exercise": workflows,
             "note": note,
         }

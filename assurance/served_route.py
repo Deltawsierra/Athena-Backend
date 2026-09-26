@@ -38,15 +38,26 @@ exactly what the fingerprint needs, and discloses nothing.
 Drift
 -----
 The deployment's route fingerprint folds into
-:func:`assurance.fingerprint.compute_system_fingerprint`, so a route change moves
-the system fingerprint, which is what the existing invalidation layer already
-watches: a claim bound to the old fingerprint is superseded and a retest
-obligation opens. Targeted revalidation is therefore not a new mechanism here --
-it is the one that already exists, now reachable by a change in what served.
+:func:`assurance.fingerprint.compute_system_fingerprint`, which is what a decision
+is fenced on. It does NOT invalidate any claim, and it did not stop doing so by
+accident: each claim now binds to the inputs its deriver reads
+(:data:`assurance.fingerprint.CLAIM_INPUTS`), and no deriver reads the route. The
+data boundary, the AI-BOM and effective access are facts about the graph; a
+tokenizer change does not move any of them, and re-opening them for it would be a
+retest nobody needed.
+
+What a route change DOES reach is the evidence gathered by running the route: the
+chain outcomes, each an exercise of the system that served it. So every outcome is
+bound, when it is written, to the route the platform had noted as serving when it
+was observed (:func:`route_for_outcome`), and the composition reads a ``held``
+taken against any other route as not yet exercised against this one
+(:data:`assurance.composition.OFF_ROUTE`). The workflows to exercise again are
+named in the decision and in the revalidation plan. That is the targeted
+revalidation: the evidence the route produced, and nothing it did not.
 
 Learning a previously-``unknown`` field moves the fingerprint too, and that is
 deliberate. A verdict taken against a route whose quantization was unknown is not
-the same verdict as one taken against a route known to be int8. The claim was
+the same verdict as one taken against a route known to be int8. The outcome was
 bound to a state that included the not-knowing.
 
 What this does NOT detect
@@ -67,7 +78,11 @@ often as discovery runs.
 
 from __future__ import annotations
 
+import logging
+
 from .receipt import ALGORITHM, _digest
+
+logger = logging.getLogger(__name__)
 
 # The literal a field carries when nothing observed it. A string rather than
 # ``None`` so it survives JSON, sorts predictably, and reads the same in a
@@ -327,11 +342,109 @@ def served_route_fingerprint(deployment) -> str:
     """The deployment's served-route fingerprint, computed from the graph.
 
     The value :func:`assurance.fingerprint.compute_system_fingerprint` folds in,
-    so a change in what served moves the system fingerprint and the existing
-    invalidation layer supersedes the claims bound to it.
+    and the value every chain outcome is bound to (:func:`route_for_outcome`) and
+    compared with (:func:`assurance.workflow_chains.read_chain_outcomes`).
     """
     routes = sorted(
         (_route_entry(a) for a in deployment.assets.all() if serves_inference(a)),
         key=lambda r: (r["kind"], r["name"], r["identifier"]),
     )
     return deployment_route_fingerprint(routes)
+
+
+def note_route(deployment, *, now):
+    """Note the route serving now, and return ``(fingerprint, since)``.
+
+    ``since`` is when the platform first noted that fingerprint: moved only when the
+    fingerprint moves, so noting an unchanged route any number of times leaves it
+    where it was. See :class:`assurance.models.ServedRouteNote` for why the instant
+    is when the platform NOTICED, and why that errs only in the safe direction.
+
+    Called wherever the graph a route is read from may have changed -- the decision
+    refresh, the scan ingest -- and at every outcome binding, so a change that no
+    refresh noticed is noticed there, before anything is bound across it. Never in
+    the operator failsafe's path: a stop does not wait on this.
+    """
+    from django.db import IntegrityError, transaction
+
+    from .models import ServedRouteNote
+
+    fingerprint = served_route_fingerprint(deployment)
+    note = ServedRouteNote.objects.filter(deployment=deployment).first()
+    if note is None:
+        try:
+            with transaction.atomic():
+                note = ServedRouteNote.objects.create(
+                    deployment=deployment, fingerprint=fingerprint, since=now
+                )
+        except IntegrityError:
+            # Another writer noted it first. Theirs stands if it says the same;
+            # otherwise fall through and move it, as below.
+            note = ServedRouteNote.objects.get(deployment=deployment)
+    if note.fingerprint != fingerprint:
+        # Conditioned on the fingerprint read, so two writers noticing one change
+        # cannot move `since` twice, and a writer holding an older reading cannot
+        # write it back over a newer one.
+        ServedRouteNote.objects.filter(pk=note.pk, fingerprint=note.fingerprint).update(
+            fingerprint=fingerprint, since=now
+        )
+        note.refresh_from_db()
+        if note.fingerprint != fingerprint:
+            # Someone else moved it in between, to a route that is not the one this
+            # read computed. Neither reading can be shown to be the route serving
+            # when anything was observed, so nothing is bound to either: an instant
+            # later than any observation says exactly that.
+            return fingerprint, None
+    return note.fingerprint, note.since
+
+
+def note_route_quietly(deployment, *, now=None) -> None:
+    """:func:`note_route`, for the writes that must not fail for it.
+
+    Run beside a decision refresh, so the instant a route change is noted is the
+    write that made it rather than the next outcome that arrives. A failure is
+    logged and rolled back to before the note, and costs only that: the next note --
+    at the latest, the binding of the next outcome -- sees the change instead, and
+    a late note errs only toward leaving an outcome unbound. Never raises.
+    """
+    from django.db import transaction
+    from django.utils import timezone
+
+    try:
+        with transaction.atomic():
+            note_route(deployment, now=now or timezone.now())
+    except Exception:
+        logger.exception(
+            "the served route of deployment %s was not noted; the next note or "
+            "outcome binding notes it instead",
+            deployment.pk,
+        )
+
+
+def route_for_outcome(deployment, observed_at, *, now) -> str:
+    """The served route a chain outcome observed at ``observed_at`` was taken
+    against, as the record shows it -- or ``""`` when the record cannot say.
+
+    The route noted as serving now, if it was already noted as serving when the
+    outcome was observed. Otherwise nothing: an outcome with no instant, or one
+    observed before the platform noted the route that serves now, may have
+    exercised that route or the one before it, and binding it to either would put a
+    fact nobody established into the evidence. ``""`` reads as
+    :data:`assurance.composition.ROUTE_UNRECORDED`, which floors a ``held`` exactly
+    as a moved route does.
+
+    What this cannot see, stated rather than left to be found: the record, not the
+    live system. A route that changed and changed back between two notes, with an
+    outcome observed in between, is bound to the route both notes record. See the
+    module docstring's "What this does NOT detect".
+    """
+    return routes_for_outcomes(deployment, [observed_at], now=now)[0]
+
+
+def routes_for_outcomes(deployment, instants, *, now) -> list[str]:
+    """:func:`route_for_outcome` for each of ``instants``, noting the route once."""
+    fingerprint, since = note_route(deployment, now=now)
+    return [
+        "" if observed_at is None or since is None or observed_at < since else fingerprint
+        for observed_at in instants
+    ]

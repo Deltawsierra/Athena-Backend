@@ -2005,6 +2005,40 @@ class RetestRequirement(models.Model):
 # ---------------------------------------------------------------------------
 
 
+class ServedRouteNote(models.Model):
+    """The served route the platform last noted for a deployment, and since when.
+
+    A chain outcome is evidence about the route that served when it was observed
+    (:mod:`assurance.served_route`), and the stored graph is a record of the route
+    serving NOW -- it keeps no history. This row is the one piece of history the
+    binding needs: the route last noted and the instant it was first noted. An
+    outcome observed at or after ``since`` was observed while that route served, as
+    far as the record shows; one observed before it cannot be bound to it.
+
+    ``since`` is when the platform NOTICED, which is at or after the change it
+    records. So a late notice only ever errs one way: an outcome from between the
+    change and the notice reads as unbound, and floors, rather than as evidence
+    about a route it may not have exercised.
+
+    Its own row rather than two columns on :class:`Deployment`, whose ``save()``
+    writes every loaded column: an instance held across a change would write the
+    old route back with the old instant, and the next outcome would be bound to a
+    route that no longer serves.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.OneToOneField(
+        Deployment, on_delete=models.CASCADE, related_name="served_route_note"
+    )
+    # `served_route.served_route_fingerprint` as last noted.
+    fingerprint = models.CharField(max_length=64)
+    # When that fingerprint was first noted: moved only when the fingerprint does.
+    since = models.DateTimeField()
+
+    def __str__(self) -> str:
+        return f"route {self.fingerprint[:12]} since {self.since.isoformat()}"
+
+
 class DeclaredComponent(models.Model):
     """One component the customer *declares* their AI system is built from.
 
@@ -2619,6 +2653,15 @@ class WorkflowChainOutcome(models.Model):
     # engine also decides what kind of evidence the row is (see the class
     # docstring); an Achilles "run" is a dispatch-time permit check, not an effect.
     outcome_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
+    # THE SERVED ROUTE THE OUTCOME WAS TAKEN AGAINST, as the platform had noted it
+    # serving at ``observed_at`` (assurance.served_route.route_for_outcome), bound
+    # when the row is written and never after. Blank when nothing can say which:
+    # a row written before routes were bound, one with no instant, or one observed
+    # before the platform noted the route that serves now. Blank reads as
+    # "unrecorded", which floors a held exactly as a moved route does -- the
+    # conservative reading, and the one a migration cannot improve on without
+    # inventing the route a past run exercised.
+    route_fingerprint = models.CharField(max_length=64, blank=True, default="")
     observer_engine = models.CharField(max_length=64, blank=True)
     observer_key_id = models.CharField(max_length=64, blank=True)
     evidence_digest = models.CharField(max_length=71, blank=True)

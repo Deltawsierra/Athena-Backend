@@ -588,10 +588,14 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
     # committed meanwhile left the refresh skipped and the decision stale.
     from .decision import recompute_decision
     from .latent import fire_due_conditions
+    from .served_route import note_route_quietly
 
     # A declared latent condition this scan made true -- a capability granted, an
     # asset appearing -- fires before the decision is refreshed, so it reads it.
     fire_due_conditions(deployment)
+    # The route this scan recorded is noted as serving from now, so the outcome of
+    # a run against it binds to it (assurance.served_route.route_for_outcome).
+    note_route_quietly(deployment)
     with obs.span(obs.PLAN, component="recompute_decision", subject=str(deployment.pk)) as active:
         recompute_decision(deployment)
         if active is not None:

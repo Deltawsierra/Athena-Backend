@@ -607,11 +607,24 @@ RECEIPT_SCHEMA = {
                         "not that the effect happened within that authority."
                     ),
                 },
+                "route_census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": (
+                        "Standing outcomes by the served route they were taken "
+                        "against: the route serving now (current), one that no longer "
+                        "serves (moved), or one nothing recorded (unrecorded). A held "
+                        "taken against any route but the current one is not evidence "
+                        "about the system this receipt describes, and on an approved "
+                        "workflow it counts as not_demonstrated."
+                    ),
+                },
             },
             "required": [
                 "approved_set_recorded", "workflows_expected", "workflows_assessed",
                 "workflows_unreported", "workflows_unapproved", "rule_decision",
                 "census", "basis_census", "workflows_unexercised", "evidence_census",
+                "route_census",
             ],
         },
         "algorithm": {"type": "string", "const": ALGORITHM},
@@ -945,6 +958,7 @@ def _chains_reference(deployment) -> dict:
         "basis_census": dict(composition.basis_census),
         "workflows_unexercised": composition.workflows_unexercised,
         "evidence_census": dict(composition.evidence_census),
+        "route_census": dict(composition.route_census),
     }
 
 

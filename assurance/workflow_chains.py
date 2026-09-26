@@ -17,10 +17,11 @@ load-bearing rather than tidy: `compose` stays exercisable from a plain Python
 prompt with four hand-made outcomes, so its tests cannot be made vacuous by a
 database fixture, and everything that needs a deployment lives here.
 
-Three queries, no writes, no clock. It was two until the provenance census
-below; the count is stated rather than left stale, because a docstring that
-undercounts its own reads is how a caller ends up fencing the wrong number of
-them in a transaction.
+Four queries, no writes, no clock: the outcomes, the approved set, the
+provenance census below, and the assets the route serving now is read from. The
+count is stated rather than left stale, because a docstring that undercounts its
+own reads is how a caller ends up fencing the wrong number of them in a
+transaction.
 """
 
 from __future__ import annotations
@@ -29,11 +30,15 @@ from . import observed_outcomes
 from .composition import (
     READY,
     READY_RESTRICTED,
+    ROUTE_CURRENT,
+    ROUTE_MOVED,
+    ROUTE_UNRECORDED,
     ChainOutcome,
     Composition,
     compose,
     explain,
 )
+from .served_route import served_route_fingerprint
 
 
 def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> list[ChainOutcome]:
@@ -52,6 +57,10 @@ def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> l
     if keyring is observed_outcomes.READ_KEYRING:
         keyring = observed_outcomes.trusted_keyring()
     deployment_uuid = str(deployment.uuid)
+    rows = list(deployment.chain_outcomes.all())
+    # The route serving now, read once, and only when there is an outcome to compare
+    # with it: a deployment with no chains reads no assets here.
+    serving = served_route_fingerprint(deployment) if rows else ""
     return [
         ChainOutcome(
             workflow=row.workflow,
@@ -63,9 +72,25 @@ def read_chain_outcomes(deployment, keyring=observed_outcomes.READ_KEYRING) -> l
             # basis in force is demonstrated, i.e. when the signature naming this
             # engine verifies now.
             signer=row.observer_engine,
+            route=route_of(row, serving),
         )
-        for row in deployment.chain_outcomes.all()
+        for row in rows
     ]
+
+
+def route_of(row, serving: str) -> str:
+    """Whether ``row`` was taken against ``serving``, the route serving now.
+
+    Compared with the route computed from the graph NOW, not with the one noted
+    when the row was written: the note says what served then, and the question is
+    whether that is what serves. A blank binding is
+    :data:`~assurance.composition.ROUTE_UNRECORDED` -- the row cannot say which
+    route it exercised, and "current" would be the one guess this axis refuses.
+    """
+    bound = row.route_fingerprint or ""
+    if not bound:
+        return ROUTE_UNRECORDED
+    return ROUTE_CURRENT if bound == serving else ROUTE_MOVED
 
 
 def _basis_of(row, keyring, deployment_uuid: str) -> str:
@@ -322,6 +347,12 @@ def composition_payload(
         # something that watches effects signs one.
         "evidence_census": dict(composition.evidence_census),
         "authorization_checked": list(composition.authorization_checked),
+        # Which standing outcomes were taken against the route serving now, every
+        # reading including the zeros, and which `held`s were not: the chains a
+        # route change left to be exercised again, named so a reader can go and do
+        # it rather than infer it from a count.
+        "route_census": dict(composition.route_census),
+        "off_route": list(composition.off_route),
         "explanation": _explanation(composition, signal),
         # Required rather than defaulted, for the reason this builder exists at
         # all: a default would let a new publisher omit provenance and still

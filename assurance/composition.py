@@ -273,10 +273,53 @@ def evidence_kind(basis: str, signer: str = "") -> str:
         return SIGNER_EVIDENCE.get(signer, EVIDENCE_UNCLASSIFIED)
     return _UNSIGNED_EVIDENCE[basis]
 
+
+#: WHAT THE OUTCOME WAS TAKEN AGAINST, a fourth axis. An exercise is an exercise
+#: of the system that served it: the model, its revision and quantization, the
+#: tokenizer, the system template, the tool schema (see
+#: :mod:`assurance.served_route`). A ``held`` taken against one route says nothing
+#: about another, and a deployment whose route changed after its chains were
+#: exercised has chains nobody has exercised against what serves now.
+#:
+#: Decided by the persistence layer, which alone can see the deployment: the route
+#: the platform had noted as serving when the outcome was observed, compared with
+#: the route serving now. This module only reads the answer.
+#:
+#: The route serving now is the one the outcome was taken against.
+ROUTE_CURRENT = "current"
+#: The outcome was taken against a route that no longer serves.
+ROUTE_MOVED = "moved"
+#: Nothing says which route the outcome was taken against: it was recorded before
+#: routes were bound, it carries no instant, or it was observed before the platform
+#: had noted the route serving at that instant. THE DEFAULT, for the reason
+#: ``BASIS_UNKNOWN`` is one: a caller that says nothing has made no claim, and
+#: defaulting to ``current`` would invent the one fact this axis exists to check.
+ROUTE_UNRECORDED = "unrecorded"
+
+#: Every route reading this module understands.
+CHAIN_ROUTES: frozenset[str] = frozenset({ROUTE_CURRENT, ROUTE_MOVED, ROUTE_UNRECORDED})
+
+#: The readings under which an outcome is NOT evidence about the route serving now.
+#: Membership rather than ``!= ROUTE_CURRENT``, for the reason
+#: :data:`UNEXERCISED_BASES` gives.
+OFF_ROUTE: frozenset[str] = frozenset({ROUTE_MOVED, ROUTE_UNRECORDED})
+#: Strongest first, for breaking a tie between survivors that share a status and a
+#: basis: an exercise of what serves now outranks one of something else. Total over
+#: :data:`CHAIN_ROUTES`, asserted by test.
+_ROUTE_RANK: Mapping[str, int] = {ROUTE_CURRENT: 0, ROUTE_MOVED: 1, ROUTE_UNRECORDED: 2}
+
 #: How many unexercised workflows `explain` names before rolling the rest into a
 #: count. One sentence naming fifty workflows is a sentence nobody reads, and the
 #: full list is on `Composition.unexercised` for anyone who needs it.
 _UNEXERCISED_NAMED = 3
+
+
+def _named(workflows) -> str:
+    """Up to :data:`_UNEXERCISED_NAMED` workflow names, the rest as a count."""
+    named = ", ".join(workflows[:_UNEXERCISED_NAMED])
+    if len(workflows) > _UNEXERCISED_NAMED:
+        named += f" and {len(workflows) - _UNEXERCISED_NAMED} more"
+    return named
 
 #: Statuses under which a workflow is actually demonstrated. Membership, not
 #: `!= VIOLATED`: three of the four are not-held for three different reasons, and
@@ -349,8 +392,13 @@ def _floor_of(workflow: str, outcome: ChainOutcome, approved: set[str] | None) -
     """The floor one standing outcome puts under the decision.
 
     Its status's floor, with ONE addition: a ``held`` on an APPROVED workflow that
-    rests on no demonstrated exercise floors exactly as that workflow would had it
-    never reported at all -- :data:`NOT_DEMONSTRATED`'s floor.
+    rests on no demonstrated exercise OF THE ROUTE SERVING NOW floors exactly as
+    that workflow would had it never reported at all -- :data:`NOT_DEMONSTRATED`'s
+    floor. Two ways to miss that: the basis says no run happened, or the run was of
+    a route that no longer serves (or of one nothing recorded). A model swapped, a
+    tokenizer changed or a system template edited after the run leaves a ``held``
+    that speaks for a system that is gone, and reading it as current evidence would
+    make a route change the one change that never needs a retest.
 
     Without it, a closed approved set whose every chain was typed in composed to
     READY, and ``composition_decision_signal`` handed that READY to the decision:
@@ -370,14 +418,17 @@ def _floor_of(workflow: str, outcome: ChainOutcome, approved: set[str] | None) -
       assertion WORSE than recording nothing, a reason to stop recording them.
     * to any status but ``held``. An asserted violation, gap or thin evidence
       already carries a floor at least this bad; a claim that something failed is
-      one to act on whoever makes it, which is the conservative direction.
+      one to act on whoever makes it, which is the conservative direction. The same
+      holds on the route axis: a violation seen on a route that has since changed
+      stands, because a route change is not a fix, and only a later verdict can
+      show one.
     """
     floor = FLOORS.get(outcome.status)
     if (
         floor is None
         and approved is not None
         and workflow in approved
-        and outcome.basis in UNEXERCISED_BASES
+        and (outcome.basis in UNEXERCISED_BASES or outcome.route in OFF_ROUTE)
     ):
         return FLOORS[NOT_DEMONSTRATED]
     return floor
@@ -391,6 +442,11 @@ class UnknownChainBasis(ValueError):
     malformed" differently from "this row is about an unapproved workflow" needs to
     be able to, and matching on message text is not that.
     """
+
+
+class UnknownChainRoute(ValueError):
+    """A route reading outside :data:`CHAIN_ROUTES`, refused for the reason
+    :class:`UnknownChainBasis` is: the convenient default reads a typo as current."""
 
 
 class UnknownChainStatus(ValueError):
@@ -436,6 +492,9 @@ class ChainOutcome:
     #: The engine whose verified signature the outcome rests on, or "" when none
     #: does. Read only through :attr:`evidence`, and only for a demonstrated basis.
     signer: str = ""
+    #: Whether the outcome was taken against the route serving now -- see
+    #: :data:`ROUTE_UNRECORDED`, the default.
+    route: str = ROUTE_UNRECORDED
 
     def __post_init__(self) -> None:
         if self.status not in CHAIN_STATUSES:
@@ -447,6 +506,11 @@ class ChainOutcome:
             raise UnknownChainBasis(
                 f"chain outcome for {self.workflow!r} has basis {self.basis!r}; "
                 f"this module defines {', '.join(sorted(CHAIN_BASES))}"
+            )
+        if self.route not in CHAIN_ROUTES:
+            raise UnknownChainRoute(
+                f"chain outcome for {self.workflow!r} has route {self.route!r}; "
+                f"this module defines {', '.join(sorted(CHAIN_ROUTES))}"
             )
         # A name, not merely something truthy. Two workflows named by values of
         # different types compare fine in a dict and blow up the moment the
@@ -567,6 +631,15 @@ class Composition:
     #: ``explain`` names them, because "every chain held" is a sentence a reader
     #: takes to mean the effects were seen, and for these nothing saw them.
     authorization_checked: tuple[str, ...] = ()
+    #: How many standing outcomes read each way on the route axis, every reading
+    #: including the zeros. An approved workflow nobody reported is counted
+    #: ``unrecorded``, as it is counted ``unknown`` on the basis axis: it is the
+    #: absence of an outcome, and no route can be said of it.
+    route_census: Mapping[str, int] = field(default_factory=dict)
+    #: The workflows whose standing ``held`` was taken against a route that no
+    #: longer serves, or against one nothing recorded, sorted. These are the chains
+    #: to exercise again; ``explain`` names them.
+    off_route: tuple[str, ...] = ()
 
     @property
     def all_held(self) -> bool:
@@ -694,10 +767,20 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
         # down: an Achilles and an Athena outcome can both be signed `held` for one
         # workflow, and without a rank the kind reported would be whichever arrived
         # first.
+        #
+        # Then the route, between the two: of two signed `held`s for one workflow, the
+        # one taken against the route serving now is the one that speaks for the
+        # deployment, whatever kind of evidence the other is. Ranked before the
+        # evidence kind so a scan of a route that is gone cannot outrank a permit
+        # check of the one that serves.
         tied = [attempt for attempt in survivors if attempt.status == status]
         standing[workflow] = min(
             tied,
-            key=lambda attempt: (_BASIS_RANK[attempt.basis], _EVIDENCE_RANK[attempt.evidence]),
+            key=lambda attempt: (
+                _BASIS_RANK[attempt.basis],
+                _ROUTE_RANK[attempt.route],
+                _EVIDENCE_RANK[attempt.evidence],
+            ),
         )
     return standing, superseded
 
@@ -802,6 +885,8 @@ def compose(
     unexercised: list[str] = []
     evidence_census = dict.fromkeys(sorted(EVIDENCE_KINDS), 0)
     authorization_checked: list[str] = []
+    route_census = dict.fromkeys(sorted(CHAIN_ROUTES), 0)
+    off_route: list[str] = []
     for workflow, outcome in standing.items():
         census[outcome.status] += 1
         basis_census[outcome.basis] += 1
@@ -810,6 +895,9 @@ def compose(
         evidence_census[outcome.evidence] += 1
         if outcome.evidence == EVIDENCE_AUTHORIZATION_CHECK:
             authorization_checked.append(workflow)
+        route_census[outcome.route] += 1
+        if outcome.status == HELD and outcome.route in OFF_ROUTE:
+            off_route.append(workflow)
 
     decision: str | None = None
     deciding: list[str] = []
@@ -845,6 +933,8 @@ def compose(
         held_floored=tuple(sorted(set(deciding) & floored_by_rule)),
         evidence_census=evidence_census,
         authorization_checked=tuple(sorted(authorization_checked)),
+        route_census=route_census,
+        off_route=tuple(sorted(off_route)),
     )
 
 
@@ -894,20 +984,37 @@ def explain(composition: Composition) -> str:
         )
     else:
         basis_clause = ""
-    # When an approved workflow's typed-in `held` is what set the floor, the
-    # sentence above names a held workflow as the reason the decision is not ready,
-    # which reads as a contradiction unless it says why -- and only then.
-    if composition.held_floored:
-        floored = ", ".join(composition.held_floored[:_UNEXERCISED_NAMED])
-        if len(composition.held_floored) > _UNEXERCISED_NAMED:
-            floored += f" and {len(composition.held_floored) - _UNEXERCISED_NAMED} more"
-        held_clause = (
-            f" The held reported for {floored} rests on no demonstrated exercise, and"
+    # The route clause, beside the basis clause and for the same reason: a `held`
+    # taken against a route that no longer serves reads, in the census, exactly
+    # like one taken against the route that does. Silent when there is none.
+    if composition.off_route:
+        basis_clause += (
+            f" {len(composition.off_route)} held chain(s) were exercised against a served"
+            f" route that is not the one serving now, or one nothing recorded"
+            f" ({_named(list(composition.off_route))})."
+        )
+    # When an approved workflow's `held` is what set the floor, the sentence above
+    # names a held workflow as the reason the decision is not ready, which reads as
+    # a contradiction unless it says why -- and only then. There are two whys, and
+    # each workflow gets the true one: the basis when no run is recorded at all,
+    # the route when a run is but of a route that no longer serves.
+    unexercised = set(composition.unexercised)
+    asserted = [w for w in composition.held_floored if w in unexercised]
+    rerouted = [w for w in composition.held_floored if w not in unexercised]
+    held_clause = ""
+    if asserted:
+        held_clause += (
+            f" The held reported for {_named(asserted)} rests on no demonstrated exercise, and"
             f" on an approved workflow that counts as {NOT_DEMONSTRATED}: an assertion"
             f" is not the run READY asks for."
         )
-    else:
-        held_clause = ""
+    if rerouted:
+        held_clause += (
+            f" The held reported for {_named(rerouted)} was taken against a served route"
+            f" that is not the one serving now, or one nothing recorded, and on an approved"
+            f" workflow that counts as {NOT_DEMONSTRATED}: a run of another route is not a"
+            f" run of this one, so the chain must be exercised again."
+        )
     # The evidence clause. "Every chain held" reads as "the effects were seen", and
     # for a workflow whose standing outcome is an authorization check nothing saw
     # them: the gate checked the action it was asked about, at dispatch, and that

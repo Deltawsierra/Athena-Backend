@@ -17,6 +17,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Exists, OuterRef
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -61,6 +62,7 @@ from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
 from .roi import build_executive_summary
 from .route import build_route_map
+from .served_route import note_route_quietly, routes_for_outcomes
 from .models import (
     ApprovedWorkflow,
     Asset,
@@ -210,9 +212,11 @@ def _refresh_stored_decision(deployment) -> None:
     two commit together or neither does.
 
     A declared latent condition the write made true fires first (it marks its claim
-    STALE and opens a retest), so the decision refreshed here reads it.
+    STALE and opens a retest), so the decision refreshed here reads it. The route the
+    write left serving is noted beside it, so a run after it binds to it.
     """
     fire_due_conditions(deployment)
+    note_route_quietly(deployment)
     recompute_decision(deployment)
 
 
@@ -1581,9 +1585,16 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     serializer.errors[0] if single else serializer.errors
                 )
             with transaction.atomic():
+                rows = list(serializer.validated_data)
+                # Bound like a signed row, so the record says which route each
+                # outcome was reported against whoever reported it. A typed-in held
+                # floors on its basis either way; the binding is not what gates it.
+                routes = routes_for_outcomes(
+                    deployment, [row.get("observed_at") for row in rows], now=timezone.now()
+                )
                 WorkflowChainOutcome.objects.bulk_create(
-                    WorkflowChainOutcome(deployment=deployment, **row)
-                    for row in serializer.validated_data
+                    WorkflowChainOutcome(deployment=deployment, route_fingerprint=route, **row)
+                    for row, route in zip(rows, routes, strict=True)
                 )
                 _refresh_stored_decision(deployment)
         recorded = deployment.chain_outcomes.all()
