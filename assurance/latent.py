@@ -126,12 +126,24 @@ def _observe_asset_appears(condition, deployment) -> tuple[bool, str]:
 def _observe_asset_becomes_unmanaged(condition, deployment) -> tuple[bool, str]:
     # A retired row is no component: read as one, a tool nobody declares any more
     # answered "still known" where the rule is that a gone asset is unobservable.
-    asset = next(iter(in_graph(deployment.assets.filter(name=condition.subject))), None)
-    if asset is None:
+    named = in_graph(deployment.assets.filter(name=condition.subject).order_by("kind", "identifier", "pk"))
+    if not named:
         # NOT False. The asset this condition is about is gone, so we cannot say
         # whether it became unmanaged -- an asset that left the inventory is a
         # coverage question, not a clean bill of health.
         raise Unobservable(f"no asset named {condition.subject!r} on this deployment")
+    if len(named) > 1:
+        # Every component by that name, not one of them. Reading one -- the oldest
+        # row, or whichever the database returned first -- made the tripwire depend
+        # on row order: two tools both called "github", one flagged unmanaged, read
+        # "still known" or "stopped" as the rows came back. The condition asks to
+        # be told when the component stops being governed, and any of them may be it.
+        shadowed = [a for a in named if is_shadow(a.classification)]
+        return bool(shadowed), (
+            f"{len(named)} assets named {condition.subject!r}: "
+            + ", ".join(f"{a.kind} {a.identifier!r} classification={a.classification}" for a in named)
+        )
+    asset = named[0]
     # `is_shadow`, not a private {UNMANAGED, UNKNOWN} set.
     #
     # An operator who declares this condition is saying "tell me when this asset

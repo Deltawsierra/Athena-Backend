@@ -26,7 +26,7 @@ from assurance.assets import derive_assets
 from assurance.bom_drift import assess_bom_drift, record_bom_drift_findings
 from assurance.component_identity import by_identity, component_key
 from assurance.coverage import coverage_manifest
-from assurance.models import Asset, DeclaredComponent, Deployment, Finding
+from assurance.models import Asset, AssuranceClaim, DeclaredComponent, Deployment, Finding
 from pentest.models import PentestScan
 
 pytestmark = pytest.mark.django_db
@@ -1619,3 +1619,71 @@ def test_0035_marks_a_name_a_person_gave_before_the_admin_marked_it():
     _asset(dep, kind=Kind.AGENT, name="alpha", metadata={**inventory, "identity": "", "tools": ["github"]})
     derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
     assert dep.assets.get(kind=Kind.TOOL, identifier="github").name == "GitHub (prod)"
+
+
+def test_deleting_a_retired_row_moves_every_fingerprint_the_reach_rests_on():
+    """A retired row's key still decides resolution: while it stands, the old unnamed
+    row's ``github`` names nothing; deleted, the reference falls through to beta's
+    ``github@corp`` -- called ``github`` -- and its ``admin``. That moved the access
+    reading with neither fingerprint moving, so the claim went on saying what it said
+    and the invalidation check found nothing to invalidate."""
+    from assurance.fingerprint import claim_input_fingerprints, compute_system_fingerprint
+
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, name="github", metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={**inventory, "identity": "", "tools": ["github"]})
+    derive_assets(dep, _agent_scan(dep.owner, "beta", [
+        {"name": "github", "server": "corp", "permissions": ["admin"]}]))
+    row = dep.assets.get(kind=Kind.TOOL, identifier="github")
+    assert row.metadata.get("retired")
+    access = AssuranceClaim.ClaimType.EFFECTIVE_ACCESS
+    before = (claim_input_fingerprints(dep)[access], compute_system_fingerprint(dep))
+    assert "privileged_control" not in _capabilities(assess_effective_access(dep), "agent")
+
+    row.delete()
+    dep = Deployment.objects.get(pk=dep.pk)
+
+    assert "privileged_control" in _capabilities(assess_effective_access(dep), "agent")
+    after = (claim_input_fingerprints(dep)[access], compute_system_fingerprint(dep))
+    assert after[0] != before[0]
+    assert after[1] != before[1]
+
+
+def test_a_merged_identity_moves_the_system_fingerprint_too():
+    """The system fingerprint is said to cover the access family as much or more; it
+    did not read ``merged_identities``, so a rescan that changed which account the
+    old unnamed row acts as moved the reading and left the system fingerprint still."""
+    from assurance.fingerprint import compute_system_fingerprint
+
+    dep = _dep()
+    agent = _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+                   metadata={"source": "declared_inventory", "identity": "svc-a", "tools": []})
+    before = compute_system_fingerprint(dep)
+    agent.metadata = {**agent.metadata, "merged_identities": ["svc-admin"]}
+    agent.save(update_fields=["metadata"])
+    assert compute_system_fingerprint(Deployment.objects.get(pk=dep.pk)) != before
+
+
+def test_an_unmanaged_condition_reads_every_asset_by_that_name_not_one():
+    """Two tools called ``github`` -- a settled plain tool and beta's
+    ``github@corp`` -- and one of them flagged unmanaged. Reading one of them, the
+    oldest row or whichever the database returned first, made the tripwire depend on
+    row order; the condition asks to be told when the component stops being governed,
+    and either may be it."""
+    from assurance.latent import _observe_asset_becomes_unmanaged
+
+    dep = _dep()
+    _asset(dep, name="github", identifier="github")
+    other = _asset(dep, name="github", identifier="github@corp")
+
+    class Condition:
+        subject = "github"
+
+    held, said = _observe_asset_becomes_unmanaged(Condition, dep)
+    assert held is False and "2 assets named 'github'" in said
+    other.classification = Asset.Classification.UNMANAGED
+    other.save(update_fields=["classification"])
+    held, said = _observe_asset_becomes_unmanaged(Condition, dep)
+    assert held is True and "github@corp" in said
