@@ -325,7 +325,13 @@ def test_revoked_claim_is_excluded_from_the_plan():
     dep = Deployment.objects.create(name="d", owner=_user())
     _claim(dep, status=Status.REVOKED, fingerprint="r")
     plan = plan_revalidation(dep)
-    assert plan["summary"] == {"required": 0, "still_current": 0, "outstanding_unknowns": 0}
+    assert plan["summary"] == {
+        "required": 0,
+        "still_current": 0,
+        "outstanding_unknowns": 0,
+        "workflows_to_exercise": 0,
+    }
+    assert plan["workflows_to_exercise"] == []
 
 
 def test_plan_carries_a_deterministic_fingerprint():
