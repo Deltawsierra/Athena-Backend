@@ -360,8 +360,8 @@ def _derive_effective_access(deployment) -> dict:
             supporting += (
                 f" {len(legacy)} declared reference(s) come from the row the old identity "
                 "rules wrote for every unnamed agent at once; the reach through them is "
-                "counted, and no rescan re-records that row -- the current rules key each "
-                "unnamed agent by where it is: "
+                "counted as the rows they name stand now, and a rescan records each unnamed "
+                "agent under a row of its own, keyed by where it is, not that one: "
                 + ", ".join(legacy)
                 + "."
             )

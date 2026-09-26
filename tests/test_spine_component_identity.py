@@ -393,8 +393,10 @@ def test_a_deployment_scanned_under_the_old_identities_hides_no_gap():
     """Rescanned, the old server-keyed tool row answered the tools' ``server:
     files-mcp`` -- the gap a fresh deployment reports, no such server declared,
     read as no gap. A server is never a tool now, so the upgraded deployment names
-    each reference the fresh one does, and the old unnamed row's own references as
-    what they are: declared by a row no rescan re-records."""
+    each reference the fresh one does. The old server-keyed row is retired -- the
+    unnamed agent's rescan names its tools under their own keys, and the old row
+    for every unnamed agent holds nothing in place -- so that row's two tools name
+    nothing any more: not found, and said to be its."""
     fresh = _dep("fresh")
     derive_assets(fresh, _files_scan(fresh.owner))
     assert _references(fresh) == [("files-mcp", "server", "not_found")] * 2
@@ -402,11 +404,13 @@ def test_a_deployment_scanned_under_the_old_identities_hides_no_gap():
     upgraded = _dep("upgraded")
     _old_rows(upgraded, agent_tools=["files-mcp", "files-mcp"])
     derive_assets(upgraded, _files_scan(upgraded.owner))
-    # The two new tools' server and the old row's own (its own key -- it used to
-    # resolve to itself and say nothing), none of them a declared server; and the
-    # old unnamed agent's two tools, still followed to the old row they name.
-    assert _references(upgraded) == [("files-mcp", "server", "not_found")] * 3 + [
-        ("files-mcp", "tools", "legacy_unnamed_agent")
+    # The two new tools' server, not a declared server, as in the fresh one; and
+    # the old unnamed agent's two tools, naming a row nothing declares any more.
+    assert _references(upgraded) == [("files-mcp", "server", "not_found")] * 2 + [
+        ("files-mcp", "tools", "not_found")
+    ] * 2
+    assert [r for r in _reasons(upgraded) if r[1] == "tools"] == [
+        ("files-mcp", "tools", ("not_found", "legacy_unnamed_agent"))
     ] * 2
 
 
@@ -660,7 +664,7 @@ def test_another_agents_declaration_merges_into_an_old_row_and_leaves_it_reporte
     refresh replaced its permissions and stamped it current, so the old agent --
     not rescanned -- lost its shell and the reason naming the row disappeared."""
     dep = _dep()
-    _old_rows(dep, agent_tools=["files-mcp"])
+    _old_named_rows(dep, agent="helper")
     derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["http:get"]}))
 
     ghost = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
@@ -668,15 +672,45 @@ def test_another_agents_declaration_merges_into_an_old_row_and_leaves_it_reporte
     assert "identity_rules" not in ghost.metadata
     assert ghost.metadata["server"] == "files-mcp"
     result = assess_effective_access(dep)
-    assert "code_execution" in {c["key"] for c in _principal(result, "agent")["capabilities"]}
+    assert "code_execution" in {c["key"] for c in _principal(result, "helper")["capabilities"]}
     assert ("files-mcp", "tools", "superseded_identity") in _references(dep)
+
+
+def test_the_old_unnamed_row_holds_no_row_in_place():
+    """ops and the old unnamed agent shared a plain tool ``github``; ops has since
+    dropped ``shell`` from it. Held in place by the old unnamed row -- which no
+    rescan re-records -- the row stayed merged, and ops reached ``shell`` through
+    every rescan while the page said a rescan would confirm it. It settles to what
+    the current declarations say, the same as where no unnamed agent ever was."""
+    from assurance.claims import _derive_effective_access
+
+    def run(*, with_unnamed):
+        dep = _dep("with" if with_unnamed else "without")
+        inventory = {"source": "declared_inventory", "declared": True}
+        _asset(dep, kind=Kind.TOOL, name="github", identifier="github", metadata={
+            **inventory, "permissions": ["repo:read", "shell"], "legacy_key": True})
+        _asset(dep, kind=Kind.AGENT, name="ops", identifier="ops",
+               metadata={**inventory, "identity": "", "tools": ["github"]})
+        if with_unnamed:
+            _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+                   metadata={**inventory, "identity": "", "tools": ["github"]})
+        for _ in range(2):
+            derive_assets(dep, _agent_scan(dep.owner, "ops", [{"name": "github", "permissions": ["repo:read"]}]))
+        return dep
+
+    for with_unnamed in (False, True):
+        dep = run(with_unnamed=with_unnamed)
+        assert "code_execution" not in _capabilities(assess_effective_access(dep), "ops"), with_unnamed
+        assert dep.assets.get(kind=Kind.TOOL, identifier="github").metadata["permissions"] == ["repo:read"]
+        digest = _derive_effective_access(dep)["supporting_summary"]
+        assert "a rescan is what confirms" not in digest, digest
 
 
 def test_a_nameless_tool_on_a_server_has_its_own_key_and_leaves_the_old_row_alone():
     """As the server's bare name it landed on the old collapsed row. It is
     ``@server`` now, which no old row holds."""
     dep = _dep()
-    _old_rows(dep, agent_tools=["files-mcp"])
+    _old_named_rows(dep, agent="helper")
     derive_assets(dep, _landing_scan(dep.owner, {"server": "files-mcp", "permissions": ["http:get"]}))
 
     assert dep.assets.get(kind=Kind.TOOL, identifier="files-mcp").metadata["permissions"] == ["shell"]
@@ -773,7 +807,7 @@ def test_an_mcp_server_row_is_never_a_collapse():
 ])
 def test_a_merge_is_approved_only_if_the_row_and_the_declaration_both_are(row_approved, approved, expected):
     dep = _dep()
-    _old_rows(dep, agent_tools=["files-mcp"])
+    _old_named_rows(dep, agent="helper")
     ghost = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
     ghost.classification = Asset.Classification.APPROVED if row_approved else Asset.Classification.KNOWN
     ghost.save()
@@ -959,9 +993,10 @@ def test_an_account_only_an_unrecorded_agent_names_says_so():
 
     (gap,) = _principal(assess_effective_access(dep), "svc-legacy")["gaps"]
     assert gap["type"] == "use_unproven"
-    # The old unnamed row: no rescan re-records it, and the gap says so rather than
-    # sending the operator to rescan.
-    assert "no rescan re-records" in gap["detail"]
+    # The old unnamed row: a rescan records each unnamed agent under a row of its
+    # own, not this one, and the gap says so rather than sending the operator to
+    # rescan.
+    assert "a row of its own" in gap["detail"]
     assert "scanned again" not in gap["detail"]
     assert "more than one service account" not in gap["detail"]
 
@@ -1228,7 +1263,7 @@ def test_a_merge_does_not_keep_a_permission_the_declaration_since_dropped():
     """Merged over the row as it stood, every power any declaration ever gave the
     key stayed: http:get, dropped from the declaration, was still on the row."""
     dep = _dep()
-    _old_rows(dep, agent_tools=["files-mcp"])
+    _old_named_rows(dep, agent="helper")
     derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["http:get"]}))
     derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["read"]}))
 
@@ -1315,7 +1350,7 @@ def test_the_digest_says_the_old_unnamed_rows_references_need_no_rescan():
         "source": "declared_inventory", "identity_rules": 2, "permissions": ["read"]})
 
     digest = _derive_effective_access(dep)["supporting_summary"]
-    assert "no rescan re-records that row" in digest and "agent → search" in digest
+    assert "a row of its own" in digest and "agent → search" in digest
     assert "a rescan is what confirms" not in digest
 
 
@@ -1341,6 +1376,90 @@ def test_a_declaration_that_dropped_the_key_does_not_come_back_as_a_tool_nobody_
     assert row.metadata[RETIRED] and "identity_rules" not in row.metadata
     result = assess_effective_access(dep)
     assert all("code_execution" not in {c["key"] for c in p["capabilities"]} for p in result["principals"])
+
+
+@pytest.mark.parametrize("order", [("alpha+", "alpha-", "beta"), ("alpha+", "beta", "alpha-")],
+                         ids=["dropped-before-beta", "dropped-after-beta"])
+def test_the_same_declarations_settle_the_same_way_in_any_order(order):
+    """Settled before its last declarer dropped the key, the row was current and
+    stayed -- a tool nobody owns, its shell the deployment's -- while the same three
+    scans in the other order retired it. A row the old rules wrote is retired
+    whenever nothing names it, settled or not."""
+    from assurance.graph_refs import RETIRED
+
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, name="github", metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    for name in ("alpha", "beta"):
+        _asset(dep, kind=Kind.AGENT, name=name, metadata={**inventory, "identity": "", "tools": ["github"]})
+    scans = {
+        "alpha+": ("alpha", [{"name": "github", "permissions": ["shell"]}]),
+        "alpha-": ("alpha", [{"name": "search", "permissions": ["read"]}]),
+        "beta": ("beta", [{"name": "create_issue", "server": "github", "permissions": ["issues:write"]}]),
+    }
+    for step in order:
+        derive_assets(dep, _agent_scan(dep.owner, *scans[step]))
+
+    row = dep.assets.get(kind=Kind.TOOL, identifier="github")
+    assert row.metadata.get(RETIRED), row.metadata
+    result = assess_effective_access(dep)
+    assert all("code_execution" not in {c["key"] for c in p["capabilities"]} for p in result["principals"])
+
+    # And written again, it comes back -- then goes again once dropped again.
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
+    assert RETIRED not in dep.assets.get(pk=row.pk).metadata
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "search", "permissions": ["read"]}]))
+    assert dep.assets.get(pk=row.pk).metadata.get(RETIRED)
+
+
+def test_a_settled_row_takes_the_name_its_declaration_gives_the_key():
+    """beta's ``create_issue`` on the server ``github`` created the old row keyed
+    ``github``, and the name is written once. Settled to alpha's plain tool
+    ``github``, it kept the name ``create_issue`` -- a tool beta really has, with
+    other powers -- and every view that labels a path by name said alpha invokes
+    create_issue with shell. A name a person gave the row is left alone."""
+    for renamed_by_hand in (False, True):
+        dep = _dep("hand" if renamed_by_hand else "machine")
+        inventory = {"source": "declared_inventory", "declared": True}
+        row = _asset(dep, name="create_issue", identifier="github",
+                     metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+        if renamed_by_hand:
+            row.name = "GitHub (prod)"
+            row.save(update_fields=["name"])
+        for name in ("alpha", "beta"):
+            _asset(dep, kind=Kind.AGENT, name=name, metadata={**inventory, "identity": "", "tools": ["github"]})
+        derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
+        derive_assets(dep, _agent_scan(dep.owner, "beta", [
+            {"name": "create_issue", "server": "github", "permissions": ["issues:write"]}]))
+
+        settled = dep.assets.get(kind=Kind.TOOL, identifier="github")
+        assert settled.metadata["permissions"] == ["shell"]
+        assert settled.name == ("GitHub (prod)" if renamed_by_hand else "github")
+        assert dep.assets.get(kind=Kind.TOOL, identifier="create_issue@github").name == "create_issue"
+
+
+def test_a_retired_row_is_no_asset_a_latent_condition_can_read():
+    """``asset_becomes_unmanaged`` read the retired row as a component still known,
+    where a gone asset is one it cannot observe; and ``asset_appears`` counted it
+    among the deployment's assets."""
+    from assurance.latent import Unobservable, _observe_asset_appears, _observe_asset_becomes_unmanaged
+
+    dep = _dep()
+    _old_named_rows(dep)
+    # The agent's rescan names a tool of its own and nothing on files-mcp, so the
+    # old row -- named read_file -- is the only asset by that name, and retired.
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "lookup", "permissions": ["read"]}]))
+    assert dep.assets.get(kind=Kind.TOOL, identifier="files-mcp").metadata.get("retired")
+    assert dep.assets.filter(name="read_file").count() == 1
+
+    class Condition:
+        subject = "read_file"
+
+    with pytest.raises(Unobservable):
+        _observe_asset_becomes_unmanaged(Condition, dep)
+    appears, said = _observe_asset_appears(Condition, dep)
+    assert appears is False
+    assert f"among {dep.assets.count() - 1} on the deployment" in said
 
 
 def test_a_settled_row_is_what_its_declaration_asked_to_be_classified():

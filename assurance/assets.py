@@ -47,6 +47,7 @@ from .graph_refs import (
     RETIRED,
     TOOL_KINDS,
     identity_references,
+    legacy_unnamed_agent,
     retired,
     superseded_identity,
     tool_references,
@@ -116,17 +117,21 @@ def _get_or_refresh(
     asset, created = Asset.objects.get_or_create(
         deployment=deployment, kind=kind, identifier=identifier[:IDENTIFIER_MAX], defaults=defaults
     )
+    renamed = False
     if not created and metadata and _keeps_what_it_stood_for(asset, metadata):
-        metadata, classification = _merge_into_legacy_row(asset, metadata, classification)
+        metadata, classification = _merge_into_legacy_row(asset, metadata, classification, name=name)
     elif not created and metadata and metadata.get("identity_rules") == IDENTITY_RULES:
         # A declaration re-recording this key under the current rules replaces
         # whatever an older one left here: the snapshot of the old content, the
-        # declaration kept beside it, the key's collision mark, a retirement.
-        asset.metadata = {
-            k: v for k, v in (asset.metadata or {}).items() if k not in _LEGACY_BOOKKEEPING
-        }
+        # declaration kept beside it, the key's collision mark, a retirement --
+        # and the old rules' name, if nobody has renamed the row since.
+        held = asset.metadata if isinstance(asset.metadata, dict) else {}
+        renamed = _takes_declared_name(asset, held.get(LEGACY_NAME), name)
+        asset.metadata = {k: v for k, v in held.items() if k not in _LEGACY_BOOKKEEPING}
     if not created:
         fields = ["last_seen", "provider", "metadata"]
+        if renamed:
+            fields.append("name")
         asset.last_seen = now
         # A machine-derived classification tracks the current computed truth; a
         # human-set one is never overwritten by a re-derive.
@@ -159,14 +164,30 @@ DECLARED_CONTENT = "declared_content"
 #: The classification that declaration asked for, before a merge held it to the
 #: old row's: what the row is again once it is that declaration alone.
 DECLARED_CLASSIFICATION = "declared_classification"
+#: The name the row had when a current declaration first landed on it, and the
+#: name that declaration gives the key. The name is written once, at creation, so
+#: a row settled to a declaration kept the old one -- a tool keyed ``github`` still
+#: called ``create_issue``, a name another component really has -- and every view
+#: that labels a path by name described the wrong tool. Renamed only while it still
+#: carries the name the old rules gave it: a person's rename is theirs.
+LEGACY_NAME = "legacy_name"
+DECLARED_NAME = "declared_name"
 _LEGACY_BOOKKEEPING = frozenset(
-    {LEGACY_KEY, LEGACY_CONTENT, DECLARED_CONTENT, DECLARED_CLASSIFICATION, RETIRED}
+    {LEGACY_KEY, LEGACY_CONTENT, DECLARED_CONTENT, DECLARED_CLASSIFICATION, DECLARED_NAME, LEGACY_NAME, RETIRED}
 )
+#: Set on every row the old rules wrote that a declaration has since settled, and
+#: kept for good (it is not bookkeeping a current write clears). Such a row is
+#: retired whenever nothing names it, current or not: settled first and dropped
+#: after, it used to stay as a tool nobody owned, while the same declarations in
+#: the other order retired it -- one set of declarations, two graphs.
+LEGACY_ORIGIN = "legacy_origin"
 
 #: What a retired row says about itself.
 RETIRED_WHY = (
-    "No declaration that could mean this row remains: every agent that named its key "
-    "under the old identity rules has been rescanned, and none names it now."
+    "No declaration names this row any more: every agent that named its key has been "
+    "recorded under the current identity rules, and none names it now. (The row the old "
+    "rules wrote for every unnamed agent at once is not counted: a rescan records each "
+    "unnamed agent under a row of its own.)"
 )
 
 
@@ -243,7 +264,19 @@ def _covers(declared: dict, held: dict) -> bool:
     return not held.get(MERGED_IDENTITIES)
 
 
-def _merge_into_legacy_row(asset: Asset, metadata: dict, classification: str) -> tuple[dict, str]:
+def _takes_declared_name(asset: Asset, legacy_name, declared_name) -> bool:
+    """Rename ``asset`` to ``declared_name`` if it still carries ``legacy_name``,
+    the name the old rules gave it; True if it was renamed."""
+    wanted = str(declared_name or "").strip()[:255]
+    if not wanted or not isinstance(legacy_name, str) or asset.name != legacy_name or asset.name == wanted:
+        return False
+    asset.name = wanted
+    return True
+
+
+def _merge_into_legacy_row(
+    asset: Asset, metadata: dict, classification: str, *, name: str = ""
+) -> tuple[dict, str]:
     """``(metadata, classification)`` for a declaration merging into a legacy row:
     its permissions and tools added to the row's, its identity beside the row's
     own (:data:`graph_refs.MERGED_IDENTITIES`), its server only where the row had
@@ -258,10 +291,16 @@ def _merge_into_legacy_row(asset: Asset, metadata: dict, classification: str) ->
     rescan. The old content is frozen the first time; the declaration is kept
     beside it (:data:`DECLARED_CONTENT`) for when nothing old can mean the row."""
     old = _legacy_content(asset)
+    held = asset.metadata if isinstance(asset.metadata, dict) else {}
     merged = {k: v for k, v in metadata.items() if k != "identity_rules"}
-    merged[LEGACY_CONTENT] = {k: v for k, v in old.items() if k not in _LEGACY_BOOKKEEPING}
+    merged[LEGACY_CONTENT] = {
+        k: v for k, v in old.items() if k not in _LEGACY_BOOKKEEPING and k != LEGACY_ORIGIN
+    }
     merged[DECLARED_CONTENT] = dict(metadata)
     merged[DECLARED_CLASSIFICATION] = classification
+    merged[DECLARED_NAME] = str(name or "").strip()[:255]
+    merged[LEGACY_NAME] = held.get(LEGACY_NAME) if isinstance(held.get(LEGACY_NAME), str) else asset.name
+    merged[LEGACY_ORIGIN] = True
     for key in ("permissions", "tools"):
         if key in merged:
             union = [str(v) for v in old.get(key) or [] if isinstance(v, str)]
@@ -555,7 +594,9 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
     since, or recorded before rows said what kind each tool was -- it stays as it
     is: followed, reported, its powers counted. Once none can, it stands for
     nothing old: a row a current declaration also landed on becomes that
-    declaration alone, and a row nothing declares is retired, its powers cleared.
+    declaration alone, and a row nothing declares is retired, its powers cleared --
+    then or later: a settled row whose last declaration drops the key is retired
+    too, so the same declarations settle the same way in any order.
 
     It never used to settle. The current rules write a tool on a server as
     ``name@server``, so no rescan ever touched the old row again, and a permission
@@ -580,6 +621,16 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
     for agent in rows:
         if agent.kind != Asset.Kind.AGENT or retired(agent):
             continue
+        if legacy_unnamed_agent(agent):
+            # The row the old rules wrote for every unnamed agent at once holds
+            # nothing in place. No rescan ever records it again -- the current rules
+            # record each unnamed agent under a row of its own -- so counting what
+            # it names kept every row it named merged for good: a named agent that
+            # dropped ``shell`` from a tool it shared with it reached ``shell``
+            # through every rescan, and the page asked for another. What it names
+            # is read as the graph holds it now, and reported as its (see
+            # ``graph_refs.UNRESOLVED_LEGACY_UNNAMED``).
+            continue
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
         kinds = metadata.get(TOOL_KINDS)
         if superseded_identity(agent) or not isinstance(kinds, dict):
@@ -595,18 +646,35 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
     for row in rows:
         if row.kind not in (Asset.Kind.TOOL, Asset.Kind.SKILL) or retired(row):
             continue
-        if not superseded_identity(row) or not _legacy_key(row) or row.identifier in old_references:
-            continue
         metadata = row.metadata if isinstance(row.metadata, dict) else {}
-        declared = metadata.get(DECLARED_CONTENT)
+        if superseded_identity(row):
+            if not _legacy_key(row):
+                continue
+        elif metadata.get(LEGACY_ORIGIN) is not True:
+            # A row only the current rules ever wrote is theirs to keep.
+            continue
+        if row.identifier in old_references:
+            continue
+        if not superseded_identity(row):
+            # Settled before, and current: it stays while a current declaration
+            # names it, and is retired the moment none does -- as it would have
+            # been had its last declarer dropped the key before the row settled.
+            if (row.identifier, row.kind) in current_references:
+                continue
+            declared = None
+        else:
+            declared = metadata.get(DECLARED_CONTENT)
         fields = ["metadata"]
         if (
             isinstance(declared, dict)
             and declared.get("identity_rules") == IDENTITY_RULES
             and (row.identifier, row.kind) in current_references
         ):
-            # What a current declaration wrote under this key, and still names.
-            row.metadata = dict(declared)
+            # What a current declaration wrote under this key, and still names --
+            # under the name it gives the key, unless a person renamed the row.
+            row.metadata = {**declared, LEGACY_ORIGIN: True}
+            if _takes_declared_name(row, metadata.get(LEGACY_NAME), metadata.get(DECLARED_NAME)):
+                fields.append("name")
             wanted = metadata.get(DECLARED_CLASSIFICATION)
             if (
                 row.classification_source == Asset.ClassificationSource.MACHINE
@@ -622,6 +690,10 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
             row.metadata = {
                 **{k: v for k, v in metadata.items() if k not in (DECLARED_CONTENT, DECLARED_CLASSIFICATION)},
                 "permissions": [],
+                LEGACY_ORIGIN: True,
+                # The name the old rules gave it, if nothing recorded one yet: a
+                # declaration that writes the key again renames it (see above).
+                LEGACY_NAME: metadata.get(LEGACY_NAME) if isinstance(metadata.get(LEGACY_NAME), str) else row.name,
                 RETIRED: {"at": now.isoformat(), "why": RETIRED_WHY},
             }
         row.save(update_fields=fields)

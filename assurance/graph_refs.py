@@ -80,11 +80,14 @@ UNRESOLVED_NAMES_A_PRINCIPAL = "names_a_principal"
 #: which is what it is.
 UNRESOLVED_SUPERSEDED = "superseded_identity"
 #: A reference from the one row the old identity rules wrote for EVERY unnamed
-#: agent at once. Followed and counted, like a superseded one, and different in
-#: the one way that matters to an operator: no rescan re-records it. The current
-#: rules key each unnamed agent by where it is, so a rescan writes that agent's
-#: own row and leaves this one as it was. Saying "rescan to confirm" of it sent
-#: people to rescan, forever, for a row no scan touches.
+#: agent at once. Followed and counted as the rows it names stand now -- it holds
+#: none of them in place, so one a later declaration settled is read as that
+#: declaration -- and different from a superseded one in the way that matters to
+#: an operator: a rescan does not re-record it. The current rules key each unnamed
+#: agent by where it is, so a rescan writes that agent's own row and leaves this
+#: one as it was (only an agent literally named "agent" writes this key again).
+#: Saying "rescan to confirm" of it sent people to rescan, forever, for a row no
+#: scan touches.
 UNRESOLVED_LEGACY_UNNAMED = "legacy_unnamed_agent"
 
 #: The key the old rules gave every unnamed agent.

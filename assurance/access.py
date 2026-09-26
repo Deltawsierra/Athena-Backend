@@ -313,7 +313,8 @@ IDENTITY_AMBIGUOUS = "ambiguous"
 #: Named by an agent row no scan has recorded under the current identity rules.
 IDENTITY_UNRECORDED = "unrecorded"
 #: Named only by the row the old rules wrote for every unnamed agent -- which,
-#: unlike any other unrecorded row, no rescan re-records.
+#: unlike any other unrecorded row, a rescan does not re-record: it records each
+#: unnamed agent under a row of its own.
 IDENTITY_LEGACY = "legacy"
 _USE_RANK = {IDENTITY_LEGACY: 0, IDENTITY_UNRECORDED: 1, IDENTITY_AMBIGUOUS: 2, IDENTITY_PROVEN: 3}
 
@@ -533,8 +534,9 @@ def _principal_dict(
         elif acted_under == IDENTITY_LEGACY:
             detail = (
                 "The only agent naming this account is the row the old identity rules "
-                "wrote for every unnamed agent at once, and no rescan re-records that row "
-                "— no principal is proven to act under this account."
+                "wrote for every unnamed agent at once, and a rescan records each unnamed "
+                "agent under a row of its own, not that one — no principal is proven to act "
+                "under this account."
             )
         else:
             detail = (

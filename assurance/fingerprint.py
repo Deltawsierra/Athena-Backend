@@ -239,7 +239,12 @@ def compute_system_fingerprint(deployment) -> str:
 # family and requires any change to a claim's derived reading to move that
 # claim's fingerprint. The other direction -- a family listed that the deriver
 # does not read -- costs a retest nobody needed, and is pinned too, per family.
-_ACCESS_METADATA_KEYS = ("identity", "permissions", "server", "tools")
+#
+# ``tool_kinds`` decides which row a tool reference reaches (a tool, not the MCP
+# server or skill at its key), so it is an input: left out, a declaration that
+# changed only the kind of a tool moved an agent's reach from ``read`` to ``shell``
+# and the access claim's inputs read as unchanged.
+_ACCESS_METADATA_KEYS = ("identity", "permissions", "server", "tool_kinds", "tools")
 _BOM_FACT_METADATA_KEYS = (
     "adapter",
     "base_url",

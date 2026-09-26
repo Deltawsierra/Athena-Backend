@@ -119,12 +119,14 @@ def _observe_asset_appears(condition, deployment) -> tuple[bool, str]:
     ]
     return bool(matches), (
         f"{len(matches)} asset(s) named or identified {condition.subject!r} "
-        f"among {deployment.assets.count()} on the deployment"
+        f"among {len(in_graph(deployment.assets.all()))} on the deployment"
     )
 
 
 def _observe_asset_becomes_unmanaged(condition, deployment) -> tuple[bool, str]:
-    asset = deployment.assets.filter(name=condition.subject).first()
+    # A retired row is no component: read as one, a tool nobody declares any more
+    # answered "still known" where the rule is that a gone asset is unobservable.
+    asset = next(iter(in_graph(deployment.assets.filter(name=condition.subject).order_by("pk"))), None)
     if asset is None:
         # NOT False. The asset this condition is about is gone, so we cannot say
         # whether it became unmanaged -- an asset that left the inventory is a
