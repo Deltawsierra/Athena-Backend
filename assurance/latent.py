@@ -126,7 +126,7 @@ def _observe_asset_appears(condition, deployment) -> tuple[bool, str]:
 def _observe_asset_becomes_unmanaged(condition, deployment) -> tuple[bool, str]:
     # A retired row is no component: read as one, a tool nobody declares any more
     # answered "still known" where the rule is that a gone asset is unobservable.
-    asset = next(iter(in_graph(deployment.assets.filter(name=condition.subject).order_by("pk"))), None)
+    asset = next(iter(in_graph(deployment.assets.filter(name=condition.subject))), None)
     if asset is None:
         # NOT False. The asset this condition is about is gone, so we cannot say
         # whether it became unmanaged -- an asset that left the inventory is a

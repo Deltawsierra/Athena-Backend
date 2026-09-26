@@ -581,9 +581,10 @@ def assess_effective_access(deployment) -> dict:
 
     Prefetch ``assets__provider`` on the caller side. Pure and side-effect-free —
     a computed view of the stored asset graph, never a stored record."""
-    assets = in_graph(deployment.assets.all())
+    every_asset = list(deployment.assets.all())
+    assets = in_graph(every_asset)
 
-    by_identifier, by_name = reference_index(assets)
+    by_identifier, by_name = reference_index(every_asset)
 
     edges, unresolved = _build_edges(assets, by_identifier, by_name)
     unresolved = sort_references(unresolved)

@@ -135,13 +135,18 @@ def reference_index(assets) -> tuple[dict, dict]:
     unmanaged one, with no change anyone could point to, and on Postgres the
     same rows can come back in either order. A reference that could mean two
     components does not get to mean one of them by accident.
+
+    Pass every asset, :func:`retired` rows too: a retired row is indexed by its
+    identifier alone, so a key only it carries still stops resolution there
+    (:func:`resolve_reference`) rather than falling through to a name.
     """
     by_identifier: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for asset in assets:
         if asset.identifier:
             by_identifier.setdefault(asset.identifier, []).append(asset)
-        by_name.setdefault(asset.name, []).append(asset)
+        if not retired(asset):
+            by_name.setdefault(asset.name, []).append(asset)
     return by_identifier, by_name
 
 
@@ -164,7 +169,7 @@ def identity_index(assets) -> tuple[tuple[dict, dict], tuple[dict, dict]]:
     carries exactly, which is what one identity means to every other reader:
     ``SVC-Admin`` acting as the only account ``svc-admin`` is that account.
     """
-    accounts = [a for a in assets if a.kind == SERVICE_ACCOUNT_KIND]
+    accounts = [a for a in assets if a.kind == SERVICE_ACCOUNT_KIND and not retired(a)]
     by_identifier: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for asset in accounts:
@@ -295,6 +300,13 @@ def resolve_reference(
     goes on to the next index -- a ``server`` that only a tool carries is a server
     nobody declared, not a principal and not that tool.
 
+    A :func:`retired` row is never a candidate, and a key only retired rows carry
+    names nothing: ``([], UNRESOLVED_NOT_FOUND)``, with no fall-through to a name.
+    The key still says which row was meant -- one nothing declares any more -- and
+    falling through handed the reference whatever else was CALLED that: the old
+    unnamed row's ``github``, retired, reached another agent's ``github@corp`` and
+    its ``admin``, a component it never named.
+
     An empty list is not permission to invent a node, and it is not permission to
     say nothing either: the caller records the reason.
     """
@@ -302,15 +314,18 @@ def resolve_reference(
     if not key:
         return [], UNRESOLVED_NOT_FOUND
     for index in (by_identifier, by_name):
-        matches = [
+        carried = [
             m for m in index.get(key) or ()
             if m.kind not in skip_kinds and (only_kinds is None or m.kind in only_kinds)
         ]
+        matches = [m for m in carried if not retired(m)]
         if matches:
             usable = [m for m in matches if m.kind not in not_kinds]
             if not usable:
                 return [], UNRESOLVED_NAMES_A_PRINCIPAL
             return usable, (UNRESOLVED_AMBIGUOUS if len(usable) > 1 else None)
+        if carried:
+            return [], UNRESOLVED_NOT_FOUND
     return [], UNRESOLVED_NOT_FOUND
 
 

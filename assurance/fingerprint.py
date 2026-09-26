@@ -243,8 +243,10 @@ def compute_system_fingerprint(deployment) -> str:
 # ``tool_kinds`` decides which row a tool reference reaches (a tool, not the MCP
 # server or skill at its key), so it is an input: left out, a declaration that
 # changed only the kind of a tool moved an agent's reach from ``read`` to ``shell``
-# and the access claim's inputs read as unchanged.
-_ACCESS_METADATA_KEYS = ("identity", "permissions", "server", "tool_kinds", "tools")
+# and the access claim's inputs read as unchanged. ``merged_identities`` likewise:
+# every account a merged agent row acts as beyond its first, so a rescan that
+# changed which account the old unnamed row acts as moves the reading.
+_ACCESS_METADATA_KEYS = ("identity", "merged_identities", "permissions", "server", "tool_kinds", "tools")
 _BOM_FACT_METADATA_KEYS = (
     "adapter",
     "base_url",

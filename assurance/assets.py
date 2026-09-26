@@ -595,6 +595,17 @@ def _agent_and_tools(
     return agent_asset, touched
 
 
+def _declared_tool_kinds(metadata: dict) -> set[tuple[str, str]]:
+    """Every ``(key, kind)`` an agent's declaration wrote a tool as (:data:`TOOL_KINDS`)."""
+    kinds = metadata.get(TOOL_KINDS)
+    if not isinstance(kinds, dict):
+        return set()
+    return {
+        (str(key), kind) for key, listed in kinds.items() if isinstance(listed, list)
+        for kind in listed if isinstance(kind, str)
+    }
+
+
 def _settle_legacy_rows(deployment: Deployment, now) -> None:
     """Re-read every old-keyed tool row now that a declaration has been recorded.
 
@@ -630,6 +641,7 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
     for agent in rows:
         if agent.kind != Asset.Kind.AGENT or retired(agent):
             continue
+        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
         if legacy_unnamed_agent(agent):
             # The row the old rules wrote for every unnamed agent at once holds
             # nothing in place. No rescan ever records it again -- the current rules
@@ -639,18 +651,24 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
             # through every rescan, and the page asked for another. What it names
             # is read as the graph holds it now, and reported as its (see
             # ``graph_refs.UNRESOLVED_LEGACY_UNNAMED``).
+            #
+            # Except what an agent literally named "agent" declares now. Its row is
+            # this one -- a declaration that does not cover what the row held merges
+            # in and leaves the old stamp -- and skipping the row whole retired every
+            # tool that agent declares, on every scan, and its reference then found
+            # another agent's tool by name. What it declares under the current rules
+            # is a current declaration like any other.
+            declared = metadata.get(DECLARED_CONTENT)
+            if isinstance(declared, dict) and declared.get("identity_rules") == IDENTITY_RULES:
+                current_references.update(_declared_tool_kinds(declared))
             continue
-        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
         kinds = metadata.get(TOOL_KINDS)
         if superseded_identity(agent) or not isinstance(kinds, dict):
             old_references.update(
                 str(r).strip() for r in tool_references(metadata) if isinstance(r, str) and str(r).strip()
             )
         else:
-            current_references.update(
-                (str(key), kind) for key, listed in kinds.items() if isinstance(listed, list)
-                for kind in listed if isinstance(kind, str)
-            )
+            current_references.update(_declared_tool_kinds(metadata))
 
     for row in rows:
         if row.kind not in (Asset.Kind.TOOL, Asset.Kind.SKILL) or retired(row):

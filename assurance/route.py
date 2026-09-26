@@ -140,11 +140,12 @@ def build_route_map(deployment) -> dict:
     node, the edges between them (declared where the inventory attests one, the
     inferred pipeline spine otherwise), and an honest summary. Prefetch
     ``assets__provider`` on the caller side. Pure and side-effect-free."""
-    assets = in_graph(deployment.assets.all())
+    every_asset = list(deployment.assets.all())
+    assets = in_graph(every_asset)
 
     nodes: list[dict] = []
     by_uuid: dict[str, dict] = {}
-    by_identifier, by_name = reference_index(assets)
+    by_identifier, by_name = reference_index(every_asset)
     layer_members: dict[str, list[Asset]] = {layer: [] for layer in LAYER_ORDER}
 
     for asset in assets:

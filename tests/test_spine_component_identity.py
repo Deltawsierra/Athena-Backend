@@ -1519,3 +1519,103 @@ def test_the_old_unnamed_row_reaching_an_old_row_says_both():
     _old_rows(dep, agent_tools=["files-mcp"])
     rows = [r for r in _reasons(dep) if r[1] == "tools"]
     assert rows == [("files-mcp", "tools", ("legacy_unnamed_agent", "superseded_identity"))]
+
+
+# ---- Second re-check: the agent named "agent", a retired key, names people gave. ----
+
+
+def test_an_agent_named_agent_keeps_the_reach_it_declares():
+    """An agent literally named "agent" writes the old unnamed row's key, and a
+    declaration that does not cover what that row held merges in and leaves the old
+    stamp. The settle passed the row over whole, so every tool the agent declares
+    was retired on every scan -- and its reference then found beta's ``github@corp``
+    by name: the agent lost ``repo:read`` and gained beta's ``admin``. It reaches
+    what the same declarations give it where no old row ever was."""
+
+    def run(*, upgraded):
+        dep = _dep("upgraded" if upgraded else "fresh")
+        if upgraded:
+            inventory = {"source": "declared_inventory", "declared": True}
+            _asset(dep, name="github", metadata={
+                **inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+            _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+                   metadata={**inventory, "identity": "", "tools": ["github", "search"]})
+        derive_assets(dep, _agent_scan(dep.owner, "beta", [
+            {"name": "github", "server": "corp", "permissions": ["admin"]}]))
+        for _ in range(2):
+            derive_assets(dep, _agent_scan(dep.owner, "agent", [{"name": "github", "permissions": ["repo:read"]}]))
+        return dep
+
+    fresh, upgraded = run(upgraded=False), run(upgraded=True)
+    row = upgraded.assets.get(kind=Kind.TOOL, identifier="github")
+    assert not row.metadata.get("retired")
+    assert row.metadata["permissions"] == ["repo:read"]
+    assert "privileged_control" not in _capabilities(assess_effective_access(upgraded), "agent")
+    assert _capabilities(assess_effective_access(upgraded), "agent") == _capabilities(
+        assess_effective_access(fresh), "agent")
+    # Found, and said to come from the old row -- not "names nothing".
+    assert [r for r in _reasons(upgraded) if r[0] == "github"] == [
+        ("github", "tools", ("legacy_unnamed_agent",))]
+
+
+def test_a_key_only_a_retired_row_carries_names_nothing_else_by_name():
+    """The old unnamed row names ``github``, and that row is retired once nothing
+    else can mean it. The key then fell through to a name: ``github`` reached beta's
+    ``github@corp`` -- which beta calls ``github`` -- and its ``admin``, a component
+    the old row never named, with only "declared by the old row" said of it."""
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, name="github", metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={**inventory, "identity": "", "tools": ["github"]})
+    derive_assets(dep, _agent_scan(dep.owner, "beta", [
+        {"name": "github", "server": "corp", "permissions": ["admin"]}]))
+
+    assert dep.assets.get(kind=Kind.TOOL, identifier="github").metadata.get("retired")
+    assert dep.assets.get(kind=Kind.TOOL, identifier="github@corp").name == "github"
+    assert "privileged_control" not in _capabilities(assess_effective_access(dep), "agent")
+    assert "privileged_control" in _capabilities(assess_effective_access(dep), "beta")
+    assert [r for r in _reasons(dep) if r[1] == "tools"] == [
+        ("github", "tools", ("not_found", "legacy_unnamed_agent"))]
+
+
+def test_0035_marks_a_name_a_person_gave_before_the_admin_marked_it():
+    """Only the admin marks a rename, and only since it learned to; a row renamed
+    before that carried no mark, and the settle put the machine's name back over the
+    person's. The admin's own change log is the record of who renamed what."""
+    import json
+    from importlib import import_module
+
+    from django.apps import apps
+    from django.contrib.admin.models import CHANGE, LogEntry
+    from django.contrib.contenttypes.models import ContentType
+
+    migration = import_module("assurance.migrations.0035_named_by_hand_from_admin_log")
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    renamed = _asset(dep, name="GitHub (prod)", identifier="github", metadata={
+        **inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    reclassified = _asset(dep, name="search", metadata={**inventory})
+    other = _asset(dep, name="lookup", metadata={**inventory})
+    content_type = ContentType.objects.get_for_model(Asset)
+
+    def log(asset, message):
+        LogEntry.objects.create(
+            user=dep.owner, content_type=content_type, object_id=str(asset.pk), object_repr=asset.name,
+            action_flag=CHANGE, change_message=message,
+        )
+
+    log(renamed, json.dumps([{"changed": {"fields": ["Classification", "Name"]}}]))
+    log(reclassified, json.dumps([{"changed": {"fields": ["Classification"]}}]))
+    # An inline object's change names its own fields, not this asset's.
+    log(other, json.dumps([{"changed": {"name": "provider assertion", "object": "x", "fields": ["Name"]}}]))
+    log(other, "not a change message the admin writes")
+
+    for _ in range(2):  # the second pass changes nothing
+        migration.mark_names_people_gave(apps, None)
+        marked = {a.name for a in Asset.objects.filter(deployment=dep) if a.metadata.get("named_by_hand") is True}
+        assert marked == {"GitHub (prod)"}
+
+    _asset(dep, kind=Kind.AGENT, name="alpha", metadata={**inventory, "identity": "", "tools": ["github"]})
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
+    assert dep.assets.get(kind=Kind.TOOL, identifier="github").name == "GitHub (prod)"
