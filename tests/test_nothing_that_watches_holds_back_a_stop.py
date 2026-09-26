@@ -22,6 +22,7 @@ structure that should make it fast; it asserts that it is.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 
@@ -272,16 +273,23 @@ def _reads_inside_a_write(monkeypatch) -> list:
     return inside
 
 
+@contextlib.contextmanager
 def _committed():
     """The write's transaction commits: the hooks it scheduled run, as they do before
-    the response is sent. The writes before it committed too."""
-    from django.test import TestCase
+    the response is sent. The writes before it committed too. Each hook runs once:
+    those a block ran used to stay in the connection's list and ran again in the next
+    block, a second refresh production never makes."""
+    _run_commit_hooks_once()  # the writes before this one
+    yield
+    _run_commit_hooks_once()  # this one, and whatever its hooks schedule
 
-    earlier = list(connection.run_on_commit)
-    del connection.run_on_commit[:]
-    for _savepoints, callback, _robust in earlier:
-        callback()
-    return TestCase.captureOnCommitCallbacks(execute=True)
+
+def _run_commit_hooks_once():
+    while connection.run_on_commit:
+        hooks = list(connection.run_on_commit)
+        del connection.run_on_commit[:]
+        for _savepoints, callback, _robust in hooks:
+            callback()
 
 
 def test_a_boundary_write_reads_no_condition_in_its_own_transaction_and_fires_it_once_committed(monkeypatch):
@@ -390,6 +398,78 @@ def test_a_revoke_answers_without_waiting_on_the_backstop(monkeypatch):
     assert refreshed == [], "the revoke's response waited on the after-commit backstop"
     stored = Deployment.objects.get(pk=dep.pk)
     assert stored.decision == decision_support(Deployment.objects.get(pk=dep.pk))["decision"]
+
+
+def test_a_contradiction_answers_without_waiting_on_the_backstop(monkeypatch):
+    """Contradicting a claim is the other move a person makes that takes a READY down,
+    and its response waited on the backstop the revoke no longer schedules: every watch
+    on the deployment evaluated, 0.46-0.58 s at 5,000 watches and up to the ten-second
+    budget. It commits the decision it moves in its own transaction, as the revoke does,
+    and schedules none (#105 round 5)."""
+    from assurance import decision
+    from assurance.decision import decision_support
+
+    dep = _ready()
+    _watched(dep, 3)
+    contradicted = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    refreshed = []
+    real = decision.refresh_stored_decisions
+    monkeypatch.setattr(decision, "refresh_stored_decisions", lambda ids: (refreshed.append(list(ids)), real(ids))[1])
+    client = APIClient()
+    client.force_authenticate(user=_user())
+
+    with _committed():
+        response = client.post(
+            f"/api/assurance/claims/{contradicted.uuid}/transition/", {"to_status": "contradicted"}, format="json"
+        )
+
+    assert response.status_code == 200, response.content
+    assert refreshed == [], "the contradiction's response waited on the after-commit backstop"
+    stored = Deployment.objects.get(pk=dep.pk)
+    assert stored.decision == Deployment.Decision.NEEDS_REMEDIATION
+    assert stored.decision == decision_support(Deployment.objects.get(pk=dep.pk))["decision"]
+
+
+@pytest.mark.parametrize("stop", ["revoke", "contradict", "pause"])
+def test_no_stop_of_a_decision_another_release_left_reads_a_watch(monkeypatch, stop):
+    """A decision the release before recomputed is left recognisable by any recompute
+    that did not read its watches, so the next publishing read reads them. None of
+    those reads may be a stop's: not the revoke's, not the contradiction's, and not
+    the dispatch fence a pause's response runs, which reads the pause the row holds
+    as it stands (#105 round 5)."""
+    from assurance import observed_outcomes
+    from assurance.decision import current_decision, stamped_in_force
+
+    dep = _ready()
+    _watched(dep, 3)
+    claims = list(AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk"))
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    # The release before recomputes to the same decision: the keyring column bare.
+    Deployment.objects.filter(pk=dep.pk).update(decision_keyring=observed_outcomes.keyring_fingerprint())
+    assert not stamped_in_force(Deployment.objects.get(pk=dep.pk))
+    evaluated = []
+    real = latent.evaluate_conditions
+    monkeypatch.setattr(latent, "evaluate_conditions", lambda *a, **k: (evaluated.append(1), real(*a, **k))[1])
+    client = APIClient()
+    client.force_authenticate(user=_user())
+
+    with _committed():
+        if stop == "pause":
+            response = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
+            fenced = current_decision(Deployment.objects.get(pk=dep.pk))  # the dispatch fence's read
+        else:
+            to_status = "revoked" if stop == "revoke" else "contradicted"
+            response = client.post(
+                f"/api/assurance/claims/{claims[-1].uuid}/transition/", {"to_status": to_status}, format="json"
+            )
+
+    assert response.status_code == 200, response.content
+    assert evaluated == [], f"the {stop} read a watch"
+    if stop == "pause":
+        assert fenced == Deployment.Decision.PAUSED
 
 
 def _refusing_writes(monkeypatch, *, refused=None, first=None) -> list:

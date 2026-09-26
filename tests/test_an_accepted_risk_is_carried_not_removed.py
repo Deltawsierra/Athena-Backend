@@ -446,6 +446,10 @@ _GOVERNING = [
     *[("assurance.served_route", name, None) for name in (
         "ROUTE_VERSION", "ROUTE_FIELDS", "_METADATA_KEY", "_DIGESTED_FIELDS", "_SERVING_KINDS", "UNKNOWN", "ALGORITHM",
     )],
+    # Round 5: the metadata key that takes a stored asset row out of the graph the
+    # coverage cap is read over, which stored rows are read against like the check
+    # states.
+    ("assurance.graph_refs", "RETIRED", None),
 ]
 
 #: The constants of the modules the decision is computed in that are NOT rules, and
@@ -572,6 +576,37 @@ def test_a_renamed_check_state_moves_the_pin_and_the_published_decision_follows(
     pin = policy_pin()
 
     monkeypatch.setattr(coverage, "CHECK_PERFORMED", "ran")
+
+    assert policy_pin() != pin
+    computed = compute_decision(Deployment.objects.get(pk=dep.pk))
+    assert computed == D.AUDIT_INCOMPLETE
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == computed
+
+
+def test_a_renamed_retired_key_moves_the_pin_and_the_published_decision_follows(monkeypatch):
+    """The coverage cap reads the stored asset rows through the key that marks one
+    retired (graph_refs.in_graph), as it reads the stored check rows through the check
+    states. Renamed, a retired high-risk tool is back in the graph and the same rows
+    read audit_incomplete; the key was not in the pin, so the stored READY was
+    published as current (#105 round 5)."""
+    from assurance import graph_refs
+    from assurance.models import Asset, DeclaredComponent
+    from assurance.policy import policy_pin
+
+    dep = _scanned()
+    DeclaredComponent.objects.create(deployment=dep, kind=Asset.Kind.TOOL, name="reader", identifier="reader")
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="reader", identifier="reader",
+        classification=Asset.Classification.KNOWN, assessed_at=timezone.now(),
+    )
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="old-shell", identifier="old-shell",
+        classification=Asset.Classification.HIGH_RISK, metadata={graph_refs.RETIRED: True},
+    )
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == D.READY
+    pin = policy_pin()
+
+    monkeypatch.setattr(graph_refs, "RETIRED", "retired_at")
 
     assert policy_pin() != pin
     computed = compute_decision(Deployment.objects.get(pk=dep.pk))

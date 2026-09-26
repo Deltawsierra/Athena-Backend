@@ -106,16 +106,27 @@ def _committed():
 
     The writes before this one committed too, each on its own: what they scheduled
     runs first. Left pending, a refresh one of them scheduled stood in for the one
-    this write schedules -- one per deployment per transaction -- and never ran."""
-    from django.db import connection
-    from django.test import TestCase
+    this write schedules -- one per deployment per transaction -- and never ran.
 
-    earlier = list(connection.run_on_commit)
-    del connection.run_on_commit[:]
-    for _savepoints, callback, _robust in earlier:
-        callback()
-    with TestCase.captureOnCommitCallbacks(execute=True):
-        yield
+    Each hook runs ONCE, as a commit runs it. The hooks this block ran used to stay in
+    the connection's list, and the next block ran them again as "the writes before":
+    a second refresh production never makes, which read the watches a second time and
+    hid what the first refresh left."""
+    from django.db import connection
+
+    _run_commit_hooks_once(connection)  # the writes before this one
+    yield
+    _run_commit_hooks_once(connection)  # this one, and whatever its hooks schedule
+
+
+def _run_commit_hooks_once(connection):
+    """Run every commit hook the connection holds, each once, dropping it first: one a
+    hook schedules runs after it, as a commit in production runs it."""
+    while connection.run_on_commit:
+        hooks = list(connection.run_on_commit)
+        del connection.run_on_commit[:]
+        for _savepoints, callback, _robust in hooks:
+            callback()
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +232,8 @@ def test_the_invalidation_check_fires_declared_conditions_too():
 def test_a_condition_that_cannot_be_evaluated_never_blocks_the_write_it_follows(
     monkeypatch, caplog, django_capture_on_commit_callbacks
 ):
-    """It is evaluated once the write it follows has committed -- a person contradicting
-    a claim among them -- never inside it. A failure there is logged, the write stands,
+    """It is evaluated once the write it follows has committed -- a finding recorded
+    among them -- never inside it. A failure there is logged, the write stands,
     and the condition is recorded as not evaluated. (A revoke, the write this used, now
     schedules no evaluation at all; see the revoke test below.)"""
     with django_capture_on_commit_callbacks(execute=True):  # the set-up commits
@@ -233,16 +244,17 @@ def test_a_condition_that_cannot_be_evaluated_never_blocks_the_write_it_follows(
     def broken(*args, **kwargs):
         raise RuntimeError("the observer broke")
 
+    from assurance.models import Finding
+
     monkeypatch.setattr(latent, "evaluate_conditions", broken)
     with django_capture_on_commit_callbacks(execute=True):
-        moved = _client().post(
-            f"/api/assurance/claims/{claim.uuid}/transition/", {"to_status": "contradicted"}, format="json"
+        written = Finding.objects.create(
+            deployment=dep, fingerprint="fp-info", finding_type="t", title="T", severity="info"
         )
 
-    assert moved.status_code == 200, moved.content
     claim.refresh_from_db()
     condition.refresh_from_db()
-    assert claim.status == Status.CONTRADICTED
+    assert Finding.objects.filter(pk=written.pk).exists()
     # On a claim still current and unrevoked the failure is recorded on the condition
     # -- read as unread by the decision -- where on the revoked claim it was left alone.
     assert condition.state == State.EVALUATION_FAILED
@@ -1835,6 +1847,32 @@ def test_a_hold_is_not_put_back_on_a_claim_a_person_revoked():
     claim.refresh_from_db()
     assert claim.status == Status.REVOKED
     assert not _open_retests(dep, claim).exists()
+
+
+def test_the_plan_and_the_decision_agree_on_a_retest_a_fired_watch_left_on_a_revoked_claim():
+    """A watch fires and opens a retest; a person then revokes the claim. The decision
+    reads the open retest and is held back; the plan said nothing needed re-running
+    (#105 round 5)."""
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    client = _client()
+    claim, condition = _training_watched(dep)
+    with _committed():
+        pass
+    _allow_training(client, dep)
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.FIRED
+    with _committed():
+        response = client.post(f"/api/assurance/claims/{claim.uuid}/transition/", {"to_status": "revoked"}, format="json")
+    assert response.status_code == 200, response.content
+
+    support = decision_support(Deployment.objects.get(pk=dep.pk))
+    plan = plan_revalidation(Deployment.objects.get(pk=dep.pk))
+
+    assert support["claims"]["retest_pending"] is True
+    assert support["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert "nothing needs to be re-run" not in plan["note"].lower()
+    assert [r["claim_uuid"] for r in plan["open_retests_without_a_current_claim"]] == [str(claim.uuid)]
 
 
 def test_putting_back_one_deployments_holds_touches_no_other_deployments_claims():

@@ -895,7 +895,9 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
     }
 
 
-def recompute_decision(deployment: Deployment, *, paused: bool | None = None) -> str | None:
+def recompute_decision(
+    deployment: Deployment, *, paused: bool | None = None, brought_current: bool = False, after_claim: bool = False
+) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
 
@@ -920,12 +922,27 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
     move, and the log is what was recorded and published
     (:func:`assurance.revision.decision_in_force`). Reading the pause off such a
     row recorded, on the repair, a lift -- or a re-pause -- no operator made.
+
+    ``brought_current``: the caller carried what the release before left and read
+    every watch (or there was none to read). Any other recompute of a decision
+    another writer left keeps it recognisable -- the policy stamp cleared -- so the
+    next publishing read still brings it current. ``after_claim``: the watches were
+    read after :func:`_claim_for_this_release`, so a keyring column found bare again
+    is a recompute of the release before since -- one the watches did not see -- and
+    that too leaves the row recognisable.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
 
     with transaction.atomic():
         locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
+        # Another writer's decision stays recognisable unless this caller brought it
+        # current, and no recompute of that writer's has landed since it did.
+        foreign = locked.decision is not None and not stamped_in_force(locked)
+        bare_since = after_claim and not (
+            locked.decision_keyring is None or locked.decision_keyring.startswith(_KEYRING_MARK)
+        )
+        keep_foreign = foreign and not (brought_current and not bare_since)
         # ONE reading of the decision in force, under the lock: the pause is taken
         # from it and the move is made from it, so the two cannot disagree, and a
         # row behind its log is repaired -- and reported -- once.
@@ -948,7 +965,7 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
             decision_keyring=keyring_stamp(observed_outcomes.keyring_fingerprint(keyring)),
             decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
             # The rules this was computed under, AND the revision it stands at.
-            decision_policy=policy_stamp(moved["revision"]),
+            decision_policy=None if keep_foreign else policy_stamp(moved["revision"]),
         )
     deployment.refresh_from_db(
         fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
@@ -1028,6 +1045,48 @@ def stamped_in_force(deployment) -> bool:
     )
 
 
+def _claim_for_this_release(deployment) -> bool:
+    """Before the watches are read for a decision another writer left: recompute it
+    as not yet brought current (:func:`recompute_decision`), which marks its keyring
+    column as this release's with the policy stamp left cleared. A recompute of the
+    release before after this rewrites the column bare, and the recompute that
+    follows the watches then leaves the row recognisable. Whether the row was
+    another writer's; one query, no lock and no write for a row that is this
+    release's."""
+    row = Deployment.objects.filter(pk=deployment.pk).only(
+        "decision", "decision_policy", "decision_keyring", "decision_revision"
+    ).first()
+    if row is None or row.decision is None or stamped_in_force(row):
+        return False
+    recompute_decision(deployment)
+    return True
+
+
+def _watches_read_since(deployment_id, since) -> bool:
+    """Whether every watch on ``deployment_id`` the decision could read as not true
+    was read at or after ``since``: none left on a closed version with a current one
+    (a carry refused), and every PENDING one on a current, unrevoked claim read since.
+    A refused evaluation that wrote nothing leaves them as they stood."""
+    from django.db.models import Exists, OuterRef
+
+    pending = LatentCondition.objects.filter(deployment_id=deployment_id, state=LatentCondition.State.PENDING)
+    left_behind = pending.filter(claim__in=AssuranceClaim.objects.closed()).filter(
+        Exists(
+            AssuranceClaim.objects.current().filter(
+                deployment_id=OuterRef("deployment_id"), fingerprint=OuterRef("claim__fingerprint")
+            )
+        )
+    )
+    if left_behind.exists():
+        return False
+    return not (
+        pending.filter(claim__in=AssuranceClaim.objects.current())
+        .exclude(claim__status=AssuranceClaim.ClaimStatus.REVOKED)
+        .filter(Q(last_evaluated_at__isnull=True) | Q(last_evaluated_at__lt=since))
+        .exists()
+    )
+
+
 def refresh_stored_decisions(deployment_ids) -> None:
     """Recompute the stored decision of each deployment named, by pk.
 
@@ -1055,6 +1114,8 @@ def refresh_stored_decisions(deployment_ids) -> None:
     # In pk order, so two writers refreshing the same pair of deployments take
     # their row locks in the same order rather than each holding the other's.
     for deployment in Deployment.objects.filter(pk__in=ids).order_by("pk"):
+        since = timezone.now()
+        claimed = _claim_for_this_release(deployment)
         with refresh_deferred(deployment.pk):
             # Whatever a release that did not carry left on a closed version, first,
             # so it is evaluated below with the rest.
@@ -1071,7 +1132,11 @@ def refresh_stored_decisions(deployment_ids) -> None:
             fire_due_conditions(deployment, schedule_refresh=False)
             # And the route the write left serving is noted, so a run after it binds.
             note_route_quietly(deployment)
-        recompute_decision(deployment)
+        recompute_decision(
+            deployment,
+            brought_current=not claimed or _watches_read_since(deployment.pk, since),
+            after_claim=True,
+        )
 
 
 def _bring_current_after_another_writer(deployment: Deployment) -> None:
@@ -1098,12 +1163,16 @@ def _bring_current_after_another_writer(deployment: Deployment) -> None:
             "its read; its decision reads it where it is",
             deployment.pk,
         )
-        carried = {}
-    recompute_decision(deployment)
-    if (
-        carried.get("watches_carried")
+        carried = None
+    watches = bool(
+        carried is None
+        or carried.get("watches_carried")
         or LatentCondition.objects.filter(deployment_id=deployment.pk, state__in=LATENT_LIVE_STATES).exists()
-    ):
+    )
+    # Stamped here only with no watch to read; else the refresh stamps it once it has
+    # read them, and until then the next read tries again.
+    recompute_decision(deployment, brought_current=not watches)
+    if watches:
         schedule_decision_refresh(deployment.pk)
         deployment.refresh_from_db(
             fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
@@ -1151,14 +1220,6 @@ def current_decision(deployment: Deployment) -> str | None:
         deployment.decision,
     )
     hold_to_its_log(deployment)
-    # Time moves the decision where no write does: a risk accepted until a moment
-    # that has now passed. The stored decision records when that happens, and the
-    # first read after it recomputes -- rather than go on publishing the
-    # READY_RESTRICTED an acceptance that no longer stands was holding up.
-    valid_until = getattr(deployment, "decision_valid_until", None)
-    if valid_until is not None and timezone.now() >= valid_until:
-        recompute_decision(deployment)
-        return deployment.decision
     # Rules move the decision where no write does too: a release that adds a cap
     # changes what the same stored inputs imply. A decision stamped under other
     # rules is recomputed rather than published under rules that no longer hold.
@@ -1176,6 +1237,12 @@ def current_decision(deployment: Deployment) -> str | None:
     # nothing to redo. That release's recompute that moved nothing is recognised by
     # the keyring column it rewrote bare (`_KEYRING_MARK`).
     if deployment.decision is not None and not stamped_in_force(deployment):
+        if deployment.decision == Deployment.Decision.PAUSED and as_read[3] == Deployment.Decision.PAUSED:
+            # A pause the row itself holds reads nothing -- no rule, keyring, lapse or
+            # watch moves it -- and the dispatch fence a pause's response runs reads it
+            # here: left recognisable by the pause, it is brought current by the read
+            # after the lift, and the pause's response waits on no watch.
+            return deployment.decision
         try:
             _bring_current_after_another_writer(deployment)
         except (DatabaseError, StaleDecisionRead):
@@ -1192,6 +1259,16 @@ def current_decision(deployment: Deployment) -> str | None:
                 "recomputed; publishing the decision the log records",
                 deployment.pk,
             )
+        return deployment.decision
+    # Time moves the decision where no write does: a risk accepted until a moment
+    # that has now passed. The stored decision records when that happens, and the
+    # first read after it recomputes -- rather than go on publishing the
+    # READY_RESTRICTED an acceptance that no longer stands was holding up. Read after
+    # the stamp: read first, a decision another writer left was recomputed here --
+    # and stamped -- without the watches that writer made true being read.
+    valid_until = getattr(deployment, "decision_valid_until", None)
+    if valid_until is not None and timezone.now() >= valid_until:
+        recompute_decision(deployment)
         return deployment.decision
     if deployment.decision_keyring == keyring_stamp(observed_outcomes.keyring_fingerprint()):
         return deployment.decision

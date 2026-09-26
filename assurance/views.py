@@ -2224,7 +2224,9 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             # reads, the carry and the route are brought current by the next refresh
             # of any other write, and the decision the revoke moves is recomputed in
             # its own transaction here, so it is current when the revoke commits.
-            revoke = to_status == AssuranceClaim.ClaimStatus.REVOKED
+            # A contradiction takes a READY down as a revoke does, and waits on no hook
+            # either.
+            revoke = to_status in (AssuranceClaim.ClaimStatus.REVOKED, AssuranceClaim.ClaimStatus.CONTRADICTED)
             with refresh_deferred(claim.deployment_id) if revoke else nullcontext(), transaction.atomic():
                 event = apply_claim_transition(
                     claim, to_status, actor=request.user, note=request.data.get("note", "")

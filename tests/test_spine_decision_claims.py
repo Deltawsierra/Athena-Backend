@@ -334,6 +334,27 @@ def test_revoked_claim_is_excluded_from_the_plan():
     assert plan["workflows_to_exercise"] == []
 
 
+def test_a_retest_left_open_on_a_revoked_claim_is_never_called_nothing_to_re_run():
+    """A person revoked a claim a retest was open on. The decision reads every open
+    retest on the deployment and is held at needs more evidence; the plan maps retests
+    to current, unrevoked claims only, and said "no open retest obligation ... Nothing
+    needs to be re-run" beside it (#105 round 5)."""
+    dep = _ready_deployment()
+    _claim(dep, status=Status.SUPPORTED, fingerprint="kept")
+    revoked = _claim(dep, status=Status.REVOKED, fingerprint="r", claim_type=ClaimType.AI_BOM)
+    retest = _retest(dep, revoked)
+
+    plan = plan_revalidation(dep)
+
+    assert claim_decision_signal(dep)["retest_pending"] is True
+    assert compute_decision(dep) == Decision.NEEDS_MORE_EVIDENCE
+    assert plan["required"] == []
+    assert "nothing needs to be re-run" not in plan["note"].lower()
+    assert not plan["note"].startswith("No claim needs revalidation")
+    assert "1 open retest obligation(s)" in plan["note"]
+    assert [r["retest_requirement_uuid"] for r in plan["open_retests_without_a_current_claim"]] == [str(retest.uuid)]
+
+
 def test_plan_carries_a_deterministic_fingerprint():
     dep = Deployment.objects.create(name="d", owner=_user())
     p = Provider.objects.create(name="OpenAI", kind=Provider.Kind.MODEL_PROVIDER)

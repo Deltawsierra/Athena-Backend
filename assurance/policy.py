@@ -45,6 +45,7 @@ from . import change as _change
 from . import composition as _composition
 from . import coverage as _coverage
 from . import decision as _decision
+from . import graph_refs as _graph_refs
 from . import models as _models
 from . import served_route as _served_route
 from . import workflow_chains as _workflow_chains
@@ -141,6 +142,10 @@ def _policy_document() -> dict:
             # The check states the engine's stored rows are read against
             # (assurance.coverage._checks_section): a row in no state named here
             # falls short, so a renamed state capped the same stored scan.
+            # The metadata key that takes a stored asset row out of the graph the
+            # coverage cap is read over (graph_refs.in_graph): renamed, the same rows
+            # cap the decision.
+            "coverage_retired_key": _graph_refs.RETIRED,
             "coverage_check_states": {
                 "performed": _coverage.CHECK_PERFORMED,
                 "degraded": _coverage.CHECK_DEGRADED,

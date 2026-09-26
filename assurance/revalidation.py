@@ -150,6 +150,10 @@ def plan_revalidation(deployment) -> dict:
       of which could not be read.
     - **still_current** — the claim is SUPPORTED or VERIFIED with no open
       obligation: explicitly NOT re-run.
+    - **open_retests_without_a_current_claim** — an open retest on a claim a person
+      revoked, or on one with no current version. No current claim is required by
+      it, but the decision reads every open retest, so the note never says there is
+      nothing to re-run beside one.
 
     PARTIALLY_VERIFIED belongs in the second bucket, not the third. It used to
     fall through to ``still_current`` — whose contract, two lines up, is
@@ -176,11 +180,12 @@ def plan_revalidation(deployment) -> dict:
         # opened against the version that drifted; its identity fingerprint matches the
         # current version, so a re-derivation that rebinds resolves it (Phase 2).
         open_reqs: dict[str, RetestRequirement] = {}
-        for req in (
+        all_open = list(
             RetestRequirement.objects.filter(deployment=deployment, resolved_at__isnull=True)
             .select_related("claim")
             .order_by("opened_at")
-        ):
+        )
+        for req in all_open:
             open_reqs.setdefault(req.claim.fingerprint, req)
 
         required: list[dict] = []
@@ -199,6 +204,22 @@ def plan_revalidation(deployment) -> dict:
         from .legal import carried_legal_statuses
 
         identities = {c.fingerprint for c in current}
+        # An open retest no current, unrevoked claim carries -- on a claim a person
+        # revoked, or one with no current version. No claim below is required by it,
+        # and the decision still reads it: ANY open retest holds the decision back
+        # (`decision.claim_decision_signal`). The plan said "no open retest obligation
+        # ... Nothing needs to be re-run" beside a decision held at needs more evidence.
+        unowned = [
+            {
+                "retest_requirement_uuid": str(req.uuid),
+                "claim_uuid": str(req.claim.uuid),
+                "claim_type": req.claim.claim_type,
+                "claim_status": req.claim.status,
+                "reason": req.reason,
+            }
+            for req in all_open
+            if req.claim.fingerprint not in identities
+        ]
         holding: dict[str, LatentCondition] = {}
         unread: dict[str, LatentCondition] = {}
         for condition in (
@@ -298,6 +319,18 @@ def plan_revalidation(deployment) -> dict:
                 "retest obligation, no condition nobody can read, and no legal ruling holding it back. "
                 "Nothing needs to be re-run."
             )
+        if unowned:
+            # Never "nothing to re-run" beside an open retest the decision reads: it
+            # holds the decision back whether or not a current claim carries it.
+            orphaned = (
+                f"{len(unowned)} open retest obligation(s) stand on a claim no current claim carries -- "
+                "one a person revoked, or one with no current version -- and hold the decision back as "
+                "every open retest does. Re-deriving does not answer them: nothing re-derives that claim."
+            )
+            if required or outstanding_unknowns:
+                note = f"{note} Separately, {orphaned}"
+            else:
+                note = orphaned
         if workflows:
             # Never "nothing to re-run" beside a chain that ran against another
             # route: every claim can be current while the chains are not, because no
@@ -307,7 +340,7 @@ def plan_revalidation(deployment) -> dict:
                 "that no longer serves, or one nothing recorded: exercise each named chain "
                 "again against the route that serves."
             )
-            if required or outstanding_unknowns:
+            if required or outstanding_unknowns or unowned:
                 note = f"{note} Separately, {chains}"
             else:
                 note = f"No claim needs revalidation, but {chains} Nothing else needs re-running."
@@ -326,5 +359,7 @@ def plan_revalidation(deployment) -> dict:
             "outstanding_unknowns": outstanding_unknowns,
             "still_current": still_current,
             "workflows_to_exercise": workflows,
+            # Open retests no current claim carries: each holds the decision back.
+            "open_retests_without_a_current_claim": unowned,
             "note": note,
         }

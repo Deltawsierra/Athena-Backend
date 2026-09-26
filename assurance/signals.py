@@ -204,7 +204,16 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    from .decision import _KEYRING_MARK, _current_policy_pin, policy_stamp, recompute_decision
+    from django.utils import timezone
+
+    from .decision import (
+        _KEYRING_MARK,
+        _claim_for_this_release,
+        _current_policy_pin,
+        _watches_read_since,
+        policy_stamp,
+        recompute_decision,
+    )
     from .latent import fire_due_conditions
     from .models import Deployment, WorkflowChainOutcome
 
@@ -230,8 +239,10 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
         # The watches first: the release before never evaluates one, so a write of
         # its -- to the data boundary, a provider's profile, a component -- that made
         # one true is read here before the decision is. One query where none is live.
+        since = timezone.now()
+        _claim_for_this_release(deployment)
         fire_due_conditions(deployment, schedule_refresh=False)
-        recompute_decision(deployment)
+        recompute_decision(deployment, brought_current=_watches_read_since(deployment.pk, since), after_claim=True)
 
 
 def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
