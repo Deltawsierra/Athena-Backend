@@ -87,7 +87,11 @@ def _trusted_engines(engine_keyring):
 
 
 def _outcome(dep, workflow, status, *, observed_at):
-    return record_signed(dep, workflow, status, observed_at)
+    """An outcome a scan observed and signed. A scan's held is READY evidence; an
+    Achilles held rests on a permit check and is ready with restrictions at best,
+    which ``test_an_observed_outcome_is_signed`` pins -- the seam is what is under
+    test here, not which kind of run is behind it."""
+    return record_signed(dep, workflow, status, observed_at, engine="athena")
 
 
 def _typed(dep, workflow, status, *, observed_at):

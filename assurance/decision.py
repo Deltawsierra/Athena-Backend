@@ -787,14 +787,23 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
         Deployment.objects.filter(pk=locked.pk).update(
             decision_keyring=observed_outcomes.keyring_fingerprint(keyring),
             decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
+            decision_policy=_current_policy_pin(),
         )
     deployment.refresh_from_db(
-        fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until"]
+        fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
     )
     # Level with its transition log -- the move above was made from the log's
     # reading -- so publishing this instance next asks the log nothing.
     deployment.logged_revision = deployment.decision_revision
     return decision
+
+
+def _current_policy_pin() -> str:
+    """The pin of the rules in force (see Deployment.decision_policy). Imported
+    here because assurance.policy reads this module's constants."""
+    from .policy import policy_pin
+
+    return policy_pin()
 
 
 def refresh_stored_decisions(deployment_ids) -> None:
@@ -858,6 +867,18 @@ def current_decision(deployment: Deployment) -> str | None:
     # READY_RESTRICTED an acceptance that no longer stands was holding up.
     valid_until = getattr(deployment, "decision_valid_until", None)
     if valid_until is not None and timezone.now() >= valid_until:
+        recompute_decision(deployment)
+        return deployment.decision
+    # Rules move the decision where no write does too: a release that adds a cap
+    # changes what the same stored inputs imply. A decision stamped under other
+    # rules is recomputed rather than published under rules that no longer hold.
+    # Any deployment: every rule is a rule of every decision. One with no stamp
+    # predates it, and is the upgrade's: the post-migrate receiver recomputes
+    # every such decision at the migrate that adds the column, keyed on the data,
+    # so a migrate that stops part-way leaves them for the next -- and the code
+    # that reads the stamp cannot run without that migrate.
+    policy = getattr(deployment, "decision_policy", None)
+    if policy is not None and policy != _current_policy_pin() and deployment.decision is not None:
         recompute_decision(deployment)
         return deployment.decision
     if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():

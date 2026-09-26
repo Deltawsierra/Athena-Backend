@@ -362,7 +362,9 @@ def test_check_invalidations_endpoint_admin_only_and_returns_counts():
     force_authenticate(ok, user=admin)
     resp = view(ok, uuid=str(dep.uuid))
     assert resp.status_code == 200
-    assert set(resp.data.keys()) == {"invalidated", "retests_opened", "retests_resolved"}
+    # `conditions_fired`: the declared latent conditions this check made true (P2.9),
+    # evaluated before the drift so the drift reads the claims they marked.
+    assert set(resp.data.keys()) == {"invalidated", "retests_opened", "retests_resolved", "conditions_fired"}
     assert resp.data["retests_opened"] == 3
     # The endpoint attributes the obligations to the calling admin.
     assert RetestRequirement.objects.filter(deployment=dep, actor=admin).count() == 3

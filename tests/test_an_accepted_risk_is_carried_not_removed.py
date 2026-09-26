@@ -168,13 +168,13 @@ def test_a_pause_records_no_end():
 
 def test_acceptances_made_before_the_rule_are_recomputed_at_their_first_read():
     """Their stored decision was computed with the finding left out: READY, logged
-    as READY. The migration marks it stale; the first read recomputes it under
-    the rule. Without the mark, the stale READY is what every surface publishes."""
-    from importlib import import_module
+    as READY, and stamped with the rules it was computed under. The upgrade moves
+    the policy pin; the first read sees a decision stamped under other rules and
+    recomputes it under these. Without the stamp, the stale READY is what every
+    surface publishes -- and marking it from a migration would write a decision
+    column behind the transition log."""
+    from assurance.decision import _current_policy_pin
 
-    from django.apps import apps
-
-    migration = import_module("assurance.migrations.0036_accepted_risk_expires")
     dep = _scanned()
     untouched = _scanned()
     _finding(untouched, "low")
@@ -188,14 +188,46 @@ def test_acceptances_made_before_the_rule_are_recomputed_at_their_first_read():
                 severity="critical", status=Finding.Status.ACCEPTED),
     ])
     dep = Deployment.objects.get(pk=dep.pk)
-    assert current_decision(dep) == D.READY
+    assert current_decision(dep) == D.READY, "stamped under the rules in force: read as stored"
 
-    migration.mark_decisions_resting_on_accepted_risk(apps, None)
+    # The decisions as the release before this one left them: stamped under its pin.
+    Deployment.objects.filter(pk__in=[dep.pk, untouched.pk]).update(decision_policy="policy-before")
 
     dep = Deployment.objects.get(pk=dep.pk)
     assert current_decision(dep) == D.NEEDS_MORE_EVIDENCE
     assert Deployment.objects.get(pk=dep.pk).decision == D.NEEDS_MORE_EVIDENCE
-    assert Deployment.objects.get(pk=untouched.pk).decision_valid_until is None
+    assert Deployment.objects.get(pk=dep.pk).decision_policy == _current_policy_pin()
+    # The other is recomputed too -- to what it already was, and stamped.
+    untouched = Deployment.objects.get(pk=untouched.pk)
+    before = untouched.decision
+    assert current_decision(untouched) == before
+    assert Deployment.objects.get(pk=untouched.pk).decision_policy == _current_policy_pin()
+
+
+def test_the_upgrade_recomputes_every_decision_stamped_under_other_rules():
+    """Eagerly, at migrate, for a deployment nothing reads: the post-migrate
+    receiver recomputes each stored decision whose stamp is not the pin in force,
+    and leaves one stamped under it alone."""
+    from django.apps import apps
+
+    from assurance import signals
+    from assurance.decision import _current_policy_pin
+
+    stale, current = _scanned(), _scanned()
+    for d in (stale, current):
+        recompute_decision(d)
+    Finding.objects.bulk_create([
+        Finding(deployment=stale, fingerprint="fp-legacy-2", finding_type="t", title="legacy",
+                severity="critical", status=Finding.Status.ACCEPTED),
+    ])
+    Deployment.objects.filter(pk=stale.pk).update(decision_policy=None)
+    revision = Deployment.objects.get(pk=current.pk).decision_revision
+
+    signals.recompute_decisions_computed_under_another_rule(apps.get_app_config("assurance"), using="default")
+
+    assert Deployment.objects.get(pk=stale.pk).decision == D.NEEDS_MORE_EVIDENCE
+    assert Deployment.objects.get(pk=stale.pk).decision_policy == _current_policy_pin()
+    assert Deployment.objects.get(pk=current.pk).decision_revision == revision
 
 
 # ---- Accepting a risk names when the acceptance ends. ----

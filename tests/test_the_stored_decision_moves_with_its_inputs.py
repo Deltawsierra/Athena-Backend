@@ -176,7 +176,8 @@ def test_a_signed_outcome_whose_refresh_failed_can_be_posted_again(engine_keyrin
     record_signed(dep, "refund-over-limit", oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=10))
     recompute_decision(dep)
     client = _client()
-    assert one_decision(dep, client) == Deployment.Decision.READY
+    # An Achilles held: a permit check, so ready with restrictions at best.
+    assert one_decision(dep, client) == Deployment.Decision.READY_RESTRICTED
 
     real = views.recompute_decision
     failures = [OperationalError("database is locked")]
@@ -192,7 +193,7 @@ def test_a_signed_outcome_whose_refresh_failed_can_be_posted_again(engine_keyrin
     violated = _signed_violation(dep)
     assert client.post(url, violated, format="json").status_code == 500
     assert not WorkflowChainOutcome.objects.filter(deployment=dep, status=oc.VIOLATED).exists()
-    assert one_decision(dep, client) == Deployment.Decision.READY
+    assert one_decision(dep, client) == Deployment.Decision.READY_RESTRICTED
 
     retry = client.post(url, violated, format="json")
     assert retry.status_code == 201, retry.content

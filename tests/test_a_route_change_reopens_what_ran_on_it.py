@@ -391,16 +391,15 @@ def test_the_admin_names_a_decision_whose_inputs_moved_with_time():
     assert "lapsed" in shown
 
 
-def test_the_upgrade_marks_every_stored_decision_for_recompute():
-    """0038: rules this release adds change what stored inputs imply without a write.
-    Every stored decision is marked for the recompute its first read then makes."""
-    import importlib
+def test_the_route_rule_moves_the_policy_pin_so_stored_decisions_are_recomputed():
+    """The route rule changes what stored chains imply without a write. It is named
+    in the policy document, so the pin moves with it and every decision stamped
+    under the pin before is recomputed (Deployment.decision_policy)."""
+    from assurance.policy import POLICY
 
-    from django.apps import apps as global_apps
-
-    migration = importlib.import_module("assurance.migrations.0038_bind_chain_outcomes_to_their_route")
-    dep = _deployment()
-    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.READY, decision_valid_until=None)
-    migration.recompute_under_the_rules_this_release_adds(global_apps, None)
-    dep.refresh_from_db()
-    assert dep.decision_valid_until is not None and dep.decision_valid_until <= timezone.now()
+    caps = POLICY["decision"]["chain_caps"]
+    assert caps["held_off_route"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert caps["held_on_unclassified_signer"] == Deployment.Decision.READY_RESTRICTED
+    assert POLICY["decision"]["accepted_risk_caps"]["lapsed_undated_or_outgrown"] == (
+        Deployment.Decision.NEEDS_MORE_EVIDENCE
+    )

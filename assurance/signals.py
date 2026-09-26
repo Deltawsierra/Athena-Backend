@@ -137,11 +137,22 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    from .decision import recompute_decision
+    from django.db.models import Q
+
+    from .decision import _current_policy_pin, recompute_decision
     from .models import Deployment, WorkflowChainOutcome
 
     deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
     for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):
+        recompute_decision(deployment)
+    # And every stored decision computed under other rules: a release that moved
+    # the policy pin moved what the same inputs imply (Deployment.decision_policy).
+    # Keyed on the data like the keyring stamp, so a migrate that failed part-way
+    # leaves them marked for the next.
+    stale = Deployment.objects.filter(decision__isnull=False).filter(
+        Q(decision_policy__isnull=True) | ~Q(decision_policy=_current_policy_pin())
+    )
+    for deployment in stale.order_by("pk"):
         recompute_decision(deployment)
 
 
@@ -180,7 +191,7 @@ def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
 #: writes every one of them, so a schema missing any is one it cannot run against --
 #: a staged upgrade stopped between the stamp and the accepted-risk expiry has the
 #: first and not the second, and asking only for the first let the receivers crash.
-_DECISION_COLUMNS_ADDED_LAST = frozenset({"decision_keyring", "decision_valid_until"})
+_DECISION_COLUMNS_ADDED_LAST = frozenset({"decision_keyring", "decision_valid_until", "decision_policy"})
 
 
 @receiver(post_migrate, dispatch_uid="assurance_repair_decisions_behind_their_log")

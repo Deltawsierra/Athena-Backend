@@ -268,7 +268,7 @@ class ProviderAssertion(models.Model):
 #: QuerySet updates under the row lock. A model save never writes them to a stored
 #: row -- see `Deployment.save`.
 DECISION_OWNED_FIELDS = frozenset(
-    {"decision", "decision_revision", "decision_keyring", "decision_valid_until"}
+    {"decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"}
 )
 
 
@@ -377,6 +377,16 @@ class Deployment(models.Model):
     # wrote this records when it goes stale and `decision.current_decision`
     # recomputes it at the first read after. NULL when nothing about it expires.
     decision_valid_until = models.DateTimeField(null=True, blank=True, default=None, editable=False)
+    # Which rules the stored decision was computed under: the policy pin
+    # (`assurance.policy.policy_pin`), whose document names every cap the decision
+    # applies. NULL when the stored decision predates the stamp. A release that
+    # changes a rule moves the pin, and the stored decisions computed under the old
+    # one are recomputed -- at migrate (the post-migrate receiver) and at the first
+    # publishing read (`decision.current_decision`) -- rather than published under
+    # rules that no longer hold. Without it every rule change needed a migration
+    # that wrote a decision column behind the transition log, which nothing but the
+    # refresh may do.
+    decision_policy = models.CharField(max_length=80, null=True, blank=True, default=None, editable=False)
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
     # `assurance.decision`: a deployment whose latest evidence is partial cannot
