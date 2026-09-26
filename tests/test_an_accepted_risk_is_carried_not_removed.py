@@ -248,6 +248,29 @@ def test_any_other_status_clears_the_end():
     assert finding.risk_accepted_until is None
 
 
+@pytest.mark.parametrize("until", [_in(-1), None], ids=["lapsed", "never-dated"])
+def test_editing_an_accepted_finding_is_not_judged_as_a_new_acceptance(until):
+    """Reassigning an accepted finding, or noting its impact, is not accepting it
+    again: it was refused when the acceptance had lapsed or predates the rule, so
+    the finding could not be handed to anyone. The acceptance is left as it was --
+    still lapsed, still holding the decision -- until someone renews it."""
+    dep = _scanned()
+    finding = _finding(dep, status=Finding.Status.ACCEPTED, until=until)
+    recompute_decision(dep)
+    client = _client()
+    response = _patch(client, finding, {"business_impact": "Refunds past the limit reach a real account."})
+    assert response.status_code == 200, response.content
+    finding.refresh_from_db()
+    assert finding.status == Finding.Status.ACCEPTED
+    assert finding.risk_accepted_until == until
+    assert finding.business_impact.startswith("Refunds")
+    assert one_decision(dep, client) == D.NEEDS_MORE_EVIDENCE
+    # Renewing it is still judged: a past end is refused, a future one stands.
+    assert _patch(client, finding, {"risk_accepted_until": _in(-2).isoformat()}).status_code == 400
+    assert _patch(client, finding, {"risk_accepted_until": _in(30).isoformat()}).status_code == 200
+    assert one_decision(dep, client) == D.READY_RESTRICTED
+
+
 def test_an_end_on_a_risk_nobody_accepted_is_refused():
     dep = _scanned()
     finding = _finding(dep)

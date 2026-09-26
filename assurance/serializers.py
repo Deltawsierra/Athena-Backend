@@ -198,13 +198,18 @@ class FindingSerializer(serializers.ModelSerializer):
                 )
             attrs["risk_accepted_until"] = None
             return attrs
-        if "risk_accepted_until" in attrs:
-            until = attrs["risk_accepted_until"]
-        elif self.instance is not None and self.instance.status == Finding.Status.ACCEPTED:
-            # Already accepted, and this change leaves the acceptance's end alone.
-            until = self.instance.risk_accepted_until
-        else:
-            until = None
+        if (
+            "risk_accepted_until" not in attrs
+            and self.instance is not None
+            and self.instance.status == Finding.Status.ACCEPTED
+        ):
+            # Already accepted, and this change leaves the acceptance alone: an
+            # owner or impact edit is not a new acceptance, so it is not judged as
+            # one. Judging it refused reassigning a finding whose acceptance had
+            # lapsed or never named an end -- which the decision already holds at
+            # NEEDS_MORE_EVIDENCE until someone accepts it again with an end.
+            return attrs
+        until = attrs.get("risk_accepted_until")
         if until is None:
             raise serializers.ValidationError(
                 {"risk_accepted_until": "Accepting a risk needs the date its acceptance ends."}
