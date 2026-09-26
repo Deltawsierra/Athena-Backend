@@ -21,7 +21,7 @@ class Migration(migrations.Migration):
             field=models.DateTimeField(blank=True, default=None, editable=False, null=True),
         ),
         # No data step. The decisions stored under the rule before this one are
-        # recomputed by the policy stamp (Deployment.decision_policy, 0038): a
+        # recomputed by the policy stamp (Deployment.decision_policy, 0039): a
         # migration that wrote a decision column would move the decision with no
         # transition recorded, which nothing but the refresh may do.
     ]

@@ -1732,9 +1732,17 @@ class LatentCondition(models.Model):
         # It does NOT mean "will not happen" and it does not mean "safe" -- it
         # means this one named thing has not happened yet.
         PENDING = "pending", "Declared, not yet true"
+        # Holds its claim at STALE, with a retest open, until a re-evaluation
+        # finds the subject back at its baseline (it re-arms to PENDING) or a
+        # person withdraws it. A re-derive does not clear it.
         FIRED = "fired", "Became true; claim invalidated"
-        # We can no longer see the subject. Not safe, not fired: uncovered.
+        # We can no longer see the subject. Not safe, not fired: uncovered. Read
+        # again on every evaluation, so a subject that comes back is watched again.
         UNOBSERVABLE = "unobservable", "Subject can no longer be observed"
+        # The evaluator raised on it. Not safe, not pending: unwatched until an
+        # evaluation completes. What was raised is kept by its type only, in
+        # `last_error`; an exception's text can carry what it read.
+        EVALUATION_FAILED = "evaluation_failed", "Its evaluation failed; not watched"
         # Withdrawn by a person -- kept rather than deleted so the record shows
         # that somebody decided to stop watching, and who.
         WITHDRAWN = "withdrawn", "Withdrawn"
@@ -1790,6 +1798,11 @@ class LatentCondition(models.Model):
         related_name="fired_by_conditions",
     )
 
+    # When the evaluator last raised on this condition, and the type of what it
+    # raised -- never its text. Cleared by the next evaluation that completes.
+    last_error_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=200, blank=True)
+
     declared_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1798,22 +1811,57 @@ class LatentCondition(models.Model):
         related_name="latent_conditions",
     )
     declared_at = models.DateTimeField(auto_now_add=True)
+    # Who stopped watching, when, and why. Kept apart from `fired_observation`: a
+    # fired condition can be withdrawn -- a person accepting the state it fired
+    # on -- and the reason must not overwrite what was observed when it fired.
+    withdrawn_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="withdrawn_latent_conditions",
+    )
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_note = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-declared_at"]
         indexes = [models.Index(fields=["deployment", "state"])]
         constraints = [
-            # One live declaration per (claim, kind, subject, expected). A second
-            # identical declaration is not a second risk.
+            # One LIVE declaration per (claim, kind, subject, expected). A second
+            # identical declaration is not a second risk. Live, not every row: a
+            # watch a person withdrew is kept as a record, and it was unconditional,
+            # so the same watch could never be declared again on that claim -- the
+            # attempt was an IntegrityError, and the route answered 500. Spelled
+            # out rather than read off `State`: Meta cannot see the class body.
             models.UniqueConstraint(
                 fields=["claim", "kind", "subject", "expected"],
+                condition=Q(state__in=["pending", "fired", "unobservable", "evaluation_failed"]),
                 name="uq_latent_condition_declaration",
             ),
         ]
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()}: {self.subject} ({self.state})"
+
+
+#: The states a latent condition is live in: re-read by every evaluation, carried to
+#: its claim's next version, and unique per declaration. Everything but WITHDRAWN.
+#: Pinned against the constraint above, which has to spell them out.
+LATENT_LIVE_STATES = frozenset(
+    {
+        LatentCondition.State.PENDING,
+        LatentCondition.State.FIRED,
+        LatentCondition.State.UNOBSERVABLE,
+        LatentCondition.State.EVALUATION_FAILED,
+    }
+)
+#: The live states in which nobody can say, now, whether the precondition holds: the
+#: subject cannot be read, or the evaluator raised. The decision reads these.
+LATENT_UNREAD_STATES = frozenset(
+    {LatentCondition.State.UNOBSERVABLE, LatentCondition.State.EVALUATION_FAILED}
+)
 
 
 class ChainBirth(models.Model):

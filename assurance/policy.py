@@ -84,6 +84,9 @@ def _policy_document() -> dict:
                 # A person's recorded judgment that a moved obligation is material
                 # (assurance.legal); a review merely pending caps nothing.
                 "legally_stale": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
+                # A declared precondition of a current claim that cannot be read now
+                # -- unobservable, or its evaluation failed (assurance.latent).
+                "unread_latent_condition": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
             },
             # How a risk a person accepted caps the decision (owner decision Q6,
             # assurance.decision.accepted_risk_signal). "accepted" is among the

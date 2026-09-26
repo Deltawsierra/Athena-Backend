@@ -33,9 +33,9 @@ from django.db.models import QuerySet
 from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete, pre_save
 from django.dispatch import receiver
 
-# A plain constant; the models module is loaded before `AppConfig.ready` imports
-# this one, so importing it here changes no loading order.
-from .models import DECISION_OWNED_FIELDS
+# Plain constants; the models module is loaded before `AppConfig.ready` imports
+# this one, so importing them here changes no loading order.
+from .models import DECISION_OWNED_FIELDS, LATENT_UNREAD_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +270,9 @@ DECISION_INPUTS = {
     "assurance.DeclaredComponent": ("deployment",),
     "assurance.ApprovedWorkflow": ("deployment",),
     "assurance.WorkflowChainOutcome": ("deployment",),
+    # A declared precondition a current claim rests on that nobody can read now --
+    # unobservable, or its evaluation failed -- holds the decision back.
+    "assurance.LatentCondition": ("deployment",),
 }
 
 def _deployments_serving_through(instance) -> set:
@@ -323,6 +326,20 @@ DECISION_COLUMNS = {
     "assurance.Finding": frozenset(
         {"deployment", "deployment_id", "status", "severity", "risk_accepted_until"}
     ),
+    # Not `last_evaluated_at`, which every evaluation writes: a refresh it scheduled
+    # would evaluate again, and write it again.
+    "assurance.LatentCondition": frozenset(
+        {"deployment", "deployment_id", "claim", "claim_id", "state"}
+    ),
+}
+
+#: For a model the decision reads only some ROWS of: the column that says which, and
+#: the values it reads. A row written whole in none of them cannot move the decision
+#: when it is first written -- declaring a watch writes a PENDING one. A whole save of
+#: an existing row is refreshed whatever it holds (`_remember_prior_deployment`
+#: notes the row's deployment first), so a row moved OUT of such a state is too.
+DECISION_ROWS = {
+    "assurance.LatentCondition": ("state", LATENT_UNREAD_STATES),
 }
 
 #: The Deployment columns that are the refresh's output rather than an input to
@@ -336,7 +353,8 @@ _DECISION_OWN_FIELDS = DECISION_OWNED_FIELDS | {"updated_at"}
 def writes_a_decision_input(instance, update_fields) -> bool:
     """Whether saving ``instance`` with ``update_fields`` can change what its
     deployment's decision is computed from. A save that names no field
-    (``update_fields=None``) writes every column, so it can."""
+    (``update_fields=None``) writes every column, so it can -- unless the row is
+    one the decision does not read (`DECISION_ROWS`)."""
     label = instance._meta.label
     if label == "assurance.Deployment":
         # `evidence_incomplete`, `last_complete_scan_at` and the reported
@@ -345,8 +363,11 @@ def writes_a_decision_input(instance, update_fields) -> bool:
         return update_fields is None or not set(update_fields) <= _DECISION_OWN_FIELDS
     if label not in DECISION_INPUTS:
         return False
+    if update_fields is None:
+        rows = DECISION_ROWS.get(label)
+        return rows is None or getattr(instance, rows[0]) in rows[1]
     columns = DECISION_COLUMNS.get(label)
-    return columns is None or update_fields is None or bool(columns & set(update_fields))
+    return columns is None or bool(columns & set(update_fields))
 
 
 #: Where a row's deployment is kept between pre_save and post_save when the save
@@ -552,9 +573,12 @@ for _label in DECISION_INPUTS:
 # claims re-derived from them -- until someone declares a latent condition on one.
 # Then a write to it is the change the condition watches for, and the deployment
 # it is declared on is brought current after the write commits: the refresh above
-# fires the conditions first (`decision.refresh_stored_decisions`). The API routes
-# that write these fire them inside their own transaction; this is the net under
-# the admin, a shell, a management command.
+# evaluates the conditions first (`decision.refresh_stored_decisions`). This is how
+# every writer brings them current -- the API routes schedule it too, and only a
+# data boundary route evaluates its own deployment inline -- so a write to a
+# provider that twenty deployments watch no longer evaluates and locks all twenty
+# inside its own transaction. Every live condition counts, not only a pending one:
+# a fired or unobservable condition is read again by the refresh.
 
 _PRIOR_PROVIDER_NAME = "_assurance_latent_prior_provider_name"
 

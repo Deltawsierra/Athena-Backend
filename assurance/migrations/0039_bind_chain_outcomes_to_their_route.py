@@ -5,7 +5,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0037_carry_watches_and_legal_rulings"),
+        ("assurance", "0038_latent_conditions_stay_watched"),
     ]
 
     operations = [
