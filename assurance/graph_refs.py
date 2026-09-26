@@ -52,6 +52,14 @@ MECHANISM_IDENTITY = "identity"
 PRINCIPAL_KINDS = frozenset({"agent", "service_account"})
 SERVICE_ACCOUNT_KIND = "service_account"
 
+#: The kinds an agent invokes and nothing is wired to. A ``server`` names a
+#: backend -- an MCP server, a data store -- never a tool or a skill, and a
+#: candidate of these kinds is passed over rather than followed. Followed, a
+#: tool's ``server: github`` found a tool NAMED github on another server and handed
+#: its declarer every power that tool carries -- ``shell`` from another agent,
+#: with no gap reported -- where the answer was that no server github is declared.
+INVOKED_KINDS = frozenset({"tool", "skill"})
+
 
 #: Why a reference could not be placed. A reference that names nothing and one
 #: that names two things are both unresolved, and they are different
@@ -71,6 +79,31 @@ UNRESOLVED_NAMES_A_PRINCIPAL = "names_a_principal"
 #: the current rules and the reason goes away; one that does not leaves it here,
 #: which is what it is.
 UNRESOLVED_SUPERSEDED = "superseded_identity"
+#: A reference from the one row the old identity rules wrote for EVERY unnamed
+#: agent at once. Followed and counted, like a superseded one, and different in
+#: the one way that matters to an operator: no rescan re-records it. The current
+#: rules key each unnamed agent by where it is, so a rescan writes that agent's
+#: own row and leaves this one as it was. Saying "rescan to confirm" of it sent
+#: people to rescan, forever, for a row no scan touches.
+UNRESOLVED_LEGACY_UNNAMED = "legacy_unnamed_agent"
+
+#: The key the old rules gave every unnamed agent.
+LEGACY_UNNAMED_AGENT = "agent"
+
+#: On an agent row: the kinds each named tool was declared as, keyed by the
+#: identifier in ``tools``. Written with the declaration, so a reference resolves
+#: only to what its own declaration wrote. Without it, an agent declaring the MCP
+#: server ``files-mcp`` also reached the old tool row the old rules keyed at
+#: ``files-mcp``, and that row's ``shell`` -- a power the declaration had removed --
+#: stayed in the agent's reach through every rescan.
+TOOL_KINDS = "tool_kinds"
+
+#: On a declared-inventory row: that nothing declares it any more. Set when the
+#: last declaration that could mean an old-keyed row has been re-recorded under the
+#: current rules; the row's powers are cleared and it is left out of the graph. Kept,
+#: not deleted -- findings and a human classification still point at it -- and taken
+#: off again if a declaration ever writes its key.
+RETIRED = "retired"
 
 #: The identity rules the declared inventory is recorded under. Stamped on every
 #: declared-inventory row as it is written, so a row the rules before this one
@@ -180,7 +213,53 @@ def resolve_identity(reference, accounts):
     return resolve_reference(identity_key(reference), *folded)
 
 
-def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kinds=frozenset()):
+def declared_tool_kinds(metadata: dict, reference) -> frozenset | None:
+    """The kinds an agent's declaration wrote ``reference`` as, or ``None`` when its
+    row does not say -- an agent recorded before :data:`TOOL_KINDS` was, whose
+    reference may mean anything its key names."""
+    kinds = metadata.get(TOOL_KINDS)
+    if not isinstance(kinds, dict):
+        return None
+    declared = kinds.get(str(reference or "").strip())
+    if not isinstance(declared, list):
+        return None
+    return frozenset(k for k in declared if isinstance(k, str)) or None
+
+
+def resolve_tool(metadata: dict, reference, by_identifier: dict, by_name: dict):
+    """:func:`resolve_reference` for one entry of an agent's ``tools``: never a
+    principal, and -- when the agent's row records it -- only the kinds its own
+    declaration wrote under that key."""
+    return resolve_reference(
+        reference, by_identifier, by_name,
+        not_kinds=PRINCIPAL_KINDS, only_kinds=declared_tool_kinds(metadata, reference),
+    )
+
+
+def retired(asset) -> bool:
+    """Whether ``asset`` is a declared-inventory row nothing declares any more."""
+    metadata = asset.metadata if isinstance(getattr(asset, "metadata", None), dict) else {}
+    return bool(metadata.get(RETIRED))
+
+
+def in_graph(assets) -> list:
+    """The assets the graph is built over: every one but a :func:`retired` row."""
+    return [a for a in assets if not retired(a)]
+
+
+def legacy_unnamed_agent(asset) -> bool:
+    """Whether ``asset`` is the row the old rules wrote for every unnamed agent."""
+    return (
+        getattr(asset, "kind", None) == "agent"
+        and getattr(asset, "identifier", None) == LEGACY_UNNAMED_AGENT
+        and superseded_identity(asset)
+    )
+
+
+def resolve_reference(
+    reference, by_identifier: dict, by_name: dict, *,
+    not_kinds=frozenset(), skip_kinds=frozenset(), only_kinds=None,
+):
     """``(candidates, reason)``: every asset a declared reference could name, and
     why it did not name exactly one.
 
@@ -207,6 +286,12 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kind
     kinds are dropped before the rest are followed; a reference that names only
     such a thing is unresolved and says so.
 
+    ``skip_kinds`` and ``only_kinds`` are different: they say which kinds the
+    reference is not ABOUT, rather than which it must not reach. A candidate
+    outside them is passed over as if it did not carry the key, and resolution
+    goes on to the next index -- a ``server`` that only a tool carries is a server
+    nobody declared, not a principal and not that tool.
+
     An empty list is not permission to invent a node, and it is not permission to
     say nothing either: the caller records the reason.
     """
@@ -214,7 +299,10 @@ def resolve_reference(reference, by_identifier: dict, by_name: dict, *, not_kind
     if not key:
         return [], UNRESOLVED_NOT_FOUND
     for index in (by_identifier, by_name):
-        matches = index.get(key)
+        matches = [
+            m for m in index.get(key) or ()
+            if m.kind not in skip_kinds and (only_kinds is None or m.kind in only_kinds)
+        ]
         if matches:
             usable = [m for m in matches if m.kind not in not_kinds]
             if not usable:
@@ -238,7 +326,15 @@ def unresolved_reasons(source, candidates, why) -> list[str]:
     agent's -- it could make an orphaned account read as used.
     """
     reasons = [why] if why else []
-    if candidates and (superseded_identity(source) or any(superseded_identity(c) for c in candidates)):
+    legacy_source = legacy_unnamed_agent(source)
+    if legacy_source:
+        # Every reference the old unnamed-agent row makes, found or not: the row is
+        # a declaration no scan re-records, and what it names is named by that.
+        reasons.append(UNRESOLVED_LEGACY_UNNAMED)
+    superseded_target = any(superseded_identity(c) for c in candidates)
+    if candidates and (superseded_target or (superseded_identity(source) and not legacy_source)):
+        # And beside it, not instead of it, when what the reference reaches is itself
+        # an old row: that is a second thing true of it.
         reasons.append(UNRESOLVED_SUPERSEDED)
     return reasons
 

@@ -43,6 +43,7 @@ import hashlib
 
 from django.utils import timezone
 
+from .graph_refs import in_graph
 from .component_identity import by_identity, component_key
 from .models import RESOLVED_FINDING_STATUSES, Asset, Deployment, Finding
 
@@ -131,7 +132,7 @@ def assess_bom_drift(deployment) -> dict:
     side to keep it query-light.
     """
     declared = list(deployment.declared_components.all())
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
 
     # Every row under an identity, not the last one: a dict keyed on the identity
     # kept one row per key, so a second undeclared component answering to the same

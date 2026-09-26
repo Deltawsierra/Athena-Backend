@@ -28,6 +28,7 @@ migration. Prefetch ``assets__provider__assertions`` and select_related
 
 from __future__ import annotations
 
+from .graph_refs import in_graph
 from .receipt import _digest
 from .served_route import served_route_fingerprint
 
@@ -162,11 +163,11 @@ def compute_system_fingerprint(deployment) -> str:
     Prefetch ``assets__provider__assertions`` and select_related ``data_boundary``
     on the caller side to keep it query-light."""
     assets = sorted(
-        (_asset_descriptor(a) for a in deployment.assets.all()),
+        (_asset_descriptor(a) for a in in_graph(deployment.assets.all())),
         key=lambda d: (d["kind"], d["identifier"], d["name"]),
     )
 
-    providers = _distinct_providers(deployment.assets.all(), _provider_descriptor)
+    providers = _distinct_providers(in_graph(deployment.assets.all()), _provider_descriptor)
 
     descriptor = {
         "environment": deployment.environment,
@@ -338,7 +339,7 @@ def _declared_component_descriptor(component) -> dict:
 
 def _families(deployment) -> dict:
     """Every input family, computed once over a (prefetched) deployment."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
 
     def by_asset(project) -> list:
         return sorted(

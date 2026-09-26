@@ -392,9 +392,9 @@ def _references(dep):
 def test_a_deployment_scanned_under_the_old_identities_hides_no_gap():
     """Rescanned, the old server-keyed tool row answered the tools' ``server:
     files-mcp`` -- the gap a fresh deployment reports, no such server declared,
-    read as no gap. Every reference to a row no scan has recorded under the
-    current rules is now followed AND reported, so the upgraded deployment names
-    each reference the fresh one does."""
+    read as no gap. A server is never a tool now, so the upgraded deployment names
+    each reference the fresh one does, and the old unnamed row's own references as
+    what they are: declared by a row no rescan re-records."""
     fresh = _dep("fresh")
     derive_assets(fresh, _files_scan(fresh.owner))
     assert _references(fresh) == [("files-mcp", "server", "not_found")] * 2
@@ -402,10 +402,11 @@ def test_a_deployment_scanned_under_the_old_identities_hides_no_gap():
     upgraded = _dep("upgraded")
     _old_rows(upgraded, agent_tools=["files-mcp", "files-mcp"])
     derive_assets(upgraded, _files_scan(upgraded.owner))
-    # The two new tools' server, the old row's own server (its own key -- it used
-    # to resolve to itself and say nothing), and the old agent's two tools.
-    assert _references(upgraded) == [("files-mcp", "server", "superseded_identity")] * 3 + [
-        ("files-mcp", "tools", "superseded_identity")
+    # The two new tools' server and the old row's own (its own key -- it used to
+    # resolve to itself and say nothing), none of them a declared server; and the
+    # old unnamed agent's two tools, still followed to the old row they name.
+    assert _references(upgraded) == [("files-mcp", "server", "not_found")] * 3 + [
+        ("files-mcp", "tools", "legacy_unnamed_agent")
     ] * 2
 
 
@@ -794,7 +795,7 @@ def test_the_old_agent_row_proves_no_use_of_the_account_it_names():
 
     result = assess_effective_access(dep)
     assert _gap_types(_principal(result, "svc-legacy")) == ["use_unproven"]
-    assert _references(dep) == [("svc-legacy", "identity", "superseded_identity")]
+    assert _references(dep) == [("svc-legacy", "identity", "legacy_unnamed_agent")]
 
 
 def test_an_ambiguous_reference_with_an_old_candidate_says_both():
@@ -958,8 +959,22 @@ def test_an_account_only_an_unrecorded_agent_names_says_so():
 
     (gap,) = _principal(assess_effective_access(dep), "svc-legacy")["gaps"]
     assert gap["type"] == "use_unproven"
-    assert "re-recorded" in gap["detail"]
+    # The old unnamed row: no rescan re-records it, and the gap says so rather than
+    # sending the operator to rescan.
+    assert "no rescan re-records" in gap["detail"]
+    assert "scanned again" not in gap["detail"]
     assert "more than one service account" not in gap["detail"]
+
+
+def test_an_account_only_a_not_yet_rescanned_named_agent_names_awaits_its_rescan():
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="bot",
+           metadata={"source": "declared_inventory", "identity": "svc-legacy", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="svc-legacy")
+
+    (gap,) = _principal(assess_effective_access(dep), "svc-legacy")["gaps"]
+    assert gap["type"] == "use_unproven"
+    assert "scanned again" in gap["detail"]
 
 
 def test_one_reference_is_one_row_however_many_reasons():
@@ -983,6 +998,9 @@ def test_one_reference_is_one_row_however_many_reasons():
     digest = _derive_effective_access(dep)["supporting_summary"]
     assert digest.count("bot → files-mcp") == 1
     assert "could not be placed" in digest
+    # Named once, and the old row it also reaches is said beside the name rather
+    # than dropped because "ambiguous" came first.
+    assert "bot → files-mcp (reached through a row no scan has re-recorded since)" in digest
 
 
 def test_a_reference_only_an_old_row_answers_is_named_as_followed_not_unplaced():
@@ -1001,9 +1019,18 @@ def test_a_reference_only_an_old_row_answers_is_named_as_followed_not_unplaced()
 def test_an_old_source_whose_reference_names_nothing_is_not_found_only():
     """"Followed" would say the reference led somewhere. It led nowhere."""
     dep = _dep()
-    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+    _asset(dep, kind=Kind.AGENT, name="bot",
            metadata={"source": "declared_inventory", "tools": ["gone"]})
     assert _reasons(dep) == [("gone", "tools", ("not_found",))]
+
+
+def test_the_old_unnamed_rows_reference_says_where_it_comes_from_found_or_not():
+    """Not found, AND declared by the row no rescan re-records: both true, and the
+    second is what tells the operator a rescan will not clear it."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "tools": ["gone"]})
+    assert _reasons(dep) == [("gone", "tools", ("not_found", "legacy_unnamed_agent"))]
 
 
 def test_an_old_source_is_named_on_its_server_reference_too():
@@ -1061,3 +1088,303 @@ def test_0034_stamps_exactly_the_rows_both_rules_key_alike():
         stamped = {k for k, a in rows.items() if Asset.objects.get(pk=a.pk).metadata.get("identity_rules") == 2}
         assert stamped == {"named agent", "tool with its own identifier", "tool with no server", "mcp server"}
     assert Asset.objects.get(pk=rows["an older stamp"].pk).metadata["identity_rules"] == 1
+
+
+# ---- Round 5: an old row settles, and a server is never a tool. ----
+
+
+def _agent_scan(user, agent, tools, target_url="https://a.example/bot"):
+    return PentestScan.objects.create(
+        user=user, target_url=target_url, consent=True, status=PentestScan.STATUS_COMPLETED,
+        engine_response={"findings": []},
+        target_config={"agent": {"name": agent}, "tools": tools},
+    )
+
+
+def _old_named_rows(dep, agent="assistant"):
+    """What the old rules left for a named agent with two tools on ``files-mcp``: the
+    agent row -- keyed the same under both rules, so 0034 stamps it, but naming the
+    old keys and not what kind each is -- and one tool row at the server's key,
+    holding the last tool's shell."""
+    from assurance.graph_refs import IDENTITY_RULES
+
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, kind=Kind.TOOL, name="read_file", identifier="files-mcp",
+           metadata={**inventory, "server": "files-mcp", "permissions": ["shell"]})
+    return _asset(dep, kind=Kind.AGENT, name=agent, identifier=agent,
+                  metadata={**inventory, "identity_rules": IDENTITY_RULES, "identity": "",
+                            "tools": ["files-mcp", "files-mcp"]})
+
+
+def _capabilities(result, name):
+    return {c["key"] for c in _principal(result, name)["capabilities"]}
+
+
+@pytest.mark.parametrize("alpha_tool", [
+    {"name": "github", "server": "composio", "permissions": ["shell"]},
+    {"name": "github", "permissions": ["shell"]},
+], ids=["a-tool-named-github-on-another-server", "a-plain-tool-named-github"])
+def test_a_server_is_never_a_tool_another_agent_declared(alpha_tool):
+    """``server: github`` found alpha's tool NAMED github and handed beta its shell,
+    with beta's own gap -- no server github is declared -- gone from the list."""
+    dep = _dep()
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [alpha_tool]))
+    derive_assets(dep, _agent_scan(dep.owner, "beta", [
+        {"name": "create_issue", "server": "github", "permissions": ["issues:write"]}]))
+
+    assert "code_execution" not in _capabilities(assess_effective_access(dep), "beta")
+    assert ("github", "server", "not_found") in _references(dep)
+
+
+def test_a_removed_permission_leaves_the_graph_once_its_declaration_is_rescanned():
+    """No rescan ever touched the old row again -- the current rules write the tool
+    as ``read_file@files-mcp`` -- so a shell the inventory had removed stayed in
+    reach for good, and the page asked for the rescan that had already happened."""
+    from assurance.graph_refs import RETIRED
+
+    dep = _dep()
+    _old_named_rows(dep)
+    declared = [{"name": "read_file", "server": "files-mcp", "permissions": ["read"]}]
+    derive_assets(dep, _inventory_scan(dep.owner, declared))
+
+    old = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    assert old.metadata[RETIRED] and old.metadata["permissions"] == []
+    result = assess_effective_access(dep)
+    assert all("code_execution" not in {c["key"] for c in p["capabilities"]} for p in result["principals"])
+
+    fresh = _dep("fresh")
+    derive_assets(fresh, _inventory_scan(fresh.owner, declared))
+    assert _references(dep) == _references(fresh) == [("files-mcp", "server", "not_found")]
+
+
+def test_an_agent_declaring_the_server_reaches_the_server_not_the_old_row_at_its_key():
+    """The MCP entry writes ``files-mcp``, the old tool row's key: followed as any
+    kind, the reference reached the old row's shell and was reported, ambiguous and
+    superseded, on every rescan."""
+    dep = _dep()
+    _old_named_rows(dep)
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "read_file", "server": "files-mcp", "permissions": ["read"]},
+        {"name": "files-mcp", "kind": "mcp"},
+    ]))
+
+    agent = dep.assets.get(kind=Kind.AGENT, identifier="assistant")
+    assert agent.metadata["tool_kinds"] == {"read_file@files-mcp": ["tool"], "files-mcp": ["mcp_server"]}
+    assert "code_execution" not in _capabilities(assess_effective_access(dep), "assistant")
+    assert _references(dep) == []
+
+
+def test_an_old_row_stays_while_an_agent_not_yet_rescanned_names_it():
+    from assurance.graph_refs import IDENTITY_RULES, RETIRED
+
+    dep = _dep()
+    _old_named_rows(dep)
+    _asset(dep, kind=Kind.AGENT, name="helper", metadata={
+        "source": "declared_inventory", "declared": True, "identity_rules": IDENTITY_RULES,
+        "identity": "", "tools": ["files-mcp"]})
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "read_file", "server": "files-mcp", "permissions": ["read"]}]))
+
+    old = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    assert RETIRED not in old.metadata and old.metadata["permissions"] == ["shell"]
+    assert "code_execution" in _capabilities(assess_effective_access(dep), "helper")
+    assert ("files-mcp", "tools", "superseded_identity") in _references(dep)
+
+    derive_assets(dep, _agent_scan(dep.owner, "helper", [{"name": "lookup", "permissions": ["read"]}]))
+    old.refresh_from_db()
+    assert old.metadata[RETIRED]
+
+
+def test_a_declaration_covering_an_old_row_waits_for_every_agent_that_named_it():
+    """alpha's plain tool ``github`` and beta's ``create_issue`` on the server
+    ``github`` were one row under the old rules. alpha's rescan covers what the row
+    holds; stamped then, beta -- not yet rescanned -- reached alpha's shell with
+    nothing reported. The row settles when the last old declaration is re-recorded,
+    to the one declaration that still writes its key."""
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, name="github", metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    for name in ("alpha", "beta"):
+        _asset(dep, kind=Kind.AGENT, name=name, metadata={
+            **inventory, "identity_rules": IDENTITY_RULES, "identity": "", "tools": ["github"]})
+
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
+    row = dep.assets.get(kind=Kind.TOOL, identifier="github")
+    assert "identity_rules" not in row.metadata
+    assert ("github", "tools", "superseded_identity") in _references(dep)
+
+    derive_assets(dep, _agent_scan(dep.owner, "beta", [
+        {"name": "create_issue", "server": "github", "permissions": ["issues:write"]}]))
+    row.refresh_from_db()
+    assert (row.metadata["identity_rules"], row.metadata["permissions"]) == (IDENTITY_RULES, ["shell"])
+    assert not {"legacy_content", "declared_content", "legacy_key"} & set(row.metadata)
+    assert "code_execution" not in _capabilities(assess_effective_access(dep), "beta")
+    assert _references(dep) == [("github", "server", "not_found")]
+
+
+def test_a_merge_does_not_keep_a_permission_the_declaration_since_dropped():
+    """Merged over the row as it stood, every power any declaration ever gave the
+    key stayed: http:get, dropped from the declaration, was still on the row."""
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["http:get"]}))
+    derive_assets(dep, _landing_scan(dep.owner, {"name": "files-mcp", "permissions": ["read"]}))
+
+    row = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    assert sorted(row.metadata["permissions"]) == ["read", "shell"]
+
+
+def test_a_retired_row_returns_when_a_declaration_writes_its_key():
+    from assurance.graph_refs import IDENTITY_RULES, RETIRED
+
+    dep = _dep()
+    _old_named_rows(dep)
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "read_file", "server": "files-mcp", "permissions": ["read"]}]))
+    assert dep.assets.get(kind=Kind.TOOL, identifier="files-mcp").metadata[RETIRED]
+
+    derive_assets(dep, _inventory_scan(dep.owner, [{"name": "files-mcp", "permissions": ["http:get"]}]))
+    row = dep.assets.get(kind=Kind.TOOL, identifier="files-mcp")
+    assert RETIRED not in row.metadata
+    assert (row.metadata["permissions"], row.metadata["identity_rules"]) == (["http:get"], IDENTITY_RULES)
+
+
+@pytest.mark.parametrize("last_writer", ["alpha", "beta"])
+def test_0034_leaves_a_key_two_declarations_name_for_a_rescan_whichever_wrote_last(last_writer):
+    """alpha's plain tool and beta's tool on the server ``github`` were one row. With
+    alpha written last the row said nothing of a server, 0034 stamped it, and the
+    collapse -- beta reaching alpha's shell -- was reported or not by scan order."""
+    from importlib import import_module
+
+    from django.apps import apps
+
+    migration = import_module("assurance.migrations.0034_stamp_unchanged_identities")
+    dep = _dep()
+    inventory = {"source": "declared_inventory"}
+    row = _asset(dep, name="github", metadata={
+        **inventory, "server": "" if last_writer == "alpha" else "github", "permissions": ["shell"]})
+    for name in ("alpha", "beta"):
+        _asset(dep, kind=Kind.AGENT, name=name, metadata={**inventory, "tools": ["github"]})
+
+    migration.stamp(apps, None)
+    row.refresh_from_db()
+    assert "identity_rules" not in row.metadata and row.metadata["legacy_key"] is True
+    assert sorted(r for r in _references(dep) if r[1] == "tools") == [
+        ("github", "tools", "superseded_identity")] * 2
+
+
+def test_the_inferred_spine_runs_through_a_current_agent_not_the_old_unnamed_row():
+    """The old row sorts first by name, and the spine was drawn through it."""
+    from assurance import route
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "tools": []})
+    derive_assets(dep, _scan(dep.owner, "https://a.example/bot", ["search"]))
+    current = dep.assets.get(kind=Kind.AGENT, identifier="agent@a.example/bot")
+
+    entry = [e for e in route.build_route_map(dep)["edges"] if e["kind"] == "entry"]
+    assert [e["target"] for e in entry] == [str(current.uuid)]
+
+
+def test_a_current_agents_ambiguous_use_outranks_the_old_rows_unrecorded_one():
+    """The old unnamed row, first by name, marked the account and kept it: the gap
+    said the only agent naming it was that row, while a current agent named it too."""
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "identity": "sa-1", "tools": []})
+    _asset(dep, kind=Kind.AGENT, name="bot", metadata={
+        "source": "declared_inventory", "identity_rules": 2, "identity": "billing", "tools": []})
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="Billing", identifier="sa-1")
+    _asset(dep, kind=Kind.SERVICE_ACCOUNT, name="BILLING", identifier="sa-2")
+
+    (gap,) = _principal(assess_effective_access(dep), "Billing")["gaps"]
+    assert gap["type"] == "use_unproven"
+    assert "more than one service account" in gap["detail"]
+
+
+def test_the_digest_says_the_old_unnamed_rows_references_need_no_rescan():
+    from assurance.claims import _derive_effective_access
+
+    dep = _dep()
+    _asset(dep, kind=Kind.AGENT, name="agent", identifier="agent",
+           metadata={"source": "declared_inventory", "tools": ["search"]})
+    _asset(dep, kind=Kind.TOOL, name="search", metadata={
+        "source": "declared_inventory", "identity_rules": 2, "permissions": ["read"]})
+
+    digest = _derive_effective_access(dep)["supporting_summary"]
+    assert "no rescan re-records that row" in digest and "agent → search" in digest
+    assert "a rescan is what confirms" not in digest
+
+
+def test_a_declaration_that_dropped_the_key_does_not_come_back_as_a_tool_nobody_owns():
+    """Settled to the last current declaration that landed on it, the row came back
+    stamped current with that declaration's shell -- after the agent had dropped the
+    tool -- and, named by no agent, its shell went to the deployment itself."""
+    from assurance.graph_refs import IDENTITY_RULES, RETIRED
+
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, name="github", metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    for name in ("alpha", "beta"):
+        _asset(dep, kind=Kind.AGENT, name=name, metadata={
+            **inventory, "identity_rules": IDENTITY_RULES, "identity": "", "tools": ["github"]})
+
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "search", "permissions": ["read"]}]))
+    derive_assets(dep, _agent_scan(dep.owner, "beta", [
+        {"name": "create_issue", "server": "github", "permissions": ["issues:write"]}]))
+
+    row = dep.assets.get(kind=Kind.TOOL, identifier="github")
+    assert row.metadata[RETIRED] and "identity_rules" not in row.metadata
+    result = assess_effective_access(dep)
+    assert all("code_execution" not in {c["key"] for c in p["capabilities"]} for p in result["principals"])
+
+
+def test_a_settled_row_is_what_its_declaration_asked_to_be_classified():
+    """A merge holds an approved declaration to the old row's classification; the
+    row it settles to is that declaration alone, approval included."""
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    inventory = {"source": "declared_inventory", "declared": True}
+    _asset(dep, name="github", metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.AGENT, name="beta", metadata={
+        **inventory, "identity_rules": IDENTITY_RULES, "identity": "", "tools": ["github"]})
+
+    derive_assets(dep, _agent_scan(dep.owner, "alpha", [
+        {"name": "github", "permissions": ["shell"], "approved": True}]))
+    assert dep.assets.get(kind=Kind.TOOL, identifier="github").classification == Asset.Classification.KNOWN
+
+    derive_assets(dep, _agent_scan(dep.owner, "beta", [{"name": "lookup", "permissions": ["read"]}]))
+    assert dep.assets.get(kind=Kind.TOOL, identifier="github").classification == Asset.Classification.APPROVED
+
+
+def test_a_retired_row_is_out_of_every_reader_not_only_the_graph():
+    """Out of the access and route graph, a retired row still stood in the capability
+    map as a component with its powers -- two readers disagreeing about what exists."""
+    import json
+
+    from assurance.capability import assess_capabilities
+    from assurance.graph_refs import IDENTITY_RULES
+
+    dep = _dep()
+    _asset(dep, kind=Kind.TOOL, name="legacy-reader", identifier="files-mcp", metadata={
+        "source": "declared_inventory", "declared": True, "server": "files-mcp", "permissions": ["shell"]})
+    _asset(dep, kind=Kind.AGENT, name="assistant", identifier="assistant", metadata={
+        "source": "declared_inventory", "declared": True, "identity_rules": IDENTITY_RULES,
+        "identity": "", "tools": ["files-mcp"]})
+    assert "legacy-reader" in json.dumps(assess_capabilities(dep), default=str)
+
+    derive_assets(dep, _inventory_scan(dep.owner, [
+        {"name": "read_file", "server": "files-mcp", "permissions": ["read"]}]))
+    assert "legacy-reader" not in json.dumps(assess_capabilities(dep), default=str)
+
+
+def test_the_old_unnamed_row_reaching_an_old_row_says_both():
+    dep = _dep()
+    _old_rows(dep, agent_tools=["files-mcp"])
+    rows = [r for r in _reasons(dep) if r[1] == "tools"]
+    assert rows == [("files-mcp", "tools", ("legacy_unnamed_agent", "superseded_identity"))]

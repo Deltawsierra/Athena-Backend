@@ -35,6 +35,7 @@ Prefetch ``assets`` on the caller side to keep it query-light.
 
 from __future__ import annotations
 
+from .graph_refs import in_graph
 from .models import Asset
 from .governance import GOVERNED
 
@@ -294,7 +295,7 @@ def assess_capabilities(deployment) -> dict:
             by_key[spec["key"]] = cap
         return cap
 
-    for asset in deployment.assets.all():
+    for asset in in_graph(deployment.assets.all()):
         # The capability the component's kind confers.
         spec = _KIND_CAPABILITY.get(asset.kind)
         if spec is not None:

@@ -41,6 +41,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
+from .graph_refs import in_graph
 from . import observability as obs
 from .models import AssuranceClaim, DataBoundary, LatentCondition, Provider
 from .governance import is_shadow
@@ -113,7 +114,7 @@ def _observe_asset_appears(condition, deployment) -> tuple[bool, str]:
     # kind where a negative is evidence.
     matches = [
         asset
-        for asset in deployment.assets.all()
+        for asset in in_graph(deployment.assets.all())
         if asset.name == condition.subject or asset.identifier == condition.subject
     ]
     return bool(matches), (

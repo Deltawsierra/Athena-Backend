@@ -34,11 +34,52 @@ def _same_key_under_both_rules(asset) -> bool:
     return not server or asset.identifier != server[:IDENTIFIER_MAX]
 
 
+#: ``assets.LEGACY_KEY``: a row whose key more than one old declaration wrote.
+LEGACY_KEY = "legacy_key"
+
+
+def _named_more_than_once(Asset) -> set:
+    """``{(deployment_id, key)}`` every key the deployment's declared agents name
+    more than once between them, counting a key one agent names twice.
+
+    The old rules wrote a named tool on a server at the server's key, so a plain
+    tool named ``github`` and a tool on the server ``github`` were one row, holding
+    whichever was written last. When the plain tool was last, the row said nothing
+    about a server and looked keyed the same way under both rules -- stamped, the
+    collapse was reported or not depending only on which agent was scanned last.
+    Every declaration that wrote a key also named it, so a key named twice is a key
+    two declarations may share. A shared tool that was never collapsed is reported
+    until a rescan re-records it, and then settles: over-reported for a while, never
+    a collapse hidden.
+    """
+    counts: dict = {}
+    for agent in Asset.objects.filter(metadata__source="declared_inventory", kind="agent").iterator():
+        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
+        tools = metadata.get("tools")
+        if not isinstance(tools, (list, tuple)):
+            continue
+        for ref in tools:
+            key = str(ref or "").strip()
+            if key:
+                counts[(agent.deployment_id, key)] = counts.get((agent.deployment_id, key), 0) + 1
+    return {pair for pair, n in counts.items() if n > 1}
+
+
 def stamp(apps, schema_editor):
     Asset = apps.get_model("assurance", "Asset")
+    shared = _named_more_than_once(Asset)
     for asset in Asset.objects.filter(metadata__source="declared_inventory").iterator():
         metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
-        if "identity_rules" in metadata or not _same_key_under_both_rules(asset):
+        if "identity_rules" in metadata:
+            continue
+        invoked = asset.kind in ("tool", "skill")
+        collapsed = invoked and (asset.deployment_id, asset.identifier) in shared
+        if collapsed or not _same_key_under_both_rules(asset):
+            # Left for a rescan, and marked, so the row is read as an old collapse
+            # whatever the last declaration to land on it said about its server.
+            if invoked and metadata.get(LEGACY_KEY) is not True:
+                asset.metadata = {**metadata, LEGACY_KEY: True}
+                asset.save(update_fields=["metadata"])
             continue
         asset.metadata = {**metadata, "identity_rules": IDENTITY_RULES}
         asset.save(update_fields=["metadata"])

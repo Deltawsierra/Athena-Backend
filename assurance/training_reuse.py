@@ -42,6 +42,7 @@ side. Nothing here reaches the network.
 
 from __future__ import annotations
 
+from .graph_refs import in_graph
 from .boundary import _affirmative, _negated, _shares_with_third_parties
 from .capability import (
     RISK_BASELINE,
@@ -228,7 +229,7 @@ def assess_training_reuse(deployment) -> dict:
     side-effect-free — a computed view of the stored graph, never a stored
     record."""
     by_provider: dict[int, dict] = {}
-    for asset in deployment.assets.all():
+    for asset in in_graph(deployment.assets.all()):
         provider = getattr(asset, "provider", None)
         if provider is None:
             continue

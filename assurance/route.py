@@ -39,15 +39,19 @@ here reaches the network.
 from __future__ import annotations
 
 from .graph_refs import (
+    INVOKED_KINDS,
     MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     identity_index,
     identity_references,
+    in_graph,
     resolve_identity,
     reference_index,
     resolve_reference,
+    resolve_tool,
+    superseded_identity,
     unresolved_row,
     sort_references,
     tool_references,
@@ -136,7 +140,7 @@ def build_route_map(deployment) -> dict:
     node, the edges between them (declared where the inventory attests one, the
     inferred pipeline spine otherwise), and an honest summary. Prefetch
     ``assets__provider`` on the caller side. Pure and side-effect-free."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
 
     nodes: list[dict] = []
     by_uuid: dict[str, dict] = {}
@@ -187,9 +191,7 @@ def build_route_map(deployment) -> dict:
         for ident in tool_references(metadata):
             if not str(ident or "").strip():
                 continue
-            targets, why = resolve_reference(
-                ident, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
-            )
+            targets, why = resolve_tool(metadata, ident, by_identifier, by_name)
             for target in targets:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
             # A tool the agent names but discovery could not place -- or could
@@ -240,7 +242,7 @@ def build_route_map(deployment) -> dict:
         if not server:
             continue
         hosts, why = resolve_reference(
-            server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+            server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS, skip_kinds=INVOKED_KINDS
         )
         # The reference names nothing in the inventory, or more than one
         # thing. The first used to vanish: no edge, and no unresolved row
@@ -269,8 +271,12 @@ def build_route_map(deployment) -> dict:
         ),
         None,
     )
-    front = front or (app_apis[0] if app_apis else None) or (agent_assets[0] if agent_assets else None)
-    brain = agent_assets[0] if agent_assets else None
+    # The orchestrating agent is one recorded under the current rules when there is
+    # one. The old unnamed row sorts first by name, so taking the first agent drew
+    # the inferred spine through a row no declaration re-records.
+    current_agents = [a for a in agent_assets if not superseded_identity(a)] or agent_assets
+    front = front or (app_apis[0] if app_apis else None) or (current_agents[0] if current_agents else None)
+    brain = current_agents[0] if current_agents else None
 
     models = [a for a in assets if a.kind == Asset.Kind.MODEL]
     gateways = [a for a in assets if a.kind == Asset.Kind.GATEWAY]

@@ -66,6 +66,7 @@ from typing import Any
 
 from django.utils import timezone
 
+from .graph_refs import in_graph
 from .component_identity import by_identity, component_key
 from .models import Asset, DeclaredComponent, Deployment
 
@@ -214,7 +215,7 @@ def coverage_manifest(deployment: Deployment) -> dict[str, Any]:
     with nothing named is a number a reader cannot act on.
     """
     declared = list(deployment.declared_components.all())
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
 
     declared_groups = by_identity(declared)
     observed_groups = by_identity(assets)

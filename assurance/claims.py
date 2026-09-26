@@ -306,11 +306,39 @@ def _derive_effective_access(deployment) -> dict:
         # identity rules WAS placed and followed; saying it "could not be placed"
         # is false and sends the operator looking for a component that exists.
         # What it needs is a rescan, and the digest says that instead.
-        pairs = sorted(
-            {f"{u['source']} → {u['reference']}" for u in unresolved if u.get("reason") != "superseded_identity"}
-        )
+        #
+        # Read off every reason a row carries, not its first. An ambiguous
+        # reference to an old row is both, and splitting on the first said only
+        # "could not be placed" where the page says both. It is named ONCE --
+        # under the sentence for what could not be placed, with what else is true
+        # of it said beside the name -- because a reference counted under two
+        # sentences is a reference a reader sums twice.
+        def _reasons(u: dict) -> set:
+            listed = u.get("reasons")
+            return {str(r) for r in listed} if isinstance(listed, list) and listed else {str(u.get("reason"))}
+
+        _followed = {"superseded_identity", "legacy_unnamed_agent"}
+
+        def _named(u: dict) -> str:
+            name = f"{u['source']} → {u['reference']}"
+            reasons = _reasons(u)
+            if "superseded_identity" in reasons:
+                name += " (reached through a row no scan has re-recorded since)"
+            if "legacy_unnamed_agent" in reasons:
+                name += " (declared by the old row for every unnamed agent)"
+            return name
+
+        pairs = sorted({_named(u) for u in unresolved if _reasons(u) - _followed})
+        # A reference from the old unnamed row goes under its sentence alone, even
+        # when what it reaches is an old row too: no rescan clears either.
         stale = sorted(
-            {f"{u['source']} → {u['reference']}" for u in unresolved if u.get("reason") == "superseded_identity"}
+            {f"{u['source']} → {u['reference']}" for u in unresolved
+             if _reasons(u) <= _followed and "superseded_identity" in _reasons(u)
+             and "legacy_unnamed_agent" not in _reasons(u)}
+        )
+        legacy = sorted(
+            {f"{u['source']} → {u['reference']}" for u in unresolved
+             if _reasons(u) <= _followed and "legacy_unnamed_agent" in _reasons(u)}
         )
         if pairs:
             supporting += (
@@ -326,6 +354,15 @@ def _derive_effective_access(deployment) -> dict:
                 "has recorded since; the reach through them is counted, and a rescan is what "
                 "confirms it: "
                 + ", ".join(stale)
+                + "."
+            )
+        if legacy:
+            supporting += (
+                f" {len(legacy)} declared reference(s) come from the row the old identity "
+                "rules wrote for every unnamed agent at once; the reach through them is "
+                "counted, and no rescan re-records that row -- the current rules key each "
+                "unnamed agent by where it is: "
+                + ", ".join(legacy)
                 + "."
             )
     contradicting_bits: list[str] = []

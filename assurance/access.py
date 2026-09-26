@@ -67,15 +67,19 @@ from .capability import (
     _permission_specs,
 )
 from .graph_refs import (
+    INVOKED_KINDS,
     MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
     identity_index,
     identity_references,
+    in_graph,
+    legacy_unnamed_agent,
     resolve_identity,
     reference_index,
     resolve_reference,
+    resolve_tool,
     superseded_identity,
     unresolved_row,
     sort_references,
@@ -185,9 +189,7 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
             for ident in tool_references(metadata):
                 if not str(ident or "").strip():
                     continue
-                targets, why = resolve_reference(
-                    ident, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
-                )
+                targets, why = resolve_tool(metadata, ident, by_identifier, by_name)
                 for target in targets:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
                 row = unresolved_row(asset, ident, MECHANISM_TOOLS, targets, why)
@@ -203,7 +205,7 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
         server = metadata.get("server")
         if server and str(server).strip():
             targets, why = resolve_reference(
-                server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+                server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS, skip_kinds=INVOKED_KINDS
             )
             for target in targets:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
@@ -310,6 +312,10 @@ IDENTITY_PROVEN = "proven"
 IDENTITY_AMBIGUOUS = "ambiguous"
 #: Named by an agent row no scan has recorded under the current identity rules.
 IDENTITY_UNRECORDED = "unrecorded"
+#: Named only by the row the old rules wrote for every unnamed agent -- which,
+#: unlike any other unrecorded row, no rescan re-records.
+IDENTITY_LEGACY = "legacy"
+_USE_RANK = {IDENTITY_LEGACY: 0, IDENTITY_UNRECORDED: 1, IDENTITY_AMBIGUOUS: 2, IDENTITY_PROVEN: 3}
 
 
 def _identity_use(agents, service_accounts) -> dict:
@@ -328,6 +334,15 @@ def _identity_use(agents, service_accounts) -> dict:
     """
     accounts = identity_index(service_accounts)
     use: dict = {}
+
+    def note(account, level: str) -> None:
+        # The strongest use any agent makes of the account stands: proven over
+        # ambiguous over unrecorded. Keeping the first one seen let the old unnamed
+        # row -- first by name -- mark an account "unrecorded" and say no current
+        # agent names it, while one did.
+        if _USE_RANK[level] > _USE_RANK.get(use.get(account.pk), -1):
+            use[account.pk] = level
+
     for agent in agents:
         metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
         # An agent row no scan has recorded under the current identity rules --
@@ -339,11 +354,11 @@ def _identity_use(agents, service_accounts) -> dict:
             candidates, why = resolve_identity(identity, accounts)
             for account in candidates:
                 if why is None and not unrecorded:
-                    use[account.pk] = IDENTITY_PROVEN
+                    note(account, IDENTITY_PROVEN)
                 elif why is None:
-                    use.setdefault(account.pk, IDENTITY_UNRECORDED)
+                    note(account, IDENTITY_LEGACY if legacy_unnamed_agent(agent) else IDENTITY_UNRECORDED)
                 else:
-                    use.setdefault(account.pk, IDENTITY_AMBIGUOUS)
+                    note(account, IDENTITY_AMBIGUOUS)
     return use
 
 
@@ -503,7 +518,7 @@ def _principal_dict(
                 "under it.",
             }
         )
-    elif unused and acted_under in (IDENTITY_AMBIGUOUS, IDENTITY_UNRECORDED):
+    elif unused and acted_under in (IDENTITY_AMBIGUOUS, IDENTITY_UNRECORDED, IDENTITY_LEGACY):
         # Neither orphaned nor used: an agent acts under an identity this account
         # and another both answer to, or an agent row no scan has re-recorded names
         # it. Calling it orphaned says nobody acts under it; calling it used says
@@ -514,6 +529,12 @@ def _principal_dict(
                 "An agent acts under an identity more than one service account answers "
                 "to, and the inventory does not say which — no principal is proven to act "
                 "under this one."
+            )
+        elif acted_under == IDENTITY_LEGACY:
+            detail = (
+                "The only agent naming this account is the row the old identity rules "
+                "wrote for every unnamed agent at once, and no rescan re-records that row "
+                "— no principal is proven to act under this account."
             )
         else:
             detail = (
@@ -558,7 +579,7 @@ def assess_effective_access(deployment) -> dict:
 
     Prefetch ``assets__provider`` on the caller side. Pure and side-effect-free —
     a computed view of the stored asset graph, never a stored record."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
 
     by_identifier, by_name = reference_index(assets)
 

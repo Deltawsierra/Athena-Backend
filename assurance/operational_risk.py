@@ -61,6 +61,7 @@ query-light. Pure and side-effect-free; deterministic.
 
 from __future__ import annotations
 
+from .graph_refs import in_graph
 from .models import (
     RESOLVED_FINDING_STATUSES,
     SEVERITY_HIGH,
@@ -566,7 +567,7 @@ def assess_operational_risk(deployment) -> dict:
     as an unearned fact — absence of data is *unmapped*, never *clear*. The overall
     roll-up is weakest-honest: it reflects the worst *observed* risk and surfaces
     the unmapped classes as open gaps rather than as a clean pass."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
     active_findings = [
         f for f in deployment.findings.all() if f.status not in _RESOLVED_STATUSES
     ]
