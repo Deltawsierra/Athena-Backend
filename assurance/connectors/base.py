@@ -249,6 +249,17 @@ class Connector(ABC):
     #: endpoint/scoping fields). The secret field is deliberately NOT listed here.
     settings_fields: tuple[str, ...] = ()
 
+    #: The request header this system deduplicates a create on, or ``None`` when it
+    #: has none. When a caller passes an ``operation_id`` -- the dispatcher passes
+    #: the durable id of "this finding to this connector" -- it is sent in this
+    #: header, so two pushes of one operation (a retry, or two runners in two
+    #: processes) are one to a system that honours it. ``None`` for every adapter
+    #: whose API has no such header: Jira's and GitHub's issue create, ServiceNow's
+    #: Table API (which carries the finding's UUID as ``correlation_id`` instead)
+    #: and Splunk HEC (whose event carries the finding's UUID). Sending one there
+    #: would claim a deduplication nothing performs.
+    idempotency_header: str | None = None
+
     def __init__(self, config: ConnectorConfig) -> None:
         self.config = config
 
@@ -290,7 +301,9 @@ class Connector(ABC):
             connector=self.name,
         )
 
-    def push_finding(self, finding: Any, *, transport: Transport) -> ConnectorResult:
+    def push_finding(
+        self, finding: Any, *, transport: Transport, operation_id: str | None = None
+    ) -> ConnectorResult:
         """Carry a finding into the external system as a ticket / issue / event.
 
         The inert-by-default guard lives here: an unconfigured connector returns
@@ -298,11 +311,14 @@ class Connector(ABC):
         ``transport``. Otherwise the adapter formats the request, the injected
         transport performs the single ``post``, and the adapter parses the
         response. A transport failure is caught and reported as ``ok=False`` — a
-        connector never raises out of a push."""
+        connector never raises out of a push. ``operation_id`` goes out in
+        :attr:`idempotency_header` when this system has one."""
         if not self.configured:
             return self._not_configured()
 
         url, headers, payload = self._format_finding(finding)
+        if operation_id and self.idempotency_header:
+            headers = {**headers, self.idempotency_header: operation_id}
         try:
             response = transport.post(url, headers=headers, json=payload)
         except Exception as exc:  # noqa: BLE001 — any transport error is a failed push, not a crash

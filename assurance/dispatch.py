@@ -41,10 +41,12 @@ import hashlib
 import logging
 import threading
 import time
+import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import connections, transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from .models import (
@@ -336,7 +338,11 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
     factory = transport_factory or _default_transport_factory
     transport = factory()
     connector = binding.build_connector()
-    result = connector.push_finding(finding, transport=transport)
+    # The operation's durable id travels with it wherever the system can
+    # deduplicate on one, so a second push of it is not a second ticket there.
+    result = connector.push_finding(
+        finding, transport=transport, operation_id=operation_id(finding, binding.connector)
+    )
     if result.ok:
         outcome = DispatchAttempt.Outcome.SENT
     elif result.uncertain:
@@ -362,7 +368,7 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory):
     )
 
 
-def dispatch_finding(finding, *, trigger, transport_factory=None):
+def dispatch_finding(finding, *, trigger, transport_factory=None, before_push=None):
     """Dispatch one finding to every connector bound to its deployment.
 
     Returns the list of :class:`~assurance.models.DispatchAttempt` records (one per
@@ -370,12 +376,18 @@ def dispatch_finding(finding, *, trigger, transport_factory=None):
     connector's failure is recorded as ``failed`` and never affects the others or
     the caller. This is the low-level worker — the policy gate (is the policy
     enabled, does the finding qualify) lives in the callers below, so this stays
-    directly testable."""
+    directly testable.
+
+    ``before_push``: asked before each connector, and when it answers false nothing
+    more is dispatched -- the decision trigger's check that the decision which asked
+    for the push still holds. It must not raise."""
     from .crypto import encryption_available
 
     key_ok = encryption_available()
     attempts = []
     for binding in ConnectorBinding.objects.filter(deployment=finding.deployment):
+        if before_push is not None and not before_push():
+            break
         try:
             attempts.append(
                 _dispatch_one(
@@ -428,30 +440,33 @@ def maybe_dispatch_finding(finding, *, transport_factory=None):
     )
 
 
-def _blocking_decision_policy(deployment):
+def _blocking_decision_policy(deployment, decision=None):
     """The policy the decision trigger dispatches ``deployment`` under, or ``None``
     when it does not: auto-dispatch off, no enabled policy opting into the trigger,
-    a decision that is not blocking, or no connector bound."""
-    if not getattr(settings, "ASSURANCE_AUTO_DISPATCH_ENABLED", True):
+    a decision that is not blocking, or no connector bound. ``decision``: the one
+    to judge, when it is not yet the instance's own."""
+    if not _auto_dispatch_enabled():
+        return None
+    if (deployment.decision if decision is None else decision) not in _BLOCKING_DECISIONS:
         return None
     policy = DispatchPolicy.objects.filter(deployment=deployment, enabled=True).first()
     if policy is None or not policy.on_blocking_decision:
-        return None
-    if deployment.decision not in _BLOCKING_DECISIONS:
         return None
     if not ConnectorBinding.objects.filter(deployment=deployment).exists():
         return None
     return policy
 
 
-def dispatch_for_blocking_decision(deployment, *, transport_factory=None):
+def dispatch_for_blocking_decision(deployment, *, transport_factory=None, before_push=None):
     """The decision trigger: when a deployment's decision has entered a blocking
     state and its policy opts into it, dispatch the deployment's active qualifying
     findings. Idempotent and inert-by-default like the severity trigger.
 
     Synchronous, and as slow as the connectors it pushes to. No stop calls it: the
     recompute route schedules it to run after its answer
-    (:func:`schedule_blocking_decision_dispatch`)."""
+    (:func:`schedule_blocking_decision_dispatch`). ``before_push`` is asked before
+    every push (:func:`dispatch_finding`); once it has answered false, nothing more
+    is pushed."""
     policy = _blocking_decision_policy(deployment)
     if policy is None:
         return []
@@ -460,6 +475,8 @@ def dispatch_for_blocking_decision(deployment, *, transport_factory=None):
         deployment.findings.exclude(status__in=_RESOLVED_STATUSES).order_by("pk")
     )
     for finding in findings:
+        if before_push is not None and getattr(before_push, "halted", None):
+            break
         if not policy.finding_qualifies(finding):
             continue
         attempts.extend(
@@ -467,6 +484,7 @@ def dispatch_for_blocking_decision(deployment, *, transport_factory=None):
                 finding,
                 trigger=DispatchAttempt.Trigger.BLOCKING_DECISION,
                 transport_factory=transport_factory,
+                before_push=before_push,
             )
         )
     return attempts
@@ -504,21 +522,42 @@ def schedule_finding_dispatch(finding):
 # second timeout, one hung ticketing system held a pause for thirteen seconds per
 # finding -- and nothing may delay a stop.
 #
-# Now the route only schedules it. After the stop's transaction commits, the
-# dispatch runs on a background thread, one per deployment at a time; the stop has
-# already answered by then and the thread holds nothing it waits on. The run
-# writes a `DecisionDispatchDue` row before it pushes anything and deletes it only
-# once a run finishes with no push left failed, so a run that raises, fails, or
-# dies with its process leaves the row behind: retried in the thread with backoff,
-# then by `manage.py retry_blocking_dispatches`, and shown by the deployment's
-# `dispatch-attempts` read. Every push keeps its own `DispatchAttempt` as before.
+# Now the stop only RECORDS that the dispatch is owed -- a `DecisionDispatchDue`
+# row, written in the stop's own transaction, in a savepoint whose failure is
+# logged and swallowed -- and schedules it. After the stop commits, the dispatch
+# runs on a background thread, one per deployment at a time in a process; the stop
+# has already answered by then, and nothing the stop does waits on the thread, a
+# connector, or anything the run writes.
+#
+# A run CLAIMS the row before it pushes anything (`running_until`, `run_token`), so
+# the thread and `manage.py retry_blocking_dispatches` -- or two processes -- never
+# push for one deployment at once, and a claim a crashed runner left lapses. Before
+# every push the run checks that its claim still holds and that the decision which
+# asked for the dispatch still does; once either does not, it pushes nothing more.
+# It deletes the row only once a run finishes with no push left failed and no stop
+# has asked again since it began. Every push keeps its own `DispatchAttempt`.
 
 #: Seconds to wait before each retry, in the background thread, of a run that did
 #: not settle. After the last one the row stays for ``retry_blocking_dispatches``.
 RETRY_DELAYS: tuple[float, ...] = (2.0, 8.0)
 
+#: How long a run's claim on an owed dispatch lasts unless renewed. A run renews it
+#: before a push once :data:`CLAIM_RENEW_AFTER` seconds have passed since it last
+#: did, and between two such checks it makes one push -- at most the transport's
+#: (3.05, 10) seconds, plus the database's 20 second busy timeout to record it -- so
+#: only a runner that has died lets it lapse. A process that exits mid-run leaves
+#: its claim, and the next runner takes the dispatch back at most this long after.
+CLAIM_SECONDS = 120.0
+CLAIM_RENEW_AFTER = 30.0
+
 #: The name every background dispatch thread starts with, then the deployment id.
 THREAD_PREFIX = "assurance-dispatch-"
+
+#: What a run reports for a deployment.
+SETTLED = "settled"  #: nothing is owed any more
+OWED = "owed"  #: still owed: a push failed, or the run raised
+ELSEWHERE = "running elsewhere"  #: another runner holds the claim and settles it
+DISABLED = "owed; auto-dispatch is disabled"  #: kept, untouched, until it is enabled
 
 #: Deployments with a background dispatch thread in this process, mapped to whether
 #: a stop asked again while it ran -- so a flood of stops of one deployment starts
@@ -526,92 +565,307 @@ THREAD_PREFIX = "assurance-dispatch-"
 _JOBS: dict[int, bool] = {}
 _JOBS_LOCK = threading.Lock()
 
+#: How many background runs push at once in one process. A flood of stops across
+#: many deployments starts a thread for each, and each run competes with the
+#: process's requests -- stops among them -- for the interpreter and the database's
+#: one writer. The rest wait here, asleep, their dispatch already recorded as owed.
+MAX_CONCURRENT_RUNS = 4
+_RUN_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_RUNS)
+
 #: The longest ``last_error`` kept on a row.
 _ERROR_LIMIT = 2000
 
 
-def _still_owed(deployment_id, detail: str) -> None:
-    """Record that a run finished without settling ``deployment_id``'s dispatch."""
-    now = timezone.now()
-    detail = detail[:_ERROR_LIMIT]
-    due, created = DecisionDispatchDue.objects.get_or_create(
-        deployment_id=deployment_id,
-        defaults={"owed_since": now, "runs": 1, "last_run_at": now, "last_error": detail},
-    )
-    if not created:
-        DecisionDispatchDue.objects.filter(pk=due.pk).update(
-            runs=F("runs") + 1, last_run_at=now, last_error=detail
+def _auto_dispatch_enabled() -> bool:
+    return bool(getattr(settings, "ASSURANCE_AUTO_DISPATCH_ENABLED", True))
+
+
+def record_blocking_dispatch_owed(deployment, decision) -> None:
+    """Record, in the stop's own transaction, that ``decision`` owes the decision
+    trigger's dispatch -- so that it is durable the moment the stop is, and a
+    process that exits right after the stop answers cannot lose it.
+
+    Passed by the recompute route to :func:`~assurance.decision.recompute_decision`,
+    which calls it under the row lock after the decision is written. It adds a few
+    indexed reads and one write to a transaction that already holds the write lock,
+    and waits on nothing else: no connector, no thread. Written in a savepoint, and
+    any failure is logged and swallowed -- a stop never fails, or waits, because its
+    dispatch could not be recorded; the background run records it then, and says so
+    if it cannot either. Never raises.
+    """
+    try:
+        if not _auto_dispatch_enabled() or decision not in _BLOCKING_DECISIONS:
+            return
+        with transaction.atomic():
+            if _blocking_decision_policy(deployment, decision) is None:
+                return
+            asked = DecisionDispatchDue.objects.filter(deployment_id=deployment.pk).update(
+                requests=F("requests") + 1
+            )
+            if not asked:
+                DecisionDispatchDue.objects.create(
+                    deployment_id=deployment.pk, owed_since=timezone.now(), requests=1
+                )
+    except Exception:  # noqa: BLE001 - a stop never fails on its dispatch's record
+        logger.exception(
+            "could not record the blocking-decision dispatch for deployment %s in its stop's "
+            "transaction; the stop stands, and the background run records it",
+            getattr(deployment, "pk", "?"),
         )
 
 
-def run_blocking_decision_dispatch(deployment_id, *, transport_factory=None) -> bool:
-    """Run the decision trigger for one deployment, as it stands now, and record
-    whether it is still owed. Returns ``True`` when nothing is left owed.
+def _owed_row(deployment_id):
+    return DecisionDispatchDue.objects.filter(deployment_id=deployment_id)
 
-    The row is written before any push, so a run that never returns -- its process
-    killed mid-push -- is still recorded. Nothing owed under the decision in force
-    now (lifted, the policy switched off, the deployment gone) settles it: a retry
-    never pushes under an authority that no longer holds. A run that raises, or
-    leaves a push FAILED, keeps the row with what went wrong; an UNKNOWN push is
-    not retried here -- it waits for reconciliation, as every uncertain push does.
+
+class _Claim:
+    """One run's claim on a deployment's owed dispatch, and the check made before
+    every push under it (``before_push``): the claim is still this run's, auto-
+    dispatch is still on, and the decision that asked for the dispatch still holds.
+
+    ``halted`` says why the run stopped pushing: :data:`WITHDRAWN` (the decision no
+    longer asks for it), :data:`LOST` (another runner holds the row now, or it is
+    gone), :data:`DISABLED`, or what went wrong making the check. The check never
+    raises: a check that cannot be made halts the run -- a push is never made on an
+    authority nobody could confirm.
     """
-    deployment = Deployment.objects.filter(pk=deployment_id).first()
-    if deployment is None:
+
+    WITHDRAWN = "withdrawn"
+    LOST = "lost"
+
+    def __init__(self, deployment, token, until):
+        self.deployment = deployment
+        self.token = token
+        self.until = until
+        self.halted = None
+
+    def mine(self):
+        return _owed_row(self.deployment.pk).filter(run_token=self.token)
+
+    def __call__(self) -> bool:
+        if self.halted:
+            return False
+        try:
+            now = timezone.now()
+            if (self.until - now).total_seconds() < CLAIM_SECONDS - CLAIM_RENEW_AFTER:
+                until = now + timedelta(seconds=CLAIM_SECONDS)
+                if not self.mine().update(running_until=until):
+                    self.halted = self.LOST
+                    return False
+                self.until = until
+            if not _auto_dispatch_enabled():
+                self.halted = DISABLED
+                return False
+            # One read: the claim is still this run's, and the decision and the
+            # policy as they stand now.
+            state = (
+                self.mine()
+                .values_list(
+                    "deployment__decision",
+                    "deployment__dispatch_policy__enabled",
+                    "deployment__dispatch_policy__on_blocking_decision",
+                )
+                .first()
+            )
+            if state is None:
+                self.halted = self.LOST
+                return False
+            decision, enabled, opted_in = state
+            if decision not in _BLOCKING_DECISIONS or not (enabled and opted_in):
+                self.halted = self.WITHDRAWN
+                return False
+            if decision != self.deployment.decision:
+                # Moved between blocking decisions: the instance every finding in
+                # this run shares is refreshed whole, so each push records the
+                # authority in force.
+                self.deployment.refresh_from_db()
+        except Exception as exc:  # noqa: BLE001 - halts the run; recorded on the row
+            logger.exception(
+                "the check before a blocking-decision push for deployment %s failed", self.deployment.pk
+            )
+            self.halted = f"the check before a push raised {type(exc).__name__}: {exc}"
+            return False
         return True
-    if _blocking_decision_policy(deployment) is None:
-        DecisionDispatchDue.objects.filter(deployment_id=deployment_id).delete()
-        return True
-    DecisionDispatchDue.objects.get_or_create(
-        deployment_id=deployment_id, defaults={"owed_since": timezone.now()}
+
+    def release(self) -> None:
+        self.mine().update(running_until=None, run_token="")
+
+    def still_owed(self, detail: str) -> None:
+        """Record that this run finished without settling it, and let the claim go."""
+        self.mine().update(
+            runs=F("runs") + 1,
+            last_run_at=timezone.now(),
+            last_error=detail[:_ERROR_LIMIT],
+            running_until=None,
+            run_token="",
+        )
+
+    def settle(self, asked) -> bool:
+        """Delete the row if no stop has asked again since this run began."""
+        deleted, _ = self.mine().filter(requests=asked).delete()
+        return bool(deleted)
+
+
+def _claim(deployment, token):
+    """Claim ``deployment``'s owed dispatch for the runner ``token``: a conditional
+    write that succeeds only when no other runner's claim is live. ``None`` when one
+    is. A runner may claim again what it already holds (its own earlier run)."""
+    now = timezone.now()
+    until = now + timedelta(seconds=CLAIM_SECONDS)
+    claimed = (
+        _owed_row(deployment.pk)
+        .filter(Q(running_until__isnull=True) | Q(running_until__lte=now) | Q(run_token=token))
+        .update(running_until=until, run_token=token)
     )
+    return _Claim(deployment, token, until) if claimed else None
+
+
+_RERUN = "rerun"
+
+
+def _run_claimed(claim, asked, transport_factory) -> str:
     try:
-        attempts = dispatch_for_blocking_decision(deployment, transport_factory=transport_factory)
+        attempts = dispatch_for_blocking_decision(
+            claim.deployment, transport_factory=transport_factory, before_push=claim
+        )
     except Exception as exc:  # noqa: BLE001 - recorded on the row and retried, never lost
-        logger.exception("blocking-decision dispatch failed for deployment %s", deployment_id)
-        _still_owed(deployment_id, f"the dispatch raised {type(exc).__name__}: {exc}")
-        return False
+        logger.exception("blocking-decision dispatch failed for deployment %s", claim.deployment.pk)
+        claim.still_owed(f"the dispatch raised {type(exc).__name__}: {exc}")
+        return OWED
+    if claim.halted == _Claim.LOST:
+        return ELSEWHERE
+    if claim.halted == DISABLED or not _auto_dispatch_enabled():
+        claim.release()
+        return DISABLED
     failed = [a for a in attempts if a.outcome == DispatchAttempt.Outcome.FAILED]
-    if failed:
+    if claim.halted not in (None, _Claim.WITHDRAWN):
+        claim.still_owed(claim.halted)
+        return OWED
+    if failed and claim.halted is None:
         detail = f"{len(failed)} push(es) failed: " + "; ".join(
             f"{a.connector} for finding {a.finding_id}: {a.detail}" for a in failed
         )
-        logger.error("blocking-decision dispatch for deployment %s: %s", deployment_id, detail)
-        _still_owed(deployment_id, detail)
-        return False
-    DecisionDispatchDue.objects.filter(deployment_id=deployment_id).delete()
-    return True
+        logger.error("blocking-decision dispatch for deployment %s: %s", claim.deployment.pk, detail)
+        claim.still_owed(detail)
+        return OWED
+    # Done -- every push sent, skipped, or UNKNOWN (which waits for reconciliation
+    # rather than a retry) -- or no longer asked for. Settled, unless a stop asked
+    # again while it ran: then it runs again for that stop.
+    if claim.settle(asked):
+        return SETTLED
+    claim.release()
+    return _RERUN
 
 
-def _run_until_settled(deployment_id) -> None:
-    """Run it, and again after each of :data:`RETRY_DELAYS` while it is not settled."""
+def run_blocking_decision_dispatch(deployment_id, *, transport_factory=None, token=None) -> str:
+    """Run the decision trigger for one deployment, as it stands now, and record
+    whether it is still owed. Returns :data:`SETTLED`, :data:`OWED`,
+    :data:`ELSEWHERE` or :data:`DISABLED`.
+
+    The row is claimed before any push, so two runners never push for one
+    deployment at once; ``token`` names the runner (a fresh one when omitted). A
+    row the stop could not write is written here first. Nothing owed under the
+    decision in force (lifted, the policy switched off, the deployment gone)
+    settles it -- checked before every push, not only at the start, so a run stops
+    pushing once the decision that asked for it is withdrawn. With auto-dispatch
+    switched off nothing is pushed and nothing owed is dropped. A run that raises,
+    or leaves a push FAILED, keeps the row with what went wrong; an UNKNOWN push is
+    not retried here -- it waits for reconciliation, as every uncertain push does.
+    """
+    token = token or uuid.uuid4().hex
+    deployment = Deployment.objects.filter(pk=deployment_id).first()
+    if deployment is None:
+        return SETTLED  # its row went with it
+    while True:
+        asked = _owed_row(deployment_id).values_list("requests", flat=True).first()
+        if not _auto_dispatch_enabled():
+            return SETTLED if asked is None else DISABLED
+        if _blocking_decision_policy(deployment) is None:
+            # Asked for under a decision that no longer holds: settled -- unless a
+            # stop has asked again since this read, which a changed count shows.
+            if asked is None or _owed_row(deployment_id).filter(requests=asked).delete()[0]:
+                return SETTLED
+            deployment.refresh_from_db()
+            continue
+        if asked is None:
+            # Its stop could not record it, or `--deployment` asked for one nobody did.
+            DecisionDispatchDue.objects.get_or_create(
+                deployment_id=deployment_id, defaults={"owed_since": timezone.now(), "requests": 1}
+            )
+            continue
+        claim = _claim(deployment, token)
+        if claim is None:
+            return ELSEWHERE
+        outcome = _run_claimed(claim, asked, transport_factory)
+        if outcome != _RERUN:
+            return outcome
+        deployment.refresh_from_db()
+
+
+def _log_still_owed(deployment_id, runs: int) -> None:
+    """The last word on a dispatch the background runs did not settle -- true in
+    every case, because it looks before it says the dispatch is recorded."""
+    try:
+        recorded = _owed_row(deployment_id).exists()
+    except Exception:  # noqa: BLE001 - reported below as not confirmed
+        recorded = None
+    if recorded:
+        logger.error(
+            "blocking-decision dispatch for deployment %s is still owed after %d run(s); it stays "
+            "recorded and `manage.py retry_blocking_dispatches` retries it",
+            deployment_id,
+            runs,
+        )
+    else:
+        logger.error(
+            "blocking-decision dispatch for deployment %s is still owed after %d run(s), and %s: "
+            "run `manage.py retry_blocking_dispatches --deployment %s`",
+            deployment_id,
+            runs,
+            "no record of it could be written" if recorded is False else "whether it is recorded could not be read",
+            deployment_id,
+        )
+
+
+def _run_until_settled(deployment_id, token) -> None:
+    """Run it, and again after each of :data:`RETRY_DELAYS` while it is owed. Stops
+    when it is settled, when another runner holds it, or when auto-dispatch is off."""
+    runs = 0
     for delay in (0.0, *RETRY_DELAYS):
         if delay:
             time.sleep(delay)
+        runs += 1
         try:
-            if run_blocking_decision_dispatch(deployment_id):
-                return
+            with _RUN_SLOTS:
+                outcome = run_blocking_decision_dispatch(deployment_id, token=token)
         except Exception:  # noqa: BLE001 - e.g. the database is unreachable; retried
             logger.exception(
                 "blocking-decision dispatch run for deployment %s did not complete", deployment_id
             )
-    logger.error(
-        "blocking-decision dispatch for deployment %s is still owed after %d run(s); it stays "
-        "recorded and `manage.py retry_blocking_dispatches` retries it",
-        deployment_id,
-        1 + len(RETRY_DELAYS),
-    )
+            continue
+        if outcome in (SETTLED, ELSEWHERE):
+            return
+        if outcome == DISABLED:
+            logger.warning(
+                "blocking-decision dispatch for deployment %s is owed and auto-dispatch is disabled; "
+                "it stays recorded and runs once it is enabled again",
+                deployment_id,
+            )
+            return
+    _log_still_owed(deployment_id, runs)
 
 
 def _blocking_dispatch_job(deployment_id) -> None:
     """The background thread: run until settled, and once more for every stop that
     asked while it ran."""
+    token = uuid.uuid4().hex
     finished = False
     try:
         while True:
-            _run_until_settled(deployment_id)
+            _run_until_settled(deployment_id, token)
             with _JOBS_LOCK:
                 if not _JOBS.get(deployment_id):
-                    del _JOBS[deployment_id]
+                    _JOBS.pop(deployment_id, None)
                     finished = True
                     return
                 _JOBS[deployment_id] = False
@@ -626,7 +880,11 @@ def _blocking_dispatch_job(deployment_id) -> None:
 def start_blocking_decision_dispatch(deployment_id) -> None:
     """Start the background run for ``deployment_id`` -- or, when one is running,
     ask it to run once more. Returns at once and never raises: it is called in a
-    stop's request, after the stop has committed."""
+    stop's request, after the stop has committed.
+
+    A daemon thread, on purpose: it never holds a worker's exit, and it need not,
+    because the stop has already recorded the dispatch as owed. A process that exits
+    mid-run leaves the row, and the claim lapses for the next runner."""
     try:
         with _JOBS_LOCK:
             if deployment_id in _JOBS:
@@ -672,8 +930,9 @@ def schedule_blocking_decision_dispatch(deployment_id) -> None:
     commits, in the background: the caller never waits on a connector.
 
     The one call the recompute route makes -- pause, lift, or a plain recompute --
-    after its decision has committed. Never raises."""
-    if not getattr(settings, "ASSURANCE_AUTO_DISPATCH_ENABLED", True):
+    after its decision has committed. Nothing with auto-dispatch switched off.
+    Never raises."""
+    if not _auto_dispatch_enabled():
         return
     try:
         transaction.on_commit(_BlockingDispatchAfterCommit(deployment_id))
@@ -688,19 +947,22 @@ def schedule_blocking_decision_dispatch(deployment_id) -> None:
 
 def retry_owed_blocking_dispatches(deployment_ids=None, *, transport_factory=None) -> dict:
     """Run every blocking-decision dispatch still owed -- or those of
-    ``deployment_ids``, owed or not -- here and now. Returns ``{deployment id:
-    settled}``; a run that raises counts as not settled and does not stop the rest."""
+    ``deployment_ids``, owed or not -- here and now, as one runner. Returns
+    ``{deployment id: outcome}`` (:data:`SETTLED`, :data:`OWED`, :data:`ELSEWHERE`,
+    :data:`DISABLED`); a run that raises counts as :data:`OWED` and does not stop
+    the rest. One another runner holds is left to it: never pushed twice at once."""
+    token = uuid.uuid4().hex
     if deployment_ids is None:
         deployment_ids = list(
             DecisionDispatchDue.objects.order_by("owed_since").values_list("deployment_id", flat=True)
         )
-    settled = {}
+    outcomes = {}
     for deployment_id in deployment_ids:
         try:
-            settled[deployment_id] = run_blocking_decision_dispatch(
-                deployment_id, transport_factory=transport_factory
+            outcomes[deployment_id] = run_blocking_decision_dispatch(
+                deployment_id, transport_factory=transport_factory, token=token
             )
         except Exception:  # noqa: BLE001 - reported per deployment; the rest still run
             logger.exception("blocking-decision dispatch retry for deployment %s did not complete", deployment_id)
-            settled[deployment_id] = False
-    return settled
+            outcomes[deployment_id] = OWED
+    return outcomes

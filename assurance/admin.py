@@ -300,11 +300,16 @@ class DispatchPolicyAdmin(admin.ModelAdmin):
 
 @admin.register(DecisionDispatchDue)
 class DecisionDispatchDueAdmin(admin.ModelAdmin):
-    # Written and cleared only by the background dispatch; shown so a dispatch that
-    # has not finished is seen. `manage.py retry_blocking_dispatches` retries it.
-    list_display = ("deployment", "owed_since", "runs", "last_run_at")
+    # Written by the stop that asks for the dispatch and cleared by the run that
+    # settles it; shown so a dispatch that has not finished is seen, and never
+    # edited by hand. `manage.py retry_blocking_dispatches` retries it. Deleting a
+    # row abandons that deployment's owed dispatch: nothing runs it again until a
+    # stop asks for it again.
+    list_display = ("deployment", "owed_since", "runs", "last_run_at", "running_until")
     search_fields = ("deployment__name",)
-    readonly_fields = ("deployment", "owed_since", "runs", "last_run_at", "last_error")
+    readonly_fields = (
+        "deployment", "owed_since", "runs", "last_run_at", "last_error", "requests", "running_until", "run_token",
+    )
 
     def has_add_permission(self, request):
         return False

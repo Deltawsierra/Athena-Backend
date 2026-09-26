@@ -937,6 +937,7 @@ def recompute_decision(
     brought_current: bool = False,
     claim: str | None = None,
     after_claim: str | None = None,
+    also_in_transaction=None,
 ) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
@@ -975,6 +976,13 @@ def recompute_decision(
     column is still marked: a recompute of the release before since rewrote that
     bare. Either way a recompute the watches did not see landed after they were read,
     and the row is left recognisable.
+
+    ``also_in_transaction``: called with the locked row and the new decision after
+    the decision is written, inside the same transaction, so what it writes commits
+    with the decision or not at all. It must not raise and must not wait: the
+    recompute route passes the record of a dispatch the decision now owes
+    (:func:`assurance.dispatch.record_blocking_dispatch_owed`), which is written in
+    a savepoint whose failure it swallows.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
@@ -1013,6 +1021,8 @@ def recompute_decision(
             # which takes any claim's token away with it.
             decision_policy=claim if keep_foreign else policy_stamp(moved["revision"]),
         )
+        if also_in_transaction is not None:
+            also_in_transaction(locked, decision)
     deployment.refresh_from_db(
         fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
     )

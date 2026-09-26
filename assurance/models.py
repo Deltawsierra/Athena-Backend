@@ -2577,21 +2577,29 @@ class DecisionDispatchDue(models.Model):
     The recompute route -- the one that pauses and lifts -- no longer runs the
     dispatch before it answers (:func:`assurance.dispatch.schedule_blocking_decision_dispatch`).
     It runs in the background after the stop has committed and answered, so it
-    can no longer hold a stop back; this row is how it can no longer be lost
-    either. The background run writes it before it pushes anything and deletes it
-    only once a run has finished with no push left failed. A run that raises, or
-    leaves a push failed, keeps it, with how many runs there have been and what the
-    last one said; ``manage.py retry_blocking_dispatches`` retries every one still
-    here, and the deployment's ``dispatch-attempts`` read shows it.
+    can no longer hold a stop back; this row is how it is not lost either.
 
-    Never written by a stop, and never read by the decision.
+    The STOP writes it, in its own transaction, when the decision it commits is one
+    the deployment's policy dispatches on: in a savepoint whose failure is logged
+    and swallowed, so the stop never fails or waits on it, and a process that exits
+    right after the stop answers leaves the row behind. A run claims it
+    (``running_until``/``run_token``) before it pushes anything, so two runners --
+    the background thread and ``manage.py retry_blocking_dispatches``, or two
+    processes -- never push for one deployment at once; a claim a crashed runner
+    left behind lapses at ``running_until``. A run deletes the row only once it has
+    finished with no push left failed and no stop has asked again since it began
+    (``requests``). A run that raises, or leaves a push failed, keeps it, with how
+    many runs there have been and what the last one said; the retry command retries
+    every one still here, and the deployment's ``dispatch-attempts`` read shows it.
+
+    Never read by the decision.
     """
 
     id = models.BigAutoField(primary_key=True)
     deployment = models.OneToOneField(
         Deployment, on_delete=models.CASCADE, related_name="decision_dispatch_due"
     )
-    #: When a run first found this dispatch owed and not done.
+    #: When a stop (or, failing that, a run) first recorded this dispatch as owed.
     owed_since = models.DateTimeField()
     #: Runs that have finished without settling it.
     runs = models.PositiveIntegerField(default=0)
@@ -2599,6 +2607,13 @@ class DecisionDispatchDue(models.Model):
     #: What the last run that did not settle it said: the exception, or the pushes
     #: it left failed. Human-readable; never a credential.
     last_error = models.TextField(blank=True)
+    #: How many times a stop has asked for it. A run settles the row only if this
+    #: is what it was when the run began: a stop that asked while it ran is run for.
+    requests = models.PositiveIntegerField(default=1)
+    #: The claim of the run pushing for it now: until when, and whose. Empty when
+    #: no run holds it; a claim past ``running_until`` belongs to a runner that died.
+    running_until = models.DateTimeField(null=True, blank=True)
+    run_token = models.CharField(max_length=32, blank=True, default="")
 
     def __str__(self) -> str:
         return f"blocking-decision dispatch owed for deployment {self.deployment_id} ({self.runs} run(s))"

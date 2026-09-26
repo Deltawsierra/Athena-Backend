@@ -54,7 +54,7 @@ from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
 from .decision import current_decision, decision_support, recompute_decision
-from .dispatch import schedule_blocking_decision_dispatch
+from .dispatch import record_blocking_dispatch_owed, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
 from .incident import assemble_incident_pack
@@ -594,16 +594,21 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             raise ValidationError({"paused": "Send an object, optionally with a boolean 'paused'."})
         raw_paused = request.data.get("paused")
         paused = None if raw_paused is None else _parse_paused(raw_paused, False)
-        decision = recompute_decision(deployment, paused=paused)
         # Commercial spine: if the decision has entered a blocking state and this
         # deployment's policy opts into it, auto-dispatch its qualifying findings.
         #
         # A pause is a stop, and this answer used to wait for that dispatch: the
         # hook ran "on commit", which in autocommit is at once, in the request --
         # every qualifying finding pushed to every connector before the pause
-        # answered, up to thirteen seconds a push against a hung one. It is only
-        # scheduled here, to run in the background once this has committed, and a
-        # run that does not finish stays recorded until one does (#303).
+        # answered, up to thirteen seconds a push against a hung one. Now the stop
+        # only RECORDS it as owed, in its own transaction (a savepoint whose failure
+        # is swallowed, so the stop never fails or waits on it), and schedules it to
+        # run in the background once this has committed. A run that does not
+        # finish -- or never starts, the process gone -- stays recorded until one
+        # does (#303).
+        decision = recompute_decision(
+            deployment, paused=paused, also_in_transaction=record_blocking_dispatch_owed
+        )
         schedule_blocking_decision_dispatch(deployment.pk)
         return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
 
