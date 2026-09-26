@@ -458,6 +458,8 @@ _NOT_RULES = {
     ("assurance.decision", "_READ_KEYRING"): "a sentinel meaning 'read the keyring now', not a rule",
     ("assurance.decision", "_KEYRING_MARK"): "which writer recomputed the stored decision; the rule it was "
     "computed under is the pin",
+    ("assurance.decision", "_CLAIM_PREFIX"): "which refresh claimed another writer's decision while it reads "
+    "the watches; no decision is computed from it",
     ("assurance.decision", "RESOLVED_FINDING_STATUSES"): "imported only to be bound to _RESOLVED_STATUSES, "
     "which the code reads and the pin names",
     ("assurance.decision", "_READINESS_ORDER"): "read once, at import, into _READINESS_RANK -- which "

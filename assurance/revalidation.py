@@ -33,9 +33,7 @@ from __future__ import annotations
 
 from . import observability as obs
 from .fingerprint import compute_system_fingerprint
-from django.db.models import Q
-
-from .models import LATENT_HOLDING_STATES, LATENT_UNREAD_STATES, AssuranceClaim, LatentCondition, RetestRequirement
+from .models import LATENT_HOLDING_STATES, AssuranceClaim, LatentCondition, RetestRequirement
 from .workflow_chains import composition_for, read_expected_workflows
 
 ClaimType = AssuranceClaim.ClaimType
@@ -84,6 +82,13 @@ def _reason_for(
         return "The current state contradicts this claim; fresh evidence is required to restore or retire it."
     if claim.status == Status.STALE:
         return "The claim's evidence has expired; a retest is due before it can be read as current."
+    if unread is not None and unread.state == LatentCondition.State.PENDING:
+        return (
+            f"A declared condition on this claim was left on a version a re-derive closed, and has not "
+            f"been carried to the current one, where it would be evaluated: {unread.description} "
+            f"({unread.get_kind_display()}; subject {unread.subject!r}). Nothing reads it there, so the "
+            "claim is not read as holding until it is carried and read, or a person withdraws it."
+        )
     if unread is not None:
         return (
             f"A declared condition on this claim cannot be read now ({unread.get_state_display()}): "
@@ -136,7 +141,8 @@ def plan_revalidation(deployment) -> dict:
 
     - **required** — the claim has an open retest obligation, is STALE, is
       CONTRADICTED, or a FIRED latent condition holds it (whatever its row reads) --
-      or a condition declared on it cannot be read now, or a person judged it legally
+      or a condition declared on it cannot be read now (one left pending on a version a
+      re-derive closed among them), or a person judged it legally
       stale (the legal axis as the carry leaves it): name the exact Athena
       reassessment and Achilles capability areas to re-run. This is the change-driven
       minimal set. The last three are read as the decision reads them, on any
@@ -200,7 +206,7 @@ def plan_revalidation(deployment) -> dict:
         # decision reads through whatever wrote the rows. The plan read only the
         # first, and said "No claim needs revalidation" while decision support said
         # needs more evidence.
-        from .decision import _LEGALLY_STALE
+        from .decision import _LEGALLY_STALE, conditions_the_decision_reads
         from .legal import carried_legal_statuses
 
         identities = {c.fingerprint for c in current}
@@ -222,15 +228,7 @@ def plan_revalidation(deployment) -> dict:
         ]
         holding: dict[str, LatentCondition] = {}
         unread: dict[str, LatentCondition] = {}
-        for condition in (
-            LatentCondition.objects.filter(deployment=deployment)
-            .filter(
-                Q(claim__fingerprint__in=identities, state__in=LATENT_UNREAD_STATES)
-                | Q(state__in=LATENT_HOLDING_STATES)
-            )
-            .select_related("claim")
-            .order_by("pk")
-        ):
+        for condition in conditions_the_decision_reads(deployment, identities):
             into = holding if condition.state in LATENT_HOLDING_STATES else unread
             into.setdefault(condition.claim.fingerprint, condition)
         carried = carried_legal_statuses(deployment.pk, current)

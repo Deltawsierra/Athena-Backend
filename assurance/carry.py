@@ -21,10 +21,12 @@ is idempotent and runs wherever such a write is next seen:
   (:func:`assurance.decision.current_decision`).
 
 And the decision does not wait for it: it reads a fired condition's hold, an unread
-condition, and the legal axis the carry leaves, on every version of the claim, so it
-computes the same answer before the repair as after (:func:`assurance.decision
-.claim_decision_signal`). What this makes right is the record itself -- the watch
-evaluated again, the retest open, the ruling on the row.
+condition, and the legal axis the carry leaves, on every version of the claim
+(:func:`assurance.decision.claim_decision_signal`). A watch left pending on a closed
+version is read as unread there -- nothing evaluates it until it is carried -- so
+until the carry and the evaluation after it the decision is held at needs more
+evidence, never read as watched. What this makes right is the record itself -- the
+watch evaluated again, the retest open, the ruling on the row.
 
 Each part writes in its own short transactions and schedules no refresh while it
 runs; the caller brings the decision current once, after. Never inside a stop.

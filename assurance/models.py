@@ -390,6 +390,9 @@ class Deployment(models.Model):
     # revision and not the stamp, and what it computed under its rules is recomputed
     # the same way. Without it every rule change needed a migration that wrote a
     # decision column behind the transition log, which nothing but the refresh may do.
+    # While a refresh reads the watches of a decision another writer left, it holds
+    # that refresh's claim instead (`decision._claim_for_this_release`): a token no
+    # stamp reads as, which every other recompute replaces.
     decision_policy = models.CharField(max_length=80, null=True, blank=True, default=None, editable=False)
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by

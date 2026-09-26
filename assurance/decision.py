@@ -59,6 +59,7 @@ everything.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field, replace
 
 from django.db import transaction
@@ -265,9 +266,10 @@ def claim_decision_signal(deployment: Deployment) -> dict:
       before and after anything writes it back onto the row;
     - a declared **latent condition** on a current claim -- on any version of it --
       that nobody can read now -- UNOBSERVABLE, or its evaluation failed
-      (:mod:`assurance.latent`) -- caps at NEEDS_MORE_EVIDENCE: the precondition
-      the claim rests on cannot be checked, and what cannot be established is not
-      read as holding;
+      (:mod:`assurance.latent`), or PENDING on a version a re-derive closed, where
+      nothing evaluates it until it is carried (:mod:`assurance.carry`) -- caps at
+      NEEDS_MORE_EVIDENCE: the precondition the claim rests on is not being
+      checked, and what cannot be established is not read as holding;
     - a current claim a **FIRED** latent condition holds -- on this version or on
       any earlier version of the claim -- caps at NEEDS_MORE_EVIDENCE whatever its
       row reads (``held``). The firing marks the claim STALE and opens a retest,
@@ -302,16 +304,8 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     # re-derive closed, and read there they still stand until they are carried
     # (assurance.carry).
     identities = {c.fingerprint for c in current}
-    watched = list(
-        LatentCondition.objects.filter(deployment=deployment)
-        .filter(
-            Q(claim__fingerprint__in=identities, state__in=LATENT_UNREAD_STATES)
-            | Q(state__in=LATENT_HOLDING_STATES)
-        )
-        .select_related("claim")
-        .order_by("pk")
-    )
-    unread_conditions = [w for w in watched if w.state in LATENT_UNREAD_STATES]
+    watched = conditions_the_decision_reads(deployment, identities)
+    unread_conditions = [w for w in watched if not_read(w)]
     holding = {w.claim.fingerprint for w in watched if w.state in LATENT_HOLDING_STATES}
     held = [c for c in current if c.fingerprint in holding]
 
@@ -353,6 +347,41 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         "held": held,
         "supporting": supporting,
     }
+
+
+def conditions_the_decision_reads(deployment, identities) -> list:
+    """The latent conditions on ``deployment`` the decision reads, on any version of a
+    claim, in pk order: every one that holds its claim (FIRED), and on the claims
+    whose identity is in ``identities`` -- the current, unrevoked ones -- every one
+    nobody reads (:func:`not_read`). One query; the plan reads the same
+    (:func:`assurance.revalidation.plan_revalidation`)."""
+    return list(
+        LatentCondition.objects.filter(deployment=deployment)
+        .filter(
+            Q(claim__fingerprint__in=identities, state__in=LATENT_UNREAD_STATES)
+            # Left pending on a version a re-derive closed, by a release that did not
+            # carry it, and not carried since (a carry refused): no evaluation reads a
+            # closed version, so it is not watched -- counted as watched, the decision
+            # published READY over a watch whose subject had come true.
+            | Q(
+                claim__fingerprint__in=identities,
+                claim__in=AssuranceClaim.objects.closed(),
+                state=LatentCondition.State.PENDING,
+            )
+            | Q(state__in=LATENT_HOLDING_STATES)
+        )
+        .select_related("claim")
+        .order_by("pk")
+    )
+
+
+def not_read(condition) -> bool:
+    """Whether nobody can say, now, whether ``condition`` holds: its subject cannot be
+    read, its evaluation failed, or it is pending where nothing evaluates it -- on a
+    version a re-derive closed."""
+    return condition.state in LATENT_UNREAD_STATES or (
+        condition.state == LatentCondition.State.PENDING and condition.claim.valid_to is not None
+    )
 
 
 def _claim_cap(applying: dict) -> str | None:
@@ -620,7 +649,13 @@ def _unread_conditions_note(conditions) -> str:
     precondition nobody can read -- naming each claim and what it rests on."""
     named = "; ".join(
         f"the {c.claim.claim_type} claim rests on {c.subject!r} ({c.get_kind_display().lower()}), "
-        + ("which cannot be read" if c.state == LatentCondition.State.UNOBSERVABLE else "whose evaluation failed")
+        + (
+            "which cannot be read"
+            if c.state == LatentCondition.State.UNOBSERVABLE
+            else "whose evaluation failed"
+            if c.state == LatentCondition.State.EVALUATION_FAILED
+            else "watched on a version a re-derive closed and not yet carried to the current one"
+        )
         for c in conditions
     )
     return (
@@ -896,7 +931,12 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
 
 
 def recompute_decision(
-    deployment: Deployment, *, paused: bool | None = None, brought_current: bool = False, after_claim: bool = False
+    deployment: Deployment,
+    *,
+    paused: bool | None = None,
+    brought_current: bool = False,
+    claim: str | None = None,
+    after_claim: str | None = None,
 ) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
@@ -926,10 +966,15 @@ def recompute_decision(
     ``brought_current``: the caller carried what the release before left and read
     every watch (or there was none to read). Any other recompute of a decision
     another writer left keeps it recognisable -- the policy stamp cleared -- so the
-    next publishing read still brings it current. ``after_claim``: the watches were
-    read after :func:`_claim_for_this_release`, so a keyring column found bare again
-    is a recompute of the release before since -- one the watches did not see -- and
-    that too leaves the row recognisable.
+    next publishing read still brings it current. ``claim``: what
+    :func:`_claim_for_this_release` leaves in the policy column of such a decision in
+    place of the stamp, a token of that claim's own. ``after_claim``: the token the
+    caller's claim left before the watches were read. The row is brought current only
+    if it still holds that token -- every recompute since, by anyone, rewrote the
+    column: another refresh's claim, a revoke, the recompute route -- and its keyring
+    column is still marked: a recompute of the release before since rewrote that
+    bare. Either way a recompute the watches did not see landed after they were read,
+    and the row is left recognisable.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
@@ -939,10 +984,9 @@ def recompute_decision(
         # Another writer's decision stays recognisable unless this caller brought it
         # current, and no recompute of that writer's has landed since it did.
         foreign = locked.decision is not None and not stamped_in_force(locked)
-        bare_since = after_claim and not (
-            locked.decision_keyring is None or locked.decision_keyring.startswith(_KEYRING_MARK)
-        )
-        keep_foreign = foreign and not (brought_current and not bare_since)
+        if after_claim is not None:
+            brought_current = brought_current and _still_claimed(locked, after_claim)
+        keep_foreign = foreign and not brought_current
         # ONE reading of the decision in force, under the lock: the pause is taken
         # from it and the move is made from it, so the two cannot disagree, and a
         # row behind its log is repaired -- and reported -- once.
@@ -964,8 +1008,10 @@ def recompute_decision(
             # included, and that is how such a recompute is told apart.
             decision_keyring=keyring_stamp(observed_outcomes.keyring_fingerprint(keyring)),
             decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
-            # The rules this was computed under, AND the revision it stands at.
-            decision_policy=None if keep_foreign else policy_stamp(moved["revision"]),
+            # The rules this was computed under, AND the revision it stands at. Kept
+            # recognisable, no stamp: the claim's token for a claim, else nothing --
+            # which takes any claim's token away with it.
+            decision_policy=claim if keep_foreign else policy_stamp(moved["revision"]),
         )
     deployment.refresh_from_db(
         fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
@@ -1045,21 +1091,41 @@ def stamped_in_force(deployment) -> bool:
     )
 
 
-def _claim_for_this_release(deployment) -> bool:
+#: What the policy column of a decision another writer left holds while a refresh of
+#: this release reads its watches (:func:`_claim_for_this_release`), before the
+#: claim's own token. Never a policy stamp: one reads ``<pin>@r<revision>``.
+_CLAIM_PREFIX = "claim:"
+
+
+def _claim_for_this_release(deployment) -> str | None:
     """Before the watches are read for a decision another writer left: recompute it
     as not yet brought current (:func:`recompute_decision`), which marks its keyring
-    column as this release's with the policy stamp left cleared. A recompute of the
-    release before after this rewrites the column bare, and the recompute that
-    follows the watches then leaves the row recognisable. Whether the row was
-    another writer's; one query, no lock and no write for a row that is this
-    release's."""
+    column as this release's and leaves, in place of the policy stamp, a token of
+    this claim's own. The token of the claim made; ``None`` -- one query, no lock and
+    no write -- for a row that is this release's.
+
+    The recompute that follows the watches brings the row current only if it still
+    holds both (``after_claim``). Every other recompute of the row takes the token
+    away -- another release's, a revoke, a contradict, the recompute route, a pause
+    or its lift, ``recompute_chain_decisions``, the first read, another refresh's
+    claim -- and a recompute of the release before rewrites the keyring column bare.
+    Only the token says which: the release before's column comes back marked after
+    any recompute of this release's, and another refresh's claim marks it too."""
     row = Deployment.objects.filter(pk=deployment.pk).only(
         "decision", "decision_policy", "decision_keyring", "decision_revision"
     ).first()
     if row is None or row.decision is None or stamped_in_force(row):
-        return False
-    recompute_decision(deployment)
-    return True
+        return None
+    token = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}"
+    recompute_decision(deployment, claim=token)
+    return token
+
+
+def _still_claimed(locked, token) -> bool:
+    """Whether the locked row is as the claim that left ``token`` left it: the token
+    still in the policy column, and the keyring column still marked."""
+    keyring = locked.decision_keyring
+    return locked.decision_policy == token and keyring is not None and keyring.startswith(_KEYRING_MARK)
 
 
 def _watches_read_since(deployment_id, since) -> bool:
@@ -1115,7 +1181,7 @@ def refresh_stored_decisions(deployment_ids) -> None:
     # their row locks in the same order rather than each holding the other's.
     for deployment in Deployment.objects.filter(pk__in=ids).order_by("pk"):
         since = timezone.now()
-        claimed = _claim_for_this_release(deployment)
+        claim = _claim_for_this_release(deployment)
         with refresh_deferred(deployment.pk):
             # Whatever a release that did not carry left on a closed version, first,
             # so it is evaluated below with the rest.
@@ -1132,10 +1198,13 @@ def refresh_stored_decisions(deployment_ids) -> None:
             fire_due_conditions(deployment, schedule_refresh=False)
             # And the route the write left serving is noted, so a run after it binds.
             note_route_quietly(deployment)
+        # Brought current only under the claim made here, still standing: a row this
+        # release's before the watches were read is left recognisable if another
+        # writer's recompute made it not, whoever recomputed after.
         recompute_decision(
             deployment,
-            brought_current=not claimed or _watches_read_since(deployment.pk, since),
-            after_claim=True,
+            brought_current=claim is not None and _watches_read_since(deployment.pk, since),
+            after_claim=claim,
         )
 
 

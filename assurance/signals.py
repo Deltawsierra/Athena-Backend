@@ -240,9 +240,13 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
         # its -- to the data boundary, a provider's profile, a component -- that made
         # one true is read here before the decision is. One query where none is live.
         since = timezone.now()
-        _claim_for_this_release(deployment)
+        claim = _claim_for_this_release(deployment)
         fire_due_conditions(deployment, schedule_refresh=False)
-        recompute_decision(deployment, brought_current=_watches_read_since(deployment.pk, since), after_claim=True)
+        recompute_decision(
+            deployment,
+            brought_current=claim is not None and _watches_read_since(deployment.pk, since),
+            after_claim=claim,
+        )
 
 
 def _the_decision_columns_are_migrated(sender, using, apps) -> bool:

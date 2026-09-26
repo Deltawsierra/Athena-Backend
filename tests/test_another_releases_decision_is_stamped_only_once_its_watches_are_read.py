@@ -290,3 +290,335 @@ def test_a_recompute_of_the_release_before_between_the_watches_and_the_stamp_is_
     published, support, state = _published_after_the_next_read(dep, condition)
 
     assert (published, support, state) == (D.NEEDS_MORE_EVIDENCE, D.NEEDS_MORE_EVIDENCE, State.FIRED)
+
+
+# -- A recompute of this release's between the release before's and the refresh's stamp --
+#
+# The refresh read the watches; then the release before made one true and recomputed
+# (the keyring column bare); then a recompute of this release's that reads no watch --
+# a revoke, a contradict, the recompute route, a pause and its lift,
+# `recompute_chain_decisions` -- marked the column again. The refresh's recompute found
+# it marked, and stamped the READY the watch it had read before no longer bore out: the
+# watch left PENDING, and no read and no `migrate` recognising the row again. Only the
+# refresh's own claim, still standing under the lock, says no recompute landed since.
+
+
+def _other_claim(dep, condition):
+    return (
+        AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True)
+        .exclude(pk=condition.claim_id)
+        .order_by("pk")
+        .first()
+    )
+
+
+def _transition(status):
+    def act(dep, condition):
+        response = _client().post(
+            f"/api/assurance/claims/{_other_claim(dep, condition).uuid}/transition/", {"to_status": status},
+            format="json",
+        )
+        assert response.status_code == 200, response.content
+
+    return act
+
+
+def _the_recompute_route(dep, condition):
+    response = _client().post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json")
+    assert response.status_code == 200, response.content
+
+
+def _a_pause_and_its_lift(dep, condition):
+    client = _client()
+    for paused in (True, False):
+        response = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": paused}, format="json")
+        assert response.status_code == 200, response.content
+
+
+def _recompute_chain_decisions(dep, condition):
+    import io
+
+    from django.core.management import call_command
+
+    call_command("recompute_chain_decisions", stdout=io.StringIO())
+
+
+def _with_a_chain_outcome(dep):
+    from assurance.composition import HELD
+    from assurance.models import WorkflowChainOutcome
+
+    WorkflowChainOutcome.objects.create(
+        deployment=dep, workflow="silent", status=HELD, observed_at=timezone.now() - datetime.timedelta(minutes=5)
+    )
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == D.READY
+
+
+_RECOMPUTES_THAT_READ_NO_WATCH = [
+    pytest.param(_transition("revoked"), None, D.NEEDS_MORE_EVIDENCE, id="a-revoke"),
+    pytest.param(_transition("contradicted"), None, D.NEEDS_REMEDIATION, id="a-contradict"),
+    pytest.param(_the_recompute_route, None, D.NEEDS_MORE_EVIDENCE, id="the-recompute-route"),
+    pytest.param(_a_pause_and_its_lift, None, D.NEEDS_MORE_EVIDENCE, id="a-pause-and-its-lift"),
+    pytest.param(_recompute_chain_decisions, _with_a_chain_outcome, D.NEEDS_MORE_EVIDENCE, id="recompute-chain-decisions"),
+]
+_AS_THE_REFRESH_FINDS_IT = [
+    pytest.param(False, id="this-releases"),
+    pytest.param(True, id="another-writers-it-claims"),
+]
+
+
+def _refreshed_while(dep, *steps, monkeypatch):
+    """The deployment's refresh, as the backstop runs it; ``steps`` land once it has
+    read the watches, before it recomputes."""
+    from assurance import latent
+    from assurance.decision import refresh_stored_decisions
+
+    real, landed = latent.fire_due_conditions, []
+
+    def and_then(deployment, **kwargs):
+        fired = real(deployment, **kwargs)
+        if not landed:
+            landed.append(True)
+            for step in steps:
+                step()
+        return fired
+
+    monkeypatch.setattr(latent, "fire_due_conditions", and_then)
+    refresh_stored_decisions([dep.pk])
+    monkeypatch.undo()
+    assert landed
+
+
+@pytest.mark.parametrize("claimed", _AS_THE_REFRESH_FINDS_IT)
+@pytest.mark.parametrize(("recompute", "prepare", "expected"), _RECOMPUTES_THAT_READ_NO_WATCH)
+def test_a_recompute_that_reads_no_watch_after_the_release_before_is_not_stamped_over_by_the_refresh(
+    recompute, prepare, expected, claimed, monkeypatch
+):
+    dep = _derived_ready()
+    if prepare is not None:
+        prepare(dep)
+    condition = _watched(dep)
+    if claimed:
+        _recomputed_by_the_release_before(dep)  # a write of the release before that makes nothing true
+    assert stamped_in_force(Deployment.objects.get(pk=dep.pk)) is not claimed
+
+    _refreshed_while(
+        dep, lambda: _the_release_before_makes_the_watch_true(dep), lambda: recompute(dep, condition),
+        monkeypatch=monkeypatch,
+    )
+
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.PENDING  # read before it came true
+    assert not stamped_in_force(Deployment.objects.get(pk=dep.pk))
+
+    published, support, state = _published_after_the_next_read(dep, condition)
+
+    assert (published, support, state) == (expected, expected, State.FIRED)
+    assert stamped_in_force(Deployment.objects.get(pk=dep.pk))
+
+
+def _refused_evaluation(monkeypatch):
+    from django.db import OperationalError
+
+    from assurance import latent
+
+    def refused(self, stored, reading):
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(latent._Evaluation, "_apply", refused)
+    monkeypatch.setattr(latent, "_record_not_evaluated", lambda *args, **kwargs: False)
+
+
+@pytest.mark.parametrize("claimed", _AS_THE_REFRESH_FINDS_IT)
+def test_a_second_refresh_whose_evaluation_is_refused_does_not_let_the_first_stamp(claimed, monkeypatch):
+    """Two refreshes of one deployment. The first read the watches; the release before
+    made one true; the second claimed the row -- marking the keyring column again --
+    and its evaluation was refused. Neither read the watch after it came true, so
+    neither stamps: the first's claim is no longer the row's, and the second read
+    nothing since its own."""
+    from assurance.decision import refresh_stored_decisions
+
+    dep = _derived_ready()
+    condition = _watched(dep)
+    if claimed:
+        _recomputed_by_the_release_before(dep)
+
+    def the_second_refresh_refused():
+        with pytest.MonkeyPatch.context() as refusing:
+            _refused_evaluation(refusing)
+            refresh_stored_decisions([dep.pk])
+
+    _refreshed_while(
+        dep, lambda: _the_release_before_makes_the_watch_true(dep), the_second_refresh_refused,
+        monkeypatch=monkeypatch,
+    )
+
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.PENDING
+    assert not stamped_in_force(Deployment.objects.get(pk=dep.pk))
+
+    published, support, state = _published_after_the_next_read(dep, condition)
+
+    assert (published, support, state) == (D.NEEDS_MORE_EVIDENCE, D.NEEDS_MORE_EVIDENCE, State.FIRED)
+
+
+def test_a_second_refresh_claiming_between_the_first_ones_reading_and_its_stamp_leaves_the_row_unstamped(
+    monkeypatch,
+):
+    """The same two refreshes interleaved the other way: the second claims before the
+    first recomputes, and recomputes -- its evaluation refused -- after it. The claim
+    marked the keyring column the release before had left bare, so the first read the
+    row as claimed by it and stamped; the second then found the row stamped."""
+    from assurance.decision import _claim_for_this_release, _watches_read_since
+    from assurance.latent import fire_due_conditions
+
+    dep = _derived_ready()
+    condition = _watched(dep)
+    _recomputed_by_the_release_before(dep)
+    second = {}
+
+    def the_second_refresh_claims():
+        second["since"] = timezone.now()
+        second["claim"] = _claim_for_this_release(Deployment.objects.get(pk=dep.pk))
+
+    _refreshed_while(
+        dep, lambda: _the_release_before_makes_the_watch_true(dep), the_second_refresh_claims,
+        monkeypatch=monkeypatch,
+    )
+    # The second refresh goes on as `refresh_stored_decisions` does: its evaluation
+    # refused, then its recompute.
+    with pytest.MonkeyPatch.context() as refusing:
+        _refused_evaluation(refusing)
+        with signals.refresh_deferred(dep.pk):
+            fire_due_conditions(Deployment.objects.get(pk=dep.pk), schedule_refresh=False)
+    recompute_decision(
+        Deployment.objects.get(pk=dep.pk),
+        brought_current=bool(second["claim"]) and _watches_read_since(dep.pk, second["since"]),
+        after_claim=second["claim"],
+    )
+
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.PENDING
+    assert not stamped_in_force(Deployment.objects.get(pk=dep.pk))
+
+    published, support, state = _published_after_the_next_read(dep, condition)
+
+    assert (published, support, state) == (D.NEEDS_MORE_EVIDENCE, D.NEEDS_MORE_EVIDENCE, State.FIRED)
+
+
+def test_the_migrate_that_finds_the_row_this_releases_by_its_claim_does_not_stamp_it_after_another_writer(
+    monkeypatch,
+):
+    """The post-migrate receiver selects the row as another writer's; by its claim a
+    refresh has brought it current, so it claims nothing. While it reads the watches
+    the release before makes one true, and a revoke marks the keyring column again.
+    With no claim of its own standing, it leaves the row for the next read."""
+    from django.core.management.sql import emit_post_migrate_signal
+
+    from assurance import decision, latent
+
+    dep = _derived_ready()
+    condition = _watched(dep)
+    _recomputed_by_the_release_before(dep)  # selected by the receiver as another writer's
+    real_claim, real_fire, armed, refreshing = decision._claim_for_this_release, latent.fire_due_conditions, [], []
+
+    def a_refresh_first(deployment):
+        if deployment.pk == dep.pk and not armed and not refreshing:
+            refreshing.append(True)
+            decision.refresh_stored_decisions([dep.pk])  # the row is this release's again
+            assert stamped_in_force(Deployment.objects.get(pk=dep.pk))
+            armed.append(True)
+        return real_claim(deployment)
+
+    def and_then(deployment, **kwargs):
+        fired = real_fire(deployment, **kwargs)
+        if deployment.pk == dep.pk and armed == [True]:
+            armed.append(True)
+            _the_release_before_makes_the_watch_true(dep)
+            _transition("revoked")(dep, condition)
+        return fired
+
+    monkeypatch.setattr(decision, "_claim_for_this_release", a_refresh_first)
+    monkeypatch.setattr(latent, "fire_due_conditions", and_then)
+    emit_post_migrate_signal(verbosity=0, interactive=False, db="default")
+    monkeypatch.undo()
+    assert armed == [True, True]
+
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.PENDING
+    assert not stamped_in_force(Deployment.objects.get(pk=dep.pk))
+
+    published, support, state = _published_after_the_next_read(dep, condition)
+
+    assert (published, support, state) == (D.NEEDS_MORE_EVIDENCE, D.NEEDS_MORE_EVIDENCE, State.FIRED)
+
+
+# -- A watch left pending on a version the release before closed, the carry refused --
+
+
+def _left_on_a_closed_version_and_made_true(dep):
+    from tests.test_latent_conditions_in_production import _re_derived_by_the_release_before
+
+    claim = _claim(dep)
+    condition = _watched(dep)
+    with signals.refresh_deferred(dep.pk):
+        current = _re_derived_by_the_release_before(dep, claim)  # the watch left on the version it closed
+    _the_release_before_makes_the_watch_true(dep)
+    return condition, current
+
+
+def _the_carry_refused(monkeypatch):
+    from assurance import carry
+
+    def refused(*args, **kwargs):
+        raise RuntimeError("the carry was refused")
+
+    monkeypatch.setattr(carry, "converge", refused)
+
+
+def test_a_watch_left_pending_on_a_closed_version_is_not_read_as_watched(monkeypatch):
+    """Nothing evaluates a closed version. While the carry that would move the watch to
+    the current one is refused, the decision counted it as watched: READY published on
+    every read -- none of them stamping it -- over a watch whose subject had come
+    true. It is read as unread, and the plan names it."""
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    condition, current = _left_on_a_closed_version_and_made_true(dep)
+    _the_carry_refused(monkeypatch)
+
+    for _ in range(2):
+        published, support, state = _published_after_the_next_read(dep, condition)
+        assert (published, support, state) == (D.NEEDS_MORE_EVIDENCE, D.NEEDS_MORE_EVIDENCE, State.PENDING)
+    unread = decision_support(Deployment.objects.get(pk=dep.pk))["claims"]["unread_conditions"]
+    assert [c["uuid"] for c in unread] == [str(condition.uuid)]
+    plan = plan_revalidation(Deployment.objects.get(pk=dep.pk))
+    required = {w["claim_uuid"]: w for w in plan["required"]}
+    assert str(current.uuid) in required, plan
+    assert "closed" in required[str(current.uuid)]["reason"]
+    assert "Nothing needs to be re-run" not in plan["note"]
+
+    monkeypatch.undo()  # the carry goes through again
+    published, support, state = _published_after_the_next_read(dep, condition)
+
+    assert (published, support, state) == (D.NEEDS_MORE_EVIDENCE, D.NEEDS_MORE_EVIDENCE, State.FIRED)
+    assert stamped_in_force(Deployment.objects.get(pk=dep.pk))
+
+
+def test_a_watch_left_on_a_closed_version_of_a_claim_a_person_revoked_holds_nothing(monkeypatch):
+    """A person took the claim out of scope: a watch left on any version of it is no
+    more a mark against readiness than the claim is, in the decision and the plan
+    alike -- whatever the carry does."""
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    condition, current = _left_on_a_closed_version_and_made_true(dep)
+    with _committed():
+        response = _client().post(
+            f"/api/assurance/claims/{current.uuid}/transition/", {"to_status": "revoked"}, format="json"
+        )
+    assert response.status_code == 200, response.content
+    _the_carry_refused(monkeypatch)
+
+    published, support, _state = _published_after_the_next_read(dep, condition)
+
+    assert published == support
+    assert decision_support(Deployment.objects.get(pk=dep.pk))["claims"]["unread_conditions"] == []
+    plan = plan_revalidation(Deployment.objects.get(pk=dep.pk))
+    assert str(current.uuid) not in {w["claim_uuid"] for w in plan["required"]}
+    assert published == D.READY
