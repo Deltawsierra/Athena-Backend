@@ -204,7 +204,8 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    from .decision import _current_policy_pin, policy_stamp, recompute_decision
+    from .decision import _KEYRING_MARK, _current_policy_pin, policy_stamp, recompute_decision
+    from .latent import fire_due_conditions
     from .models import Deployment, WorkflowChainOutcome
 
     deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
@@ -213,18 +214,23 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     # And every stored decision this release's rules did not compute: stamped under
     # another pin -- a release that moved the policy pin moved what the same inputs
     # imply -- or moved since it was stamped by a writer that does not stamp, the
-    # release before this one mid-rollout (Deployment.decision_policy). Keyed on the
-    # data like the keyring stamp, so a migrate that failed part-way leaves them
-    # marked for the next.
+    # release before this one mid-rollout (Deployment.decision_policy), or recomputed
+    # by that writer to the same decision, which rewrote the keyring column bare
+    # (decision._KEYRING_MARK). Keyed on the data like the keyring stamp, so a
+    # migrate that failed part-way leaves them marked for the next.
     pin = _current_policy_pin()
     stale = [
         pk
-        for pk, stamp, revision in Deployment.objects.filter(decision__isnull=False)
+        for pk, stamp, revision, keyring in Deployment.objects.filter(decision__isnull=False)
         .order_by("pk")
-        .values_list("pk", "decision_policy", "decision_revision")
-        if stamp != policy_stamp(revision, pin=pin)
+        .values_list("pk", "decision_policy", "decision_revision", "decision_keyring")
+        if stamp != policy_stamp(revision, pin=pin) or (keyring is not None and not keyring.startswith(_KEYRING_MARK))
     ]
     for deployment in Deployment.objects.filter(pk__in=stale).order_by("pk"):
+        # The watches first: the release before never evaluates one, so a write of
+        # its -- to the data boundary, a provider's profile, a component -- that made
+        # one true is read here before the decision is. One query where none is live.
+        fire_due_conditions(deployment, schedule_refresh=False)
         recompute_decision(deployment)
 
 

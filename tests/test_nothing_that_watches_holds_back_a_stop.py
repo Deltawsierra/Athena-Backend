@@ -347,3 +347,371 @@ def test_a_scan_ingest_reads_no_condition_in_its_own_transaction(monkeypatch):
 
     condition.refresh_from_db()
     assert condition.state == State.FIRED
+
+
+# ---------------------------------------------------------------------------
+# Round 4: a revoke waits on no backstop; a refused write is not asked again per
+# condition; the asset graph is read before a write lock, never under it; and the
+# guards on what an evaluation writes, each held by a test.
+# ---------------------------------------------------------------------------
+
+
+def test_a_revoke_answers_without_waiting_on_the_backstop(monkeypatch):
+    """A revoke is a stop. It committed at once, and then its response waited on the
+    after-commit refresh its claim's write scheduled -- the carry, every watch on the
+    deployment evaluated, the route noted: 0.7 s with 5,000 watches, past the ten
+    seconds of the evaluation's budget where the database refused its writes. Now it
+    schedules none, and the decision it commits is current: it was recomputed in the
+    revoke's own transaction."""
+    from assurance import decision
+    from assurance.decision import decision_support
+
+    dep = _ready()
+    _watched(dep, 5)
+    revoked = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("-pk").first()
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    refreshed = []
+    real = decision.refresh_stored_decisions
+
+    def counted(ids):
+        refreshed.append(list(ids))
+        return real(ids)
+
+    monkeypatch.setattr(decision, "refresh_stored_decisions", counted)
+    client = APIClient()
+    client.force_authenticate(user=_user())
+
+    with _committed():
+        response = client.post(f"/api/assurance/claims/{revoked.uuid}/transition/", {"to_status": "revoked"}, format="json")
+
+    assert response.status_code == 200, response.content
+    assert AssuranceClaim.objects.get(pk=revoked.pk).status == Status.REVOKED
+    assert refreshed == [], "the revoke's response waited on the after-commit backstop"
+    stored = Deployment.objects.get(pk=dep.pk)
+    assert stored.decision == decision_support(Deployment.objects.get(pk=dep.pk))["decision"]
+
+
+def _refusing_writes(monkeypatch, *, refused=None, first=None) -> list:
+    """Every transaction :mod:`assurance.latent` opens, counted -- and refused, as a
+    database locked past its busy timeout refuses it: the ones numbered in
+    ``refused`` (from 1), or every one when it is None. ``first``: an error the
+    first one raises instead."""
+    import types
+
+    from django.db import OperationalError
+    from django.db import transaction as real
+
+    calls = []
+
+    def atomic(*args, **kwargs):
+        calls.append(len(calls) + 1)
+        if first is not None and calls[-1] == 1:
+            raise first
+        if refused is None or calls[-1] in refused:
+            raise OperationalError("database is locked")
+        return real.atomic(*args, **kwargs)
+
+    monkeypatch.setattr(latent, "transaction", types.SimpleNamespace(atomic=atomic))
+    return calls
+
+
+def _thirty_watched_one_true(dep, *, true):
+    """Thirty watches on ``dep``, read in pk order; the eleventh true when ``true``."""
+    _watched(dep, 30)
+    LatentCondition.objects.filter(deployment=dep).update(last_evaluated_at=None)
+    if true:
+        Asset.objects.create(
+            deployment=dep, kind=Asset.Kind.TOOL, name="exporter-10", identifier="exporter-10",
+            classification=Asset.Classification.KNOWN,
+        )
+
+
+@pytest.mark.parametrize("true", [True, False], ids=["a-firing-refused", "a-batch-of-unchanged-refused"])
+def test_a_database_that_refuses_a_write_is_not_asked_again_for_each_condition(monkeypatch, true):
+    """Each condition whose write the database refused was recorded as failed in a
+    write of its own, and each of those waited out the busy timeout again, outside
+    the evaluation's budget: sixty watches took 30.8 s against a half-second timeout
+    (about twenty minutes at the production twenty seconds), inside the request of
+    the write it followed. Now the first refusal ends the writing: what was refused,
+    and everything after it, is recorded in ONE write -- two waits, however many
+    watches."""
+    dep = _ready()
+    _thirty_watched_one_true(dep, true=true)
+    calls = _refusing_writes(monkeypatch)
+
+    result = evaluate_conditions(Deployment.objects.get(pk=dep.pk))
+
+    assert len(calls) == 2, f"{len(calls)} writes asked of a database that refused the first"
+    assert result["not_reached_count"] == 30 and result["fired_count"] == 0
+    # Nothing could be written: the rows stand as they were, and the next evaluation
+    # reads them first.
+    assert set(LatentCondition.objects.filter(deployment=dep).values_list("state", flat=True)) == {State.PENDING}
+
+
+def test_after_a_refused_write_no_other_condition_is_read_or_written(monkeypatch):
+    """The refusal ends the evaluation, not only its batch: a second watch that holds,
+    read after it, tried a write of its own and waited out the busy timeout again."""
+    dep = _ready()
+    _thirty_watched_one_true(dep, true=True)
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="exporter-20", identifier="exporter-20",
+        classification=Asset.Classification.KNOWN,
+    )
+    read = []
+    real = latent.observe
+
+    def counting(condition, deployment):
+        read.append(condition.subject)
+        return real(condition, deployment)
+
+    monkeypatch.setattr(latent, "observe", counting)
+    calls = _refusing_writes(monkeypatch)
+
+    result = evaluate_conditions(Deployment.objects.get(pk=dep.pk))
+
+    assert read == [f"exporter-{i}" for i in range(11)], "a condition was read after the refusal"
+    assert len(calls) == 2
+    assert result["not_reached_count"] == 30
+
+
+def test_a_database_that_refuses_the_record_of_a_failure_is_not_asked_again_for_each_condition(monkeypatch):
+    """A batch whose write failed for another reason is recorded as failed a condition
+    at a time; the database refusing that record ends it as a refused write does."""
+    from django.db import DatabaseError
+
+    dep = _ready()
+    _thirty_watched_one_true(dep, true=False)
+    calls = _refusing_writes(monkeypatch, first=DatabaseError("the batch could not be written"))
+
+    evaluate_conditions(Deployment.objects.get(pk=dep.pk))
+
+    # The batch, the first failure's record (refused), and one record of the rest.
+    assert len(calls) == 3, f"{len(calls)} writes asked of a database that refused a record"
+
+
+@pytest.mark.parametrize("true", [True, False], ids=["a-firing-refused", "a-batch-of-unchanged-refused"])
+def test_what_an_evaluation_could_not_write_is_recorded_as_not_evaluated_and_holds_the_decision_back(
+    monkeypatch, true
+):
+    """Refused once, then the lock is let go: every condition the evaluation did not
+    write -- the one refused, the batch it took with it, the ones never read -- is
+    recorded as not evaluated, which the decision reads as a precondition nobody can
+    check. They stood PENDING, read as watched and not true: a watch the write had
+    just made true among them."""
+    dep = _ready()
+    _thirty_watched_one_true(dep, true=true)
+    calls = _refusing_writes(monkeypatch, refused={1})
+
+    evaluate_conditions(Deployment.objects.get(pk=dep.pk))
+
+    assert len(calls) == 2
+    rows = LatentCondition.objects.filter(deployment=dep)
+    assert set(rows.values_list("state", flat=True)) == {State.EVALUATION_FAILED}
+    assert all(error.startswith("not evaluated: the database refused a write") for error in rows.values_list("last_error", flat=True))
+    monkeypatch.undo()
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    # Read first next time, and watched again -- or fired, the one that holds.
+    evaluate_conditions(Deployment.objects.get(pk=dep.pk))
+    assert rows.filter(state=State.FIRED).count() == (1 if true else 0)
+    assert rows.filter(state=State.PENDING).count() == (29 if true else 30)
+
+
+def test_the_carry_asks_a_database_that_refused_a_write_for_no_other_watch(monkeypatch):
+    """converge carries each watch a release that did not carry left on a closed
+    version in a transaction of its own. Refused once, it asked again for every other
+    watch, each waiting out the busy timeout. It stops at the first refusal; the rest
+    stay where they are for the next refresh."""
+    from assurance.latent import carry_conditions_to_current
+
+    dep = _ready()
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    for i in range(3):
+        declare_condition(claim, kind=Kind.ASSET_APPEARS, subject=f"exporter-{i}", description="d")
+    # A re-derive of a release that did not carry: a new version, the watches left behind.
+    AssuranceClaim.objects.filter(pk=claim.pk).update(valid_to=timezone.now(), status=Status.SUPERSEDED)
+    new = AssuranceClaim.objects.create(
+        deployment=dep, claim_type=claim.claim_type, statement=claim.statement, fingerprint=claim.fingerprint,
+        system_fingerprint="moved", policy_version=claim.policy_version, environment=dep.environment,
+        status=Status.SUPPORTED,
+    )
+    AssuranceClaim.objects.filter(pk=claim.pk).update(superseded_by=new)
+    calls = _refusing_writes(monkeypatch)
+
+    assert carry_conditions_to_current(Deployment.objects.get(pk=dep.pk)) == 0
+    assert len(calls) == 1
+    assert LatentCondition.objects.filter(deployment=dep, claim=claim).count() == 3
+
+
+def test_putting_back_holds_asks_a_database_that_refused_a_write_for_no_other_hold(monkeypatch):
+    """The same for the holds converge puts back, one claim at a time."""
+    from assurance.latent import restore_fired_holds
+    from assurance.models import RetestRequirement
+
+    dep = _ready()
+    claims = list(AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk"))
+    assert len(claims) >= 2
+    for i, claim in enumerate(claims):
+        declare_condition(claim, kind=Kind.ASSET_APPEARS, subject=f"exporter-{i}", description="d")
+        Asset.objects.create(
+            deployment=dep, kind=Asset.Kind.TOOL, name=f"exporter-{i}", identifier=f"exporter-{i}",
+            classification=Asset.Classification.KNOWN,
+        )
+    assert evaluate_conditions(Deployment.objects.get(pk=dep.pk))["fired_count"] == len(claims)
+    AssuranceClaim.objects.filter(pk__in=[c.pk for c in claims]).update(status=Status.SUPPORTED)
+    RetestRequirement.objects.filter(deployment=dep).update(resolved_at=timezone.now())
+    calls = _refusing_writes(monkeypatch)
+
+    assert restore_fired_holds(Deployment.objects.get(pk=dep.pk)) == 0
+    assert len(calls) == 1
+
+
+def _graph_reads_under_a_write(monkeypatch) -> list:
+    """Each read of the whole asset graph (the system fingerprint) from here on:
+    whether a transaction deeper than the test's own was open when it was taken."""
+    from assurance import fingerprint
+
+    reads = []
+    real = fingerprint.compute_system_fingerprint
+    depth = len(connection.atomic_blocks)
+
+    def watching(deployment):
+        reads.append(len(connection.atomic_blocks) > depth)
+        return real(deployment)
+
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", watching)
+    return reads
+
+
+def _shadow_watched(dep):
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    condition = declare_condition(claim, kind=Kind.ASSET_APPEARS, subject="shadow-exporter", description="d")
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="shadow-exporter", identifier="shadow-exporter",
+        classification=Asset.Classification.KNOWN,
+    )
+    return claim, condition
+
+
+def test_a_firing_reads_the_asset_graph_before_its_write_lock(monkeypatch):
+    """A firing opens a retest bound to the system fingerprint, and read under the
+    firing's write lock -- SQLite's database-wide one -- the graph held a pause of any
+    other deployment for 0.15 s at 300 tools and 0.42 s at 3,000."""
+    dep = _ready()
+    _shadow_watched(dep)
+    reads = _graph_reads_under_a_write(monkeypatch)
+
+    assert evaluate_conditions(Deployment.objects.get(pk=dep.pk))["fired_count"] == 1
+    assert reads == [False]
+
+
+@pytest.mark.parametrize("path", ["an-evaluation", "the-carry"])
+def test_a_hold_put_back_reads_the_asset_graph_before_its_write_lock(monkeypatch, path):
+    """A FIRED condition whose hold something lifted -- the claim read back to a pass,
+    its retest resolved -- is put back with a retest bound to the system fingerprint:
+    by an evaluation that finds it still true, and by the carry (converge), 0.29 s
+    under the lock at 3,000 tools."""
+    from assurance.latent import restore_fired_holds
+    from assurance.models import RetestRequirement
+
+    dep = _ready()
+    claim, _condition = _shadow_watched(dep)
+    assert evaluate_conditions(Deployment.objects.get(pk=dep.pk))["fired_count"] == 1
+    AssuranceClaim.objects.filter(pk=claim.pk).update(status=Status.SUPPORTED)
+    RetestRequirement.objects.filter(deployment=dep).update(resolved_at=timezone.now())
+    reads = _graph_reads_under_a_write(monkeypatch)
+
+    if path == "the-carry":
+        assert restore_fired_holds(Deployment.objects.get(pk=dep.pk)) == 1
+    else:
+        assert evaluate_conditions(Deployment.objects.get(pk=dep.pk))["still_fired_count"] == 1
+    assert reads == [False]
+    assert AssuranceClaim.objects.get(pk=claim.pk).status == Status.STALE
+    assert RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).exists()
+
+
+def test_a_batch_of_unchanged_readings_is_not_written_over_a_later_reading():
+    """Unchanged readings are written a batch at a time, after they were taken; an
+    evaluation that started later may have read the condition since. Its reading
+    stands."""
+    dep = _ready()
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    condition = declare_condition(claim, kind=Kind.ASSET_APPEARS, subject="shadow-exporter", description="d")
+    later = timezone.now()
+    run = latent._Evaluation(Deployment.objects.get(pk=dep.pk), actor=None, now=later - timezone.timedelta(seconds=5))
+    run._unchanged.append((LatentCondition.objects.get(pk=condition.pk), latent._Reading(holds=False, observation="0")))
+    LatentCondition.objects.filter(pk=condition.pk).update(last_evaluated_at=later)  # a later evaluation's reading
+
+    run._touch()
+
+    assert LatentCondition.objects.get(pk=condition.pk).last_evaluated_at == later
+    assert run.found["skipped"] == [str(condition.uuid)]
+
+
+def test_a_batch_of_unchanged_readings_is_not_written_over_a_condition_that_moved_since():
+    """Read PENDING and not true; fired meanwhile by another evaluation. The batch
+    writes when it was read only where the row still stands as it was read."""
+    dep = _ready()
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    condition = declare_condition(claim, kind=Kind.ASSET_APPEARS, subject="shadow-exporter", description="d")
+    run = latent._Evaluation(Deployment.objects.get(pk=dep.pk), actor=None, now=timezone.now())
+    run._unchanged.append((LatentCondition.objects.get(pk=condition.pk), latent._Reading(holds=False, observation="0")))
+    LatentCondition.objects.filter(pk=condition.pk).update(state=State.FIRED, last_evaluated_at=None)
+
+    run._touch()
+
+    assert LatentCondition.objects.get(pk=condition.pk).last_evaluated_at is None
+    assert run.found["skipped"] == [str(condition.uuid)]
+
+
+def test_a_claim_revoked_between_the_reading_and_the_write_is_not_fired_on(monkeypatch):
+    """A person revokes the claim while its condition is read, with no lock held. The
+    write re-reads it under the lock and fires nothing on a claim taken out of scope."""
+    from assurance.models import RetestRequirement
+
+    dep = _ready()
+    claim, condition = _shadow_watched(dep)
+    read = latent._Reading.of.__func__
+
+    def read_then_revoked(cls, condition, deployment):
+        reading = read(cls, condition, deployment)
+        AssuranceClaim.objects.filter(pk=condition.claim_id).update(status=Status.REVOKED)  # a stop, meanwhile
+        return reading
+
+    monkeypatch.setattr(latent._Reading, "of", classmethod(read_then_revoked))
+    result = evaluate_conditions(Deployment.objects.get(pk=dep.pk))
+
+    assert result["fired_count"] == 0 and result["skipped"] == [str(condition.uuid)]
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.PENDING
+    assert not RetestRequirement.objects.filter(claim=claim).exists()
+    assert AssuranceClaim.objects.get(pk=claim.pk).status == Status.REVOKED
+
+
+def test_one_write_that_makes_three_watches_true_evaluates_them_once(monkeypatch):
+    """The refresh a write schedules evaluates the watches with its own writes
+    deferred: the firings it writes schedule no refresh of their own. Without that,
+    each wrote another refresh that evaluated every watch again."""
+    dep = _ready()
+    claim = AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).order_by("pk").first()
+    for i in range(3):
+        declare_condition(claim, kind=Kind.ASSET_APPEARS, subject=f"exporter-{i}", description="d")
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    calls = []
+    real = latent.evaluate_conditions
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(latent, "evaluate_conditions", counted)
+    with _committed():
+        with transaction.atomic():
+            for i in range(3):
+                Asset.objects.create(
+                    deployment=dep, kind=Asset.Kind.TOOL, name=f"exporter-{i}", identifier=f"exporter-{i}",
+                    classification=Asset.Classification.KNOWN,
+                )
+
+    assert LatentCondition.objects.filter(deployment=dep, state=State.FIRED).count() == 3
+    assert len(calls) == 1, f"{len(calls)} evaluations for one write"

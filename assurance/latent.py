@@ -70,7 +70,7 @@ import logging
 import time
 
 from django.conf import settings
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, OperationalError, transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
@@ -701,6 +701,13 @@ class _Evaluation:
         # Read as they stood, with nothing to write but the time they were read:
         # written together, a batch at a time, not one transaction each (`_touch`).
         self._unchanged: list = []
+        # What the database refused to write -- locked past its busy timeout, or not
+        # taking writes at all. Once it refuses one write, no other is tried one
+        # condition at a time: each waited out the busy timeout again, outside the
+        # evaluation's budget, and sixty watches took thirty seconds against a
+        # half-second timeout, then stood PENDING, as if read. What was refused, and
+        # every condition not yet written or read, is recorded as not evaluated, once.
+        self._refused: list = []
 
     # -- shared reads ---------------------------------------------------------
 
@@ -717,14 +724,19 @@ class _Evaluation:
     def evaluate_all(self, conditions) -> None:
         seconds, most = _evaluation_budget()
         deadline = time.monotonic() + seconds
+        unreached: list = []
         try:
             for index, condition in enumerate(conditions):
-                if index >= most or time.monotonic() >= deadline:
-                    self._not_reached(conditions[index:])
-                    return
+                if self._refused or index >= most or time.monotonic() >= deadline:
+                    unreached = conditions[index:]
+                    break
                 self.evaluate(condition)
         finally:
             self._touch()
+            # One write for all of them: the refused, the batch it took with it, and
+            # the ones never read.
+            if self._refused or unreached:
+                self._not_reached([*self._refused, *unreached], refused=bool(self._refused))
 
     # -- one condition ---------------------------------------------------------
 
@@ -736,12 +748,26 @@ class _Evaluation:
                 if len(self._unchanged) >= _TOUCH_BATCH:
                     self._touch()
                 return
+            if reading.holds or condition.state == State.FIRED:
+                # A firing, or a hold put back, opens a retest bound to the system
+                # fingerprint: a read of the whole asset graph, taken here and never
+                # under the write lock below -- 0.13 s at 300 tools, 0.35 s at 3,000,
+                # which a pause of any other deployment waited out.
+                self.system_fp()
             with transaction.atomic():
                 stored = self._still_ours(condition)
                 if stored is None:
                     self.found["skipped"].append(str(condition.uuid))
                     return
                 self._apply(stored, reading)
+        except OperationalError:
+            logger.exception(
+                "the database refused the write of latent condition %s on deployment %s; it and "
+                "every condition after it are recorded as not evaluated, in one write",
+                condition.pk,
+                self.deployment.pk,
+            )
+            self._refused.append(condition)
         except Exception as exc:  # recorded on the condition, never raised
             logger.exception(
                 "latent condition %s on deployment %s could not be evaluated; it is "
@@ -786,6 +812,11 @@ class _Evaluation:
             .values("pk")
         )
         for state, rows in by_state.items():
+            if self._refused:
+                # The database refused a write, here or before: recorded with the
+                # rest, once.
+                self._refused.extend(condition for condition, _reading in rows)
+                continue
             by_pk = {condition.pk: (condition, reading) for condition, reading in rows}
             try:
                 with transaction.atomic():
@@ -805,6 +836,15 @@ class _Evaluation:
                     LatentCondition.objects.filter(pk__in=written).update(
                         last_evaluated_at=self.now, updated_at=self.now
                     )
+            except OperationalError:
+                logger.exception(
+                    "the database refused to record when %d latent conditions on deployment %s were "
+                    "read; they and every condition after them are recorded as not evaluated, in one write",
+                    len(by_pk),
+                    self.deployment.pk,
+                )
+                self._refused.extend(condition for condition, _reading in rows)
+                continue
             except DatabaseError as exc:
                 logger.exception(
                     "when %d latent conditions on deployment %s were read could not be recorded",
@@ -994,8 +1034,12 @@ class _Evaluation:
         which the posture counts as not watching and the decision reads as a
         precondition nobody can check. The type of what was raised is kept, never
         its text -- an exception's message can carry what it read. If even this
-        write fails, it is logged and the evaluation goes on.
+        write fails, it is logged and the evaluation goes on -- and if the database
+        refused it, it is recorded with the rest, once (``_refused``).
         """
+        if self._refused:
+            self._refused.append(condition)
+            return
         self.found["failed"].append(str(condition.uuid))
         try:
             with transaction.atomic():
@@ -1014,19 +1058,31 @@ class _Evaluation:
                     fields.append("state")
                     self.moved = True
                 stored.save(update_fields=fields)
+        except OperationalError:
+            logger.exception(
+                "the database refused to record the failed evaluation of latent condition %s; it "
+                "and every condition after it are recorded as not evaluated, in one write",
+                condition.pk,
+            )
+            self.found["failed"].remove(str(condition.uuid))
+            self._refused.append(condition)
         except DatabaseError:
             logger.exception(
                 "the failed evaluation of latent condition %s could not be recorded on it",
                 condition.pk,
             )
 
-    def _not_reached(self, conditions) -> None:
-        """The conditions this evaluation's budget did not reach, recorded as not
-        evaluated: not watched until an evaluation reads them, which the next one
-        does first. A FIRED one keeps its state and its hold."""
+    def _not_reached(self, conditions, *, refused: bool = False) -> None:
+        """The conditions this evaluation's budget did not reach -- or, ``refused``,
+        that it could not write once the database refused a write -- recorded as not
+        evaluated, in one write: not watched until an evaluation reads them, which the
+        next one does first. A FIRED one keeps its state and its hold."""
         seconds, most = _evaluation_budget()
         self.found["not_reached"].extend(str(c.uuid) for c in conditions)
-        error = f"not reached: the evaluation read its limit of {most} conditions or {seconds:g}s first"[:200]
+        if refused:
+            error = "not evaluated: the database refused a write, and the rest were not written one at a time"
+        else:
+            error = f"not reached: the evaluation read its limit of {most} conditions or {seconds:g}s first"[:200]
         if _record_not_evaluated(self.deployment, self.now, error, pks=[c.pk for c in conditions]):
             self.moved = True
 
@@ -1322,7 +1378,12 @@ def restore_fired_holds(deployment, *, now=None) -> int:
         return system_fp[0]
 
     restored = 0
-    for condition, _claim in _lifted_holds(deployment.pk):
+    lifted = _lifted_holds(deployment.pk)
+    if lifted:
+        # The whole asset graph, read now: under the write lock below, a pause of any
+        # other deployment waited it out (0.29 s at 3,000 tools).
+        fingerprint()
+    for condition, _claim in lifted:
         try:
             with transaction.atomic():
                 stored = (
@@ -1349,6 +1410,16 @@ def restore_fired_holds(deployment, *, now=None) -> int:
                         fired_requirement=requirement, updated_at=now
                     )
             restored += 1
+        except OperationalError:
+            # Refused -- locked past the busy timeout: every other hold would wait it out
+            # again. Left for the next refresh; the decision reads them meanwhile.
+            logger.exception(
+                "the database refused to put back the hold latent condition %s keeps on its claim; "
+                "the rest are left for the next refresh, and the decision still reads them "
+                "(assurance.decision.claim_decision_signal)",
+                condition.pk,
+            )
+            break
         except DatabaseError:
             logger.exception(
                 "the hold latent condition %s keeps on its claim could not be put back; "
@@ -1409,6 +1480,15 @@ def carry_conditions_to_current(deployment, *, now=None) -> int:
         try:
             with transaction.atomic():
                 carried += _carry_watch(deployment, current, kind, subject, expected, now)
+        except OperationalError:
+            # Refused -- locked past the busy timeout: every other watch would wait it
+            # out again. Left where they are for the next refresh, which tries again.
+            logger.exception(
+                "the database refused to carry a latent condition left on a closed version of claim "
+                "%s; the rest are left for the next refresh",
+                current.pk,
+            )
+            break
         except DatabaseError:
             logger.exception(
                 "a latent condition left on a closed version of claim %s could not be carried "

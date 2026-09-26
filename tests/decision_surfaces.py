@@ -38,12 +38,17 @@ def stamped_under_the_rules_in_force(dep):
     it (``decision.current_decision``); stamped here, the hand-written decision is
     published as written, which is what such a test is about. A later move through
     the one writer keeps the stamp (``revision._write``); a QuerySet update of the
-    revision does not, as a writer that does not stamp would not."""
-    from assurance.decision import policy_stamp
+    revision does not, as a writer that does not stamp would not. A keyring column
+    written bare -- by hand -- is marked as this release's recompute writes it
+    (``decision.keyring_stamp``): bare, it is the release before's recompute."""
+    from assurance.decision import _KEYRING_MARK, keyring_stamp, policy_stamp
 
-    revision = Deployment.objects.values_list("decision_revision", flat=True).get(pk=dep.pk)
-    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_stamp(revision))
+    revision, keyring = Deployment.objects.values_list("decision_revision", "decision_keyring").get(pk=dep.pk)
+    if keyring is not None and not keyring.startswith(_KEYRING_MARK):
+        keyring = keyring_stamp(keyring)
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_stamp(revision), decision_keyring=keyring)
     dep.decision_policy = policy_stamp(revision)
+    dep.decision_keyring = keyring
     dep.decision_revision = revision
     return dep
 

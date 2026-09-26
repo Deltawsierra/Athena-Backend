@@ -290,6 +290,54 @@ def test_a_repair_the_one_writer_refuses_still_publishes_the_pause(caplog, monke
     ]
 
 
+@pytest.mark.parametrize("surface", _SURFACES, ids=lambda s: s.__name__.strip("_"))
+def test_a_row_restored_beneath_its_log_with_its_own_stamp_publishes_the_pause_where_it_cannot_be_written(
+    caplog, monkeypatch, surface
+):
+    """``loaddata`` of a dump taken before the log moved: the row as this release left
+    it at revision 1, its stamp included. Brought to the log's revision on the
+    instance, the stamp named a revision the instance had left, the read tried to
+    recompute a row it could not write, and every surface raised -- eight answered
+    500 and two raised "database is locked" -- where before round 3 each published
+    the pause the log records. Judged on the row as read, the stamp is this release's
+    at that revision: the read publishes what the log records, as it does when it
+    cannot bring the row up to it."""
+    from assurance.decision import policy_stamp
+
+    dep = _paused_beneath_its_log()
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_stamp(1))
+
+    def locked_out(*args, **kwargs):
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(revision, "accept_transition", locked_out)
+    with caplog.at_level(logging.ERROR):
+        _published(surface, dep)
+
+    assert _row(dep) == (D.READY, 1), "nothing could be written"
+    assert any(
+        "could not be recomputed" in r.getMessage() and f"deployment {dep.pk}:" in r.getMessage()
+        for r in _errors(caplog)
+    ), [r.getMessage() for r in _errors(caplog)]
+
+
+def test_another_writers_decision_beneath_its_log_is_never_published_unrecomputed(monkeypatch):
+    """The same row, moved by a writer that does not stamp -- the release before, mid
+    rollout -- so its stamp names a revision it has left. Where it cannot be
+    recomputed the read fails rather than publish a decision other rules computed."""
+    from assurance.decision import policy_stamp
+
+    dep = _paused_beneath_its_log()
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_stamp(0))
+
+    def locked_out(*args, **kwargs):
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(revision, "accept_transition", locked_out)
+    with pytest.raises(OperationalError):
+        current_decision(Deployment.objects.get(pk=dep.pk))
+
+
 @pytest.mark.django_db(transaction=True)
 def test_a_read_repairs_the_row_from_a_reading_taken_under_its_lock_in_its_own_transaction(
     monkeypatch,

@@ -46,6 +46,7 @@ from . import composition as _composition
 from . import coverage as _coverage
 from . import decision as _decision
 from . import models as _models
+from . import served_route as _served_route
 from . import workflow_chains as _workflow_chains
 from .receipt import RECEIPT_VERSION, _digest
 
@@ -137,6 +138,15 @@ def _policy_document() -> dict:
             # path or a check a scan fell short of.
             "scan_incomplete_cap": _value(decision.SCAN_INCOMPLETE_CAP),
             "coverage_cap": _value(_coverage.COVERAGE_CAP),
+            # The check states the engine's stored rows are read against
+            # (assurance.coverage._checks_section): a row in no state named here
+            # falls short, so a renamed state capped the same stored scan.
+            "coverage_check_states": {
+                "performed": _coverage.CHECK_PERFORMED,
+                "degraded": _coverage.CHECK_DEGRADED,
+                "not_performed": _coverage.CHECK_NOT_PERFORMED,
+                "unmeasured": _coverage.CHECK_UNMEASURED,
+            },
             # How a live claim caps the decision (assurance.decision
             # .claim_decision_signal). The cap can only hold a decision back.
             "claim_caps": _table(decision.CLAIM_CAPS),
@@ -194,6 +204,19 @@ def _policy_document() -> dict:
                 "held_unexercised": _value(composition.FLOORS[composition.NOT_DEMONSTRATED]),
                 "held_off_route": _value(composition.FLOORS[composition.NOT_DEMONSTRATED]),
             },
+        },
+        # What a served route is (assurance.served_route). The route axis compares the
+        # route each chain outcome was bound to with the route this definition reads
+        # off the graph now (workflow_chains.route_of): a release that changes the
+        # definition moves every route, and so the decision of the same stored rows.
+        "served_route": {
+            "version": _served_route.ROUTE_VERSION,
+            "fields": list(_served_route.ROUTE_FIELDS),
+            "metadata_keys": dict(_served_route._METADATA_KEY),
+            "digested_fields": sorted(_served_route._DIGESTED_FIELDS),
+            "serving_kinds": sorted(_served_route._SERVING_KINDS),
+            "unknown": _served_route.UNKNOWN,
+            "algorithm": _served_route.ALGORITHM,
         },
         # Required-evidence rules (assurance.claims / assurance.change).
         "required_evidence": {

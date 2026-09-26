@@ -221,9 +221,10 @@ def test_the_invalidation_check_fires_declared_conditions_too():
 def test_a_condition_that_cannot_be_evaluated_never_blocks_the_write_it_follows(
     monkeypatch, caplog, django_capture_on_commit_callbacks
 ):
-    """It is evaluated once the write it follows has committed -- a person revoking a
-    claim among them -- never inside it. A failure there is logged, the write stands,
-    and the condition keeps its last evaluation."""
+    """It is evaluated once the write it follows has committed -- a person contradicting
+    a claim among them -- never inside it. A failure there is logged, the write stands,
+    and the condition is recorded as not evaluated. (A revoke, the write this used, now
+    schedules no evaluation at all; see the revoke test below.)"""
     with django_capture_on_commit_callbacks(execute=True):  # the set-up commits
         dep = _ready()
         claim = _claim(dep)
@@ -234,15 +235,17 @@ def test_a_condition_that_cannot_be_evaluated_never_blocks_the_write_it_follows(
 
     monkeypatch.setattr(latent, "evaluate_conditions", broken)
     with django_capture_on_commit_callbacks(execute=True):
-        revoked = _client().post(
-            f"/api/assurance/claims/{claim.uuid}/transition/", {"to_status": "revoked"}, format="json"
+        moved = _client().post(
+            f"/api/assurance/claims/{claim.uuid}/transition/", {"to_status": "contradicted"}, format="json"
         )
 
-    assert revoked.status_code == 200, revoked.content
+    assert moved.status_code == 200, moved.content
     claim.refresh_from_db()
     condition.refresh_from_db()
-    assert claim.status == Status.REVOKED
-    assert condition.state == State.PENDING
+    assert claim.status == Status.CONTRADICTED
+    # On a claim still current and unrevoked the failure is recorded on the condition
+    # -- read as unread by the decision -- where on the revoked claim it was left alone.
+    assert condition.state == State.EVALUATION_FAILED
     assert "were not evaluated" in caplog.text
 
 
@@ -448,11 +451,15 @@ def _counting_observations(monkeypatch) -> list:
     return observed
 
 
-def test_a_revoke_evaluates_no_condition_before_it_commits(monkeypatch, django_capture_on_commit_callbacks):
+def test_a_revoke_evaluates_no_condition_before_or_after_it_commits(
+    monkeypatch, django_capture_on_commit_callbacks
+):
     """A revoke is a stop, and nothing that watches may delay one. It evaluated every
     condition on the deployment inline, before it could commit -- 2.3 seconds with a
-    hundred principal conditions over three hundred tools. Now the revoke recomputes
-    the decision and returns, and the conditions are read once it has committed."""
+    hundred principal conditions over three hundred tools. Then it read them once it
+    had committed -- still before its response, which waited 0.7 s on 5,000 watches.
+    Now the revoke recomputes the decision in its own transaction and answers; it
+    changes nothing a watch reads, so nothing evaluates them for it."""
     with django_capture_on_commit_callbacks(execute=True):  # the set-up commits
         dep = _ready()
         target = _claim(dep, AssuranceClaim.ClaimType.AI_BOM)
@@ -474,10 +481,11 @@ def test_a_revoke_evaluates_no_condition_before_it_commits(monkeypatch, django_c
         dep.refresh_from_db()
         assert dep.decision == Deployment.Decision.READY, "the decision is still recomputed in the revoke"
 
-    assert any(isinstance(h, signals._RefreshAfterCommit) and h.deployment_id == dep.pk for h in hooks)
+    assert not any(isinstance(h, signals._RefreshAfterCommit) and h.deployment_id == dep.pk for h in hooks)
     for hook in hooks:  # the revoke commits
         hook()
-    assert sorted(set(observed)) == sorted(c.pk for c in conditions)
+    assert observed == [], "a condition was evaluated after the revoke, before its response"
+    assert len(conditions) == LatentCondition.objects.filter(deployment=dep, state=State.PENDING).count()
 
 
 def test_a_pause_evaluates_no_condition_before_or_after_it_commits(monkeypatch, django_capture_on_commit_callbacks):
@@ -2003,3 +2011,275 @@ def test_the_re_derive_itself_carries_every_live_watch_to_the_new_version(state)
     assert current.pk != claim.pk
     condition.refresh_from_db()
     assert (condition.state, condition.claim_id) == (state, current.pk)
+
+
+# ---------------------------------------------------------------------------
+# Round 4 of #105: a recompute by the release before that moves nothing is still
+# recognised; the watches it never evaluates are evaluated where it is recognised;
+# versions are read in the order the re-derives made them; and the plan reads what
+# the decision reads.
+# ---------------------------------------------------------------------------
+
+
+def _recomputed_by_the_release_before(dep):
+    """The release before recomputing after one of its writes, by ITS rules. They read
+    the same decision, so the revision, the transition log and the policy stamp stay
+    where they are; the one column it writes on every recompute is the keyring, which
+    it writes bare (decision._KEYRING_MARK)."""
+    from assurance import observed_outcomes
+
+    Deployment.objects.filter(pk=dep.pk).update(decision_keyring=observed_outcomes.keyring_fingerprint())
+
+
+def test_a_ruling_the_release_before_records_without_moving_its_decision_is_not_published_as_ready():
+    """The adversary's gap. The release before records a person's ruling that a claim
+    is legally stale, and recomputes under rules that do not read the legal axis:
+    READY, at the revision it stood at, the stamp untouched. The stamp named this
+    release's rules at that revision, so every publishing read -- the receipt, the
+    detail, read_decision -- went on publishing READY while decision support said
+    needs more evidence, with nothing to bound how long."""
+    from assurance.decision import current_decision
+    from assurance.legal import record_materiality_decision
+
+    dep = _derived_ready()
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.READY
+    row = Deployment.objects.values_list("decision", "decision_revision", "decision_policy")
+    before = row.get(pk=dep.pk)
+    gdpr, _ai_act = _obligations(dep)
+    record_materiality_decision(
+        _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY), gdpr, decided_by=_user(), material=True,
+        rationale="the Art. 28 change is material",
+    )
+    _recomputed_by_the_release_before(dep)  # its rules do not read the legal axis: READY, unmoved
+    assert row.get(pk=dep.pk) == before
+
+    support = decision_support(Deployment.objects.get(pk=dep.pk))["decision"]
+    assert support == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == support
+    from assurance.revision import read_decision
+
+    assert read_decision(Deployment.objects.get(pk=dep.pk))["decision"] == support
+    # Recomputed by this release, the next read is the one with nothing to redo.
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    with CaptureQueriesContext(connection) as ctx:
+        assert current_decision(Deployment.objects.get(pk=dep.pk)) == support
+    assert len(ctx.captured_queries) <= 3, [q["sql"][:80] for q in ctx.captured_queries]
+
+
+def test_a_migrate_recomputes_a_decision_the_release_before_recomputed_to_the_same_answer(
+    django_capture_on_commit_callbacks,
+):
+    """Not only the first publishing read: the migrate after the rollout finds the
+    keyring column that release rewrote bare, and recomputes it, with no stamp to
+    clear by hand."""
+    from django.core.management.sql import emit_post_migrate_signal
+
+    from assurance.decision import stamped_in_force
+    from assurance.legal import record_materiality_decision
+
+    dep = _derived_ready()
+    gdpr, _ai_act = _obligations(dep)
+    record_materiality_decision(
+        _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY), gdpr, decided_by=_user(), material=True,
+        rationale="the Art. 28 change is material",
+    )
+    _recomputed_by_the_release_before(dep)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        emit_post_migrate_signal(verbosity=0, interactive=False, db="default")
+
+    fresh = Deployment.objects.get(pk=dep.pk)
+    assert fresh.decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert stamped_in_force(fresh)
+
+
+def test_a_watch_a_write_of_the_release_before_made_true_is_evaluated_at_the_first_read():
+    """The release before evaluates no watch. A tool it recorded that a watch here
+    names left the watch pending, and its recompute after moved nothing. Recognised
+    as that release's recompute, the decision was recomputed here -- and read the
+    watch as still not true: READY, until some later write of this release's."""
+    from assurance.decision import current_decision
+
+    dep = _derived_ready()
+    condition = _declare(_claim(dep), kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    with signals.refresh_deferred(dep.pk):  # the release before's write: its refresh evaluates nothing
+        Asset.objects.create(
+            deployment=dep, kind=Asset.Kind.TOOL, name="shadow-exporter", identifier="shadow-exporter",
+            classification=Asset.Classification.KNOWN, assessed_at=timezone.now(),
+        )
+    _recomputed_by_the_release_before(dep)
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.PENDING
+
+    with _committed():
+        current_decision(Deployment.objects.get(pk=dep.pk))
+
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.FIRED
+    support = decision_support(Deployment.objects.get(pk=dep.pk))["decision"]
+    assert support == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == support
+
+
+def test_the_migrate_after_the_rollout_evaluates_a_watch_the_release_before_made_true(
+    django_capture_on_commit_callbacks,
+):
+    """A write the release before recomputes nothing after -- the data boundary, a
+    provider's profile -- leaves no mark on the row, so no read recognises it. The
+    remedy after the rollout (the stamp cleared, then `migrate`) recomputed every
+    decision without evaluating a watch, and read one that write made true as still
+    not true."""
+    from django.core.management.sql import emit_post_migrate_signal
+
+    from assurance.decision import stamped_in_force
+
+    dep = _derived_ready()
+    _claim_, condition = _training_watched(dep)
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)  # the release before's write
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=None)  # the remedy: the stamp cleared, then
+
+    with django_capture_on_commit_callbacks(execute=True):
+        emit_post_migrate_signal(verbosity=0, interactive=False, db="default")
+
+    assert LatentCondition.objects.get(pk=condition.pk).state == State.FIRED
+    fresh = Deployment.objects.get(pk=dep.pk)
+    assert fresh.decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert stamped_in_force(fresh)
+
+
+def test_a_ruling_the_release_before_dropped_still_caps_after_it_flags_the_version_for_review():
+    """Its re-derive opened the new version "not assessed"; a later obligation then
+    flagged it for review (pending). The carry reads a pending version too: a flag is
+    not a ruling, and the person's ruling on the version before still stands."""
+    from assurance.decision import current_decision
+    from assurance.legal import flag_for_materiality_review, record_materiality_decision
+
+    dep = _derived_ready()
+    gdpr, ai_act = _obligations(dep)
+    claim = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+    record_materiality_decision(claim, gdpr, decided_by=_user(), material=True, rationale="material")
+    current = _re_derived_by_the_release_before(dep, claim)  # opened "not assessed"
+    flag_for_materiality_review(ai_act)  # not assessed -> pending
+    current.refresh_from_db()
+    assert current.legal_status == LegalStatus.REVIEW_PENDING
+
+    assert [c.pk for c in claim_decision_signal(Deployment.objects.get(pk=dep.pk))["legally_stale"]] == [current.pk]
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_a_watch_a_publishing_read_carries_is_evaluated_once_the_read_commits():
+    """The first publishing read of the release before's decision carries the watch it
+    left on the version it closed -- and a watch carried has not been read against the
+    current version: the refresh that reads it is scheduled for once the read commits."""
+    from assurance.decision import current_decision
+
+    dep = _derived_ready()
+    claim, condition = _training_watched(dep)
+    with _committed():
+        pass  # what the set-up scheduled runs first
+    with signals.refresh_deferred(dep.pk):  # the release before's writes: its refresh is not this one's
+        _re_derived_by_the_release_before(dep, claim)
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)  # true, and nothing evaluated it
+
+    with _committed():
+        current_decision(Deployment.objects.get(pk=dep.pk))
+
+    condition.refresh_from_db()
+    assert condition.state == State.FIRED
+    assert condition.claim_id == _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY).pk
+
+
+def test_a_clock_that_stepped_back_between_two_re_derives_reorders_neither_replay():
+    """Two re-derives by the release before on two hosts, the second 30 s behind the
+    first. By `valid_from` the versions read v1, v3, v2: the lineage ended on a closed
+    version, the running code carried nothing, and 0037 -- walking `superseded_by` --
+    read v3 legally stale. Both now walk the versions in the order they were made."""
+    import datetime
+
+    from django.db import transaction
+
+    from assurance.legal import carried_legal_statuses
+    from assurance.models import LegalObligation, MaterialityDecision
+
+    owner = _user()
+    dep = Deployment.objects.create(name="order", owner=owner)
+    obligation = LegalObligation.objects.create(
+        jurisdiction="EU", authority_tier=LegalObligation.AuthorityTier.REGULATION, source="GDPR-order",
+        source_version="1", operative_date=datetime.date(2026, 1, 1),
+    )
+    t = timezone.now() - datetime.timedelta(hours=1)
+
+    def version(n, valid_from, valid_to, legal):
+        return AssuranceClaim.objects.create(
+            deployment=dep, claim_type=AssuranceClaim.ClaimType.DATA_BOUNDARY, statement="s", fingerprint="fp",
+            system_fingerprint=f"s{n}", policy_version="p", environment=dep.environment,
+            status=Status.VERIFIED, legal_status=legal, valid_from=valid_from, valid_to=valid_to,
+            effective_from=valid_from,
+        )
+
+    minutes = datetime.timedelta(minutes=1)
+    v1 = version(1, t, t + 10 * minutes, LegalStatus.STALE)
+    v2 = version(2, t + 10 * minutes, t + 9.5 * minutes, LegalStatus.NOT_ASSESSED)
+    v3 = version(3, t + 9.5 * minutes, None, LegalStatus.NOT_ASSESSED)
+    AssuranceClaim.objects.filter(pk=v1.pk).update(superseded_by=v2)
+    AssuranceClaim.objects.filter(pk=v2.pk).update(superseded_by=v3)
+    ruling = MaterialityDecision.objects.create(claim=v1, obligation=obligation, decided_by=owner, material=True, rationale="m")
+    MaterialityDecision.objects.filter(pk=ruling.pk).update(decided_at=t + 5 * minutes)
+
+    live = carried_legal_statuses(dep.pk, [AssuranceClaim.objects.get(pk=v3.pk)]).get(v3.pk, LegalStatus.NOT_ASSESSED)
+    with transaction.atomic():
+        undo = transaction.savepoint()
+        _run_data_steps("0037_carry_watches_and_legal_rulings")
+        by_0037 = AssuranceClaim.objects.get(pk=v3.pk).legal_status
+        transaction.savepoint_rollback(undo)
+
+    assert by_0037 == LegalStatus.STALE
+    assert live == by_0037
+    assert [c.pk for c in claim_decision_signal(Deployment.objects.get(pk=dep.pk))["legally_stale"]] == [v3.pk]
+
+
+def test_the_plan_reads_the_legal_carry_and_an_unread_condition_left_by_the_release_before():
+    """The plan read only a fired condition's hold of the three things the decision
+    reads through the release before's writes: this claim, legally stale by the carry
+    and with a watch nobody can read, sat in still_current under "No claim needs
+    revalidation" while decision support said needs more evidence."""
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    claim, condition = _ruled_stale_and_watched(dep)
+    current = _re_derived_by_the_release_before(dep, claim)
+    LatentCondition.objects.filter(pk=condition.pk).update(state=State.EVALUATION_FAILED)
+    support = decision_support(Deployment.objects.get(pk=dep.pk))
+    assert support["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert [c["uuid"] for c in support["claims"]["legally_stale"]] == [str(current.uuid)]
+
+    plan = plan_revalidation(Deployment.objects.get(pk=dep.pk))
+
+    assert str(current.uuid) in [w["claim_uuid"] for w in plan["required"]]
+    assert str(current.uuid) not in [w["claim_uuid"] for w in plan["still_current"]]
+    assert not plan["note"].startswith("No claim needs revalidation")
+
+
+@pytest.mark.parametrize("cause", ["a-legal-ruling", "a-watch-nobody-can-read"])
+def test_the_plan_names_the_work_for_each_thing_the_decision_is_held_back_by(cause):
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    if cause == "a-legal-ruling":
+        claim, _condition = _ruled_stale_and_watched(dep)
+        said = "legally stale"
+    else:
+        claim, condition = _training_watched(dep)
+        LatentCondition.objects.filter(pk=condition.pk).update(state=State.UNOBSERVABLE, fired_observation="gone")
+        said = "cannot be read now"
+    assert decision_support(Deployment.objects.get(pk=dep.pk))["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+    plan = plan_revalidation(Deployment.objects.get(pk=dep.pk))
+
+    required = {w["claim_uuid"]: w for w in plan["required"]}
+    assert str(claim.uuid) in required and said in required[str(claim.uuid)]["reason"]
+    assert "No claim needs revalidation" not in plan["note"]

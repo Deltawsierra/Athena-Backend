@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid as uuidlib
+from contextlib import nullcontext
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -46,7 +47,7 @@ from .latent import (
     latent_posture,
     withdraw_condition,
 )
-from .signals import schedule_decision_refresh
+from .signals import refresh_deferred, schedule_decision_refresh
 from .business_impact import build_business_impact
 from .capability import assess_capabilities
 from .compliance import build_compliance_map
@@ -228,6 +229,8 @@ def _refresh_stored_decision(deployment) -> None:
     condition's write -- milliseconds -- and never for a reading
     (tests/test_nothing_that_watches_holds_back_a_stop.py measures it). The
     invalidation check evaluates the conditions it reports outside its transaction.
+    A claim revoke schedules no backstop at all (the transition route defers it): a
+    stop's response must not wait on one, and a revoke changes nothing a watch reads.
 
     The served route is NOT noted here. This runs inside writes a stop must not wait
     on -- a revoke among them -- and the note reads the whole asset graph. Every
@@ -2213,7 +2216,16 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             # SAME revision the receipt was still publishing READY under: one
             # revision, two decisions. And in the same transaction as the move, or
             # a reader between the two commits saw exactly that.
-            with transaction.atomic():
+            #
+            # A revoke is a stop, and its response waited on the after-commit
+            # backstop the claim's write scheduled -- the carry, every watch on the
+            # deployment evaluated (up to ten seconds), the route noted: 0.7 s with
+            # 5,000 watches. It schedules none. A revoke changes nothing a watch
+            # reads, the carry and the route are brought current by the next refresh
+            # of any other write, and the decision the revoke moves is recomputed in
+            # its own transaction here, so it is current when the revoke commits.
+            revoke = to_status == AssuranceClaim.ClaimStatus.REVOKED
+            with refresh_deferred(claim.deployment_id) if revoke else nullcontext(), transaction.atomic():
                 event = apply_claim_transition(
                     claim, to_status, actor=request.user, note=request.data.get("note", "")
                 )

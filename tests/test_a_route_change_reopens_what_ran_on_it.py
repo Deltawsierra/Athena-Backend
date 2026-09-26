@@ -468,3 +468,30 @@ def test_the_plan_names_every_held_chain_off_the_serving_route_approved_or_not(m
         ("refund", True),
         ("export", False),
     }
+
+
+def test_a_release_that_changes_what_a_served_route_is_moves_the_policy_pin(engine_keyring, monkeypatch):
+    """The route axis compares the route each outcome was bound to with the route the
+    definition reads off the graph now, so a release that changes the definition --
+    its version, its fields, the metadata key each is read from -- moves every route,
+    and the decision of the same stored rows. The pin did not move with it (#105 round
+    4): the stored READY stayed stamped as current and was published."""
+    from assurance import served_route
+    from assurance.decision import compute_decision, current_decision, recompute_decision, stamped_in_force
+    from assurance.policy import policy_pin
+
+    t0 = timezone.now() - timedelta(hours=3)
+    dep = _deployment()
+    _model(dep, tokenizer="tok-1")
+    note_route(dep, now=t0)
+    _ingest(dep, _envelope(dep, oc.HELD, t0 + timedelta(minutes=5)), now=t0 + timedelta(minutes=6))
+    stored = recompute_decision(Deployment.objects.get(pk=dep.pk))
+    pin = policy_pin()
+
+    monkeypatch.setattr(served_route, "ROUTE_VERSION", "mythos.assurance.served-route/2")
+
+    computed = compute_decision(Deployment.objects.get(pk=dep.pk))
+    assert computed != stored
+    assert policy_pin() != pin, "the route definition moved the decision and not the pin"
+    assert not stamped_in_force(Deployment.objects.get(pk=dep.pk))
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == computed

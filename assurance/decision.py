@@ -942,7 +942,10 @@ def recompute_decision(deployment: Deployment, *, paused: bool | None = None) ->
         decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
         moved = accept_transition(locked, to_decision=decision, in_force=in_force)
         Deployment.objects.filter(pk=locked.pk).update(
-            decision_keyring=observed_outcomes.keyring_fingerprint(keyring),
+            # Marked as this release's (`keyring_stamp`): the release before rewrites
+            # this column bare on every recompute of its own, one that moves nothing
+            # included, and that is how such a recompute is told apart.
+            decision_keyring=keyring_stamp(observed_outcomes.keyring_fingerprint(keyring)),
             decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
             # The rules this was computed under, AND the revision it stands at.
             decision_policy=policy_stamp(moved["revision"]),
@@ -980,10 +983,49 @@ def policy_stamp(revision, *, pin=None) -> str:
     return f"{pin or _current_policy_pin()}@r{revision}"
 
 
+#: What marks ``Deployment.decision_keyring`` as written by this release's recompute.
+#: The release before it writes the column BARE -- the keyring fingerprint, 64 hex
+#: characters, or "" for no keyring -- on EVERY recompute, one whose decision did not
+#: move included. That recompute leaves the revision where it was and the policy stamp
+#: with it, so by the stamp alone a READY it re-read under its own rules, after it
+#: wrote an input this release reads more strictly (a legal ruling, an accepted
+#: finding), was published as this release's -- with no bound on how long. A bare
+#: value is that recompute; this release never writes one.
+_KEYRING_MARK = "~"
+
+
+def keyring_stamp(fingerprint: str) -> str:
+    """``decision_keyring`` as this release writes it: the keyring fingerprint behind
+    :data:`_KEYRING_MARK`, cut to the column's 64 characters.
+
+    The cut drops the fingerprint's last hex digit. Whether the column is this
+    release's is read off the mark alone, which no bare value carries, so the cut
+    cannot make another writer's value read as this one's; two keyrings read as the
+    same one only if their SHA-256 fingerprints agree in the first 252 bits."""
+    return (_KEYRING_MARK + (fingerprint or ""))[:64]
+
+
+def _stamped(policy, keyring, revision) -> bool:
+    """Whether a row with this policy stamp, keyring column and revision holds a
+    decision this release's rules computed, at that revision, and that no writer that
+    does not stamp has recomputed since (see :func:`stamped_in_force`)."""
+    if policy != policy_stamp(revision):
+        return False
+    # NULL predates the signed-outcome rule; the keyring branch of `current_decision`
+    # and the upgrade receiver reconcile it.
+    return keyring is None or keyring.startswith(_KEYRING_MARK)
+
+
 def stamped_in_force(deployment) -> bool:
     """Whether ``deployment``'s stored decision (as the instance holds it) is one the
-    rules in force computed, at the revision it stands at."""
-    return getattr(deployment, "decision_policy", None) == policy_stamp(deployment.decision_revision)
+    rules in force computed, at the revision it stands at -- and one the release
+    before has not recomputed since, even to the same decision: its recompute
+    rewrites the keyring column bare (:data:`_KEYRING_MARK`)."""
+    return _stamped(
+        getattr(deployment, "decision_policy", None),
+        getattr(deployment, "decision_keyring", None),
+        deployment.decision_revision,
+    )
 
 
 def refresh_stored_decisions(deployment_ids) -> None:
@@ -1036,12 +1078,16 @@ def _bring_current_after_another_writer(deployment: Deployment) -> None:
     """Recompute a stored decision this release's rules did not compute, after
     carrying what a release that did not carry left behind (``assurance.carry``).
 
-    A watch it carried has not been read against the claim's current version, so the
-    deployment's refresh -- which evaluates it -- is scheduled for once this read's
-    transaction commits, or runs now outside one; the decision published here already
-    reads every hold and unread condition on any version of the claim, so it does not
-    wait for that."""
+    Where the deployment has a live watch, the deployment's refresh -- which
+    evaluates the watches -- is scheduled for once this read's transaction commits,
+    or runs now outside one. A watch it carried has not been read against the
+    claim's current version. And the release before never evaluates a watch: a write
+    of its that made one true -- a tool that appeared, recomputed after under its own
+    rules -- left the watch pending, and recomputed here alone the decision read it
+    as still not true. The decision published here already reads every hold and
+    unread condition on any version of the claim, so it does not wait for that."""
     from .carry import converge
+    from .models import LATENT_LIVE_STATES
     from .signals import schedule_decision_refresh
 
     try:
@@ -1054,7 +1100,10 @@ def _bring_current_after_another_writer(deployment: Deployment) -> None:
         )
         carried = {}
     recompute_decision(deployment)
-    if carried.get("watches_carried"):
+    if (
+        carried.get("watches_carried")
+        or LatentCondition.objects.filter(deployment_id=deployment.pk, state__in=LATENT_LIVE_STATES).exists()
+    ):
         schedule_decision_refresh(deployment.pk)
         deployment.refresh_from_db(
             fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
@@ -1087,9 +1136,20 @@ def current_decision(deployment: Deployment) -> str | None:
     the database timeout the read fails rather than publish a decision computed
     under the withdrawn keys. The eager path is ``manage.py recompute_chain_decisions``,
     run when the keyring changes, after which every read is the two-query one."""
-    from . import observed_outcomes
-    from .revision import hold_to_its_log
+    from django.db import DatabaseError
 
+    from . import observed_outcomes
+    from .revision import StaleDecisionRead, hold_to_its_log
+
+    # The row as read, before the log moves the instance: a row `loaddata` restored
+    # beneath its log carries the stamp of its OWN revision, which is this release's
+    # decision at that revision -- not another writer's move.
+    as_read = (
+        getattr(deployment, "decision_policy", None),
+        getattr(deployment, "decision_keyring", None),
+        deployment.decision_revision,
+        deployment.decision,
+    )
     hold_to_its_log(deployment)
     # Time moves the decision where no write does: a risk accepted until a moment
     # that has now passed. The stored decision records when that happens, and the
@@ -1113,11 +1173,27 @@ def current_decision(deployment: Deployment) -> str | None:
     # and it was published while decision-support, computing afresh, said otherwise.
     # What that release's re-derive left behind is carried first, so the recompute
     # and the record agree. A deployment nothing has decided has no stamp and
-    # nothing to redo.
+    # nothing to redo. That release's recompute that moved nothing is recognised by
+    # the keyring column it rewrote bare (`_KEYRING_MARK`).
     if deployment.decision is not None and not stamped_in_force(deployment):
-        _bring_current_after_another_writer(deployment)
+        try:
+            _bring_current_after_another_writer(deployment)
+        except (DatabaseError, StaleDecisionRead):
+            policy, keyring, revision, decision = as_read
+            beneath_its_log = revision != deployment.decision_revision
+            if not (beneath_its_log and (decision is None or _stamped(policy, keyring, revision))):
+                raise  # another writer's decision is never published unrecomputed
+            # A row restored beneath its log with this release's own stamp, and the
+            # row cannot be written now: publish what the log records, as
+            # `hold_to_its_log` does when it cannot bring the row up to it. Raised,
+            # every surface answered 500 -- a pause the log records included.
+            logger.exception(
+                "deployment %s: stored decision is behind its transition log and could not be "
+                "recomputed; publishing the decision the log records",
+                deployment.pk,
+            )
         return deployment.decision
-    if deployment.decision_keyring == observed_outcomes.keyring_fingerprint():
+    if deployment.decision_keyring == keyring_stamp(observed_outcomes.keyring_fingerprint()):
         return deployment.decision
     # Stale or never stamped -- but only a deployment with chain outcomes can move
     # on a keyring change. A caller that already knows (the bundle annotates it in

@@ -393,17 +393,36 @@ def _recorded_moves(claim_pks) -> dict:
 
 def _lineages(deployment_id, fingerprints) -> dict:
     """Every version of each claim identity named, oldest first, with what was
-    recorded on each: ``{fingerprint: [(claim, moves), ...]}``. Three queries."""
+    recorded on each: ``{fingerprint: [(claim, moves), ...]}``. Three queries.
+
+    Oldest first in the order the re-derives made them: back from the current version
+    along ``superseded_by``, as 0037 reads a lineage -- not by ``valid_from``, which a
+    clock that stepped back between two re-derives (two hosts mid-rollout) reorders,
+    and the ruling a person made on the first version was then replayed onto no
+    current version at all. A version no re-derive links to the current one is not in
+    its lineage; an identity with no current version keeps the ``valid_from`` order,
+    and nothing reads its carry (``carried_legal_statuses``)."""
     versions = list(
         AssuranceClaim.objects.filter(deployment_id=deployment_id, fingerprint__in=fingerprints)
         .filter(effective_to__isnull=True)
-        .only("pk", "fingerprint", "legal_status", "valid_from", "valid_to", "status")
+        .only("pk", "fingerprint", "legal_status", "valid_from", "valid_to", "status", "superseded_by_id")
         .order_by("valid_from", "pk")
     )
     moves = _recorded_moves([v.pk for v in versions])
-    lineages: dict = {}
+    by_identity: dict = {}
     for version in versions:
-        lineages.setdefault(version.fingerprint, []).append((version, moves[version.pk]))
+        by_identity.setdefault(version.fingerprint, []).append(version)
+    lineages: dict = {}
+    for fingerprint, chain in by_identity.items():
+        head = next((v for v in chain if v.valid_to is None), None)
+        if head is not None:
+            previous = {v.superseded_by_id: v for v in chain if v.superseded_by_id is not None}
+            walked, seen = [head], {head.pk}
+            while walked[-1].pk in previous and previous[walked[-1].pk].pk not in seen:
+                walked.append(previous[walked[-1].pk])
+                seen.add(walked[-1].pk)
+            chain = walked[::-1]
+        lineages[fingerprint] = [(v, moves[v.pk]) for v in chain]
     return lineages
 
 

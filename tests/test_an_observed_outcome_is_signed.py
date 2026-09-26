@@ -1633,7 +1633,7 @@ def test_a_recompute_leaves_the_callers_instance_holding_the_stamp_it_wrote(djan
     """``recompute_decision`` refreshes the caller's instance, stamp included, so the
     next ``current_decision`` on it is the read with no query -- not a second
     recompute under the row lock for a decision that is already current."""
-    from assurance.decision import current_decision, recompute_decision
+    from assurance.decision import current_decision, keyring_stamp, recompute_decision
 
     dep = _deployment()
     _approved(dep, "refund-over-limit")
@@ -1641,7 +1641,8 @@ def test_a_recompute_leaves_the_callers_instance_holding_the_stamp_it_wrote(djan
     Deployment.objects.filter(pk=dep.pk).update(decision_keyring=None)
     dep.refresh_from_db()
     recompute_decision(dep)
-    assert dep.decision_keyring == observed_outcomes.keyring_fingerprint()
+    # Written marked as this release's (#105 round 4): bare, it is the release before's.
+    assert dep.decision_keyring == keyring_stamp(observed_outcomes.keyring_fingerprint())
     with django_assert_num_queries(0):
         assert current_decision(dep) == ACHILLES_HELD
 
