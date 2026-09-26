@@ -128,30 +128,108 @@ class Transport(Protocol):
     the URL, headers and JSON body the adapter formatted. The real one wraps an
     HTTP client; the test one records the call and returns a canned
     :class:`Response`. Injecting it is what keeps the adapters free of any
-    hardcoded network access."""
+    hardcoded network access.
+
+    A transport MAY also offer ``get(url, *, headers, params)``: the read an
+    adapter uses to look for an issue it may already have created
+    (:meth:`Connector.find_existing`). One without it simply cannot look."""
 
     def post(self, url: str, *, headers: dict, json: dict) -> Response: ...
 
 
+class DeadlineExceeded(Exception):
+    """The request had no complete answer within the transport's total deadline.
+
+    It may have reached the provider, so it is classified as an uncertain outcome
+    (:func:`classify_transport_error` defaults to :class:`OutcomeUnknown`)."""
+
+
+#: The wall-clock limit on one whole request -- name resolution, connect, sending,
+#: and every read of the answer -- in seconds. ``requests``' own ``(connect, read)``
+#: timeout bounds each socket operation, not the total: a server that drips one
+#: byte every few seconds held a push for 40 s under ``(3.05, 10)``.
+DEFAULT_DEADLINE_SECONDS = 30.0
+
+
 class RequestsTransport:
-    """The production :class:`Transport`: a thin wrapper over ``requests.post``.
+    """The production :class:`Transport`: a thin wrapper over ``requests``.
 
     It is **never constructed at import** and **never invoked unless a caller
     both builds it and passes it to a *configured* connector** — an unconfigured
     connector short-circuits before any transport is touched. It carries a
     (connect, read) timeout so a hung external system cannot pin a worker, mirror-
-    ing ``ai_engine.services.cyberengine_client``. No base URL lives here: the URL
-    is always the one the adapter formatted from its injected config."""
+    ing ``ai_engine.services.cyberengine_client``, AND a total deadline
+    (``ASSURANCE_CONNECTOR_DEADLINE_SECONDS``, default 30): the request runs on a
+    helper thread and the caller stops waiting when the deadline passes, raising
+    :class:`DeadlineExceeded`. The helper thread is abandoned to finish or time out
+    on its own; it holds no lock and no database connection. No base URL lives
+    here: the URL is always the one the adapter formatted from its injected config."""
 
-    def __init__(self, timeout: tuple[float, float] = (3.05, 10.0)) -> None:
+    def __init__(self, timeout: tuple[float, float] = (3.05, 10.0), deadline: float | None = None) -> None:
         self.timeout = timeout
+        if deadline is None:
+            from django.conf import settings
+
+            deadline = float(getattr(settings, "ASSURANCE_CONNECTOR_DEADLINE_SECONDS", DEFAULT_DEADLINE_SECONDS))
+        self.deadline = deadline
 
     def post(self, url: str, *, headers: dict, json: dict) -> Response:
         # Imported lazily so merely importing this package pulls in no HTTP client
         # and, more to the point, so nothing here can be mistaken for a call site.
         import requests
 
-        return requests.post(url, headers=headers, json=json, timeout=self.timeout)
+        return self.within_deadline(requests.post, url, headers=headers, json=json, timeout=self.timeout)
+
+    def get(self, url: str, *, headers: dict, params: dict | None = None) -> Response:
+        import requests
+
+        return self.within_deadline(requests.get, url, headers=headers, params=params, timeout=self.timeout)
+
+    def within_deadline(self, call, *args, **kwargs):
+        """``call(*args, **kwargs)``, or :class:`DeadlineExceeded` once the deadline passes."""
+        import threading
+
+        box: dict = {}
+
+        def run():
+            try:
+                box["value"] = call(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - handed back to the caller below
+                box["error"] = exc
+
+        helper = threading.Thread(target=run, name="assurance-transport", daemon=True)
+        helper.start()
+        helper.join(self.deadline)
+        if helper.is_alive():
+            raise DeadlineExceeded(f"no complete answer within the {self.deadline:g} s deadline")
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+
+
+@dataclass(frozen=True)
+class Lookup:
+    """What an adapter found when it looked for the issue a finding may already
+    have: ``state`` is ``"found"`` (with ``external_ref``), ``"absent"``, or
+    ``"unknown"`` -- it could not look, or the answer did not say."""
+
+    state: str
+    external_ref: str | None = None
+    detail: str = ""
+
+    FOUND = "found"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def unknown(cls, detail: str) -> Lookup:
+        return cls(cls.UNKNOWN, None, detail)
+
+
+def finding_marker(finding: Any) -> str:
+    """The label an adapter tags a created issue with, so it can find it again:
+    ``athena-<finding uuid>`` (43 characters; within Jira's and GitHub's limits)."""
+    return f"athena-{finding.uuid}"
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +338,12 @@ class Connector(ABC):
     #: would claim a deduplication nothing performs.
     idempotency_header: str | None = None
 
+    #: Whether delivering one operation twice is harmless to this system -- true
+    #: only where the receiver deduplicates on :attr:`idempotency_header`. A push
+    #: whose answer was lost may then simply be sent again; anywhere else it waits
+    #: until :meth:`find_existing`, or a person, settles whether it arrived.
+    redelivery_is_idempotent: bool = False
+
     def __init__(self, config: ConnectorConfig) -> None:
         self.config = config
 
@@ -342,6 +426,39 @@ class Connector(ABC):
                 certain=certain,
             )
         return self._parse(response)
+
+    def find_existing(self, finding: Any, *, transport: Any) -> Lookup:
+        """Look for the issue this finding was already pushed as, so a push whose
+        answer was lost, or a second runner, reuses it instead of creating another.
+
+        The base cannot look: ``unknown``. An adapter that can overrides
+        :meth:`_lookup_request` and :meth:`_parse_lookup`. A transport without
+        ``get`` cannot look either, and any error while looking is ``unknown`` --
+        never ``absent``, which would license a second create."""
+        if not self.configured:
+            return Lookup.unknown(f"{self.name} not configured")
+        request = self._lookup_request(finding)
+        if request is None:
+            return Lookup.unknown(f"{self.name} offers no read-back of what it was sent")
+        get = getattr(transport, "get", None)
+        if get is None:
+            return Lookup.unknown("the transport cannot read")
+        url, headers, params = request
+        try:
+            response = get(url, headers=headers, params=params)
+            if not is_success(response.status_code):
+                return Lookup.unknown(error_detail(self.name, response))
+            return self._parse_lookup(response.json())
+        except Exception as exc:  # noqa: BLE001 - a failed or unreadable look says nothing
+            return Lookup.unknown(f"{self.name} look-up failed: {type(exc).__name__}: {exc}")
+
+    def _lookup_request(self, finding: Any) -> tuple[str, dict, dict] | None:
+        """``(url, headers, params)`` of the read that finds this finding's issue,
+        or ``None`` when this system offers none."""
+        return None
+
+    def _parse_lookup(self, body: Any) -> Lookup:  # pragma: no cover - only with _lookup_request
+        return Lookup.unknown(f"{self.name} look-up not implemented")
 
     @abstractmethod
     def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:

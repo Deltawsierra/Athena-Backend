@@ -20,6 +20,7 @@ from .base import (
     ConnectorResult,
     Response,
     error_detail,
+    Lookup,
     finding_body,
     finding_summary,
     is_success,
@@ -80,6 +81,25 @@ class ServiceNowConnector(Connector):
             "correlation_id": summary["uuid"],
         }
         return url, headers, payload
+
+    def _lookup_request(self, finding: Any):
+        cfg: ServiceNowConfig = self.config  # type: ignore[assignment]
+        url = f"{cfg.base_url.rstrip('/')}/api/now/table/{cfg.table}"
+        headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
+        return url, headers, {
+            "sysparm_query": f"correlation_id={finding.uuid}",
+            "sysparm_fields": "sys_id",
+            "sysparm_limit": 1,
+        }
+
+    def _parse_lookup(self, body: Any) -> Lookup:
+        rows = body.get("result")
+        if not isinstance(rows, list):
+            return Lookup.unknown("servicenow answer has no result list")
+        if rows:
+            sys_id = rows[0].get("sys_id")
+            return Lookup(Lookup.FOUND, sys_id, f"servicenow record {sys_id} already exists")
+        return Lookup(Lookup.ABSENT, None, "servicenow has no record for this finding")
 
     def _parse(self, response: Response) -> ConnectorResult:
         if is_success(response.status_code):

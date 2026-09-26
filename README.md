@@ -79,6 +79,42 @@ python manage.py check --deploy --fail-level WARNING
 CI runs this and it must stay clean. `DJANGO_SECRET_KEY` is required outside
 development, and the process refuses to start without it.
 
+## Connector dispatch that a stop owes
+
+A pause, or any recompute that leaves a blocking decision, never waits on a
+connector. When the deployment's dispatch policy opts into the decision trigger,
+the stop records the dispatch as owed (a `DecisionDispatchDue` row, in the stop's
+own transaction) and a background thread pushes the findings after the stop has
+answered. What is not finished stays recorded, and three things retry it:
+
+- the thread itself, 2 s and then 8 s later;
+- every serving process (WSGI or ASGI), a few seconds after it starts and then
+  every `ASSURANCE_DISPATCH_SWEEP_SECONDS` (default 300; `0` turns it off);
+- `python manage.py retry_blocking_dispatches`, which you should also run on a
+  schedule. It exits non-zero while anything is owed, so the scheduler reports
+  it. For example, cron every five minutes:
+
+  ```cron
+  */5 * * * * cd /srv/athena && .venv/bin/python manage.py retry_blocking_dispatches >> /var/log/athena/dispatch-retry.log 2>&1
+  ```
+
+  or a systemd timer with `OnUnitActiveSec=5min` running the same command.
+
+Only one runner pushes for a deployment at a time, in any process: a run claims
+the row first, and a claim left by a process that died lapses after five minutes.
+A push whose answer was lost is looked for in Jira, GitHub or ServiceNow before
+anything is sent again. Where it cannot be looked for (Splunk HEC), it stays owed
+until someone records what happened:
+`python manage.py reconcile_dispatch_attempt <attempt uuid> --provider-has-it` (or
+`--provider-lacks-it`). The deployment's `dispatch-attempts` read shows what is owed.
+
+Settings: `ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS` (default 4) runs push at once
+per process, with at most `ASSURANCE_DISPATCH_MAX_WAITING_RUNS` (default 32) more
+threads waiting; past that nothing is started and the sweeper picks the dispatch
+up. `ASSURANCE_CONNECTOR_DEADLINE_SECONDS` (default 30) bounds each connector
+request in total, including name resolution. `ASSURANCE_AUTO_DISPATCH_ENABLED=False`
+stops all of it without dropping anything owed.
+
 ## Secrets
 
 Nothing belongs in source. A Google app password for the company mailbox and a

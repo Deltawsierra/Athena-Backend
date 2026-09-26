@@ -19,7 +19,9 @@ from .base import (
     ConnectorResult,
     Response,
     error_detail,
+    Lookup,
     finding_body,
+    finding_marker,
     finding_summary,
     is_success,
 )
@@ -79,10 +81,28 @@ class JiraConnector(Connector):
                 "description": finding_body(summary),
                 "issuetype": {"name": cfg.issue_type},
                 "priority": {"name": _PRIORITY.get(summary["severity"], "Medium")},
-                "labels": ["athena", f"severity-{summary['severity']}"],
+                # The marker label is how a lost answer or a second runner finds
+                # this issue again instead of creating another (find_existing).
+                "labels": ["athena", f"severity-{summary['severity']}", finding_marker(finding)],
             }
         }
         return url, headers, payload
+
+    def _lookup_request(self, finding: Any):
+        cfg: JiraConfig = self.config  # type: ignore[assignment]
+        url = f"{cfg.base_url.rstrip('/')}/rest/api/2/search"
+        headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
+        jql = f'project = "{cfg.project_key}" AND labels = "{finding_marker(finding)}"'
+        return url, headers, {"jql": jql, "fields": "key", "maxResults": 1}
+
+    def _parse_lookup(self, body: Any) -> Lookup:
+        issues = body.get("issues")
+        if not isinstance(issues, list):
+            return Lookup.unknown("jira search answer has no issues list")
+        if issues:
+            key = issues[0].get("key")
+            return Lookup(Lookup.FOUND, key, f"jira issue {key} already exists")
+        return Lookup(Lookup.ABSENT, None, "jira has no issue for this finding")
 
     def _parse(self, response: Response) -> ConnectorResult:
         if is_success(response.status_code):

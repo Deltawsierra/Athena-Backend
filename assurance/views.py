@@ -53,8 +53,8 @@ from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
-from .decision import current_decision, decision_support, recompute_decision
-from .dispatch import record_blocking_dispatch_owed, schedule_blocking_decision_dispatch
+from .decision import TransactionLostInHook, current_decision, decision_support, recompute_decision
+from .dispatch import OwedRecorder, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
 from .incident import assemble_incident_pack
@@ -601,16 +601,37 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # hook ran "on commit", which in autocommit is at once, in the request --
         # every qualifying finding pushed to every connector before the pause
         # answered, up to thirteen seconds a push against a hung one. Now the stop
-        # only RECORDS it as owed, in its own transaction (a savepoint whose failure
-        # is swallowed, so the stop never fails or waits on it), and schedules it to
-        # run in the background once this has committed. A run that does not
-        # finish -- or never starts, the process gone -- stays recorded until one
-        # does (#303).
-        decision = recompute_decision(
-            deployment, paused=paused, also_in_transaction=record_blocking_dispatch_owed
-        )
-        schedule_blocking_decision_dispatch(deployment.pk)
-        return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
+        # only RECORDS it as owed, in its own transaction, and schedules it to run
+        # in the background once this has committed (#303).
+        recorder = OwedRecorder()
+        try:
+            decision = recompute_decision(deployment, paused=paused, also_in_transaction=recorder)
+        except TransactionLostInHook:
+            # Writing the record ended the stop's transaction, so nothing committed.
+            # The stop lands anyway, without it: the background run records what is
+            # owed, and says so at ERROR if it cannot either.
+            logging.getLogger(__name__).error(
+                "deployment %s: recording its blocking-decision dispatch ended the stop's transaction; "
+                "the stop is committed again without the record, and the background run writes it",
+                deployment.pk,
+            )
+            recorder = None
+            decision = recompute_decision(deployment, paused=paused)
+        # The answer is the decision as committed, not as computed: recompute_decision
+        # read the row back after its transaction (a read, which under WAL waits on no
+        # writer), and that is what goes out. A 200 "paused" over a decision that is
+        # not paused is the failure this read exists to make impossible.
+        stored = deployment.decision
+        if stored != decision:
+            logging.getLogger(__name__).error(
+                "deployment %s: the recompute computed %r but the stored decision is %r; answering what is stored",
+                deployment.pk,
+                decision,
+                stored,
+            )
+        if recorder is None or recorder.owed is not False:
+            schedule_blocking_decision_dispatch(deployment.pk)
+        return Response({"decision": stored, "decision_label": deployment.get_decision_display()})
 
     @action(detail=True, methods=["get"])
     def receipt(self, request, uuid=None):

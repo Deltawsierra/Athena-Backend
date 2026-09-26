@@ -23,7 +23,9 @@ from .base import (
     ConnectorResult,
     Response,
     error_detail,
+    Lookup,
     finding_body,
+    finding_marker,
     finding_summary,
     is_success,
 )
@@ -67,9 +69,27 @@ class GitHubIssuesConnector(Connector):
         payload = {
             "title": summary["title"][:256],
             "body": finding_body(summary),
-            "labels": ["athena", f"severity:{summary['severity']}"],
+            # The marker label is how a lost answer or a second runner finds this
+            # issue again instead of opening another (find_existing).
+            "labels": ["athena", f"severity:{summary['severity']}", finding_marker(finding)],
         }
         return url, headers, payload
+
+    def _lookup_request(self, finding: Any):
+        # The issues LIST filtered by label: read from the repository itself, so an
+        # issue is there the moment it is created (the search index lags).
+        cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
+        url = f"{cfg.base_url.rstrip('/')}/repos/{cfg.owner}/{cfg.repo}/issues"
+        headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/vnd.github+json"}
+        return url, headers, {"labels": finding_marker(finding), "state": "all", "per_page": 1}
+
+    def _parse_lookup(self, body: Any) -> Lookup:
+        if not isinstance(body, list):
+            return Lookup.unknown("github issues answer is not a list")
+        if body:
+            number = body[0].get("number")
+            return Lookup(Lookup.FOUND, str(number), f"github issue #{number} already exists")
+        return Lookup(Lookup.ABSENT, None, "github has no issue for this finding")
 
     def _parse(self, response: Response) -> ConnectorResult:
         if is_success(response.status_code):

@@ -2451,6 +2451,11 @@ class DispatchAttempt(models.Model):
         # that creates the ticket twice, and recording it as SENT claims a ticket
         # that may not exist. It stays here until reconciliation resolves it.
         UNKNOWN = "unknown", "Unknown — may have been committed"
+        # Written BEFORE the request goes out and replaced by how it ended. One
+        # still SENDING was left by a runner that never recorded the end (it died,
+        # or lost its claim mid-push): the request may have landed, exactly as for
+        # UNKNOWN, and it is held and looked for the same way.
+        SENDING = "sending", "Sending — no answer recorded yet"
         SKIPPED_INERT = "skipped_inert", "Skipped — connector not configured"
         SKIPPED_NO_KEY = "skipped_no_key", "Skipped — no encryption key"
         SKIPPED_DISABLED = "skipped_disabled", "Skipped — binding disabled"
@@ -2473,7 +2478,7 @@ class DispatchAttempt(models.Model):
     #: Outcomes whose truth is not known. NOT terminal (nothing was confirmed) and
     #: NOT retryable (a retry may double-execute) -- the two properties that used to
     #: be the same thing. An attempt here waits for reconciliation.
-    UNCERTAIN_OUTCOMES = frozenset({Outcome.UNKNOWN})
+    UNCERTAIN_OUTCOMES = frozenset({Outcome.UNKNOWN, Outcome.SENDING})
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -2580,17 +2585,20 @@ class DecisionDispatchDue(models.Model):
     can no longer hold a stop back; this row is how it is not lost either.
 
     The STOP writes it, in its own transaction, when the decision it commits is one
-    the deployment's policy dispatches on: in a savepoint whose failure is logged
-    and swallowed, so the stop never fails or waits on it, and a process that exits
-    right after the stop answers leaves the row behind. A run claims it
-    (``running_until``/``run_token``) before it pushes anything, so two runners --
-    the background thread and ``manage.py retry_blocking_dispatches``, or two
-    processes -- never push for one deployment at once; a claim a crashed runner
-    left behind lapses at ``running_until``. A run deletes the row only once it has
-    finished with no push left failed and no stop has asked again since it began
-    (``requests``). A run that raises, or leaves a push failed, keeps it, with how
-    many runs there have been and what the last one said; the retry command retries
-    every one still here, and the deployment's ``dispatch-attempts`` read shows it.
+    the deployment's policy dispatches on: in a savepoint, so the stop never fails
+    or waits on it -- and if writing it ends the stop's transaction, the stop is
+    committed again without it and the background run writes it -- and a process
+    that exits right after the stop answers leaves the row behind. A run claims it
+    (``running_until``/``run_token``) before it pushes anything, so no two runners
+    -- the background thread, a process's sweeper, ``manage.py
+    retry_blocking_dispatches``, in any processes -- push for one deployment at
+    once; a claim a crashed runner left behind lapses at ``running_until``. A run
+    deletes the row only once it has finished with nothing left undone (a push
+    failed, uncertain, still recorded as sending, blocked by a missing key or an
+    authority boundary) and no stop has asked again since it began (``requests``).
+    Otherwise it keeps it, with how many runs there have been and what the last one
+    said; the sweeper and the retry command retry every one still here, and the
+    deployment's ``dispatch-attempts`` read shows it.
 
     Never read by the decision.
     """
