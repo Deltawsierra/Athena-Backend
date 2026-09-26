@@ -28,6 +28,7 @@ from __future__ import annotations
 from . import observed_outcomes
 from .composition import (
     READY,
+    READY_RESTRICTED,
     ChainOutcome,
     Composition,
     compose,
@@ -217,7 +218,9 @@ def composition_decision_signal(composition: Composition) -> str | None:
       scope -- the approved set is recorded, every approved workflow reported, and
       no outcome arrived for a workflow off the list. Then "these chains hold" is
       a statement about the deployment and enters as an assessment, exactly as a
-      completed clean scan does;
+      completed clean scan does -- as ``READY_RESTRICTED`` when any workflow holds
+      on an authorization check alone, which shows the gate authorized the action
+      and not that the effect happened;
     * otherwise ``None``: this signal assessed nothing, which
       :func:`assurance.decision._worse` already knows never to treat as good news.
 
@@ -249,7 +252,20 @@ def composition_decision_signal(composition: Composition) -> str | None:
     # written down here and pinned by
     # `test_ready_already_implies_every_approved_workflow_reported`, so the
     # simplification stays sound if the rule's flooring ever changes.
-    return READY if closed_scope(composition) else None
+    if not closed_scope(composition):
+        return None
+    # A workflow held on an authorization check alone makes the deployment READY
+    # _RESTRICTED at best (owner default, #278). Achilles signs `held` when its
+    # permit check passes at dispatch: the authority chain resolves, and nothing in
+    # the record shows the effect happened inside it. Counted as READY, a permit
+    # check stood in for the exercise the status names. Restricted rather than
+    # refused: a chain that resolves is evidence, and nothing here found a fault.
+    # Any one such workflow is enough -- the others' effects being seen says
+    # nothing about this one's. Only reachable with every approved workflow held,
+    # so every name in `authorization_checked` here is a held.
+    if composition.authorization_checked:
+        return READY_RESTRICTED
+    return READY
 
 
 def composition_payload(
@@ -354,6 +370,13 @@ def _explanation(composition: Composition, signal: str | None) -> str:
             f"{sentence} That verdict did NOT reach the deployment decision, which "
             "was placed by something outside the chains -- the operator failsafe "
             "nulls every signal."
+        )
+    if signal == READY_RESTRICTED and composition.decision == READY and composition.authorization_checked:
+        return (
+            f"{sentence} What reached the deployment decision was ready with "
+            f"restrictions: {len(composition.authorization_checked)} workflow(s) hold on an "
+            "authorization check alone -- the gate authorized the action at dispatch, "
+            "and no record shows the effect happened within that authority."
         )
     return (
         f"{sentence} What reached the deployment decision was {signal}, not the "

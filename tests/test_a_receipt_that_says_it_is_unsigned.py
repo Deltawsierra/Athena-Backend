@@ -126,11 +126,20 @@ def test_the_version_moved_and_the_step_is_minor_because_the_digest_did_not():
     would be the same error with the sign flipped: announcing a digest break that
     did not happen, and inviting a consumer to discard receipts that still verify.
     """
-    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/3.1"
-    assert receipt_mod.RECEIPT_SCHEMA["$id"] == receipt_mod.RECEIPT_VERSION
-    # Same major number as the version it supersedes. That is the claim.
-    assert receipt_mod.RECEIPT_VERSION.rsplit("/", 1)[1].split(".")[0] == "3"
+    # 3.1 is superseded now (4.0 added hashed chain content), and the claim is
+    # about the step 3.0 -> 3.1 itself, so it is pinned on those two strings.
+    assert receipt_mod._VERSION_3_1 == "mythos.assurance.receipt/3.1"
+    assert receipt_mod._VERSION_3_1 in receipt_mod.SUPERSEDED_VERSIONS
     assert receipt_mod._VERSION_3_0 in receipt_mod.SUPERSEDED_VERSIONS
+    # Same major number as the version it superseded. That is the claim.
+    major = [v.rsplit("/", 1)[1].split(".")[0]
+             for v in (receipt_mod._VERSION_3_0, receipt_mod._VERSION_3_1)]
+    assert major == ["3", "3"]
+    # And the 3.1 schema is the one that carries the three fields.
+    schema = receipt_mod.receipt_schema(receipt_mod._VERSION_3_1)
+    for field in ("signed", "signature", "unsigned_reason"):
+        assert field in schema["properties"], field
+        assert field in schema["required"], field
 
 
 def test_an_auditor_holding_a_3_0_receipt_still_gets_a_schema_that_reads_it():

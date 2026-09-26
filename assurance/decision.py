@@ -27,7 +27,10 @@ Two independent signals, combined worst-first:
 - **Workflow chains** (the compositional assurance graph) place the deployment by
   the worst status among its approved business workflows' authority-to-effect
   chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
-  a NOT_DEMONSTRATED one → NEEDS_MORE_EVIDENCE, all held → READY. Worst-of-N, never
+  a NOT_DEMONSTRATED one → NEEDS_MORE_EVIDENCE, all held → READY -- or
+  READY_RESTRICTED when any of them holds on an authorization check alone (an
+  Achilles permit check shows the gate authorized the action, not that the
+  effect happened; owner default, #278). Worst-of-N, never
   coverage-weighted: forty-nine of fifty workflows holding does not make a
   deployment that can move customer records to an unauthorised destination 98%
   safe. :mod:`assurance.composition` is the rule and argues for itself at length;
@@ -552,6 +555,23 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
 
     if paused:
         note = "Operator failsafe is paused; the deployment is not deploying regardless of findings or claims."
+    elif (
+        chain_signal == Deployment.Decision.READY_RESTRICTED
+        and parts.composition.decision == composition_READY
+        and parts.composition.authorization_checked
+        and chains_are_binding
+    ):
+        # Every approved workflow holds, and the chains alone place the deployment
+        # here -- restricted, because some of what holds is a permit check. Its own
+        # sentence: the generic one below says the chains "place it there" without
+        # saying why a composition whose every chain held is not READY.
+        note = (
+            f"Ready with restrictions: every one of the {parts.composition.workflows_expected} "
+            f"approved workflow(s) has a chain outcome and all of them hold, but "
+            f"{len(parts.composition.authorization_checked)} hold on an authorization check "
+            "alone -- the gate authorized the action at dispatch, and no record shows the "
+            f"effect happened within that authority. {explain_composition(parts.composition)}"
+        )
     elif chain_signal is not None and chain_signal != composition_READY and chains_are_binding:
         # The per-workflow chains, and nothing else, place the deployment here --
         # `chains_are_binding` is what earns the "not" in the sentence. Without the

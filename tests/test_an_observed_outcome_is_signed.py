@@ -286,8 +286,9 @@ def test_an_operator_cannot_type_demonstrated():
 def test_a_typed_in_held_cannot_make_a_workflow_exercised_and_a_signed_one_can():
     """The case #239 exists for. The same held, twice: typed in, it leaves the
     workflow unexercised; signed by the engine that reported it, it does not. The
-    signer here is Achilles, so what makes it READY is an authorization check at
-    dispatch, not an observed effect -- the gating the owner has to rule on."""
+    signer here is Achilles, so what it rests on is an authorization check at
+    dispatch, not an observed effect -- and the owner's ruling (#278) holds that
+    at ready with restrictions, never plain READY."""
     dep = _deployment()
     ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="Refund")
     WorkflowChainOutcome.objects.create(
@@ -303,7 +304,7 @@ def test_a_typed_in_held_cannot_make_a_workflow_exercised_and_a_signed_one_can()
     assert _client().post(_url(dep), _signed(dep), format="json").status_code == 201
     signed = composition_for(dep)
     assert signed.workflows_unexercised == 0
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
 
 # ------------------------------------------------ what a recorded row rests on
@@ -332,7 +333,7 @@ def test_a_row_is_demonstrated_only_while_its_envelope_verifies_and_says_what_th
     _approved(dep, "refund-over-limit")
     row = _ingested(dep)
     assert row.rests_on_signed_evidence
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
     tampered = {
         "an empty envelope": {"envelope": {}},
@@ -408,7 +409,7 @@ def test_withdrawing_a_key_withdraws_what_it_vouched_for(tmp_path, monkeypatch):
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
     only_athena = tmp_path / "rotated.json"
     only_athena.write_text(json.dumps(
@@ -707,7 +708,7 @@ def test_a_same_size_in_place_rewrite_of_the_keyring_is_read_not_trusted_stale(k
     achilles, athena = _achilles_only(), _athena_only()
     assert len(achilles) == len(athena), "the test needs a same-length rotation"
     keyring.write_text(achilles)
-    assert composition_signal(dep) == comp.READY
+    assert composition_signal(dep) == comp.READY_RESTRICTED
 
     stat = os.stat(keyring)
     keyring.write_text(athena)
@@ -717,7 +718,7 @@ def test_a_same_size_in_place_rewrite_of_the_keyring_is_read_not_trusted_stale(k
 
     assert composition_signal(dep) == comp.NEEDS_MORE_EVIDENCE
     keyring.write_text(achilles)
-    assert composition_signal(dep) == comp.READY, "and rotating back is seen too"
+    assert composition_signal(dep) == comp.READY_RESTRICTED, "and rotating back is seen too"
 
 
 @pytest.mark.parametrize("damage", ["deleted", "corrupted", "not-utf8", "nested"])
@@ -725,7 +726,7 @@ def test_a_keyring_gone_or_damaged_after_a_good_read_trusts_nothing(keyring, dam
     dep = _deployment()
     _approved(dep, "refund-over-limit")
     _ingested(dep)
-    assert composition_signal(dep) == comp.READY, "a good read first, so a cache exists"
+    assert composition_signal(dep) == comp.READY_RESTRICTED, "a good read first, so a cache exists"
 
     if damage == "deleted":
         keyring.unlink()
@@ -762,7 +763,7 @@ def test_every_chain_write_route_refreshes_the_stored_decision():
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
 
     assert client.post(_url(dep), _signed(dep, observed_at=_now() - timedelta(minutes=2)), format="json").status_code == 201
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
 
     # Widening the approved set moves it: the new workflow never reported.
     payout = {"slug": "payout", "name": "Payout"}
@@ -770,7 +771,7 @@ def test_every_chain_write_route_refreshes_the_stored_decision():
     assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
     # And narrowing it back moves it back.
     assert client.put(_approved_url(dep), {"workflows": [refund]}, format="json").status_code == 200
-    assert _stored(dep) == Deployment.Decision.READY
+    assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
 
     violated = _signed(dep, status=oc.VIOLATED, observed_at=_now() - timedelta(seconds=10))
     assert client.post(_url(dep), violated, format="json").status_code == 201

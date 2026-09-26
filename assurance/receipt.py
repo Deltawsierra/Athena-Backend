@@ -52,7 +52,13 @@ E, time T, environment C, result R*. It binds, into one deterministic payload:
   actually ran (see :mod:`assurance.coverage`) — because the evidence root
   attests to the findings that exist and can say nothing about the components
   nothing ever tested. A clean test and an absent test leave the same silence,
-  and the receipt has to tell them apart.
+  and the receipt has to tell them apart;
+- the **chains** -- how the deployment's approved workflows composed into its
+  decision, reduced to counts (see :mod:`assurance.composition`): how many were
+  approved and assessed, and what KIND of evidence the standing outcomes rest on.
+  A READY built on three typed-in ``held`` rows, on three gate authorization
+  checks, and on three watched effects are three different claims, and without
+  this block the receipt signed all three identically.
 
 Together those two are what make the receipt answer, on its own, *which
 configuration passed and what was not covered*. Neither is retrievable from the
@@ -166,14 +172,22 @@ NOT_SIGNED_OVER_REASON = (
 #         consumer that silently compared the two would report a change that did
 #         not happen, which is why the version is IN the hashed content and a
 #         reader is expected to key on it.
-# A MINOR bump, and deliberately so. Every previous step here was MAJOR because it
+#   3.0 — added ``checks_gap_fingerprint`` and ``checks_reported_at`` to
+#         ``coverage``: which checks fell short, and when that was measured.
+#   3.1 — the three fields that say whether the receipt is signed. A MINOR bump,
+#         and deliberately so. Every previous step here was MAJOR because it
 # added new HASHED content: a 2.0 digest and a 3.0 digest of the same state differ,
 # so a minor bump would have told a consumer the shapes were compatible when the
 # digests were not. The three fields 3.1 adds sit OUTSIDE the digest, so a 3.0
 # digest and a 3.1 digest of the same state are IDENTICAL. Calling this major would
 # be that same error with the sign flipped -- announcing a digest break that did
 # not happen, and inviting a consumer to discard receipts that still verify.
-RECEIPT_VERSION = "mythos.assurance.receipt/3.1"
+#   4.0 — added ``chains``: the workflow-chain composition behind the decision, as
+#         counts. MAJOR, for the reason 2.0 was: it is new HASHED content, so a 3.1
+#         digest and a 4.0 digest of the same state differ, and a consumer comparing
+#         them has to be told the shapes are not the same.
+RECEIPT_VERSION = "mythos.assurance.receipt/4.0"
+_VERSION_3_1 = "mythos.assurance.receipt/3.1"
 _VERSION_3_0 = "mythos.assurance.receipt/3.0"
 _VERSION_2_0 = "mythos.assurance.receipt/2.0"
 
@@ -183,7 +197,9 @@ _VERSION_2_0 = "mythos.assurance.receipt/2.0"
 # version's shape is only recoverable from git history. :func:`receipt_schema`
 # is the lookup; :data:`RECEIPT_SCHEMA` stays the current one so existing
 # callers are unaffected.
-SUPERSEDED_VERSIONS = ("mythos.assurance.receipt/1.1", _VERSION_2_0, _VERSION_3_0)
+SUPERSEDED_VERSIONS = (
+    "mythos.assurance.receipt/1.1", _VERSION_2_0, _VERSION_3_0, _VERSION_3_1,
+)
 
 
 def _digest(payload: dict) -> str:
@@ -510,14 +526,101 @@ RECEIPT_SCHEMA = {
                 "checks_complete", "checks_gap_fingerprint", "checks_reported_at",
             ],
         },
+        "chains": {
+            "type": "object",
+            "description": (
+                "How the deployment's approved workflow chains composed into its "
+                "decision (assurance.composition), reduced to counts. No workflow is "
+                "named: the names are retrievable from the deployment, unbounded, and "
+                "the customer's own vocabulary, and this receipt is built to travel. "
+                "The censuses are over STANDING outcomes -- one per workflow, the "
+                "latest -- and each carries every key its vocabulary defines, zeros "
+                "included, because a count that appears only when non-zero reads "
+                "exactly like a zero when it is missing."
+            ),
+            "properties": {
+                "approved_set_recorded": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether anyone recorded the approved workflow set. False "
+                        "means the counts speak only for the chains that arrived -- "
+                        "never that the deployment has no approved workflows."
+                    ),
+                },
+                "workflows_expected": {
+                    "type": ["integer", "null"],
+                    "description": "Approved workflows. Null when the set was not recorded.",
+                },
+                "workflows_assessed": {
+                    "type": "integer",
+                    "description": (
+                        "Workflows with a standing outcome, counting an approved one "
+                        "nothing reported on as not_demonstrated."
+                    ),
+                },
+                "workflows_unreported": {
+                    "type": "integer",
+                    "description": "Approved workflows no outcome was recorded for.",
+                },
+                "workflows_unapproved": {
+                    "type": "integer",
+                    "description": "Workflows an outcome arrived for that are not approved.",
+                },
+                "rule_decision": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "What the composition rule alone reaches, before findings, "
+                        "claims and coverage are combined with it into `result`. Null "
+                        "when no chain was assessed -- never read as ready."
+                    ),
+                },
+                "census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": "Standing outcomes by status: what each chain SAYS.",
+                },
+                "basis_census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": (
+                        "Standing outcomes by basis: whether a key this deployment "
+                        "trusts signed it (demonstrated), someone typed it in "
+                        "(attested), or nobody said (unknown)."
+                    ),
+                },
+                "workflows_unexercised": {
+                    "type": "integer",
+                    "description": (
+                        "Standing outcomes whose status claims an exercise while their "
+                        "basis does not say one happened."
+                    ),
+                },
+                "evidence_census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": (
+                        "Standing outcomes by what KIND of evidence they are: a gate's "
+                        "authorization_check at dispatch, a scan, an observed_effect "
+                        "watched by an independent collector, an unclassified signer, "
+                        "or an unsigned record at its basis. A held resting on an "
+                        "authorization check alone shows the action was authorized, "
+                        "not that the effect happened within that authority."
+                    ),
+                },
+            },
+            "required": [
+                "approved_set_recorded", "workflows_expected", "workflows_assessed",
+                "workflows_unreported", "workflows_unapproved", "rule_decision",
+                "census", "basis_census", "workflows_unexercised", "evidence_census",
+            ],
+        },
         "algorithm": {"type": "string", "const": ALGORITHM},
         "digest": {
             "type": "string",
             "description": (
-                "The top-level SHA-256 over the stable content above (version, system, "
-                "result, policy, evidence root, assessment digests, served route, "
-                "coverage) — reproducible, no timestamp inside. This is the value a "
-                "signature is taken over."
+                "The top-level SHA-256 over every field above except algorithm, "
+                "digest, computed_at and the signature fields -- reproducible, no "
+                "timestamp inside. This is the value a signature is taken over."
             ),
         },
         "computed_at": {
@@ -562,6 +665,7 @@ RECEIPT_SCHEMA = {
         "assessments",
         "served_route",
         "coverage",
+        "chains",
         "algorithm",
         "digest",
         "computed_at",
@@ -572,108 +676,83 @@ RECEIPT_SCHEMA = {
 }
 
 
-# The shape a 1.1 receipt has: this one, minus the two blocks 2.0 added. Kept as
-# data rather than in the commit history, because "the schema is versioned and
-# backward-readable" is only true if an auditor holding an older receipt can still
-# obtain the schema that reads it.
+# Every earlier shape, kept as data rather than in the commit history: "versioned
+# and backward-readable" is only true if an auditor holding an older receipt can
+# still obtain the schema that reads it.
+#
+# Each one is the current schema MINUS what every later version added -- all of
+# it. Deriving each from the current schema by subtracting only its own successor's
+# fields is how 2.0 and 1.1 came to require `signed`, `signature` and
+# `unsigned_reason`, which 3.1 added: a genuine 2.0 receipt failed the schema
+# published to read it, the failure `UnknownReceiptVersion` exists to prevent,
+# arriving through the front door. So what each version added is written down
+# once, below, and each older schema subtracts the union of everything after it.
 _VERSION_1_1 = "mythos.assurance.receipt/1.1"
 
-_SCHEMA_1_1 = {
-    **{
-        k: v
-        for k, v in RECEIPT_SCHEMA.items()
-        if k not in ("$id", "properties", "required")
-    },
-    "$id": _VERSION_1_1,
-    "properties": {
-        **{
-            k: v
-            for k, v in RECEIPT_SCHEMA["properties"].items()
-            if k not in ("served_route", "coverage")
-        },
-        # Overridden, not inherited. The current schema pins `receipt_version` to
-        # the CURRENT version, so copying it would hand an auditor a 1.1 schema
-        # that requires the string "2.0" -- a schema that rejects the very
-        # receipts it exists to read, which is worse than not shipping one.
-        "receipt_version": {
-            **RECEIPT_SCHEMA["properties"]["receipt_version"],
-            "const": _VERSION_1_1,
-        },
-    },
-    "required": [
-        r for r in RECEIPT_SCHEMA["required"] if r not in ("served_route", "coverage")
-    ],
-}
+#: What each version added, newest first.
+_ADDED_IN = (
+    # 4.0: the chain composition.
+    (_VERSION_3_1, {"fields": ("chains",), "coverage": ()}),
+    # 3.1: whether the receipt is signed, outside the digest.
+    (_VERSION_3_0, {"fields": ("signed", "signature", "unsigned_reason"), "coverage": ()}),
+    # 3.0: which checks fell short, and when that was measured.
+    (_VERSION_2_0, {"fields": (), "coverage": ("checks_gap_fingerprint", "checks_reported_at")}),
+    # 2.0: what actually ran, and what was never looked at. (The four check-axis
+    # counts inside `coverage` joined it under 2.0 without a version change, which
+    # is why the 2.0 schema carries them.)
+    (_VERSION_1_1, {"fields": ("served_route", "coverage"), "coverage": ()}),
+)
 
-# The shape a 2.0 receipt has: this one, minus the check-axis fields 2.1 added.
-#
-# This block exists because the version string did not move when those fields
-# became `required`. For a while `receipt_schema("…/2.0")` handed an auditor
-# holding a genuine 2.0 receipt a schema that rejected it -- the exact failure
-# UnknownReceiptVersion was written to prevent, arriving through the front door.
-# Two payload shapes must not share one version string.
-_SCHEMA_2_0 = {
-    **{
-        k: v
-        for k, v in RECEIPT_SCHEMA.items()
-        if k not in ("$id", "properties")
-    },
-    "$id": _VERSION_2_0,
-    "properties": {
-        **{
-            k: v
-            for k, v in RECEIPT_SCHEMA["properties"].items()
-            if k != "coverage"
-        },
-        "receipt_version": {
-            **RECEIPT_SCHEMA["properties"]["receipt_version"],
-            "const": _VERSION_2_0,
-        },
-        "coverage": {
-            **{
-                k: v
-                for k, v in RECEIPT_SCHEMA["properties"]["coverage"].items()
-                if k not in ("properties", "required")
-            },
+
+def _schema_before(version: str) -> dict:
+    """The schema a ``version`` receipt has: the current one without everything a
+    later version added."""
+    dropped: set[str] = set()
+    dropped_coverage: set[str] = set()
+    for older, added in _ADDED_IN:
+        dropped.update(added["fields"])
+        dropped_coverage.update(added["coverage"])
+        if older == version:
+            break
+    else:
+        raise KeyError(version)
+
+    properties = {
+        k: v for k, v in RECEIPT_SCHEMA["properties"].items() if k not in dropped
+    }
+    # Overridden, not inherited. The current schema pins `receipt_version` to the
+    # CURRENT version, so copying it would hand an auditor an old schema that
+    # requires the new string -- one that rejects the very receipts it exists to
+    # read, which is worse than not shipping one.
+    properties["receipt_version"] = {
+        **RECEIPT_SCHEMA["properties"]["receipt_version"],
+        "const": version,
+    }
+    if "coverage" in properties and dropped_coverage:
+        coverage = RECEIPT_SCHEMA["properties"]["coverage"]
+        properties["coverage"] = {
+            **{k: v for k, v in coverage.items() if k not in ("properties", "required")},
             "properties": {
-                k: v
-                for k, v in RECEIPT_SCHEMA["properties"]["coverage"]["properties"].items()
-                if k not in ("checks_gap_fingerprint", "checks_reported_at")
+                k: v for k, v in coverage["properties"].items() if k not in dropped_coverage
             },
-            "required": [
-                r
-                for r in RECEIPT_SCHEMA["properties"]["coverage"]["required"]
-                if r not in ("checks_gap_fingerprint", "checks_reported_at")
-            ],
-        },
-    },
-}
+            "required": [r for r in coverage["required"] if r not in dropped_coverage],
+        }
+    return {
+        **{k: v for k, v in RECEIPT_SCHEMA.items() if k not in ("$id", "properties", "required")},
+        "$id": version,
+        "properties": properties,
+        "required": [r for r in RECEIPT_SCHEMA["required"] if r not in dropped],
+    }
 
-# The shape a 3.0 receipt has: this one, minus the three fields 3.1 added to say
-# the receipt is unsigned. Kept as data for the same reason 1.1 and 2.0 are: an
-# auditor holding a 3.0 receipt needs the schema that reads it, and "versioned and
-# backward-readable" is worth nothing if the previous shape lives only in git.
-_HONESTY_FIELDS = ("signed", "signature", "unsigned_reason")
 
-_SCHEMA_3_0 = {
-    **{k: v for k, v in RECEIPT_SCHEMA.items() if k not in ("$id", "properties", "required")},
-    "$id": _VERSION_3_0,
-    "properties": {
-        **{
-            k: v
-            for k, v in RECEIPT_SCHEMA["properties"].items()
-            if k not in _HONESTY_FIELDS
-        },
-        "receipt_version": {
-            **RECEIPT_SCHEMA["properties"]["receipt_version"],
-            "const": _VERSION_3_0,
-        },
-    },
-    "required": [r for r in RECEIPT_SCHEMA["required"] if r not in _HONESTY_FIELDS],
-}
+_SCHEMA_3_1 = _schema_before(_VERSION_3_1)
+_SCHEMA_3_0 = _schema_before(_VERSION_3_0)
+_SCHEMA_2_0 = _schema_before(_VERSION_2_0)
+_SCHEMA_1_1 = _schema_before(_VERSION_1_1)
 
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_3_1: _SCHEMA_3_1,
     _VERSION_3_0: _SCHEMA_3_0,
     _VERSION_2_0: _SCHEMA_2_0,
     _VERSION_1_1: _SCHEMA_1_1,
@@ -834,6 +913,41 @@ def _coverage_reference(deployment) -> dict:
     }
 
 
+def _chains_reference(deployment) -> dict:
+    """The workflow-chain composition behind the decision, reduced to counts.
+
+    The result block says READY; before this block, nothing signed said what that
+    READY rested on. Three typed-in ``held`` rows, three gate authorization checks
+    at dispatch, and three effects an independent collector watched all composed
+    to the same decision and produced receipts differing only in the digest of
+    nothing a reader could name. The censuses here are what tell those apart, and
+    they are inside the digest because they are part of the state being attested.
+
+    Names stay out, as they do for routes and coverage entities: retrievable,
+    unbounded, and the customer's own vocabulary on an artifact built to travel.
+    Imported lazily -- :mod:`assurance.workflow_chains` reaches this module through
+    :mod:`assurance.decision`.
+    """
+    from .workflow_chains import composition_for
+
+    composition = composition_for(deployment)
+    return {
+        # `workflows_expected is None` is the recorded-or-not distinction the rule
+        # turns on; said as its own boolean so a reader of a receipt with an empty
+        # approved set is not left to infer it from a null.
+        "approved_set_recorded": composition.workflows_expected is not None,
+        "workflows_expected": composition.workflows_expected,
+        "workflows_assessed": composition.workflows_assessed,
+        "workflows_unreported": composition.workflows_unreported,
+        "workflows_unapproved": composition.workflows_unapproved,
+        "rule_decision": composition.decision,
+        "census": dict(composition.census),
+        "basis_census": dict(composition.basis_census),
+        "workflows_unexercised": composition.workflows_unexercised,
+        "evidence_census": dict(composition.evidence_census),
+    }
+
+
 def build_assurance_receipt(deployment) -> dict:
     """The full, versioned assurance receipt for a deployment — the roadmap tuple
     (*system, version, policy, evidence, time, environment, result*) as one
@@ -847,7 +961,8 @@ def build_assurance_receipt(deployment) -> dict:
     ``needs_more_evidence`` result, or an undeclared policy, reads as exactly that.
 
     Deterministic: the digest is over stable content only (version, system,
-    result, policy, evidence root, assessment digests). ``computed_at`` rides
+    result, policy, evidence root, assessment digests, served route, coverage,
+    chains). ``computed_at`` rides
     alongside as metadata, outside the hash, so the same DB state always yields
     the same digest. Prefetch ``findings__evidence`` and
     ``assets__provider__assertions`` and select_related ``data_boundary`` on the
@@ -902,6 +1017,10 @@ def build_assurance_receipt(deployment) -> dict:
         # absent test leave the same silence behind them.
         "served_route": _served_route_reference(deployment),
         "coverage": _coverage_reference(deployment),
+        # What the decision's chains rest on: typed in, a gate's authorization
+        # check, a scan, or a watched effect. Hashed, because a READY resting on
+        # assertion and one resting on observation are different states.
+        "chains": _chains_reference(deployment),
     }
 
     return {

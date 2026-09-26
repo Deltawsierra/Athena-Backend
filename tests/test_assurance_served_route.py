@@ -559,7 +559,9 @@ def test_the_receipt_declares_the_new_major_version():
     # 3.1 added signed/signature/unsigned_reason, which are NOT hashed. The digest
     # is byte-identical to 3.0's for the same state, so this step is minor by the
     # same rule that made the earlier ones major.
-    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/3.1"
+    #
+    # 4.0 added `chains`, which IS hashed: major, by that same rule.
+    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/4.0"
 
 
 def test_the_schema_requires_the_two_new_blocks():
