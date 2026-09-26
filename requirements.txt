@@ -119,7 +119,7 @@ zopfli==0.2.3.post1
 # same tree. CI needs a MYTHOS_CORE_TOKEN secret to install the private
 # dependency, as on the engine repos.
 #
-# What this pin adds over the previous one (539538c, Mythos-Core#23):
+# What the pins since 539538c (Mythos-Core#23) added:
 #
 # Mythos-Core#24 -- the control loop died on a hostile command. The failure log
 # line evaluated _action_of(command) as an ARGUMENT, so attribute access on the
@@ -135,4 +135,23 @@ zopfli==0.2.3.post1
 # the approved address is never dialled), and the merge used `or`, so a caller
 # dict naming any scheme also suppressed the whole of an operator's mandatory
 # proxy configuration while proxy_summary() went on printing it.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@48288659082c37625b6ddf6504d43ae11f0b30e1
+#
+# Mythos-Core#26 -- four ways a request left safe_http's guard, the control
+# channel's ambient-identity lockout among them. This service imports neither
+# safe_http nor the control channel; recorded so the next reader need not check.
+#
+# Mythos-Core#27 -- mythos_core.outcome: one schema, DSSE signature and verifier
+# for a chain outcome an engine observed. assurance/observed_outcomes.py verifies
+# every signed outcome with it, at ingest and again at every read.
+#
+# Mythos-Core#28 -- a small-order Ed25519 key verifies one constant signature for
+# every message, so a keyring holding one returned any typed-in outcome as
+# authentic. TrustedKey now refuses small-order, off-curve and non-canonical keys
+# at construction -- the keyring this service loads is built from TrustedKeys --
+# the signed payload must be the canonical encoding of what it parses to, and the
+# named engine must equal the key's exactly.
+#
+# Mythos-Core#29 -- documentation only: a signed held establishes which engine
+# said so and when, not that the effect happened. assurance.composition reads an
+# Achilles held as an authorization check for exactly that reason.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@c568674113350f855fbd0acabcc9924c20de33e7
