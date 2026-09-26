@@ -2570,6 +2570,40 @@ class DispatchAttempt(models.Model):
         return f"{self.connector} <- finding {self.finding_id}: {self.outcome}"
 
 
+class DecisionDispatchDue(models.Model):
+    """A blocking-decision dispatch that was asked for and has not yet finished
+    cleanly: the durable record that it is still owed.
+
+    The recompute route -- the one that pauses and lifts -- no longer runs the
+    dispatch before it answers (:func:`assurance.dispatch.schedule_blocking_decision_dispatch`).
+    It runs in the background after the stop has committed and answered, so it
+    can no longer hold a stop back; this row is how it can no longer be lost
+    either. The background run writes it before it pushes anything and deletes it
+    only once a run has finished with no push left failed. A run that raises, or
+    leaves a push failed, keeps it, with how many runs there have been and what the
+    last one said; ``manage.py retry_blocking_dispatches`` retries every one still
+    here, and the deployment's ``dispatch-attempts`` read shows it.
+
+    Never written by a stop, and never read by the decision.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.OneToOneField(
+        Deployment, on_delete=models.CASCADE, related_name="decision_dispatch_due"
+    )
+    #: When a run first found this dispatch owed and not done.
+    owed_since = models.DateTimeField()
+    #: Runs that have finished without settling it.
+    runs = models.PositiveIntegerField(default=0)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    #: What the last run that did not settle it said: the exception, or the pushes
+    #: it left failed. Human-readable; never a credential.
+    last_error = models.TextField(blank=True)
+
+    def __str__(self) -> str:
+        return f"blocking-decision dispatch owed for deployment {self.deployment_id} ({self.runs} run(s))"
+
+
 # ---------------------------------------------------------------------------
 # The compositional assurance graph — approved workflows and their chain outcomes
 # ---------------------------------------------------------------------------

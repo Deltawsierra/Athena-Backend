@@ -54,6 +54,7 @@ from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
 from .decision import current_decision, decision_support, recompute_decision
+from .dispatch import schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
 from .incident import assemble_incident_pack
@@ -72,6 +73,7 @@ from .models import (
     AssuranceClaim,
     ConnectorBinding,
     DataBoundary,
+    DecisionDispatchDue,
     DeclaredComponent,
     Deployment,
     DispatchAttempt,
@@ -595,29 +597,15 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         decision = recompute_decision(deployment, paused=paused)
         # Commercial spine: if the decision has entered a blocking state and this
         # deployment's policy opts into it, auto-dispatch its qualifying findings.
-        # Inert-by-default and never fatal — a dispatch error must not break a
-        # decision recompute — so it runs on commit and is wrapped.
-        self._maybe_dispatch_on_blocking_decision(deployment)
+        #
+        # A pause is a stop, and this answer used to wait for that dispatch: the
+        # hook ran "on commit", which in autocommit is at once, in the request --
+        # every qualifying finding pushed to every connector before the pause
+        # answered, up to thirteen seconds a push against a hung one. It is only
+        # scheduled here, to run in the background once this has committed, and a
+        # run that does not finish stays recorded until one does (#303).
+        schedule_blocking_decision_dispatch(deployment.pk)
         return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
-
-    def _maybe_dispatch_on_blocking_decision(self, deployment) -> None:
-        """Schedule the blocking-decision dispatch on commit, wrapped so it can
-        never break the recompute. A no-op unless the deployment has an enabled
-        policy that opts into the decision trigger and the decision is blocking."""
-        deployment_pk = deployment.pk
-
-        def _run():
-            try:
-                from .dispatch import dispatch_for_blocking_decision
-
-                fresh = Deployment.objects.get(pk=deployment_pk)
-                dispatch_for_blocking_decision(fresh)
-            except Exception:  # dispatch must never break a recompute
-                logging.getLogger(__name__).exception(
-                    "blocking-decision dispatch failed for deployment %s", deployment_pk
-                )
-
-        transaction.on_commit(_run)
 
     @action(detail=True, methods=["get"])
     def receipt(self, request, uuid=None):
@@ -1179,7 +1167,22 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         attempts = DispatchAttempt.objects.filter(deployment=deployment).select_related(
             "finding"
         )
-        return Response({"attempts": [_dispatch_attempt_state(a) for a in attempts]})
+        # The blocking-decision dispatch runs after the stop that asked for it, so
+        # one that has not finished cleanly is shown here rather than only logged.
+        owed = DecisionDispatchDue.objects.filter(deployment=deployment).first()
+        return Response(
+            {
+                "attempts": [_dispatch_attempt_state(a) for a in attempts],
+                "blocking_decision_dispatch_owed": None
+                if owed is None
+                else {
+                    "owed_since": owed.owed_since.isoformat(),
+                    "runs": owed.runs,
+                    "last_run_at": owed.last_run_at.isoformat() if owed.last_run_at else None,
+                    "last_error": owed.last_error,
+                },
+            }
+        )
 
     @action(detail=True, methods=["get", "put", "patch"], url_path="data-boundary")
     def data_boundary(self, request, uuid=None):
