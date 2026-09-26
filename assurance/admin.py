@@ -192,6 +192,12 @@ class AssetAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
         # overwriting it (see Asset.ClassificationSource / assets._get_or_refresh).
         if change and "classification" in getattr(form, "changed_data", ()):
             obj.classification_source = Asset.ClassificationSource.HUMAN
+        # And a rename is a person's too: marked, so no settle or re-declaration
+        # of the key puts a machine name back over it (see assets.NAMED_BY_HAND).
+        if change and "name" in getattr(form, "changed_data", ()):
+            from .assets import NAMED_BY_HAND
+
+            obj.metadata = {**(obj.metadata if isinstance(obj.metadata, dict) else {}), NAMED_BY_HAND: True}
         super().save_model(request, obj, form, change)
 
 

@@ -172,6 +172,12 @@ DECLARED_CLASSIFICATION = "declared_classification"
 #: carries the name the old rules gave it: a person's rename is theirs.
 LEGACY_NAME = "legacy_name"
 DECLARED_NAME = "declared_name"
+#: Set by the admin when a person renames an asset (like ``classification_source``
+#: for a classification): a name a person gave a row is theirs, and no settle or
+#: re-declaration renames it. Not bookkeeping -- it stays for the row's life. The
+#: legacy-name comparison alone could not tell: a person who renamed the row before
+#: any declaration landed on it left their name as the one frozen at the merge.
+NAMED_BY_HAND = "named_by_hand"
 _LEGACY_BOOKKEEPING = frozenset(
     {LEGACY_KEY, LEGACY_CONTENT, DECLARED_CONTENT, DECLARED_CLASSIFICATION, DECLARED_NAME, LEGACY_NAME, RETIRED}
 )
@@ -268,6 +274,9 @@ def _takes_declared_name(asset: Asset, legacy_name, declared_name) -> bool:
     """Rename ``asset`` to ``declared_name`` if it still carries ``legacy_name``,
     the name the old rules gave it; True if it was renamed."""
     wanted = str(declared_name or "").strip()[:255]
+    held = asset.metadata if isinstance(asset.metadata, dict) else {}
+    if held.get(NAMED_BY_HAND) is True:
+        return False
     if not wanted or not isinstance(legacy_name, str) or asset.name != legacy_name or asset.name == wanted:
         return False
     asset.name = wanted
@@ -294,7 +303,7 @@ def _merge_into_legacy_row(
     held = asset.metadata if isinstance(asset.metadata, dict) else {}
     merged = {k: v for k, v in metadata.items() if k != "identity_rules"}
     merged[LEGACY_CONTENT] = {
-        k: v for k, v in old.items() if k not in _LEGACY_BOOKKEEPING and k != LEGACY_ORIGIN
+        k: v for k, v in old.items() if k not in _LEGACY_BOOKKEEPING and k not in (LEGACY_ORIGIN, NAMED_BY_HAND)
     }
     merged[DECLARED_CONTENT] = dict(metadata)
     merged[DECLARED_CLASSIFICATION] = classification
@@ -672,9 +681,13 @@ def _settle_legacy_rows(deployment: Deployment, now) -> None:
         ):
             # What a current declaration wrote under this key, and still names --
             # under the name it gives the key, unless a person renamed the row.
-            row.metadata = {**declared, LEGACY_ORIGIN: True}
             if _takes_declared_name(row, metadata.get(LEGACY_NAME), metadata.get(DECLARED_NAME)):
                 fields.append("name")
+            row.metadata = {
+                **declared,
+                LEGACY_ORIGIN: True,
+                **({NAMED_BY_HAND: True} if metadata.get(NAMED_BY_HAND) is True else {}),
+            }
             wanted = metadata.get(DECLARED_CLASSIFICATION)
             if (
                 row.classification_source == Asset.ClassificationSource.MACHINE

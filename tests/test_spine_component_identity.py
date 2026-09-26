@@ -1424,8 +1424,20 @@ def test_a_settled_row_takes_the_name_its_declaration_gives_the_key():
         row = _asset(dep, name="create_issue", identifier="github",
                      metadata={**inventory, "legacy_key": True, "server": "", "permissions": ["shell"]})
         if renamed_by_hand:
+            # As the admin does it: the one place a person renames an asset.
+            from django.contrib.admin.sites import site
+            from django.test import RequestFactory
+
+            from assurance.admin import AssetAdmin
+
+            class _Form:
+                changed_data = ["name"]
+
+            request = RequestFactory().post("/admin/")
+            request.user = dep.owner
             row.name = "GitHub (prod)"
-            row.save(update_fields=["name"])
+            AssetAdmin(Asset, site).save_model(request, row, _Form(), change=True)
+            assert row.metadata.get("named_by_hand") is True
         for name in ("alpha", "beta"):
             _asset(dep, kind=Kind.AGENT, name=name, metadata={**inventory, "identity": "", "tools": ["github"]})
         derive_assets(dep, _agent_scan(dep.owner, "alpha", [{"name": "github", "permissions": ["shell"]}]))
