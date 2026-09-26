@@ -56,6 +56,7 @@ from assurance.dispatch import dispatch_finding, policy_epoch, reconcile_attempt
 from assurance.models import ConnectorBinding, Deployment, DispatchAttempt, Finding
 from assurance.revision import accept_transition
 from django.contrib.auth import get_user_model
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 User = get_user_model()
 
@@ -76,7 +77,11 @@ def _deployment(decision=Deployment.Decision.READY):
     user = User.objects.create_user(
         username=f"epoch-{Deployment.objects.count()}", password="x", role=User.Roles.ANALYST
     )
-    return Deployment.objects.create(name="d", owner=user, decision=decision)
+    # Stamped: these tests are about the epoch a hand-written decision gives a
+    # dispatch, not about recomputing it.
+    return stamped_under_the_rules_in_force(
+        Deployment.objects.create(name="d", owner=user, decision=decision)
+    )
 
 
 def _finding(dep):
