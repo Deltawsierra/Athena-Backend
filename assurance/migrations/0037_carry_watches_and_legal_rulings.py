@@ -5,8 +5,10 @@ from django.db import migrations
 WATCHED = ("pending", "unobservable")
 #: ``LatentCondition.State.WITHDRAWN``.
 WITHDRAWN = "withdrawn"
-#: ``LegalStatus.NOT_ASSESSED``.
+#: ``LegalStatus`` values when this migration was written.
 NOT_ASSESSED = "legally_not_assessed"
+REVIEW_PENDING = "legal_review_pending"
+LEGALLY_STALE = "legally_stale"
 
 
 def _merged(into, observation):
@@ -82,19 +84,49 @@ def carry_forward(apps, schema_editor):
         condition.claim = current
         condition.save(update_fields=["claim"])
 
-    # A current version still "not assessed" whose predecessor carried a ruling: the
-    # ruling of the nearest predecessor that had one.
-    for claim in AssuranceClaim.objects.filter(valid_to__isnull=True, legal_status=NOT_ASSESSED).iterator():
+    # The legal axis, replayed. Every re-derive opened its version "not assessed",
+    # so each version's legal_status records only what happened ON it: a review
+    # flagged (pending), or a person's ruling (current, stale). Replaying a chain
+    # oldest first under the rule the code now applies -- the next version carries
+    # its predecessor's status; a flag leaves stale and pending as they are
+    # (`legal.flag_for_materiality_review`) and moves anything else to pending; a
+    # ruling sets the status -- gives what the current version would say had the
+    # carry always happened. Only a current version still "not assessed" or
+    # "pending" is corrected: one a person ruled on is theirs.
+    #
+    # Restoring onto "not assessed" alone missed a stale ruling whose version a
+    # review was later flagged on: the flag landed on the version that had lost the
+    # ruling, left it "pending", and the person's STALE -- which a flag leaves alone
+    # -- stayed lost, with no cap on the decision.
+    for claim in AssuranceClaim.objects.filter(
+        valid_to__isnull=True, legal_status__in=(NOT_ASSESSED, REVIEW_PENDING)
+    ).iterator():
+        chain = [claim.legal_status]
         seen = {claim.pk}
         previous = AssuranceClaim.objects.filter(superseded_by_id=claim.pk).first()
         while previous is not None and previous.pk not in seen:
-            if previous.legal_status != NOT_ASSESSED:
-                claim.legal_status = previous.legal_status
-                claim.save(update_fields=["legal_status"])
-                break
+            chain.append(previous.legal_status)
             seen.add(previous.pk)
             previous = AssuranceClaim.objects.filter(superseded_by_id=previous.pk).first()
+        replayed = _replayed(reversed(chain))
+        if replayed != claim.legal_status:
+            claim.legal_status = replayed
+            claim.save(update_fields=["legal_status"])
 
+
+def _replayed(statuses) -> str:
+    """The legal status the newest version carries, given each version's own
+    recorded status oldest first, under carry-forward."""
+    carried = NOT_ASSESSED
+    for recorded in statuses:
+        if recorded == NOT_ASSESSED:
+            continue
+        if recorded == REVIEW_PENDING:
+            if carried not in (LEGALLY_STALE, REVIEW_PENDING):
+                carried = REVIEW_PENDING
+            continue
+        carried = recorded
+    return carried
 
 class Migration(migrations.Migration):
     dependencies = [

@@ -1032,3 +1032,64 @@ def test_the_unread_condition_cap_is_named_in_the_policy_document():
 
     caps = POLICY["decision"]["claim_caps"]
     assert caps["unread_latent_condition"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def _chain_left_by_the_old_re_derive(statuses):
+    """A claim's versions as the re-derive left them before it carried the legal
+    axis: each opened "not assessed", then marked with what happened on it. The
+    last is current."""
+    dep = _ready()
+    first = _claim(dep)
+    versions = [first]
+    for _ in statuses[1:]:
+        prior = versions[-1]
+        # Closed before its successor opens, as the re-derive does: one open version
+        # per claim.
+        AssuranceClaim.objects.filter(pk=prior.pk).update(
+            valid_to=timezone.now(), status=Status.SUPERSEDED
+        )
+        successor = AssuranceClaim.objects.create(
+            deployment=dep, claim_type=prior.claim_type, statement=prior.statement,
+            fingerprint=prior.fingerprint, system_fingerprint=f"moved-{len(versions)}",
+            policy_version=prior.policy_version, environment=dep.environment,
+            status=Status.SUPPORTED,
+        )
+        AssuranceClaim.objects.filter(pk=prior.pk).update(superseded_by=successor)
+        versions.append(successor)
+    for version, status in zip(versions, statuses):
+        AssuranceClaim.objects.filter(pk=version.pk).update(legal_status=status)
+    return versions[-1]
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        ((LegalStatus.STALE, LegalStatus.REVIEW_PENDING), LegalStatus.STALE),
+        ((LegalStatus.STALE, LegalStatus.NOT_ASSESSED, LegalStatus.REVIEW_PENDING), LegalStatus.STALE),
+        ((LegalStatus.STALE, LegalStatus.NOT_ASSESSED), LegalStatus.STALE),
+        ((LegalStatus.CURRENT, LegalStatus.REVIEW_PENDING), LegalStatus.REVIEW_PENDING),
+        ((LegalStatus.CURRENT, LegalStatus.NOT_ASSESSED), LegalStatus.CURRENT),
+        ((LegalStatus.STALE, LegalStatus.CURRENT), LegalStatus.CURRENT),
+        ((LegalStatus.REVIEW_PENDING, LegalStatus.NOT_ASSESSED), LegalStatus.REVIEW_PENDING),
+    ],
+    ids=[
+        "a flag after a lost stale ruling",
+        "a flag two versions after it",
+        "a lost stale ruling",
+        "a flag after a current ruling",
+        "a lost current ruling",
+        "a person's later ruling stands",
+        "a lost pending review",
+    ],
+)
+def test_0037_replays_the_legal_axis_as_the_carry_would_have_left_it(statuses, expected):
+    """Restoring only onto a version still "not assessed" missed a stale ruling whose
+    version a review was later flagged on: the flag left it "pending" and the
+    person's STALE -- which a flag leaves alone -- stayed lost, capping nothing."""
+    from django.apps import apps
+
+    current = _chain_left_by_the_old_re_derive(statuses)
+    for _ in range(2):  # the second pass changes nothing
+        _migration("0037_carry_watches_and_legal_rulings").carry_forward(apps, None)
+        current.refresh_from_db()
+        assert current.legal_status == expected
