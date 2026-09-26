@@ -151,6 +151,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "status_label",
             "status_must_not_imply",
             "risk_accepted_until",
+            "risk_accepted_severity",
             "owner",
             "assignee",
             "remediation_state",
@@ -197,6 +198,7 @@ class FindingSerializer(serializers.ModelSerializer):
                     {"risk_accepted_until": "Only an accepted risk has an acceptance to end."}
                 )
             attrs["risk_accepted_until"] = None
+            attrs["risk_accepted_severity"] = ""
             return attrs
         if (
             "risk_accepted_until" not in attrs
@@ -219,6 +221,9 @@ class FindingSerializer(serializers.ModelSerializer):
                 {"risk_accepted_until": "An acceptance cannot end in the past."}
             )
         attrs["risk_accepted_until"] = until
+        # What was accepted, as it reads now: the acceptance covers this severity
+        # and no higher (see Finding.risk_accepted_severity).
+        attrs["risk_accepted_severity"] = getattr(self.instance, "severity", "") or ""
         return attrs
 
     def _latest_seen(self, obj):

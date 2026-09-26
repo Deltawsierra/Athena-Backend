@@ -85,6 +85,25 @@ def _policy_document() -> dict:
                 # (assurance.legal); a review merely pending caps nothing.
                 "legally_stale": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
             },
+            # How a risk a person accepted caps the decision (owner decision Q6,
+            # assurance.decision.accepted_risk_signal). "accepted" is among the
+            # resolved statuses above for every deriver; for the decision it is
+            # carried, never removed.
+            "accepted_risk_caps": {
+                "standing": Deployment.Decision.READY_RESTRICTED.value,
+                "lapsed_undated_or_outgrown": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
+            },
+            # How the workflow chains cap it (assurance.workflow_chains
+            # .composition_decision_signal and assurance.composition._floor_of):
+            # a held resting on a permit check or an unclassified signer is ready
+            # with restrictions at best; one resting on no run, or taken against a
+            # route that no longer serves, counts as not demonstrated.
+            "chain_caps": {
+                "held_on_authorization_check": Deployment.Decision.READY_RESTRICTED.value,
+                "held_on_unclassified_signer": Deployment.Decision.READY_RESTRICTED.value,
+                "held_unexercised": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
+                "held_off_route": Deployment.Decision.NEEDS_MORE_EVIDENCE.value,
+            },
         },
         # Required-evidence rules (assurance.claims / assurance.change).
         "required_evidence": {

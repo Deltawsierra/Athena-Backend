@@ -62,7 +62,7 @@ from .training_reuse import assess_training_reuse
 from .packs import UnknownPack, apply_pack, list_packs
 from .roi import build_executive_summary
 from .route import build_route_map
-from .served_route import note_route_quietly, routes_for_outcomes
+from .served_route import routes_for_outcomes
 from .models import (
     ApprovedWorkflow,
     Asset,
@@ -212,11 +212,15 @@ def _refresh_stored_decision(deployment) -> None:
     two commit together or neither does.
 
     A declared latent condition the write made true fires first (it marks its claim
-    STALE and opens a retest), so the decision refreshed here reads it. The route the
-    write left serving is noted beside it, so a run after it binds to it.
+    STALE and opens a retest), so the decision refreshed here reads it.
+
+    The served route is NOT noted here. This runs inside writes a stop must not wait
+    on -- a revoke among them -- and the note reads the whole asset graph. Every
+    write that can move the route reaches the after-commit backstop
+    (:func:`assurance.decision.refresh_stored_decisions`), which notes it, and an
+    outcome's binding notes it first in any case.
     """
     fire_due_conditions(deployment)
-    note_route_quietly(deployment)
     recompute_decision(deployment)
 
 

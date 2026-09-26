@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.db import transaction
+from django.utils import timezone
 
 from .decision import refresh_stored_decisions
 from .revision import in_force_of, logged_head
@@ -147,7 +148,16 @@ class DeploymentAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
         transition log shows what the log records -- a logged pause as the pause,
         not the READY the stale row holds. A read: it repairs nothing."""
         decision, _revision = self._in_force(obj)
-        return Deployment.Decision(decision).label if decision else "-"
+        if not decision:
+            return "-"
+        label = Deployment.Decision(decision).label
+        # A decision whose inputs moved with time and no write -- an acceptance that
+        # lapsed at `decision_valid_until` -- is recomputed by the first published
+        # read, which this column is not. Said here rather than shown as current.
+        valid_until = getattr(obj, "decision_valid_until", None)
+        if valid_until is not None and timezone.now() >= valid_until:
+            return f"{label} (lapsed; recomputed on the next published read)"
+        return label
 
     @admin.display(description="decision revision")
     def revision_in_force(self, obj):
@@ -171,6 +181,19 @@ class FindingAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     list_filter = ("severity", "status", "remediation_state", "retest_required")
     search_fields = ("title", "finding_type", "location")
     inlines = [EvidenceInline, RemediationEventInline]
+    # Recorded from the finding when a person accepts it here, never typed: it is
+    # what the acceptance covers (Finding.risk_accepted_severity).
+    readonly_fields = ("risk_accepted_severity",)
+
+    def save_model(self, request, obj, form, change):
+        # An acceptance made or renewed here covers the severity the finding has
+        # as it is accepted, as the API's acceptance does; leaving acceptance clears it.
+        changed = set(getattr(form, "changed_data", ()))
+        if obj.status != Finding.Status.ACCEPTED:
+            obj.risk_accepted_severity = ""
+        elif changed & {"status", "risk_accepted_until"}:
+            obj.risk_accepted_severity = obj.severity or ""
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(RemediationEvent)

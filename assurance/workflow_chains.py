@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from . import observed_outcomes
 from .composition import (
+    EVIDENCE_UNCLASSIFIED,
     READY,
     READY_RESTRICTED,
     ROUTE_CURRENT,
@@ -290,6 +291,14 @@ def composition_decision_signal(composition: Composition) -> str | None:
     # so every name in `authorization_checked` here is a held.
     if composition.authorization_checked:
         return READY_RESTRICTED
+    # And so does one signed by an engine this platform has not classified. Its
+    # signature verifies, and nothing says what the signer could see -- which is
+    # at best a permit check's worth. Left at READY it outranked the permit check
+    # it cannot be shown to exceed: weaker evidence, the better decision. Every
+    # standing outcome is an approved `held` here, so the census counts exactly
+    # the held chains resting on such a signer.
+    if composition.evidence_census.get(EVIDENCE_UNCLASSIFIED, 0):
+        return READY_RESTRICTED
     return READY
 
 
@@ -408,6 +417,14 @@ def _explanation(composition: Composition, signal: str | None) -> str:
             f"restrictions: {len(composition.authorization_checked)} workflow(s) hold on an "
             "authorization check alone -- the gate authorized the action at dispatch, "
             "and no record shows the effect happened within that authority."
+        )
+    unclassified = composition.evidence_census.get(EVIDENCE_UNCLASSIFIED, 0)
+    if signal == READY_RESTRICTED and composition.decision == READY and unclassified:
+        return (
+            f"{sentence} What reached the deployment decision was ready with "
+            f"restrictions: {unclassified} workflow(s) hold on the signature of an engine "
+            "this platform has not classified, which says who reported the chain and "
+            "not what that engine could see."
         )
     return (
         f"{sentence} What reached the deployment decision was {signal}, not the "

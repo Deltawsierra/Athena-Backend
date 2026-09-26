@@ -83,6 +83,7 @@ from .models import (
     Finding,
     LegalStatus,
     RetestRequirement,
+    SEVERITY_ORDER,
     severity_rank,
 )
 
@@ -261,6 +262,11 @@ def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
     - An acceptance that has LAPSED, or never named an end, caps it at
       NEEDS_MORE_EVIDENCE: the decision to carry the risk no longer stands, and
       until a person decides again nobody has.
+    - So does an acceptance OUTGROWN: the finding is now more severe than the
+      severity it was accepted at (``risk_accepted_severity``), or the acceptance
+      does not say what severity it covered. A next scan reporting the same
+      signature as critical refreshes the severity and leaves the status alone,
+      and a medium someone chose to carry is not a critical they chose to carry.
 
     ``valid_until`` is the earliest moment a standing acceptance lapses, which is
     when the decision stops being the one its inputs imply without any write --
@@ -269,10 +275,16 @@ def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
     """
     accepted = list(
         deployment.findings.filter(status=Finding.Status.ACCEPTED).only(
-            "uuid", "title", "severity", "risk_accepted_until"
+            "uuid", "title", "severity", "risk_accepted_until", "risk_accepted_severity"
         )
     )
-    standing = [f for f in accepted if f.risk_accepted_until is not None and f.risk_accepted_until > now]
+    standing = [
+        f
+        for f in accepted
+        if f.risk_accepted_until is not None
+        and f.risk_accepted_until > now
+        and _acceptance_covers(f)
+    ]
     lapsed = [f for f in accepted if f not in standing]
     if lapsed:
         cap = Deployment.Decision.NEEDS_MORE_EVIDENCE
@@ -286,6 +298,17 @@ def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
         "lapsed": lapsed,
         "valid_until": min((f.risk_accepted_until for f in standing), default=None),
     }
+
+
+def _acceptance_covers(finding: Finding) -> bool:
+    """Whether the severity accepted covers the finding's severity now. An
+    acceptance that recorded none covers nothing, and a severity this platform does
+    not rank is not shown to be within one it does."""
+    accepted_at = (finding.risk_accepted_severity or "").strip().lower()
+    current = (finding.severity or "").strip().lower()
+    if accepted_at not in SEVERITY_ORDER or current not in SEVERITY_ORDER:
+        return False
+    return severity_rank(current) <= severity_rank(accepted_at)
 
 
 def _no_accepted_risk() -> dict:

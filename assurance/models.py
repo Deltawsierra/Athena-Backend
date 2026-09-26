@@ -721,6 +721,14 @@ class Finding(models.Model):
     # lapses -- or for an acceptance that never named an end -- the decision needs
     # more evidence. Required to accept, cleared by any other status.
     risk_accepted_until = models.DateTimeField(null=True, blank=True)
+    # The severity the acceptance was given at. A person who accepted a medium did
+    # not accept the critical the next scan reported under the same signature --
+    # ingest refreshes the severity and leaves the status alone -- so an acceptance
+    # stands only while the finding is no more severe than this. Blank on an
+    # acceptance that does not say (one set before this was recorded, or outside
+    # the route that records it), which reads as lapsed: an acceptance of an
+    # unknown severity is not one anybody can be shown to have made.
+    risk_accepted_severity = models.CharField(max_length=16, blank=True, default="")
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

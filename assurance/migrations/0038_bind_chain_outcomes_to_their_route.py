@@ -1,25 +1,35 @@
+from datetime import datetime, timezone
+
 import django.db.models.deletion
 from django.db import migrations, models
 
 
-def recompute_under_the_route_rule(apps, schema_editor):
-    """Mark every stored decision with chain outcomes under it as computed under
-    another rule, so it is recomputed under this one.
+#: An instant every clock has passed. ``decision_valid_until`` at or before now makes
+#: the first read of the stored decision recompute it (``decision.current_decision``),
+#: the mechanism 0036 used for the accepted-risk rule.
+_ALREADY_PASSED = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-    From here a ``held`` counts only when it was taken against the route serving
-    now, and every row written before this migration has no route bound: each reads
-    ``unrecorded``, which on an approved workflow floors exactly as a moved route
-    does. A decision stored READY on those rows is no longer the one its inputs
-    imply, and nothing writes to it to say so. A NULL ``decision_keyring`` is the
-    mark the post-migrate receiver
-    (``assurance.signals.recompute_decisions_computed_under_another_rule``) and
-    every publishing read (``assurance.decision.current_decision``) already
-    reconcile, so it is set here rather than a second mechanism built beside it.
+
+def recompute_under_the_rules_this_release_adds(apps, schema_editor):
+    """Mark every stored decision as due for a recompute under the rules that now
+    compose it.
+
+    Several rules change what the same stored inputs imply, and none of them is a
+    write: a held that rests on an authorization check alone reads READY_RESTRICTED;
+    a claim a person ruled legally stale -- rulings 0037 carried back onto current
+    versions -- reads NEEDS_MORE_EVIDENCE; a held taken against any route but the one
+    serving now, and every held recorded before routes were bound, reads as not yet
+    exercised. A decision stored READY under the old rules went on being published
+    READY by every surface that reads the stored value, while decision-support,
+    computing live, said otherwise under the same revision.
+
+    Every deployment with a stored decision, not a guess at which ones moved: a
+    recompute that changes nothing records no transition, and one that does is the
+    point. Lazily, on the first read, because the recompute takes the row lock and a
+    migration holding every deployment's lock at once is the wrong place to take it.
     """
     Deployment = apps.get_model("assurance", "Deployment")
-    WorkflowChainOutcome = apps.get_model("assurance", "WorkflowChainOutcome")
-    with_chains = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
-    Deployment.objects.filter(pk__in=with_chains).update(decision_keyring=None)
+    Deployment.objects.filter(decision__isnull=False).update(decision_valid_until=_ALREADY_PASSED)
 
 
 class Migration(migrations.Migration):
@@ -29,6 +39,11 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.AddField(
+            model_name="finding",
+            name="risk_accepted_severity",
+            field=models.CharField(blank=True, default="", max_length=16),
+        ),
         migrations.AddField(
             model_name="workflowchainoutcome",
             name="route_fingerprint",
@@ -50,8 +65,7 @@ class Migration(migrations.Migration):
                 ),
             ],
         ),
-        # Not reversed: un-marking would leave decisions computed under this rule
-        # stamped as though nothing had changed, and a reversal that drops the
-        # column already returns every row to the rule before it.
-        migrations.RunPython(recompute_under_the_route_rule, migrations.RunPython.noop),
+        # Not reversed: the mark is cleared by the recompute it asks for, and a
+        # reversal that drops the column returns every row to the rules before.
+        migrations.RunPython(recompute_under_the_rules_this_release_adds, migrations.RunPython.noop),
     ]
