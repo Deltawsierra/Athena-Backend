@@ -64,7 +64,15 @@ from .fingerprint import (
     compute_system_fingerprint,
     policy_version,
 )
-from .models import AssuranceClaim, ClaimEvent, Deployment, EvidenceClass, LatentCondition, evidence_strength
+from .models import (
+    LATENT_LIVE_STATES,
+    AssuranceClaim,
+    ClaimEvent,
+    Deployment,
+    EvidenceClass,
+    LatentCondition,
+    evidence_strength,
+)
 from .legal import ruling_for_next_version
 from .receipt import build_assurance_receipt
 
@@ -510,14 +518,58 @@ def _prefetched(deployment) -> Deployment:
     )
 
 
+# ---------------------------------------------------------------------------
+# The hold a fired latent condition keeps on its claim
+# ---------------------------------------------------------------------------
+
+#: The statuses a hold leaves as they are -- the ones ``_mark_stale`` never moves:
+#: a live contradiction is not softened, a withdrawal is terminal, and STALE and
+#: SUPERSEDED are already no pass.
+_HOLD_KEEPS = frozenset({Status.CONTRADICTED, Status.REVOKED, Status.STALE, Status.SUPERSEDED})
+
+#: Why a re-derived claim reads STALE where its deriver reads a pass.
+_HELD = (
+    "held at stale while a declared condition that fired on this claim still stands; "
+    "it clears when the condition is found back at its baseline or a person withdraws it"
+)
+
+
+def held_by_fired_conditions(deployment) -> frozenset:
+    """The claim identities (``fingerprint``) on ``deployment`` that a FIRED latent
+    condition holds: on any version of the claim, since the hold is on the claim and
+    not on one version of it.
+
+    Such a claim reads no better than STALE and its retest stays open, whatever a
+    re-derive reads. A re-derive used to refresh it straight back to VERIFIED and
+    resolve the retest, and the deployment read READY again while the precondition
+    the condition named was still true (:mod:`assurance.latent`).
+    """
+    return frozenset(
+        LatentCondition.objects.filter(
+            deployment=deployment, state=LatentCondition.State.FIRED
+        ).values_list("claim__fingerprint", flat=True)
+    )
+
+
+def _held_status(status: str) -> str:
+    """``status`` as a claim held by a fired condition may read it: no better than
+    STALE, exactly as the firing left it (``invalidation._mark_stale``)."""
+    return status if status in _HOLD_KEEPS else Status.STALE
+
+
 def _make_claim(
     deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now,
-    human_owner=None, legal_status=None,
+    human_owner=None, legal_status=None, held=False,
 ) -> AssuranceClaim:
     """Create a new CURRENT claim version from a deriver's output, and seed its
     lifecycle with a ``∅ → status`` :class:`ClaimEvent`. ``legal_status`` is the
-    version it replaces' (see :func:`_supersede`); a first version is not assessed."""
+    version it replaces' (see :func:`_supersede`); a first version is not assessed.
+    ``held``: a fired latent condition holds this claim, so it opens at STALE."""
     status = derived["status"]
+    note = "Derived"
+    if held and _held_status(status) != status:
+        status = _held_status(status)
+        note = f"Derived; {_HELD}."
     legal = {} if legal_status is None else {"legal_status": legal_status}
     claim = AssuranceClaim.objects.create(
         deployment=deployment,
@@ -547,7 +599,7 @@ def _make_claim(
         expiration=now + timedelta(days=EVIDENCE_TTL_DAYS),
     )
     ClaimEvent.objects.create(
-        claim=claim, from_status="", to_status=status, actor=None, note="Derived"
+        claim=claim, from_status="", to_status=status, actor=None, note=note
     )
     return claim
 
@@ -589,14 +641,25 @@ def _same_reading(claim: AssuranceClaim, derived, *, human_status: bool = False)
     return all(getattr(claim, field) == derived[field] for field in _READING_FIELDS)
 
 
-def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now, *, human_status: bool = False) -> bool:
+def _refresh_machine_fields(
+    claim: AssuranceClaim, derived, receipt_digest, now, *, human_status: bool = False, held: bool = False
+) -> bool:
     """Refresh a current claim's MACHINE fields in place (system state unchanged),
     preserving every human field -- including a status a person set, which stands
     on this version until the inputs or the policy it was set against change.
     Writes a :class:`ClaimEvent` only on an actual status change. Returns whether
-    the row was updated."""
+    the row was updated.
+
+    ``held``: a fired latent condition holds this claim, and it reads no better
+    than STALE whatever the deriver -- or a person -- reads. The STALE mark the
+    firing left used to be read as "whatever the deriver says now", and a re-derive
+    turned it straight back into VERIFIED with the precondition still true."""
     old_status = claim.status
     new_status = old_status if human_status else derived["status"]
+    note = "Re-derived"
+    if held and _held_status(new_status) != new_status:
+        new_status = _held_status(new_status)
+        note = f"Re-derived; {_HELD}."
 
     claim.statement = derived["statement"]
     claim.evidence_class = derived["evidence_class"]
@@ -619,7 +682,7 @@ def _refresh_machine_fields(claim: AssuranceClaim, derived, receipt_digest, now,
 
     if status_changed:
         ClaimEvent.objects.create(
-            claim=claim, from_status=old_status, to_status=new_status, actor=None, note="Re-derived"
+            claim=claim, from_status=old_status, to_status=new_status, actor=None, note=note
         )
     return True
 
@@ -711,12 +774,16 @@ def record_retroactive_claim(
     return claim
 
 
-def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now, note) -> None:
+def _supersede(
+    current: AssuranceClaim, deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest,
+    derived, now, note, held=False,
+) -> None:
     """Close the current version (``valid_to`` set, status SUPERSEDED, its own
     ClaimEvent), open a new current version bound to the new system state, and link
     ``old.superseded_by = new``. The old version is closed BEFORE the new one is
     created so the partial unique constraint (one current version per identity) is
-    never momentarily violated."""
+    never momentarily violated. ``held``: a fired latent condition holds the claim,
+    and the new version opens at STALE."""
     old_status = current.status
     current.valid_to = now
     current.status = Status.SUPERSEDED
@@ -742,15 +809,18 @@ def _supersede(current: AssuranceClaim, deployment, *, identity_fp, system_fp, i
         # what the new version starts with). Dropped here, every re-derive erased a
         # person's materiality ruling and any review still pending.
         legal_status=ruling_for_next_version(current),
+        held=held,
     )
     current.superseded_by = new_claim
     current.save(update_fields=["superseded_by", "updated_at"])
     # And the watches declared on it: a latent condition is about the claim, not one
     # version of it. Left on the closed version, it was evaluated never again -- only
     # current versions are -- while the posture went on counting it as watched.
-    LatentCondition.objects.filter(
-        claim=current, state__in=(LatentCondition.State.PENDING, LatentCondition.State.UNOBSERVABLE)
-    ).update(claim=new_claim, updated_at=now)
+    # Every live one, a FIRED one too: it holds the claim, not the version it fired
+    # on, and it is read again to find whether it has come back to its baseline.
+    LatentCondition.objects.filter(claim=current, state__in=LATENT_LIVE_STATES).update(
+        claim=new_claim, updated_at=now
+    )
 
 
 def _mark_stale(deployment, now) -> int:
@@ -811,6 +881,9 @@ def _derive_claims(dep, now) -> dict:
     input_fps = claim_input_fingerprints(dep)
     pol_version = policy_version(dep)
     receipt_digest = build_assurance_receipt(dep)["digest"]
+    # Read once, before anything moves: a supersede below carries each fired
+    # condition to the claim's new version, and the identity it holds is the same.
+    held = held_by_fired_conditions(dep)
 
     counts = {"created": 0, "updated": 0, "superseded": 0, "stale": 0}
 
@@ -837,6 +910,7 @@ def _derive_claims(dep, now) -> dict:
                 receipt_digest=receipt_digest,
                 derived=derived,
                 now=now,
+                held=identity_fp in held,
             )
             counts["created"] += 1
             continue
@@ -871,7 +945,9 @@ def _derive_claims(dep, now) -> dict:
                 # its inputs now, so the next change is read per claim rather than
                 # for the whole deployment.
                 current.input_fingerprint = input_fp
-            if _refresh_machine_fields(current, derived, receipt_digest, now, human_status=human_status):
+            if _refresh_machine_fields(
+                current, derived, receipt_digest, now, human_status=human_status, held=identity_fp in held
+            ):
                 counts["updated"] += 1
         else:
             if state_moved and policy_moved:
@@ -905,6 +981,7 @@ def _derive_claims(dep, now) -> dict:
                 derived=derived,
                 now=now,
                 note=note,
+                held=identity_fp in held,
             )
             counts["superseded"] += 1
 
@@ -920,7 +997,7 @@ def _derive_claims(dep, now) -> dict:
     from .invalidation import resolve_satisfied_requirements
 
     resolve_satisfied_requirements(
-        dep, system_fp=system_fp, policy_version=pol_version, now=now, input_fps=input_fps
+        dep, system_fp=system_fp, policy_version=pol_version, now=now, input_fps=input_fps, held=held
     )
     return counts
 

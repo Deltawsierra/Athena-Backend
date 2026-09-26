@@ -3,8 +3,22 @@ from django.db import migrations
 #: ``LatentCondition.State`` values when this migration was written: a condition
 #: still watched. Spelled here, not imported: a migration records what it did.
 WATCHED = ("pending", "unobservable")
+#: ``LatentCondition.State.WITHDRAWN``.
+WITHDRAWN = "withdrawn"
 #: ``LegalStatus.NOT_ASSESSED``.
 NOT_ASSESSED = "legally_not_assessed"
+
+
+def _merged(into, observation):
+    """The note an orphan is withdrawn with when the watch it carries is already on
+    the current version. Written to ``fired_observation``, where a withdrawal's
+    note was kept when this migration was written."""
+    note = (
+        f"Merged into the same declaration on the claim's current version ({into.uuid}, "
+        f"{into.state}) when migration 0037 carried forward the watches a re-derive had "
+        "left behind; withdrawn here so one watch is not counted as two."
+    )
+    return f"{note} Last observation here: {observation}" if observation else note
 
 
 def _current_version(AssuranceClaim, claim):
@@ -33,12 +47,40 @@ def carry_forward(apps, schema_editor):
     AssuranceClaim = apps.get_model("assurance", "AssuranceClaim")
     LatentCondition = apps.get_model("assurance", "LatentCondition")
 
-    orphaned = LatentCondition.objects.filter(state__in=WATCHED, claim__valid_to__isnull=False).select_related("claim")
-    for condition in orphaned.iterator():
+    # Read whole before any row moves, and newest first: where two orphans of one
+    # watch sit on one chain, the most recent statement of it is the one carried.
+    orphaned = list(
+        LatentCondition.objects.filter(state__in=WATCHED, claim__valid_to__isnull=False)
+        .select_related("claim")
+        .order_by("-declared_at", "-pk")
+    )
+    for condition in orphaned:
         current = _current_version(AssuranceClaim, condition.claim)
-        if current is not None and current.pk != condition.claim_id:
-            condition.claim = current
-            condition.save(update_fields=["claim"])
+        if current is None or current.pk == condition.claim_id:
+            continue
+        # The current version may already carry this declaration: an operator who
+        # saw the watch left behind re-declared it there, or a second orphan of it
+        # further up the chain was carried a moment ago. The constraint allows one
+        # row per declaration per claim, so the move raised IntegrityError and the
+        # whole migration aborted. The watch is on the current version already;
+        # this row is kept, withdrawn, with a note saying where it went.
+        already = (
+            LatentCondition.objects.filter(
+                claim_id=current.pk,
+                kind=condition.kind,
+                subject=condition.subject,
+                expected=condition.expected,
+            )
+            .exclude(pk=condition.pk)
+            .first()
+        )
+        if already is not None:
+            condition.fired_observation = _merged(already, condition.fired_observation)
+            condition.state = WITHDRAWN
+            condition.save(update_fields=["state", "fired_observation"])
+            continue
+        condition.claim = current
+        condition.save(update_fields=["claim"])
 
     # A current version still "not assessed" whose predecessor carried a ruling: the
     # ruling of the nearest predecessor that had one.

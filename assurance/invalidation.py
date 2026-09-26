@@ -52,7 +52,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from . import observability as obs
-from .claims import Status
+from .claims import Status, held_by_fired_conditions
 from .fingerprint import (
     CLAIM_INPUTS,
     claim_input_fingerprints,
@@ -133,10 +133,11 @@ def _open_requirement(deployment, claim, *, system_fp, now, actor, reason) -> Re
     return req
 
 
-def _mark_stale(claim, now) -> None:
+def _mark_stale(claim, now, *, note: str = "System state changed; claim invalidated, retest due.") -> None:
     """Move a drifted claim away from a pass to STALE ("a retest is due"), through
     the same status seam Phase 1 uses, and attribute it. Skips a claim whose status
-    must not be softened (see ``_STALE_SKIP``)."""
+    must not be softened (see ``_STALE_SKIP``) -- including one already STALE, so a
+    caller that marks the same claim instance twice writes one event."""
     if claim.status in _STALE_SKIP:
         return
     old_status = claim.status
@@ -147,7 +148,7 @@ def _mark_stale(claim, now) -> None:
         from_status=old_status,
         to_status=Status.STALE,
         actor=None,
-        note="System state changed; claim invalidated, retest due.",
+        note=note,
     )
 
 
@@ -173,7 +174,9 @@ def _rederived_since(claim, req) -> bool:
     return claim.last_seen > seen and claim.status != Status.STALE
 
 
-def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version=None, now=None, input_fps=None) -> int:
+def resolve_satisfied_requirements(
+    deployment, *, system_fp=None, policy_version=None, now=None, input_fps=None, held=None
+) -> int:
     """Resolve every open retest obligation that a fresh derivation has satisfied.
 
     An obligation is satisfied when the claim's CURRENT version is bound to the
@@ -187,6 +190,14 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version
     rebinding re-derivation is. Records ``resolving_claim`` and ``resolved_at`` and
     returns how many it resolved.
 
+    Never one on a claim a FIRED latent condition holds (``held``, the claim
+    identities :func:`assurance.claims.held_by_fired_conditions` names): the
+    precondition that opened it is still true, and a re-derivation reads the
+    state the precondition broke -- it cannot be the retest the precondition asks
+    for. That retest is resolved when the condition is found back at its baseline
+    (:mod:`assurance.latent`), or, once a person withdraws the condition, here, the
+    ordinary way.
+
     Called by ``derive_claims`` after it reconciles (so a re-derive settles the
     obligations it answered) and by :func:`check_invalidations` (so a check reports
     what it settled, e.g. after a change was reverted)."""
@@ -197,12 +208,19 @@ def resolve_satisfied_requirements(deployment, *, system_fp=None, policy_version
         policy_version = _current_policy_version(deployment)
     if input_fps is None:
         input_fps = claim_input_fingerprints(deployment)
+    if held is None:
+        held = held_by_fired_conditions(deployment)
 
     resolved = 0
     open_reqs = RetestRequirement.objects.filter(
         deployment=deployment, resolved_at__isnull=True
     ).select_related("claim")
     for req in open_reqs:
+        if req.claim.fingerprint in held:
+            # A re-derive refreshed this claim back to a pass and resolved this
+            # retest while the declared precondition that opened it still held --
+            # READY again, with nothing changed back and nobody having accepted it.
+            continue
         current = (
             AssuranceClaim.objects.filter(
                 deployment=deployment,

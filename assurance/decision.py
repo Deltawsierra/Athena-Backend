@@ -21,9 +21,9 @@ Two independent signals, combined worst-first:
   evidence" rather than as either a live severity or a clean pass.
 - **Claims** (Stage 1C) cap the decision by claim health. A live CONTRADICTED claim
   (an assurance statement the current state falsifies) caps at NEEDS_REMEDIATION; a
-  STALE or UNKNOWN claim, or any open retest obligation, caps at
-  NEEDS_MORE_EVIDENCE. Supported/verified claims and a deployment with no claims add
-  no cap.
+  STALE or UNKNOWN claim, any open retest obligation, or a declared precondition of
+  a claim that cannot be read now, caps at NEEDS_MORE_EVIDENCE. Supported/verified
+  claims and a deployment with no claims add no cap.
 - **Workflow chains** (the compositional assurance graph) place the deployment by
   the worst status among its approved business workflows' authority-to-effect
   chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
@@ -75,12 +75,14 @@ from .workflow_chains import (
     read_chain_provenance,
 )
 from .models import (
+    LATENT_UNREAD_STATES,
     UNTRUSTED_SEVERITY_STATUSES,
     RESOLVED_FINDING_STATUSES,
     AssuranceClaim,
     Deployment,
     EvidenceClass,
     Finding,
+    LatentCondition,
     LegalStatus,
     RetestRequirement,
     severity_rank,
@@ -203,6 +205,10 @@ def claim_decision_signal(deployment: Deployment) -> dict:
       it moved and a person recorded that the move is material here, so it needs
       re-assessing on legal grounds. Only that recorded judgment caps -- a review
       merely PENDING is the trigger flagging, and the trigger never judges;
+    - a declared **latent condition** on a current claim that nobody can read now
+      -- UNOBSERVABLE, or its evaluation failed (:mod:`assurance.latent`) -- caps
+      at NEEDS_MORE_EVIDENCE: the precondition the claim rests on cannot be
+      checked, and what cannot be established is not read as holding;
     - SUPPORTED / VERIFIED / PARTIALLY_VERIFIED claims (and DRAFT, which is not yet
       an assessment) impose no cap.
 
@@ -227,10 +233,19 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         for c in current
         if c.status in (Status.SUPPORTED, Status.VERIFIED, Status.PARTIALLY_VERIFIED)
     ]
+    # Only on a current, unrevoked claim: a condition on a claim a person took out
+    # of scope is no more a mark against readiness than the claim is.
+    unread_conditions = list(
+        LatentCondition.objects.filter(
+            deployment=deployment, claim__in=[c.pk for c in current], state__in=LATENT_UNREAD_STATES
+        )
+        .select_related("claim")
+        .order_by("pk")
+    )
 
     if contradicted:
         cap = Deployment.Decision.NEEDS_REMEDIATION
-    elif stale or unknown or retest_pending or legally_stale:
+    elif stale or unknown or retest_pending or legally_stale or unread_conditions:
         cap = Deployment.Decision.NEEDS_MORE_EVIDENCE
     else:
         cap = None
@@ -243,6 +258,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         "stale": stale,
         "unknown": unknown,
         "legally_stale": legally_stale,
+        "unread_conditions": unread_conditions,
         "supporting": supporting,
     }
 
@@ -474,6 +490,20 @@ def _claim_brief(claim: AssuranceClaim) -> dict:
     }
 
 
+def _unread_conditions_note(conditions) -> str:
+    """Why the decision is held when the only thing holding it is a declared
+    precondition nobody can read -- naming each claim and what it rests on."""
+    named = "; ".join(
+        f"the {c.claim.claim_type} claim rests on {c.subject!r} ({c.get_kind_display().lower()}), "
+        + ("which cannot be read" if c.state == LatentCondition.State.UNOBSERVABLE else "whose evaluation failed")
+        for c in conditions
+    )
+    return (
+        f"Held at 'needs more evidence' by {len(conditions)} declared precondition(s) that "
+        f"cannot be checked now: {named}. What cannot be established is not read as holding."
+    )
+
+
 def _accepted_brief(finding: Finding) -> dict:
     """An accepted finding for the decision-support view: what it is, how severe,
     and when its acceptance ends (``None`` for one that never named an end)."""
@@ -629,6 +659,10 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         held = ", ".join(sorted({c.claim_type for c in signal["contradicted"] + signal["stale"] + signal["unknown"]}))
         if signal["contradicted"]:
             note = f"Held at 'needs remediation' by a contradicted assurance claim ({held}); a current claim's boundary does not hold."
+        elif signal["unread_conditions"] and not (
+            signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
+        ):
+            note = _unread_conditions_note(signal["unread_conditions"])
         elif not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
             legal = ", ".join(sorted({c.claim_type for c in signal["legally_stale"]}))
             note = (
@@ -709,6 +743,11 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             "stale": [_claim_brief(c) for c in signal["stale"]],
             "unknown": [_claim_brief(c) for c in signal["unknown"]],
             "legally_stale": [_claim_brief(c) for c in signal["legally_stale"]],
+            "unread_conditions": [
+                {"uuid": str(c.uuid), "state": c.state, "kind": c.kind, "subject": c.subject,
+                 "claim": _claim_brief(c.claim)}
+                for c in signal["unread_conditions"]
+            ],
             "supporting": [_claim_brief(c) for c in signal["supporting"]],
         },
         "note": note,

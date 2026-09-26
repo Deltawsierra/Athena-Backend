@@ -17,6 +17,11 @@ prose, which nothing evaluates. This module makes one checkable:
 3. :func:`evaluate_conditions` re-reads each declared precondition against current
    state. The instant one becomes true, its claim goes STALE and a retest opens
    whose reason NAMES the condition -- not "the fingerprint changed".
+4. A condition that FIRED holds its claim there. A re-derive does not read it back
+   to a pass, and does not resolve its retest, while the precondition is still
+   true: the watch clears only when a re-evaluation finds the subject back at its
+   baseline (the condition re-arms to PENDING and its retest is resolved), or when
+   a person withdraws it, which is a person accepting the state it fired on.
 
 What it deliberately does not do
 --------------------------------
@@ -29,7 +34,19 @@ something unnamed fires nothing.
 -- the principal is gone, the boundary row was deleted -- the condition goes
 UNOBSERVABLE, not "still does not hold". A precondition we have lost sight of is
 a gap in coverage and is counted as one. Returning False there would be the exact
-silent zero this codebase keeps finding: nothing seen, read as nothing wrong.
+silent zero this codebase keeps finding: nothing seen, read as nothing wrong. It
+is read again on every evaluation, so a subject that comes back into sight is
+watched again -- and while it cannot be read, the deployment's decision is held
+at "needs more evidence" (:func:`assurance.decision.claim_decision_signal`). So is
+a condition whose evaluation failed (EVALUATION_FAILED): each is read in its own
+savepoint, so one that raises is recorded as failed and the rest are evaluated.
+
+**It never runs inside a stop.** Evaluation is scheduled for after the commit of
+the write that could make a condition true, through the backstop in
+:mod:`assurance.signals`. A claim revoke used to evaluate every condition on the
+deployment inline, before the revoke could commit, and on a large graph that took
+seconds. Only the write's own deployment may be evaluated inline, and only on a
+write that is not a stop (a data boundary, the invalidation check, a scan ingest).
 
 **PENDING is not a guarantee.** It means this one named thing has not happened as
 of ``last_evaluated_at``. The posture read says so in words, because "0 fired" on
@@ -38,20 +55,37 @@ a dashboard reads as "safe" unless something stops it.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 
-from django.db import transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.utils import timezone
 
 from .graph_refs import in_graph
 from . import observability as obs
-from .models import AssuranceClaim, DataBoundary, LatentCondition, Provider
+from .models import (
+    LATENT_LIVE_STATES,
+    AssuranceClaim,
+    ClaimEvent,
+    DataBoundary,
+    LatentCondition,
+    Provider,
+)
 from .governance import is_shadow
 
 Kind = LatentCondition.Kind
 State = LatentCondition.State
 
 logger = logging.getLogger(__name__)
+
+#: One effective-access assessment per deployment per evaluation, shared by every
+#: principal condition in it. Each read it afresh: a hundred principal conditions on
+#: a deployment with three hundred tools took 2.3 seconds -- inside a claim revoke,
+#: when evaluation still ran there. Set only for the length of one evaluation, so no
+#: reading outlives the state it was taken from.
+_ACCESS_READ: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "assurance_latent_access_read", default=None
+)
 
 #: The kinds a write to the deployment's data boundary can make true.
 BOUNDARY_KINDS = frozenset({Kind.BOUNDARY_ALLOWS, Kind.BOUNDARY_REGION_ADDED})
@@ -74,6 +108,20 @@ class LatentConditionRefused(ValueError):
     """
 
 
+class LatentConditionDuplicate(LatentConditionRefused):
+    """The same watch is already declared, live, on this claim.
+
+    A refusal like the others, and a different answer: nothing is wrong with the
+    declaration, it is already in force. ``existing`` is the one that stands (None
+    when it was declared concurrently and could not be read back). The route answers
+    409 with it rather than 500 on the constraint.
+    """
+
+    def __init__(self, message: str, existing: LatentCondition | None = None):
+        super().__init__(message)
+        self.existing = existing
+
+
 class Unobservable(Exception):
     """The subject cannot be seen, so the condition has no truth value right now.
 
@@ -92,7 +140,12 @@ class Unobservable(Exception):
 def _principal(deployment, name: str) -> dict:
     from .access import assess_effective_access
 
-    assessment = assess_effective_access(deployment)
+    read = _ACCESS_READ.get()
+    assessment = None if read is None else read.get(deployment.pk)
+    if assessment is None:
+        assessment = assess_effective_access(deployment)
+        if read is not None:
+            read[deployment.pk] = assessment
     for principal in assessment["principals"]:
         if principal["name"] == name:
             return principal
@@ -303,6 +356,11 @@ def declare_condition(
     An unobservable subject is also refused, for a different reason: we cannot
     establish that the condition does not hold today, so we cannot honestly call
     it latent.
+
+    And a declaration already live on this claim -- pending, fired, unobservable or
+    failed -- is refused as :class:`LatentConditionDuplicate`: it is in force, and a
+    second one is not a second risk. A withdrawn one does not count; the same watch
+    can be declared again once the first is withdrawn.
     """
     if kind not in _OBSERVERS:
         raise LatentConditionRefused(
@@ -333,6 +391,22 @@ def declare_condition(
         expected=(expected or "").strip(),
         description=description.strip(),
     )
+    # Before the probe: a duplicate of a watch that fired would otherwise be told it
+    # "already holds", which is true and not the reason it is refused.
+    existing = LatentCondition.objects.filter(
+        claim=claim,
+        kind=kind,
+        subject=probe.subject,
+        expected=probe.expected,
+        state__in=LATENT_LIVE_STATES,
+    ).first()
+    if existing is not None:
+        raise LatentConditionDuplicate(
+            f"this claim already has this condition declared ({existing.uuid}, "
+            f"{existing.state}); a second identical declaration is not a second risk. "
+            "Withdraw that one to declare it again",
+            existing,
+        )
     try:
         holds, observation = observe(probe, deployment)
     except Unobservable as exc:
@@ -350,19 +424,38 @@ def declare_condition(
     probe.state = State.PENDING
     probe.last_evaluated_at = timezone.now()
     probe.declared_by = declared_by
-    probe.save()
+    try:
+        # In a savepoint: the same declaration made concurrently loses on the
+        # constraint, and the refusal must not take the caller's transaction with it.
+        with transaction.atomic():
+            probe.save()
+    except IntegrityError as exc:
+        raise LatentConditionDuplicate(
+            "this claim already has this condition declared -- it was declared a moment "
+            "ago; a second identical declaration is not a second risk"
+        ) from exc
     return probe
 
 
 def withdraw_condition(
-    condition: LatentCondition, *, note: str = ""
+    condition: LatentCondition, *, note: str = "", withdrawn_by=None, now=None
 ) -> LatentCondition:
     """Stop watching, visibly. The row is kept, not deleted, so the record shows
     that somebody decided to stop -- a watch that vanishes leaves no trace that it
-    ever existed, which is how a gap becomes invisible."""
+    ever existed, which is how a gap becomes invisible.
+
+    Who withdrew it, when and why are recorded on their own fields. A FIRED
+    condition can be withdrawn too: that is a person accepting the state it fired
+    on, and it releases the hold the condition had on its claim, so the retest it
+    opened is resolved the ordinary way -- by the next re-derivation that reads the
+    claim. What was observed when it fired is kept as it was."""
     condition.state = State.WITHDRAWN
-    condition.fired_observation = note
-    condition.save(update_fields=["state", "fired_observation", "updated_at"])
+    condition.withdrawn_at = now or timezone.now()
+    condition.withdrawn_by = withdrawn_by
+    condition.withdrawn_note = note
+    condition.save(
+        update_fields=["state", "withdrawn_at", "withdrawn_by", "withdrawn_note", "updated_at"]
+    )
     return condition
 
 
@@ -373,28 +466,42 @@ def withdraw_condition(
 
 @transaction.atomic
 def evaluate_conditions(deployment, *, actor=None, now=None) -> dict:
-    """Re-read every pending condition on this deployment's current claims.
+    """Re-read every live condition on this deployment's current claims.
 
     A condition that has become true fires: its claim is moved away from a pass to
     STALE and a retest obligation opens whose reason NAMES the condition. That is
     the whole point -- an operator reading the obligation learns which declared
     precondition gave way, not that some fingerprint moved.
 
+    Every live state is read, not only PENDING:
+
+    - **UNOBSERVABLE** (and **EVALUATION_FAILED**) is read again. A subject back in
+      sight returns the condition to PENDING if it does not hold, and fires it if
+      it does. Read once and never again, a watch that lost sight of its subject for
+      one write -- a provider renamed and renamed back -- was disarmed for good, and
+      the change it was declared for went by unseen.
+    - **FIRED** is read again. While it holds, its claim stays at STALE with a
+      retest open; a claim something moved back to a pass is marked again. Back at
+      its baseline, it re-arms to PENDING and resolves the retest it opened. A
+      subject it can no longer see does not clear it: that is not the subject coming
+      back to its baseline, so the hold stands.
+
     A condition whose subject can no longer be read goes UNOBSERVABLE and is
     counted as a coverage loss. It is never treated as "still does not hold".
 
+    Each condition is read in its OWN savepoint. It was one atomic block, so one
+    observer that raised rolled back every other condition's evaluation with it --
+    the one that had fired included -- every time. Now the one that raised is
+    recorded as EVALUATION_FAILED (a FIRED one keeps its state and its hold), with
+    ``last_error_at`` and the TYPE of what was raised, never its text, and every
+    other condition is evaluated as if it had not.
+
     Only CURRENT claim versions are considered, and never a human-REVOKED claim:
     a withdrawn claim is not invalidated, and a superseded version is history.
-    Idempotent -- a second run neither re-fires nor opens a duplicate obligation.
+    Idempotent -- a second run neither re-fires nor opens a duplicate obligation,
+    and writes nothing the decision reads unless a condition changed state.
     """
-    from .fingerprint import compute_system_fingerprint
-    from .invalidation import _has_open_requirement, _mark_stale, _open_requirement
-
     now = now or timezone.now()
-    fired: list[str] = []
-    lost: list[str] = []
-    still_pending: list[str] = []
-
     with obs.span(
         obs.PLAN, component="evaluate_conditions", subject=str(deployment.pk)
     ):
@@ -414,89 +521,288 @@ def evaluate_conditions(deployment, *, actor=None, now=None) -> dict:
         # read. Removing either alone is invisible; removing both is not.
         conditions = list(
             LatentCondition.objects.filter(
-                deployment=deployment, state=State.PENDING, claim__in=current_pks
-            ).select_related("claim")
+                deployment=deployment, state__in=LATENT_LIVE_STATES, claim__in=current_pks
+            )
+            .select_related("claim", "fired_requirement")
+            .order_by("pk")
         )
-        if not conditions:
-            return _result(deployment, fired, lost, still_pending, now)
+        run = _Evaluation(deployment, conditions, actor=actor, now=now)
+        token = _ACCESS_READ.set({})
+        try:
+            for condition in conditions:
+                run.evaluate(condition)
+        finally:
+            _ACCESS_READ.reset(token)
+    return run.result()
 
-        system_fp = compute_system_fingerprint(deployment)
 
-        for condition in conditions:
-            try:
-                holds, observation = observe(condition, deployment)
-            except Unobservable as exc:
-                condition.state = State.UNOBSERVABLE
-                condition.fired_observation = str(exc)
-                condition.last_evaluated_at = now
-                condition.save(
-                    update_fields=[
-                        "state",
-                        "fired_observation",
-                        "last_evaluated_at",
-                        "updated_at",
-                    ]
-                )
-                lost.append(str(condition.uuid))
-                continue
+def _reason(condition, observation: str) -> str:
+    return (
+        f"A declared invalidating condition came true: {condition.description} "
+        f"({condition.get_kind_display()}; subject {condition.subject!r}"
+        f"{f'; expected {condition.expected!r}' if condition.expected else ''}). "
+        f"Observed: {observation}. Declared baseline was: "
+        f"{condition.baseline_observation or '(none recorded)'}."
+    )
 
-            condition.last_evaluated_at = now
-            if not holds:
-                condition.save(update_fields=["last_evaluated_at", "updated_at"])
-                still_pending.append(str(condition.uuid))
-                continue
 
-            claim = condition.claim
-            reason = (
-                f"A declared invalidating condition came true: {condition.description} "
-                f"({condition.get_kind_display()}; subject {condition.subject!r}"
-                f"{f'; expected {condition.expected!r}' if condition.expected else ''}). "
-                f"Observed: {observation}. Declared baseline was: "
-                f"{condition.baseline_observation or '(none recorded)'}."
+#: What a claim's lifecycle says when a condition that fired on it is found still
+#: holding and the claim had been moved back to a pass.
+_STILL_HOLDS = (
+    "A declared condition that fired on this claim still holds; the claim is held at "
+    "stale until the condition re-arms or a person withdraws it."
+)
+
+
+class _Evaluation:
+    """One evaluation of a deployment's live conditions: what the conditions in it
+    share, and what it found."""
+
+    def __init__(self, deployment, conditions, *, actor, now):
+        self.deployment = deployment
+        self.actor = actor
+        self.now = now
+        self._system_fp = None
+        # One instance per claim, shared by every condition declared on it. Each
+        # condition held its own, so two that fired on one claim in one evaluation
+        # each found it SUPPORTED and each wrote "supported -> stale". Now the second
+        # finds it STALE and writes nothing: one mark, one event.
+        self._claims: dict = {}
+        self._conditions = {c.pk: c for c in conditions}
+        self.found: dict[str, list[str]] = {
+            "fired": [], "lost": [], "still_pending": [], "rearmed": [], "still_fired": [], "failed": [],
+        }
+
+    # -- shared reads ---------------------------------------------------------
+
+    def system_fp(self) -> str:
+        # Only a firing needs it, so a run that fires nothing does not compute it.
+        if self._system_fp is None:
+            from .fingerprint import compute_system_fingerprint
+
+            self._system_fp = compute_system_fingerprint(self.deployment)
+        return self._system_fp
+
+    def claim_of(self, condition) -> AssuranceClaim:
+        return self._claims.setdefault(condition.claim_id, condition.claim)
+
+    # -- one condition ---------------------------------------------------------
+
+    def evaluate(self, condition) -> None:
+        prior = condition.state
+        try:
+            with transaction.atomic():
+                self._evaluate(condition, prior)
+        except Exception as exc:  # recorded on the condition, never raised
+            logger.exception(
+                "latent condition %s on deployment %s could not be evaluated; it is "
+                "recorded as not watched and every other condition is evaluated as usual",
+                condition.pk,
+                self.deployment.pk,
             )
-            requirement = None
-            if not _has_open_requirement(deployment, claim):
-                requirement = _open_requirement(
-                    deployment,
-                    claim,
-                    system_fp=system_fp,
-                    now=now,
-                    actor=actor,
-                    reason=reason,
-                )
-            _mark_stale(claim, now)
+            self._record_failure(condition, prior, exc)
 
-            condition.state = State.FIRED
-            condition.fired_at = now
-            condition.fired_observation = observation
-            condition.fired_requirement = requirement
-            condition.save(
-                update_fields=[
-                    "state",
-                    "fired_at",
-                    "fired_observation",
-                    "fired_requirement",
-                    "last_evaluated_at",
-                    "updated_at",
-                ]
+    def _evaluate(self, condition, prior) -> None:
+        uid = str(condition.uuid)
+        try:
+            holds, observation = observe(condition, self.deployment)
+        except Unobservable as exc:
+            if prior == State.FIRED:
+                # Out of sight is not back at baseline. The hold stands; what was
+                # observed when it fired is left as it was.
+                self._save(condition)
+                self.found["still_fired"].append(uid)
+                return
+            self._save(condition, state=State.UNOBSERVABLE, fired_observation=str(exc))
+            self.found["lost"].append(uid)
+            return
+        if prior == State.FIRED:
+            if holds:
+                self._hold(condition, observation)
+                self.found["still_fired"].append(uid)
+            else:
+                self._rearm(condition, observation)
+                self.found["rearmed"].append(uid)
+            return
+        if holds:
+            self._fire(condition, observation)
+            self.found["fired"].append(uid)
+            return
+        # Not true. From PENDING that is "still pending"; from UNOBSERVABLE or a
+        # failed evaluation it is the subject back in sight, at its baseline -- and
+        # the note of why it could not be read no longer describes it.
+        back = {"fired_observation": ""} if prior == State.UNOBSERVABLE else {}
+        self._save(condition, state=State.PENDING, **back)
+        self.found["still_pending"].append(uid)
+
+    def _fire(self, condition, observation: str) -> None:
+        from .invalidation import _has_open_requirement, _mark_stale, _open_requirement
+
+        claim = self.claim_of(condition)
+        requirement = None
+        if not _has_open_requirement(self.deployment, claim):
+            requirement = _open_requirement(
+                self.deployment,
+                claim,
+                system_fp=self.system_fp(),
+                now=self.now,
+                actor=self.actor,
+                reason=_reason(condition, observation),
             )
-            fired.append(str(condition.uuid))
+        _mark_stale(claim, self.now)
+        self._save(
+            condition,
+            state=State.FIRED,
+            fired_at=self.now,
+            fired_observation=observation,
+            fired_requirement=requirement,
+        )
 
-    return _result(deployment, fired, lost, still_pending, now)
+    def _hold(self, condition, observation: str) -> None:
+        """A FIRED condition that still holds: its claim reads no better than STALE
+        and a retest is open. Both are already so, unless something moved them -- a
+        person moved the claim back to a pass, or a re-derive resolved the retest
+        before a fired condition held one -- and each is put back if it was."""
+        from .invalidation import _has_open_requirement, _mark_stale, _open_requirement
+
+        claim = self.claim_of(condition)
+        changes = {}
+        if not _has_open_requirement(self.deployment, claim):
+            changes["fired_requirement"] = _open_requirement(
+                self.deployment,
+                claim,
+                system_fp=self.system_fp(),
+                now=self.now,
+                actor=self.actor,
+                reason=f"{_reason(condition, observation)} It still holds.",
+            )
+        _mark_stale(claim, self.now, note=_STILL_HOLDS)
+        self._save(condition, **changes)
+
+    def _rearm(self, condition, observation: str) -> None:
+        """A FIRED condition found back at its baseline: watched again, and the
+        retest it opened is resolved -- unless another condition that fired on the
+        same claim still holds it, which then answers for that retest."""
+        claim = self.claim_of(condition)
+        requirement = condition.fired_requirement
+        if requirement is not None and requirement.resolved_at is None:
+            others = list(
+                LatentCondition.objects.filter(
+                    deployment=self.deployment,
+                    claim__fingerprint=claim.fingerprint,
+                    state=State.FIRED,
+                )
+                .exclude(pk=condition.pk)
+                .values_list("pk", "fired_requirement_id")
+                .order_by("pk")
+            )
+            if others:
+                unowned = [pk for pk, owned in others if owned is None]
+                if unowned:
+                    LatentCondition.objects.filter(pk=unowned[0]).update(fired_requirement=requirement)
+                    if unowned[0] in self._conditions:
+                        self._conditions[unowned[0]].fired_requirement = requirement
+            else:
+                requirement.resolved_at = self.now
+                requirement.resolving_claim = claim
+                requirement.save(update_fields=["resolved_at", "resolving_claim", "updated_at"])
+                ClaimEvent.objects.create(
+                    claim=claim,
+                    from_status=claim.status,
+                    to_status=claim.status,
+                    actor=None,
+                    note=(
+                        "Retest requirement resolved: the declared condition that opened it "
+                        f"no longer holds ({observation}); it is watched again."
+                    ),
+                )
+        fired = condition.fired_observation
+        self._save(
+            condition,
+            state=State.PENDING,
+            fired_observation=(
+                f"Re-armed: {observation}. It had fired"
+                f"{f' at {condition.fired_at.isoformat()}' if condition.fired_at else ''}"
+                f"{f' on: {fired}' if fired else ''}."
+            ),
+        )
+
+    def _save(self, condition, **changes) -> None:
+        """Write what this evaluation found. ``state`` is written only when it moved:
+        it is the column the decision reads, and an evaluation that changed nothing
+        must not schedule a refresh that evaluates again."""
+        fields = ["last_evaluated_at", "updated_at"]
+        condition.last_evaluated_at = self.now
+        if condition.last_error_at is not None or condition.last_error:
+            condition.last_error_at = None
+            condition.last_error = ""
+            fields += ["last_error_at", "last_error"]
+        for name, value in changes.items():
+            if name == "fired_requirement":
+                if condition.fired_requirement_id == (None if value is None else value.pk):
+                    continue
+            elif getattr(condition, name) == value:
+                continue
+            setattr(condition, name, value)
+            fields.append(name)
+        condition.save(update_fields=fields)
+
+    def _record_failure(self, condition, prior, exc) -> None:
+        """Record on the condition that its evaluation failed, in its own savepoint.
+
+        A FIRED one keeps its state: a failure to read it is not the subject coming
+        back to its baseline, so the hold stands. Any other goes EVALUATION_FAILED,
+        which the posture counts as not watching and the decision reads as a
+        precondition nobody can check. The type of what was raised is kept, never
+        its text -- an exception's message can carry what it read. If even this
+        write fails, it is logged and the evaluation goes on.
+        """
+        self.found["failed"].append(str(condition.uuid))
+        # What the rolled-back savepoint left in memory is not what is stored: the
+        # claim is read again before another condition on it uses it.
+        self._claims.pop(condition.claim_id, None)
+        try:
+            with transaction.atomic():
+                self._claims[condition.claim_id] = AssuranceClaim.objects.get(pk=condition.claim_id)
+                condition.refresh_from_db()
+                fields = ["last_error_at", "last_error", "updated_at"]
+                condition.last_error_at = self.now
+                condition.last_error = f"the evaluator raised {type(exc).__name__}"[:200]
+                if prior != State.FIRED and condition.state != State.EVALUATION_FAILED:
+                    condition.state = State.EVALUATION_FAILED
+                    fields.append("state")
+                condition.save(update_fields=fields)
+        except (DatabaseError, LatentCondition.DoesNotExist, AssuranceClaim.DoesNotExist):
+            logger.exception(
+                "the failed evaluation of latent condition %s could not be recorded on it",
+                condition.pk,
+            )
+
+    def result(self) -> dict:
+        return _result(self.deployment, self.now, **self.found)
 
 
-def _result(deployment, fired, lost, still_pending, now) -> dict:
+def _result(deployment, now, *, fired, lost, still_pending, rearmed=(), still_fired=(), failed=()) -> dict:
     return {
         "deployment": str(deployment.uuid),
         "evaluated_at": now.isoformat(),
-        "fired": fired,
+        "fired": list(fired),
         "fired_count": len(fired),
         # Counted and named separately from "pending". A condition we can no
         # longer read is not one that has not happened.
-        "unobservable": lost,
+        "unobservable": list(lost),
         "unobservable_count": len(lost),
-        "still_pending": still_pending,
+        "still_pending": list(still_pending),
         "still_pending_count": len(still_pending),
+        # A fired condition found back at its baseline, watched again.
+        "rearmed": list(rearmed),
+        "rearmed_count": len(rearmed),
+        # A fired condition still holding its claim at stale.
+        "still_fired": list(still_fired),
+        "still_fired_count": len(still_fired),
+        # The evaluator raised on these; they are not watched until it does not.
+        "evaluation_failed": list(failed),
+        "evaluation_failed_count": len(failed),
         # Said on every call so a caller cannot read a zero as an all-clear.
         "note": (
             "Fired counts only conditions somebody declared. This mechanism says "
@@ -510,12 +816,13 @@ def _result(deployment, fired, lost, still_pending, now) -> dict:
 def latent_posture(deployment) -> dict:
     """What is being watched for on this deployment, counted without a score.
 
-    Three numbers, never blended. Pending is not a safety measure, fired is work
-    already owed, and unobservable is watch we have lost -- each calls for
-    something different, and one percentage would hide the third.
+    Numbers, never blended. Pending is not a safety measure, fired is work already
+    owed, unobservable is watch we have lost, and a failed evaluation is watch we
+    could not run -- each calls for something different, and one percentage would
+    hide the last two.
     """
     conditions = list(
-        LatentCondition.objects.filter(deployment=deployment).select_related("claim")
+        LatentCondition.objects.filter(deployment=deployment).select_related("claim", "withdrawn_by")
     )
     by_state = {value: 0 for value, _ in State.choices}
     for condition in conditions:
@@ -537,15 +844,20 @@ def latent_posture(deployment) -> dict:
         # Surfaced at the top level, not buried in by_state, because this is the
         # number that silently turns into "nothing wrong" if nobody looks.
         "coverage_lost": by_state.get(State.UNOBSERVABLE, 0),
+        # And this one for the same reason: a condition the evaluator raised on is
+        # not watched, however recently it was declared.
+        "evaluation_failed": by_state.get(State.EVALUATION_FAILED, 0),
         "unwatched": len(unwatched),
         "conditions": [condition_view(c) for c in conditions],
         "note": (
             "Watching counts named preconditions that have not happened as of each "
             "one's last evaluation. It is not a prediction and not an all-clear. "
             "coverage_lost counts conditions whose subject can no longer be read: "
-            "those are unwatched, not safe. So are the ones counted as unwatched, "
-            "declared on a claim nothing evaluates any more (a closed version, or one "
-            "a person revoked)."
+            "those are unwatched, not safe. So are the ones counted as "
+            "evaluation_failed, whose last evaluation raised, and the ones counted as "
+            "unwatched, declared on a claim nothing evaluates any more (a closed "
+            "version, or one a person revoked). A fired condition holds its claim at "
+            "stale until it is found back at its baseline or a person withdraws it."
         ),
     }
 
@@ -553,6 +865,10 @@ def latent_posture(deployment) -> dict:
 def _evaluated_claim(claim) -> bool:
     """Whether :func:`evaluate_conditions` reads conditions declared on ``claim``."""
     return claim.valid_to is None and claim.status != AssuranceClaim.ClaimStatus.REVOKED
+
+
+def _iso(moment):
+    return moment.isoformat() if moment else None
 
 
 def condition_view(c: LatentCondition) -> dict:
@@ -568,9 +884,13 @@ def condition_view(c: LatentCondition) -> dict:
         "state": c.state,
         "baseline_observation": c.baseline_observation,
         "fired_observation": c.fired_observation,
-        "last_evaluated_at": (
-            c.last_evaluated_at.isoformat() if c.last_evaluated_at else None
-        ),
+        "fired_at": _iso(c.fired_at),
+        "last_evaluated_at": _iso(c.last_evaluated_at),
+        "last_error_at": _iso(c.last_error_at),
+        "last_error": c.last_error,
+        "withdrawn_at": _iso(c.withdrawn_at),
+        "withdrawn_by": c.withdrawn_by.username if c.withdrawn_by_id else None,
+        "withdrawn_note": c.withdrawn_note,
     }
 
 
@@ -580,54 +900,88 @@ def condition_view(c: LatentCondition) -> dict:
 
 
 def fire_due_conditions(deployment, *, actor=None, now=None) -> int:
-    """Evaluate ``deployment``'s pending conditions now; the number that fired.
+    """Evaluate ``deployment``'s live conditions now; the number that fired.
 
-    Called wherever the deployment's stored decision is brought current -- every
-    write to what the decision reads refreshes it (:mod:`assurance.signals`, the
-    API routes, scan ingest, the admin) -- and after a write to the data boundary
-    or a provider's profile a pending condition names. :func:`evaluate_conditions`
-    had no caller outside the tests, so a declared precondition that came true
-    fired never: the claim it was declared on stayed a pass, and no retest opened.
+    Called wherever the deployment's stored decision is brought current AFTER a
+    write commits -- the backstop in :mod:`assurance.signals`, which every route
+    that refreshes the decision schedules -- and inline only on the few writes that
+    are not a stop: a data boundary write for its own deployment, the invalidation
+    check, a scan ingest (itself run after the scan's completion committed).
+    Never inside a revoke, a pause or any other stop: see the module docstring.
 
     A condition firing marks its claim STALE and opens a retest, and the decision
-    is refreshed after this, so it reads them. Never raises: it runs inside writes
-    that must not fail for it -- a claim a person is revoking among them -- so a
-    failure is logged, rolled back to before the evaluation, and leaves every
-    condition PENDING with the ``last_evaluated_at`` of the last evaluation that
-    completed, which the posture reports. Returns 0 at once, with one query, for a
-    deployment nobody declared a condition on.
+    is refreshed after this, so it reads them. Never raises: it runs where a failure
+    must not undo what went before it. A condition whose own evaluation fails is
+    recorded as failed and the rest are evaluated (:func:`evaluate_conditions`); if
+    the evaluation cannot run at all, that is logged, and every live condition on a
+    current claim is recorded as not evaluated, best effort, so the posture and the
+    decision do not go on reading it as watched. Returns 0 at once, with one query,
+    for a deployment with no live condition.
     """
-    if not LatentCondition.objects.filter(deployment=deployment, state=State.PENDING).exists():
-        return 0
+    now = now or timezone.now()
     try:
+        if not LatentCondition.objects.filter(
+            deployment=deployment, state__in=LATENT_LIVE_STATES
+        ).exists():
+            return 0
         with transaction.atomic():
             return evaluate_conditions(deployment, actor=actor, now=now)["fired_count"]
-    except Exception:
+    except Exception as exc:  # never raised into the write it follows
         logger.exception(
-            "latent conditions on deployment %s were not evaluated; each keeps the "
-            "last_evaluated_at of the last evaluation that completed",
+            "latent conditions on deployment %s were not evaluated; each is recorded "
+            "as not evaluated and keeps the last_evaluated_at of the last evaluation "
+            "that completed",
             deployment.pk,
         )
+        _record_not_evaluated(deployment, now, exc)
         return 0
+
+
+def _record_not_evaluated(deployment, now, exc) -> None:
+    """Best effort, in a savepoint: every live condition on a current claim of
+    ``deployment`` did not get evaluated. A FIRED one keeps its state and its hold."""
+    error = f"the evaluator raised {type(exc).__name__}"[:200]
+    try:
+        with transaction.atomic():
+            current = (
+                AssuranceClaim.objects.filter(deployment=deployment)
+                .current()
+                .exclude(status=AssuranceClaim.ClaimStatus.REVOKED)
+                .values("pk")
+            )
+            live = LatentCondition.objects.filter(
+                deployment=deployment, state__in=LATENT_LIVE_STATES, claim__in=current
+            )
+            live.filter(state=State.FIRED).update(last_error_at=now, last_error=error, updated_at=now)
+            live.exclude(state=State.FIRED).update(
+                state=State.EVALUATION_FAILED, last_error_at=now, last_error=error, updated_at=now
+            )
+    except DatabaseError:
+        logger.exception(
+            "the failed evaluation of deployment %s's latent conditions could not be recorded",
+            deployment.pk,
+        )
 
 
 def deployments_watching_boundary(deployment_id) -> set:
-    """``{deployment_id}`` if a pending condition there reads its data boundary."""
+    """``{deployment_id}`` if a live condition there reads its data boundary --
+    pending, fired, or one that could not be read, all of which are read again."""
     watched = LatentCondition.objects.filter(
-        deployment_id=deployment_id, state=State.PENDING, kind__in=BOUNDARY_KINDS
+        deployment_id=deployment_id, state__in=LATENT_LIVE_STATES, kind__in=BOUNDARY_KINDS
     ).exists()
     return {deployment_id} if watched else set()
 
 
 def deployments_watching_provider(*names) -> set:
-    """The deployments where a pending condition reads the profile of a provider
+    """The deployments where a live condition reads the profile of a provider
     called any of ``names`` -- every name the write touched, the one it had before
-    a rename included, since a condition naming that one now names nothing."""
+    a rename included, since a condition naming that one now names nothing, and the
+    one it has after, since a condition that lost sight of it can now read it again."""
     wanted = {str(n) for n in names if n}
     if not wanted:
         return set()
     return set(
         LatentCondition.objects.filter(
-            state=State.PENDING, kind=Kind.PROVIDER_POSTURE_CHANGES, subject__in=wanted
+            state__in=LATENT_LIVE_STATES, kind=Kind.PROVIDER_POSTURE_CHANGES, subject__in=wanted
         ).values_list("deployment_id", flat=True)
     )
