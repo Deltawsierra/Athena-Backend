@@ -20,6 +20,8 @@ own transaction; and two conditions firing on one claim marked it stale twice.
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -94,6 +96,28 @@ def _declare(claim, **condition):
     return declare_condition(claim, **condition)
 
 
+@contextlib.contextmanager
+def _committed():
+    """What production does when a write's transaction commits: the hooks it scheduled
+    run, before the response is sent -- the backstop, which evaluates the declared
+    conditions after the commit and never inside the write (tests/
+    test_nothing_that_watches_holds_back_a_stop.py). Each test runs in a transaction
+    that is rolled back, so without this nothing a write scheduled would run.
+
+    The writes before this one committed too, each on its own: what they scheduled
+    runs first. Left pending, a refresh one of them scheduled stood in for the one
+    this write schedules -- one per deployment per transaction -- and never ran."""
+    from django.db import connection
+    from django.test import TestCase
+
+    earlier = list(connection.run_on_commit)
+    del connection.run_on_commit[:]
+    for _savepoints, callback, _robust in earlier:
+        callback()
+    with TestCase.captureOnCommitCallbacks(execute=True):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # It fires, where production changes the named thing
 # ---------------------------------------------------------------------------
@@ -119,10 +143,11 @@ def test_a_scan_that_grants_the_named_capability_fires_the_condition_it_names():
         description="contained only while the assistant cannot run code",
     )
 
-    ingest.ingest_scan(
-        _scan(dep, [{"name": "reader", "permissions": ["read"]}, {"name": "shell", "permissions": ["exec"]}]),
-        deployment=dep,
-    )
+    with _committed():
+        ingest.ingest_scan(
+            _scan(dep, [{"name": "reader", "permissions": ["read"]}, {"name": "shell", "permissions": ["exec"]}]),
+            deployment=dep,
+        )
 
     condition.refresh_from_db()
     claim.refresh_from_db()
@@ -132,7 +157,7 @@ def test_a_scan_that_grants_the_named_capability_fires_the_condition_it_names():
     assert "contained only while the assistant cannot run code" in requirement.reason
 
 
-def test_a_boundary_write_that_makes_a_declared_condition_true_fires_it_in_that_write():
+def test_a_boundary_write_that_makes_a_declared_condition_true_fires_it_once_that_write_commits():
     dep = _ready()
     claim = _claim(dep)
     client = _client()
@@ -144,7 +169,10 @@ def test_a_boundary_write_that_makes_a_declared_condition_true_fires_it_in_that_
     assert declared.status_code == 201, declared.content
     assert declared.json()["state"] == State.PENDING
 
-    written = client.patch(f"/api/assurance/deployments/{dep.uuid}/data-boundary/", {"training_allowed": True}, format="json")
+    with _committed():
+        written = client.patch(
+            f"/api/assurance/deployments/{dep.uuid}/data-boundary/", {"training_allowed": True}, format="json"
+        )
 
     assert written.status_code == 200, written.content
     claim.refresh_from_db()
@@ -537,14 +565,16 @@ def _training_watched(dep):
 
 
 def _allow_training(client, dep, allowed=True):
-    response = client.patch(
-        f"/api/assurance/deployments/{dep.uuid}/data-boundary/", {"training_allowed": allowed}, format="json"
-    )
+    with _committed():
+        response = client.patch(
+            f"/api/assurance/deployments/{dep.uuid}/data-boundary/", {"training_allowed": allowed}, format="json"
+        )
     assert response.status_code == 200, response.content
 
 
 def _re_derive(client, dep):
-    response = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute-claims/")
+    with _committed():
+        response = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute-claims/")
     assert response.status_code == 200, response.content
     return response.json()
 
@@ -1489,3 +1519,487 @@ def test_every_column_this_release_adds_without_null_has_a_database_default():
         and operation.field.db_default is NOT_PROVIDED
     ]
     assert undefaulted == []
+
+
+# ---------------------------------------------------------------------------
+# Round 3 of #105: whatever the release before writes mid-rollout, this one converges
+# ---------------------------------------------------------------------------
+#
+# A rolling deploy keeps the release before this one writing AFTER 0037 and 0038 ran
+# (the database defaults 0036-0039 give their columns are for exactly that). Its
+# re-derive opened the new version "not assessed" and left every watch on the version
+# it closed, and read a claim a fired condition holds back to a pass. Nothing one-shot
+# can repair a write made after it ran.
+
+
+def _decided_by_the_release_before(dep, decision):
+    """The release before this one recording ``decision`` through ITS writer: the
+    decision and its revision move with a transition, and the policy stamp -- a column
+    it does not know -- is left where it was."""
+    from assurance.models import DecisionTransition
+
+    row = Deployment.objects.get(pk=dep.pk)
+    revision = row.decision_revision + 1
+    Deployment.objects.filter(pk=dep.pk).update(decision=decision, decision_revision=revision)
+    DecisionTransition.objects.create(
+        deployment=row, revision=revision, from_decision=row.decision or "", to_decision=decision or ""
+    )
+
+
+def _re_derived_by_the_release_before(dep, claim):
+    """The release before this one re-deriving mid-rollout, after the migrations ran:
+    a new version reading its deriver's pass, opened "not assessed" on the legal axis,
+    every watch left on the version it closed, every retest resolved -- and the READY
+    it computed under its own rules, recorded through its writer."""
+    new = _next_version(dep, claim)
+    AssuranceClaim.objects.filter(pk=new.pk).update(status=Status.VERIFIED)
+    RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).update(
+        resolved_at=timezone.now(), resolving_claim=new
+    )
+    _decided_by_the_release_before(dep, Deployment.Decision.READY)
+    return AssuranceClaim.objects.get(pk=new.pk)
+
+
+def _ruled_stale_and_watched(dep):
+    from assurance.legal import record_materiality_decision
+
+    gdpr, _ai_act = _obligations(dep)
+    claim, condition = _training_watched(dep)
+    record_materiality_decision(claim, gdpr, decided_by=_user(), material=True, rationale="the Art. 28 change is material")
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    return claim, condition
+
+
+def test_a_ruling_and_a_watch_the_release_before_drops_mid_rollout_are_carried_back_at_the_first_read():
+    """The adversary's rolling deploy: the release before re-derived after the
+    migrations and left the current version "not assessed" and the watch on the
+    version it closed -- for good. The decision read READY; the watch never fired."""
+    from assurance.decision import current_decision
+
+    dep = _derived_ready()
+    claim, condition = _ruled_stale_and_watched(dep)
+    current = _re_derived_by_the_release_before(dep, claim)
+    assert current.legal_status == LegalStatus.NOT_ASSESSED
+
+    # Read before anything repairs the rows: the ruling as the carry leaves it caps.
+    support = decision_support(Deployment.objects.get(pk=dep.pk))
+    assert support["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert [c["uuid"] for c in support["claims"]["legally_stale"]] == [str(current.uuid)]
+    # The first publishing read does not publish the READY the release before stored,
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    # and it carried the ruling and the watch to the current version, and says so.
+    current.refresh_from_db()
+    condition.refresh_from_db()
+    assert current.legal_status == LegalStatus.STALE
+    assert ClaimEvent.objects.filter(claim=current, note__startswith="Legal axis carried forward to this version").count() == 1
+    assert (condition.state, condition.claim_id) == (State.PENDING, current.pk)
+    posture = latent_posture(dep)
+    assert (posture["watching"], posture["unwatched"]) == (1, 0)
+    # The change the watch was declared for now fires it, on the current version.
+    _allow_training(_client(), dep)
+    condition.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (State.FIRED, current.pk)
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    # And a second pass writes nothing more.
+    events = ClaimEvent.objects.filter(claim=current).count()
+    from assurance.carry import converge
+
+    assert not any(converge(Deployment.objects.get(pk=dep.pk)).values())
+    assert ClaimEvent.objects.filter(claim=current).count() == events
+
+
+def test_a_hold_the_release_before_lifts_mid_rollout_is_never_published_weaker_than_decision_support():
+    """current_decision() published READY while decision_support() said needs more
+    evidence: the release before moved the decision without the stamp, and the stamp
+    named only the rules. And the condition stayed FIRED on the closed version,
+    never evaluated again."""
+    from assurance.decision import current_decision, refresh_stored_decisions
+
+    dep = _derived_ready()
+    claim, condition = _training_watched(dep)
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 1
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    current = _re_derived_by_the_release_before(dep, claim)
+
+    support = decision_support(Deployment.objects.get(pk=dep.pk))["decision"]
+    assert support == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == support
+    condition.refresh_from_db()
+    current.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (State.FIRED, current.pk)
+    assert current.status == Status.STALE
+    assert _open_retests(dep, current).exists()
+    # The refresh every write schedules evaluates it there, and keeps it so.
+    refresh_stored_decisions([dep.pk])
+    assert _evaluate(dep)["still_fired"] == [str(condition.uuid)]
+    assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_the_refresh_every_write_schedules_carries_what_the_release_before_left():
+    """Not only a publishing read: the backstop after any write of this release."""
+    from assurance.decision import refresh_stored_decisions
+
+    dep = _derived_ready()
+    claim, condition = _ruled_stale_and_watched(dep)
+    current = _re_derived_by_the_release_before(dep, claim)
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)
+
+    refresh_stored_decisions([dep.pk])
+
+    condition.refresh_from_db()
+    current.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (State.FIRED, current.pk), "carried, then evaluated"
+    assert current.legal_status == LegalStatus.STALE
+    assert current.status == Status.STALE
+    assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_a_migrate_after_the_rollout_carries_what_the_release_before_left(django_capture_on_commit_callbacks):
+    from django.core.management.sql import emit_post_migrate_signal
+
+    dep = _derived_ready()
+    claim, condition = _ruled_stale_and_watched(dep)
+    current = _re_derived_by_the_release_before(dep, claim)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        emit_post_migrate_signal(verbosity=0, interactive=False, db="default")
+
+    condition.refresh_from_db()
+    current.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (State.PENDING, current.pk)
+    assert current.legal_status == LegalStatus.STALE
+    fresh = Deployment.objects.get(pk=dep.pk)
+    assert fresh.decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    from assurance.decision import stamped_in_force
+
+    assert stamped_in_force(fresh)
+
+
+def test_the_decision_and_the_plan_read_a_hold_left_on_a_closed_version_before_anything_carries_it():
+    """The hold is on the claim, on any version of it. Read only on the current
+    version, a condition the release before left FIRED on the version it closed held
+    nothing: nothing in the tests read it there."""
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    claim, condition = _training_watched(dep)
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 1
+    current = _re_derived_by_the_release_before(dep, claim)
+    assert LatentCondition.objects.get(pk=condition.pk).claim_id == claim.pk
+
+    signal = claim_decision_signal(Deployment.objects.get(pk=dep.pk))
+    assert [c.pk for c in signal["held"]] == [current.pk]
+    assert signal["cap"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    support = decision_support(Deployment.objects.get(pk=dep.pk))
+    assert support["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert [c["uuid"] for c in support["claims"]["held"]] == [str(current.uuid)]
+    required = {w["claim_uuid"]: w for w in plan_revalidation(dep)["required"]}
+    assert str(current.uuid) in required
+    assert "safe only while training stays denied" in required[str(current.uuid)]["reason"]
+    # Reading it moved nothing.
+    assert LatentCondition.objects.get(pk=condition.pk).claim_id == claim.pk
+
+
+def test_a_condition_nobody_can_read_left_on_a_closed_version_still_holds_the_decision_back():
+    dep = _derived_ready()
+    vendor, _retention, condition = _vendor_watched(dep)
+    Provider.objects.filter(pk=vendor.pk).update(name="VendorX Inc")
+    assert _evaluate(dep)["unobservable_count"] == 1
+    _re_derived_by_the_release_before(dep, condition.claim)
+
+    signal = claim_decision_signal(Deployment.objects.get(pk=dep.pk))
+    assert [c.pk for c in signal["unread_conditions"]] == [condition.pk]
+    assert signal["cap"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_the_carry_keeps_one_statement_of_a_watch_the_release_before_left_beside_a_re_declaration():
+    """0038's rule, wherever the release before's writes are next seen: the newest
+    statement is kept on the current version and the other withdrawn with a note;
+    a FIRED statement is never withdrawn, and one already on the current version that
+    fired is the one kept."""
+    from assurance.carry import converge
+
+    dep = _derived_ready()
+    claim, older = _training_watched(dep)
+    current = _re_derived_by_the_release_before(dep, claim)
+    newer = _declare(current, kind=Kind.BOUNDARY_ALLOWS, subject="training", description="re-declared")
+
+    converge(Deployment.objects.get(pk=dep.pk))
+
+    older.refresh_from_db()
+    newer.refresh_from_db()
+    assert (newer.state, newer.claim_id) == (State.PENDING, current.pk)
+    assert (older.state, older.claim_id) == (State.WITHDRAWN, claim.pk)
+    assert str(newer.uuid) in older.withdrawn_note
+
+
+def test_the_carry_keeps_a_fired_statement_already_on_the_current_version_over_a_newer_one_left_behind():
+    """The older statement, on the current version, fired; a newer one fired on the
+    version the release before closed. Keeping the newest would move it onto the
+    current version beside the other: two live statements of one watch, which the
+    declaration constraint refuses."""
+    from assurance.carry import converge
+
+    dep = _ready()
+    v1 = _claim(dep)
+    v2 = _next_version(dep, v1)
+    on_current = _declare(v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    left = LatentCondition.objects.create(
+        deployment=dep, claim=v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter",
+        description="declared on v1 later", state=State.FIRED,
+    )
+    LatentCondition.objects.filter(pk=on_current.pk).update(
+        state=State.FIRED, declared_at=timezone.now() - timezone.timedelta(days=1)
+    )
+
+    for step in ("0038", "carry"):
+        if step == "0038":
+            _run_data_steps("0038_latent_conditions_stay_watched")
+        else:
+            converge(Deployment.objects.get(pk=dep.pk))
+        on_current.refresh_from_db()
+        left.refresh_from_db()
+        assert (on_current.state, on_current.claim_id) == (State.FIRED, v2.pk), step
+        assert (left.state, left.claim_id) == (State.FIRED, v1.pk), step
+
+
+def test_0038_does_not_merge_two_watches_that_differ_in_what_they_expect():
+    """One watch is a declaration of (kind, subject, EXPECTED): two regions watched for
+    are two watches. Grouped without it, one was merged into the other and withdrawn."""
+    dep = _ready()
+    v1 = _claim(dep)
+    us = _declare(v1, kind=Kind.BOUNDARY_REGION_ADDED, subject="boundary", expected="us-east-1")
+    ap = _declare(v1, kind=Kind.BOUNDARY_REGION_ADDED, subject="boundary", expected="ap-south-1")
+    v2 = _next_version(dep, v1)
+
+    _run_data_steps("0038_latent_conditions_stay_watched")
+
+    us.refresh_from_db()
+    ap.refresh_from_db()
+    assert {(us.state, us.claim_id), (ap.state, ap.claim_id)} == {(State.PENDING, v2.pk)}
+
+
+# ---- the hold put back without an evaluation: only where it is lifted, only there
+
+
+def _fired_and_lifted(dep):
+    """A condition fired on ``dep``'s claim, and both halves of its hold lifted."""
+    claim = _claim(dep)
+    condition = _declare(claim, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="shadow-exporter", identifier="shadow-exporter",
+        classification=Asset.Classification.KNOWN,
+    )
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 1
+    AssuranceClaim.objects.filter(pk=claim.pk).update(status=Status.VERIFIED)
+    RetestRequirement.objects.filter(deployment=dep).update(resolved_at=timezone.now())
+    return claim, condition
+
+
+@pytest.mark.parametrize("lifted", ["status", "retest"])
+def test_a_hold_lifted_by_either_half_is_put_back(lifted):
+    """Lifted is EITHER half gone: the claim reads a pass, or no retest is open. A
+    check that needed both -- or read only the status -- left a claim STALE with no
+    retest, or VERIFIED with one, as it found it."""
+    dep = _ready()
+    claim, _condition = _fired_and_lifted(dep)
+    if lifted == "status":  # the retest is open again; only the status reads a pass
+        RetestRequirement.objects.filter(deployment=dep).update(resolved_at=None)
+    else:  # the claim is STALE again; only the retest is gone
+        AssuranceClaim.objects.filter(pk=claim.pk).update(status=Status.STALE)
+
+    assert latent.restore_fired_holds(Deployment.objects.get(pk=dep.pk)) == 1
+
+    claim.refresh_from_db()
+    assert claim.status == Status.STALE
+    assert _open_retests(dep, claim).count() == 1
+
+
+def test_a_hold_is_not_put_back_on_a_claim_a_person_revoked():
+    dep = _ready()
+    claim, _condition = _fired_and_lifted(dep)
+    AssuranceClaim.objects.filter(pk=claim.pk).update(status=Status.REVOKED)
+
+    assert latent.restore_fired_holds(Deployment.objects.get(pk=dep.pk)) == 0
+
+    claim.refresh_from_db()
+    assert claim.status == Status.REVOKED
+    assert not _open_retests(dep, claim).exists()
+
+
+def test_putting_back_one_deployments_holds_touches_no_other_deployments_claims():
+    one, other = _ready(), _ready()
+    _fired_and_lifted(one)
+    other_claim, _other = _fired_and_lifted(other)
+
+    latent.restore_fired_holds(Deployment.objects.get(pk=one.pk))
+
+    other_claim.refresh_from_db()
+    assert other_claim.status == Status.VERIFIED
+    assert not _open_retests(other, other_claim).exists()
+
+
+def test_a_retest_put_back_for_a_condition_on_an_older_version_is_not_linked_to_it():
+    """Two statements of one watch fired; one stays on the version it fired on. The
+    retest put back is for the current version, and the one left behind -- which no
+    evaluation reads -- is not made its owner."""
+    dep = _ready()
+    v1 = _claim(dep)
+    left = _declare(v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    LatentCondition.objects.filter(pk=left.pk).update(state=State.FIRED)
+    v2 = _next_version(dep, v1)
+
+    assert latent.restore_fired_holds(Deployment.objects.get(pk=dep.pk)) == 1
+
+    left.refresh_from_db()
+    assert left.claim_id == v1.pk and left.fired_requirement_id is None
+    assert _open_retests(dep, v2).count() == 1
+
+
+def test_a_fired_condition_evaluated_again_and_again_opens_one_retest_and_records_no_failure():
+    """The put-back opens a retest only when none is open. Opening one every time hit
+    the one-open-retest index on every evaluation, which recorded each as failed."""
+    dep = _ready()
+    claim, condition = _fired_and_lifted(dep)
+
+    for _ in range(3):
+        result = _evaluate(dep)
+        assert (result["still_fired_count"], result["evaluation_failed_count"]) == (1, 0)
+
+    condition.refresh_from_db()
+    assert (condition.state, condition.last_error) == (State.FIRED, "")
+    assert _open_retests(dep, claim).count() == 1
+
+
+# ---- the legal axis: one rule, whether the carry ran live or 0037 replayed it
+
+
+def _ruling_after_its_version_closed(re_derive):
+    """The adversary's history: a person rules v1 material (STALE); a re-derive closes
+    v1 and opens v2; the person then rules again ON V1 -- the version they had open --
+    not material (CURRENT)."""
+    import datetime
+
+    from assurance.legal import record_materiality_decision
+    from assurance.models import LegalObligation
+
+    dep = _derived_ready()
+    gdpr = LegalObligation.objects.create(
+        jurisdiction="EU", authority_tier=LegalObligation.AuthorityTier.REGULATION, source=f"GDPR-{dep.pk}",
+        source_version="1", operative_date=datetime.date(2026, 1, 1),
+    )
+    gdpr.deployments.add(dep)
+    person = _user()
+    v1 = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+    record_materiality_decision(v1, gdpr, decided_by=person, material=True, rationale="material")
+    v2 = re_derive(dep, v1)
+    v1 = AssuranceClaim.objects.get(pk=v1.pk)
+    record_materiality_decision(v1, gdpr, decided_by=person, material=False, rationale="reviewed again: not material")
+    return dep, v1, v2
+
+
+def _live_re_derive(dep, v1):
+    DataBoundary.objects.filter(deployment=dep).update(allowed_regions=["eu-west-1", "eu-central-1"])
+    derive_claims(Deployment.objects.get(pk=dep.pk))
+    return _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+
+
+def test_a_ruling_made_on_a_version_after_it_closed_is_not_carried_live_or_by_0037():
+    """A ruling applies to the version it was made on and is carried at the close
+    (legal.ruling_for_next_version). The live code left v2 legally stale; 0037,
+    replaying one time order across every version, carried the later ruling on v1
+    onto v2 and read it legally current -- two answers from one history."""
+    dep, v1, live = _ruling_after_its_version_closed(_live_re_derive)
+    assert v1.legal_status == LegalStatus.CURRENT
+    live.refresh_from_db()
+    assert live.legal_status == LegalStatus.STALE
+
+    dep, v1, migrated = _ruling_after_its_version_closed(_next_version)
+    assert migrated.legal_status == LegalStatus.NOT_ASSESSED
+    _run_data_steps("0037_carry_watches_and_legal_rulings")
+    migrated.refresh_from_db()
+    assert migrated.legal_status == LegalStatus.STALE
+    # And the running code reads -- and carries -- the same.
+    from assurance.legal import carried_legal_statuses, carry_rulings_to_current
+
+    dep2, _v1, unrepaired = _ruling_after_its_version_closed(_next_version)
+    assert carried_legal_statuses(dep2.pk, [unrepaired]) == {unrepaired.pk: LegalStatus.STALE}
+    assert carry_rulings_to_current(dep2) == 1
+    unrepaired.refresh_from_db()
+    assert unrepaired.legal_status == LegalStatus.STALE
+
+
+_T0 = timezone.now().replace(microsecond=0)
+
+
+def _at(minutes):
+    return _T0 + timezone.timedelta(minutes=minutes)
+
+
+#: Histories as ``(stored, closed_at, moves)`` per version, oldest first -- what the
+#: record says, however it came about -- and the status the carry leaves the last in.
+_HISTORIES = [
+    ("a ruling carried", [
+        ("legally_stale", _at(2), [(_at(1), "set", "legally_stale")]),
+        ("legally_not_assessed", None, []),
+    ], "legally_stale"),
+    ("a ruling on v1 after it closed", [
+        ("legally_current", _at(2), [(_at(1), "set", "legally_stale"), (_at(3), "set", "legally_current")]),
+        ("legally_not_assessed", None, []),
+    ], "legally_stale"),
+    ("a flag after a carried ruling", [
+        ("legally_stale", _at(2), [(_at(1), "set", "legally_stale")]),
+        ("legal_review_pending", None, [(_at(3), "flag", None)]),
+    ], "legally_stale"),
+    ("a person's later ruling on the current version", [
+        ("legally_stale", _at(2), [(_at(1), "set", "legally_stale")]),
+        ("legal_review_pending", None, [(_at(3), "set", "legally_current"), (_at(4), "flag", None)]),
+    ], "legal_review_pending"),
+    ("a ruling and a flag in one instant", [
+        ("legally_stale", _at(2), [(_at(1), "set", "legally_stale")]),
+        ("legally_not_assessed", None, [(_at(3), "set", "legally_current"), (_at(3), "flag", None)]),
+    ], "legal_review_pending"),
+    ("a status the record does not explain", [
+        ("legally_stale", _at(2), []),
+        ("legally_not_assessed", _at(4), []),
+        ("legal_review_pending", None, []),
+    ], "legally_stale"),
+]
+
+
+@pytest.mark.parametrize(("history", "expected"), [h[1:] for h in _HISTORIES], ids=[h[0] for h in _HISTORIES])
+def test_the_running_code_and_0037_replay_one_history_to_one_status(history, expected):
+    """Both paths, over the same histories: the running code's replay
+    (legal.replay_lineage) and the one 0037 spells for itself. They disagreed on a
+    ruling recorded on a version after it closed; nothing held them together."""
+    from assurance.legal import _EVENT, _RULING, replay_lineage
+
+    migration = _migration("0037_carry_watches_and_legal_rulings")
+    # A moment's ruling is replayed before its event, on both paths.
+    ordered = [
+        (stored, closed, sorted(moves, key=lambda m: (m[0], _RULING if m[1] == "set" else _EVENT)))
+        for stored, closed, moves in history
+    ]
+    assert replay_lineage(ordered) == expected
+    assert migration._replay_lineage(ordered) == expected
+    assert (migration._RULING, migration._EVENT) == (_RULING, _EVENT)
+
+
+@pytest.mark.parametrize("state", [State.PENDING, State.FIRED, State.UNOBSERVABLE, State.EVALUATION_FAILED])
+def test_the_re_derive_itself_carries_every_live_watch_to_the_new_version(state):
+    """At the supersede, not later: the repair that converges what a release that did
+    not carry left behind runs only where a write is next seen, and this release's
+    own re-derive must leave nothing for it."""
+    dep = _derived_ready()
+    claim, condition = _training_watched(dep)
+    LatentCondition.objects.filter(pk=condition.pk).update(state=state)
+    DataBoundary.objects.filter(deployment=dep).update(allowed_regions=["eu-west-1", "eu-central-1"])
+
+    derive_claims(Deployment.objects.get(pk=dep.pk))
+
+    current = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+    assert current.pk != claim.pk
+    condition.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (state, current.pk)

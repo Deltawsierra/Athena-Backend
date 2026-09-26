@@ -69,9 +69,9 @@ def _in(days):
 
 def _stamped_under_these_rules(dep) -> bool:
     """Whether ``dep``'s stored decision carries the stamp of the rules in force."""
-    from assurance.decision import _current_policy_pin
+    from assurance.decision import stamped_in_force
 
-    return Deployment.objects.get(pk=dep.pk).decision_policy == _current_policy_pin()
+    return stamped_in_force(Deployment.objects.get(pk=dep.pk))
 
 
 # ---- The rule. ----
@@ -417,7 +417,61 @@ _GOVERNING = [
     ("assurance.composition", "SIGNER_EVIDENCE", "athena"),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_authorization_check"),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_unclassified_signer"),
+    # Round 3: the orders and ranks every threshold, tie and cap is read against, and
+    # what an unsigned basis counts as. A reordered severity scale moved the decision
+    # of the same stored inputs and left the pin where it was.
+    ("assurance.models", "SEVERITY_ORDER", None),
+    ("assurance.models", "EVIDENCE_STRENGTH_ORDER", None),
+    ("assurance.composition", "READINESS_ORDER", None),
+    ("assurance.composition", "_RANK", None),
+    ("assurance.workflow_chains", "READINESS_ORDER", None),
+    *[("assurance.composition", "_BASIS_RANK", key) for key in ("demonstrated", "attested", "unknown")],
+    *[("assurance.composition", "_ROUTE_RANK", key) for key in ("current", "moved", "unrecorded")],
+    *[("assurance.composition", "_EVIDENCE_RANK", key) for key in (
+        "observed_effect", "scan", "authorization_check", "unclassified", "attested", "unknown",
+    )],
+    *[("assurance.composition", "_UNSIGNED_EVIDENCE", key) for key in ("attested", "unknown")],
+    ("assurance.composition", "CHAIN_STATUSES", None),
+    ("assurance.composition", "CHAIN_BASES", None),
+    ("assurance.composition", "CHAIN_ROUTES", None),
+    ("assurance.composition", "EVIDENCE_KINDS", None),
+    ("assurance.composition", "DEMONSTRATED", None),
 ]
+
+#: The constants of the modules the decision is computed in that are NOT rules, and
+#: why. Every other one must move the pin (`test_every_constant_the_decision_reads_is_in_the_pin`).
+_NOT_RULES = {
+    ("assurance.decision", "_READ_KEYRING"): "a sentinel meaning 'read the keyring now', not a rule",
+    ("assurance.decision", "RESOLVED_FINDING_STATUSES"): "imported only to be bound to _RESOLVED_STATUSES, "
+    "which the code reads and the pin names",
+    ("assurance.decision", "_READINESS_ORDER"): "read once, at import, into _READINESS_RANK -- which "
+    "every worse-of reads and the pin names",
+    ("assurance.decision", "_NO_CHAINS"): "a composition of nothing: the counterfactual a note is "
+    "explained with; the decision never reads it",
+    ("assurance.composition", "EVIDENCE_LABELS"): "the words shown beside a kind; nothing decides on them",
+    ("assurance.composition", "_UNEXERCISED_NAMED"): "how many workflows one sentence names",
+    ("assurance.workflow_chains", "PROVENANCE_LIMIT"): "how many sources the provenance census lists",
+    ("assurance.workflow_chains", "UNATTRIBUTED"): "the census's name for an outcome with no source",
+}
+#: A spelling of one value -- a status, a basis, a kind, a route reading, a decision
+#: state. Renaming one renames a value; the sets, tables and orders that hold it --
+#: every one of them pinned -- are what the decision reads.
+_SPELLINGS = {
+    "assurance.composition": {
+        "HELD", "VIOLATED", "NOT_DEMONSTRATED", "INCOMPLETE", "BASIS_DEMONSTRATED", "BASIS_ATTESTED",
+        "BASIS_UNKNOWN", "EVIDENCE_AUTHORIZATION_CHECK", "EVIDENCE_SCAN", "EVIDENCE_OBSERVED_EFFECT",
+        "EVIDENCE_UNCLASSIFIED", "EVIDENCE_ATTESTED", "EVIDENCE_UNKNOWN", "ROUTE_CURRENT", "ROUTE_MOVED",
+        "ROUTE_UNRECORDED", "READY", "READY_RESTRICTED", "NEEDS_MORE_EVIDENCE", "AUDIT_INCOMPLETE",
+        "NEEDS_REMEDIATION", "NOT_RECOMMENDED",
+    },
+    "assurance.workflow_chains": {
+        "EVIDENCE_UNCLASSIFIED", "READY", "READY_RESTRICTED", "ROUTE_CURRENT", "ROUTE_MOVED", "ROUTE_UNRECORDED",
+    },
+    "assurance.coverage": {
+        "COMPLETE", "INCOMPLETE", "UNDECLARED", "CHECK_PERFORMED", "CHECK_DEGRADED", "CHECK_NOT_PERFORMED",
+        "CHECK_UNMEASURED",
+    },
+}
 
 
 @pytest.mark.parametrize(("module_name", "name", "key"), _GOVERNING, ids=lambda v: str(v))
@@ -435,6 +489,86 @@ def test_the_policy_pin_moves_with_every_rule_the_decision_applies(monkeypatch, 
     else:
         monkeypatch.setitem(getattr(module, name), key, _changed(getattr(module, name)[key]))
     assert policy_pin() != before, f"{module_name}.{name}{'' if key is None else f'[{key!r}]'}"
+
+
+def test_every_constant_the_decision_reads_is_in_the_pin(monkeypatch):
+    """Not a list someone keeps: every constant of every module the decision is
+    computed in either moves the pin when it changes, or is named above as not a rule,
+    with the reason. The route and evidence ranks could be dropped from the pin with
+    every test passing, and the severity order and the unsigned-evidence table were
+    never in it."""
+    import re
+    import types
+    from importlib import import_module
+
+    from assurance.policy import policy_pin
+
+    governed = {(module, name) for module, name, _key in _GOVERNING}
+    unaccounted, unmoved = [], []
+    for module_name in ("assurance.decision", "assurance.composition", "assurance.workflow_chains", "assurance.coverage"):
+        module = import_module(module_name)
+        for name, value in list(vars(module).items()):
+            if not re.fullmatch(r"_?[A-Z][A-Z0-9_]*", name) or callable(value) or isinstance(value, types.ModuleType):
+                continue
+            if (module_name, name) in _NOT_RULES or name in _SPELLINGS.get(module_name, ()):
+                continue
+            if (module_name, name) not in governed:
+                unaccounted.append(f"{module_name}.{name}")
+            before = policy_pin()
+            monkeypatch.setattr(module, name, _changed(value))
+            if policy_pin() == before:
+                unmoved.append(f"{module_name}.{name}")
+            monkeypatch.undo()
+    assert unaccounted == [], "constants the decision is computed with that no test holds to the pin"
+    assert unmoved == [], "constants the decision is computed with that do not move the pin"
+
+
+def test_a_reordered_severity_scale_moves_the_pin_and_the_published_decision_follows(monkeypatch):
+    """The adversary's reordering: every threshold and every acceptance is ranked in
+    SEVERITY_ORDER. Reordered, the decision computed from the same stored inputs
+    moved and the pin did not, so the stored one went on being published."""
+    from assurance import models
+    from assurance.policy import policy_pin
+
+    dep = _scanned()
+    _finding(dep, "medium", n="m")
+    assert recompute_decision(dep) == D.READY_RESTRICTED
+    pin = policy_pin()
+
+    monkeypatch.setattr(models, "SEVERITY_ORDER", ("info", "medium", "low", "high", "critical"))
+
+    assert policy_pin() != pin
+    computed = compute_decision(Deployment.objects.get(pk=dep.pk))
+    assert computed != D.READY_RESTRICTED
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == computed
+
+
+def test_the_claim_cap_is_the_worst_of_every_claim_that_holds_the_decision_back():
+    """A contradicted claim beside a stale one needs remediation. The cap taken as the
+    last kind that applied, not the worst, read needs more evidence."""
+    from assurance.decision import claim_decision_signal
+    from assurance.models import AssuranceClaim
+
+    dep = _scanned()
+    for n, status in enumerate((AssuranceClaim.ClaimStatus.CONTRADICTED, AssuranceClaim.ClaimStatus.STALE)):
+        AssuranceClaim.objects.create(
+            deployment=dep, claim_type=AssuranceClaim.ClaimType.AI_BOM, statement="s", fingerprint=f"fp-{n}",
+            system_fingerprint="sys", policy_version="p", environment=dep.environment, status=status,
+        )
+
+    assert claim_decision_signal(dep)["cap"] == D.NEEDS_REMEDIATION
+    assert recompute_decision(dep) == D.NEEDS_REMEDIATION
+
+
+def test_a_deployment_nothing_has_decided_is_published_as_undecided_and_nothing_is_written():
+    """No decision, no stamp, and nothing to redo: the first publishing read writes
+    no decision and no stamp for it."""
+    dep = Deployment.objects.create(name="never", owner=_admin())
+
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) is None
+    row = Deployment.objects.values("decision", "decision_revision", "decision_policy").get(pk=dep.pk)
+    assert row == {"decision": None, "decision_revision": 0, "decision_policy": None}
+    assert not dep.decision_transitions.exists()
 
 
 def test_the_decision_applies_the_claim_caps_the_policy_names(monkeypatch):

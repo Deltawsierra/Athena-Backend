@@ -360,7 +360,7 @@ def serving_route_now(deployment) -> str:
     return served_route_fingerprint(deployment, deployment.assets.select_related("provider"))
 
 
-def note_route(deployment, *, now):
+def note_route(deployment, *, now, fingerprint=None):
     """Note the route serving now, and return ``(fingerprint, since)``.
 
     ``since`` is when the platform first noted that fingerprint: moved only when the
@@ -371,13 +371,16 @@ def note_route(deployment, *, now):
     Called wherever the graph a route is read from may have changed -- the decision
     refresh, the scan ingest -- and at every outcome binding, so a change that no
     refresh noticed is noticed there, before anything is bound across it. Never in
-    the operator failsafe's path: a stop does not wait on this.
+    the operator failsafe's path: a stop does not wait on this. ``fingerprint``: the
+    route serving now, read already by a caller that reads it outside the
+    transaction it notes it in.
     """
     from django.db import IntegrityError, transaction
 
     from .models import ServedRouteNote
 
-    fingerprint = serving_route_now(deployment)
+    if fingerprint is None:
+        fingerprint = serving_route_now(deployment)
     note = ServedRouteNote.objects.filter(deployment=deployment).first()
     if note is None:
         try:
@@ -414,13 +417,18 @@ def note_route_quietly(deployment, *, now=None) -> None:
     logged and rolled back to before the note, and costs only that: the next note --
     at the latest, the binding of the next outcome -- sees the change instead, and
     a late note errs only toward leaving an outcome unbound. Never raises.
+
+    The route is read -- the whole asset graph -- BEFORE the transaction the note is
+    written in, so no lock is held while it is read: on SQLite the transaction takes
+    the database-wide write lock at its start, which a stop of any deployment waits on.
     """
     from django.db import transaction
     from django.utils import timezone
 
     try:
+        fingerprint = serving_route_now(deployment)
         with transaction.atomic():
-            note_route(deployment, now=now or timezone.now())
+            note_route(deployment, now=now or timezone.now(), fingerprint=fingerprint)
     except Exception:
         logger.exception(
             "the served route of deployment %s was not noted; the next note or "

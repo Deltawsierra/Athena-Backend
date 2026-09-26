@@ -213,14 +213,21 @@ def _refresh_stored_decision(deployment) -> None:
     for good -- a signed outcome cannot be posted twice to try again. Inside, the
     two commit together or neither does.
 
-    The deployment's declared latent conditions are NOT evaluated here. They are
-    evaluated once the write commits, by the backstop (`signals.schedule_decision_refresh`,
-    which evaluates them and refreshes the decision again). Evaluated here, they ran
-    inside every write that refreshes the decision -- a claim revoke among them --
-    before it could commit: 2.3 seconds on a deployment with a hundred conditions
-    over three hundred tools, spent holding back a revoke. Nothing that watches may
-    delay a stop, and a revoke is one. A write that must read a condition in its own
-    transaction evaluates it itself (`_fire_conditions`, the invalidation check).
+    The deployment's declared latent conditions are NOT evaluated here, nor inside
+    any write's transaction. They are evaluated once the write commits, by the
+    backstop (`signals.schedule_decision_refresh`, which evaluates them and refreshes
+    the decision again). Evaluated here, they ran inside every write that refreshes
+    the decision -- a claim revoke among them -- before it could commit: 2.3 seconds
+    on a deployment with a hundred conditions over three hundred tools, spent holding
+    back a revoke. And evaluated after the commit in one transaction, they held the
+    database-wide write lock SQLite takes at BEGIN IMMEDIATE for the whole
+    evaluation: a pause of any other deployment waited 1.5 seconds on a hundred
+    conditions, and past the twenty-second busy timeout failed. So the evaluation
+    holds no transaction while it reads a condition, and writes each outcome in its
+    own short one (`latent.evaluate_conditions`): a stop waits on it for at most one
+    condition's write -- milliseconds -- and never for a reading
+    (tests/test_nothing_that_watches_holds_back_a_stop.py measures it). The
+    invalidation check evaluates the conditions it reports outside its transaction.
 
     The served route is NOT noted here. This runs inside writes a stop must not wait
     on -- a revoke among them -- and the note reads the whole asset graph. Every
@@ -232,27 +239,20 @@ def _refresh_stored_decision(deployment) -> None:
     schedule_decision_refresh(deployment.pk)
 
 
-def _fire_conditions(deployment_ids, actor, *, own=None) -> None:
+def _fire_conditions(deployment_ids) -> None:
     """Bring current the deployments whose declared latent conditions read something
     a write just changed that the decision does not read itself -- the data boundary,
-    a provider's profile.
+    a provider's profile: each is scheduled for after the write commits, through the
+    backstop, which evaluates its conditions and refreshes its decision.
 
-    ``own``, the deployment the written row belongs to (a data boundary's), is
-    evaluated here, in the write's transaction, and its decision refreshed with it:
-    a boundary write that makes its own watch true is refused with it if the refresh
-    fails. Every other deployment is scheduled for after the write commits, through
-    the backstop. They were each evaluated and refreshed here, in turn, each under
-    its row lock, inside the write's own transaction -- a provider twenty
-    deployments watch held all twenty locks until its PATCH committed.
+    None of them is evaluated inside the write's transaction. They were each
+    evaluated and refreshed here, in turn, each under its row lock -- a provider
+    twenty deployments watch held all twenty locks until its PATCH committed -- and
+    the data boundary's own deployment was, until this round: every condition read
+    under the write lock the boundary write held, which a stop of any other
+    deployment waited on (see `_refresh_stored_decision`).
     """
-    ids = set(deployment_ids)
-    if own is not None and own in ids:
-        ids.discard(own)
-        deployment = Deployment.objects.filter(pk=own).first()
-        if deployment is not None:
-            fire_due_conditions(deployment, actor=actor)
-            recompute_decision(deployment)
-    for deployment_id in sorted(ids):
+    for deployment_id in sorted(set(deployment_ids)):
         schedule_decision_refresh(deployment_id)
 
 
@@ -1212,14 +1212,13 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     defaults={**fields, "updated_by": request.user},
                 )
                 # A condition declared on this boundary -- "training stays denied",
-                # "no region beyond these" -- that the write made true fires here,
-                # in the write's transaction, and the decision is refreshed with it.
-                # The boundary otherwise reaches the decision only through claims
-                # re-derived from it. Its own deployment, so inline: a boundary write
-                # is no stop, and nothing but its own deployment is evaluated with it.
-                _fire_conditions(
-                    deployments_watching_boundary(deployment.pk), request.user, own=deployment.pk
-                )
+                # "no region beyond these" -- that the write made true fires once
+                # the write commits, before this response is sent, and the decision
+                # is refreshed with it. The boundary otherwise reaches the decision
+                # only through claims re-derived from it. Not inside this
+                # transaction: every condition would be read under the write lock it
+                # holds, which a stop of any other deployment waits on.
+                _fire_conditions(deployments_watching_boundary(deployment.pk))
         assessed = (
             Deployment.objects.prefetch_related("assets__provider__assertions")
             .select_related("data_boundary")
@@ -2100,14 +2099,20 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         the counts ``{invalidated, retests_opened, retests_resolved}``.
 
         A stale claim and an open obligation each cap the decision, so the stored
-        decision is refreshed in the same transaction as the check."""
+        decision is refreshed in the same transaction as the check.
+
+        And every declared latent condition, attributed to whoever asked: the named
+        preconditions are the other half of "what invalidates a claim". Evaluated
+        BEFORE that transaction and outside it -- each condition read with no lock
+        held, each outcome written in its own short transaction -- so the check's
+        own transaction reads what fired and no stop waits on the evaluation."""
         _require_admin(request)
         deployment = self.get_object()
+        # The refresh the transaction below makes brings the decision current.
+        fired = fire_due_conditions(deployment, actor=request.user, schedule_refresh=False)
         with transaction.atomic():
             counts = run_invalidation_check(deployment, actor=request.user)
-            # And every declared latent condition, attributed to whoever asked: the
-            # named preconditions are the other half of "what invalidates a claim".
-            counts["conditions_fired"] = fire_due_conditions(deployment, actor=request.user)
+            counts["conditions_fired"] = fired
             _refresh_stored_decision(deployment)
         return Response(counts)
 
@@ -2716,14 +2721,12 @@ class ProviderViewSet(
     # no deployment, so none of them is evaluated inside this write.
     def perform_create(self, serializer):
         serializer.save()
-        _fire_conditions(deployments_watching_provider(serializer.instance.name), self.request.user)
+        _fire_conditions(deployments_watching_provider(serializer.instance.name))
 
     def perform_update(self, serializer):
         before = serializer.instance.name
         serializer.save()
-        _fire_conditions(
-            deployments_watching_provider(before, serializer.instance.name), self.request.user
-        )
+        _fire_conditions(deployments_watching_provider(before, serializer.instance.name))
 
 
 class ProviderAssertionViewSet(viewsets.ModelViewSet):
@@ -2769,19 +2772,17 @@ class ProviderAssertionViewSet(viewsets.ModelViewSet):
     # each in its own transaction, never all of them inside this one.
     def perform_create(self, serializer):
         serializer.save(updated_by=self.request.user)
-        _fire_conditions(deployments_watching_provider(serializer.instance.provider.name), self.request.user)
+        _fire_conditions(deployments_watching_provider(serializer.instance.provider.name))
 
     def perform_update(self, serializer):
         before = serializer.instance.provider.name
         serializer.save(updated_by=self.request.user)
-        _fire_conditions(
-            deployments_watching_provider(before, serializer.instance.provider.name), self.request.user
-        )
+        _fire_conditions(deployments_watching_provider(before, serializer.instance.provider.name))
 
     def perform_destroy(self, instance):
         name = instance.provider.name
         instance.delete()
-        _fire_conditions(deployments_watching_provider(name), self.request.user)
+        _fire_conditions(deployments_watching_provider(name))
 
 
 class UnknownViewSet(

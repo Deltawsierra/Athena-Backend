@@ -441,6 +441,26 @@ def test_a_held_off_the_serving_route_is_no_work_beside_one_as_strong_on_it():
         assert result.off_route == ()
 
 
+@pytest.mark.parametrize("later", ["a weaker held on the serving route", "a violation on it"])
+def test_a_held_off_the_serving_route_a_later_verdict_superseded_is_no_work(monkeypatch, later):
+    """Only what survives is read: a scan of a route that is gone, displaced by a
+    later demonstrated verdict on the route serving now, is history, not work. Read
+    over every attempt, the plan named it -- beside a later permit check it would
+    otherwise be weaker than, or a violation that already floors the workflow."""
+    at = timezone.now() - timedelta(hours=2)
+    old = _held(comp.ROUTE_MOVED, signer="athena", at=at)
+    if later == "a weaker held on the serving route":
+        newer = _held(comp.ROUTE_CURRENT, signer="achilles", at=at + timedelta(hours=1))
+    else:
+        newer = ChainOutcome(
+            "refund", VIOLATED, observed_at=at + timedelta(hours=1), basis=comp.BASIS_DEMONSTRATED,
+            signer="athena", route=comp.ROUTE_CURRENT,
+        )
+
+    assert compose([old, newer], expected_workflows=["refund"]).off_route == ()
+    assert _planned(monkeypatch, _deployment(), [old, newer])["workflows_to_exercise"] == []
+
+
 @pytest.mark.parametrize("route", sorted(comp.OFF_ROUTE))
 def test_the_plan_names_every_held_chain_off_the_serving_route_approved_or_not(monkeypatch, route):
     plan = _planned(monkeypatch, _deployment(), [_held(route), _held(route, workflow="export")])

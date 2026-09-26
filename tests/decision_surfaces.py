@@ -29,17 +29,22 @@ def surfaces(dep, client) -> dict:
 
 
 def stamped_under_the_rules_in_force(dep):
-    """Stamp ``dep``'s stored decision with the policy pin in force, and return it.
+    """Stamp ``dep``'s stored decision as one the rules in force computed at the
+    revision it stands at, and return it.
 
     For a test that writes a decision by hand -- through the one writer, or a
     QuerySet update -- to stand for one the rules computed. A stored decision with no
     stamp names no rules it was computed under, and every publishing read recomputes
     it (``decision.current_decision``); stamped here, the hand-written decision is
-    published as written, which is what such a test is about."""
-    from assurance.policy import policy_pin
+    published as written, which is what such a test is about. A later move through
+    the one writer keeps the stamp (``revision._write``); a QuerySet update of the
+    revision does not, as a writer that does not stamp would not."""
+    from assurance.decision import policy_stamp
 
-    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_pin())
-    dep.decision_policy = policy_pin()
+    revision = Deployment.objects.values_list("decision_revision", flat=True).get(pk=dep.pk)
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_stamp(revision))
+    dep.decision_policy = policy_stamp(revision)
+    dep.decision_revision = revision
     return dep
 
 

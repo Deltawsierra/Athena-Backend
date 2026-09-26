@@ -377,15 +377,19 @@ class Deployment(models.Model):
     # wrote this records when it goes stale and `decision.current_decision`
     # recomputes it at the first read after. NULL when nothing about it expires.
     decision_valid_until = models.DateTimeField(null=True, blank=True, default=None, editable=False)
-    # Which rules the stored decision was computed under: the policy pin
-    # (`assurance.policy.policy_pin`), whose document names every cap the decision
-    # applies. NULL when the stored decision predates the stamp. A release that
-    # changes a rule moves the pin, and the stored decisions computed under the old
-    # one are recomputed -- at migrate (the post-migrate receiver) and at the first
-    # publishing read (`decision.current_decision`) -- rather than published under
-    # rules that no longer hold. Without it every rule change needed a migration
-    # that wrote a decision column behind the transition log, which nothing but the
-    # refresh may do.
+    # Which rules the stored decision was computed under, and at which revision:
+    # the policy pin (`assurance.policy.policy_pin`), whose document names every cap
+    # the decision applies, then `@r` and the revision the decision stood at when
+    # they computed it (`decision.policy_stamp`). NULL when the stored decision
+    # predates the stamp. A release that changes a rule moves the pin, and the stored
+    # decisions computed under the old one are recomputed -- at migrate (the
+    # post-migrate receiver) and at the first publishing read
+    # (`decision.current_decision`) -- rather than published under rules that no
+    # longer hold. The revision tells apart a decision a writer that does not stamp
+    # moved since: the release before this one, still writing mid-rollout, moves the
+    # revision and not the stamp, and what it computed under its rules is recomputed
+    # the same way. Without it every rule change needed a migration that wrote a
+    # decision column behind the transition log, which nothing but the refresh may do.
     decision_policy = models.CharField(max_length=80, null=True, blank=True, default=None, editable=False)
     # Did the scan this decision rests on stop before it finished? Set by the
     # ingest from the engine's own `scan_incomplete` marker, and read as a cap by
@@ -1363,6 +1367,12 @@ class AssuranceClaimQuerySet(models.QuerySet):
         the current-claims query or the other way round.
         """
         return self.filter(valid_to__isnull=True)
+
+    def closed(self):
+        """Every version no longer believed: one a re-derive superseded. What a
+        release that did not carry a claim's watches and legal ruling left them on
+        (``assurance.carry``) -- history, never a current reading."""
+        return self.filter(valid_to__isnull=False)
 
     def effective_at(self, when):
         """Every version whose EFFECTIVE window contains ``when`` -- what was true

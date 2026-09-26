@@ -587,12 +587,15 @@ def _ingest_findings(scan, deployment, raw_findings) -> list[Finding]:
     # the pause from the instance loaded when the ingest began, so an unpause
     # committed meanwhile left the refresh skipped and the decision stale.
     from .decision import recompute_decision
-    from .latent import fire_due_conditions
     from .served_route import note_route_quietly
+    from .signals import schedule_decision_refresh
 
     # A declared latent condition this scan made true -- a capability granted, an
-    # asset appearing -- fires before the decision is refreshed, so it reads it.
-    fire_due_conditions(deployment)
+    # asset appearing -- fires once the ingest commits: the backstop evaluates the
+    # conditions and refreshes the decision again. Not in here: every condition would
+    # be read under the write lock this transaction holds, which a stop of any other
+    # deployment waits on.
+    schedule_decision_refresh(deployment.pk)
     # The route this scan recorded is noted as serving from now, so the outcome of
     # a run against it binds to it (assurance.served_route.route_for_outcome).
     note_route_quietly(deployment)

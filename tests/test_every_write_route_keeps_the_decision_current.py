@@ -279,8 +279,6 @@ def _withdraw_a_condition_nobody_can_read():
 
 
 MOVES = {
-    ("DeploymentViewSet", "data_boundary", "put"): _allow_training_a_condition_watches("put"),
-    ("DeploymentViewSet", "data_boundary", "patch"): _allow_training_a_condition_watches("patch"),
     ("ClaimViewSet", "withdraw_latent_condition", "post"): _withdraw_a_condition_nobody_can_read,
     ("DeploymentViewSet", "recompute", "post"): _pause,
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
@@ -518,7 +516,17 @@ _PROFILE = (
     "write commits, each in its own transaction, never all of them inside this one"
 )
 
+_BOUNDARY = (
+    "a data boundary reaches the decision only through the claims re-derived from it "
+    "and through a latent condition that watches it. The condition is evaluated once "
+    "the write commits -- before the response is sent -- and never inside the write: "
+    "read there, every condition was read under the write lock this transaction holds, "
+    "which a stop of any other deployment waits on"
+)
+
 MOVES_AFTER_COMMIT = {
+    ("DeploymentViewSet", "data_boundary", "put"): (_BOUNDARY, _allow_training_a_condition_watches("put")),
+    ("DeploymentViewSet", "data_boundary", "patch"): (_BOUNDARY, _allow_training_a_condition_watches("patch")),
     ("ProviderAssertionViewSet", "partial_update", "patch"): (_PROFILE, _change_a_posture_a_condition_watches),
     ("ProviderAssertionViewSet", "create", "post"): (_PROFILE, _declare_the_assertion_a_condition_lost_sight_of),
     ("ProviderAssertionViewSet", "destroy", "delete"): (_PROFILE, _delete_an_assertion_a_condition_watches),

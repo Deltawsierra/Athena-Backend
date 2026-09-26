@@ -25,12 +25,14 @@ management command (see :func:`schedule_decision_refresh`).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 
 from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, transaction
 from django.db.models import QuerySet
-from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete, pre_save
+from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete, pre_migrate, pre_save
 from django.dispatch import receiver
 
 # Plain constants; the models module is loaded before `AppConfig.ready` imports
@@ -121,31 +123,69 @@ def _has_column(using, table, column) -> bool:
     return any(col.name == column for col in description)
 
 
+@receiver(pre_migrate, dispatch_uid="assurance_refuse_a_reverse_past_an_irreversible_step")
+def refuse_a_reverse_past_an_irreversible_step(sender, plan=None, **kwargs):
+    """Refuse a ``migrate`` whose plan unapplies an irreversible migration -- BEFORE
+    it unapplies anything.
+
+    Django checks reversibility one migration at a time, as it reaches each, and each
+    is unapplied and committed on its own. So ``migrate assurance 0036`` on a database
+    at 0039 unapplied 0039 -- dropping the decision stamp, the served-route notes, the
+    accepted severity and every outcome's route binding -- committed that, and only
+    then raised IrreversibleError at 0038: the refusal came after the data was gone,
+    and the database was left between releases. Now the whole plan is read first,
+    and a backwards step no reverse exists for refuses it with nothing touched.
+
+    Every app's plan, not only this one's: the loss is the same whoever owns the
+    step. Sent once per app with models; the plan is the same, so it is read on
+    this app's signal only.
+    """
+    if getattr(sender, "name", None) != "assurance" or not plan:
+        return
+    from django.db.migrations.exceptions import IrreversibleError
+
+    for migration, backwards in plan:
+        if not backwards:
+            continue
+        for operation in migration.operations:
+            if not operation.reversible:
+                raise IrreversibleError(
+                    f"{migration.app_label}.{migration.name} cannot be reversed "
+                    f"({operation.describe()}), and this migrate would reverse it: it is "
+                    "refused before anything is unapplied, so the database stays where it "
+                    "is. Stop at the migration after it."
+                )
+
+
 @receiver(post_migrate, dispatch_uid="assurance_restore_fired_holds")
-def restore_the_holds_fired_conditions_keep(sender, using=None, apps=None, **kwargs):
-    """Put back the hold each FIRED latent condition keeps on its claim, wherever
-    something removed it (:func:`assurance.latent.restore_fired_holds`).
+def carry_what_a_release_that_did_not_carry_left(sender, using=None, apps=None, **kwargs):
+    """Carry every watch and legal ruling a re-derive of an earlier release left on a
+    closed version to the claim's current version, put back every hold a FIRED
+    condition keeps, and bring each deployment it touched current
+    (:func:`assurance.carry.converge`).
 
-    The upgrade from the release before this one: its re-derive left a fired
-    condition on the version it closed and read the new version back to a pass,
-    resolving the retest. 0038 carries the condition to the claim's current version,
-    where it holds it again -- but the claim row still read VERIFIED, no retest was
-    open, and the stored decision, recomputed here, read READY until some later
-    write happened to evaluate the condition. Connected BEFORE the recompute below,
-    so the decisions it recomputes read the hold as it is put back; each restore
-    also schedules its deployment's refresh, as any write to a claim does.
+    0037 and 0038 do this once, at the migration. A release before this one still
+    writing mid-rollout does it again after them, and a later ``migrate`` -- the step
+    after a rollout -- finds and repairs what it left, and evaluates the watches it
+    carried. Connected BEFORE the recompute below, so the decisions it recomputes
+    read the record as repaired.
 
-    Keyed on the data, like the receivers below: a condition whose hold is in place
-    is not touched, so an unrelated ``migrate`` writes nothing. It reads no condition
-    again and writes no decision column itself.
+    Keyed on the data, like the receivers below: a deployment with nothing to carry
+    or put back is not touched, so an unrelated ``migrate`` writes nothing. It writes
+    no decision column itself; each deployment it touched is refreshed through the
+    one refresh (:func:`assurance.decision.refresh_stored_decisions`).
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    from .latent import deployments_with_a_lifted_hold, restore_fired_holds
+    from .carry import converge, deployments_to_converge
+    from .decision import refresh_stored_decisions
     from .models import Deployment
 
-    for deployment in Deployment.objects.filter(pk__in=deployments_with_a_lifted_hold()).order_by("pk"):
-        restore_fired_holds(deployment)
+    touched = []
+    for deployment in Deployment.objects.filter(pk__in=deployments_to_converge()).order_by("pk"):
+        if any(converge(deployment).values()):
+            touched.append(deployment.pk)
+    refresh_stored_decisions(touched)
 
 
 @receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
@@ -164,22 +204,27 @@ def recompute_decisions_computed_under_another_rule(sender, using=None, apps=Non
     """
     if not _the_decision_columns_are_migrated(sender, using, apps):
         return
-    from django.db.models import Q
-
-    from .decision import _current_policy_pin, recompute_decision
+    from .decision import _current_policy_pin, policy_stamp, recompute_decision
     from .models import Deployment, WorkflowChainOutcome
 
     deployment_ids = WorkflowChainOutcome.objects.values_list("deployment_id", flat=True).distinct()
     for deployment in Deployment.objects.filter(pk__in=deployment_ids, decision_keyring__isnull=True):
         recompute_decision(deployment)
-    # And every stored decision computed under other rules: a release that moved
-    # the policy pin moved what the same inputs imply (Deployment.decision_policy).
-    # Keyed on the data like the keyring stamp, so a migrate that failed part-way
-    # leaves them marked for the next.
-    stale = Deployment.objects.filter(decision__isnull=False).filter(
-        Q(decision_policy__isnull=True) | ~Q(decision_policy=_current_policy_pin())
-    )
-    for deployment in stale.order_by("pk"):
+    # And every stored decision this release's rules did not compute: stamped under
+    # another pin -- a release that moved the policy pin moved what the same inputs
+    # imply -- or moved since it was stamped by a writer that does not stamp, the
+    # release before this one mid-rollout (Deployment.decision_policy). Keyed on the
+    # data like the keyring stamp, so a migrate that failed part-way leaves them
+    # marked for the next.
+    pin = _current_policy_pin()
+    stale = [
+        pk
+        for pk, stamp, revision in Deployment.objects.filter(decision__isnull=False)
+        .order_by("pk")
+        .values_list("pk", "decision_policy", "decision_revision")
+        if stamp != policy_stamp(revision, pin=pin)
+    ]
+    for deployment in Deployment.objects.filter(pk__in=stale).order_by("pk"):
         recompute_decision(deployment)
 
 
@@ -487,6 +532,28 @@ class _RefreshAfterCommit:
             )
 
 
+#: The deployments whose refresh -- or a step of it: the watches' evaluation, the
+#: carry -- is running in this context, and brings the decision current itself once
+#: it is done. A write it makes schedules no other refresh of the same deployment.
+#: Outside a transaction every write commits at once and its refresh ran at once:
+#: each condition an evaluation wrote, in its own short transaction, evaluated every
+#: condition again, and each of THOSE writes did the same.
+_REFRESH_DEFERRED: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
+    "assurance_refresh_deferred", default=frozenset()
+)
+
+
+@contextlib.contextmanager
+def refresh_deferred(deployment_id):
+    """While this runs, a write to ``deployment_id``'s decision inputs schedules no
+    refresh: the caller refreshes it once, after (see :data:`_REFRESH_DEFERRED`)."""
+    token = _REFRESH_DEFERRED.set(_REFRESH_DEFERRED.get() | {deployment_id})
+    try:
+        yield
+    finally:
+        _REFRESH_DEFERRED.reset(token)
+
+
 def schedule_decision_refresh(deployment_id, *, using=None) -> None:
     """Refresh ``deployment_id``'s stored decision once the current transaction
     commits -- once, however many of its inputs the transaction wrote.
@@ -504,6 +571,10 @@ def schedule_decision_refresh(deployment_id, *, using=None) -> None:
     """
     using = using or DEFAULT_DB_ALIAS
     if deployment_id is None or using != DEFAULT_DB_ALIAS:
+        return
+    if deployment_id in _REFRESH_DEFERRED.get():
+        # Written by a step of this deployment's own refresh, which brings its decision
+        # current once it is done (`refresh_deferred`).
         return
     connection = connections[using]
     pending = None
@@ -605,11 +676,12 @@ for _label in DECISION_INPUTS:
 # Then a write to it is the change the condition watches for, and the deployment
 # it is declared on is brought current after the write commits: the refresh above
 # evaluates the conditions first (`decision.refresh_stored_decisions`). This is how
-# every writer brings them current -- the API routes schedule it too, and only a
-# data boundary route evaluates its own deployment inline -- so a write to a
-# provider that twenty deployments watch no longer evaluates and locks all twenty
-# inside its own transaction. Every live condition counts, not only a pending one:
-# a fired or unobservable condition is read again by the refresh.
+# every writer brings them current -- the API routes schedule it too, the data
+# boundary route for its own deployment included -- so no write evaluates a
+# condition inside its own transaction: a write to a provider that twenty
+# deployments watch no longer evaluates and locks all twenty, and no condition is
+# read under a write lock a stop waits on. Every live condition counts, not only a
+# pending one: a fired or unobservable condition is read again by the refresh.
 
 _PRIOR_PROVIDER_NAME = "_assurance_latent_prior_provider_name"
 

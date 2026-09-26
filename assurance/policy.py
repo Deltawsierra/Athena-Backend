@@ -45,6 +45,7 @@ from . import change as _change
 from . import composition as _composition
 from . import coverage as _coverage
 from . import decision as _decision
+from . import models as _models
 from . import workflow_chains as _workflow_chains
 from .receipt import RECEIPT_VERSION, _digest
 
@@ -73,13 +74,21 @@ def _table(mapping) -> dict:
 def _policy_document() -> dict:
     """The governing assurance policy, as deterministic data.
 
-    Every cap, floor, threshold and state set the decision applies is here, and each
-    is read from the constant the decision code itself applies -- the very object,
-    off its module, at the moment the pin is taken -- so the pin computed over this
-    document tracks the rules rather than a hand-maintained copy of them. Adding a
-    rule means adding the constant the code reads to this document; a test holds
-    every constant it lists to moving the pin, and each to being what the decision
-    applies (tests/test_an_accepted_risk_is_carried_not_removed.py)."""
+    Every cap, floor, threshold, order, rank and state set the decision applies is
+    here, and each is read from the constant the decision code itself applies -- the
+    very object, off its module, at the moment the pin is taken -- so the pin
+    computed over this document tracks the rules rather than a hand-maintained copy
+    of them. That includes the orders the thresholds are measured against: the
+    severity order every finding threshold and every acceptance is ranked in
+    (``models.SEVERITY_ORDER``), the evidence-strength order a finding's weakest
+    evidence is read with, the chain rule's own readiness order and ranks, and what
+    an unsigned basis counts as. A reordered severity scale changed the decision of
+    the same stored inputs and left the pin -- and every decision stamped under it --
+    where it was. Adding a rule means adding the constant the code reads to this
+    document; a test holds every constant of the modules the decision is computed in
+    either to moving the pin or to a named reason it is not a rule, and each listed
+    one to being what the decision applies
+    (tests/test_an_accepted_risk_is_carried_not_removed.py)."""
     decision = _decision
     composition = _composition
     return {
@@ -94,6 +103,15 @@ def _policy_document() -> dict:
             "readiness_order": sorted(
                 (_value(d) for d in decision._READINESS_RANK), key=lambda d: decision._READINESS_RANK[d]
             ),
+            # The order severities are ranked in, weakest first (assurance.models
+            # .severity_rank): every threshold below, and whether an acceptance covers
+            # a finding's severity (assurance.decision._acceptance_covers), is read
+            # against it.
+            "severity_order": [_value(s) for s in _models.SEVERITY_ORDER],
+            # Strongest first: a finding's evidence class is its weakest evidence
+            # row's by this order (assurance.models.evidence_strength), and that is
+            # what the unverified set below is matched against.
+            "evidence_strength_order": [_value(e) for e in _models.EVIDENCE_STRENGTH_ORDER],
             # Worst active finding severity -> decision (assurance.decision
             # ._decision_from_findings): the first threshold reached decides.
             "severity_thresholds": {
@@ -138,6 +156,18 @@ def _policy_document() -> dict:
             # workflow counts as when it rests on no run, or on a run of a route
             # that no longer serves (assurance.composition._floor_of).
             "chain_floors": _table(composition.FLOORS),
+            # The chain rule's own readiness order, and the rank it takes the worse
+            # of two floors by (assurance.composition._RANK), which is read at every
+            # composition -- not the order it was built from at import.
+            "chain_readiness_order": [_value(s) for s in composition.READINESS_ORDER],
+            "chain_readiness_rank": _table(composition._RANK),
+            # The vocabulary an outcome is checked against: what the rule accepts is
+            # part of what it computes.
+            "chain_statuses": _values(composition.CHAIN_STATUSES),
+            "chain_bases": _values(composition.CHAIN_BASES),
+            "chain_routes": _values(composition.CHAIN_ROUTES),
+            "evidence_kinds": _values(composition.EVIDENCE_KINDS),
+            "demonstrated_statuses": _values(composition.DEMONSTRATED),
             "unexercised_bases": _values(composition.UNEXERCISED_BASES),
             "off_route": _values(composition.OFF_ROUTE),
             # Which outcomes displace earlier ones, and how a tie among the
@@ -147,13 +177,18 @@ def _policy_document() -> dict:
             "basis_rank": _table(composition._BASIS_RANK),
             "route_rank": _table(composition._ROUTE_RANK),
             "evidence_rank": _table(composition._EVIDENCE_RANK),
-            # Which signer's outcomes are which kind of evidence.
+            # Which signer's outcomes are which kind of evidence, and what an
+            # unsigned basis counts as (assurance.composition.evidence_kind).
             "signer_evidence": _table(composition.SIGNER_EVIDENCE),
+            "unsigned_evidence": _table(composition._UNSIGNED_EVIDENCE),
             # How the workflow chains cap it (assurance.workflow_chains
             # .composition_decision_signal): a held resting on a permit check or an
             # unclassified signer is ready with restrictions at best; one resting on
             # no run, or taken against a route that no longer serves, counts as not
             # demonstrated.
+            # The order the chain caps are taken the worse of in
+            # (assurance.workflow_chains._worse), read there by its own name.
+            "chain_cap_order": [_value(s) for s in _workflow_chains.READINESS_ORDER],
             "chain_caps": {
                 **_table(_workflow_chains.CHAIN_CAPS),
                 "held_unexercised": _value(composition.FLOORS[composition.NOT_DEMONSTRATED]),

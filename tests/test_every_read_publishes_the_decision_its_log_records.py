@@ -429,9 +429,11 @@ def test_a_row_level_with_or_ahead_of_its_log_is_published_as_it_stands(caplog):
     """A row with a revision and no transitions behind it (decided before the log
     existed) is not behind anything; it is trusted, and nothing is written. Stamped
     under the rules in force: the planted decision stands for one they computed."""
-    dep = stamped_under_the_rules_in_force(Deployment.objects.create(name="d", owner=_owner()))
+    dep = Deployment.objects.create(name="d", owner=_owner())
     accept_transition(dep, to_decision=D.PAUSED)
     Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=5)
+    # The stamp names the revision the rules computed it at: the planted one.
+    stamped_under_the_rules_in_force(dep)
 
     with caplog.at_level(logging.ERROR):
         assert read_decision(dep) == {"decision": D.READY, "revision": 5}

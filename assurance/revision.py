@@ -170,7 +170,7 @@ def accept_transition(
                 # The row was behind its log and the log already records this
                 # decision: bring the row up to it, and record nothing new -- the
                 # move was recorded when it happened.
-                _write(locked, to_decision, at)
+                _write(locked, to_decision, at, stamped_at=at)
                 deployment.decision = to_decision
                 deployment.decision_revision = at
             return {
@@ -184,7 +184,7 @@ def accept_transition(
         # trusted, and a row written back beneath its log computed a revision that
         # was already taken, collided with it, and failed on every recompute after.
         revision = at + 1
-        _write(locked, to_decision, revision)
+        _write(locked, to_decision, revision, stamped_at=at)
 
         # In the SAME transaction, which is the whole mechanism: a decision whose
         # transition is missing, or a transition whose decision never landed,
@@ -375,16 +375,34 @@ def bring_up_to_its_log(pk) -> tuple[str | None, int]:
     return locked.decision, locked.decision_revision
 
 
-def _write(locked: Deployment, decision, revision) -> None:
+def _write(locked: Deployment, decision, revision, *, stamped_at) -> None:
     """Write the decision columns: the refresh's own write, and the only one.
 
     A QuerySet update under the row lock the caller holds. ``Deployment.save``
     refuses these columns (see :data:`~assurance.models.DECISION_OWNED_FIELDS`), so
     no instance loaded before a transition can write the decision it holds back
     over this one.
+
+    The policy stamp moves with the revision when it named the decision in force this
+    replaces (``stamped_at``, the revision the log records -- a row written back
+    beneath its log does not stand at it): a decision this release's rules computed
+    stays theirs through this writer. A writer that does not stamp -- the release
+    before this one, mid-rollout -- moves the revision and leaves the stamp behind,
+    and the first publishing read then recomputes what it wrote
+    (``Deployment.decision_policy``).
     """
+    from django.db.models import Case, F, Value, When
+
+    from .decision import policy_stamp
+
     Deployment.objects.filter(pk=locked.pk).update(
-        decision=decision, decision_revision=revision, updated_at=timezone.now()
+        decision=decision,
+        decision_revision=revision,
+        updated_at=timezone.now(),
+        decision_policy=Case(
+            When(decision_policy=policy_stamp(stamped_at), then=Value(policy_stamp(revision))),
+            default=F("decision_policy"),
+        ),
     )
     locked.decision = decision
     locked.decision_revision = revision

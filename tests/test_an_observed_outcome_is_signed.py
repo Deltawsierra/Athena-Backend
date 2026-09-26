@@ -26,8 +26,8 @@ from rest_framework.test import APIClient
 from assurance import composition as comp
 from assurance import observed_outcomes
 from assurance.models import ApprovedWorkflow, Deployment, WorkflowChainOutcome
-from assurance.policy import policy_pin
 from assurance.workflow_chains import composition_for, composition_signal
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -841,8 +841,9 @@ def test_the_upgrade_recomputes_every_decision_the_old_rule_made_and_only_those(
     # Stamped under the rules in force: what is under test is the keyring upgrade's
     # reach, not the policy stamp's (test_an_accepted_risk_is_carried_not_removed).
     Deployment.objects.filter(pk=untouched.pk).update(
-        decision=Deployment.Decision.READY, decision_policy=policy_pin()
+        decision=Deployment.Decision.READY
     )
+    stamped_under_the_rules_in_force(untouched)
 
     receiver(sender=object(), using="default")
     receiver(sender=_assurance_app(), using="other")
@@ -1078,8 +1079,9 @@ def test_a_deployment_without_chains_is_not_reconciled_on_read():
     # read, not the policy stamp's (a decision with no stamp is recomputed on read,
     # test_an_accepted_risk_is_carried_not_removed).
     Deployment.objects.filter(pk=dep.pk).update(
-        decision=Deployment.Decision.READY, decision_keyring=None, decision_policy=policy_pin()
+        decision=Deployment.Decision.READY, decision_keyring=None
     )
+    stamped_under_the_rules_in_force(dep)
     assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.READY
     assert Deployment.objects.get(pk=dep.pk).decision_revision == 0
 
