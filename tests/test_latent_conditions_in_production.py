@@ -287,12 +287,7 @@ def test_a_claim_a_person_judged_legally_stale_caps_the_decision_and_a_pending_r
     assert len(support["claims"]["legally_stale"]) == 1
 
 
-def test_0037_brings_a_left_behind_watch_and_ruling_to_the_current_version():
-    from importlib import import_module
-
-    from django.apps import apps
-
-    migration = import_module("assurance.migrations.0037_carry_watches_and_legal_rulings")
+def test_the_carry_migrations_bring_a_left_behind_watch_and_ruling_to_the_current_version():
     dep = _ready()
     old = _claim(dep)
     condition = _declare(old, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
@@ -308,7 +303,8 @@ def test_0037_brings_a_left_behind_watch_and_ruling_to_the_current_version():
     AssuranceClaim.objects.filter(pk=old.pk).update(superseded_by=new)
 
     for _ in range(2):  # the second pass changes nothing
-        migration.carry_forward(apps, None)
+        _run_data_steps("0037_carry_watches_and_legal_rulings")
+        _run_data_steps("0038_latent_conditions_stay_watched")
         condition.refresh_from_db()
         new.refresh_from_db()
         assert condition.claim_id == new.pk
@@ -894,13 +890,10 @@ def _migration(name):
     return import_module(f"assurance.migrations.{name}")
 
 
-def test_0037_merges_a_left_behind_watch_the_current_version_already_carries():
+def test_0038_merges_a_left_behind_watch_the_current_version_already_carries():
     """Re-declared on the new version by an operator who saw it left behind, or a
     second orphan of it on the same chain: the move raised IntegrityError and the
-    whole migration aborted."""
-    from django.apps import apps
-
-    carry_forward = _migration("0037_carry_watches_and_legal_rulings").carry_forward
+    whole migration aborted. The newest statement stands; the other is withdrawn."""
     dep = _ready()
     v1 = _claim(dep)
     left = _declare(v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
@@ -908,17 +901,16 @@ def test_0037_merges_a_left_behind_watch_the_current_version_already_carries():
     redeclared = _declare(v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
 
     for _ in range(2):  # the second pass changes nothing
-        carry_forward(apps, None)
+        _run_data_steps("0038_latent_conditions_stay_watched")
         left.refresh_from_db()
         redeclared.refresh_from_db()
         assert (left.claim_id, left.state) == (v1.pk, State.WITHDRAWN)
-        assert left.fired_observation.startswith("Merged into the same declaration") and str(redeclared.uuid) in left.fired_observation
+        assert left.withdrawn_note.startswith("Merged into the same declaration")
+        assert str(redeclared.uuid) in left.withdrawn_note and left.withdrawn_at is not None
         assert (redeclared.claim_id, redeclared.state) == (v2.pk, State.PENDING)
 
 
-def test_0037_carries_the_newest_of_two_orphans_on_one_chain_and_merges_the_other():
-    from django.apps import apps
-
+def test_0038_carries_the_newest_of_two_orphans_on_one_chain_and_merges_the_other():
     dep = _ready()
     v1 = _claim(dep)
     older = _declare(v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
@@ -926,37 +918,36 @@ def test_0037_carries_the_newest_of_two_orphans_on_one_chain_and_merges_the_othe
     newer = _declare(v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
     v3 = _next_version(dep, v2)
 
-    _migration("0037_carry_watches_and_legal_rulings").carry_forward(apps, None)
+    _run_data_steps("0038_latent_conditions_stay_watched")
 
     older.refresh_from_db()
     newer.refresh_from_db()
     assert (newer.claim_id, newer.state) == (v3.pk, State.PENDING)
-    assert older.state == State.WITHDRAWN and "Merged" in older.fired_observation
+    assert older.state == State.WITHDRAWN and "Merged" in older.withdrawn_note
 
 
-def test_0038_carries_a_fired_condition_left_behind_and_merges_one_already_re_declared():
-    from django.apps import apps
-
-    carry = _migration("0038_latent_conditions_stay_watched").carry_fired_forward
+def test_0038_carries_a_fired_condition_left_behind_over_one_re_declared_since():
+    """A fired statement is never the one withdrawn: withdrawing it accepts the state
+    it fired on, which only a person may do. The re-declaration is withdrawn instead."""
     dep = _ready()
     boundary_v1 = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
     bom_v1 = _claim(dep, AssuranceClaim.ClaimType.AI_BOM)
     carried = _declare(boundary_v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
-    merged = _declare(bom_v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
-    LatentCondition.objects.filter(pk__in=[carried.pk, merged.pk]).update(state=State.FIRED)
+    fired = _declare(bom_v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    LatentCondition.objects.filter(pk__in=[carried.pk, fired.pk]).update(state=State.FIRED)
     boundary_v2 = _next_version(dep, boundary_v1)
     bom_v2 = _next_version(dep, bom_v1)
     redeclared = _declare(bom_v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
 
-    carry(apps, None)
+    _run_data_steps("0038_latent_conditions_stay_watched")
 
     carried.refresh_from_db()
-    merged.refresh_from_db()
+    fired.refresh_from_db()
     redeclared.refresh_from_db()
     assert (carried.claim_id, carried.state) == (boundary_v2.pk, State.FIRED)
-    assert (merged.claim_id, merged.state) == (bom_v1.pk, State.WITHDRAWN)
-    assert str(redeclared.uuid) in merged.withdrawn_note and merged.withdrawn_at is not None
-    assert (redeclared.claim_id, redeclared.state) == (bom_v2.pk, State.PENDING)
+    assert (fired.claim_id, fired.state, fired.withdrawn_at) == (bom_v2.pk, State.FIRED, None)
+    assert (redeclared.claim_id, redeclared.state) == (bom_v2.pk, State.WITHDRAWN)
+    assert str(fired.uuid) in redeclared.withdrawn_note and redeclared.withdrawn_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1086,10 +1077,415 @@ def test_0037_replays_the_legal_axis_as_the_carry_would_have_left_it(statuses, e
     """Restoring only onto a version still "not assessed" missed a stale ruling whose
     version a review was later flagged on: the flag left it "pending" and the
     person's STALE -- which a flag leaves alone -- stayed lost, capping nothing."""
-    from django.apps import apps
-
     current = _chain_left_by_the_old_re_derive(statuses)
     for _ in range(2):  # the second pass changes nothing
-        _migration("0037_carry_watches_and_legal_rulings").carry_forward(apps, None)
+        _run_data_steps("0037_carry_watches_and_legal_rulings")
         current.refresh_from_db()
         assert current.legal_status == expected
+
+
+# ---------------------------------------------------------------------------
+# Round 2 of #105: a fired condition holds its claim wherever it is read from
+# ---------------------------------------------------------------------------
+
+
+def _run_data_steps(name):
+    """Every data step of migration ``name``, as `migrate` runs it."""
+    from django.apps import apps
+    from django.db.migrations.operations import RunPython
+
+    for operation in _migration(name).Migration.operations:
+        if isinstance(operation, RunPython):
+            operation.code(apps, None)
+
+
+def _upgrade(django_capture_on_commit_callbacks):
+    """What `migrate` does on the upgrade from main: the carry migrations' data steps,
+    then every post_migrate receiver, each hook they schedule run as its commit runs it."""
+    from django.core.management.sql import emit_post_migrate_signal
+
+    _run_data_steps("0037_carry_watches_and_legal_rulings")
+    _run_data_steps("0038_latent_conditions_stay_watched")
+    with django_capture_on_commit_callbacks(execute=True):
+        emit_post_migrate_signal(verbosity=0, interactive=False, db="default")
+
+
+def _open_retests(dep, claim):
+    return RetestRequirement.objects.filter(
+        deployment=dep, claim__fingerprint=claim.fingerprint, resolved_at__isnull=True
+    )
+
+
+def _as_main_left_it(dep, claim):
+    """What main's routine re-derive left after a condition fired on ``claim``: a new
+    version reading its deriver's pass, the retest resolved, the condition on the
+    version it closed -- and the decision stored READY with no policy stamp, a column
+    main does not have."""
+    new = _next_version(dep, claim)
+    AssuranceClaim.objects.filter(pk=new.pk).update(status=Status.VERIFIED)
+    RetestRequirement.objects.filter(deployment=dep, resolved_at__isnull=True).update(
+        resolved_at=timezone.now(), resolving_claim=new
+    )
+    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.READY, decision_policy=None)
+    return AssuranceClaim.objects.get(pk=new.pk)
+
+
+def test_after_the_upgrade_a_claim_a_fired_condition_holds_is_not_published_ready(
+    django_capture_on_commit_callbacks,
+):
+    """Main fired the watch, and a routine re-derive read the claim back to VERIFIED
+    and resolved its retest. After `migrate` the condition sat FIRED on the current
+    version while the stored decision, current_decision() and decision_support() all
+    read READY, with no retest open -- and nothing but a later write would fix it."""
+    from assurance.decision import current_decision
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    claim, condition = _training_watched(dep)
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 1
+    current = _as_main_left_it(dep, claim)
+
+    _upgrade(django_capture_on_commit_callbacks)
+
+    fresh = Deployment.objects.get(pk=dep.pk)
+    assert fresh.decision == Deployment.Decision.NEEDS_MORE_EVIDENCE, "the stored decision"
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert decision_support(Deployment.objects.get(pk=dep.pk))["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    condition.refresh_from_db()
+    current.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (State.FIRED, current.pk)
+    assert current.status == Status.STALE
+    assert _open_retests(dep, current).exists()
+    assert str(current.uuid) in [w["claim_uuid"] for w in plan_revalidation(dep)["required"]]
+
+
+def test_a_claim_a_fired_condition_holds_caps_the_decision_whatever_its_row_reads():
+    """The hold is on the claim, and the decision reads it there: not only through
+    the STALE mark and the retest, which anything that writes a claim row can undo."""
+    from assurance.revalidation import plan_revalidation
+
+    dep = _derived_ready()
+    claim, condition = _training_watched(dep)
+    DataBoundary.objects.filter(deployment=dep).update(training_allowed=True)
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 1
+    AssuranceClaim.objects.filter(pk=claim.pk).update(status=Status.VERIFIED)
+    RetestRequirement.objects.filter(deployment=dep).update(resolved_at=timezone.now())
+
+    signal = claim_decision_signal(dep)
+    assert signal["cap"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert [c.pk for c in signal["held"]] == [claim.pk]
+    assert claim.pk not in [c.pk for c in signal["supporting"]]
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    support = decision_support(Deployment.objects.get(pk=dep.pk))
+    assert support["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert [c["uuid"] for c in support["claims"]["held"]] == [str(claim.uuid)]
+    assert "fired" in support["note"] and "data_boundary" in support["note"]
+    required = {w["claim_uuid"]: w for w in plan_revalidation(dep)["required"]}
+    assert str(claim.uuid) in required
+    assert "safe only while training stays denied" in required[str(claim.uuid)]["reason"]
+
+
+def test_a_fired_condition_that_loses_sight_of_its_subject_keeps_and_restores_its_hold():
+    """Out of sight is not back at its baseline. The hold stands -- and where
+    something removed it, it is put back, as it is for a condition still read true."""
+    dep = _derived_ready()
+    vendor, retention, condition = _vendor_watched(dep)
+    claim = condition.claim
+    ProviderAssertion.objects.filter(pk=retention.pk).update(value="365d")
+    assert _evaluate(dep)["fired_count"] == 1
+    Provider.objects.filter(pk=vendor.pk).update(name="VendorX Inc")
+    claim.refresh_from_db()
+    apply_claim_transition(claim, Status.SUPPORTED, actor=_user(), note="looks fine to me")
+    RetestRequirement.objects.filter(deployment=dep).update(resolved_at=timezone.now())
+
+    result = _evaluate(dep)
+
+    assert (result["still_fired_count"], result["unobservable_count"]) == (1, 0)
+    condition.refresh_from_db()
+    claim.refresh_from_db()
+    assert condition.state == State.FIRED
+    assert claim.status == Status.STALE
+    assert _open_retests(dep, claim).exists()
+    # And a re-derive reads it no better, the subject still out of sight.
+    derive_claims(Deployment.objects.get(pk=dep.pk))
+    current = AssuranceClaim.objects.get(deployment=dep, fingerprint=claim.fingerprint, valid_to__isnull=True)
+    condition.refresh_from_db()
+    assert (condition.state, condition.claim_id) == (State.FIRED, current.pk)
+    assert current.status == Status.STALE
+    assert _open_retests(dep, current).exists()
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_an_evaluation_that_cannot_run_at_all_keeps_a_fired_condition_fired(monkeypatch, caplog):
+    dep = _ready()
+    claim = _claim(dep)
+    condition = _declare(claim, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="shadow-exporter", identifier="shadow-exporter",
+        classification=Asset.Classification.KNOWN,
+    )
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 1
+    real = latent.evaluate_conditions
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("could not read")
+
+    monkeypatch.setattr(latent, "evaluate_conditions", broken)
+    assert fire_due_conditions(Deployment.objects.get(pk=dep.pk)) == 0
+
+    condition.refresh_from_db()
+    assert condition.state == State.FIRED
+    assert condition.last_error_at is not None and "RuntimeError" in condition.last_error
+    assert "were not evaluated" in caplog.text
+    monkeypatch.setattr(latent, "evaluate_conditions", real)
+    derive_claims(Deployment.objects.get(pk=dep.pk))
+    current = AssuranceClaim.objects.get(deployment=dep, fingerprint=claim.fingerprint, valid_to__isnull=True)
+    assert current.status == Status.STALE
+    assert _open_retests(dep, current).exists()
+    assert recompute_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+@pytest.mark.parametrize(
+    ("state", "refreshed"),
+    [
+        (State.UNOBSERVABLE, True),
+        (State.EVALUATION_FAILED, True),
+        (State.FIRED, True),
+        (State.PENDING, False),
+    ],
+    ids=["unobservable", "evaluation-failed", "fired", "pending"],
+)
+def test_a_condition_written_whole_in_a_state_the_decision_reads_schedules_a_refresh(
+    django_capture_on_commit_callbacks, state, refreshed
+):
+    """An admin or a shell can write the row whole, in any state. One the decision
+    reads -- unread, or FIRED, which holds its claim -- must refresh it."""
+    with django_capture_on_commit_callbacks(execute=True):  # the set-up commits
+        dep = _ready()
+        claim = _claim(dep)
+    with django_capture_on_commit_callbacks() as hooks:
+        LatentCondition.objects.create(
+            deployment=dep, claim=claim, kind=Kind.ASSET_APPEARS, subject="shadow-exporter",
+            description="written whole", state=state,
+        )
+    scheduled = [h.deployment_id for h in hooks if isinstance(h, signals._RefreshAfterCommit)]
+    assert (dep.pk in scheduled) is refreshed
+
+
+def test_a_boundary_write_the_admin_or_a_shell_makes_fires_a_boundary_watch_when_it_commits(
+    django_capture_on_commit_callbacks,
+):
+    with django_capture_on_commit_callbacks(execute=True):  # the set-up commits
+        dep = _ready()
+        claim, condition = _training_watched(dep)
+
+    with django_capture_on_commit_callbacks(execute=True) as hooks:
+        boundary = DataBoundary.objects.get(deployment=dep)
+        boundary.training_allowed = True
+        boundary.save()
+
+    assert any(isinstance(h, signals._RefreshAfterCommit) and h.deployment_id == dep.pk for h in hooks)
+    condition.refresh_from_db()
+    claim.refresh_from_db()
+    dep.refresh_from_db()
+    assert condition.state == State.FIRED
+    assert claim.status == Status.STALE
+    assert dep.decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_the_upgrade_keeps_the_newest_statement_of_a_watch_and_never_withdraws_one_that_fired(
+    django_capture_on_commit_callbacks,
+):
+    """Main left an operator to re-declare a watch its re-derive dropped. The older
+    statement stayed PENDING on v1; the newer one, on v2, fired. 0037 carried the
+    older to the current version first, and 0038 then withdrew the newer, FIRED
+    statement as a duplicate of it: the precondition stayed broken and the
+    deployment read READY."""
+    from assurance.decision import current_decision
+
+    dep = _derived_ready()
+    vendor = Provider.objects.create(name="VendorX", kind=Provider.Kind.MODEL_PROVIDER)
+    retention = ProviderAssertion.objects.create(
+        provider=vendor, field="data_retention", value="0d", evidence_class=EvidenceClass.VENDOR_ASSERTED
+    )
+    watch = dict(kind=Kind.PROVIDER_POSTURE_CHANGES, subject="VendorX", expected="data_retention")
+    v1 = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+    older = _declare(v1, description="first statement of the watch", **watch)
+    v2 = _next_version(dep, v1)
+    ProviderAssertion.objects.filter(pk=retention.pk).update(value="30d")
+    newer = _declare(v2, description="re-declared: safe only while retention stays 30d", **watch)
+    ProviderAssertion.objects.filter(pk=retention.pk).update(value="0d")
+    assert _evaluate(dep)["fired_count"] == 1
+    v3 = _as_main_left_it(dep, v2)
+
+    _upgrade(django_capture_on_commit_callbacks)
+
+    older.refresh_from_db()
+    newer.refresh_from_db()
+    assert (newer.state, newer.claim_id, newer.withdrawn_at) == (State.FIRED, v3.pk, None)
+    assert (older.state, older.claim_id) == (State.WITHDRAWN, v1.pk)
+    assert str(newer.uuid) in older.withdrawn_note
+    v3.refresh_from_db()
+    assert v3.status == Status.STALE
+    assert _open_retests(dep, v3).exists()
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_the_upgrade_withdraws_no_fired_statement_where_two_statements_of_a_watch_fired():
+    from assurance.claims import held_by_fired_conditions
+
+    dep = _ready()
+    v1 = _claim(dep)
+    first = _declare(v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    v2 = _next_version(dep, v1)
+    second = _declare(v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    LatentCondition.objects.filter(pk__in=[first.pk, second.pk]).update(state=State.FIRED)
+    v3 = _next_version(dep, v2)
+
+    for _ in range(2):  # the second pass changes nothing
+        _run_data_steps("0037_carry_watches_and_legal_rulings")
+        _run_data_steps("0038_latent_conditions_stay_watched")
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (second.claim_id, second.state) == (v3.pk, State.FIRED)
+        # Left where it fired, still holding the claim -- a migration withdraws no
+        # fired watch; a person withdrawing it is the only thing that accepts it.
+        assert (first.claim_id, first.state, first.withdrawn_at) == (v1.pk, State.FIRED, None)
+    assert v3.fingerprint in held_by_fired_conditions(dep)
+
+
+def test_the_upgrade_keeps_a_fired_statement_over_a_later_pending_one_and_withdraws_that():
+    dep = _ready()
+    v1 = _claim(dep)
+    fired = _declare(v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    LatentCondition.objects.filter(pk=fired.pk).update(state=State.FIRED, fired_observation="it appeared")
+    v2 = _next_version(dep, v1)
+    pending = _declare(v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+
+    _run_data_steps("0037_carry_watches_and_legal_rulings")
+    _run_data_steps("0038_latent_conditions_stay_watched")
+
+    fired.refresh_from_db()
+    pending.refresh_from_db()
+    assert (fired.claim_id, fired.state, fired.fired_observation) == (v2.pk, State.FIRED, "it appeared")
+    assert (pending.claim_id, pending.state) == (v2.pk, State.WITHDRAWN)
+    assert str(fired.uuid) in pending.withdrawn_note and pending.withdrawn_at is not None
+
+
+def test_the_upgrade_carries_a_fired_watch_past_a_withdrawn_re_declaration_and_leaves_that_alone():
+    """A withdrawn row is a record, not a watch: nothing is merged into it, and
+    nothing about it is rewritten."""
+    dep = _ready()
+    v1 = _claim(dep)
+    fired = _declare(v1, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    LatentCondition.objects.filter(pk=fired.pk).update(state=State.FIRED, fired_observation="it appeared")
+    v2 = _next_version(dep, v1)
+    redeclared = _declare(v2, kind=Kind.ASSET_APPEARS, subject="shadow-exporter")
+    LatentCondition.objects.filter(pk=redeclared.pk).update(state=State.WITHDRAWN, fired_observation="not needed")
+    fields = ["state", "claim_id", "fired_observation", "withdrawn_at", "withdrawn_note", "withdrawn_by_id"]
+    before = LatentCondition.objects.filter(pk=redeclared.pk).values(*fields).get()
+
+    _run_data_steps("0037_carry_watches_and_legal_rulings")
+    _run_data_steps("0038_latent_conditions_stay_watched")
+
+    fired.refresh_from_db()
+    assert (fired.claim_id, fired.state, fired.withdrawn_at) == (v2.pk, State.FIRED, None)
+    assert LatentCondition.objects.filter(pk=redeclared.pk).values(*fields).get() == before
+
+
+def _obligations(dep):
+    import datetime
+
+    from assurance.models import LegalObligation
+
+    made = []
+    for source, operative in (("GDPR", datetime.date(2026, 1, 1)), ("AI Act", datetime.date(2026, 8, 1))):
+        obligation = LegalObligation.objects.create(
+            jurisdiction="EU", authority_tier=LegalObligation.AuthorityTier.REGULATION, source=source,
+            source_version="1", operative_date=operative,
+        )
+        obligation.deployments.add(dep)
+        made.append(obligation)
+    return made
+
+
+def test_0037_replays_a_persons_later_ruling_and_the_flag_after_it_in_the_order_they_happened():
+    """v1 ruled material (STALE); main's re-derive opened v2 not assessed; the person
+    ruled v2 NOT material (CURRENT); a later obligation flagged v2 for review. The
+    replay from each version's last status read STALE, then a flag, and restored
+    STALE over the person's own later ruling -- a legal judgment nobody made."""
+    from assurance.legal import flag_for_materiality_review, record_materiality_decision
+
+    dep = _ready()
+    person = _user()
+    gdpr, ai_act = _obligations(dep)
+    v1 = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+    record_materiality_decision(v1, gdpr, decided_by=person, material=True, rationale="the Art. 28 change is material")
+    v2 = _next_version(dep, v1)
+    record_materiality_decision(v2, gdpr, decided_by=person, material=False, rationale="not material any more")
+    flag_for_materiality_review(ai_act)
+    v2.refresh_from_db()
+    assert v2.legal_status == LegalStatus.REVIEW_PENDING
+    events = ClaimEvent.objects.filter(claim=v2).count()
+
+    for _ in range(2):  # the second pass changes nothing
+        _run_data_steps("0037_carry_watches_and_legal_rulings")
+        v2.refresh_from_db()
+        assert v2.legal_status == LegalStatus.REVIEW_PENDING
+        assert ClaimEvent.objects.filter(claim=v2).count() == events
+
+
+def test_0037_records_every_legal_status_it_moves():
+    from assurance.legal import record_materiality_decision
+
+    dep = _ready()
+    gdpr, _ai_act = _obligations(dep)
+    v1 = _claim(dep, AssuranceClaim.ClaimType.DATA_BOUNDARY)
+    record_materiality_decision(v1, gdpr, decided_by=_user(), material=True, rationale="material")
+    v2 = _next_version(dep, v1)
+    assert v2.legal_status == LegalStatus.NOT_ASSESSED
+
+    for _ in range(2):  # the second pass changes nothing
+        _run_data_steps("0037_carry_watches_and_legal_rulings")
+        v2.refresh_from_db()
+        assert v2.legal_status == LegalStatus.STALE
+        moved = ClaimEvent.objects.filter(claim=v2, note__contains="0037")
+        assert moved.count() == 1
+        assert f"{LegalStatus.NOT_ASSESSED} -> {LegalStatus.STALE}" in moved.get().note
+
+
+@pytest.mark.parametrize(
+    "name", ["0037_carry_watches_and_legal_rulings", "0038_latent_conditions_stay_watched"]
+)
+def test_the_carry_migrations_say_they_cannot_be_reversed(name):
+    """0038's reverse re-adds the unconditional constraint, which a watch withdrawn
+    and declared again violates: the reverse failed part-way on an IntegrityError.
+    Undoing a carry would recreate the defect it repairs, so neither claims a reverse."""
+    from django.db.migrations.operations import RunPython
+
+    steps = [op for op in _migration(name).Migration.operations if isinstance(op, RunPython)]
+    assert steps and not any(step.reversible for step in steps)
+
+
+def test_every_column_this_release_adds_without_null_has_a_database_default():
+    """Mid-rollout, a writer of the release before inserts rows without the columns
+    this one adds. A NOT NULL column the database does not default refuses its every
+    insert: it could not record a finding, declare a watch or ingest an outcome."""
+    from django.db.migrations.operations import AddField
+    from django.db.models.fields import NOT_PROVIDED
+
+    undefaulted = [
+        f"{operation.model_name}.{operation.name}"
+        for name in (
+            "0036_accepted_risk_expires",
+            "0037_carry_watches_and_legal_rulings",
+            "0038_latent_conditions_stay_watched",
+            "0039_bind_chain_outcomes_to_their_route",
+        )
+        for operation in _migration(name).Migration.operations
+        if isinstance(operation, AddField)
+        and not operation.field.null
+        and operation.field.db_default is NOT_PROVIDED
+    ]
+    assert undefaulted == []

@@ -54,6 +54,7 @@ from assurance.revision import (
     read_decision,
     transitions_since,
 )
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -426,8 +427,9 @@ def test_a_row_behind_a_log_that_moved_off_the_pause_is_published_as_the_lift():
 
 def test_a_row_level_with_or_ahead_of_its_log_is_published_as_it_stands(caplog):
     """A row with a revision and no transitions behind it (decided before the log
-    existed) is not behind anything; it is trusted, and nothing is written."""
-    dep = Deployment.objects.create(name="d", owner=_owner())
+    existed) is not behind anything; it is trusted, and nothing is written. Stamped
+    under the rules in force: the planted decision stands for one they computed."""
+    dep = stamped_under_the_rules_in_force(Deployment.objects.create(name="d", owner=_owner()))
     accept_transition(dep, to_decision=D.PAUSED)
     Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=5)
 

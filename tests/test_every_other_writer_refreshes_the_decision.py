@@ -461,15 +461,54 @@ def test_the_decision_reads_no_finding_column_but_these():
     """A finding saved on a column outside `DECISION_COLUMNS` schedules no refresh,
     so no such column may move the decision. Each one is changed here, alone, on a
     finding that places the deployment, and the decision must not move."""
+    dep = _scanned()
+    finding = _finding(dep, severity="high")
+    changed = _no_other_finding_column_moves(dep, finding, Deployment.Decision.NEEDS_REMEDIATION)
+    assert "remediation_state" in changed and "assignee" in changed
+
+
+def test_the_decision_reads_no_finding_column_but_these_on_an_accepted_finding_either():
+    """An accepted finding is read through more columns than an open one: when its
+    acceptance ends, and what severity it was given at. A save naming only the
+    second scheduled no refresh, so narrowing an acceptance left the stored decision
+    READY_RESTRICTED while a fresh one needed more evidence."""
+    dep = _scanned()
+    finding = Finding.objects.create(
+        deployment=dep, fingerprint="fp-accepted", finding_type="t", title="T", severity="high",
+        status=Finding.Status.ACCEPTED, risk_accepted_until=timezone.now() + timedelta(days=30),
+        risk_accepted_severity="high",
+    )
+    changed = _no_other_finding_column_moves(dep, finding, Deployment.Decision.READY_RESTRICTED)
+    assert "remediation_state" in changed and "assignee" in changed
+
+
+def test_narrowing_an_acceptance_refreshes_the_decision(django_capture_on_commit_callbacks):
+    with django_capture_on_commit_callbacks(execute=True):
+        dep = _scanned()
+        finding = Finding.objects.create(
+            deployment=dep, fingerprint="fp-accepted", finding_type="t", title="T", severity="high",
+            status=Finding.Status.ACCEPTED, risk_accepted_until=timezone.now() + timedelta(days=30),
+            risk_accepted_severity="high",
+        )
+    assert _stored(dep) == Deployment.Decision.READY_RESTRICTED
+
+    with django_capture_on_commit_callbacks(execute=True) as callbacks:
+        finding.risk_accepted_severity = "low"
+        finding.save(update_fields=["risk_accepted_severity"])
+
+    assert _refreshes(callbacks) == [dep.pk]
+    assert _stored(dep) == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def _no_other_finding_column_moves(dep, finding, decided):
+    """Change every Finding column outside `DECISION_COLUMNS`, one at a time, and
+    hold the decision to ``decided`` throughout. The columns changed, by name."""
     from django.db import models as dj_models
 
     columns = signals.DECISION_COLUMNS["assurance.Finding"]
-    dep = _scanned()
     other = _scanned("other")
-    finding = _finding(dep, severity="high")
     asset = Asset.objects.create(deployment=dep, kind=Asset.Kind.MODEL, name="m", identifier="m")
-    decided = compute_decision(Deployment.objects.get(pk=dep.pk))
-    assert decided == Deployment.Decision.NEEDS_REMEDIATION
+    assert compute_decision(Deployment.objects.get(pk=dep.pk)) == decided
     changed = []
     for field in Finding._meta.concrete_fields:
         if field.primary_key or field.name in columns or field.attname in columns:
@@ -502,7 +541,7 @@ def test_the_decision_reads_no_finding_column_but_these():
         assert compute_decision(Deployment.objects.get(pk=dep.pk)) == decided, field.name
         Finding.objects.filter(pk=finding.pk).update(**{field.attname: before[field.attname]})
         changed.append(field.name)
-    assert "remediation_state" in changed and "assignee" in changed
+    return changed
 
 
 # ------------------------------------------------ an ingest is one transaction

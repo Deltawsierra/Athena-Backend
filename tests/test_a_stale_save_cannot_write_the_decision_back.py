@@ -66,7 +66,7 @@ from assurance.revision import (
     decision_in_force,
     read_decision,
 )
-from tests.decision_surfaces import one_decision
+from tests.decision_surfaces import one_decision, stamped_under_the_rules_in_force
 
 pytestmark = pytest.mark.django_db
 
@@ -299,8 +299,9 @@ def test_the_admin_saving_an_instance_loaded_before_a_refresh_leaves_the_decisio
 def _behind_its_log():
     """READY at 1, then NOT_RECOMMENDED at 2 -- and the row written back to READY at
     1 beneath the log, the state the stale save left before the model refused it.
-    Planted with a QuerySet update, which the model cannot see."""
-    dep = Deployment.objects.create(name="d", owner=_owner())
+    Planted with a QuerySet update, which the model cannot see. Stamped under the
+    rules in force: what is planted stands for decisions the rules computed."""
+    dep = stamped_under_the_rules_in_force(Deployment.objects.create(name="d", owner=_owner()))
     accept_transition(dep, to_decision=D.READY)
     accept_transition(dep, to_decision=D.NOT_RECOMMENDED)
     Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_revision=1)
@@ -571,7 +572,7 @@ def test_a_reading_of_a_row_that_has_moved_is_refused():
     """``accept_transition(in_force=...)`` trusts the caller's reading. One taken
     before the row moved would be moved FROM -- and when it already held the
     decision accepted, written back: the row beneath its log again."""
-    dep = Deployment.objects.create(name="d", owner=_owner())
+    dep = stamped_under_the_rules_in_force(Deployment.objects.create(name="d", owner=_owner()))
     accept_transition(dep, to_decision=D.READY)
     reading = decision_in_force(Deployment.objects.get(pk=dep.pk))
     assert reading[:2] == (D.READY, 1)
@@ -605,7 +606,7 @@ def test_a_reading_of_a_row_that_moved_away_and_back_is_refused():
     decision, a different fact. A reading compared on the decision alone accepted
     the old one and wrote the row back to revision 1, beneath its own log -- the
     wedge the repair exists to undo. The revision is part of the reading."""
-    dep = Deployment.objects.create(name="d", owner=_owner())
+    dep = stamped_under_the_rules_in_force(Deployment.objects.create(name="d", owner=_owner()))
     accept_transition(dep, to_decision=D.READY)
     reading = decision_in_force(Deployment.objects.get(pk=dep.pk))
     accept_transition(Deployment.objects.get(pk=dep.pk), to_decision=D.NOT_RECOMMENDED)

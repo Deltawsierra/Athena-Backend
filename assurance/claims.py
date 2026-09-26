@@ -65,6 +65,7 @@ from .fingerprint import (
     policy_version,
 )
 from .models import (
+    LATENT_HOLDING_STATES,
     LATENT_LIVE_STATES,
     AssuranceClaim,
     ClaimEvent,
@@ -546,7 +547,7 @@ def held_by_fired_conditions(deployment) -> frozenset:
     """
     return frozenset(
         LatentCondition.objects.filter(
-            deployment=deployment, state=LatentCondition.State.FIRED
+            deployment=deployment, state__in=LATENT_HOLDING_STATES
         ).values_list("claim__fingerprint", flat=True)
     )
 

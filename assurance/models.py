@@ -738,7 +738,10 @@ class Finding(models.Model):
     # acceptance that does not say (one set before this was recorded, or outside
     # the route that records it), which reads as lapsed: an acceptance of an
     # unknown severity is not one anybody can be shown to have made.
-    risk_accepted_severity = models.CharField(max_length=16, blank=True, default="")
+    # Defaulted in the database too, so a writer that predates the column -- the
+    # release before this one, mid-rollout -- can still insert a finding: blank,
+    # which covers nothing, the conservative reading.
+    risk_accepted_severity = models.CharField(max_length=16, blank=True, default="", db_default="")
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1801,7 +1804,9 @@ class LatentCondition(models.Model):
     # When the evaluator last raised on this condition, and the type of what it
     # raised -- never its text. Cleared by the next evaluation that completes.
     last_error_at = models.DateTimeField(null=True, blank=True)
-    last_error = models.CharField(max_length=200, blank=True)
+    # Defaulted in the database, as is `withdrawn_note`: a writer that predates the
+    # column can still declare a condition.
+    last_error = models.CharField(max_length=200, blank=True, default="", db_default="")
 
     declared_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -1822,7 +1827,7 @@ class LatentCondition(models.Model):
         related_name="withdrawn_latent_conditions",
     )
     withdrawn_at = models.DateTimeField(null=True, blank=True)
-    withdrawn_note = models.TextField(blank=True)
+    withdrawn_note = models.TextField(blank=True, default="", db_default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -1862,6 +1867,11 @@ LATENT_LIVE_STATES = frozenset(
 LATENT_UNREAD_STATES = frozenset(
     {LatentCondition.State.UNOBSERVABLE, LatentCondition.State.EVALUATION_FAILED}
 )
+#: The state in which a condition holds its claim: no better than STALE, with a retest
+#: open, on every version of the claim, until it re-arms or a person withdraws it. The
+#: decision reads this too -- on the claim, not only through the STALE mark and the
+#: retest, which anything that writes a claim row or a retest can undo.
+LATENT_HOLDING_STATES = frozenset({LatentCondition.State.FIRED})
 
 
 class ChainBirth(models.Model):
@@ -2727,7 +2737,9 @@ class WorkflowChainOutcome(models.Model):
     # "unrecorded", which floors a held exactly as a moved route does -- the
     # conservative reading, and the one a migration cannot improve on without
     # inventing the route a past run exercised.
-    route_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    # Defaulted in the database too, so a writer that predates the column can still
+    # record an outcome -- as unrecorded, which floors a held.
+    route_fingerprint = models.CharField(max_length=64, blank=True, default="", db_default="")
     observer_engine = models.CharField(max_length=64, blank=True)
     observer_key_id = models.CharField(max_length=64, blank=True)
     evidence_digest = models.CharField(max_length=71, blank=True)

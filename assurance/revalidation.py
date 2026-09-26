@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from . import observability as obs
 from .fingerprint import compute_system_fingerprint
-from .models import AssuranceClaim, RetestRequirement
+from .models import LATENT_HOLDING_STATES, AssuranceClaim, LatentCondition, RetestRequirement
 from .workflow_chains import composition_for, read_expected_workflows
 
 ClaimType = AssuranceClaim.ClaimType
@@ -60,11 +60,19 @@ _ACHILLES_CAPABILITIES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _reason_for(claim: AssuranceClaim, requirement: RetestRequirement | None) -> str:
+def _reason_for(claim: AssuranceClaim, requirement: RetestRequirement | None, holding=None) -> str:
     """Why this claim needs revalidating: the open retest obligation's own reason
-    when a change opened one, else the honest reason its status implies."""
+    when a change opened one, else the declared condition that fired on it and holds
+    it (``holding``), else the honest reason its status implies."""
     if requirement is not None:
         return requirement.reason
+    if holding is not None:
+        return (
+            f"A declared condition fired on this claim and still holds it: {holding.description} "
+            f"({holding.get_kind_display()}; subject {holding.subject!r}). Observed when it fired: "
+            f"{holding.fired_observation or '(not recorded)'}. It is held at stale until the "
+            "condition is found back at its baseline or a person withdraws it."
+        )
     if claim.status == Status.CONTRADICTED:
         return "The current state contradicts this claim; fresh evidence is required to restore or retire it."
     if claim.status == Status.STALE:
@@ -72,15 +80,15 @@ def _reason_for(claim: AssuranceClaim, requirement: RetestRequirement | None) ->
     return "The claim requires fresh evidence."
 
 
-def _claim_work(claim: AssuranceClaim, requirement: RetestRequirement | None) -> dict:
-    """The minimal revalidation work for one drifted/stale/contradicted claim."""
+def _claim_work(claim: AssuranceClaim, requirement: RetestRequirement | None, holding=None) -> dict:
+    """The minimal revalidation work for one drifted/stale/contradicted/held claim."""
     reassessment = _ATHENA_REASSESSMENT.get(claim.claim_type)
     return {
         "claim_uuid": str(claim.uuid),
         "claim_type": claim.claim_type,
         "statement": claim.statement,
         "status": claim.status,
-        "reason": _reason_for(claim, requirement),
+        "reason": _reason_for(claim, requirement, holding),
         "retest_requirement_uuid": str(requirement.uuid) if requirement is not None else None,
         # The minimal Athena work: re-derive exactly this claim's assessment.
         "athena_reassessments": [reassessment] if reassessment else [],
@@ -102,9 +110,10 @@ def plan_revalidation(deployment) -> dict:
 
     For each CURRENT claim (``valid_to`` null, excluding human REVOKED withdrawals):
 
-    - **required** — the claim has an open retest obligation, is STALE, or is
-      CONTRADICTED: name the exact Athena reassessment and Achilles capability areas
-      to re-run. This is the change-driven minimal set.
+    - **required** — the claim has an open retest obligation, is STALE, is
+      CONTRADICTED, or a FIRED latent condition holds it (whatever its row reads):
+      name the exact Athena reassessment and Achilles capability areas to re-run.
+      This is the change-driven minimal set.
     - **outstanding_unknowns** — the claim is UNKNOWN or PARTIALLY_VERIFIED: a
       pre-existing gap in what could be established, surfaced as work to reach
       assurance but distinct from what *this* change invalidated. Each entry
@@ -150,11 +159,27 @@ def plan_revalidation(deployment) -> dict:
         outstanding_unknowns: list[dict] = []
         still_current: list[dict] = []
 
+        # And each claim a FIRED latent condition holds, on any version of it: it is
+        # work until the condition re-arms or a person withdraws it, whatever the
+        # claim row reads -- the decision reads it the same way.
+        holding: dict[str, LatentCondition] = {}
+        for condition in (
+            LatentCondition.objects.filter(deployment=deployment, state__in=LATENT_HOLDING_STATES)
+            .select_related("claim")
+            .order_by("pk")
+        ):
+            holding.setdefault(condition.claim.fingerprint, condition)
+
         for claim in current:
             requirement = open_reqs.get(claim.fingerprint)
-            drifted = requirement is not None or claim.status in (Status.CONTRADICTED, Status.STALE)
+            held = holding.get(claim.fingerprint)
+            drifted = (
+                requirement is not None
+                or held is not None
+                or claim.status in (Status.CONTRADICTED, Status.STALE)
+            )
             if drifted:
-                required.append(_claim_work(claim, requirement))
+                required.append(_claim_work(claim, requirement, held))
             elif claim.status in _NOT_ESTABLISHED:
                 outstanding_unknowns.append(
                     {
@@ -190,9 +215,9 @@ def plan_revalidation(deployment) -> dict:
                 # others are still evidence gone stale, and are listed as such.
                 "approved": workflow in approved,
                 "reason": (
-                    "its standing held was taken against a served route that is not "
-                    "the one serving now, or one nothing recorded; exercise the chain "
-                    "again against the route that serves"
+                    "a held for it was taken against a served route that is not the one "
+                    "serving now, or one nothing recorded, and nothing as strong has been "
+                    "taken against the route that serves; exercise the chain again against it"
                 ),
             }
             for workflow in composition.off_route

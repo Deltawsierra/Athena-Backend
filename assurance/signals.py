@@ -35,7 +35,7 @@ from django.dispatch import receiver
 
 # Plain constants; the models module is loaded before `AppConfig.ready` imports
 # this one, so importing them here changes no loading order.
-from .models import DECISION_OWNED_FIELDS, LATENT_UNREAD_STATES
+from .models import DECISION_OWNED_FIELDS, LATENT_HOLDING_STATES, LATENT_UNREAD_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,33 @@ def _has_column(using, table, column) -> bool:
     except DatabaseError:
         return False
     return any(col.name == column for col in description)
+
+
+@receiver(post_migrate, dispatch_uid="assurance_restore_fired_holds")
+def restore_the_holds_fired_conditions_keep(sender, using=None, apps=None, **kwargs):
+    """Put back the hold each FIRED latent condition keeps on its claim, wherever
+    something removed it (:func:`assurance.latent.restore_fired_holds`).
+
+    The upgrade from the release before this one: its re-derive left a fired
+    condition on the version it closed and read the new version back to a pass,
+    resolving the retest. 0038 carries the condition to the claim's current version,
+    where it holds it again -- but the claim row still read VERIFIED, no retest was
+    open, and the stored decision, recomputed here, read READY until some later
+    write happened to evaluate the condition. Connected BEFORE the recompute below,
+    so the decisions it recomputes read the hold as it is put back; each restore
+    also schedules its deployment's refresh, as any write to a claim does.
+
+    Keyed on the data, like the receivers below: a condition whose hold is in place
+    is not touched, so an unrelated ``migrate`` writes nothing. It reads no condition
+    again and writes no decision column itself.
+    """
+    if not _the_decision_columns_are_migrated(sender, using, apps):
+        return
+    from .latent import deployments_with_a_lifted_hold, restore_fired_holds
+    from .models import Deployment
+
+    for deployment in Deployment.objects.filter(pk__in=deployments_with_a_lifted_hold()).order_by("pk"):
+        restore_fired_holds(deployment)
 
 
 @receiver(post_migrate, dispatch_uid="assurance_recompute_after_demotion")
@@ -323,8 +350,11 @@ def _fanout_input_deleted(sender, instance, using=None, **kwargs):
 #: nothing the decision computes. Pinned by
 #: test_the_decision_reads_no_finding_column_but_these.
 DECISION_COLUMNS = {
+    # An accepted finding is read for when its acceptance ends and the severity it
+    # was given at (`decision.accepted_risk_signal`): narrowing that severity alone
+    # took an acceptance from standing to outgrown and scheduled nothing.
     "assurance.Finding": frozenset(
-        {"deployment", "deployment_id", "status", "severity", "risk_accepted_until"}
+        {"deployment", "deployment_id", "status", "severity", "risk_accepted_until", "risk_accepted_severity"}
     ),
     # Not `last_evaluated_at`, which every evaluation writes: a refresh it scheduled
     # would evaluate again, and write it again.
@@ -337,9 +367,10 @@ DECISION_COLUMNS = {
 #: the values it reads. A row written whole in none of them cannot move the decision
 #: when it is first written -- declaring a watch writes a PENDING one. A whole save of
 #: an existing row is refreshed whatever it holds (`_remember_prior_deployment`
-#: notes the row's deployment first), so a row moved OUT of such a state is too.
+#: notes the row's deployment first), so a row moved OUT of such a state is too. A
+#: condition is read unread, and FIRED, which holds its claim whatever the claim reads.
 DECISION_ROWS = {
-    "assurance.LatentCondition": ("state", LATENT_UNREAD_STATES),
+    "assurance.LatentCondition": ("state", LATENT_UNREAD_STATES | LATENT_HOLDING_STATES),
 }
 
 #: The Deployment columns that are the refresh's output rather than an input to

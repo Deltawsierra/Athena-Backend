@@ -19,6 +19,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from assurance import receipt
+from assurance.decision import recompute_decision
 from assurance.models import (
     Asset,
     DataBoundary,
@@ -59,7 +60,6 @@ def _populated_deployment(owner, *, environment=Deployment.Environment.PRODUCTIO
         name="checkout-assistant",
         owner=owner,
         environment=environment,
-        decision=Deployment.Decision.NEEDS_MORE_EVIDENCE,
     )
     f = _finding(dep)
     _evidence(f, EvidenceClass.VENDOR_ASSERTED, "vendor_doc", "a" * 64)
@@ -71,6 +71,10 @@ def _populated_deployment(owner, *, environment=Deployment.Environment.PRODUCTIO
         deployment=dep, kind=Asset.Kind.MODEL, name="gpt-x", provider=provider,
         classification=Asset.Classification.APPROVED,
     )
+    # Decided by the rules, and stamped with them. A decision written by hand with
+    # no stamp is not what any rule computed, and the receipt recomputes it rather
+    # than publish it (decision.current_decision).
+    recompute_decision(dep)
     return dep, f
 
 
@@ -106,9 +110,10 @@ def test_receipt_carries_the_full_versioned_tuple():
     assert r["system"]["uuid"] == str(dep.uuid)
     assert r["system"]["environment"] == Deployment.Environment.PRODUCTION
 
-    # Result R — the six-state decision, carried at its true strength (not inflated).
-    assert r["result"]["decision"] == Deployment.Decision.NEEDS_MORE_EVIDENCE
-    assert r["result"]["decision_label"] == "Requires additional evidence"
+    # Result R — the six-state decision, carried at its true strength (not inflated):
+    # an open high finding needs remediation.
+    assert r["result"]["decision"] == Deployment.Decision.NEEDS_REMEDIATION
+    assert r["result"]["decision_label"] == Deployment.Decision.NEEDS_REMEDIATION.label
 
     # Evidence set E — the Merkle-style root over the finding/evidence hashes.
     assert r["evidence"]["algorithm"] == "sha256"

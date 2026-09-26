@@ -64,12 +64,14 @@ from django.utils import timezone
 from .graph_refs import in_graph
 from . import observability as obs
 from .models import (
+    LATENT_HOLDING_STATES,
     LATENT_LIVE_STATES,
     AssuranceClaim,
     ClaimEvent,
     DataBoundary,
     LatentCondition,
     Provider,
+    RetestRequirement,
 )
 from .governance import is_shadow
 
@@ -484,7 +486,7 @@ def evaluate_conditions(deployment, *, actor=None, now=None) -> dict:
       retest open; a claim something moved back to a pass is marked again. Back at
       its baseline, it re-arms to PENDING and resolves the retest it opened. A
       subject it can no longer see does not clear it: that is not the subject coming
-      back to its baseline, so the hold stands.
+      back to its baseline, so the hold stands, and is put back the same way.
 
     A condition whose subject can no longer be read goes UNOBSERVABLE and is
     counted as a coverage loss. It is never treated as "still does not hold".
@@ -554,6 +556,38 @@ _STILL_HOLDS = (
 )
 
 
+def _still_holding_reason(condition, observation: str = "", *, unread: str = "", restored: bool = False) -> str:
+    """The reason a retest re-opened for a FIRED condition gives: read still true,
+    no longer readable, or -- ``restored`` -- put back without reading it again."""
+    if unread:
+        return (
+            f"{_reason(condition, condition.fired_observation or '(not recorded)')} It can no "
+            f"longer be read ({unread}), which is not the subject back at its baseline: the "
+            "hold stands."
+        )
+    if restored:
+        return (
+            f"{_reason(condition, condition.fired_observation or '(not recorded)')} It has not "
+            "re-armed and nobody withdrew it, so the hold it keeps on its claim is put back."
+        )
+    return f"{_reason(condition, observation)} It still holds."
+
+
+def _put_back_hold(deployment, claim, *, reason: str, now, actor, system_fp):
+    """The hold a FIRED condition keeps on ``claim``: no better than STALE, and a
+    retest open for its identity. Each is put back if something moved it; the retest
+    opened, if one was, is returned. ``system_fp`` is called only when one is."""
+    from .invalidation import _has_open_requirement, _mark_stale, _open_requirement
+
+    requirement = None
+    if not _has_open_requirement(deployment, claim):
+        requirement = _open_requirement(
+            deployment, claim, system_fp=system_fp(), now=now, actor=actor, reason=reason
+        )
+    _mark_stale(claim, now, note=_STILL_HOLDS)
+    return requirement
+
+
 class _Evaluation:
     """One evaluation of a deployment's live conditions: what the conditions in it
     share, and what it found."""
@@ -608,9 +642,10 @@ class _Evaluation:
             holds, observation = observe(condition, self.deployment)
         except Unobservable as exc:
             if prior == State.FIRED:
-                # Out of sight is not back at baseline. The hold stands; what was
-                # observed when it fired is left as it was.
-                self._save(condition)
+                # Out of sight is not back at baseline. The hold stands -- and is put
+                # back where something removed it, as for a condition read still true;
+                # what was observed when it fired is left as it was.
+                self._hold(condition, unread=str(exc))
                 self.found["still_fired"].append(uid)
                 return
             self._save(condition, state=State.UNOBSERVABLE, fired_observation=str(exc))
@@ -658,26 +693,22 @@ class _Evaluation:
             fired_requirement=requirement,
         )
 
-    def _hold(self, condition, observation: str) -> None:
-        """A FIRED condition that still holds: its claim reads no better than STALE
-        and a retest is open. Both are already so, unless something moved them -- a
-        person moved the claim back to a pass, or a re-derive resolved the retest
-        before a fired condition held one -- and each is put back if it was."""
-        from .invalidation import _has_open_requirement, _mark_stale, _open_requirement
-
-        claim = self.claim_of(condition)
-        changes = {}
-        if not _has_open_requirement(self.deployment, claim):
-            changes["fired_requirement"] = _open_requirement(
-                self.deployment,
-                claim,
-                system_fp=self.system_fp(),
-                now=self.now,
-                actor=self.actor,
-                reason=f"{_reason(condition, observation)} It still holds.",
-            )
-        _mark_stale(claim, self.now, note=_STILL_HOLDS)
-        self._save(condition, **changes)
+    def _hold(self, condition, observation: str = "", *, unread: str = "") -> None:
+        """A FIRED condition that still holds, or that can no longer be read: its
+        claim reads no better than STALE and a retest is open. Both are already so,
+        unless something moved them -- a person moved the claim back to a pass, or a
+        re-derive resolved the retest before a fired condition held one -- and each is
+        put back if it was. ``unread``: why the subject cannot be read now, for a
+        condition out of sight, which is not back at its baseline."""
+        requirement = _put_back_hold(
+            self.deployment,
+            self.claim_of(condition),
+            reason=_still_holding_reason(condition, observation, unread=unread),
+            now=self.now,
+            actor=self.actor,
+            system_fp=self.system_fp,
+        )
+        self._save(condition, **({} if requirement is None else {"fired_requirement": requirement}))
 
     def _rearm(self, condition, observation: str) -> None:
         """A FIRED condition found back at its baseline: watched again, and the
@@ -961,6 +992,91 @@ def _record_not_evaluated(deployment, now, exc) -> None:
             "the failed evaluation of deployment %s's latent conditions could not be recorded",
             deployment.pk,
         )
+
+
+def _lifted_holds(deployment_id=None):
+    """Each FIRED condition whose hold on its claim is not in place, with the claim
+    version it holds -- the current, unrevoked version of the claim it fired on, which
+    reads better than STALE or has no retest open for its identity. Only the
+    deployment ``deployment_id``, when one is named. Reads, and writes nothing."""
+    from .invalidation import _STALE_SKIP
+
+    fired = LatentCondition.objects.filter(state__in=LATENT_HOLDING_STATES).select_related("claim")
+    if deployment_id is not None:
+        fired = fired.filter(deployment_id=deployment_id)
+    lifted = []
+    for condition in fired.order_by("deployment_id", "pk"):
+        claim = (
+            AssuranceClaim.objects.filter(
+                deployment_id=condition.deployment_id, fingerprint=condition.claim.fingerprint
+            )
+            .current()
+            .exclude(status=AssuranceClaim.ClaimStatus.REVOKED)
+            .first()
+        )
+        if claim is None:
+            continue
+        retest_open = RetestRequirement.objects.filter(
+            deployment_id=condition.deployment_id,
+            claim__fingerprint=claim.fingerprint,
+            resolved_at__isnull=True,
+        ).exists()
+        if claim.status not in _STALE_SKIP or not retest_open:
+            lifted.append((condition, claim))
+    return lifted
+
+
+def deployments_with_a_lifted_hold() -> list:
+    """The deployments where a FIRED condition's hold on its claim is not in place
+    (:func:`restore_fired_holds`), by pk, in order."""
+    return sorted({condition.deployment_id for condition, _claim in _lifted_holds()})
+
+
+@transaction.atomic
+def restore_fired_holds(deployment, *, now=None) -> int:
+    """Put back the hold each FIRED condition on ``deployment`` keeps on its claim,
+    wherever something removed it; the number of conditions whose hold was put back.
+
+    Without reading any condition again: a FIRED condition holds its claim until an
+    evaluation finds it back at its baseline or a person withdraws it, and until then
+    the hold is a fact of the record, not of a reading. It is what the evaluation's
+    own hold does (:class:`_Evaluation`), for the case nothing evaluates: the upgrade
+    from a release whose re-derive read a held claim back to a pass and resolved its
+    retest while the condition stayed FIRED. The claim held is the current, unrevoked
+    version of the one the condition fired on -- a condition left on an older version
+    holds the claim, not that version.
+
+    Writes a claim and a retest, which the backstop refreshes the decision after, as
+    any other writer's. Never inside a stop: called from the upgrade only.
+    """
+    now = now or timezone.now()
+    system_fp = []
+
+    def fingerprint():
+        if not system_fp:
+            from .fingerprint import compute_system_fingerprint
+
+            system_fp.append(compute_system_fingerprint(deployment))
+        return system_fp[0]
+
+    restored = 0
+    # One instance per claim, as in an evaluation: two conditions holding one claim
+    # mark it once, and write one event.
+    claims: dict = {}
+    for condition, claim in _lifted_holds(deployment.pk):
+        claim = claims.setdefault(claim.pk, claim)
+        requirement = _put_back_hold(
+            deployment,
+            claim,
+            reason=_still_holding_reason(condition, restored=True),
+            now=now,
+            actor=None,
+            system_fp=fingerprint,
+        )
+        if requirement is not None and condition.claim_id == claim.pk:
+            LatentCondition.objects.filter(pk=condition.pk).update(fired_requirement=requirement, updated_at=now)
+        restored += 1
+    return restored
 
 
 def deployments_watching_boundary(deployment_id) -> set:

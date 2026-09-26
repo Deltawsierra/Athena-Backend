@@ -29,6 +29,7 @@ from __future__ import annotations
 from . import observed_outcomes
 from .composition import (
     EVIDENCE_UNCLASSIFIED,
+    READINESS_ORDER,
     READY,
     READY_RESTRICTED,
     ROUTE_CURRENT,
@@ -219,6 +220,20 @@ def closed_scope(composition: Composition) -> bool:
     )
 
 
+#: What an approved workflow set whose every chain holds contributes, where some of
+#: what holds is weaker evidence than an exercise of the effect (owner default,
+#: #278). The worst of those that apply. Named in the policy document, as every rule
+#: of the decision is (:mod:`assurance.policy`).
+CHAIN_CAPS: dict[str, str] = {
+    # A held resting on an authorization check alone: the gate authorized the
+    # action at dispatch, and nothing shows the effect happened within it.
+    "held_on_authorization_check": READY_RESTRICTED,
+    # A held signed by an engine this platform has not classified: at best a
+    # permit check's worth.
+    "held_on_unclassified_signer": READY_RESTRICTED,
+}
+
+
 def composition_decision_signal(composition: Composition) -> str | None:
     """What a composition contributes to the deployment decision. Pure.
 
@@ -289,17 +304,24 @@ def composition_decision_signal(composition: Composition) -> str | None:
     # Any one such workflow is enough -- the others' effects being seen says
     # nothing about this one's. Only reachable with every approved workflow held,
     # so every name in `authorization_checked` here is a held.
-    if composition.authorization_checked:
-        return READY_RESTRICTED
+    #
     # And so does one signed by an engine this platform has not classified. Its
     # signature verifies, and nothing says what the signer could see -- which is
     # at best a permit check's worth. Left at READY it outranked the permit check
     # it cannot be shown to exceed: weaker evidence, the better decision. Every
     # standing outcome is an approved `held` here, so the census counts exactly
     # the held chains resting on such a signer.
+    signal = READY
+    if composition.authorization_checked:
+        signal = _worse_state(signal, CHAIN_CAPS["held_on_authorization_check"])
     if composition.evidence_census.get(EVIDENCE_UNCLASSIFIED, 0):
-        return READY_RESTRICTED
-    return READY
+        signal = _worse_state(signal, CHAIN_CAPS["held_on_unclassified_signer"])
+    return signal
+
+
+def _worse_state(a: str, b: str) -> str:
+    """The worse of two decision states, in the order the composition rule ranks them."""
+    return a if READINESS_ORDER.index(a) >= READINESS_ORDER.index(b) else b
 
 
 def composition_payload(

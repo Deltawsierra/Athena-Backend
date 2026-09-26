@@ -28,6 +28,21 @@ def surfaces(dep, client) -> dict:
     }
 
 
+def stamped_under_the_rules_in_force(dep):
+    """Stamp ``dep``'s stored decision with the policy pin in force, and return it.
+
+    For a test that writes a decision by hand -- through the one writer, or a
+    QuerySet update -- to stand for one the rules computed. A stored decision with no
+    stamp names no rules it was computed under, and every publishing read recomputes
+    it (``decision.current_decision``); stamped here, the hand-written decision is
+    published as written, which is what such a test is about."""
+    from assurance.policy import policy_pin
+
+    Deployment.objects.filter(pk=dep.pk).update(decision_policy=policy_pin())
+    dep.decision_policy = policy_pin()
+    return dep
+
+
 def one_decision(dep, client) -> str | None:
     """The decision every surface publishes, asserting they publish ONE -- the same
     decision under the same revision."""

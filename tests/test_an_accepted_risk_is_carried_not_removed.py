@@ -67,6 +67,13 @@ def _in(days):
     return timezone.now() + timedelta(days=days)
 
 
+def _stamped_under_these_rules(dep) -> bool:
+    """Whether ``dep``'s stored decision carries the stamp of the rules in force."""
+    from assurance.decision import _current_policy_pin
+
+    return Deployment.objects.get(pk=dep.pk).decision_policy == _current_policy_pin()
+
+
 # ---- The rule. ----
 
 
@@ -173,8 +180,6 @@ def test_acceptances_made_before_the_rule_are_recomputed_at_their_first_read():
     recomputes it under these. Without the stamp, the stale READY is what every
     surface publishes -- and marking it from a migration would write a decision
     column behind the transition log."""
-    from assurance.decision import _current_policy_pin
-
     dep = _scanned()
     untouched = _scanned()
     _finding(untouched, "low")
@@ -196,12 +201,12 @@ def test_acceptances_made_before_the_rule_are_recomputed_at_their_first_read():
     dep = Deployment.objects.get(pk=dep.pk)
     assert current_decision(dep) == D.NEEDS_MORE_EVIDENCE
     assert Deployment.objects.get(pk=dep.pk).decision == D.NEEDS_MORE_EVIDENCE
-    assert Deployment.objects.get(pk=dep.pk).decision_policy == _current_policy_pin()
+    assert _stamped_under_these_rules(dep)
     # The other is recomputed too -- to what it already was, and stamped.
     untouched = Deployment.objects.get(pk=untouched.pk)
     before = untouched.decision
     assert current_decision(untouched) == before
-    assert Deployment.objects.get(pk=untouched.pk).decision_policy == _current_policy_pin()
+    assert _stamped_under_these_rules(untouched)
 
 
 def test_the_upgrade_recomputes_every_decision_stamped_under_other_rules():
@@ -211,7 +216,6 @@ def test_the_upgrade_recomputes_every_decision_stamped_under_other_rules():
     from django.apps import apps
 
     from assurance import signals
-    from assurance.decision import _current_policy_pin
 
     stale, current = _scanned(), _scanned()
     for d in (stale, current):
@@ -226,7 +230,7 @@ def test_the_upgrade_recomputes_every_decision_stamped_under_other_rules():
     signals.recompute_decisions_computed_under_another_rule(apps.get_app_config("assurance"), using="default")
 
     assert Deployment.objects.get(pk=stale.pk).decision == D.NEEDS_MORE_EVIDENCE
-    assert Deployment.objects.get(pk=stale.pk).decision_policy == _current_policy_pin()
+    assert _stamped_under_these_rules(stale)
     assert Deployment.objects.get(pk=current.pk).decision_revision == revision
 
 
@@ -337,3 +341,190 @@ def test_decision_support_names_the_lapsed_acceptance():
     assert payload["decision"] == D.NEEDS_MORE_EVIDENCE
     assert [f["accepted_until"] for f in payload["accepted_risk"]["lapsed"]] == [None]
     assert "lapsed or never named an end" in payload["note"]
+
+
+# ---- Round 2 of #105: a decision with no stamp, and the pin names every rule. ----
+
+
+def test_a_stored_decision_with_no_policy_stamp_is_recomputed_at_its_first_read():
+    """`loaddata` of a fixture dumped before the stamp: a stored READY, no stamp, and
+    nothing that recomputes it -- the post-migrate receiver ran before the load. It
+    was published as READY while a fresh computation says it needs more evidence."""
+    dep = _scanned()
+    _finding(dep, status=Finding.Status.ACCEPTED, until=None)
+    paused = _scanned()
+    Deployment.objects.filter(pk=dep.pk).update(decision=D.READY, decision_policy=None)
+    Deployment.objects.filter(pk=paused.pk).update(decision=D.PAUSED, decision_policy=None)
+
+    assert current_decision(Deployment.objects.get(pk=dep.pk)) == D.NEEDS_MORE_EVIDENCE
+    assert Deployment.objects.get(pk=dep.pk).decision == D.NEEDS_MORE_EVIDENCE
+    assert _stamped_under_these_rules(dep)
+    # A pause with no stamp is recomputed too, and a recompute keeps the pause.
+    assert current_decision(Deployment.objects.get(pk=paused.pk)) == D.PAUSED
+
+
+def _governed(module_name, name):
+    from importlib import import_module
+
+    return import_module(module_name), name
+
+
+def _changed(value):
+    """Something ``value`` is not, of its own shape: every governing constant is a
+    decision state, a set, a sequence, a mapping of those, or a rank."""
+    if isinstance(value, (set, frozenset)):
+        return frozenset(value) | {"changed-by-test"}
+    if isinstance(value, tuple):
+        return value[:-1]
+    if isinstance(value, dict):
+        return {**value, "changed-by-test": 99}
+    if isinstance(value, int):
+        return value + 10
+    return D.NOT_RECOMMENDED.value if str(value) != D.NOT_RECOMMENDED.value else D.READY.value
+
+
+#: Every rule the decision applies that is a value rather than a line of code: each
+#: cap, floor, threshold and state set, by the module and name the decision code reads
+#: it under -- and the key, for one entry of a table.
+_GOVERNING = [
+    *[("assurance.decision", "CLAIM_CAPS", key) for key in (
+        "contradicted", "stale", "unknown", "open_retest", "legally_stale",
+        "unread_latent_condition", "held_by_fired_latent_condition",
+    )],
+    ("assurance.decision", "ACCEPTED_RISK_CAPS", "standing"),
+    ("assurance.decision", "ACCEPTED_RISK_CAPS", "lapsed_undated_or_outgrown"),
+    ("assurance.decision", "SCAN_INCOMPLETE_CAP", None),
+    ("assurance.decision", "COMPLETED_SCAN_SIGNAL", None),
+    ("assurance.decision", "FINDING_SEVERITY_DECISIONS", None),
+    ("assurance.decision", "FINDING_UNVERIFIED_ONLY", None),
+    ("assurance.decision", "FINDING_CLEAN", None),
+    ("assurance.decision", "UNTRUSTED_SEVERITY_STATUSES", None),
+    ("assurance.decision", "LATENT_UNREAD_STATES", None),
+    ("assurance.decision", "LATENT_HOLDING_STATES", None),
+    ("assurance.decision", "_LEGALLY_STALE", None),
+    ("assurance.decision", "_RESOLVED_STATUSES", None),
+    ("assurance.decision", "_UNVERIFIED", None),
+    ("assurance.decision", "_READINESS_RANK", None),
+    ("assurance.coverage", "COVERAGE_CAP", None),
+    ("assurance.coverage", "COMPLETE_AUDIT_SIGNAL", None),
+    ("assurance.composition", "FLOORS", "violated"),
+    ("assurance.composition", "FLOORS", "incomplete"),
+    ("assurance.composition", "FLOORS", "not_demonstrated"),
+    ("assurance.composition", "OFF_ROUTE", None),
+    ("assurance.composition", "UNEXERCISED_BASES", None),
+    ("assurance.composition", "VERDICTS", None),
+    ("assurance.composition", "SIGNER_EVIDENCE", "achilles"),
+    ("assurance.composition", "SIGNER_EVIDENCE", "athena"),
+    ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_authorization_check"),
+    ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_unclassified_signer"),
+]
+
+
+@pytest.mark.parametrize(("module_name", "name", "key"), _GOVERNING, ids=lambda v: str(v))
+def test_the_policy_pin_moves_with_every_rule_the_decision_applies(monkeypatch, module_name, name, key):
+    """Seven single-line rule changes left the pin where it was: the document named
+    some caps as literals and left the chain floors, the scan and coverage caps and
+    the state sets out. A rule change the pin does not see leaves every stored
+    decision stamped as current under rules that no longer hold."""
+    from assurance.policy import policy_pin
+
+    module, name = _governed(module_name, name)
+    before = policy_pin()
+    if key is None:
+        monkeypatch.setattr(module, name, _changed(getattr(module, name)))
+    else:
+        monkeypatch.setitem(getattr(module, name), key, _changed(getattr(module, name)[key]))
+    assert policy_pin() != before, f"{module_name}.{name}{'' if key is None else f'[{key!r}]'}"
+
+
+def test_the_decision_applies_the_claim_caps_the_policy_names(monkeypatch):
+    from assurance import decision
+    from assurance.decision import claim_decision_signal
+    from assurance.models import AssuranceClaim
+
+    for key in decision.CLAIM_CAPS:
+        monkeypatch.setitem(decision.CLAIM_CAPS, key, D.NOT_RECOMMENDED)
+        assert decision._claim_cap({key: [object()]}) == D.NOT_RECOMMENDED, key
+        monkeypatch.undo()
+    dep = _scanned()
+    AssuranceClaim.objects.create(
+        deployment=dep, claim_type=AssuranceClaim.ClaimType.AI_BOM, statement="s", fingerprint="fp-stale",
+        system_fingerprint="sys", policy_version="p", environment=dep.environment,
+        status=AssuranceClaim.ClaimStatus.STALE,
+    )
+    monkeypatch.setitem(decision.CLAIM_CAPS, "stale", D.AUDIT_INCOMPLETE)
+    assert claim_decision_signal(dep)["cap"] == D.AUDIT_INCOMPLETE
+
+
+def test_the_decision_applies_the_acceptance_caps_the_policy_names(monkeypatch):
+    from assurance import decision
+    from assurance.decision import accepted_risk_signal
+
+    dep = _scanned()
+    _finding(dep, status=Finding.Status.ACCEPTED, until=_in(30))
+    monkeypatch.setitem(decision.ACCEPTED_RISK_CAPS, "standing", D.AUDIT_INCOMPLETE)
+    assert accepted_risk_signal(dep, now=timezone.now())["cap"] == D.AUDIT_INCOMPLETE
+    _finding(dep, status=Finding.Status.ACCEPTED, until=None, n="2")
+    monkeypatch.setitem(decision.ACCEPTED_RISK_CAPS, "lapsed_undated_or_outgrown", D.NOT_RECOMMENDED)
+    assert accepted_risk_signal(dep, now=timezone.now())["cap"] == D.NOT_RECOMMENDED
+
+
+def test_the_decision_applies_the_finding_thresholds_the_policy_names(monkeypatch):
+    from assurance import decision
+
+    dep = _scanned()
+    _finding(dep, "high")
+    assert compute_decision(dep) == D.NEEDS_REMEDIATION
+    thresholds = decision.FINDING_SEVERITY_DECISIONS
+    monkeypatch.setattr(
+        decision, "FINDING_SEVERITY_DECISIONS",
+        tuple((s, D.AUDIT_INCOMPLETE if s == "high" else placed) for s, placed in thresholds),
+    )
+    assert compute_decision(dep) == D.AUDIT_INCOMPLETE
+    monkeypatch.setattr(decision, "FINDING_SEVERITY_DECISIONS", thresholds)
+    clean = _scanned()
+    _finding(clean, "high", status=Finding.Status.CLOSED)
+    monkeypatch.setattr(decision, "FINDING_CLEAN", D.READY_RESTRICTED)
+    assert compute_decision(clean) == D.READY_RESTRICTED
+    invalidated = _scanned()
+    _finding(invalidated, "high", status=Finding.Status.INVALIDATED)
+    monkeypatch.setattr(decision, "FINDING_UNVERIFIED_ONLY", D.AUDIT_INCOMPLETE)
+    assert compute_decision(invalidated) == D.AUDIT_INCOMPLETE
+    # Trusted, it is placed by its severity.
+    monkeypatch.setattr(decision, "UNTRUSTED_SEVERITY_STATUSES", frozenset())
+    assert compute_decision(invalidated) == D.NEEDS_REMEDIATION
+
+
+def test_the_decision_applies_the_scan_and_coverage_caps_the_policy_names(monkeypatch):
+    from types import SimpleNamespace
+
+    from assurance import coverage, decision
+
+    monkeypatch.setattr(decision, "SCAN_INCOMPLETE_CAP", D.AUDIT_INCOMPLETE)
+    assert decision.incomplete_evidence_cap(SimpleNamespace(evidence_incomplete=True)) == D.AUDIT_INCOMPLETE
+    monkeypatch.setattr(decision, "COMPLETED_SCAN_SIGNAL", D.READY_RESTRICTED)
+    assert decision._completed_scan_signal(SimpleNamespace(last_complete_scan_at=timezone.now())) == D.READY_RESTRICTED
+    monkeypatch.setattr(coverage, "checks_gap", lambda deployment: True)
+    monkeypatch.setattr(coverage, "COVERAGE_CAP", D.NOT_RECOMMENDED)
+    assert coverage.coverage_decision_cap(SimpleNamespace()) == D.NOT_RECOMMENDED
+    monkeypatch.setattr(coverage, "coverage_manifest", lambda deployment: {"verdict": coverage.COMPLETE})
+    monkeypatch.setattr(coverage, "COMPLETE_AUDIT_SIGNAL", D.READY_RESTRICTED)
+    assert coverage.complete_audit_signal(SimpleNamespace()) == D.READY_RESTRICTED
+
+
+def test_the_chains_apply_the_floors_and_caps_the_policy_names(monkeypatch):
+    from assurance import composition as comp
+    from assurance import workflow_chains
+
+    violated = comp.ChainOutcome("refund", comp.VIOLATED, basis=comp.BASIS_DEMONSTRATED, signer="athena",
+                                 route=comp.ROUTE_CURRENT)
+    monkeypatch.setitem(comp.FLOORS, comp.VIOLATED, comp.NEEDS_REMEDIATION)
+    assert comp.compose([violated], expected_workflows=["refund"]).decision == comp.NEEDS_REMEDIATION
+    typed = comp.ChainOutcome("refund", comp.HELD, basis=comp.BASIS_ATTESTED, route=comp.ROUTE_CURRENT)
+    monkeypatch.setitem(comp.FLOORS, comp.NOT_DEMONSTRATED, comp.AUDIT_INCOMPLETE)
+    assert comp.compose([typed], expected_workflows=["refund"]).decision == comp.AUDIT_INCOMPLETE
+    permit = comp.ChainOutcome("refund", comp.HELD, basis=comp.BASIS_DEMONSTRATED, signer="achilles",
+                               route=comp.ROUTE_CURRENT)
+    monkeypatch.setitem(workflow_chains.CHAIN_CAPS, "held_on_authorization_check", comp.NEEDS_MORE_EVIDENCE)
+    composed = comp.compose([permit], expected_workflows=["refund"])
+    assert workflow_chains.composition_decision_signal(composed) == comp.NEEDS_MORE_EVIDENCE

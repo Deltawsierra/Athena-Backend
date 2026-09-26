@@ -44,6 +44,7 @@ from assurance.decision import (
 from assurance.models import AssuranceClaim, Deployment, Finding
 from assurance.revision import accept_transition
 from assurance.serializers import DeploymentSerializer
+from tests.decision_surfaces import stamped_under_the_rules_in_force
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.utils import timezone
@@ -240,7 +241,7 @@ def test_the_payload_names_the_revision_it_was_read_at():
 
 @pytest.mark.django_db
 def test_the_serializer_serves_the_revision():
-    dep = _deployment()
+    dep = stamped_under_the_rules_in_force(_deployment())
     accept_transition(dep, to_decision=D.READY)
     data = DeploymentSerializer(Deployment.objects.get(pk=dep.pk)).data
     assert data["decision_revision"] == 1

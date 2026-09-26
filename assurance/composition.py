@@ -636,9 +636,10 @@ class Composition:
     #: ``unrecorded``, as it is counted ``unknown`` on the basis axis: it is the
     #: absence of an outcome, and no route can be said of it.
     route_census: Mapping[str, int] = field(default_factory=dict)
-    #: The workflows whose standing ``held`` was taken against a route that no
-    #: longer serves, or against one nothing recorded, sorted. These are the chains
-    #: to exercise again; ``explain`` names them.
+    #: The held workflows with a surviving ``held`` taken against a route that no
+    #: longer serves, or against one nothing recorded, that nothing taken against the
+    #: route serving now matches in strength -- the standing one, or one beside it --
+    #: sorted. These are the chains to exercise again; ``explain`` names them.
     off_route: tuple[str, ...] = ()
 
     @property
@@ -676,8 +677,12 @@ def _survives(attempt: ChainOutcome, newest: datetime | None) -> bool:
     return attempt.observed_at is None or newest is None or attempt.observed_at >= newest
 
 
-def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome], int]:
-    """The outcome that stands for each workflow, and how many a re-run displaced.
+def _surviving(
+    outcomes: Iterable[ChainOutcome],
+) -> tuple[dict[str, ChainOutcome], int, dict[str, list[ChainOutcome]]]:
+    """The outcome that stands for each workflow, how many a re-run displaced, and
+    every outcome still standing for each workflow -- the survivors the one that
+    stands was picked from.
 
     Returns the surviving OUTCOME rather than its status alone, and that is how the
     basis axis became reportable at all: the value the rule composed over had
@@ -726,6 +731,7 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
         history.setdefault(outcome.workflow, []).append(outcome)
 
     standing: dict[str, ChainOutcome] = {}
+    surviving: dict[str, list[ChainOutcome]] = {}
     superseded = 0
     for workflow, attempts in history.items():
         # Two newest instants, because what may supersede depends on what is being
@@ -748,6 +754,7 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
             )
         ]
         superseded += len(attempts) - len(survivors)
+        surviving[workflow] = survivors
         status = survivors[0].status
         for attempt in survivors[1:]:
             status = _worse_status(status, attempt.status)
@@ -782,7 +789,33 @@ def _surviving(outcomes: Iterable[ChainOutcome]) -> tuple[dict[str, ChainOutcome
                 _EVIDENCE_RANK[attempt.evidence],
             ),
         )
-    return standing, superseded
+    return standing, superseded, surviving
+
+
+def _strength(outcome: ChainOutcome) -> tuple[int, int]:
+    """How strong a record of an exercise ``outcome`` is: its basis, then its kind of
+    evidence. Lower is stronger, as in the ranks it is read from."""
+    return _BASIS_RANK[outcome.basis], _EVIDENCE_RANK[outcome.evidence]
+
+
+def _exercise_again(survivors: Sequence[ChainOutcome]) -> bool:
+    """Whether a workflow's chain must be exercised again against the route serving
+    now: a ``held`` among its survivors was taken against a route that no longer
+    serves, or one nothing recorded, and no ``held`` taken against the route serving
+    now is as strong a record as it.
+
+    Read over every survivor, not only the one that stands. The rank that picks the
+    standing outcome puts the route serving now ahead of the kind of evidence, so a
+    permit check signed on the new route stood for a workflow whose scan of the old
+    route stood beside it -- and a plan read off the standing outcome named nothing
+    to exercise, with a permit check the only exercise of the route that serves."""
+    serving = [s for s in survivors if s.status == HELD and s.route == ROUTE_CURRENT]
+    return any(
+        s.status == HELD
+        and s.route in OFF_ROUTE
+        and not any(_strength(c) <= _strength(s) for c in serving)
+        for s in survivors
+    )
 
 
 def _checked_approved(expected_workflows: Sequence[str]) -> tuple[str, ...]:
@@ -840,7 +873,7 @@ def compose(
     The decision is the worst floor among the surviving outcomes. A composition
     over nothing is ``None``.
     """
-    standing, superseded = _surviving(outcomes)
+    standing, superseded, surviving = _surviving(outcomes)
 
     # Materialised once. It is read twice below, and a caller passing a
     # generator got the second read empty: `workflows_expected` came back 0
@@ -896,7 +929,7 @@ def compose(
         if outcome.evidence == EVIDENCE_AUTHORIZATION_CHECK:
             authorization_checked.append(workflow)
         route_census[outcome.route] += 1
-        if outcome.status == HELD and outcome.route in OFF_ROUTE:
+        if outcome.status == HELD and _exercise_again(surviving.get(workflow, ())):
             off_route.append(workflow)
 
     decision: str | None = None

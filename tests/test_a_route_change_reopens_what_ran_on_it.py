@@ -403,3 +403,48 @@ def test_the_route_rule_moves_the_policy_pin_so_stored_decisions_are_recomputed(
     assert POLICY["decision"]["accepted_risk_caps"]["lapsed_undated_or_outgrown"] == (
         Deployment.Decision.NEEDS_MORE_EVIDENCE
     )
+
+
+# ------------------------------------------------------------------ round 2 of #105
+
+
+def _planned(monkeypatch, dep, outcomes, approved=("refund",)):
+    """The plan for ``dep`` over ``outcomes`` as the chains it reads."""
+    from assurance import revalidation
+
+    composition = compose(outcomes, expected_workflows=list(approved))
+    monkeypatch.setattr(revalidation, "composition_for", lambda deployment, *a, **k: composition)
+    return plan_revalidation(dep)
+
+
+def test_a_stronger_held_off_the_serving_route_is_work_beside_a_permit_check_on_it(monkeypatch):
+    """A scan held for the workflow on a route nothing can bind, and Achilles' permit
+    check held on the route that serves: both stand, and the rank picked the permit
+    check. The plan was computed from that one alone, so it named nothing to
+    exercise, while the only exercise of the serving route is a permit check."""
+    scan = _held(comp.ROUTE_UNRECORDED, signer="athena")  # undated: nothing displaces it
+    permit = _held(comp.ROUTE_CURRENT, signer="achilles", at=timezone.now() - timedelta(hours=1))
+    result = compose([scan, permit], expected_workflows=["refund"])
+    assert result.authorization_checked == ("refund",)
+    assert result.off_route == ("refund",)
+
+    plan = _planned(monkeypatch, _deployment(), [scan, permit])
+    assert [w["workflow"] for w in plan["workflows_to_exercise"]] == ["refund"]
+    assert plan["summary"]["workflows_to_exercise"] == 1
+    assert "Nothing needs to be re-run" not in plan["note"]
+
+
+def test_a_held_off_the_serving_route_is_no_work_beside_one_as_strong_on_it():
+    at = timezone.now() - timedelta(hours=1)
+    for weaker in (_held(comp.ROUTE_MOVED, signer="achilles", at=at), _held(comp.ROUTE_MOVED, at=at)):
+        result = compose([weaker, _held(comp.ROUTE_CURRENT, at=at)], expected_workflows=["refund"])
+        assert result.off_route == ()
+
+
+@pytest.mark.parametrize("route", sorted(comp.OFF_ROUTE))
+def test_the_plan_names_every_held_chain_off_the_serving_route_approved_or_not(monkeypatch, route):
+    plan = _planned(monkeypatch, _deployment(), [_held(route), _held(route, workflow="export")])
+    assert {(w["workflow"], w["approved"]) for w in plan["workflows_to_exercise"]} == {
+        ("refund", True),
+        ("export", False),
+    }

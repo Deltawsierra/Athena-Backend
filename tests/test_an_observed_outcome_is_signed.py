@@ -1074,7 +1074,12 @@ def test_a_deployment_without_chains_is_not_reconciled_on_read():
     from assurance.decision import current_decision
 
     dep = _deployment()
-    Deployment.objects.filter(pk=dep.pk).update(decision=Deployment.Decision.READY, decision_keyring=None)
+    # Stamped under the rules in force: what is under test is the keyring's reach on
+    # read, not the policy stamp's (a decision with no stamp is recomputed on read,
+    # test_an_accepted_risk_is_carried_not_removed).
+    Deployment.objects.filter(pk=dep.pk).update(
+        decision=Deployment.Decision.READY, decision_keyring=None, decision_policy=policy_pin()
+    )
     assert current_decision(Deployment.objects.get(pk=dep.pk)) == Deployment.Decision.READY
     assert Deployment.objects.get(pk=dep.pk).decision_revision == 0
 
