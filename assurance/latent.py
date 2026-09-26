@@ -41,6 +41,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
+from .graph_refs import in_graph
 from . import observability as obs
 from .models import AssuranceClaim, DataBoundary, LatentCondition, Provider
 from .governance import is_shadow
@@ -113,22 +114,36 @@ def _observe_asset_appears(condition, deployment) -> tuple[bool, str]:
     # kind where a negative is evidence.
     matches = [
         asset
-        for asset in deployment.assets.all()
+        for asset in in_graph(deployment.assets.all())
         if asset.name == condition.subject or asset.identifier == condition.subject
     ]
     return bool(matches), (
         f"{len(matches)} asset(s) named or identified {condition.subject!r} "
-        f"among {deployment.assets.count()} on the deployment"
+        f"among {len(in_graph(deployment.assets.all()))} on the deployment"
     )
 
 
 def _observe_asset_becomes_unmanaged(condition, deployment) -> tuple[bool, str]:
-    asset = deployment.assets.filter(name=condition.subject).first()
-    if asset is None:
+    # A retired row is no component: read as one, a tool nobody declares any more
+    # answered "still known" where the rule is that a gone asset is unobservable.
+    named = in_graph(deployment.assets.filter(name=condition.subject).order_by("kind", "identifier", "pk"))
+    if not named:
         # NOT False. The asset this condition is about is gone, so we cannot say
         # whether it became unmanaged -- an asset that left the inventory is a
         # coverage question, not a clean bill of health.
         raise Unobservable(f"no asset named {condition.subject!r} on this deployment")
+    if len(named) > 1:
+        # Every component by that name, not one of them. Reading one -- the oldest
+        # row, or whichever the database returned first -- made the tripwire depend
+        # on row order: two tools both called "github", one flagged unmanaged, read
+        # "still known" or "stopped" as the rows came back. The condition asks to
+        # be told when the component stops being governed, and any of them may be it.
+        shadowed = [a for a in named if is_shadow(a.classification)]
+        return bool(shadowed), (
+            f"{len(named)} assets named {condition.subject!r}: "
+            + ", ".join(f"{a.kind} {a.identifier!r} classification={a.classification}" for a in named)
+        )
+    asset = named[0]
     # `is_shadow`, not a private {UNMANAGED, UNKNOWN} set.
     #
     # An operator who declares this condition is saying "tell me when this asset

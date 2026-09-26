@@ -35,6 +35,7 @@ record, no migration, no timestamp in the returned identity content. Prefetch
 
 from __future__ import annotations
 
+from .graph_refs import in_graph
 from .capability import RISK_BASELINE, RISK_ELEVATED, RISK_HIGH
 from .models import (
     RESOLVED_FINDING_STATUSES,
@@ -101,7 +102,7 @@ def _asset_coverage(deployment) -> dict:
     versus unknown or shadow (unmanaged). Real counts and true ratios only."""
     by_classification: dict[str, int] = {}
     total = classified = managed = unknown = shadow = high_risk = 0
-    for asset in deployment.assets.all():
+    for asset in in_graph(deployment.assets.all()):
         total += 1
         by_classification[asset.classification] = by_classification.get(asset.classification, 0) + 1
         if asset.classification not in _COVERAGE_GAP_CLASSIFICATIONS:

@@ -350,3 +350,34 @@ def test_reach_and_summary_expose_high_risk_reach_count():
         r["capability"] == "code_execution" and r["risk"] == RISK_HIGH
         for r in agent["effective_reach"]
     )
+
+
+def test_an_agent_holds_the_powers_of_the_account_it_acts_as():
+    """An agent acting as an account with admin rights has admin rights. The reach
+    stopped at the agent's own tools, so the account's powers were held by no
+    agent and the agent read as standard-privilege."""
+    dep = Deployment.objects.create(name="d", owner=_user())
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"identity": "svc-admin", "tools": []})
+    _asset(dep, kind=Asset.Kind.SERVICE_ACCOUNT, name="svc-admin", identifier="svc-admin",
+           metadata={"permissions": ["iam:admin"]})
+
+    agent = _principals_by_name(assess_effective_access(dep))["assistant"]
+    assert "privileged_control" in {c["key"] for c in agent["capabilities"]}
+    assert agent["privilege_level"] == "high"
+
+
+def test_an_identity_nobody_can_place_keeps_the_access_claim_off_verified():
+    from assurance.claims import derive_claims
+    from assurance.models import AssuranceClaim
+
+    dep = Deployment.objects.create(name="d", owner=_user())
+    _asset(dep, kind=Asset.Kind.AGENT, name="assistant", identifier="assistant",
+           metadata={"identity": "svc-nowhere", "tools": []})
+
+    derive_claims(dep)
+    claim = AssuranceClaim.objects.get(
+        deployment=dep, claim_type=AssuranceClaim.ClaimType.EFFECTIVE_ACCESS, valid_to__isnull=True
+    )
+    assert claim.status == AssuranceClaim.ClaimStatus.PARTIALLY_VERIFIED
+    assert "assistant → svc-nowhere" in claim.supporting_summary

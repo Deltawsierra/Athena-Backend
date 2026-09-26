@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from django.utils import timezone
 
+from .graph_refs import in_graph
 from .models import evidence_strength
 from .receipt import ALGORITHM, _digest
 from .governance import is_shadow
@@ -125,7 +126,7 @@ def build_ai_bom(deployment) -> dict:
     chain behind them, an honest summary, and a tamper-evident digest. Prefetch
     ``assets__provider__assertions`` on the caller side. Pure and
     side-effect-free (the ``generated_at`` timestamp rides outside the digest)."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
     components = [_component(a) for a in assets]
     components.sort(key=lambda c: (c["kind"], c["name"]))
 

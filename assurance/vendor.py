@@ -99,6 +99,7 @@ The return shape of :func:`assess_vendors`::
 
 from __future__ import annotations
 
+from .graph_refs import in_graph
 from .capability import RISK_BASELINE, RISK_ELEVATED, RISK_HIGH, _RISK_ORDER, _RISK_RAISED
 from .models import (
     EvidenceClass,
@@ -272,7 +273,7 @@ def assess_vendors(deployment) -> dict:
     # the ungoverned ones (no vendor and/or unmanaged) as first-class gaps.
     by_provider: dict[int, dict] = {}
     ungoverned: list[dict] = []
-    for asset in deployment.assets.all():
+    for asset in in_graph(deployment.assets.all()):
         managed = asset.classification in _MANAGED
         if asset.provider_id is None:
             # A dependency with no vendor behind it — provider-less, and doubly a

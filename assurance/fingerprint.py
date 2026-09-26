@@ -28,6 +28,7 @@ migration. Prefetch ``assets__provider__assertions`` and select_related
 
 from __future__ import annotations
 
+from .graph_refs import in_graph, retired
 from .receipt import _digest
 from .served_route import served_route_fingerprint
 
@@ -49,8 +50,13 @@ _SALIENT_METADATA_KEYS = (
     "subkind",
     "system_prompt",
     "temperature",
+    "tool_kinds",
     "tools",
     "version",
+    # Which row each tool reference reaches, and every account a merged agent row
+    # acts as: both decide an agent's reach, and the system fingerprint covers the
+    # access family (``_SYSTEM_COVERED``) only while it reads them too.
+    "merged_identities",
 )
 
 
@@ -162,11 +168,11 @@ def compute_system_fingerprint(deployment) -> str:
     Prefetch ``assets__provider__assertions`` and select_related ``data_boundary``
     on the caller side to keep it query-light."""
     assets = sorted(
-        (_asset_descriptor(a) for a in deployment.assets.all()),
+        (_asset_descriptor(a) for a in in_graph(deployment.assets.all())),
         key=lambda d: (d["kind"], d["identifier"], d["name"]),
-    )
+    ) + _retired_keys(deployment)
 
-    providers = _distinct_providers(deployment.assets.all(), _provider_descriptor)
+    providers = _distinct_providers(in_graph(deployment.assets.all()), _provider_descriptor)
 
     descriptor = {
         "environment": deployment.environment,
@@ -238,7 +244,14 @@ def compute_system_fingerprint(deployment) -> str:
 # family and requires any change to a claim's derived reading to move that
 # claim's fingerprint. The other direction -- a family listed that the deriver
 # does not read -- costs a retest nobody needed, and is pinned too, per family.
-_ACCESS_METADATA_KEYS = ("identity", "permissions", "server", "tools")
+#
+# ``tool_kinds`` decides which row a tool reference reaches (a tool, not the MCP
+# server or skill at its key), so it is an input: left out, a declaration that
+# changed only the kind of a tool moved an agent's reach from ``read`` to ``shell``
+# and the access claim's inputs read as unchanged. ``merged_identities`` likewise:
+# every account a merged agent row acts as beyond its first, so a rescan that
+# changed which account the old unnamed row acts as moves the reading.
+_ACCESS_METADATA_KEYS = ("identity", "merged_identities", "permissions", "server", "tool_kinds", "tools")
 _BOM_FACT_METADATA_KEYS = (
     "adapter",
     "base_url",
@@ -336,9 +349,27 @@ def _declared_component_descriptor(component) -> dict:
     }
 
 
+def _retired_keys(deployment) -> list:
+    """The key and kind of every :func:`graph_refs.retired` row, and nothing else of
+    it. A retired row is out of the graph, but its key still decides resolution: a
+    reference only it carries names nothing, where without it the reference falls
+    through to whatever is CALLED that (``graph_refs.resolve_reference``). Deleting
+    one moved an agent's reach -- to another agent's ``admin`` -- and no fingerprint
+    moved, so the claim went on saying what it said. Appended only where there is
+    one, so a deployment with none keeps the fingerprint it had."""
+    return sorted(
+        (
+            {"retired": True, "kind": a.kind, "identifier": a.identifier}
+            for a in deployment.assets.all()
+            if retired(a) and a.identifier
+        ),
+        key=lambda d: (d["kind"], d["identifier"]),
+    )
+
+
 def _families(deployment) -> dict:
     """Every input family, computed once over a (prefetched) deployment."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
 
     def by_asset(project) -> list:
         return sorted(
@@ -364,7 +395,8 @@ def _families(deployment) -> dict:
                 **_asset_identity(a),
                 "access": _metadata_subset(a.metadata, _ACCESS_METADATA_KEYS),
             }
-        ),
+        )
+        + _retired_keys(deployment),
         "declared_components": sorted(
             (_declared_component_descriptor(c) for c in deployment.declared_components.all()),
             key=lambda d: (d["kind"], d["identifier"], d["name"], d["provider_name"]),

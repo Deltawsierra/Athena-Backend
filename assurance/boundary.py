@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 
+from .graph_refs import in_graph
 from .models import Asset
 from .governance import is_shadow
 
@@ -343,7 +344,7 @@ def assess_boundary(deployment) -> dict:
     # shadow one is still surfaced below).
     by_provider: dict[int, dict] = {}
     shadow: list[dict] = []
-    for asset in deployment.assets.all():
+    for asset in in_graph(deployment.assets.all()):
         if asset.kind not in DATA_DESTINATION_KINDS:
             continue
         # A destination somebody flagged high-risk is not a governed

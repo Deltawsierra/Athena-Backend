@@ -301,13 +301,70 @@ def _derive_effective_access(deployment) -> dict:
         # duplicated inventory line said "2 declared reference(s)" above one pair:
         # an operator told to chase two and handed one goes looking for a
         # reference that does not exist. Distinct pairs, counted and listed.
-        pairs = sorted({f"{u['source']} → {u['reference']}" for u in unresolved})
-        supporting += (
-            f" {len(pairs)} declared reference(s) could not be placed, so this is "
-            "the reach over the graph we could read rather than all of it: "
-            + ", ".join(pairs)
-            + "."
+        #
+        # A reference to or from a row no scan has recorded under the current
+        # identity rules WAS placed and followed; saying it "could not be placed"
+        # is false and sends the operator looking for a component that exists.
+        # What it needs is a rescan, and the digest says that instead.
+        #
+        # Read off every reason a row carries, not its first. An ambiguous
+        # reference to an old row is both, and splitting on the first said only
+        # "could not be placed" where the page says both. It is named ONCE --
+        # under the sentence for what could not be placed, with what else is true
+        # of it said beside the name -- because a reference counted under two
+        # sentences is a reference a reader sums twice.
+        def _reasons(u: dict) -> set:
+            listed = u.get("reasons")
+            return {str(r) for r in listed} if isinstance(listed, list) and listed else {str(u.get("reason"))}
+
+        _followed = {"superseded_identity", "legacy_unnamed_agent"}
+
+        def _named(u: dict) -> str:
+            name = f"{u['source']} → {u['reference']}"
+            reasons = _reasons(u)
+            if "superseded_identity" in reasons:
+                name += " (reached through a row no scan has re-recorded since)"
+            if "legacy_unnamed_agent" in reasons:
+                name += " (declared by the old row for every unnamed agent)"
+            return name
+
+        pairs = sorted({_named(u) for u in unresolved if _reasons(u) - _followed})
+        # A reference from the old unnamed row goes under its sentence alone, even
+        # when what it reaches is an old row too: no rescan clears either.
+        stale = sorted(
+            {f"{u['source']} → {u['reference']}" for u in unresolved
+             if _reasons(u) <= _followed and "superseded_identity" in _reasons(u)
+             and "legacy_unnamed_agent" not in _reasons(u)}
         )
+        legacy = sorted(
+            {f"{u['source']} → {u['reference']}" for u in unresolved
+             if _reasons(u) <= _followed and "legacy_unnamed_agent" in _reasons(u)}
+        )
+        if pairs:
+            supporting += (
+                f" {len(pairs)} declared reference(s) could not be placed, so this is "
+                "the reach over the graph we could read rather than all of it: "
+                + ", ".join(pairs)
+                + "."
+            )
+        if stale:
+            supporting += (
+                f" {len(stale)} declared reference(s) were followed to or from a component "
+                "recorded under identity rules this platform no longer writes, which no scan "
+                "has recorded since; the reach through them is counted, and a rescan is what "
+                "confirms it: "
+                + ", ".join(stale)
+                + "."
+            )
+        if legacy:
+            supporting += (
+                f" {len(legacy)} declared reference(s) come from the row the old identity "
+                "rules wrote for every unnamed agent at once; the reach through them is "
+                "counted as the rows they name stand now, and a rescan records each unnamed "
+                "agent under a row of its own, keyed by where it is, not that one: "
+                + ", ".join(legacy)
+                + "."
+            )
     contradicting_bits: list[str] = []
     if principals:
         offenders = sorted(

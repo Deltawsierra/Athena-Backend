@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 
+from .graph_refs import in_graph
 from .boundary import _negated
 from .capability import (
     RISK_BASELINE,
@@ -136,7 +137,7 @@ def assess_data_lifecycle(deployment) -> dict:
     Prefetch ``assets__provider__assertions`` on the caller side. Pure and
     side-effect-free — a computed view of the stored graph, never a stored
     record."""
-    assets = list(deployment.assets.all())
+    assets = in_graph(deployment.assets.all())
     rows = {stage: _stage_row(stage) for stage in STAGE_ORDER}
 
     # --- Flow stages: evidenced by the components that carry data through them.

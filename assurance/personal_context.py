@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import re
 
+from .graph_refs import in_graph
 from .access import (
     PRIVILEGE_HIGH,
     assess_effective_access,
@@ -318,7 +319,7 @@ def assess_personal_context(deployment) -> dict:
     shadow_names, violation_providers = _boundary_index(boundary_result)
 
     stores: list[dict] = []
-    for asset in deployment.assets.all():
+    for asset in in_graph(deployment.assets.all()):
         if asset.kind not in DATA_BEARING_KINDS:
             continue
         sensitivity, signals, evidence_class = _sensitivity(asset)

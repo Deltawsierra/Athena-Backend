@@ -39,12 +39,20 @@ here reaches the network.
 from __future__ import annotations
 
 from .graph_refs import (
+    INVOKED_KINDS,
+    MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
-    dangling_reference,
+    identity_index,
+    identity_references,
+    in_graph,
+    resolve_identity,
     reference_index,
     resolve_reference,
+    resolve_tool,
+    superseded_identity,
+    unresolved_row,
     sort_references,
     tool_references,
 )
@@ -132,11 +140,12 @@ def build_route_map(deployment) -> dict:
     node, the edges between them (declared where the inventory attests one, the
     inferred pipeline spine otherwise), and an honest summary. Prefetch
     ``assets__provider`` on the caller side. Pure and side-effect-free."""
-    assets = list(deployment.assets.all())
+    every_asset = list(deployment.assets.all())
+    assets = in_graph(every_asset)
 
     nodes: list[dict] = []
     by_uuid: dict[str, dict] = {}
-    by_identifier, by_name = reference_index(assets)
+    by_identifier, by_name = reference_index(every_asset)
     layer_members: dict[str, list[Asset]] = {layer: [] for layer in LAYER_ORDER}
 
     for asset in assets:
@@ -183,14 +192,28 @@ def build_route_map(deployment) -> dict:
         for ident in tool_references(metadata):
             if not str(ident or "").strip():
                 continue
-            targets, why = resolve_reference(ident, by_identifier, by_name)
+            targets, why = resolve_tool(metadata, ident, by_identifier, by_name)
             for target in targets:
                 add_edge(agent, target, "invokes", "invokes", declared=True)
-            if why:
-                # A tool the agent names but discovery could not place -- or could
-                # place as more than one component: a reference to chase, surfaced
-                # rather than silently dropped.
-                unresolved.append(dangling_reference(agent, ident, MECHANISM_TOOLS, why))
+            # A tool the agent names but discovery could not place -- or could
+            # place as more than one component: a reference to chase, surfaced
+            # rather than silently dropped.
+            row = unresolved_row(agent, ident, MECHANISM_TOOLS, targets, why)
+            if row is not None:
+                unresolved.append(row)
+
+    # The account each agent acts as: a declared edge, and a gap when the
+    # identity names no account or more than one.
+    accounts = identity_index(assets)
+    for agent in agent_assets:
+        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
+        for identity in identity_references(metadata):
+            targets, why = resolve_identity(identity, accounts)
+            for target in targets:
+                add_edge(agent, target, "acts_as", "acts as", declared=True)
+            row = unresolved_row(agent, identity, MECHANISM_IDENTITY, targets, why)
+            if row is not None:
+                unresolved.append(row)
 
     def _declare_server_edge(source, host) -> None:
         if (str(source.uuid), str(host.uuid)) in attested_pairs:
@@ -220,14 +243,15 @@ def build_route_map(deployment) -> dict:
         if not server:
             continue
         hosts, why = resolve_reference(
-            server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+            server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS, skip_kinds=INVOKED_KINDS
         )
-        if why:
-            # The reference names nothing in the inventory, or more than one
-            # thing. The first used to vanish: no edge, and no unresolved row
-            # either, because only the agent→tool mechanism had a channel for a
-            # miss. An ambiguous one is also drawn to every candidate below.
-            unresolved.append(dangling_reference(source, server, MECHANISM_SERVER, why))
+        # The reference names nothing in the inventory, or more than one
+        # thing. The first used to vanish: no edge, and no unresolved row
+        # either, because only the agent→tool mechanism had a channel for a
+        # miss. An ambiguous one is also drawn to every candidate below.
+        row = unresolved_row(source, server, MECHANISM_SERVER, hosts, why)
+        if row is not None:
+            unresolved.append(row)
         for host in hosts:
             _declare_server_edge(source, host)
 
@@ -248,8 +272,12 @@ def build_route_map(deployment) -> dict:
         ),
         None,
     )
-    front = front or (app_apis[0] if app_apis else None) or (agent_assets[0] if agent_assets else None)
-    brain = agent_assets[0] if agent_assets else None
+    # The orchestrating agent is one recorded under the current rules when there is
+    # one. The old unnamed row sorts first by name, so taking the first agent drew
+    # the inferred spine through a row no declaration re-records.
+    current_agents = [a for a in agent_assets if not superseded_identity(a)] or agent_assets
+    front = front or (app_apis[0] if app_apis else None) or (current_agents[0] if current_agents else None)
+    brain = current_agents[0] if current_agents else None
 
     models = [a for a in assets if a.kind == Asset.Kind.MODEL]
     gateways = [a for a in assets if a.kind == Asset.Kind.GATEWAY]
@@ -302,6 +330,9 @@ def build_route_map(deployment) -> dict:
         "unresolved_edges": len(unresolved),
         "unresolved_tool_references": sum(1 for u in unresolved if u["mechanism"] == MECHANISM_TOOLS),
         "unresolved_server_references": sum(1 for u in unresolved if u["mechanism"] == MECHANISM_SERVER),
+        "unresolved_identity_references": sum(
+            1 for u in unresolved if u["mechanism"] == MECHANISM_IDENTITY
+        ),
         "layers_present": [layer for layer in LAYER_ORDER if layer_members[layer]],
         # The honest gap: nobody discovered where this system's logs go.
         "logs_observed": bool(layer_members[LAYER_LOGS]),

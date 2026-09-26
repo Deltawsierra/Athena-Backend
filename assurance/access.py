@@ -67,12 +67,21 @@ from .capability import (
     _permission_specs,
 )
 from .graph_refs import (
+    INVOKED_KINDS,
+    MECHANISM_IDENTITY,
     MECHANISM_SERVER,
     PRINCIPAL_KINDS,
     MECHANISM_TOOLS,
-    dangling_reference,
+    identity_index,
+    identity_references,
+    in_graph,
+    legacy_unnamed_agent,
+    resolve_identity,
     reference_index,
     resolve_reference,
+    resolve_tool,
+    superseded_identity,
+    unresolved_row,
     sort_references,
     tool_references,
 )
@@ -149,6 +158,10 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
     Two declared mechanisms, both ground truth:
 
     - an ``agent`` invokes each asset named in its ``metadata.tools``;
+    - an ``agent`` acts as the service account its ``metadata.identity`` names,
+      and so holds every power that account holds. An agent acting as an
+      account with admin rights has admin rights; the reach used to stop at
+      the agent's own tools, so the account's powers were nobody's;
     - any component connects to the backend named in its ``metadata.server``
       (an MCP server that hosts it, a data store it is wired to).
 
@@ -160,6 +173,7 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
     """
     edges: dict[int, list[tuple]] = {}
     unresolved: list[dict] = []
+    accounts = identity_index(assets)
 
     def add(src, tgt, hop: str, cap_key: str) -> None:
         if tgt is None or src.pk == tgt.pk:
@@ -175,20 +189,29 @@ def _build_edges(assets: list, by_identifier: dict, by_name: dict) -> tuple[dict
             for ident in tool_references(metadata):
                 if not str(ident or "").strip():
                     continue
-                targets, why = resolve_reference(ident, by_identifier, by_name)
+                targets, why = resolve_tool(metadata, ident, by_identifier, by_name)
                 for target in targets:
                     add(asset, target, "invokes", _kind_cap(target.kind)["key"])
-                if why:
-                    unresolved.append(dangling_reference(asset, ident, MECHANISM_TOOLS, why))
+                row = unresolved_row(asset, ident, MECHANISM_TOOLS, targets, why)
+                if row is not None:
+                    unresolved.append(row)
+            for identity in identity_references(metadata):
+                targets, why = resolve_identity(identity, accounts)
+                for target in targets:
+                    add(asset, target, "acts as", _kind_cap(target.kind)["key"])
+                row = unresolved_row(asset, identity, MECHANISM_IDENTITY, targets, why)
+                if row is not None:
+                    unresolved.append(row)
         server = metadata.get("server")
         if server and str(server).strip():
             targets, why = resolve_reference(
-                server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS
+                server, by_identifier, by_name, not_kinds=PRINCIPAL_KINDS, skip_kinds=INVOKED_KINDS
             )
             for target in targets:
                 add(asset, target, "connects to", _kind_cap(target.kind)["key"])
-            if why:
-                unresolved.append(dangling_reference(asset, server, MECHANISM_SERVER, why))
+            row = unresolved_row(asset, server, MECHANISM_SERVER, targets, why)
+            if row is not None:
+                unresolved.append(row)
 
     return edges, unresolved
 
@@ -283,6 +306,63 @@ def _power_entry(asset, via_to_asset: list, via_keys_to_asset: list, perm: str, 
     }
 
 
+#: How an agent's declared identity names a service account it did not name
+#: alone. See :func:`_identity_use`.
+IDENTITY_PROVEN = "proven"
+IDENTITY_AMBIGUOUS = "ambiguous"
+#: Named by an agent row no scan has recorded under the current identity rules.
+IDENTITY_UNRECORDED = "unrecorded"
+#: Named only by the row the old rules wrote for every unnamed agent -- which,
+#: unlike any other unrecorded row, a rescan does not re-record: it records each
+#: unnamed agent under a row of its own.
+IDENTITY_LEGACY = "legacy"
+_USE_RANK = {IDENTITY_LEGACY: 0, IDENTITY_UNRECORDED: 1, IDENTITY_AMBIGUOUS: 2, IDENTITY_PROVEN: 3}
+
+
+def _identity_use(agents, service_accounts) -> dict:
+    """``{service_account_pk: IDENTITY_PROVEN | IDENTITY_AMBIGUOUS}`` for every
+    service account some agent's declared ``identity`` resolves to.
+
+    Resolved the way every other reference in the graph is
+    (:func:`graph_refs.resolve_reference`): identifier first, then name, and an
+    identifier that matches never falls through to a name. Only service accounts
+    are candidates -- an identity is the account an agent acts as, so a tool or
+    a store that happens to share the string is not one.
+
+    One candidate is a proven use. More than one is ambiguous for each of them,
+    unless another agent's identity names that account alone: a proven use is
+    not undone by an ambiguous one.
+    """
+    accounts = identity_index(service_accounts)
+    use: dict = {}
+
+    def note(account, level: str) -> None:
+        # The strongest use any agent makes of the account stands: proven over
+        # ambiguous over unrecorded. Keeping the first one seen let the old unnamed
+        # row -- first by name -- mark an account "unrecorded" and say no current
+        # agent names it, while one did.
+        if _USE_RANK[level] > _USE_RANK.get(use.get(account.pk), -1):
+            use[account.pk] = level
+
+    for agent in agents:
+        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
+        # An agent row no scan has recorded under the current identity rules --
+        # the old unnamed "agent", standing for every unnamed agent at once --
+        # does not prove anyone acts under the account it names. It kept an
+        # orphaned account reading as used, with nothing anywhere to say why.
+        unrecorded = superseded_identity(agent)
+        for identity in identity_references(metadata):
+            candidates, why = resolve_identity(identity, accounts)
+            for account in candidates:
+                if why is None and not unrecorded:
+                    note(account, IDENTITY_PROVEN)
+                elif why is None:
+                    note(account, IDENTITY_LEGACY if legacy_unnamed_agent(agent) else IDENTITY_UNRECORDED)
+                else:
+                    note(account, IDENTITY_AMBIGUOUS)
+    return use
+
+
 def _principal_dict(
     *,
     key: str,
@@ -296,7 +376,7 @@ def _principal_dict(
     own_asset,
     reaches_raw: list,
     is_service_account: bool,
-    referenced_identities: set,
+    acted_under: str | None = None,
 ) -> dict:
     """Assemble one principal from its own asset and the assets it transitively
     reaches: its held sensitive capabilities, its effective reach (concrete
@@ -423,13 +503,13 @@ def _principal_dict(
     # Orphaned: a service account with no dependent or declared use — no agent
     # acts under it, and it grants no reach or power. A standing credential nobody
     # uses is a gap, not a clean bill.
-    is_orphaned = (
-        is_service_account
-        and not reach
-        and not capabilities
-        and name not in referenced_identities
-        and (own_asset is None or own_asset.identifier not in referenced_identities)
-    )
+    #
+    # ``acted_under`` is how an agent's declared identity resolved to THIS
+    # account (see ``_identity_use``), never a string compared to its name: a
+    # second account that merely shared the name used to count as used, so the
+    # real orphan hid behind its namesake.
+    unused = is_service_account and not reach and not capabilities
+    is_orphaned = unused and acted_under is None
     if is_orphaned:
         gaps.append(
             {
@@ -439,6 +519,32 @@ def _principal_dict(
                 "under it.",
             }
         )
+    elif unused and acted_under in (IDENTITY_AMBIGUOUS, IDENTITY_UNRECORDED, IDENTITY_LEGACY):
+        # Neither orphaned nor used: an agent acts under an identity this account
+        # and another both answer to, or an agent row no scan has re-recorded names
+        # it. Calling it orphaned says nobody acts under it; calling it used says
+        # someone does. The inventory says neither -- and says which of the two
+        # it is, because they are fixed differently.
+        if acted_under == IDENTITY_AMBIGUOUS:
+            detail = (
+                "An agent acts under an identity more than one service account answers "
+                "to, and the inventory does not say which — no principal is proven to act "
+                "under this one."
+            )
+        elif acted_under == IDENTITY_LEGACY:
+            detail = (
+                "The only agent naming this account is the row the old identity rules "
+                "wrote for every unnamed agent at once, and a rescan records each unnamed "
+                "agent under a row of its own, not that one — no principal is proven to act "
+                "under this account."
+            )
+        else:
+            detail = (
+                "The only agent naming this account is recorded under identity rules no "
+                "scan has re-recorded it under since — no principal is proven to act under "
+                "it until that agent is scanned again."
+            )
+        gaps.append({"type": "use_unproven", "risk": RISK_ELEVATED, "detail": detail})
 
     # Principal risk: the worst of its base risk and any gap it carries.
     risk = base_risk
@@ -475,9 +581,10 @@ def assess_effective_access(deployment) -> dict:
 
     Prefetch ``assets__provider`` on the caller side. Pure and side-effect-free —
     a computed view of the stored asset graph, never a stored record."""
-    assets = list(deployment.assets.all())
+    every_asset = list(deployment.assets.all())
+    assets = in_graph(every_asset)
 
-    by_identifier, by_name = reference_index(assets)
+    by_identifier, by_name = reference_index(every_asset)
 
     edges, unresolved = _build_edges(assets, by_identifier, by_name)
     unresolved = sort_references(unresolved)
@@ -486,14 +593,7 @@ def assess_effective_access(deployment) -> dict:
     service_accounts = [a for a in assets if a.kind == Asset.Kind.SERVICE_ACCOUNT]
     tools = [a for a in assets if a.kind in _TOOL_KINDS]
 
-    # Identities that something acts under: an agent's declared ``identity``. Used
-    # to tell an orphaned service account (nobody acts under it) from a used one.
-    referenced_identities: set[str] = set()
-    for agent in agents:
-        metadata = agent.metadata if isinstance(agent.metadata, dict) else {}
-        identity = str(metadata.get("identity") or "").strip()
-        if identity:
-            referenced_identities.add(identity)
+    identity_use = _identity_use(agents, service_accounts)
 
     principals: list[dict] = []
 
@@ -530,7 +630,6 @@ def assess_effective_access(deployment) -> dict:
                 own_asset=agent,
                 reaches_raw=reaches_raw,
                 is_service_account=False,
-                referenced_identities=referenced_identities,
             )
         )
 
@@ -549,7 +648,7 @@ def assess_effective_access(deployment) -> dict:
                 own_asset=sa,
                 reaches_raw=reaches_raw,
                 is_service_account=True,
-                referenced_identities=referenced_identities,
+                acted_under=identity_use.get(sa.pk),
             )
         )
 
@@ -572,7 +671,6 @@ def assess_effective_access(deployment) -> dict:
                 own_asset=None,
                 reaches_raw=base_reaches,
                 is_service_account=False,
-                referenced_identities=referenced_identities,
             )
         )
 

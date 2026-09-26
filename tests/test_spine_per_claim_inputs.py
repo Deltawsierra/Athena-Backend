@@ -192,6 +192,24 @@ def _malform_tools(dep):
     agent.save(update_fields=["metadata"])
 
 
+def _retype_tool_reference(dep):
+    # What kind the agent declared its tool as decides which row the reference
+    # reaches. Declared a skill, "reader" names no skill, so the agent reaches none
+    # of the tool's powers: the access reading moves, and so must its inputs.
+    agent = _asset(dep, "agent")
+    agent.metadata = {**agent.metadata, "tool_kinds": {"reader": ["skill"]}}
+    agent.save(update_fields=["metadata"])
+
+
+def _merge_an_identity(dep):
+    # The old unnamed row acts as every account a declaration merged into it. A
+    # second one is a second account the agent's reach runs through, so the access
+    # reading moves -- here, one more identity nothing places -- and so must its inputs.
+    agent = _asset(dep, "agent")
+    agent.metadata = {**agent.metadata, "merged_identities": ["svc-other"]}
+    agent.save(update_fields=["metadata"])
+
+
 def _rename_deployment(dep):
     # The effective-access graph names its base principal after the deployment.
     dep.name = "renamed"
@@ -220,6 +238,8 @@ _MUTATIONS = [
     _move_environment,
     _add_component,
     _malform_tools,
+    _retype_tool_reference,
+    _merge_an_identity,
     _rename_deployment,
 ]
 
@@ -279,6 +299,8 @@ def test_every_mapped_claim_type_is_a_real_claim_type():
         (_add_component, {BOUNDARY, ACCESS, BOM}),
         (_move_environment, {BOUNDARY, ACCESS, BOM}),
         (_malform_tools, {ACCESS}),
+        (_retype_tool_reference, {ACCESS}),
+        (_merge_an_identity, {ACCESS}),
         (_rename_deployment, {ACCESS}),
     ],
     ids=lambda v: v.__name__.lstrip("_") if callable(v) else "+".join(sorted(v)),
