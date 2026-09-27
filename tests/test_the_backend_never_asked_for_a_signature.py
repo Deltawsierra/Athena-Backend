@@ -623,9 +623,12 @@ _LEAKY_BODY = (
 )
 
 #: Every substring that must not appear in a response served to a reader.
+#: The port is matched as the leaked message spells it ("port=8443"): a bare
+#: "8443" also turns up by chance in the response's own random ids, digest and
+#: microsecond timestamp, which failed this test on a clean run.
 _SECRETS = (
     "cyberengine.internal",
-    "8443",
+    "port=8443",
     "HTTPConnectionPool",
     "/srv/cyberengine/signer.py",
     "/etc/athena/operator.pem",

@@ -235,7 +235,14 @@ def decision_in_force(locked: Deployment) -> InForce:
     )
     if revision == locked.decision_revision:
         return InForce(decision, revision, read_from)
-    logger.error(
+    # Logged from another thread: this runs under the row lock, inside the
+    # transaction of whatever holds it -- a stop among them -- and a slow log sink
+    # held that stop, and every other writer behind its lock, for as long as it
+    # took (#303). It reports a repair made here; nothing waits on it being read.
+    from .oplog import log_later
+
+    log_later(
+        logging.ERROR,
         "deployment %s: stored decision %r at revision %s is behind its transition log "
         "(revision %s recorded %r); repairing the row from the log",
         locked.pk,
@@ -243,6 +250,7 @@ def decision_in_force(locked: Deployment) -> InForce:
         locked.decision_revision,
         latest[0],
         latest[1],
+        logger_name=__name__,
     )
     return InForce(decision, revision, read_from)
 

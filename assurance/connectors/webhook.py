@@ -44,6 +44,10 @@ class WebhookConnector(Connector):
     config_class = WebhookConfig
     secret_field = "token"
     settings_fields = ("url", "token_header")
+    # The receiver is the customer's own endpoint: the conventional header lets it
+    # drop a second delivery of one operation.
+    idempotency_header = "Idempotency-Key"
+    redelivery_is_idempotent = True
 
     @classmethod
     def config_from_settings(cls) -> WebhookConfig:

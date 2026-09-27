@@ -79,6 +79,123 @@ python manage.py check --deploy --fail-level WARNING
 CI runs this and it must stay clean. `DJANGO_SECRET_KEY` is required outside
 development, and the process refuses to start without it.
 
+## Connector dispatch that a stop owes
+
+A pause, or any recompute that leaves a blocking decision, never waits on a
+connector. When the deployment's dispatch policy opts into the decision trigger,
+the stop records the dispatch as owed (a `DecisionDispatchDue` row, in the stop's
+own transaction) and a background thread pushes the findings after the stop has
+answered. If the stop could not write that record, its thread is started anyway
+(past any bound) and writes the record before anything else. What is not finished
+stays recorded, and three things retry it:
+
+- the thread itself, 2 s and then 8 s later;
+- a sweeper in every serving process. The WSGI and ASGI entry points start it on
+  the process's first request -- never at import, so under a pre-forking server
+  (`gunicorn --preload` included) each worker has its own and the master none --
+  5 s after that and then every `ASSURANCE_DISPATCH_SWEEP_SECONDS` (default 300;
+  `0` turns it off). A sweep claims each row it starts, so several processes share
+  the backlog instead of racing for the same rows;
+- `python manage.py retry_blocking_dispatches`, which you should also run on a
+  schedule. It exits non-zero while anything is owed, so the scheduler reports
+  it. For example, cron every five minutes:
+
+  ```cron
+  */5 * * * * cd /srv/athena && .venv/bin/python manage.py retry_blocking_dispatches >> /var/log/athena/dispatch-retry.log 2>&1
+  ```
+
+  or a systemd timer with `OnUnitActiveSec=5min` running the same command.
+
+Only one runner pushes for a deployment at a time, in any process: a run claims
+the row first, and a claim left by a process that died lapses after five minutes.
+Every push is recorded as `sending` before the request goes out, with the marker it
+carries. Before a first push, and for a push whose answer was lost, the provider is
+asked for the finding's issue, oldest first, 100 a page:
+
+- **Jira**: one JQL over the marker label, the older labels `athena-<uuid>` and
+  `<uuid>`, and `text ~ "<uuid>"` (every issue Athena ever created says
+  `Athena finding: <uuid>`), through `/rest/api/3/search/jql` (Jira Cloud), falling
+  back to `/rest/api/2/search` (Data Center and Server) when the first is missing;
+- **GitHub**: the issues list by each of those labels, then the search for the uuid
+  in bodies (GitHub drops the labels of a token without push access; the create
+  then says so);
+- **ServiceNow**: `correlation_id`, which every release has sent.
+
+Each issue Athena creates carries its marker twice: the label
+`athena-<installation>-<finding uuid>`, and the body line
+`Athena marker: <label> <tag>`, where the tag is an HMAC, keyed by a secret only this
+backend holds, over the installation id, the connector and its destination (base URL
+plus repository, project or table), the finding and its deployment -- so a tag read
+in one tracker never verifies in another. Only an issue whose tag verifies, or the
+one already recorded for the finding (read directly by its id), is adopted; of
+several that verify, the one created first, since a copy (a Jira clone, a pasted
+body) is always made after what it copies. Anything else the search matches -- a
+copied label, a planted body, a forged tag, another installation's or another
+tracker's tag -- is ignored and named in a WARNING; it never holds a dispatch.
+
+An issue in a format older than tags (master's `Athena finding: <uuid>` body, or an
+earlier label) is never adopted: anyone who can edit an old issue can make it
+mention a finding. One the provider says was created before this installation began
+tagging is a possible duplicate: the ticket filed for the finding names it in its
+body, and a WARNING names it too, so a person can close one of the two. A push an
+earlier release made (no marker recorded on its attempt) is pushed again the same
+way when the look names such issues; when nothing at all is found for it, it is
+held, not pushed again blind.
+
+A closed issue for the finding is not reopened and not duplicated: it is commented
+on (on the first push and on a lost answer's alike), and the attempt is recorded
+`sent_to_closed`, with a WARNING and a note on the attempt that the tracker says the
+work is done while the decision still blocks. Where a push cannot be looked for
+(Splunk HEC), or is held, it stays owed until someone records what happened:
+`python manage.py reconcile_dispatch_attempt <attempt uuid> --provider-has-it --by <you>`
+(or `--provider-lacks-it`). The deployment's `dispatch-attempts` read shows what is owed.
+
+The installation id and the marker secret are random, generated once and kept in
+the database (`AssuranceInstallation`); neither is derived from `DJANGO_SECRET_KEY`,
+so rotating that key changes no marker. `ASSURANCE_INSTALLATION_ID` overrides the id.
+Every id the database has used is kept (`AssuranceInstallationId`) and a marker made
+under any of them verifies, so setting or changing it after go-live files no second
+ticket. A database restored into another environment (staging from production) is
+the same installation, markers and all: to make it a separate one before it pushes
+to a tracker production also uses, give it a new identity with
+`python manage.py shell -c "from assurance.models import AssuranceInstallation as I, AssuranceInstallationId as J; J.objects.all().delete(); I.objects.all().delete()"`.
+
+Settings, read from the environment (see `.env.example`):
+`ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS` (default 4) runs push at once per process,
+with at most `ASSURANCE_DISPATCH_MAX_WAITING_RUNS` (default 32) more threads waiting;
+past that nothing recorded is started now, and the next sweep starts it. A dispatch
+the stop could not record is started past that bound, but never past twice it.
+`ASSURANCE_DISPATCH_SWEEP_SECONDS` (default 300; `0` off).
+`ASSURANCE_CONNECTOR_DEADLINE_SECONDS` (default 30) bounds each connector request in
+total, including name resolution. A value that is not a number fails
+`manage.py check` (`assurance.E303`), is logged once at start, and the default is
+used. `ASSURANCE_AUTO_DISPATCH_ENABLED=False` stops all of it without dropping
+anything owed.
+
+Logging. A stop's thread never writes to a log handler. A dispatch that is neither
+recorded nor started is named at ERROR, with the `retry_blocking_dispatches
+--deployment N` command to run: at once, in the stop's own thread, as one line to
+stderr -- only if stderr can take it without waiting -- and, for the log handlers,
+through the background log thread. When no thread can start, the record waits in
+that queue (bounded, counted) until the next request, sweep or exit starts or runs
+the writer. Everything else on a stop's path goes the same way, through a queue of
+at most 1000 records (the oldest are dropped and counted); what is queued at exit is
+written then, for at most 2 s.
+
+**Migration `assurance.0043`** adds `marker` as a nullable column with no default: a
+plain `ADD COLUMN`, so it copies no table and holds the write lock for no time
+whatever the table's size, and code still serving from before it (migrate, then
+restart) goes on recording its attempts, which read as an earlier release's. Code
+deployed AHEAD of it cannot dispatch or push by hand (the columns are missing) until
+it runs; stops are unaffected and what is owed stays recorded.
+**Rolling back past `assurance.0043`** is refused while an uncertain attempt carries
+a marker (code before it cannot look for it), and turns `sent_to_closed` back into
+`sent`. **Past `assurance.0042`** it is refused while any
+attempt is `sending`, because code from before it would push those again blind.
+Check with
+`python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome__in=['sending','unknown']).count())"`,
+and settle them first (let a run finish, or use `reconcile_dispatch_attempt`).
+
 ## Secrets
 
 Nothing belongs in source. A Google app password for the company mailbox and a

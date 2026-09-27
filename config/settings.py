@@ -20,6 +20,20 @@ def _env_list(name: str, default: str = "") -> list:
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
+def _env_number(name: str, default):
+    """``name`` from the environment as a number of ``default``'s type, or the
+    default when it is unset. A value that is not one is kept as given, so
+    ``manage.py check`` names it and the code that reads it logs it once and uses
+    the default -- rather than every process failing to import its settings."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return type(default)(raw)
+    except ValueError:
+        return raw
+
+
 # DEBUG was hardcoded True with no way to turn it off short of editing this
 # file, so any unhandled exception returned a traceback carrying settings, SQL
 # and local variables. It is now off unless the environment asks for it.
@@ -314,6 +328,21 @@ ASSURANCE_CREDENTIAL_KEY = os.environ.get("ASSURANCE_CREDENTIAL_KEY", "")
 # a no-op unless a deployment has an admin-enabled DispatchPolicy and connector
 # bindings — this only lets an operator disable the whole path at once.
 ASSURANCE_AUTO_DISPATCH_ENABLED = _env_flag("ASSURANCE_AUTO_DISPATCH_ENABLED", default=True)
+
+# This installation's id in the systems it files issues in (assurance.markers).
+# Unset, a random id generated once and kept in the database is used; set it to
+# give a database restored into another environment (staging from production) an
+# id of its own, so it never adopts the first environment's issues. Never derived
+# from DJANGO_SECRET_KEY: rotating that key changes no marker.
+ASSURANCE_INSTALLATION_ID = os.environ.get("ASSURANCE_INSTALLATION_ID", "").strip()
+# The blocking-decision dispatch a stop owes runs in the background (#303): how
+# many runs push at once per process, how many more threads may wait for one, and
+# how often the sweeper retries what is still owed (0 turns it off).
+ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS = _env_number("ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS", 4)
+ASSURANCE_DISPATCH_MAX_WAITING_RUNS = _env_number("ASSURANCE_DISPATCH_MAX_WAITING_RUNS", 32)
+ASSURANCE_DISPATCH_SWEEP_SECONDS = _env_number("ASSURANCE_DISPATCH_SWEEP_SECONDS", 300.0)
+# The wall-clock limit on one whole connector request, in seconds.
+ASSURANCE_CONNECTOR_DEADLINE_SECONDS = _env_number("ASSURANCE_CONNECTOR_DEADLINE_SECONDS", 30.0)
 
 # -------------------------------------------------------------------
 # FAILSAFE CONTROL PLANE (operator-held pause / stand down / terminate)

@@ -25,3 +25,14 @@ class AssuranceConfig(AppConfig):
         from . import observability
 
         observability.configure()
+
+        # The background dispatch's settings (#303), read once here: one that is
+        # not a number is an ERROR now, once, and `manage.py check` names it; the
+        # default is used in its place, and no request logs it again.
+        from django.core import checks
+
+        from . import dispatch
+        from .checks import dispatch_settings
+
+        checks.register(dispatch_settings)
+        dispatch.read_settings()

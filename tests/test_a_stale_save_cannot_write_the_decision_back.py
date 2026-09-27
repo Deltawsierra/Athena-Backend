@@ -50,7 +50,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from assurance import signals
+from assurance import oplog, signals
 from assurance.admin import DeploymentAdmin
 from assurance.decision import decision_support, recompute_decision
 from assurance.models import (
@@ -73,6 +73,22 @@ pytestmark = pytest.mark.django_db
 User = get_user_model()
 D = Deployment.Decision
 _REPO = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _deferred_logs_written():
+    """The repair of a row behind its log is reported from the log thread, never
+    under the row lock (#303): what an earlier test left queued is written before
+    this one, what it leaves is written before the next, and its reads wait for
+    its own (:func:`_errors_logged`)."""
+    oplog.drain()
+    yield
+    oplog.drain()
+
+
+def _errors_logged(caplog):
+    oplog.drain()
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 def _owner():
@@ -141,7 +157,7 @@ def test_a_shell_writers_stale_full_save_leaves_the_decision_where_the_backstop_
         (before + 1, D.READY, D.NOT_RECOMMENDED),
     ], "the row and its transition log agree"
     assert decision_support(stored)["decision"] == D.NOT_RECOMMENDED
-    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert _errors_logged(caplog) == []
 
     client = _client(dep)
     assert one_decision(dep, client) == D.NOT_RECOMMENDED
@@ -309,7 +325,7 @@ def _behind_its_log():
 
 
 def _repair_logged(caplog, dep):
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    errors = _errors_logged(caplog)
     assert len(errors) == 1, [r.getMessage() for r in errors]
     assert errors[0].name == "assurance.revision"
     message = errors[0].getMessage()
@@ -400,7 +416,7 @@ def test_a_row_ahead_of_its_log_is_trusted_and_not_reported(caplog):
 
     assert out == {"decision": D.NOT_RECOMMENDED, "revision": 6, "changed": True}
     assert _log(dep) == [(6, D.READY, D.NOT_RECOMMENDED)]
-    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert [r.getMessage() for r in _errors_logged(caplog)] == []
 
 
 def test_a_wedged_deployment_is_repaired_by_the_next_recompute(caplog):
@@ -542,7 +558,7 @@ def test_a_row_level_with_or_ahead_of_its_log_keeps_its_own_pause(caplog, stored
 
     assert read_decision(dep) == {"decision": stored, "revision": top + ahead}
     assert _log(dep) == log
-    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert _errors_logged(caplog) == []
 
 
 @pytest.mark.parametrize(
