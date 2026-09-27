@@ -7,6 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { REFRESH_TOKEN_KEY, postRefresh, refreshSession } from "./refresh-token.ts";
 
 export interface AuthUser {
   id: number;
@@ -29,7 +30,6 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const REFRESH_TOKEN_KEY = "athena_refresh_token";
 const DEMO_MODE_KEY = "athena_demo_mode";
 
 const DEMO_USER: AuthUser = {
@@ -149,49 +149,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const refreshIn = Math.max((timeUntilExpiry - 60) * 1000, 0);
 
       refreshTimerRef.current = setTimeout(async () => {
-        const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-        if (!refreshToken) return;
+        if (!localStorage.getItem(REFRESH_TOKEN_KEY)) return;
 
-        try {
-          const res = await fetch("/api/token/refresh/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ refresh: refreshToken }),
-          });
-
-          if (!res.ok) {
-            accessTokenRef.current = null;
-            setUser(null);
-            localStorage.removeItem(REFRESH_TOKEN_KEY);
-            return;
-          }
-
-          const data = await res.json();
-          accessTokenRef.current = data.access;
-
-          if (data.refresh) {
-            localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
-          }
-
-          scheduleTokenRefresh(data.access);
-        } catch {
-          accessTokenRef.current = null;
-          setUser(null);
-          localStorage.removeItem(REFRESH_TOKEN_KEY);
+        // Another tab may refresh at the same moment: refreshSession removes
+        // the stored token only if it is still the one this tab sent, and
+        // follows a newer one another tab stored (refresh-token.ts).
+        const outcome = await refreshSession(localStorage, postRefresh);
+        if (outcome.kind === "refreshed") {
+          accessTokenRef.current = outcome.access;
+          scheduleTokenRefresh(outcome.access);
+          return;
         }
+        accessTokenRef.current = null;
+        setUser(null);
       }, refreshIn);
     },
     [clearRefreshTimer],
   );
 
-  const logout = useCallback(() => {
+  // This tab's session ended because its refresh was refused. Unlike
+  // logout(), the stored refresh token is not removed here: refreshSession has
+  // already removed it if it was still this tab's, and left another tab's.
+  const endSession = useCallback(() => {
     clearRefreshTimer();
     accessTokenRef.current = null;
     setUser(null);
     setIsDemo(false);
-    localStorage.removeItem(REFRESH_TOKEN_KEY);
     localStorage.removeItem(DEMO_MODE_KEY);
   }, [clearRefreshTimer]);
+
+  const logout = useCallback(() => {
+    endSession();
+    localStorage.removeItem(REFRESH_TOKEN_KEY);
+  }, [endSession]);
 
   const loginDemo = useCallback(() => {
     clearRefreshTimer();
@@ -235,35 +225,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshAccessToken = useCallback(async (): Promise<string | null> => {
-    const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-    if (!refreshToken) return null;
+    if (!localStorage.getItem(REFRESH_TOKEN_KEY)) return null;
 
-    try {
-      const res = await fetch("/api/token/refresh/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh: refreshToken }),
-      });
-
-      if (!res.ok) {
-        logout();
-        return null;
-      }
-
-      const data = await res.json();
-      accessTokenRef.current = data.access;
-
-      if (data.refresh) {
-        localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
-      }
-
-      scheduleTokenRefresh(data.access);
-      return data.access;
-    } catch {
-      logout();
-      return null;
+    const outcome = await refreshSession(localStorage, postRefresh);
+    if (outcome.kind === "refreshed") {
+      accessTokenRef.current = outcome.access;
+      scheduleTokenRefresh(outcome.access);
+      return outcome.access;
     }
-  }, [logout, scheduleTokenRefresh]);
+    endSession();
+    return null;
+  }, [endSession, scheduleTokenRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,41 +248,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-      if (!refreshToken) {
+      if (!localStorage.getItem(REFRESH_TOKEN_KEY)) {
         setIsLoading(false);
         return;
       }
 
       try {
-        const res = await fetch("/api/token/refresh/", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ refresh: refreshToken }),
-        });
+        // Several restored tabs refresh at once; refreshSession keeps the
+        // session for all of them (refresh-token.ts).
+        const outcome = await refreshSession(localStorage, postRefresh);
+        if (outcome.kind !== "refreshed" || cancelled) return;
 
-        if (!res.ok) {
-          localStorage.removeItem(REFRESH_TOKEN_KEY);
-          if (!cancelled) setIsLoading(false);
-          return;
-        }
-
-        const data = await res.json();
-        if (cancelled) return;
-
-        accessTokenRef.current = data.access;
-
-        if (data.refresh) {
-          localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
-        }
-
-        const currentUser = await fetchCurrentUser(data.access);
+        accessTokenRef.current = outcome.access;
+        const currentUser = await fetchCurrentUser(outcome.access);
         if (cancelled) return;
 
         setUser(currentUser);
-        scheduleTokenRefresh(data.access);
+        scheduleTokenRefresh(outcome.access);
       } catch {
-        localStorage.removeItem(REFRESH_TOKEN_KEY);
+        // The user could not be read. The refresh token is the new one the
+        // refresh just stored, and still good: it stays, so the next load
+        // restores the session.
       } finally {
         if (!cancelled) setIsLoading(false);
       }

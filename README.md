@@ -105,16 +105,38 @@ SQLite database). A sign-in from an address under a guessing flood can be
 refused, the operator's own included if they share the attacker's address.
 
 A stop draft is never refused and never throttled. Drafted again by the same
-account while its identical draft (same engine, same action) is unsigned and
-has at least half its window left, it returns that draft (200, the same bytes
-to sign) instead of adding one. The command list and the state view list the
-stop commands awaiting a signature first -- those already signed once, then
-each account's drafts in turn, so a flood from one account lies behind every
-other operator's newest -- at most 500, never cut by the other row caps. Every
-stop-lane read does work bounded by its row limits, whatever the number of
-commands, and marks at most 200 commands expired per read, in one write. The
-state view waits for the engine's live state `FAILSAFE_STATE_ENGINE_SECONDS`
-(default 2) at most.
+account while its identical draft (same engine, same action, same reason) is
+unsigned and has at least half its window (`FAILSAFE_COMMAND_TTL_SECONDS`, 600 s)
+left, it returns that draft (200: the same uuid, the same bytes to sign, and the
+window it has left, at least 300 s) instead of adding one; with another reason
+it is a new draft. Identical drafts sent at once are one row. A reason is at
+most 1,000 characters: a longer one is answered 400 naming the limit. One
+account has at most `FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT` (default 100)
+unsigned stop drafts awaiting a signature: a draft past that is made, and the
+account's OLDEST unsigned stop drafts are superseded (status `superseded`, with
+an audit event naming the draft that superseded each; no longer signable; drafted
+again, a new draft). Never another account's, and never one already carrying a
+signature -- but the dashboard's service account is one account, so every
+dashboard user's drafts share its limit. Every draft still adds a row to the
+command history, as every stop adds to the audit trail. The command list and the
+state view list the stop commands awaiting a signature first -- those already
+signed once, then each account's drafts in turn, so a flood from one account lies
+behind every other operator's newest -- at most 500, never cut by the other row
+caps. Every stop-lane read does work bounded by its row limits, whatever the
+number of commands, returns at most `FAILSAFE_STOP_LANE_READ_BYTES` (default
+1,000,000) of commands in that order, says in its `X-Failsafe-More` header (and
+the state view in `more`) whether it left any out, and marks at most 200
+commands expired per read, in one write. Identical stop-lane reads by one
+account at once -- identical in the parameters the view reads, whatever else the
+query string carries -- share one computation; reads of different engines do
+not. The state view waits for the engine's live state
+`FAILSAFE_STATE_ENGINE_SECONDS` (default 2) at most. Two operators signing one
+command at once both count: each signature is added to the command as it is at
+that moment, under the write lock.
+
+Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
+engagements they created are kept, with the creator unlinked; such an engagement
+is visible to admins only.
 
 ## Signed chain outcomes
 

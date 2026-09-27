@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import itertools
+import json
 import logging
 import secrets
 import threading
@@ -67,6 +68,34 @@ AWAITING_STOP_LIMIT = 500
 UNSIGNED_STOP_SCAN = 1000
 #: The most commands one read marks expired, in one write.
 EXPIRE_PER_READ = 200
+#: The most drafts one new stop draft supersedes (see _supersede_past_limit):
+#: past the limit there is normally exactly one; a backlog is superseded a
+#: bounded few at a time by the drafts that follow.
+SUPERSEDE_PER_DRAFT = 200
+
+
+def _setting(name, default, least):
+    """An integer setting, at least ``least``; the default when it is unset or
+    not a number."""
+    try:
+        return max(least, int(getattr(settings, name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def unsigned_stop_drafts_per_account():
+    """The most unsigned stop drafts one account has awaiting a signature
+    (FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT, default 100, at least 1). A new
+    stop draft past it is made -- a stop draft is never refused -- and the
+    account's OLDEST unsigned stop drafts past it are superseded."""
+    return _setting("FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT", 100, 1)
+
+
+def stop_lane_read_bytes():
+    """The most bytes of commands one stop-lane read returns
+    (FAILSAFE_STOP_LANE_READ_BYTES, default 1,000,000, at least 64 KiB)."""
+    return _setting("FAILSAFE_STOP_LANE_READ_BYTES", 1_000_000, 64 * 1024)
+
 
 _AWAITING = FailsafeCommand.STATUS_AWAITING
 _READY = FailsafeCommand.STATUS_READY
@@ -145,15 +174,16 @@ def _fetch(pks):
 
 def _newest(qs, parts, limit, expiry, in_flight_only):
     """The newest ``limit`` commands of ``qs`` matching any of ``parts`` (each a
-    filter an index serves in creation order), newest first.
+    filter an index serves in creation order), newest first; and whether any
+    more matched than the limit let through.
 
-    Each part is one index read of at most ``limit`` keys, then one read of the
-    rows chosen, so the work is the limit and the number of parts, whatever
+    Each part is one index read of at most ``limit`` + 1 keys, then one read of
+    the rows chosen, so the work is the limit and the number of parts, whatever
     the number of commands. A command in flight past its window is marked
     expired; ``in_flight_only`` drops it instead of showing it."""
     keys = []
     for part in parts:  # {} is every command, newest first, by the index on creation time
-        keys.extend(qs.filter(**part).order_by("-created_at").values_list("pk", "created_at")[:limit])
+        keys.extend(qs.filter(**part).order_by("-created_at").values_list("pk", "created_at")[: limit + 1])
     keys.sort(key=lambda key: key[1], reverse=True)
     out = []
     for command in _fetch([pk for pk, _created in keys[:limit]]):
@@ -162,7 +192,7 @@ def _newest(qs, parts, limit, expiry, in_flight_only):
                 continue
             command.status = FailsafeCommand.STATUS_EXPIRED
         out.append(command)
-    return out
+    return out, len(keys) > limit
 
 
 def _parts(statuses, actions):
@@ -183,7 +213,8 @@ def _parts(statuses, actions):
 
 def _awaiting_stops(qs, expiry):
     """The stop commands in ``qs`` awaiting a signature, at most
-    AWAITING_STOP_LIMIT, in the order a co-signer needs them.
+    AWAITING_STOP_LIMIT, in the order a co-signer needs them; and whether any
+    were left out.
 
     First those that already carry a signature -- a stand-down or terminate
     waiting for its second -- newest first: a signature needs an enrolled
@@ -197,42 +228,88 @@ def _awaiting_stops(qs, expiry):
     signed keys and one of at most UNSIGNED_STOP_SCAN unsigned ones, then one
     read of the rows chosen. What that leaves out, stated plainly: an unsigned
     draft older than UNSIGNED_STOP_SCAN newer unsigned drafts of its action --
-    or ranked below 500 others -- is not in a read of every engine. A read of
-    one engine (the dashboard's state and list reads name the engine) never
-    comes near that: a stop draft made again while an identical one is unsigned
-    returns it (commands), so an account has at most one fresh unsigned draft
-    of each stop action for an engine."""
-    signed, unsigned = [], []
+    or ranked below 500 others -- is not in the read, which then says "more".
+    No one account comes near that: it has at most
+    unsigned_stop_drafts_per_account() unsigned stop drafts awaiting a
+    signature (commands), so every other account's are ranked beside them."""
+    signed, unsigned, scans_full = [], [], False
     for action in STOP_ACTIONS:
         base = qs.filter(status=_AWAITING, action=action).order_by("-created_at")
-        signed.extend(base.filter(signed=True).values_list("pk", "created_at", "expires_at")[:AWAITING_STOP_LIMIT])
-        unsigned.extend(
+        some_signed = list(base.filter(signed=True).values_list("pk", "created_at", "expires_at")[:AWAITING_STOP_LIMIT])
+        some_unsigned = list(
             base.filter(signed=False).values_list("pk", "created_at", "expires_at", "initiator_id")[
                 :UNSIGNED_STOP_SCAN
             ]
         )
+        scans_full |= len(some_signed) == AWAITING_STOP_LIMIT or len(some_unsigned) == UNSIGNED_STOP_SCAN
+        signed += some_signed
+        unsigned += some_unsigned
+
     def newest_in_flight(keys):
         live = [key for key in keys if not expiry.due(key[0], _AWAITING, key[2])]
         return sorted(live, key=lambda key: key[1], reverse=True)
 
-    signed = [key[0] for key in newest_in_flight(signed)][:AWAITING_STOP_LIMIT]
+    signed = [key[0] for key in newest_in_flight(signed)]
     per_account = {}
     for pk, _created, _expires, initiator in newest_in_flight(unsigned):
         per_account.setdefault(initiator, []).append(pk)
     in_turn = [pk for round_ in itertools.zip_longest(*per_account.values()) for pk in round_ if pk is not None]
-    return _fetch(signed + in_turn[: AWAITING_STOP_LIMIT - len(signed)])
+    chosen = (signed + in_turn)[:AWAITING_STOP_LIMIT]
+    return _fetch(chosen), scans_full or len(signed) + len(in_turn) > len(chosen)
 
 
-def _fresh_unsigned_draft(user, engine_id, action, ttl):
-    """``user``'s unsigned draft of ``action`` for ``engine_id`` with at least
-    half its window left, or None. One indexed read; a read that fails is
-    None, so the draft is made afresh -- a stop draft is never refused."""
+class _Page:
+    """What one stop-lane read returns: rows in the order given, serialized,
+    until they come to stop_lane_read_bytes() -- and whether anything was left
+    out, by that or by a row limit.
+
+    Round 4 bounded a read in rows, not bytes: 500 drafts with 60,000-character
+    reasons made one read of every engine 18.8 MB. A reason is at most
+    REASON_LIMIT characters now, but rows drafted before that are not, so the
+    read is bounded in bytes too. Rows are taken in priority order -- the stop
+    commands awaiting a signature first, signed ones first among them -- and
+    the first row that does not fit ends the page. ``more`` is what the read
+    says about it: in the state read's body, and in both reads' X-Failsafe-More
+    header."""
+
+    def __init__(self):
+        self.left = stop_lane_read_bytes()
+        self.more = False
+
+    def cut(self, more):
+        self.more = self.more or bool(more)
+
+    def take(self, commands):
+        out = []
+        if self.left <= 0:
+            self.more = self.more or bool(commands)
+            return out
+        for row in FailsafeCommandSerializer(commands, many=True).data:
+            size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) + 1
+            if size > self.left:
+                self.left = 0
+                self.more = True
+                break
+            self.left -= size
+            out.append(row)
+        return out
+
+
+def _fresh_unsigned_draft(user, engine_id, action, reason, ttl, before=None):
+    """``user``'s newest unsigned draft of ``action`` for ``engine_id`` with the
+    SAME reason and at least half its window left -- made before the draft
+    ``before`` names, when it names one -- or None. One indexed read, and no
+    lock; a read that fails is None, so the draft is made afresh -- a stop draft
+    is never refused. The reason is in the signed bytes, so a draft with another
+    reason is another draft: round 4 returned a "DRILL - do not sign" draft to
+    the dashboard's real pause a second later."""
     try:
-        drafts = list(
-            FailsafeCommand.objects.filter(
-                initiator=user, engine_id=engine_id, action=action, status=_AWAITING, signed=False
-            ).order_by("-created_at")[:1]
+        drafts = FailsafeCommand.objects.filter(
+            initiator=user, engine_id=engine_id, action=action, status=_AWAITING, signed=False, reason=reason
         )
+        if before is not None:
+            drafts = drafts.filter(pk__lt=before)
+        drafts = list(drafts.order_by("-created_at")[:1])
     except Exception:  # noqa: BLE001 - a failed read makes a new draft; it never refuses one
         return None
     if not drafts:
@@ -252,8 +329,9 @@ class _SharedReads:
     account can send as many at once as it likes, and each ran on a thread of
     its own: eight threads reading state took a pause's latency from 0.013 s to
     0.231 s (round 3), because every read competed for the interpreter with the
-    pause. Now a read of one kind (the route, the account, the credential, the
-    query) waits while an identical one is being computed -- a wait on a lock,
+    pause. Now a read of one kind (the route, the account, the credential, and
+    the query parameters the view reads: _read_kind) waits while an identical
+    one is being computed -- a wait on a lock,
     which competes for nothing -- and then either reuses a result whose
     computation STARTED after it arrived, or computes the next one itself. So a
     reader never gets a result older than its own arrival: it sees every command
@@ -299,8 +377,19 @@ _SHARED_READS = _SharedReads()
 
 def _read_kind(request, view):
     """What makes two stop-lane reads identical: the route, the account, the
-    credential it presented, and the query."""
-    return (view, request.user.pk, _by_service_token(request), request.META.get("QUERY_STRING", ""))
+    credential it presented, and the query parameters the view reads --
+    engine_id, and for the list its status -- as the view reads them. Never
+    the raw query string: round 4 made every read distinct by adding
+    ``&n=<i>``, which the view ignores, and none was shared (a pause took
+    0.33 s instead of 0.05 s)."""
+    params = request.query_params
+    engine_id = params.get("engine_id") or ""
+    status_ = ""
+    if view == "commands":
+        status_ = params.get("status") or ""
+        if status_ and status_ not in _STATUSES:
+            status_ = "(none)"  # every status the view does not know reads the same: no rows
+    return (view, request.user.pk, _by_service_token(request), engine_id, status_)
 
 
 def _audit(command, event, request, **detail):
@@ -326,10 +415,12 @@ def _expire_if_due(command, now=None):
 def commands(request):
     if request.method == "GET":
         # A stop-lane read: no throttle counts it (safety.stops), so its work is
-        # bounded by its row limits, not by the number of commands. The stop
-        # commands awaiting a signature come first (_awaiting_stops) and are
-        # never cut by the row cap, so no flood of other drafts hides one.
-        return Response(_SHARED_READS.read(_read_kind(request, "commands"), lambda: _list(request)))
+        # bounded by its row and byte limits, not by the number of commands.
+        # The stop commands awaiting a signature come first (_awaiting_stops)
+        # and are never cut by the row cap, so no flood of other drafts hides
+        # one. X-Failsafe-More says whether anything was left out.
+        rows, more = _SHARED_READS.read(_read_kind(request, "commands"), lambda: _list(request))
+        return Response(rows, headers={MORE_HEADER: "true" if more else "false"})
 
     serializer = DraftCommandSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -343,19 +434,16 @@ def commands(request):
         )
 
     ttl = int(getattr(settings, "FAILSAFE_COMMAND_TTL_SECONDS", 600))
+    reason = serializer.validated_data.get("reason", "")
     if action in STOP_ACTIONS:
-        # A stop draft is never refused and never throttled (safety.stops). Made
-        # again while this account's identical draft is unsigned and has at
-        # least half its window left, it returns that draft (200) rather than
-        # adding another: the same bytes to sign, so a signature already made
-        # out of band still counts, and a flood of one draft is one row.
-        existing = _fresh_unsigned_draft(request.user, engine_id, action, ttl)
-        if existing is not None:
-            body = FailsafeCommandSerializer(existing).data
-            body["signing_bytes"] = signing_bytes_hex(existing.as_command_dict())
-            return Response(body, status=status.HTTP_200_OK)
+        return _stop_draft(request, action, engine_id, reason, ttl)
 
-    draft = make_draft(action, engine_id, serializer.validated_data.get("reason", ""), ttl)
+    command, draft = _new_draft(request, action, engine_id, reason, ttl)
+    return _drafted(command, draft, status.HTTP_201_CREATED)
+
+
+def _new_draft(request, action, engine_id, reason, ttl, audit=True):
+    draft = make_draft(action, engine_id, reason, ttl)
     command = FailsafeCommand.objects.create(
         engine_id=draft["engine_id"],
         action=draft["action"],
@@ -366,15 +454,130 @@ def commands(request):
         required_signatures=required_signatures(action),
         initiator=request.user,
     )
-    _audit(command, FailsafeAuditEvent.EVENT_DRAFTED, request, action=action,
-           engine_id=command.engine_id)
+    if audit:
+        _audit(command, FailsafeAuditEvent.EVENT_DRAFTED, request, action=action,
+               engine_id=command.engine_id)
+    return command, draft
+
+
+def _drafted(command, draft, code):
     body = FailsafeCommandSerializer(command).data
     # The exact bytes the operator's CLI must sign for this command.
     body["signing_bytes"] = signing_bytes_hex(draft)
-    return Response(body, status=status.HTTP_201_CREATED)
+    return Response(body, status=code)
+
+
+def _stop_draft(request, action, engine_id, reason, ttl):
+    """A stop draft: never refused and never throttled (safety.stops).
+
+    Made again by the same account for the same engine with the same reason
+    while that draft is unsigned and has at least half its window left, it
+    returns that draft (200) -- the same uuid, the same bytes to sign, and the
+    window it has left, at least half of FAILSAFE_COMMAND_TTL_SECONDS -- so a
+    signature already made out of band still counts. Any other draft is new
+    (201): another reason, action, engine or account, or one signed, cancelled,
+    expired, superseded or past half its window.
+
+    Identical drafts sent at once are one row, where round 4 made up to four:
+    each is inserted on its own, and then looks for an identical fresh draft
+    inserted BEFORE it (on SQLite, the one database this project configures,
+    rows are numbered in the order they are written, so of any two the later
+    one finds the earlier). One that finds one takes its own row back -- it was
+    never answered to anyone, and it is taken back only while it is still
+    unsigned -- and answers with the earlier one (200). No lock is held across
+    the look-up and the insert: every write here is one statement, so a flood
+    of drafts never holds the database's write lock against a pause for longer
+    than one statement does. (Holding it across them, in one transaction,
+    delayed a pause 2.9 s during a draft flood.)
+
+    The account's unsigned stop drafts past unsigned_stop_drafts_per_account()
+    -- its oldest -- are then superseded (_supersede_past_limit). Only the
+    account's own: one account's flood never supersedes another's drafts."""
+    existing = _fresh_unsigned_draft(request.user, engine_id, action, reason, ttl)
+    if existing is not None:
+        return _drafted(existing, existing.as_command_dict(), status.HTTP_200_OK)
+    command, draft = _new_draft(request, action, engine_id, reason, ttl, audit=False)
+    earlier = _fresh_unsigned_draft(request.user, engine_id, action, reason, ttl, before=command.pk)
+    if earlier is not None and _take_back(command):
+        return _drafted(earlier, earlier.as_command_dict(), status.HTTP_200_OK)
+    superseded = _supersede_past_limit(command)
+    actor = request.user if request.user.is_authenticated else None
+    metadata = getattr(request, "audit_metadata", {})
+    events = [
+        FailsafeAuditEvent(
+            command=command, event=FailsafeAuditEvent.EVENT_DRAFTED, actor=actor,
+            detail={**metadata, "action": action, "engine_id": command.engine_id,
+                    **({"superseded": len(superseded)} if superseded else {})},
+        )
+    ]
+    events += [
+        FailsafeAuditEvent(
+            command_id=pk, event=FailsafeAuditEvent.EVENT_SUPERSEDED, actor=actor,
+            detail={**metadata, "by": str(command.uuid), "limit": unsigned_stop_drafts_per_account()},
+        )
+        for pk in superseded
+    ]
+    FailsafeAuditEvent.objects.bulk_create(events)
+    return _drafted(command, draft, status.HTTP_201_CREATED)
+
+
+def _take_back(command):
+    """Delete ``command``, a draft just inserted and never answered, if it is
+    still unsigned and awaiting. Whether it was."""
+    try:
+        deleted, _by_model = FailsafeCommand.objects.filter(pk=command.pk, status=_AWAITING, signed=False).delete()
+        return deleted >= 1
+    except Exception:  # noqa: BLE001 - a draft that cannot be taken back stands; it is never refused
+        logger.exception("could not take back duplicate draft %s", command.uuid)
+        return False
+
+
+def _supersede_past_limit(newest):
+    """Supersede ``newest``'s account's oldest unsigned stop drafts past
+    unsigned_stop_drafts_per_account(): no longer awaiting a signature, and
+    recorded as superseded -- the status, and an audit event naming the draft
+    that superseded each (_stop_draft). A draft already carrying a signature is
+    never superseded. One index read of the account's unsigned drafts past the
+    limit (at most SUPERSEDE_PER_DRAFT of them), one write, and one read of
+    what the write changed. Returns their primary keys.
+
+    Why: a stop draft is never refused, so one account could draft without end
+    -- 1,200 in 10 s to engines that do not exist, all awaiting a signature
+    (round 4, H1). Its unsigned drafts are bounded now, never its right to draft.
+    A failure here is logged; the new draft stands."""
+    limit = unsigned_stop_drafts_per_account()
+    try:
+        pks = [
+            pk
+            for pk in FailsafeCommand.objects.filter(
+                initiator=newest.initiator_id, status=_AWAITING, signed=False, action__in=STOP_ACTIONS
+            )
+            .order_by("-created_at")
+            .values_list("pk", flat=True)[limit : limit + SUPERSEDE_PER_DRAFT]
+            if pk != newest.pk
+        ]
+        if not pks:
+            return []
+        now = timezone.now()
+        FailsafeCommand.objects.filter(pk__in=pks, status=_AWAITING, signed=False).update(
+            status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now
+        )
+        return list(
+            FailsafeCommand.objects.filter(pk__in=pks, status=FailsafeCommand.STATUS_SUPERSEDED, updated_at=now)
+            .values_list("pk", flat=True)
+        )
+    except Exception:  # noqa: BLE001 - superseding is housekeeping; the new stop draft stands
+        logger.exception("could not supersede drafts past the limit of account %s", newest.initiator_id)
+        return []
+
+
+#: The header both stop-lane reads carry: "true" when the read left out a
+#: command it would otherwise have listed, by a row limit or the byte limit.
+MORE_HEADER = "X-Failsafe-More"
 
 
 def _list(request):
+    """The list read: (rows, more)."""
     qs = FailsafeCommand.objects.all()
     engine_id = request.query_params.get("engine_id")
     state_ = request.query_params.get("status")
@@ -382,15 +585,18 @@ def _list(request):
         qs = qs.filter(engine_id=engine_id)
     statuses = _STATUSES if not state_ else tuple(s for s in _STATUSES if s == state_)
     expiry = _Expiry()
-    stops = _awaiting_stops(qs, expiry) if _AWAITING in statuses else []
+    stops, stops_more = _awaiting_stops(qs, expiry) if _AWAITING in statuses else ([], False)
     if _by_service_token(request):
         # The service token reads the stop commands in flight, nothing else.
-        rest = _newest(qs, _parts([s for s in statuses if s == _READY], STOP_ACTIONS), AWAITING_STOP_LIMIT,
-                       expiry, in_flight_only=True)
+        rest, rest_more = _newest(qs, _parts([s for s in statuses if s == _READY], STOP_ACTIONS),
+                                  AWAITING_STOP_LIMIT, expiry, in_flight_only=True)
     else:
-        rest = _newest(qs, _rest_parts(statuses), COMMAND_LIST_LIMIT, expiry, in_flight_only=False)
+        rest, rest_more = _newest(qs, _rest_parts(statuses), COMMAND_LIST_LIMIT, expiry, in_flight_only=False)
     expiry.mark()
-    return FailsafeCommandSerializer([*stops, *rest], many=True).data
+    page = _Page()
+    page.cut(stops_more or rest_more)
+    rows = page.take([*stops, *rest])
+    return rows, page.more
 
 
 def _rest_parts(statuses):
@@ -443,26 +649,43 @@ def submit_signature(request, cmd_uuid):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    if key_id in command.distinct_signers():
-        return Response(
-            {"detail": f"{key_id} has already signed"}, status=status.HTTP_409_CONFLICT
-        )
+    # The append is made to the row as it is NOW, under the write lock: the
+    # read above can be stale by the time it is written. Two operators signing
+    # one stand-down at the same moment both read it with no signature, and
+    # the second save overwrote the first's -- both answered 200, and the
+    # stand-down stayed awaiting with one (round 4, M3: 6/20 on main). The
+    # transaction takes SQLite's write lock at its start (IMMEDIATE,
+    # config.settings) and the row's lock elsewhere (select_for_update); the
+    # row is read again inside it and everything is judged on that.
+    with transaction.atomic():
+        command = FailsafeCommand.objects.select_for_update().filter(pk=command.pk).first()
+        if command is None:
+            raise Http404
+        if _expire_if_due(command) or command.status != FailsafeCommand.STATUS_AWAITING:
+            return Response(
+                {"detail": f"command is {command.status}; not accepting signatures"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if key_id in command.distinct_signers():
+            return Response(
+                {"detail": f"{key_id} has already signed"}, status=status.HTTP_409_CONFLICT
+            )
 
-    command.signatures.append({
-        "key_id": key_id,
-        "sig": sig,
-        "submitted_by": request.user.username,
-        "submitted_at": timezone.now().isoformat(),
-    })
-    command.signed = True
-    command.save(update_fields=["signatures", "signed", "updated_at"])
-    _audit(command, FailsafeAuditEvent.EVENT_SIGNED, request, key_id=key_id)
+        command.signatures.append({
+            "key_id": key_id,
+            "sig": sig,
+            "submitted_by": request.user.username,
+            "submitted_at": timezone.now().isoformat(),
+        })
+        command.signed = True
+        command.save(update_fields=["signatures", "signed", "updated_at"])
+        _audit(command, FailsafeAuditEvent.EVENT_SIGNED, request, key_id=key_id)
 
-    valid = distinct_valid_signers(command.as_command_dict(), command.signatures, keyring)
-    if len(valid) >= command.required_signatures:
-        command.mark_ready()
-        _audit(command, FailsafeAuditEvent.EVENT_READY, request,
-               signers=sorted(valid))
+        valid = distinct_valid_signers(command.as_command_dict(), command.signatures, keyring)
+        if len(valid) >= command.required_signatures:
+            command.mark_ready()
+            _audit(command, FailsafeAuditEvent.EVENT_READY, request,
+                   signers=sorted(valid))
 
     return Response(FailsafeCommandSerializer(command).data)
 
@@ -558,25 +781,31 @@ def state(request):
     "not reported" when the engine cannot be reached.
 
     A stop-lane read (safety.stops): no gateway or throttle holds it back, so
-    its work is bounded by its row limits and not by the number of commands.
-    The stop commands awaiting a signature come first, at most
+    its work is bounded by its row and byte limits and not by the number of
+    commands. The stop commands awaiting a signature come first, at most
     AWAITING_STOP_LIMIT and never cut by the row cap (_awaiting_stops); every
-    other list is an index read of its few newest rows; commands found past
-    their window are marked expired in one write, at most EXPIRE_PER_READ of
-    them (_Expiry) -- a read never walks every command to expire it; and the
-    engine is waited for FAILSAFE_STATE_ENGINE_SECONDS at most. Identical
-    reads by one account at once share one computation at a time
-    (_SharedReads), never one that started before they arrived. With the
+    other list is an index read of its few newest rows; the rows come to at
+    most stop_lane_read_bytes(), in that order (_Page); ``more`` (and the
+    X-Failsafe-More header) says whether an awaiting or ready command was left
+    out by either limit -- ``recent`` is the newest ten and is not counted;
+    commands found past their window are marked expired in one write, at most
+    EXPIRE_PER_READ of them (_Expiry) -- a read never walks every command to
+    expire it; and the engine is waited for FAILSAFE_STATE_ENGINE_SECONDS at
+    most. Identical reads by one account at once share one computation at a
+    time (_SharedReads), never one that started before they arrived. With the
     service token it shows the stop commands in flight and the engine's state:
     no resume or release, and no history."""
     commands_ = _SHARED_READS.read(_read_kind(request, "state"), lambda: _in_flight(request))
     engine_state, engine_state_available = _engine_live_state()
-    return Response({
-        "engine_id": request.query_params.get("engine_id"),
-        "engine_state": engine_state,
-        "engine_state_available": engine_state_available,
-        **commands_,
-    })
+    return Response(
+        {
+            "engine_id": request.query_params.get("engine_id"),
+            "engine_state": engine_state,
+            "engine_state_available": engine_state_available,
+            **commands_,
+        },
+        headers={MORE_HEADER: "true" if commands_["more"] else "false"},
+    )
 
 
 def _in_flight(request):
@@ -586,19 +815,27 @@ def _in_flight(request):
     if engine_id:
         qs = qs.filter(engine_id=engine_id)
     expiry = _Expiry()
-    awaiting = _awaiting_stops(qs, expiry)
+    awaiting, more = _awaiting_stops(qs, expiry)
     if _by_service_token(request):
-        ready = _newest(qs, _parts([_READY], STOP_ACTIONS), 20, expiry, in_flight_only=True)
+        ready, ready_more = _newest(qs, _parts([_READY], STOP_ACTIONS), 20, expiry, in_flight_only=True)
         recent = []
     else:
-        awaiting += _newest(qs, _parts([_AWAITING], START_ACTIONS), 20, expiry, in_flight_only=True)
-        ready = _newest(qs, _parts([_READY], None), 20, expiry, in_flight_only=True)
-        recent = _newest(qs, [{}], 10, expiry, in_flight_only=False)
+        starts, starts_more = _newest(qs, _parts([_AWAITING], START_ACTIONS), 20, expiry, in_flight_only=True)
+        awaiting += starts
+        more = more or starts_more
+        ready, ready_more = _newest(qs, _parts([_READY], None), 20, expiry, in_flight_only=True)
+        recent, _history = _newest(qs, [{}], 10, expiry, in_flight_only=False)
     expiry.mark()
+    page = _Page()
+    page.cut(more or ready_more)
+    awaiting, ready = page.take(awaiting), page.take(ready)
+    in_flight_more = page.more
+    recent = page.take(recent)
     return {
-        "awaiting_signatures": FailsafeCommandSerializer(awaiting, many=True).data,
-        "ready": FailsafeCommandSerializer(ready, many=True).data,
-        "recent": FailsafeCommandSerializer(recent, many=True).data,
+        "awaiting_signatures": awaiting,
+        "ready": ready,
+        "recent": recent,
+        "more": in_flight_more,
     }
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from rest_framework import exceptions
+from rest_framework_simplejwt.exceptions import DetailDictMixin
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
@@ -32,7 +33,12 @@ from rest_framework_simplejwt.utils import datetime_from_epoch
 from rest_framework_simplejwt.views import TokenRefreshView
 
 
-class RefreshTokenAlreadyUsed(exceptions.AuthenticationFailed):
+class RefreshTokenAlreadyUsed(DetailDictMixin, exceptions.AuthenticationFailed):
+    """Answered with its code, as SimpleJWT's own token errors are, so a client
+    can tell "another refresh of this token got the new one" -- another tab,
+    whose token is on its way to storage -- from a token that is simply bad
+    (frontend/src/lib/refresh-token.ts)."""
+
     default_detail = "refresh token already used"
     default_code = "refresh_token_already_used"
 

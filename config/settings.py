@@ -403,6 +403,17 @@ FAILSAFE_SERVICE_USER = os.environ.get("FAILSAFE_SERVICE_USER")
 # dashboard's second operator finds a command to sign, so it is bounded.
 FAILSAFE_STATE_ENGINE_SECONDS = float(os.environ.get("FAILSAFE_STATE_ENGINE_SECONDS", "2.0"))
 
+# The most unsigned stop drafts one account has awaiting a signature. A stop
+# draft is never refused: one past this is made, and that account's OLDEST
+# unsigned stop drafts past it are superseded (never another account's, never
+# one already carrying a signature). The dashboard's service account is one
+# account, so its drafts share this.
+FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT = int(os.environ.get("FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT", "100"))
+
+# The most bytes of commands one stop-lane read (the failsafe list and state)
+# returns; what it leaves out it says, in X-Failsafe-More (and "more" in state).
+FAILSAFE_STOP_LANE_READ_BYTES = int(os.environ.get("FAILSAFE_STOP_LANE_READ_BYTES", "1000000"))
+
 # -------------------------------------------------------------------
 # AI DEFENDER (SAFE MODE) NOT AI LOGIC JUST A SAFETY SWITCH
 # -------------------------------------------------------------------

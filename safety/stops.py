@@ -339,8 +339,9 @@ STOP_ROUTES = {
     # failsafe:state is where the dashboard's second operator finds the command
     # awaiting their signature, the list is where a client finds it by engine
     # and status, and the detail carries the bytes to sign. Each is bounded --
-    # its work does not grow with the number of commands -- and changes no
-    # running work (failsafe.views).
+    # its work does not grow with the number of commands, and the list and
+    # state return at most FAILSAFE_STOP_LANE_READ_BYTES, saying what they left
+    # out -- and changes no running work (failsafe.views).
     "failsafe:state": {"GET": always},
     "failsafe:commands": {"GET": always, "POST": _stop_draft},
     "failsafe:command-detail": {"GET": always},

@@ -54,6 +54,17 @@ are counted atomically in the database before the hash (M4); a service account
 that cannot be read is a 503, not a 401 (L1); deleting an engagement is not a
 stop (L2); a removed or deactivated operator's refresh is not exempt (L3); and
 the service token reads only the stop commands in flight (L4).
+
+Round 5 (the adversary's round-4 findings): what stop drafts cost is bounded
+without refusing one -- a reason is at most 1,000 characters, an account's
+unsigned stop drafts past its limit supersede its oldest and never another
+account's, and each stop-lane read is bounded in bytes and says what it left
+out (H1); reads that differ only in what the view ignores share one computation
+(H2); a draft is reused only for an identical reason (M1); two signatures at
+once both count (M3); identical drafts at once are one row (L1); every stop,
+with every limit saturated, is answered within a stated bound, so a control
+that delays a stop without refusing it fails (L2); and removing an operator
+keeps their engagements.
 """
 
 from __future__ import annotations
@@ -3064,6 +3075,11 @@ def test_a_read_waits_for_an_identical_one_no_longer_than_its_bound(monkeypatch)
 
 @pytest.mark.django_db
 def test_the_stop_lane_reads_are_shared_per_account_credential_and_query(rates, service, monkeypatch):
+    """H2 (round 4): the kind included the raw query string, so ``&n=<i>`` --
+    which the view ignores -- made every read distinct and none was shared (a
+    pause went from 0.05 s to 0.33 s under 8 threads of reads). The kind is the
+    route, the account, the credential, and the parameters the view reads, as
+    it reads them."""
     from failsafe import views
 
     kinds = []
@@ -3074,10 +3090,78 @@ def test_the_stop_lane_reads_are_shared_per_account_credential_and_query(rates, 
     _client_for(analyst).get("/api/failsafe/commands/?engine_id=athena-1")
     _service_client().get("/api/failsafe/state/?engine_id=athena-1")
     assert kinds == [
-        ("state", analyst.pk, False, "engine_id=athena-1"),
-        ("commands", analyst.pk, False, "engine_id=athena-1"),
-        ("state", service.pk, True, "engine_id=athena-1"),
+        ("state", analyst.pk, False, "athena-1", ""),
+        ("commands", analyst.pk, False, "athena-1", ""),
+        ("state", service.pk, True, "athena-1", ""),
     ]
+    # What the view does not read is not part of the kind, in any order or
+    # spelling; what it reads is, as it reads it.
+    kinds.clear()
+    client = _client_for(analyst)
+    for path in ("/api/failsafe/state/?engine_id=athena-1&n=1", "/api/failsafe/state/?n=2&engine_id=athena-1",
+                 "/api/failsafe/state/?engine_id=athena-1&status=ready", "/api/failsafe/state/?n=3",
+                 "/api/failsafe/state/?engine_id=&n=4", "/api/failsafe/state/",
+                 "/api/failsafe/commands/?status=ready&n=5", "/api/failsafe/commands/?n=6&status=ready",
+                 "/api/failsafe/commands/?status=bogus", "/api/failsafe/commands/?status=other-bogus&n=7",
+                 "/api/failsafe/commands/?engine_id=e2&status=ready"):
+        assert client.get(path).status_code == 200, path
+    assert kinds == [
+        ("state", analyst.pk, False, "athena-1", ""),
+        ("state", analyst.pk, False, "athena-1", ""),
+        ("state", analyst.pk, False, "athena-1", ""),
+        ("state", analyst.pk, False, "", ""),
+        ("state", analyst.pk, False, "", ""),
+        ("state", analyst.pk, False, "", ""),
+        ("commands", analyst.pk, False, "", "ready"),
+        ("commands", analyst.pk, False, "", "ready"),
+        ("commands", analyst.pk, False, "", "(none)"),
+        ("commands", analyst.pk, False, "", "(none)"),
+        ("commands", analyst.pk, False, "e2", "ready"),
+    ]
+
+
+def test_reads_that_differ_only_in_what_the_view_ignores_share_one_computation(monkeypatch):
+    """H2, as it happens: eight reads of every engine at once, each with a query
+    parameter of its own that the view ignores, while one is computing -- the
+    eight share the next computation instead of making eight."""
+    from django.http import QueryDict
+
+    from failsafe import views
+
+    shared = views._SharedReads()
+    monkeypatch.setattr(views, "_SHARED_READS", shared)
+    started, release, computed = threading.Event(), threading.Event(), []
+
+    def compute():
+        computed.append(1)
+        if len(computed) == 1:
+            started.set()
+            release.wait(5)
+        return len(computed)
+
+    def request(query):
+        return types.SimpleNamespace(
+            query_params=QueryDict(query), META={"QUERY_STRING": query}, user=types.SimpleNamespace(pk=7), auth=None,
+        )
+
+    answers = {}
+
+    def reader(i):
+        answers[i] = shared.read(views._read_kind(request(f"n={i}"), "state"), compute)
+
+    first = threading.Thread(target=reader, args=(0,))
+    first.start()
+    assert started.wait(5)
+    later = [threading.Thread(target=reader, args=(i,)) for i in range(1, 9)]
+    for thread in later:
+        thread.start()
+    waited = time.monotonic() + 5
+    while shared._kinds.get(views._read_kind(request(""), "state"), {}).get("users", 0) < 9 and time.monotonic() < waited:
+        time.sleep(0.01)
+    release.set()
+    for thread in (first, *later):
+        thread.join(5)
+    assert len(computed) == 2 and answers == {0: 1, **{i: 2 for i in range(1, 9)}}
 
 
 @pytest.mark.django_db
@@ -3116,3 +3200,346 @@ def test_the_state_read_waits_for_the_engine_no_longer_than_its_deadline(rates, 
     assert time.monotonic() - started < 0.3 + 0.5
     assert answer.status_code == 200
     assert answer.data["engine_state"] is None and answer.data["engine_state_available"] is False
+
+
+# --- Round 5: what a stop draft costs, bounded without refusing one ------------
+
+#: The header both stop-lane reads carry: whether the read left anything out.
+MORE_HEADER = "X-Failsafe-More"
+
+
+@pytest.mark.django_db
+def test_a_reason_past_the_limit_is_a_400_naming_it(rates):
+    """H1 (round 4): a reason was unbounded up to the 64 KiB a stop body may
+    be, so 300 drafts with 60,000-character reasons grew the database 5 MB/s.
+    A reason is at most 1,000 characters: longer is 400, naming the limit --
+    input validation, not a count -- for every action; at the limit, 201."""
+    from failsafe.models import FailsafeCommand
+
+    client = _client_for(_admin())
+    for action in ("pause", "stand_down", "terminate", "resume"):
+        long = client.post("/api/failsafe/commands/", {"action": action, "engine_id": "e", "reason": "x" * 1001}, format="json")
+        assert long.status_code == 400, action
+        assert long.data["reason"] == ["A reason is at most 1,000 characters."]
+        assert client.post(
+            "/api/failsafe/commands/", {"action": action, "engine_id": f"e-{action}", "reason": "x" * 1000}, format="json"
+        ).status_code == 201
+    assert not FailsafeCommand.objects.filter(engine_id="e").exists()
+
+
+@pytest.mark.django_db
+def test_an_accounts_unsigned_stop_drafts_past_its_limit_supersede_its_oldest_and_only_its_own(rates, operator_key, configure):
+    """H1 (round 4): one analyst drafted 1,200 pauses in 10 s to engines that do
+    not exist, every one awaiting a signature. No stop draft is refused: past
+    the account's limit of unsigned stop drafts, its OLDEST unsigned stop drafts
+    are superseded -- recorded as such, with an audit event naming the draft
+    that superseded each. Another account's drafts, and this account's draft
+    that already carries a signature, are untouched. A superseded draft is not
+    signable, and drafting it again makes a new one."""
+    from failsafe.models import FailsafeAuditEvent, FailsafeCommand
+
+    configure(FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT=5)
+    other = _client_for(_user("analyst"))
+    theirs = _draft(other, "pause", "athena-2").data
+    flooder = _user("analyst")
+    client = _client_for(flooder)
+    signed = _draft(client, "stand_down", "athena-3").data
+    sig = {"key_id": "alice", "sig": operator_key.sign(bytes.fromhex(signed["signing_bytes"])).hex()}
+    assert client.post(f"/api/failsafe/commands/{signed['uuid']}/signatures/", sig, format="json").status_code == 200
+    drafts = [_draft(client, "pause", f"junk-{i}") for i in range(12)]
+    assert [d.status_code for d in drafts] == [201] * 12
+    mine = FailsafeCommand.objects.filter(initiator=flooder)
+    awaiting = set(mine.filter(status="awaiting_signatures", signed=False).values_list("engine_id", flat=True))
+    assert awaiting == {f"junk-{i}" for i in range(7, 12)}
+    superseded = mine.filter(status="superseded")
+    assert set(superseded.values_list("engine_id", flat=True)) == {f"junk-{i}" for i in range(7)}
+    events = FailsafeAuditEvent.objects.filter(event="superseded", command__in=superseded)
+    assert events.count() == 7 and all(e.detail["limit"] == 5 and e.detail["by"] for e in events)
+    assert FailsafeCommand.objects.get(uuid=signed["uuid"]).status == "awaiting_signatures"
+    assert FailsafeCommand.objects.get(uuid=theirs["uuid"]).status == "awaiting_signatures"
+    # Not signable; drafted again, a new draft, never refused.
+    old = drafts[0].data
+    sig = {"key_id": "alice", "sig": operator_key.sign(bytes.fromhex(old["signing_bytes"])).hex()}
+    refused = client.post(f"/api/failsafe/commands/{old['uuid']}/signatures/", sig, format="json")
+    assert refused.status_code == 409 and "superseded" in refused.data["detail"]
+    again = _draft(client, "pause", "junk-0")
+    assert again.status_code == 201 and again.data["uuid"] != old["uuid"]
+    # The other account's flood never reaches this one's drafts either.
+    assert [_draft(other, "pause", f"theirs-{i}").status_code for i in range(8)] == [201] * 8
+    assert mine.filter(status="awaiting_signatures", signed=False).count() == 5
+    assert FailsafeCommand.objects.get(engine_id="junk-11").status == "awaiting_signatures"
+
+
+@pytest.mark.django_db
+def test_a_stop_draft_with_another_reason_is_a_new_draft(rates, service):
+    """M1 (round 4): a draft made again returned the first drafter's draft
+    whatever its reason -- the service token drafted "DRILL - do not sign", and
+    the dashboard's real pause a second later got that draft back, reason and
+    all. The reason is in the signed bytes: only an identical one is reused."""
+    from failsafe.models import FailsafeCommand
+
+    ttl = 600
+    for client in (_service_client(), _client_for(_user("analyst"))):
+        drill = client.post("/api/failsafe/commands/", {"action": "pause", "engine_id": "athena-7", "reason": "DRILL - do not sign"}, format="json")
+        real = client.post("/api/failsafe/commands/", {"action": "pause", "engine_id": "athena-7", "reason": "REAL: exfiltration in progress"}, format="json")
+        assert (drill.status_code, real.status_code) == (201, 201)
+        assert real.data["uuid"] != drill.data["uuid"] and real.data["reason"] == "REAL: exfiltration in progress"
+        again = client.post("/api/failsafe/commands/", {"action": "pause", "engine_id": "athena-7", "reason": "REAL: exfiltration in progress"}, format="json")
+        assert again.status_code == 200 and again.data["uuid"] == real.data["uuid"]
+        assert again.data["signing_bytes"] == real.data["signing_bytes"]
+        left = (timezone.datetime.fromisoformat(again.data["expires_at"]) - timezone.now()).total_seconds()
+        assert left >= ttl / 2
+        blank = client.post("/api/failsafe/commands/", {"action": "pause", "engine_id": "athena-7"}, format="json")
+        assert blank.status_code == 201 and blank.data["reason"] == ""
+        FailsafeCommand.objects.filter(engine_id="athena-7").update(status="canceled")
+
+
+def _flood_of_long_reasons(count, reason_length, initiators):
+    """Stop drafts with reasons as long as round 4 allowed, as rows drafted
+    before the reason's limit are."""
+    from failsafe.models import FailsafeCommand
+
+    FailsafeCommand.objects.bulk_create(
+        [
+            FailsafeCommand(engine_id=f"long-{i}", action="pause", nonce=uuid.uuid4().hex, issued_at="t",
+                            expires_at="2999-01-01T00:00:00+00:00", reason="x" * reason_length,
+                            initiator=initiators[i % len(initiators)])
+            for i in range(count)
+        ],
+        batch_size=100,
+    )
+
+
+@pytest.mark.django_db
+def test_a_stop_lane_read_is_bounded_in_bytes_and_says_what_it_left_out(rates, configure):
+    """H1 (round 4): the reads were bounded in rows, not bytes -- after 500
+    drafts with 60,000-character reasons one read of every engine was 18.8 MB.
+    Each read now returns at most FAILSAFE_STOP_LANE_READ_BYTES of commands,
+    the stop commands awaiting a signature first (a signed one before them
+    all), and says whether it left any out: X-Failsafe-More on both reads, and
+    "more" in the state read."""
+    limit = 64 * 1024
+    configure(FAILSAFE_STOP_LANE_READ_BYTES=limit)
+    reader = _client_for(_admin())
+    quiet = reader.get("/api/failsafe/state/")
+    assert quiet.data["more"] is False and quiet[MORE_HEADER] == "false"
+    assert reader.get("/api/failsafe/commands/")[MORE_HEADER] == "false"
+    signed = _command("stand_down", "athena-1", initiator=_admin(), signatures=[{"key_id": "alice", "sig": "ab"}], signed=True)
+    _flood_of_long_reasons(40, 60_000, [_user("analyst"), _user("analyst")])
+    for path in ("/api/failsafe/state/", "/api/failsafe/commands/", "/api/failsafe/commands/?status=awaiting_signatures"):
+        answer = reader.get(path)
+        assert answer.status_code == 200 and answer[MORE_HEADER] == "true", path
+        assert len(answer.content) <= limit + 1024, (path, len(answer.content))
+        rows = answer.data["awaiting_signatures"] if "state" in path else answer.data
+        assert rows[0]["uuid"] == str(signed.uuid) and 1 < len(rows) < 41, (path, len(rows))
+    assert reader.get("/api/failsafe/state/").data["more"] is True
+    # The default: 600 such rows -- more than a read lists -- come to at most ~1 MB.
+    configure(FAILSAFE_STOP_LANE_READ_BYTES=1_000_000)
+    _flood_of_long_reasons(560, 60_000, [_user("analyst")])
+    for path in ("/api/failsafe/state/", "/api/failsafe/commands/"):
+        answer = reader.get(path)
+        assert len(answer.content) <= 1_000_000 + 1024 and answer[MORE_HEADER] == "true", path
+
+
+@pytest.mark.django_db
+def test_a_read_that_lists_every_awaiting_stop_says_there_is_no_more(rates):
+    """"more" is not always true: a read that left nothing out says so, and
+    one cut by the row limit says it was."""
+    from failsafe.views import AWAITING_STOP_LIMIT
+
+    reader = _client_for(_admin())
+    _flood_of_long_reasons(30, 10, [_user("analyst") for _ in range(3)])
+    state = reader.get("/api/failsafe/state/")
+    assert state.data["more"] is False and len(state.data["awaiting_signatures"]) == 30
+    listed = reader.get("/api/failsafe/commands/?status=awaiting_signatures")
+    assert listed[MORE_HEADER] == "false" and len(listed.data) == 30
+    _flood_of_long_reasons(AWAITING_STOP_LIMIT, 10, [_user("analyst") for _ in range(3)])
+    state = reader.get("/api/failsafe/state/")
+    assert state.data["more"] is True and len(state.data["awaiting_signatures"]) == AWAITING_STOP_LIMIT
+
+
+@pytest.mark.django_db(transaction=True)
+def test_two_operators_signing_one_stand_down_at_once_both_count(rates, monkeypatch, configure):
+    """M3 (round 4; on main too): the signature was read, appended to and saved
+    with no lock, so two operators signing one stand-down at the same moment
+    were both answered 200 and the stand-down stayed awaiting with one
+    signature (6/20 on main). Here both requests reach the save together
+    whenever nothing orders them; the append is to the row read again under
+    the write lock, so both signatures count and the stand-down is ready."""
+    from failsafe.models import FailsafeCommand
+
+    alice, bob = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    configure(FAILSAFE_OPERATOR_KEYS={
+        "alice": alice.public_key().public_bytes_raw().hex(),
+        "bob": bob.public_key().public_bytes_raw().hex(),
+    })
+    first, second = (
+        User.objects.create_user(username=f"sig-{uuid.uuid4().hex[:8]}", password="x", role="admin") for _ in range(2)
+    )
+    drafted = _client_for(first).post("/api/failsafe/commands/", {"action": "stand_down", "engine_id": f"sd-{uuid.uuid4().hex[:6]}"}, format="json").data
+    raw = bytes.fromhex(drafted["signing_bytes"])
+    together = threading.Barrier(2)
+    real_save = FailsafeCommand.save
+
+    def save(self, *args, **kwargs):
+        if "signatures" in (kwargs.get("update_fields") or ()):
+            try:
+                together.wait(1.0)
+            except threading.BrokenBarrierError:
+                pass
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(FailsafeCommand, "save", save)
+    answers = {}
+
+    def sign(user, key_id, key):
+        from django.db import connection
+
+        try:
+            answers[key_id] = _client_for(user).post(
+                f"/api/failsafe/commands/{drafted['uuid']}/signatures/", {"key_id": key_id, "sig": key.sign(raw).hex()}, format="json"
+            ).status_code
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=sign, args=args) for args in ((first, "alice", alice), (second, "bob", bob))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    command = FailsafeCommand.objects.get(uuid=drafted["uuid"])
+    assert answers == {"alice": 200, "bob": 200}
+    assert sorted(command.distinct_signers()) == ["alice", "bob"] and command.status == "ready"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_identical_stop_drafts_sent_at_once_are_one_row(rates, monkeypatch):
+    """L1 (round 4): identical drafts sent at once each looked for the other
+    before either was written, and made up to four rows. Here both reach the
+    insert together whenever nothing orders them; each then looks for an
+    identical draft inserted before it, and the later one takes its own,
+    unanswered row back -- one row, one 201 and one 200 with the same draft,
+    and neither is refused."""
+    from failsafe import views
+    from failsafe.models import FailsafeCommand
+
+    operator = User.objects.create_user(username=f"drafts-{uuid.uuid4().hex[:8]}", password="x", role="admin")
+    engine_id = f"race-{uuid.uuid4().hex[:6]}"
+    together = threading.Barrier(2)
+    real_make = views.make_draft
+
+    def make_draft(*args, **kwargs):
+        try:
+            together.wait(1.0)
+        except threading.BrokenBarrierError:
+            pass
+        return real_make(*args, **kwargs)
+
+    monkeypatch.setattr(views, "make_draft", make_draft)
+    answers = []
+
+    def draft():
+        from django.db import connection
+
+        try:
+            answers.append(_draft(_client_for(operator), "pause", engine_id))
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=draft) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    assert sorted(a.status_code for a in answers) == [200, 201]
+    assert len({a.data["uuid"] for a in answers}) == 1
+    assert FailsafeCommand.objects.filter(engine_id=engine_id).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_stop_draft_never_reads_while_it_holds_the_write_lock(rates, configure):
+    """A draft flood must not hold SQLite's write lock against a pause. A first
+    fix for L1 looked up and inserted in one IMMEDIATE transaction, with the
+    superseding inside it: during a 4-thread draft flood a pause then took
+    2.9 s. Every read a stop draft makes -- new, reused, or superseding others
+    -- runs outside any transaction, so each write holds the lock for one
+    statement."""
+    from django.db import connection
+
+    configure(FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT=2)
+    operator = User.objects.create_user(username=f"lock-{uuid.uuid4().hex[:8]}", password="x", role="admin")
+    client = _client_for(operator)
+    seen = []
+
+    def record(execute, sql, params, many, context):
+        seen.append((sql.split(" ", 1)[0], connection.in_atomic_block))
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(record):
+        codes = [_draft(client, "pause", f"lock-{i}").status_code for i in range(4)]
+        codes.append(_draft(client, "pause", "lock-3").status_code)
+    assert codes == [201, 201, 201, 201, 200]
+    assert ("UPDATE", False) in seen  # the superseding ran
+    assert [kind for kind, in_transaction in seen if in_transaction and kind == "SELECT"] == []
+
+
+@pytest.mark.django_db
+def test_removing_an_operator_keeps_their_engagements_and_unlinks_them(rates):
+    """Removing an operator is a stop (the lead's decision), and its cascade
+    deleted every engagement they had created -- the record of what had been
+    authorised. The records are kept, with the creator unlinked; such an
+    engagement is an admin's to see, and no longer the removed operator's."""
+    from pentest.models import Engagement
+    from pentest.views import engagements_visible_to
+
+    leaver = _user("analyst")
+    kept = [
+        Engagement.objects.create(name=f"kept-{i}", created_by=leaver, status=state, scope_hosts=["client.example"])
+        for i, state in enumerate(("running", "completed"))
+    ]
+    admin_user = _admin()
+    assert _client_for(admin_user).delete(f"/api/accounts/users/{leaver.pk}/").status_code == 204
+    assert not User.objects.filter(pk=leaver.pk).exists()
+    rows = Engagement.objects.filter(pk__in=[e.pk for e in kept]).order_by("pk")
+    assert [(e.name, e.status, e.created_by_id) for e in rows] == [("kept-0", "running", None), ("kept-1", "completed", None)]
+    assert set(engagements_visible_to(admin_user).filter(pk__in=[e.pk for e in kept])) == set(rows)
+    assert not engagements_visible_to(_user("analyst")).filter(pk__in=[e.pk for e in kept]).exists()
+
+
+#: The longest any stop may take through the whole stack with every limit
+#: saturated. The slowest here takes about a tenth of this.
+STOP_LATENCY_BOUND = 0.25
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("gateway_answer", list(GATEWAY_ANSWERS))
+def test_with_every_limit_saturated_every_stop_is_answered_within_its_bound(saturated, operator_key, gateway_answer, monkeypatch):
+    """L2 (round 4): the saturation checked status codes only, so a control
+    that DELAYS a stop without refusing it -- T4, a 0.3 s sleep in StopsPass
+    for every stop -- passed it. Each stop through config.wsgi.application and
+    the whole stack, with every limit saturated, is answered within
+    STOP_LATENCY_BOUND, by an operator's JWT and by the service token."""
+    payload, _refused = GATEWAY_ANSWERS[gateway_answer]
+    saturated(payload)
+    timings = []
+    real = _WsgiHandler.__call__
+
+    def timed(self, environ):
+        began = time.perf_counter()
+        try:
+            return real(self, environ)
+        finally:
+            timings.append((time.perf_counter() - began, environ["REQUEST_METHOD"], environ["PATH_INFO"]))
+
+    monkeypatch.setattr(_WsgiHandler, "__call__", timed)
+    operator = _admin()
+    bearer = _wsgi_bearer_client(operator)
+    bearer.get("/api/failsafe/audit/")  # the first request through the entry point imports what it needs
+    timings.clear()
+    assert _every_stop(bearer, operator, operator_key, anonymous=_WsgiClient) == SERVED
+    service = _service_account()
+    with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
+        assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
+    assert len(timings) >= 2 * len(EVERY_STOP)
+    slow = [(round(t, 3), method, path) for t, method, path in timings if t > STOP_LATENCY_BOUND]
+    assert slow == [], slow
