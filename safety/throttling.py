@@ -10,11 +10,18 @@ and every pause, stand-down and terminate waited behind it.
 A stop (:func:`safety.stops.is_stop`) is allowed before the rate is looked at,
 so it is never refused and never recorded: a flood cannot exhaust a stop, and a
 stop does not spend the caller's budget. The same holds for a token refresh
-whose refresh token verifies and has not been spent by an earlier refresh,
-which is how an operator signed in to this project's frontend stays signed in. A poll without the poll token is not a stop, so it keeps the anonymous
-throttle and the token cannot be guessed at speed; nor is a request on a stop
-route that is not a stop (a draft of a resume, a promotion, a body that is not
-in the canonical form), so it spends the caller's budget like any other.
+whose refresh token verifies, for an account that exists and is active, and
+has not been spent by an earlier refresh, which is how an operator signed in to
+this project's frontend stays signed in. A poll without the poll token is not a
+stop, so it keeps the anonymous throttle and the token cannot be guessed at
+speed; nor is a request on a stop route that is not a stop (a draft of a
+resume, a cancel of a pause, a promotion, a body that is not in the canonical
+form), so it spends the caller's budget like any other.
+
+A throttle lets a stop through only if StopsPass's allow_request is the first
+one it calls: a subclass that overrides allow_request before it never asks.
+The test module checks every exempt view's throttles for exactly that, and
+drives every stop through the whole stack with every throttle refusing.
 
 The judgement is made once per request and kept on it: the gateway has usually
 made it already.

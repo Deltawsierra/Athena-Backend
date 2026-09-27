@@ -14,20 +14,32 @@ stop (safety.stops.is_stop) on a route a stop client relays stops on
 (:data:`SERVICE_ROUTES`: every stop route but the engines' poll and the two
 account routes), the three stop-lane reads included (failsafe:state, the
 failsafe:commands list and a command's detail), and it authenticates as the
-account named by
-``FAILSAFE_SERVICE_USER``, whose role the views check as they check any
+account named by ``FAILSAFE_SERVICE_USER``, whose role the views check as they check any
 operator's. It is tried before any other authentication, so a stale bearer
 header beside it cannot refuse the stop.
 
 What it cannot do is as important. Anywhere else -- a lift, a resume or release
-draft, a routine recompute, any read that is not in the stop lane, an operator
-demoted or removed, the engines' poll, a refresh -- the header is ignored and
-the request is judged and authenticated exactly as if it were absent. A stolen
-service token can stop things and read the stop lane; it can start nothing,
-and it cannot demote or remove an operator. A token that does not match is
-ignored the same way: the request takes the normal path, and the
-token confers no exemption of its own. (A stop is exempt from the gateway and
-the throttles because it is a stop, with or without this header.)
+draft, a signature on a resume or release, a routine recompute, a cancel of a
+pause, stand-down or terminate (that withdraws a stop, so it needs an operator's
+own session), an engagement deleted, any read that is not in the stop lane, an
+operator demoted or removed, the engines' poll, a refresh -- the header is
+ignored and the request is judged and authenticated exactly as if it were
+absent. A stolen service token can stop things and read the stop commands in
+flight; it cannot start anything, withdraw a stop, destroy a record, or demote
+or remove an operator. What it reads is limited to what stopping needs
+(failsafe.views): the pause, stand-down and terminate commands in flight, their
+signing bytes, and the engine's live state -- no resume or release, and no
+history. A token that does not match is
+ignored the same way: the request takes the normal path, and the token confers
+no exemption of its own. (A stop is exempt from the gateway and the throttles
+because it is a stop, with or without this header.)
+
+When the token matches but the service account cannot be read -- the database
+is locked or unreachable -- the stop is answered 503 with that reason and
+Retry-After, never 401: a 401 tells a client its credentials are wrong, and the
+dashboard answers one by signing in again with a password, which is the path
+this token exists to avoid. A service account that does not exist or is not
+active is a configuration an admin made, and is answered 401 as before.
 
 Checking it is cheap and bounded, because the gateway and the throttles run
 before authentication: the stop judgement is made once per request and kept on
@@ -48,6 +60,7 @@ import logging
 import secrets
 
 from django.conf import settings
+from rest_framework import exceptions, status
 from rest_framework.authentication import BaseAuthentication
 
 from .stops import STOP_ROUTES, is_stop, view_name
@@ -110,6 +123,15 @@ def accepted(request):
     return token_matches(request)
 
 
+class ServiceAccountUnavailable(exceptions.APIException):
+    """The token matched, but the service account could not be read."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_code = "failsafe_service_account_unavailable"
+    #: DRF's exception handler sends this as Retry-After.
+    wait = 1
+
+
 class ServiceCredential:
     """``request.auth`` for a request the service token authenticated."""
 
@@ -137,9 +159,12 @@ class FailsafeServiceTokenAuthentication(BaseAuthentication):
         User = get_user_model()
         try:
             user = User._default_manager.filter(**{User.USERNAME_FIELD: username}, is_active=True).first()
-        except Exception:  # noqa: BLE001 - a failed read authenticates nobody; the next class decides
+        except Exception as exc:  # noqa: BLE001 - any failed read is a 503 with its reason, never a 401
             logger.exception("the failsafe service account could not be read")
-            return None
+            raise ServiceAccountUnavailable(
+                f"the failsafe service account could not be read ({exc.__class__.__name__}: "
+                f"{str(exc)[:200]}); the service token was accepted -- retry the request, do not sign in"
+            ) from None
         if user is None:
             logger.error("FAILSAFE_SERVICE_USER %r is not an active account; the service token is ignored", username)
             return None

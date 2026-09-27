@@ -109,6 +109,9 @@ INSTALLED_APPS = [
     "pentest",
     "failsafe",
     "assurance",
+    # The stop-safety rules (safety.stops); its one table counts sign-in
+    # attempts, shared by every worker (safety.sign_in).
+    "safety",
 ]
 
 # -------------------------------------------------------------------
@@ -227,7 +230,7 @@ REST_FRAMEWORK = {
     # unlimited credential guesses. DRF's own two throttles, except that a stop
     # (safety.stops) is never refused and never counted: they answered 429 to a
     # flooded operator's pause and to the engines' command poll. Sign-in has
-    # its own limit on failures (safety.sign_in).
+    # its own limit on attempts that reach a password hash (safety.sign_in).
     "DEFAULT_THROTTLE_CLASSES": (
         "safety.throttling.StopExemptAnonRateThrottle",
         "safety.throttling.StopExemptUserRateThrottle",
@@ -235,10 +238,11 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DJANGO_THROTTLE_ANON", "30/min"),
         "user": os.environ.get("DJANGO_THROTTLE_USER", "300/min"),
-        # Failed sign-ins (safety.sign_in): of one username, as authentication
+        # Sign-in attempts (safety.sign_in): of one username, as authentication
         # reads it, from one address; and of every username from one address.
-        # Only failures count. An address past either is answered 429 before
-        # any password hash.
+        # Each attempt is counted in the database before its password is
+        # hashed, atomically and for every worker at once, and refused unhashed
+        # past either limit; a successful sign-in is given back.
         "sign_in": os.environ.get("DJANGO_THROTTLE_SIGN_IN", "10/min"),
         "sign_in_address": os.environ.get("DJANGO_THROTTLE_SIGN_IN_ADDRESS", "60/min"),
     },
@@ -393,11 +397,6 @@ FAILSAFE_POLL_TOKEN = os.environ.get("FAILSAFE_POLL_TOKEN")
 # is treated as unset.
 FAILSAFE_SERVICE_TOKEN = os.environ.get("FAILSAFE_SERVICE_TOKEN")
 FAILSAFE_SERVICE_USER = os.environ.get("FAILSAFE_SERVICE_USER")
-
-# The most stop commands (pause, stand-down, terminate) one account may have
-# awaiting signatures at once. A stop draft is never throttled, so this is what
-# keeps a flood of drafts from burying a real command. At least 1.
-FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS = int(os.environ.get("FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS", "20"))
 
 # How long the failsafe state view waits, in all, for the engine's live
 # governor state before reporting it "not reported". That view is how the

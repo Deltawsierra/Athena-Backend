@@ -49,6 +49,7 @@ added without somebody deciding whether it stops something.
 from __future__ import annotations
 
 import codecs
+import functools
 import json
 
 from django.conf import settings
@@ -132,11 +133,52 @@ def _revoke_or_contradict(request, read):
 #: The failsafe commands that stop an engine. Resume and release put one back
 #: to work: drafting them is not a stop.
 _STOP_ACTIONS = frozenset({"pause", "stand_down", "terminate"})
+#: The failsafe commands that put an engine back to work.
+_START_ACTIONS = frozenset({"resume", "release"})
 
 
 def _stop_draft(request, read):
     data = _fields(read(), {"action", "engine_id"})
     return data is not None and isinstance(data.get("action"), str) and data["action"] in _STOP_ACTIONS
+
+
+def _command_action(request):
+    """The action of the failsafe command the URL names, or None when there is
+    no such command. One read of one indexed row (the command's unique uuid).
+    Raises when the row cannot be read: each caller decides which way a failed
+    read falls."""
+    from failsafe.models import FailsafeCommand
+
+    cmd_uuid = _match(request).kwargs.get("cmd_uuid")
+    return FailsafeCommand.objects.filter(uuid=cmd_uuid).values_list("action", flat=True).first()
+
+
+def _cancel(request, read):
+    """Cancelling a resume or release keeps an engine stopped: a stop.
+    Cancelling a pause, stand-down or terminate WITHDRAWS a stop, so it is not
+    one: it needs an operator's own session (only the command's initiator or an
+    admin may cancel), and it goes through the gateway and the throttles. The
+    body is not read. A read of the command that fails is not a stop either --
+    the cancel may be withdrawing one -- and goes through the gateway, bounded
+    by its deadline, and on to the view, which reads the command again."""
+    try:
+        action = _command_action(request)
+    except Exception:  # noqa: BLE001 - a failed read must not exempt what may withdraw a stop
+        return False
+    return action in _START_ACTIONS
+
+
+def _signature(request, read):
+    """A signature on a pause, stand-down or terminate brings the stop nearer:
+    a stop. A signature on a resume or release is start-direction, and is not.
+    The body is not read. A read of the command that fails is a stop, because a
+    failed read must never hold back a stop's signature; the view reads the
+    command again and answers 404 or 409 for anything it cannot sign."""
+    try:
+        action = _command_action(request)
+    except Exception:  # noqa: BLE001 - a failed read must not hold back a stop's signature
+        return True
+    return action in _STOP_ACTIONS
 
 
 def _dispatch_off(request, read):
@@ -226,22 +268,63 @@ def _engine_poll(request, read):
     return poll_token_ok(request)
 
 
+@functools.cache
+def _refresh_without_blacklist():
+    """SimpleJWT's RefreshToken, minus its own blacklist read (one query of
+    its own), which :func:`_valid_refresh` makes in the same statement as the
+    account's."""
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    class Verified(RefreshToken):
+        def check_blacklist(self):
+            pass
+
+    return Verified
+
+
+def _verified_refresh(raw):
+    """The refresh token ``raw`` with its signature, expiry, type and jti
+    verified, or None. The blacklist is not read here."""
+    try:
+        return _refresh_without_blacklist()(raw)
+    except Exception:  # noqa: BLE001 - a token that does not verify, for any reason, is not exempt
+        return None
+
+
 def _valid_refresh(request, read):
-    # A refresh token that verifies: signature, expiry and type, and that it is
-    # not on the blacklist -- one indexed read of its unique jti, because a
-    # refresh spends the token it was given. An invalid, expired or spent one
-    # is not exempt: it stays under the gateway and the anonymous throttle like
-    # any other guess, and so does one whose blacklist cannot be read.
+    # A refresh token that verifies (signature, expiry, type), for an account
+    # that exists and is active, and that no refresh has spent yet. The account
+    # and the blacklist are read in ONE statement: the account by its primary
+    # key, the blacklist by the token's unique jti. An invalid, expired or spent
+    # token, one for a removed or deactivated account, and one whose read fails
+    # are none of them exempt: each stays under the gateway and the anonymous
+    # throttle like any other guess. The view spends the token atomically
+    # (safety.refresh), so of two refreshes racing with one token only one is
+    # answered with a new one.
     data = read()
     if not isinstance(data, dict) or set(data) != {"refresh"} or not isinstance(data["refresh"], str):
         return False
-    from rest_framework_simplejwt.tokens import RefreshToken
-
-    try:
-        RefreshToken(data["refresh"])
-    except Exception:  # noqa: BLE001 - a token that does not verify, for any reason, is not exempt
+    token = _verified_refresh(data["refresh"])
+    if token is None:
         return False
-    return True
+    from django.contrib.auth import get_user_model
+    from django.db.models import Exists
+    from rest_framework_simplejwt.settings import api_settings
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+
+    user_id = token.payload.get(api_settings.USER_ID_CLAIM)
+    jti = token.payload.get(api_settings.JTI_CLAIM)
+    if user_id is None or not isinstance(jti, str):
+        return False
+    spent = BlacklistedToken.objects.filter(token__jti=jti)
+    try:
+        return (
+            get_user_model()
+            ._default_manager.filter(~Exists(spent), **{api_settings.USER_ID_FIELD: user_id}, is_active=True)
+            .exists()
+        )
+    except Exception:  # noqa: BLE001 - a read that fails is not exempt; the view reads again
+        return False
 
 
 #: URL name -> {method: predicate}. A method not listed is not a stop.
@@ -251,23 +334,27 @@ STOP_ROUTES = {
     # Revoke or contradict a claim.
     "claim-transition": {"POST": _revoke_or_contradict},
     # The failsafe control plane. A pause, stand-down or terminate is drafted,
-    # found and read for its signing bytes, signed and cancelled here. The three
-    # reads are the stop lane: failsafe:state is where the dashboard's second
-    # operator finds the command awaiting their signature, the list is where a
-    # client finds it by engine and status, and the detail carries the bytes to
-    # sign. Each is bounded and changes no running work (failsafe.views).
+    # found and read for its signing bytes, and signed here; a resume or
+    # release is cancelled here. The three reads are the stop lane:
+    # failsafe:state is where the dashboard's second operator finds the command
+    # awaiting their signature, the list is where a client finds it by engine
+    # and status, and the detail carries the bytes to sign. Each is bounded --
+    # its work does not grow with the number of commands -- and changes no
+    # running work (failsafe.views).
     "failsafe:state": {"GET": always},
     "failsafe:commands": {"GET": always, "POST": _stop_draft},
     "failsafe:command-detail": {"GET": always},
-    "failsafe:submit-signature": {"POST": always},
-    "failsafe:cancel-command": {"POST": always},
+    "failsafe:submit-signature": {"POST": _signature},
+    "failsafe:cancel-command": {"POST": _cancel},
     # The engine's poll: the only way a signed command reaches an engine.
     "failsafe:pending": {"GET": _engine_poll},
     # The automated-dispatch kill switch of one deployment, switched off.
     "deployment-dispatch-policy": {"PUT": _dispatch_off},
     # A scan's authority withdrawn: paused, cancelled or completed, its scope
-    # emptied, its window closed, or the engagement deleted.
-    "pentest:engagement_detail": {"PATCH": _authority_withdrawn, "DELETE": always},
+    # emptied, or its window closed. Deleting the engagement is not a stop: it
+    # destroys the record of what was authorised, and a PATCH to a status that
+    # is not running withdraws the same authority and keeps the record.
+    "pentest:engagement_detail": {"PATCH": _authority_withdrawn},
     # An operator's access taken away: demoted, or removed.
     "accounts:user-set-role": {"PATCH": _demotion},
     "accounts:user-detail": {"DELETE": always},
@@ -276,10 +363,11 @@ STOP_ROUTES = {
 #: Not stops, but what an operator needs in order to make one, exempt the same
 #: way. An access token lives an hour; the refresh is how an operator signed in
 #: to this project's own frontend keeps the session they press stop from. A
-#: refresh token is spent by its refresh (the token blacklist, with rotation),
-#: so a used one no longer verifies and is not exempt. A stop client that signs
-#: in with a password -- the dashboard's server -- needs neither: it presents
-#: the failsafe service token on the stop itself (safety.service_token).
+#: refresh token is spent by its refresh, exactly once even when two arrive
+#: together (safety.refresh), so a used one is not exempt; nor is one for an
+#: account that is removed or deactivated. A stop client that presents the
+#: failsafe service token on the stop itself (safety.service_token) needs
+#: neither.
 STOP_ACCESS_ROUTES = {
     "token_refresh": {"POST": _valid_refresh},
 }
@@ -459,7 +547,13 @@ NOT_STOPS = {
         "GET": _READ,
         "POST": "creates an engagement: it grants a scan's authority and withdraws none",
     },
-    "pentest:engagement_detail": {"GET": _READ},
+    "pentest:engagement_detail": {
+        "GET": _READ,
+        "DELETE": (
+            "deletes an engagement and with it the record of what was authorised; withdrawing "
+            "a scan's authority is a PATCH to a status that is not running, which is a stop"
+        ),
+    },
     "pentest:engagement_plan": {"POST": "returns a suggested plan for an engagement; it writes nothing"},
 }
 

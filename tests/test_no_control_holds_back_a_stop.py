@@ -40,6 +40,20 @@ failures are counted per username as authentication reads it and per address
 (L2); a flood of drafts cannot hide a command awaiting a signature (L1); and
 every limit saturated at once, the request path pinned, and initial() and the
 other request hooks checked, catch a limit added any way (M2).
+
+Round 4 (the adversary's round-3 findings): a stop draft is never refused --
+the per-account cap refused a fleet pause past 20 and let 20 junk drafts through
+the service token refuse the dashboard's stand-down -- and is idempotent
+instead (H1); cancelling a pause, stand-down or terminate withdraws a stop, so
+it is not one, and neither is a signature on a resume or release (H2); a refresh
+token is spent exactly once however many refreshes race (M1); the state read's
+work is bounded by its row limits, not by the number of commands (M2); every
+limit is saturated however it is built -- any throttle class, any cache count,
+the WSGI entry point -- and round 3's T2 mutant is caught (M3); sign-in attempts
+are counted atomically in the database before the hash (M4); a service account
+that cannot be read is a 503, not a 401 (L1); deleting an engagement is not a
+stop (L2); a removed or deactivated operator's refresh is not exempt (L3); and
+the service token reads only the stop commands in flight (L4).
 """
 
 from __future__ import annotations
@@ -51,6 +65,7 @@ import json
 import re
 import threading
 import time
+import types
 import uuid
 from datetime import timedelta
 from unittest import mock
@@ -61,12 +76,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.cache.backends.base import DEFAULT_TIMEOUT
+from django.core.cache.backends.locmem import LocMemCache
 from django.http import HttpResponse
 from django.test import RequestFactory, override_settings
 from django.urls import URLPattern, URLResolver, get_resolver
 from django.utils import timezone
 from rest_framework.test import APIClient
-from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.throttling import BaseThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 
 from audit import middleware as gateway_module
@@ -88,7 +105,7 @@ EXPECTED_STOPS = {
     "failsafe:cancel-command": {"POST"},
     "failsafe:pending": {"GET"},
     "deployment-dispatch-policy": {"PUT"},
-    "pentest:engagement_detail": {"PATCH", "DELETE"},
+    "pentest:engagement_detail": {"PATCH"},
     "accounts:user-set-role": {"PATCH"},
     "accounts:user-detail": {"DELETE"},
 }
@@ -124,13 +141,32 @@ FUTURE = "2999-01-01T00:00:00Z"
 
 
 def _fresh_refresh():
+    """A refresh token that verifies, for an account that exists and is active."""
     from rest_framework_simplejwt.tokens import RefreshToken
 
-    return {"refresh": str(RefreshToken())}
+    return {"refresh": str(RefreshToken.for_user(_user("viewer")))}
 
 
-#: One request that is a stop for every exempt (route, method):
-#: (route, method, path, JSON body -- or a function making one -- or None, extra headers).
+def _command(action, engine_id="athena-1", initiator=None, **fields):
+    """A failsafe command made directly, as a draft would make it."""
+    from failsafe.models import FailsafeCommand
+    from failsafe.signing import make_draft, required_signatures
+
+    draft = make_draft(action, engine_id, "", 600)
+    return FailsafeCommand.objects.create(
+        **draft, required_signatures=required_signatures(action), initiator=initiator, **fields
+    )
+
+
+def _on(action, route):
+    """A path on one command of ``action``, made when the request is: the
+    signature and cancel routes are judged by the command's action."""
+    return lambda: f"/api/failsafe/commands/{_command(action).uuid}/{route}/"
+
+
+#: One request that is a stop for every exempt (route, method): (route, method,
+#: path -- or a function making one --, JSON body -- or a function making one --
+#: or None, extra headers).
 STOP_REQUESTS = [
     ("deployment-recompute", "POST", RECOMPUTE, {"paused": True}, {}),
     ("failsafe:state", "GET", "/api/failsafe/state/?engine_id=e", None, {}),
@@ -139,14 +175,13 @@ STOP_REQUESTS = [
     ("failsafe:commands", "GET", "/api/failsafe/commands/", None, {}),
     ("failsafe:commands", "POST", "/api/failsafe/commands/", {"action": "stand_down", "engine_id": "e"}, {}),
     ("failsafe:command-detail", "GET", f"/api/failsafe/commands/{U}/", None, {}),
-    ("failsafe:submit-signature", "POST", f"/api/failsafe/commands/{U}/signatures/", {"key_id": "a", "sig": "00"}, {}),
-    ("failsafe:cancel-command", "POST", f"/api/failsafe/commands/{U}/cancel/", {}, {}),
+    ("failsafe:submit-signature", "POST", _on("stand_down", "signatures"), {"key_id": "a", "sig": "00"}, {}),
+    ("failsafe:cancel-command", "POST", _on("resume", "cancel"), {}, {}),
     ("failsafe:pending", "GET", "/api/failsafe/pending/", None, {"HTTP_X_FAILSAFE_POLL_TOKEN": POLL_TOKEN}),
     ("deployment-dispatch-policy", "PUT", DISPATCH, {"enabled": False}, {}),
     ("pentest:engagement_detail", "PATCH", ENGAGEMENT, {"status": "paused"}, {}),
     ("pentest:engagement_detail", "PATCH", ENGAGEMENT, {"testing_window_end": PAST}, {}),
     ("pentest:engagement_detail", "PATCH", ENGAGEMENT, {"scope_hosts": []}, {}),
-    ("pentest:engagement_detail", "DELETE", ENGAGEMENT, None, {}),
     ("accounts:user-set-role", "PATCH", SET_ROLE, {"role": "viewer"}, {}),
     ("accounts:user-detail", "DELETE", "/api/accounts/users/7/", None, {}),
     ("token_refresh", "POST", "/api/token/refresh/", _fresh_refresh, {}),
@@ -188,6 +223,7 @@ NOT_STOP_REQUESTS = [
     ("engagement paused and widened", "PATCH", ENGAGEMENT, {"status": "paused", "scope_hosts": ["b.example"]}, "application/json", {}),
     ("engagement window extended", "PATCH", ENGAGEMENT, {"testing_window_end": FUTURE}, "application/json", {}),
     ("engagement read", "GET", ENGAGEMENT, None, "application/json", {}),
+    ("engagement deleted", "DELETE", ENGAGEMENT, None, "application/json", {}),
     ("promotion to admin", "PATCH", SET_ROLE, {"role": "admin"}, "application/json", {}),
     ("refresh with a token that does not verify", "POST", "/api/token/refresh/", {"refresh": "x.y.z"}, "application/json", {}),
     ("audit read", "GET", "/api/failsafe/audit/", None, "application/json", {}),
@@ -390,7 +426,31 @@ def test_the_reason_check_refuses_boilerplate():
 #: Where a view can refuse a request before or around its handler. Round 2
 #: looked at the first two only; a limit added in ``initial()`` throttled every
 #: pause after the second in a minute and passed all 250 cases (M2).
-_REQUEST_HOOKS = ("initial", "check_throttles", "get_throttles", "throttled", "dispatch")
+_REQUEST_HOOKS = (
+    "initial", "check_throttles", "get_throttles", "throttled", "dispatch",
+    "get_permissions", "check_permissions", "permission_denied", "perform_authentication", "get_authenticators",
+)
+
+
+def _view_throttles(callback):
+    """The throttle classes a served view applies: its throttle_classes, and
+    the class of each throttle its get_throttles() builds."""
+    cls = callback.cls
+    classes = list(callback.initkwargs.get("throttle_classes", cls.throttle_classes))
+    try:
+        built = cls(**callback.initkwargs).get_throttles()
+    except Exception:  # noqa: BLE001 - one that cannot be built here is judged by its classes
+        built = []
+    return classes + [type(throttle) for throttle in built]
+
+
+def _unwrapped(function):
+    """The code objects along ``function``'s ``__wrapped__`` chain."""
+    chain = []
+    while function is not None and len(chain) < 50:
+        chain.append(getattr(function, "__code__", None))
+        function = getattr(function, "__wrapped__", None)
+    return chain
 
 
 def _throttle_problems(callback):
@@ -402,17 +462,31 @@ def _throttle_problems(callback):
     scope = callback.initkwargs.get("throttle_scope", getattr(cls, "throttle_scope", None))
     if scope is not None:
         problems.append(f"sets throttle_scope {scope!r}")
-    throttles = callback.initkwargs.get("throttle_classes", cls.throttle_classes)
-    problems += [f"throttles with {t.__name__}" for t in throttles if not issubclass(t, StopsPass)]
+    # A stop is let through only where StopsPass's allow_request is the one
+    # called: a class that subclasses StopsPass but overrides allow_request
+    # before it (round 3's T2) never asks whether the request is a stop.
+    problems += [
+        f"throttles with {t.__name__}, whose allow_request is not StopsPass's"
+        for t in dict.fromkeys(_view_throttles(callback))
+        if getattr(t, "allow_request", None) is not StopsPass.allow_request
+    ]
+    # A decorator wrapped round the view where it is routed keeps .cls (by
+    # functools.wraps), so it hides from everything above: the routed
+    # callback must be exactly what the view class builds.
+    actions = getattr(callback, "actions", None)
+    built = cls.as_view(actions, **callback.initkwargs) if actions else cls.as_view(**callback.initkwargs)
+    if _unwrapped(callback) != _unwrapped(built):
+        problems.append("is routed through a wrapper the view class does not build")
     return problems
 
 
 def test_no_exempt_view_opts_out_of_the_stop_exemption():
     """A stop view's own throttle_classes, throttle_scope, or its own
     initial(), dispatch(), throttled(), check_throttles() or get_throttles(),
-    would replace or bypass the defaults; every one must still let a stop
-    through. The behavioural test below (every throttle saturated) catches a
-    limit added any other way."""
+    or a wrapper where it is routed, would replace or bypass the defaults;
+    every one must still let a stop through. This is the static half: the
+    saturation below drives every stop through the whole stack with every
+    limit it can reach refusing."""
     served = walk()
     for name in stops.EXEMPT_ROUTES:
         for callback in served[name]["callbacks"]:
@@ -436,8 +510,12 @@ def test_the_opt_out_check_sees_an_overridden_get_throttles():
     class Scoped(APIView):
         throttle_scope = "recompute"
 
-    assert _throttle_problems(Sneaky.as_view()) == ["overrides get_throttles()"]
-    assert _throttle_problems(Plain.as_view()) == ["throttles with AnonRateThrottle"]
+    assert _throttle_problems(Sneaky.as_view()) == [
+        "overrides get_throttles()", "throttles with AnonRateThrottle, whose allow_request is not StopsPass's"
+    ]
+    assert _throttle_problems(Plain.as_view()) == [
+        "throttles with AnonRateThrottle, whose allow_request is not StopsPass's"
+    ]
     assert _throttle_problems(Initial.as_view()) == ["overrides initial()"]
     assert _throttle_problems(Scoped.as_view()) == ["sets throttle_scope 'recompute'"]
 
@@ -468,9 +546,56 @@ EXPECTED_AUTHENTICATION_CLASSES = (
 )
 
 
+EXPECTED_PERMISSION_CLASSES = ("rest_framework.permissions.IsAuthenticated",)
+#: Each exempt route's permission classes, as reviewed. A permission can refuse
+#: a request as surely as a throttle can: one added here fails until reviewed.
+EXPECTED_STOP_PERMISSIONS = {
+    "accounts:user-detail": {"accounts.permissions.IsAdmin", "rest_framework.permissions.IsAuthenticated"},
+    "accounts:user-set-role": {"accounts.permissions.IsAdmin", "rest_framework.permissions.IsAuthenticated"},
+    "claim-transition": {"rest_framework.permissions.IsAuthenticated"},
+    "deployment-dispatch-policy": {"rest_framework.permissions.IsAuthenticated"},
+    "deployment-recompute": {"rest_framework.permissions.IsAuthenticated"},
+    "failsafe:cancel-command": {"accounts.permissions.IsAdminOrAnalyst"},
+    "failsafe:command-detail": {"accounts.permissions.IsAdminOrAnalyst"},
+    "failsafe:commands": {"accounts.permissions.IsAdminOrAnalyst"},
+    "failsafe:pending": {"rest_framework.permissions.AllowAny"},
+    "failsafe:state": {"accounts.permissions.IsAdminOrAnalyst"},
+    "failsafe:submit-signature": {"accounts.permissions.IsAdminOrAnalyst"},
+    "pentest:engagement_detail": {"accounts.permissions.IsAdminOrAnalyst"},
+    "token_refresh": set(),
+}
+#: SHA-256 of the WSGI and ASGI entry points, as reviewed: each wraps Django's
+#: handler to start the owed-dispatch sweeper (#303), and a limit added in
+#: either would be in front of every stop. Change one, review it against the
+#: stop set, and put its new digest here.
+REVIEWED_ENTRY_POINTS = {
+    "config/wsgi.py": "1baddd7cfccd4ad81f808351bab9d44d35d300dd1ea40de2d3db3138991002cb",
+    "config/asgi.py": "e1ed66dc5a469fd49e73b5fa94fdbe732fe71ff3dc8412ce417a725a013e7625",
+}
+
+
 def test_the_request_path_in_front_of_every_view_is_the_one_reviewed():
+    import hashlib
+    import pathlib
+
     from django.conf import settings
     from rest_framework.settings import api_settings
+
+    root = pathlib.Path(settings.BASE_DIR)
+    assert {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in REVIEWED_ENTRY_POINTS
+    } == REVIEWED_ENTRY_POINTS
+    assert tuple(settings.REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"]) == EXPECTED_PERMISSION_CLASSES
+    served = walk()
+    permissions = {
+        name: {
+            f"{c.__module__}.{c.__name__}"
+            for callback in served[name]["callbacks"]
+            for c in callback.initkwargs.get("permission_classes", callback.cls.permission_classes)
+        }
+        for name in stops.EXEMPT_ROUTES
+    }
+    assert permissions == EXPECTED_STOP_PERMISSIONS
 
     assert list(settings.MIDDLEWARE) == EXPECTED_MIDDLEWARE
     assert tuple(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"]) == EXPECTED_THROTTLE_CLASSES
@@ -751,11 +876,12 @@ def test_head_is_judged_as_get_and_options_is_not_a_stop():
 
 
 def test_a_length_that_is_not_a_number_is_read_as_no_body():
-    """Django reads no body for it, and neither does this: a routine recompute."""
+    """Django reads no body for it, and neither does this: a routine recompute.
+    A stop that reads no body is a stop whatever its length says."""
     request = _raw("POST", RECOMPUTE, b'{"paused": true}')
     request.META["CONTENT_LENGTH"] = "sixteen"
     assert not stops.is_stop(request)
-    request = _raw("POST", f"/api/failsafe/commands/{U}/cancel/", b"{}")
+    request = _raw("GET", "/api/failsafe/commands/", b"{}")
     request.META["CONTENT_LENGTH"] = "sixteen"
     assert stops.is_stop(request)
 
@@ -874,17 +1000,70 @@ REAL_CLIENTS = [
     # read a second operator finds the command awaiting their signature in.
     ("dashboard state", "GET", "/api/failsafe/state/?engine_id=athena-1", None, {}),
     ("dashboard state, no engine", "GET", "/api/failsafe/state/", None, {}),
-    # server/failsafe.ts submitSignature: {key_id, sig} as mythos-failsafe sign
-    # prints it (mythos_core/failsafe/sign.py sign_draft: json.dumps, spaced).
-    ("signer CLI signature relayed", "POST", f"/api/failsafe/commands/{U}/signatures/", json.dumps({"key_id": "alice", "sig": "ab" * 64}).encode(), {}),
-    # server/failsafe.ts cancelCommand: POST, JSON content type, no body.
-    ("dashboard cancel", "POST", f"/api/failsafe/commands/{U}/cancel/", None, {}),
 ]
 
 
 @pytest.mark.parametrize(("label", "method", "path", "body", "extra"), REAL_CLIENTS, ids=[c[0] for c in REAL_CLIENTS])
 def test_every_real_clients_stop_is_recognised(label, method, path, body, extra):
     assert stops.is_stop(_client_shape(method, path, body, **BEARER, **extra)), label
+
+
+#: server/failsafe.ts submitSignature relays {key_id, sig} as mythos-failsafe
+#: sign prints it (mythos_core/failsafe/sign.py sign_draft: json.dumps, spaced);
+#: cancelCommand is a POST with the JSON content type and no body.
+SIGNATURE_BODY = json.dumps({"key_id": "alice", "sig": "ab" * 64}).encode()
+
+
+@pytest.mark.django_db
+def test_a_signature_or_cancel_is_judged_by_its_commands_direction():
+    """H2: every cancel was exempt, and cancelling a pause, stand-down or
+    terminate that is awaiting signatures or ready withdraws the stop. A cancel
+    of a resume or release keeps the engine stopped: that one is a stop. A
+    signature is the other way round: on a stop command it brings the stop
+    nearer, on a resume or release it starts the engine again. Each is judged
+    by one read of the command's action; the body is not read."""
+    for action, cancel_is_a_stop in (("pause", False), ("stand_down", False), ("terminate", False),
+                                     ("resume", True), ("release", True)):
+        for state in ("awaiting_signatures", "ready"):
+            command = _command(action, status=state)
+            cancel = _client_shape("POST", f"/api/failsafe/commands/{command.uuid}/cancel/", None, **BEARER)
+            sign = _client_shape("POST", f"/api/failsafe/commands/{command.uuid}/signatures/", SIGNATURE_BODY, **BEARER)
+            assert stops.is_stop(cancel) is cancel_is_a_stop, (action, state)
+            assert stops.is_stop(sign) is not cancel_is_a_stop, (action, state)
+    # No such command: the view answers 404, and neither is a stop.
+    for route in ("cancel", "signatures"):
+        assert not stops.is_stop(_client_shape("POST", f"/api/failsafe/commands/{U}/{route}/", SIGNATURE_BODY, **BEARER))
+
+
+@pytest.mark.django_db
+def test_a_command_that_cannot_be_read_falls_the_safe_way(monkeypatch):
+    """A cancel whose command cannot be read may be withdrawing a stop: not a
+    stop, so it goes through the gateway (bounded by its deadline) to the view.
+    A signature whose command cannot be read may be a stop's: a stop."""
+    from failsafe.models import FailsafeCommand
+
+    command = _command("resume")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the database is gone")
+
+    monkeypatch.setattr(FailsafeCommand.objects, "filter", broken)
+    assert not stops.is_stop(_client_shape("POST", f"/api/failsafe/commands/{command.uuid}/cancel/", None, **BEARER))
+    assert stops.is_stop(_client_shape("POST", f"/api/failsafe/commands/{command.uuid}/signatures/", SIGNATURE_BODY, **BEARER))
+
+
+@pytest.mark.django_db
+def test_judging_a_signature_or_cancel_is_one_indexed_read():
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from failsafe.models import FailsafeCommand
+
+    command = _command("resume")
+    with CaptureQueriesContext(connection) as queries:
+        assert stops.is_stop(_client_shape("POST", f"/api/failsafe/commands/{command.uuid}/cancel/", None, **BEARER))
+    assert len(queries) == 1 and "uuid" in queries[0]["sql"]
+    assert FailsafeCommand._meta.get_field("uuid").unique
 
 
 def test_the_engines_poll_is_recognised():
@@ -1018,6 +1197,8 @@ def gateway(configure, engine):
 
 def _request(method, path, body, extra, content_type="application/json"):
     factory = RequestFactory()
+    if callable(path):
+        path = path()
     if callable(body):
         body = body()
     if isinstance(body, bytes):
@@ -1038,8 +1219,9 @@ def test_a_slow_or_trickling_engine_never_delays_a_stop(gateway, engine, mode, s
     the engines' own poll. A stop never reaches the engine now."""
     _name, method, path, body, extra = sample
     app = gateway(mode=mode, monitor_only=True)
+    request = _request(method, path, body, extra)
     started = time.monotonic()
-    response = app(_request(method, path, body, extra))
+    response = app(request)
     took = time.monotonic() - started
     assert response.status_code == 200 and response.content == b"the view ran"
     assert took < 0.25, f"{method} {path} took {took:.3f}s behind an engine in mode {mode!r}"
@@ -1353,25 +1535,28 @@ def operator_key(configure):
     return key
 
 
-def _every_stop(client, operator, operator_key):
+def _every_stop(client, operator, operator_key, anonymous=APIClient):
     """Every kind of stop an operator makes, each on its own row, the three
     stop-lane reads, the engine's poll, and the refresh that keeps an operator
     signed in. Returns {stop: status code}; EVERY_STOP says which route and
-    method each one is, and a test below holds that to the exempt set."""
+    method each one is, and a test below holds that to the exempt set. The
+    failsafe commands are for an engine of their own, so a second call drafts
+    afresh. ``anonymous`` makes the client the poll and the refresh are sent
+    with."""
     from rest_framework_simplejwt.tokens import RefreshToken
 
     from pentest.models import Engagement
 
     to_pause, to_revoke, to_contradict, to_switch_off = (_deployment() for _ in range(4))
-    # Two drafts, one to sign and one to cancel. A draft of a stop is a stop too.
-    drafts = [
-        client.post("/api/failsafe/commands/", {"action": "pause", "engine_id": "athena-1"}, format="json").data
-        for _ in range(2)
-    ]
-    sig = operator_key.sign(bytes.fromhex(drafts[0]["signing_bytes"])).hex()
+    engine_id = f"athena-{uuid.uuid4().hex[:8]}"
+    # A pause to read and sign (a draft of a stop is a stop too), and a resume
+    # to cancel: cancelling a resume keeps the engine stopped.
+    pause = client.post("/api/failsafe/commands/", {"action": "pause", "engine_id": engine_id}, format="json").data
+    sig = operator_key.sign(bytes.fromhex(pause["signing_bytes"])).hex()
+    resume = _command("resume", engine_id, initiator=operator)
     engagements = [
         Engagement.objects.create(name=f"stop321-{i}", created_by=operator, status="running", scope_hosts=["client.example"])
-        for i in range(4)
+        for i in range(3)
     ]
     colleague, deputy, leaver = _admin(), _admin(), _admin()
     past = (timezone.now() - timedelta(minutes=1)).isoformat()
@@ -1381,23 +1566,22 @@ def _every_stop(client, operator, operator_key):
         "pause": client.post(f"{base}/deployments/{to_pause.uuid}/recompute/", {"paused": True}, format="json").status_code,
         "revoke": client.post(f"{base}/claims/{_claim(to_revoke).uuid}/transition/", {"to_status": "revoked"}, format="json").status_code,
         "contradict": client.post(f"{base}/claims/{_claim(to_contradict).uuid}/transition/", {"to_status": "contradicted"}, format="json").status_code,
-        "stand down": client.post("/api/failsafe/commands/", {"action": "stand_down", "engine_id": "athena-1"}, format="json").status_code,
-        "terminate": client.post("/api/failsafe/commands/", {"action": "terminate", "engine_id": "athena-1"}, format="json").status_code,
-        "state read": client.get("/api/failsafe/state/?engine_id=athena-1").status_code,
-        "list": client.get("/api/failsafe/commands/?engine_id=athena-1&status=awaiting_signatures").status_code,
-        "command read": client.get(f"/api/failsafe/commands/{drafts[1]['uuid']}/").status_code,
-        "sign": client.post(f"/api/failsafe/commands/{drafts[0]['uuid']}/signatures/", {"key_id": "alice", "sig": sig}, format="json").status_code,
-        "cancel": client.post(f"/api/failsafe/commands/{drafts[1]['uuid']}/cancel/", {}, format="json").status_code,
+        "stand down": client.post("/api/failsafe/commands/", {"action": "stand_down", "engine_id": engine_id}, format="json").status_code,
+        "terminate": client.post("/api/failsafe/commands/", {"action": "terminate", "engine_id": engine_id}, format="json").status_code,
+        "state read": client.get(f"/api/failsafe/state/?engine_id={engine_id}").status_code,
+        "list": client.get(f"/api/failsafe/commands/?engine_id={engine_id}&status=awaiting_signatures").status_code,
+        "command read": client.get(f"/api/failsafe/commands/{pause['uuid']}/").status_code,
+        "sign": client.post(f"/api/failsafe/commands/{pause['uuid']}/signatures/", {"key_id": "alice", "sig": sig}, format="json").status_code,
+        "cancel": client.post(f"/api/failsafe/commands/{resume.uuid}/cancel/", {}, format="json").status_code,
         "dispatch off": client.put(f"{base}/deployments/{to_switch_off.uuid}/dispatch-policy/", {"enabled": False}, format="json").status_code,
         "engagement paused": client.patch(f"/api/pentest/engagements/{engagements[0].pk}/", {"status": "paused"}, format="json").status_code,
         "engagement window closed": client.patch(f"/api/pentest/engagements/{engagements[1].pk}/", {"testing_window_end": past}, format="json").status_code,
         "engagement scope emptied": client.patch(f"/api/pentest/engagements/{engagements[2].pk}/", {"scope_hosts": []}, format="json").status_code,
-        "engagement deleted": client.delete(f"/api/pentest/engagements/{engagements[3].pk}/").status_code,
         "operator demoted": client.patch(f"/api/accounts/users/{colleague.pk}/set_role/", {"role": "viewer"}, format="json").status_code,
         "admin demoted to analyst": client.patch(f"/api/accounts/users/{deputy.pk}/set_role/", {"role": "analyst"}, format="json").status_code,
         "operator removed": client.delete(f"/api/accounts/users/{leaver.pk}/").status_code,
-        "poll": _poll().status_code,
-        "refresh": APIClient().post("/api/token/refresh/", {"refresh": str(RefreshToken.for_user(operator))}, format="json").status_code,
+        "poll": _poll(anonymous()).status_code,
+        "refresh": anonymous().post("/api/token/refresh/", {"refresh": str(RefreshToken.for_user(operator))}, format="json").status_code,
     }
 
 
@@ -1417,7 +1601,6 @@ EVERY_STOP = {
     "engagement paused": ("pentest:engagement_detail", "PATCH", 200),
     "engagement window closed": ("pentest:engagement_detail", "PATCH", 200),
     "engagement scope emptied": ("pentest:engagement_detail", "PATCH", 200),
-    "engagement deleted": ("pentest:engagement_detail", "DELETE", 204),
     "operator demoted": ("accounts:user-set-role", "PATCH", 200),
     "admin demoted to analyst": ("accounts:user-set-role", "PATCH", 200),
     "operator removed": ("accounts:user-detail", "DELETE", 204),
@@ -1556,7 +1739,7 @@ def test_enforce_mode_still_refuses_what_is_not_a_stop_through_the_whole_stack(r
     assert Deployment.objects.get(pk=paused.pk).decision == Deployment.Decision.PAUSED
 
 
-# --- Every limit saturated at once: the stops are still served (M2) ------------
+# --- Every limit saturated at once: the stops are still served (M2, M3) --------
 
 
 class _EveryScope(dict):
@@ -1569,20 +1752,185 @@ class _EveryScope(dict):
         return self[key]
 
 
+#: What a count in the saturated cache reads as.
+_FULL = 10**9
+_ABSENT = object()
+
+
+def _full(value):
+    """``value`` as a count past any limit: a number at least _FULL, a list or
+    tuple of ten thousand moments, now. Anything else is left as it is."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return max(value, _FULL)
+    if isinstance(value, (list, tuple)):
+        return type(value)([time.time()] * 10_000)
+    return value
+
+
+class SaturatedCache(LocMemCache):
+    """A cache in which every count is already full. Whatever a limit keeps in
+    it -- a number, a list of moments -- reads as past any limit, whether it is
+    there or not; a key it adds is already there; an increment lands past any
+    limit. The saturation installs it as the default cache, so a limit that
+    counts in the cache refuses, however it is built and wherever it runs: a
+    throttle, a permission, a middleware, a view."""
+
+    def get(self, key, default=None, version=None):
+        value = super().get(key, _ABSENT, version)
+        return _full(default if value is _ABSENT else value)
+
+    def get_many(self, keys, version=None):
+        return {key: _full(value) for key, value in super().get_many(keys, version).items()}
+
+    def add(self, key, value, timeout=DEFAULT_TIMEOUT, version=None):
+        return False
+
+    def incr(self, key, delta=1, version=None):
+        return _FULL
+
+    def has_key(self, key, version=None):
+        return True
+
+
+def _every_throttle_class():
+    """Every throttle class there is: every subclass of BaseThrottle, however
+    deep (StopsPass's included), and the class of every throttle a served view
+    names or builds, whatever it subclasses."""
+    found, todo = set(), [BaseThrottle]
+    while todo:
+        cls = todo.pop()
+        if cls not in found:
+            found.add(cls)
+            todo.extend(cls.__subclasses__())
+    for entry in walk().values():
+        for callback in entry["callbacks"]:
+            if getattr(callback, "cls", None) is not None:
+                found.update(_view_throttles(callback))
+    return found
+
+
+def _saturate_every_throttle(monkeypatch):
+    """Every throttle refuses, and asks for an hour. Every allow_request any
+    throttle class defines or inherits is replaced by one that refuses --
+    except StopsPass's, the one place a stop is let through before any limit is
+    asked. So a throttle lets a stop through only if StopsPass's allow_request
+    is the first one it calls."""
+
+    def refuse(self, request, view):
+        return False
+
+    def an_hour(self):
+        return 3600.0
+
+    for cls in _every_throttle_class():
+        for klass in cls.__mro__:
+            if klass in (StopsPass, object):
+                continue
+            if "allow_request" in vars(klass):
+                monkeypatch.setattr(klass, "allow_request", refuse)
+            if "wait" in vars(klass):
+                monkeypatch.setattr(klass, "wait", an_hour)
+
+
 @pytest.fixture()
 def saturated(rates, configure, monkeypatch):
-    """Every rate-based throttle refuses at once, whatever its scope and however
-    its rate is set -- a rate in its class body, a scope, a setting -- because
-    every rate reads as zero; the sign-in windows are full; and the gateway is
-    in enforce mode. Returns a function that sets the gateway's answer."""
+    """Every limit refuses at once, however it is built. Returns a function to
+    call once the test's own classes exist, with the gateway's answer:
+
+    * every throttle refuses and waits an hour (_saturate_every_throttle);
+    * every rate reads as zero, whatever its scope and however it is set, so
+      the sign-in limits refuse every attempt;
+    * the default cache is saturated (SaturatedCache), so a count kept there
+      by anything else is full;
+    * the gateway is in enforce mode, answering as the test says.
+
+    The stops are sent through config.wsgi.application (_WsgiClient), the
+    entry point a server calls, so its wrapper is in front of them too."""
+    configure(CACHES={"default": {"BACKEND": f"{__name__}.SaturatedCache", "LOCATION": "saturated-321"}})
     monkeypatch.setattr(SimpleRateThrottle, "THROTTLE_RATES", _EveryScope())
     monkeypatch.setattr(SimpleRateThrottle, "parse_rate", lambda self, rate: (0, 60))
     configure(DEFENDER_MONITOR_ONLY=False)
+    # The WSGI wrapper starts the owed-dispatch sweeper (#303) on a request; not
+    # a thread to leave running in a test.
+    monkeypatch.setattr("assurance.dispatch.ensure_owed_sweeper", lambda: None)
 
-    def answer(payload):
+    def apply(payload):
+        _saturate_every_throttle(monkeypatch)
         monkeypatch.setattr("audit.middleware.requests.post", _engine_answers(payload))
 
-    return answer
+    return apply
+
+
+def _wsgi_application():
+    """config.wsgi.application, imported without configuring Django again."""
+    import django
+
+    with mock.patch.object(django, "setup"):
+        from config import wsgi
+    return wsgi.application
+
+
+class _WsgiHandler:
+    """Sends a test client's request through config.wsgi.application, as a
+    server does, and turns what it answers back into a response."""
+
+    def __call__(self, environ):
+        from django.core import signals
+        from django.db import close_old_connections
+
+        application = _wsgi_application()
+        answer = {}
+
+        def start_response(status_line, headers, exc_info=None):
+            answer["status"], answer["headers"] = status_line, headers
+
+        # As Django's test client does: the request ending must not close the
+        # connection the test's transaction is on.
+        signals.request_started.disconnect(close_old_connections)
+        signals.request_finished.disconnect(close_old_connections)
+        try:
+            result = application(environ, start_response)
+            try:
+                body = b"".join(result)
+            finally:
+                if hasattr(result, "close"):
+                    result.close()
+        finally:
+            signals.request_started.connect(close_old_connections)
+            signals.request_finished.connect(close_old_connections)
+        response = HttpResponse(body, status=int(answer["status"].split(" ", 1)[0]))
+        for name, value in answer["headers"]:
+            response[name] = value
+        response.wsgi_request = types.SimpleNamespace(urlconf=None)
+        try:
+            response.data = json.loads(body)
+        except ValueError:
+            response.data = None
+        return response
+
+
+class _WsgiClient(APIClient):
+    """An APIClient whose requests go through config.wsgi.application."""
+
+    def __init__(self, **defaults):
+        super().__init__(**defaults)
+        self.handler = _WsgiHandler()
+
+
+def _wsgi_bearer_client(user):
+    from rest_framework_simplejwt.tokens import AccessToken
+
+    client = _WsgiClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {AccessToken.for_user(user)}")
+    return client
+
+
+def _wsgi_service_client(token=None):
+    client = _WsgiClient()
+    client.credentials(HTTP_X_FAILSAFE_SERVICE_TOKEN=token or SERVICE_TOKEN)
+    return client
 
 
 GATEWAY_ANSWERS = {
@@ -1595,22 +1943,24 @@ GATEWAY_ANSWERS = {
 @pytest.mark.django_db
 @pytest.mark.parametrize("gateway_answer", list(GATEWAY_ANSWERS))
 def test_with_every_limit_saturated_every_stop_is_served(saturated, operator_key, gateway_answer):
-    """Every throttle and scope saturated, the sign-in windows full, and the
-    gateway answering allow, block or throttle in enforce mode: each stop
-    route's request, through the whole stack as installed, is served -- by an
+    """Every throttle class refusing, every rate zero, every count in the cache
+    full, the sign-in limits refusing, and the gateway answering allow, block
+    or throttle in enforce mode: each stop route's request, sent through the
+    WSGI entry point and the whole stack as installed, is served -- by an
     operator with a JWT, and by the failsafe service token. A read that is not
-    a stop is refused, so the saturation is real. The initial() limit of round
-    2's T1 mutant fails here, whatever its rate."""
+    a stop is refused, so the saturation is real. Round 2's T1 (a limit in
+    initial()) and round 3's T2 (a StopsPass subclass counting in the cache)
+    fail here, whatever their rate."""
     payload, refused = GATEWAY_ANSWERS[gateway_answer]
     saturated(payload)
     operator = _admin()
     assert _sign_in(operator.username, "x").status_code in (403, 429)
-    bearer = _bearer_client(operator)
+    bearer = _wsgi_bearer_client(operator)
     assert bearer.get("/api/failsafe/audit/").status_code == refused
-    assert _every_stop(bearer, operator, operator_key) == SERVED
+    assert _every_stop(bearer, operator, operator_key, anonymous=_WsgiClient) == SERVED
     service = _service_account()
     with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
-        assert _every_stop(_service_client(), service, operator_key) == SERVICE_SERVED
+        assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
 
 
 @pytest.mark.django_db
@@ -1638,8 +1988,93 @@ def test_the_saturation_catches_a_limit_added_in_initial(saturated, monkeypatch)
     served = walk()
     assert any("overrides initial()" in _throttle_problems(cb) for cb in served["deployment-recompute"]["callbacks"])
     dep = _deployment()
-    pause = _client_for(_admin()).post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
+    pause = _wsgi_bearer_client(_admin()).post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
     assert pause.status_code == 429
+
+
+class _RecomputeBurst(StopsPass, BaseThrottle):
+    """Round 3's T2 mutant, as it was put in DeploymentViewSet.throttle_classes:
+    a StopsPass subclass -- so ``issubclass(t, StopsPass)`` passed -- whose own
+    allow_request never asks whether the request is a stop, counting in the
+    cache rather than through SimpleRateThrottle. It refused the 26th pause in
+    a minute, and all 297 round-3 cases passed."""
+
+    LIMIT = 25
+
+    def allow_request(self, request, view):
+        if getattr(view, "action", None) != "recompute":
+            return True
+        key = f"t2-burst-{request.user.pk}"
+        count = cache.get(key, 0) + 1
+        cache.set(key, count, 60)
+        return count <= self.LIMIT
+
+    def wait(self):
+        return 60
+
+
+@pytest.mark.django_db
+def test_the_saturation_catches_round_3s_t2_mutant(saturated, monkeypatch):
+    """T2 in DeploymentViewSet.throttle_classes: the static check names it, and
+    the saturation refuses the pause -- by its own allow_request, which the
+    saturation replaces as it does every throttle's but StopsPass's, and by its
+    count in the cache, which the saturated cache reads as full."""
+    from assurance.views import DeploymentViewSet
+    from safety.throttling import StopExemptAnonRateThrottle, StopExemptUserRateThrottle
+
+    monkeypatch.setattr(
+        DeploymentViewSet,
+        "throttle_classes",
+        (StopExemptAnonRateThrottle, StopExemptUserRateThrottle, _RecomputeBurst),
+    )
+    problems = [p for cb in walk()["deployment-recompute"]["callbacks"] for p in _throttle_problems(cb)]
+    assert "throttles with _RecomputeBurst, whose allow_request is not StopsPass's" in problems
+    saturated({"allow": True, "action": "allow"})
+    dep = _deployment()
+    pause = _wsgi_bearer_client(_admin()).post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
+    assert pause.status_code == 429
+    # Its count alone, with its own allow_request put back, is full in the
+    # saturated cache: the first pause is refused.
+    monkeypatch.setattr(_RecomputeBurst, "allow_request", _RecomputeBurst.__dict__["allow_request"])
+    assert not _RecomputeBurst().allow_request(
+        types.SimpleNamespace(user=types.SimpleNamespace(pk=1)), types.SimpleNamespace(action="recompute")
+    )
+
+
+@pytest.mark.django_db
+def test_the_saturation_catches_a_limit_that_is_not_a_throttle(saturated, monkeypatch):
+    """A counting permission on the recompute -- not a throttle at all, so no
+    throttle patch reaches it -- that keeps its count in the cache: the
+    saturated cache reads the count as full, and the pause is refused. And a
+    wrapper round the routed view (functools.wraps keeps its .cls) is named by
+    the static check."""
+    import functools
+
+    from rest_framework.permissions import BasePermission
+
+    from assurance.views import DeploymentViewSet
+
+    class Budget(BasePermission):
+        def has_permission(self, request, view):
+            if getattr(view, "action", None) != "recompute":
+                return True
+            if cache.add(f"budget-{request.user.pk}", 0, 60):
+                return True
+            return cache.incr(f"budget-{request.user.pk}") <= 1000
+
+    monkeypatch.setattr(DeploymentViewSet, "permission_classes", [*DeploymentViewSet.permission_classes, Budget])
+    saturated({"allow": True, "action": "allow"})
+    dep = _deployment()
+    pause = _wsgi_bearer_client(_admin()).post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
+    assert pause.status_code == 403
+
+    callback = walk()["deployment-recompute"]["callbacks"][0]
+
+    @functools.wraps(callback)
+    def wrapped(request, *args, **kwargs):
+        return callback(request, *args, **kwargs)
+
+    assert "is routed through a wrapper the view class does not build" in _throttle_problems(wrapped)
 
 
 # --- The failsafe service token: stops without a password sign-in (H1) ---------
@@ -1696,21 +2131,34 @@ def test_the_dashboards_stops_need_no_password_sign_in(rates, service, operator_
 def test_the_service_token_does_nothing_but_stop(rates, service):
     """Accepted only on a stop or a stop-lane read. Everywhere else the header
     is ignored, so with no other credential the answer is 401 -- still 401,
-    with the bearer challenge, not 403."""
+    with the bearer challenge, not 403. Round 3 let it cancel another
+    operator's stand-down awaiting its second signature, and a pause already
+    signed and ready (H2), and delete other tenants' engagements (L2)."""
+    from failsafe.models import FailsafeCommand
     from pentest.models import Engagement
 
     client = _service_client()
     dep, other = _deployment(), _deployment()
     engagement = Engagement.objects.create(name="stop321-s", created_by=service, status="paused", scope_hosts=["a.example"])
+    running = Engagement.objects.create(name="stop321-r", created_by=_admin(), status="running", scope_hosts=["b.example"])
     viewer = _user("viewer")
+    operator = _admin()
+    stand_down = _command("stand_down", initiator=operator, signed=True,
+                          signatures=[{"key_id": "alice", "sig": "00", "submitted_by": operator.username}])
+    ready = _command("pause", initiator=operator, status="ready", signed=True)
+    resume = _command("resume", initiator=operator)
     refused = {
         "lift": client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": False}, format="json"),
         "routine recompute": client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {}, format="json"),
         "resume drafted": client.post("/api/failsafe/commands/", {"action": "resume", "engine_id": "e"}, format="json"),
         "release drafted": client.post("/api/failsafe/commands/", {"action": "release", "engine_id": "e"}, format="json"),
+        "resume signed": client.post(f"/api/failsafe/commands/{resume.uuid}/signatures/", {"key_id": "alice", "sig": "00"}, format="json"),
+        "stand-down cancelled": client.post(f"/api/failsafe/commands/{stand_down.uuid}/cancel/", {}, format="json"),
+        "ready pause cancelled": client.post(f"/api/failsafe/commands/{ready.uuid}/cancel/", {}, format="json"),
         "claim verified": client.post(f"/api/assurance/claims/{_claim(other).uuid}/transition/", {"to_status": "verified"}, format="json"),
         "dispatch on": client.put(f"/api/assurance/deployments/{dep.uuid}/dispatch-policy/", {"enabled": True}, format="json"),
         "engagement running": client.patch(f"/api/pentest/engagements/{engagement.pk}/", {"status": "running"}, format="json"),
+        "engagement deleted": client.delete(f"/api/pentest/engagements/{running.pk}/"),
         "promotion": client.patch(f"/api/accounts/users/{viewer.pk}/set_role/", {"role": "admin"}, format="json"),
         "audit read": client.get("/api/failsafe/audit/"),
         "user list": client.get("/api/accounts/users/"),
@@ -1721,8 +2169,97 @@ def test_the_service_token_does_nothing_but_stop(rates, service):
     assert all(r["WWW-Authenticate"].startswith("Bearer") for r in refused.values())
     viewer.refresh_from_db(), engagement.refresh_from_db()
     assert viewer.role == "viewer" and engagement.status == "paused"
+    assert Engagement.objects.filter(pk=running.pk).exists()
+    assert FailsafeCommand.objects.get(pk=stand_down.pk).status == "awaiting_signatures"
+    assert FailsafeCommand.objects.get(pk=ready.pk).status == "ready"
+    assert _poll(engine_id="athena-1").data[0]["nonce"] == ready.nonce
     pause = client.post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
     assert pause.status_code == 200
+    # Cancelling a resume keeps the engine stopped: that one the token may do.
+    assert client.post(f"/api/failsafe/commands/{resume.uuid}/cancel/", {}, format="json").status_code == 200
+
+
+@pytest.mark.django_db
+def test_a_cancel_of_a_stop_needs_its_initiator_or_an_admin_and_goes_through_the_gateway(rates, configure, monkeypatch):
+    """H2: cancelling a pause, stand-down or terminate withdraws a stop, so it
+    is judged like any other request that is not one: authenticated by an
+    operator's own session, allowed only to the command's initiator or an
+    admin, and asked about at the gateway, whose block refuses it."""
+    from failsafe.models import FailsafeCommand
+
+    initiator, colleague, admin_ = _user("analyst"), _user("analyst"), _admin()
+    commands_ = [_command("stand_down", initiator=initiator) for _ in range(3)]
+    assert _client_for(colleague).post(f"/api/failsafe/commands/{commands_[0].uuid}/cancel/", {}, format="json").status_code == 403
+    assert _client_for(initiator).post(f"/api/failsafe/commands/{commands_[0].uuid}/cancel/", {}, format="json").status_code == 200
+    assert _client_for(admin_).post(f"/api/failsafe/commands/{commands_[1].uuid}/cancel/", {}, format="json").status_code == 200
+    configure(DEFENDER_MONITOR_ONLY=False)
+    post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
+    monkeypatch.setattr("audit.middleware.requests.post", post)
+    blocked = _client_for(admin_).post(f"/api/failsafe/commands/{commands_[2].uuid}/cancel/", {}, format="json")
+    assert blocked.status_code == 403 and post.call_count == 1
+    assert FailsafeCommand.objects.get(pk=commands_[2].pk).status == "awaiting_signatures"
+    # Past the rate it is refused as well: it spends the caller's budget.
+    rates(user="2/min")
+    client = _client_for(initiator)
+    configure(DEFENDER_MONITOR_ONLY=True)
+    cache.clear()
+    others = [_command("pause", initiator=initiator) for _ in range(3)]
+    codes = [client.post(f"/api/failsafe/commands/{c.uuid}/cancel/", {}, format="json").status_code for c in others]
+    assert codes == [200, 200, 429]
+
+
+@pytest.mark.django_db
+def test_a_service_account_that_cannot_be_read_is_a_503_not_a_401(rates, service, monkeypatch):
+    """L1: a failed read of the service account answered the stop 401, and the
+    dashboard answers a 401 by signing in again with a password -- the path the
+    token exists to avoid. Now: 503, the reason, and Retry-After."""
+    from django.db import OperationalError
+    from django.db.models.query import QuerySet
+
+    real_first = QuerySet.first
+
+    def locked(self):
+        if self.model is User and service.username in str(self.query):
+            raise OperationalError("database is locked")
+        return real_first(self)
+
+    monkeypatch.setattr(QuerySet, "first", locked)
+    dep = _deployment()
+    answer = _service_client().post(f"/api/assurance/deployments/{dep.uuid}/recompute/", {"paused": True}, format="json")
+    assert answer.status_code == 503
+    assert "OperationalError: database is locked" in answer.data["detail"]
+    assert answer["Retry-After"] == "1"
+
+
+@pytest.mark.django_db
+def test_the_service_token_reads_only_the_stop_commands_in_flight(rates, service):
+    """L4: the token read the whole command history: resume and release
+    commands with their signing bytes, reasons, signatures and initiators. It
+    now reads what stopping needs: the pause, stand-down and terminate commands
+    in flight, their signing bytes, and the engine's live state."""
+    operator = _admin()
+    awaiting_stop = _command("stand_down", "athena-7", initiator=operator)
+    ready_stop = _command("pause", "athena-7", initiator=operator, status="ready", signed=True)
+    history = [_command("terminate", "athena-7", initiator=operator, status=state) for state in ("consumed", "canceled", "expired")]
+    starts = [_command(action, "athena-7", initiator=operator, status=state)
+              for action in ("resume", "release") for state in ("awaiting_signatures", "ready", "consumed")]
+    client = _service_client()
+    listed = {row["uuid"] for row in client.get("/api/failsafe/commands/?engine_id=athena-7").data}
+    assert listed == {str(awaiting_stop.uuid), str(ready_stop.uuid)}
+    state = client.get("/api/failsafe/state/?engine_id=athena-7").data
+    assert {row["uuid"] for row in state["awaiting_signatures"]} == {str(awaiting_stop.uuid)}
+    assert {row["uuid"] for row in state["ready"]} == {str(ready_stop.uuid)}
+    assert state["recent"] == [] and state["engine_state"] == "running"
+    for command in (awaiting_stop, ready_stop):
+        detail = client.get(f"/api/failsafe/commands/{command.uuid}/")
+        assert detail.status_code == 200 and detail.data["signing_bytes"]
+    for command in (*history, *starts):
+        assert client.get(f"/api/failsafe/commands/{command.uuid}/").status_code == 404
+    # An operator's own session reads everything, as before.
+    reader = _client_for(operator)
+    everything = {row["uuid"] for row in reader.get("/api/failsafe/commands/?engine_id=athena-7").data}
+    assert everything == {str(c.uuid) for c in (awaiting_stop, ready_stop, *history, *starts)}
+    assert reader.get(f"/api/failsafe/commands/{starts[0].uuid}/").status_code == 200
 
 
 @pytest.mark.django_db
@@ -1930,6 +2467,154 @@ def test_the_address_count_is_not_cleared_by_a_success(rates):
     assert [_sign_in(f"m-{i}", "wrong").status_code for i in range(2)] == [401, 429]
 
 
+def _burst(names, monkeypatch, size):
+    """``size`` sign-ins in flight at once, as a burst is: each attempt that
+    reaches a password hash starts every attempt not yet started before its
+    own hash finishes. Returns (answers, attempts that reached a hash)."""
+    from rest_framework_simplejwt import serializers as jwt_serializers
+
+    started, answers, hashed = [0], [], []
+    real = jwt_serializers.authenticate
+
+    def attempt():
+        started[0] += 1
+        answers.append(_sign_in(names(started[0]), f"guess-{started[0]}").status_code)
+
+    def authenticate(**kwargs):
+        hashed.append(kwargs["username"])
+        while started[0] < size:
+            attempt()
+        return real(**kwargs)
+
+    monkeypatch.setattr(jwt_serializers, "authenticate", authenticate)
+    while started[0] < size:
+        attempt()
+    return answers, hashed
+
+
+@pytest.mark.django_db
+def test_a_burst_of_guesses_is_counted_before_any_password_is_hashed(rates, monkeypatch):
+    """M4: round 3 checked the count before the hash and added to it after, so
+    every attempt of a burst passed the check before any was counted: 40
+    simultaneous guesses at one account were 40 hashes against a limit of 10,
+    and 80 names from one address 80 hashes against 60. Each attempt is
+    counted before its hash now."""
+    User.objects.create_user(username="op330", password="right-password", role="admin")
+    answers, hashed = _burst(lambda k: "op330", monkeypatch, 40)
+    assert len(hashed) == 10
+    assert sorted(answers) == [401] * 10 + [429] * 30
+    assert _sign_in("op330", "right-password").status_code == 429
+
+
+@pytest.mark.django_db
+def test_a_burst_of_names_from_one_address_is_counted_before_any_password_is_hashed(rates, monkeypatch):
+    """The same for the address's limit (60 a minute; 12 here, so the burst
+    nests no deeper than a test can)."""
+    rates(sign_in_address="12/min")
+    answers, hashed = _burst(lambda k: f"nobody-{k}", monkeypatch, 30)
+    assert len(hashed) == 12
+    assert sorted(answers) == [401] * 12 + [429] * 18
+
+
+@pytest.mark.django_db
+def test_the_count_is_kept_where_every_worker_reads_it(rates, configure):
+    """Round 3 kept the count in the per-process cache, so each worker had
+    limits of its own. It is in the database now: a worker with an empty
+    cache of its own still refuses the eleventh guess, and the one row per
+    window is incremented in place."""
+    from safety.models import SignInCount
+
+    User.objects.create_user(username="op331", password="right-password", role="admin")
+    assert [_sign_in("op331", "wrong").status_code for _ in range(10)] == [401] * 10
+    cache.clear()
+    assert _sign_in("op331", "wrong").status_code == 429
+    per_key = {}
+    for key, count in SignInCount.objects.values_list("key", "count"):
+        per_key[key] = per_key.get(key, 0) + count
+    assert sorted(per_key.values()) == [10, 10]
+    assert SignInCount._meta.get_field("count").get_internal_type() == "PositiveIntegerField"
+    assert any(c.fields == ("key", "window") for c in SignInCount._meta.constraints)
+
+
+@pytest.mark.django_db
+def test_an_attempt_that_cannot_be_counted_is_refused_unhashed(rates, monkeypatch):
+    """No password is hashed uncounted: a count that cannot be written is 503."""
+    from rest_framework_simplejwt import serializers as jwt_serializers
+
+    from safety.models import SignInCount
+
+    User.objects.create_user(username="op332", password="right-password", role="admin")
+    hashed = []
+    real = jwt_serializers.authenticate
+    monkeypatch.setattr(jwt_serializers, "authenticate", lambda **kw: hashed.append(1) or real(**kw))
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the database is gone")
+
+    monkeypatch.setattr(SignInCount.objects, "bulk_create", broken)
+    answer = _sign_in("op332", "right-password")
+    assert answer.status_code == 503 and answer["Retry-After"] == "1"
+    assert hashed == []
+
+
+def test_the_deployment_check_warns_when_the_count_is_per_process(monkeypatch):
+    """`check --deploy` names a sign-in count that each worker would have its
+    own of: an in-memory SQLite database."""
+    from django.core.checks import registry
+    from django.db import connections
+
+    from safety import checks
+
+    assert checks.sign_in_limits_are_shared in registry.registry.get_checks(include_deployment_checks=True)
+    assert checks.sign_in_limits_are_shared(None) == []
+    for name in (":memory:", "file::memory:?cache=shared", "file:x?mode=memory"):
+        assert checks.per_process_database({"ENGINE": "django.db.backends.sqlite3", "NAME": name})
+    assert not checks.per_process_database({"ENGINE": "django.db.backends.sqlite3", "NAME": "/var/db/athena.sqlite3"})
+    assert not checks.per_process_database({"ENGINE": "django.db.backends.postgresql", "NAME": "athena"})
+    monkeypatch.setitem(connections["default"].settings_dict, "NAME", ":memory:")
+    assert [w.id for w in checks.sign_in_limits_are_shared(None)] == ["safety.W001"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_simultaneous_sign_ins_on_threads_are_limited(rates, monkeypatch):
+    """M4, as it happens: threads sending sign-ins at the same moment, each with
+    its own database connection, as workers do. At most the limit are hashed."""
+    from rest_framework_simplejwt import serializers as jwt_serializers
+
+    rates(sign_in="5/min", sign_in_address="12/min")
+    name = f"op333-{uuid.uuid4().hex[:6]}"
+    User.objects.create_user(username=name, password="right-password", role="admin")
+    hashed = []
+    real = jwt_serializers.authenticate
+    monkeypatch.setattr(jwt_serializers, "authenticate", lambda **kw: hashed.append(kw["username"]) or real(**kw))
+
+    def burst(names, address):
+        barrier = threading.Barrier(len(names))
+        answers = [None] * len(names)
+
+        def one(k):
+            from django.db import connection
+
+            try:
+                barrier.wait()
+                answers[k] = _sign_in(names[k], "guess", address=address).status_code
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=one, args=(k,)) for k in range(len(names))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(120)
+        return answers
+
+    answers = burst([name] * 16, "10.0.3.1")
+    assert len(hashed) <= 5 and answers.count(401) == len(hashed) and set(answers) <= {401, 429}
+    hashed.clear()
+    answers = burst([f"nobody-{k}" for k in range(24)], "10.0.3.2")
+    assert len(hashed) <= 12 and answers.count(401) == len(hashed) and set(answers) <= {401, 429}
+
+
 # --- The refresh: exempt only while its token is unspent (L2) -------------------
 
 
@@ -1977,6 +2662,8 @@ def test_a_spent_refresh_token_no_longer_verifies_and_is_not_exempt(rates, confi
 
 @pytest.mark.django_db
 def test_judging_a_refresh_is_one_indexed_read():
+    """The account (by its primary key) and the blacklist (by the token's
+    unique jti) in one statement."""
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
     from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
@@ -1986,8 +2673,97 @@ def test_judging_a_refresh_is_one_indexed_read():
     with CaptureQueriesContext(connection) as queries:
         assert stops.is_stop(_json("POST", "/api/token/refresh/", {"refresh": token}))
     assert len(queries) == 1
-    assert "token_blacklist" in queries[0]["sql"] and "jti" in queries[0]["sql"]
+    sql = queries[0]["sql"]
+    assert "token_blacklist" in sql and "jti" in sql and User._meta.db_table in sql and "is_active" in sql
     assert OutstandingToken._meta.get_field("jti").unique
+
+
+@pytest.mark.django_db
+def test_a_removed_or_deactivated_operators_refresh_is_not_exempt_and_is_a_401(rates, configure, monkeypatch):
+    """L3: the exemption checked the token but not its account. A removed
+    operator's token rode it and was answered 500 (DoesNotExist, a traceback
+    each time); a deactivated one's 401 -- both past the gateway and every
+    throttle. Now neither is exempt, and both are 401."""
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    gone, off = _user("analyst"), _user("analyst")
+    gone_token, off_token = str(RefreshToken.for_user(gone)), str(RefreshToken.for_user(off))
+    gone.delete()
+    User.objects.filter(pk=off.pk).update(is_active=False)
+    for token in (gone_token, off_token):
+        assert not stops.is_stop(_json("POST", "/api/token/refresh/", {"refresh": token}))
+        answer = APIClient().post("/api/token/refresh/", {"refresh": token}, format="json")
+        assert answer.status_code == 401, answer.content
+    configure(DEFENDER_MONITOR_ONLY=False)
+    post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
+    monkeypatch.setattr("audit.middleware.requests.post", post)
+    for token in (gone_token, off_token):
+        assert APIClient().post("/api/token/refresh/", {"refresh": token}, format="json").status_code == 403
+    assert post.call_count == 2
+
+
+@pytest.mark.django_db
+def test_a_refresh_token_is_spent_once_even_when_its_check_is_raced(rates, monkeypatch):
+    """M1: SimpleJWT reads the blacklist and then writes to it, so two
+    refreshes that overlap both passed the read and both got a new token --
+    8 at once forked into 8 live chains. The read is made to pass here for
+    both, as it does in a race: the spend itself (a unique insert) still lets
+    only the first through, and the second is 401 "refresh token already used"
+    and is issued nothing."""
+    from django.db.models.query import QuerySet
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    operator = _user("analyst")
+    token = str(RefreshToken.for_user(operator))
+    real_exists = QuerySet.exists
+
+    def blind(self):
+        # Every read of the blacklist says "not spent", as it does for two
+        # refreshes that both read it before either writes.
+        return False if self.model is BlacklistedToken else real_exists(self)
+
+    monkeypatch.setattr(QuerySet, "exists", blind)
+    first = APIClient().post("/api/token/refresh/", {"refresh": token}, format="json")
+    second = APIClient().post("/api/token/refresh/", {"refresh": token}, format="json")
+    assert first.status_code == 200 and "refresh" in first.data
+    assert second.status_code == 401
+    assert second.data["detail"] == "refresh token already used" and "access" not in second.data
+    # The one chain goes on.
+    assert APIClient().post("/api/token/refresh/", {"refresh": first.data["refresh"]}, format="json").status_code == 200
+
+
+@pytest.mark.django_db(transaction=True)
+def test_eight_refreshes_of_one_token_at_once_leave_one_live_chain(rates):
+    """M1, as it happens: eight threads refresh one token at the same moment.
+    Exactly one gets a new token; the other seven are 401 "refresh token
+    already used"; and the one new token refreshes."""
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    operator = User.objects.create_user(username=f"tabs-{uuid.uuid4().hex[:8]}", password="x", role="analyst")
+    token = str(RefreshToken.for_user(operator))
+    barrier = threading.Barrier(8)
+    answers = [None] * 8
+
+    def refresh(k):
+        from django.db import connection
+
+        try:
+            barrier.wait()
+            answers[k] = APIClient().post("/api/token/refresh/", {"refresh": token}, format="json")
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=refresh, args=(k,)) for k in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    codes = sorted(answer.status_code for answer in answers)
+    assert codes == [200] + [401] * 7, codes
+    assert all(a.data["detail"] == "refresh token already used" for a in answers if a.status_code == 401)
+    new = next(a.data["refresh"] for a in answers if a.status_code == 200)
+    assert APIClient().post("/api/token/refresh/", {"refresh": new}, format="json").status_code == 200
 
 
 @pytest.mark.django_db
@@ -2004,7 +2780,7 @@ def test_enforce_mode_never_refuses_a_valid_refresh(rates, configure, monkeypatc
     assert APIClient().post("/api/token/refresh/", {"refresh": "x.y.z"}, format="json").status_code == 403
 
 
-# --- The stop lane: a flood cannot hide a command awaiting a signature (L1, M1) --
+# --- The stop lane: no draft refused, none hidden, every read bounded (H1, M2) --
 
 
 def _draft(client, action="pause", engine_id="eng-1"):
@@ -2012,48 +2788,71 @@ def _draft(client, action="pause", engine_id="eng-1"):
 
 
 @pytest.mark.django_db
-def test_a_flood_of_drafts_cannot_hide_a_stop_awaiting_a_signature(rates):
-    """L1: an admin drafted a stand-down, then one analyst drafted 60 pauses:
-    the list (50 rows) and the state view (20) no longer showed the stand-down.
-    Now one account has at most 20 stop drafts awaiting -- the 21st is 429 and
-    names them -- and the stop commands awaiting a signature are listed first,
-    never cut by the row cap, however many other commands there are."""
-    from failsafe.models import FailsafeCommand
-    from failsafe.views import COMMAND_LIST_LIMIT
-
-    stand_down = _draft(_client_for(_admin()), "stand_down").data["uuid"]
-    analyst = _client_for(_user("analyst"))
-    codes = [_draft(analyst).status_code for _ in range(20)]
-    assert codes == [201] * 20
-    refused = _draft(analyst)
-    assert refused.status_code == 429
-    assert len(refused.data["outstanding"]) == 20
-    # And many newer commands that are not stops awaiting a signature.
-    FailsafeCommand.objects.bulk_create(
-        [
-            FailsafeCommand(engine_id="eng-1", action=action, nonce=f"n-{uuid.uuid4()}", issued_at="t",
-                            expires_at="2999-01-01T00:00:00+00:00", status=state)
-            for action, state in [("resume", "awaiting_signatures"), ("pause", "consumed")] * (COMMAND_LIST_LIMIT + 5)
-        ]
-    )
-    reader = _client_for(_admin())
-    for query in ("?engine_id=eng-1&status=awaiting_signatures", "?engine_id=eng-1", ""):
-        rows = reader.get(f"/api/failsafe/commands/{query}").data
-        assert stand_down in [row["uuid"] for row in rows[:21]], query
-    state = reader.get("/api/failsafe/state/?engine_id=eng-1").data
-    assert stand_down in [row["uuid"] for row in state["awaiting_signatures"]]
+def test_no_stop_draft_is_ever_refused(rates, service):
+    """H1: round 3 capped the stop commands one account had awaiting
+    signatures at 20. One admin pausing a fleet of 25 engines (draft first,
+    sign after, as the CLI does) got 429 from the 21st, and a terminate after
+    them 429; 20 junk drafts through the dashboard's one service account got
+    the dashboard's real stand-down 429. A stop draft is never refused now."""
+    fleet = _client_for(_admin())
+    assert [_draft(fleet, "pause", f"eng-{i:02d}").status_code for i in range(25)] == [201] * 25
+    assert _draft(fleet, "terminate", "eng-24").status_code == 201
+    token = _service_client()
+    assert [_draft(token, "pause", f"junk-{i}").status_code for i in range(20)] == [201] * 20
+    assert _draft(token, "stand_down", "athena-1").status_code == 201
+    assert [_draft(token, "pause", f"more-junk-{i}").status_code for i in range(40)] == [201] * 40
+    assert _draft(token, "terminate", "athena-1").status_code == 201
 
 
 @pytest.mark.django_db
-def test_an_accounts_first_stop_draft_is_never_refused(rates, configure, monkeypatch):
-    """The cap is at least one, and a cap that cannot be read refuses nothing."""
+def test_a_stop_draft_made_again_while_unsigned_returns_the_same_draft(rates, operator_key):
+    """Idempotent, not refused: the same account's draft of the same action
+    for the same engine, while it is unsigned and has at least half its window
+    left, is answered 200 with that draft -- the same bytes, so a signature
+    already made out of band still counts. Signed, cancelled, expired or past
+    half its window, the next one is a new draft."""
     from failsafe.models import FailsafeCommand
 
-    configure(FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS=0)
+    analyst = _user("analyst")
+    client = _client_for(analyst)
+    first = _draft(client, "pause", "athena-9")
+    again = [_draft(client, "pause", "athena-9") for _ in range(30)]
+    assert first.status_code == 201 and {a.status_code for a in again} == {200}
+    assert {a.data["uuid"] for a in again} == {first.data["uuid"]}
+    assert {a.data["signing_bytes"] for a in again} == {first.data["signing_bytes"]}
+    assert FailsafeCommand.objects.filter(engine_id="athena-9").count() == 1
+    # Another action, engine or account is a draft of its own.
+    assert _draft(client, "stand_down", "athena-9").status_code == 201
+    assert _draft(client, "pause", "athena-10").status_code == 201
+    assert _draft(_client_for(_user("analyst")), "pause", "athena-9").status_code == 201
+    # Signed: a stand-down with its first signature is awaiting its second.
+    stand_down = FailsafeCommand.objects.get(engine_id="athena-9", action="stand_down")
+    sig = operator_key.sign(bytes.fromhex(_draft(client, "stand_down", "athena-9").data["signing_bytes"])).hex()
+    signed = client.post(f"/api/failsafe/commands/{stand_down.uuid}/signatures/", {"key_id": "alice", "sig": sig}, format="json")
+    assert signed.status_code == 200 and signed.data["status"] == "awaiting_signatures"
+    assert _draft(client, "stand_down", "athena-9").status_code == 201
+    # Cancelled, expired, or with less than half its window left.
+    pause = FailsafeCommand.objects.get(uuid=first.data["uuid"])
+    assert client.post(f"/api/failsafe/commands/{pause.uuid}/cancel/", {}, format="json").status_code == 200
+    renewed = _draft(client, "pause", "athena-9")
+    assert renewed.status_code == 201
+    FailsafeCommand.objects.filter(uuid=renewed.data["uuid"]).update(expires_at="2000-01-01T00:00:00+00:00")
+    renewed = _draft(client, "pause", "athena-9")
+    assert renewed.status_code == 201
+    late = (timezone.now() + timedelta(seconds=200)).isoformat()
+    FailsafeCommand.objects.filter(uuid=renewed.data["uuid"]).update(expires_at=late)
+    assert _draft(client, "pause", "athena-9").status_code == 201
+    # Resume and release are not stops: each draft is a new one, and the rate limits them.
+    assert [_draft(client, "resume", "athena-9").status_code for _ in range(2)] == [201, 201]
+
+
+@pytest.mark.django_db
+def test_a_draft_whose_earlier_one_cannot_be_read_is_made_afresh(rates, monkeypatch):
+    """The read for an identical draft fails: the draft is made anyway."""
+    from failsafe.models import FailsafeCommand
+
     client = _client_for(_user("analyst"))
     assert _draft(client).status_code == 201
-    assert _draft(client).status_code == 429
-
     real = FailsafeCommand.objects.filter
 
     def failing(*args, **kwargs):
@@ -2066,22 +2865,219 @@ def test_an_accounts_first_stop_draft_is_never_refused(rates, configure, monkeyp
 
 
 @pytest.mark.django_db
-def test_a_cancelled_or_expired_draft_frees_its_place(rates, configure):
+def test_a_flood_of_drafts_cannot_hide_a_stop_awaiting_a_signature(rates, operator_key, configure):
+    """Round 2's L1 without round 3's cap: one analyst drafts 60 pauses of one
+    engine and 60 more of sixty engines, after one admin's stand-down has its
+    first signature and another admin's is unsigned; and there are many newer
+    commands that are not stops awaiting a signature. No draft is refused; the
+    60 of one engine are one row; the signed stand-down is listed first and the
+    unsigned one within the first three -- in the list with each filter and in
+    state, with the engine and without -- and the signed one is signed again,
+    to ready."""
+    from failsafe.models import FailsafeCommand
+    from failsafe.views import COMMAND_LIST_LIMIT
+
+    bob = Ed25519PrivateKey.generate()
+    configure(FAILSAFE_OPERATOR_KEYS={
+        "alice": operator_key.public_key().public_bytes_raw().hex(),
+        "bob": bob.public_key().public_bytes_raw().hex(),
+    })
+    first_admin = _client_for(_admin())
+    signed = _draft(first_admin, "stand_down").data
+    sign = {"key_id": "alice", "sig": operator_key.sign(bytes.fromhex(signed["signing_bytes"])).hex()}
+    assert first_admin.post(f"/api/failsafe/commands/{signed['uuid']}/signatures/", sign, format="json").status_code == 200
+    unsigned = _draft(_client_for(_admin()), "stand_down").data
+    analyst = _client_for(_user("analyst"))
+    assert [_draft(analyst).status_code for _ in range(60)] == [201] + [200] * 59
+    assert [_draft(analyst, "pause", f"eng-{i}").status_code for i in range(100, 160)] == [201] * 60
+    assert FailsafeCommand.objects.filter(engine_id="eng-1", action="pause").count() == 1
+    FailsafeCommand.objects.bulk_create(
+        [
+            FailsafeCommand(engine_id="eng-1", action=action, nonce=f"n-{uuid.uuid4()}", issued_at="t",
+                            expires_at="2999-01-01T00:00:00+00:00", status=state)
+            for action, state in [("resume", "awaiting_signatures"), ("pause", "consumed")] * (COMMAND_LIST_LIMIT + 5)
+        ]
+    )
+    reader = _client_for(_admin())
+    reads = {query: reader.get(f"/api/failsafe/commands/{query}").data
+             for query in ("?engine_id=eng-1&status=awaiting_signatures", "?engine_id=eng-1", "")}
+    reads.update({f"state{query}": reader.get(f"/api/failsafe/state/{query}").data["awaiting_signatures"]
+                  for query in ("?engine_id=eng-1", "")})
+    for label, rows in reads.items():
+        order = [row["uuid"] for row in rows]
+        assert order[0] == signed["uuid"], label
+        assert unsigned["uuid"] in order[:3], label
+    sign = {"key_id": "bob", "sig": bob.sign(bytes.fromhex(signed["signing_bytes"])).hex()}
+    ready = reader.post(f"/api/failsafe/commands/{signed['uuid']}/signatures/", sign, format="json")
+    assert ready.status_code == 200 and ready.data["status"] == "ready"
+
+
+def _loads_and_statements(client, path, monkeypatch):
+    """(rows loaded as commands, SELECTs of commands, UPDATEs of commands)
+    for one read, and every SELECT of commands is by an index range with a
+    LIMIT, or by primary keys."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
     from failsafe.models import FailsafeCommand
 
-    configure(FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS=2)
-    client = _client_for(_user("analyst"))
-    first, second = _draft(client).data["uuid"], _draft(client).data["uuid"]
-    refused = _draft(client)
-    assert refused.status_code == 429
-    assert {row["uuid"] for row in refused.data["outstanding"]} == {first, second}
-    assert client.post(f"/api/failsafe/commands/{first}/cancel/", {}, format="json").status_code == 200
-    assert _draft(client).status_code == 201
-    FailsafeCommand.objects.filter(uuid=second).update(expires_at="2000-01-01T00:00:00+00:00")
-    assert _draft(client).status_code == 201
-    assert FailsafeCommand.objects.get(uuid=second).status == "expired"
-    # Resume and release are not capped here: the per-user rate limits them.
-    assert _draft(client, "resume").status_code == 201
+    loaded = []
+    real = FailsafeCommand.from_db.__func__
+    monkeypatch.setattr(
+        FailsafeCommand, "from_db", classmethod(lambda cls, db, names, values: loaded.append(1) or real(cls, db, names, values))
+    )
+    with CaptureQueriesContext(connection) as queries:
+        answer = client.get(path)
+    monkeypatch.setattr(FailsafeCommand, "from_db", classmethod(real))
+    assert answer.status_code == 200
+    table = FailsafeCommand._meta.db_table
+    selects = [q["sql"] for q in queries if q["sql"].startswith("SELECT") and f'FROM "{table}"' in q["sql"]]
+    unbounded = [sql for sql in selects if " LIMIT " not in sql and '"id" IN (' not in sql]
+    assert unbounded == [], unbounded
+    updates = [q["sql"] for q in queries if q["sql"].startswith("UPDATE") and table in q["sql"]]
+    return len(loaded), len(selects), len(updates), answer.data
+
+
+@pytest.mark.django_db
+def test_a_stop_lane_read_does_bounded_work_however_many_commands_there_are(rates, monkeypatch):
+    """M2: the state read expired every in-flight command of the engine (or of
+    every engine) one by one: 3,000 resume drafts took a read from 0.011 s to
+    0.07-0.13 s, and the first read after they expired took 3.8 s, a write per
+    row. Now every list is an index read of its few newest rows and one read of
+    the rows chosen: with 30 commands or 3,630, a read loads at most its row
+    limits and runs the same statements; and it marks at most EXPIRE_PER_READ
+    commands expired, in one write."""
+    from failsafe.models import FailsafeCommand
+    from failsafe.views import AWAITING_STOP_LIMIT, EXPIRE_PER_READ
+
+    reader = _client_for(_admin())
+    flooder = _user("analyst")
+
+    def seed(resumes, pauses):
+        FailsafeCommand.objects.bulk_create(
+            [FailsafeCommand(engine_id="athena-1", action="resume", nonce=uuid.uuid4().hex, issued_at="t",
+                             expires_at="2999-01-01T00:00:00+00:00", initiator=flooder) for _ in range(resumes)]
+            + [FailsafeCommand(engine_id=f"flood-{uuid.uuid4().hex[:8]}", action="pause", nonce=uuid.uuid4().hex,
+                               issued_at="t", expires_at="2999-01-01T00:00:00+00:00", initiator=flooder)
+               for _ in range(pauses)],
+            batch_size=500,
+        )
+
+    seed(20, 10)
+    real = _command("stand_down", "athena-1", initiator=_admin())
+    paths = ("/api/failsafe/state/?engine_id=athena-1", "/api/failsafe/state/", "/api/failsafe/commands/")
+    small = {path: _loads_and_statements(reader, path, monkeypatch) for path in paths}
+    seed(3000, 600)
+    large = {path: _loads_and_statements(reader, path, monkeypatch) for path in paths}
+    for path in paths:
+        loaded, selects, updates, data = large[path]
+        assert selects == small[path][1], path
+        assert updates == 0, path
+        assert loaded <= AWAITING_STOP_LIMIT + 20 + 20 + 10 + 50, (path, loaded)
+    state = large["/api/failsafe/state/"][3]
+    assert len(state["awaiting_signatures"]) == AWAITING_STOP_LIMIT + 20
+    assert str(real.uuid) in [row["uuid"] for row in state["awaiting_signatures"][:2]]
+    # Every one of them past its window: the next read marks what it came
+    # across expired in one write, and shows none of them as in flight.
+    FailsafeCommand.objects.update(expires_at="2000-01-01T00:00:00+00:00")
+    loaded, _selects, updates, data = _loads_and_statements(reader, paths[0], monkeypatch)
+    assert updates == 1 and loaded <= AWAITING_STOP_LIMIT + 20 + 20 + 10
+    assert data["awaiting_signatures"] == [] and data["ready"] == []
+    assert all(row["status"] == "expired" for row in data["recent"])
+    first_read = FailsafeCommand.objects.filter(status="expired").count()
+    assert first_read == EXPIRE_PER_READ, first_read
+    # The backlog is marked a bounded few at a time, by the reads that follow.
+    _loads_and_statements(reader, paths[1], monkeypatch)
+    second_read = FailsafeCommand.objects.filter(status="expired").count()
+    assert second_read == 2 * EXPIRE_PER_READ, second_read
+
+
+def test_identical_reads_at_once_share_one_computation_never_an_older_one():
+    """M2: eight threads of one analyst reading state each computed it, and a
+    pause competed with all eight (0.013 s -> 0.231 s). Identical reads by one
+    account now share one computation at a time: a read that arrives while one
+    is running waits for it, then reuses a result only if that result's
+    computation started after it arrived -- else it computes the next one. So
+    no reader gets a result older than its own arrival."""
+    from failsafe.views import _SharedReads
+
+    shared = _SharedReads()
+    started, release, computed = threading.Event(), threading.Event(), []
+
+    def compute():
+        computed.append(len(computed) + 1)
+        n = len(computed)
+        if n == 1:
+            started.set()
+            release.wait(5)
+        return n
+
+    answers = {}
+
+    def reader(name):
+        answers[name] = shared.read("kind", compute)
+
+    first = threading.Thread(target=reader, args=("first",))
+    first.start()
+    assert started.wait(5)
+    later = [threading.Thread(target=reader, args=(f"later-{i}",)) for i in range(5)]
+    for thread in later:
+        thread.start()
+    waited = time.monotonic() + 5
+    while shared._kinds["kind"]["users"] < 6 and time.monotonic() < waited:
+        time.sleep(0.01)
+    assert shared._kinds["kind"]["users"] == 6
+    assert computed == [1]  # the five wait; none computes beside the first
+    release.set()
+    for thread in (first, *later):
+        thread.join(5)
+    # The first gets its own; the five arrived while it ran, so they share the
+    # NEXT computation, which started after all of them arrived.
+    assert answers == {"first": 1, **{f"later-{i}": 2 for i in range(5)}}
+    assert computed == [1, 2]
+    # Another kind (another account, credential or query) is never shared.
+    assert shared.read("other", lambda: "other") == "other"
+    assert shared._kinds == {}
+
+
+def test_a_read_waits_for_an_identical_one_no_longer_than_its_bound(monkeypatch):
+    from failsafe import views
+
+    monkeypatch.setattr(views, "SHARED_READ_WAIT", 0.2)
+    shared = views._SharedReads()
+    started, release = threading.Event(), threading.Event()
+
+    def slow():
+        started.set()
+        release.wait(5)
+        return "slow"
+
+    thread = threading.Thread(target=shared.read, args=("kind", slow))
+    thread.start()
+    assert started.wait(5)
+    began = time.monotonic()
+    assert shared.read("kind", lambda: "own") == "own"
+    assert time.monotonic() - began < 0.2 + 0.2
+    release.set()
+    thread.join(5)
+
+
+@pytest.mark.django_db
+def test_the_stop_lane_reads_are_shared_per_account_credential_and_query(rates, service, monkeypatch):
+    from failsafe import views
+
+    kinds = []
+    real = views._SHARED_READS.read
+    monkeypatch.setattr(views._SHARED_READS, "read", lambda kind, compute: kinds.append(kind) or real(kind, compute))
+    analyst = _user("analyst")
+    _client_for(analyst).get("/api/failsafe/state/?engine_id=athena-1")
+    _client_for(analyst).get("/api/failsafe/commands/?engine_id=athena-1")
+    _service_client().get("/api/failsafe/state/?engine_id=athena-1")
+    assert kinds == [
+        ("state", analyst.pk, False, "engine_id=athena-1"),
+        ("commands", analyst.pk, False, "engine_id=athena-1"),
+        ("state", service.pk, True, "engine_id=athena-1"),
+    ]
 
 
 @pytest.mark.django_db
