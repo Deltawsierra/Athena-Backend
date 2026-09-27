@@ -95,6 +95,11 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "rest_framework_simplejwt",
+    # A refresh spends the refresh token it is given (ROTATE_REFRESH_TOKENS and
+    # BLACKLIST_AFTER_ROTATION below did nothing without this app), so a used
+    # one no longer verifies -- and is no longer exempt from the gateway and
+    # the throttles as a valid refresh (safety.stops).
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
 
     # Local apps
@@ -204,7 +209,11 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.FormParser",
         "rest_framework.parsers.MultiPartParser",
     ),
+    # The failsafe service token first: it authenticates a stop, and nothing
+    # else, without a password sign-in (safety.service_token). Anywhere else it
+    # is ignored and the JWT decides, as it always has.
     "DEFAULT_AUTHENTICATION_CLASSES": (
+        "safety.service_token.FailsafeServiceTokenAuthentication",
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
@@ -226,10 +235,12 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DJANGO_THROTTLE_ANON", "30/min"),
         "user": os.environ.get("DJANGO_THROTTLE_USER", "300/min"),
-        # Failed sign-ins of one username from one address (safety.sign_in).
-        # Only failures count, so a flood of anything else never refuses an
-        # operator's correct password.
+        # Failed sign-ins (safety.sign_in): of one username, as authentication
+        # reads it, from one address; and of every username from one address.
+        # Only failures count. An address past either is answered 429 before
+        # any password hash.
         "sign_in": os.environ.get("DJANGO_THROTTLE_SIGN_IN", "10/min"),
+        "sign_in_address": os.environ.get("DJANGO_THROTTLE_SIGN_IN_ADDRESS", "60/min"),
     },
     # Without this, DRF's throttles key anonymous callers on the whole raw
     # X-Forwarded-For header, so rotating one header defeated the rate limit
@@ -372,6 +383,26 @@ FAILSAFE_COMMAND_TTL_SECONDS = int(os.environ.get("FAILSAFE_COMMAND_TTL_SECONDS"
 # Shared token the engine presents when polling /api/failsafe/pending. The
 # engine is not an operator, so it authenticates with this rather than a JWT.
 FAILSAFE_POLL_TOKEN = os.environ.get("FAILSAFE_POLL_TOKEN")
+
+# The failsafe service credential (safety.service_token): a stop client -- the
+# dashboard's server -- presents this in the X-Failsafe-Service-Token header on
+# a stop, and is authenticated as FAILSAFE_SERVICE_USER without signing in with
+# a password, which a gateway block or a guessing flood could refuse. Accepted
+# ONLY on a request that is a stop, or a read of the stop lane; anywhere else
+# the header is ignored. At least 32 characters (`openssl rand -hex 32`), or it
+# is treated as unset.
+FAILSAFE_SERVICE_TOKEN = os.environ.get("FAILSAFE_SERVICE_TOKEN")
+FAILSAFE_SERVICE_USER = os.environ.get("FAILSAFE_SERVICE_USER")
+
+# The most stop commands (pause, stand-down, terminate) one account may have
+# awaiting signatures at once. A stop draft is never throttled, so this is what
+# keeps a flood of drafts from burying a real command. At least 1.
+FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS = int(os.environ.get("FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS", "20"))
+
+# How long the failsafe state view waits, in all, for the engine's live
+# governor state before reporting it "not reported". That view is how the
+# dashboard's second operator finds a command to sign, so it is bounded.
+FAILSAFE_STATE_ENGINE_SECONDS = float(os.environ.get("FAILSAFE_STATE_ENGINE_SECONDS", "2.0"))
 
 # -------------------------------------------------------------------
 # AI DEFENDER (SAFE MODE) NOT AI LOGIC JUST A SAFETY SWITCH

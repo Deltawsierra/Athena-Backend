@@ -18,6 +18,9 @@ view that could hold a request back reads it from here:
   and never counts one. A user past the per-user rate got 429 on a pause (#310),
   and the engines' poll, which is anonymous, hit the anonymous rate at exactly
   its own polling interval.
+* ``safety.service_token`` accepts the failsafe service token -- a stop client's
+  credential that needs no password sign-in -- only on a request judged a stop
+  here, so what the token can do is exactly the stop set.
 
 A route is named by its URL name (``ResolverMatch.view_name``), so a format
 suffix such as ``.json`` is the same route. Each stop route maps its methods to
@@ -109,11 +112,12 @@ def always(request, read):
     return True
 
 
-def _pause_or_lift(request, read):
-    # `paused` true pauses and false lifts; absent is a routine recompute, which
-    # keeps the paused state and is not a stop.
+def _pause(request, read):
+    # `paused` true pauses. False lifts a pause: that puts a deployment back to
+    # work, as a resume does, so it is start-direction and not a stop. Absent is
+    # a routine recompute, which keeps the paused state and is not a stop.
     data = _fields(read(), {"paused"})
-    return data is not None and _as_bool(data["paused"]) is not None
+    return data is not None and _as_bool(data["paused"]) is True
 
 
 #: The claim moves an operator makes to take a claim down.
@@ -223,9 +227,11 @@ def _engine_poll(request, read):
 
 
 def _valid_refresh(request, read):
-    # A refresh token that verifies (signature, expiry, type: no database read).
-    # An invalid one is not exempt: it stays under the gateway and the anonymous
-    # throttle like any other guess.
+    # A refresh token that verifies: signature, expiry and type, and that it is
+    # not on the blacklist -- one indexed read of its unique jti, because a
+    # refresh spends the token it was given. An invalid, expired or spent one
+    # is not exempt: it stays under the gateway and the anonymous throttle like
+    # any other guess, and so does one whose blacklist cannot be read.
     data = read()
     if not isinstance(data, dict) or set(data) != {"refresh"} or not isinstance(data["refresh"], str):
         return False
@@ -240,12 +246,17 @@ def _valid_refresh(request, read):
 
 #: URL name -> {method: predicate}. A method not listed is not a stop.
 STOP_ROUTES = {
-    # Pause (`paused` true) and lift (`paused` false) of a deployment.
-    "deployment-recompute": {"POST": _pause_or_lift},
+    # Pause (`paused` true) of a deployment. A lift is not a stop.
+    "deployment-recompute": {"POST": _pause},
     # Revoke or contradict a claim.
     "claim-transition": {"POST": _revoke_or_contradict},
     # The failsafe control plane. A pause, stand-down or terminate is drafted,
-    # found and read for its signing bytes, signed and cancelled here.
+    # found and read for its signing bytes, signed and cancelled here. The three
+    # reads are the stop lane: failsafe:state is where the dashboard's second
+    # operator finds the command awaiting their signature, the list is where a
+    # client finds it by engine and status, and the detail carries the bytes to
+    # sign. Each is bounded and changes no running work (failsafe.views).
+    "failsafe:state": {"GET": always},
     "failsafe:commands": {"GET": always, "POST": _stop_draft},
     "failsafe:command-detail": {"GET": always},
     "failsafe:submit-signature": {"POST": always},
@@ -263,8 +274,12 @@ STOP_ROUTES = {
 }
 
 #: Not stops, but what an operator needs in order to make one, exempt the same
-#: way. An access token lives an hour; the refresh is how a signed-in operator
-#: keeps the session they press stop from.
+#: way. An access token lives an hour; the refresh is how an operator signed in
+#: to this project's own frontend keeps the session they press stop from. A
+#: refresh token is spent by its refresh (the token blacklist, with rotation),
+#: so a used one no longer verifies and is not exempt. A stop client that signs
+#: in with a password -- the dashboard's server -- needs neither: it presents
+#: the failsafe service token on the stop itself (safety.service_token).
 STOP_ACCESS_ROUTES = {
     "token_refresh": {"POST": _valid_refresh},
 }
@@ -286,8 +301,9 @@ NOT_STOPS = {
     "health": {"GET": "the liveness probe: it answers at once and is already unthrottled"},
     "token_obtain_pair": {
         "POST": (
-            "signs in: it issues a token and stops nothing; failed attempts are limited per "
-            "address and username (safety.sign_in), never by the shared anonymous bucket"
+            "signs in with a password: it issues a token and stops nothing; no stop needs it "
+            "(the failsafe service token is presented on the stop itself), and failed attempts "
+            "are limited per address and username and per address (safety.sign_in)"
         )
     },
     "api-root": _get(),
@@ -430,9 +446,6 @@ NOT_STOPS = {
     "detection:cve-detail": _get(),
     "detection:cve-pdf": _get("renders a CVE report as a PDF: a read that changes nothing"),
     "detection:cve-email": {"POST": "emails a CVE report to its recipients: it stops nothing"},
-    "failsafe:state": _get(
-        "reads the engine's live governor state to show whether a stop landed; it changes nothing"
-    ),
     "failsafe:audit": _get(),
     "pentest:run_pentest_scan": {"POST": "launches a scan: the work a stop would stop"},
     "pentest:run_llm_pentest_scan": {"POST": "launches a scan: the work a stop would stop"},
@@ -478,7 +491,7 @@ _ADMIN_MODELS = {
     "assurance.databoundary": "a deployment's data boundary: configuration that starts and stops nothing",
     "assurance.decisiondispatchdue": "the owed dispatch record: bookkeeping that starts and stops nothing",
     "assurance.deployment": (
-        "deployments; pausing or lifting one is deployment-recompute, which is a stop"
+        "deployments; pausing one is deployment-recompute with paused true, which is a stop"
     ),
     "assurance.dispatchattempt": "the dispatch attempt log: records that start and stop nothing",
     "assurance.dispatchpolicy": (
@@ -497,6 +510,11 @@ _ADMIN_MODELS = {
         "engagements; withdrawing a scan's authority is pentest:engagement_detail, which is a stop"
     ),
     "pentest.pentestscan": "scan records: results that start and stop nothing",
+    "token_blacklist.blacklistedtoken": (
+        "spent or revoked refresh tokens, which the refresh writes itself; taking an operator's "
+        "access away is accounts:user-set-role or accounts:user-detail DELETE, which are stops"
+    ),
+    "token_blacklist.outstandingtoken": "issued refresh tokens: records that start and stop nothing",
 }
 
 #: A model admin's routes, and what each does.

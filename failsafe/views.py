@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
@@ -44,8 +45,58 @@ from .signing import (
 # is enforced separately, on the signatures.
 _ADMIN_ONLY_ACTIONS = {"terminate"}
 
-#: The most commands one list read returns. It was 100.
+#: The most commands one list read returns besides the stops awaiting a
+#: signature. It was 100.
 COMMAND_LIST_LIMIT = 50
+
+#: The actions that stop an engine (safety.stops drafts them as stops).
+STOP_ACTIONS = ("pause", "stand_down", "terminate")
+
+#: The stop commands awaiting a signature that one read returns, listed before
+#: everything else and never cut by COMMAND_LIST_LIMIT. Generous: each account
+#: has at most FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS of them, and each expires
+#: within FAILSAFE_COMMAND_TTL_SECONDS.
+AWAITING_STOP_LIMIT = 500
+
+
+def _awaiting_stops_first(qs, rest_limit):
+    """The stop commands in ``qs`` awaiting a signature (newest first, at most
+    AWAITING_STOP_LIMIT), then the rest of ``qs`` (at most ``rest_limit``).
+
+    A co-signer finds a stand-down or terminate among these reads. On round 2
+    fifty newer drafts pushed a real one out of the list, so however many
+    other commands there are, the ones waiting for a signature come first."""
+    awaiting = FailsafeCommand.STATUS_AWAITING
+    stops = qs.filter(status=awaiting, action__in=STOP_ACTIONS)[:AWAITING_STOP_LIMIT]
+    rest = qs.exclude(status=awaiting, action__in=STOP_ACTIONS)[:rest_limit]
+    return [*stops, *rest]
+
+
+def _outstanding_stop_drafts(user):
+    """``user``'s stop drafts still awaiting a signature, expiring any that are
+    due first; or None when they cannot be read, which refuses no draft.
+
+    Bounded: every draft is checked against this cap, so an account never has
+    more than the cap outstanding for this loop to expire."""
+    try:
+        outstanding = []
+        mine = FailsafeCommand.objects.filter(
+            initiator=user, status=FailsafeCommand.STATUS_AWAITING, action__in=STOP_ACTIONS
+        )
+        now = timezone.now()
+        for command in mine:
+            if not _expire_if_due(command, now):
+                outstanding.append(command)
+        return outstanding
+    except Exception:  # noqa: BLE001 - a read that fails must not refuse a stop draft
+        return None
+
+
+def _max_outstanding_stop_drafts():
+    try:
+        return max(1, int(getattr(settings, "FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS", 20)))
+    except (TypeError, ValueError):
+        return 20
 
 
 def _audit(command, event, request, **detail):
@@ -82,9 +133,11 @@ def commands(request):
             qs = qs.filter(engine_id=engine_id)
         if state:
             qs = qs.filter(status=state)
-        # A stop route: no throttle counts this read (safety.stops), so each one
-        # is kept small. Commands awaiting a signature expire within minutes.
-        return Response(FailsafeCommandSerializer(qs[:COMMAND_LIST_LIMIT], many=True).data)
+        # A stop-lane read: no throttle counts it (safety.stops), so each one is
+        # bounded. The stop commands awaiting a signature come first and are
+        # never cut by the row cap, so no flood of other drafts hides one.
+        rows = _awaiting_stops_first(qs, COMMAND_LIST_LIMIT)
+        return Response(FailsafeCommandSerializer(rows, many=True).data)
 
     serializer = DraftCommandSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -95,6 +148,27 @@ def commands(request):
             {"detail": f"{action} may only be initiated by an admin"},
             status=status.HTTP_403_FORBIDDEN,
         )
+
+    if action in STOP_ACTIONS:
+        # A stop draft is never throttled (safety.stops), so the drafts one
+        # account has awaiting a signature are capped instead: a flood of them
+        # would otherwise bury a real command. The cap is at least one, so an
+        # account's first draft is never refused, and a read that fails refuses
+        # nothing. A refusal names the drafts awaiting, which the account can
+        # sign, or cancel (a stop too, never refused) to draft again.
+        outstanding = _outstanding_stop_drafts(request.user)
+        cap = _max_outstanding_stop_drafts()
+        if outstanding is not None and len(outstanding) >= cap:
+            return Response(
+                {
+                    "detail": (
+                        f"you have {len(outstanding)} stop commands awaiting signatures, the most "
+                        f"one account may have outstanding; sign or cancel one of them"
+                    ),
+                    "outstanding": FailsafeCommandSerializer(outstanding, many=True).data,
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
 
     draft = make_draft(
         action,
@@ -199,19 +273,61 @@ def cancel_command(request, cmd_uuid):
     return Response(FailsafeCommandSerializer(command).data)
 
 
+#: At most this many reads of the engine's live state run at once. A read the
+#: state view stopped waiting for can still be running; one that finds every
+#: slot taken is "not reported" at once.
+_LIVE_STATE_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _ask_engine_for_state(deadline):
+    """The engine's failsafe state payload, or None: waited for ``deadline``
+    seconds in all, however slowly the engine answers.
+
+    The state view is a stop-lane read (safety.stops): the dashboard's second
+    operator finds the command awaiting their signature in it. Its commands
+    are read from the database; only this part asks the engine, whose client
+    allows 60 s a socket read. So the call runs on a thread of its own and the
+    view waits for it only until the deadline, as the gateway does."""
+    if not _LIVE_STATE_SLOTS.acquire(blocking=False):
+        return None
+    outcome = {}
+    done = threading.Event()
+
+    def call():
+        try:
+            from ai_engine.services.cyberengine_client import CyberEngineClient
+
+            outcome["payload"] = CyberEngineClient.from_settings().failsafe_state()
+        except Exception as exc:  # noqa: BLE001 - any failure to reach the engine is "not reported"
+            outcome["error"] = exc.__class__.__name__
+        finally:
+            _LIVE_STATE_SLOTS.release()
+            done.set()
+
+    try:
+        threading.Thread(target=call, name="failsafe-live-state", daemon=True).start()
+    except RuntimeError:
+        _LIVE_STATE_SLOTS.release()
+        return None
+    if not done.wait(deadline):
+        return None
+    return outcome.get("payload")
+
+
 def _engine_live_state():
     """The engine's own governor state, proxied from the engine itself.
 
-    Any failure -- no engine configured, unreachable, an error, or a failsafe
-    that is disabled there -- is reported as "not available" rather than
-    guessed. The console must show the truth (a state, or "not reported"), never
-    a green light nobody checked, and the engine being down must not turn the
-    control plane's own state view into a 500. Returns (state, available)."""
+    Any failure -- no engine configured, unreachable, an error, no answer
+    within FAILSAFE_STATE_ENGINE_SECONDS, or a failsafe that is disabled there
+    -- is reported as "not available" rather than guessed. The console must
+    show the truth (a state, or "not reported"), never a green light nobody
+    checked, and the engine being down must not turn the control plane's own
+    state view into a 500. Returns (state, available)."""
     try:
-        from ai_engine.services.cyberengine_client import CyberEngineClient
-        payload = CyberEngineClient.from_settings().failsafe_state()
-    except Exception:  # noqa: BLE001 - any failure to reach the engine is "not reported", which the caller must not read as "running"
-        return None, False
+        deadline = max(0.0, float(getattr(settings, "FAILSAFE_STATE_ENGINE_SECONDS", 2.0)))
+    except (TypeError, ValueError):
+        deadline = 2.0
+    payload = _ask_engine_for_state(deadline)
     if not isinstance(payload, dict) or not payload.get("enabled"):
         # enabled=false means the engine has no failsafe -- "not reported",
         # which a caller must not read as "running".
@@ -226,7 +342,12 @@ def state(request):
     """A control-plane view of failsafe activity for an engine: commands in
     flight, the last ready/consumed one, and the engine's live governor state
     proxied from the engine itself (running/paused/stood-down/terminated), or
-    "not reported" when the engine cannot be reached."""
+    "not reported" when the engine cannot be reached.
+
+    A stop-lane read (safety.stops): no gateway or throttle holds it back, so
+    it is bounded -- the stop commands awaiting a signature come first and are
+    never cut by the row cap (AWAITING_STOP_LIMIT), every other list is capped,
+    and the engine is waited for FAILSAFE_STATE_ENGINE_SECONDS at most."""
     engine_id = request.query_params.get("engine_id")
     qs = FailsafeCommand.objects.all()
     if engine_id:
@@ -241,7 +362,7 @@ def state(request):
         "engine_id": engine_id,
         "engine_state": engine_state,
         "engine_state_available": engine_state_available,
-        "awaiting_signatures": FailsafeCommandSerializer(awaiting[:20], many=True).data,
+        "awaiting_signatures": FailsafeCommandSerializer(_awaiting_stops_first(awaiting, 20), many=True).data,
         "ready": FailsafeCommandSerializer(ready[:20], many=True).data,
         "recent": FailsafeCommandSerializer(qs[:10], many=True).data,
     })

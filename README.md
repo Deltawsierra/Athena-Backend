@@ -37,12 +37,16 @@ but not enforced. Turning enforcement on is a deliberate go-live step.
 
 A stop is never sent to the engine and never refused by it, in either mode, and
 no throttle refuses or counts one. The stops are listed in `safety/stops.py`:
-pause and lift, a claim revoked or contradicted, a failsafe pause, stand-down or
-terminate drafted (not a resume or release), a failsafe command read, signed or
-cancelled, the engines' poll with its token, a deployment's automated dispatch
-switched off, an engagement's authority withdrawn (moved off running, scope
-emptied, window closed, or deleted), and an operator demoted (never promoted) or
-removed. A token refresh whose refresh token verifies is exempt the same way.
+a pause (`{"paused": true}`; a lift is start-direction and is not a stop), a
+claim revoked or contradicted, a failsafe pause, stand-down or terminate drafted
+(not a resume or release), a failsafe command signed or cancelled, the three
+stop-lane reads (the failsafe state, the command list, and a command's detail),
+the engines' poll with its token, a deployment's automated dispatch switched
+off, an engagement's authority withdrawn (moved off running, scope emptied,
+window closed, or deleted), and an operator demoted (never promoted) or
+removed. A token refresh whose refresh token verifies and has not been spent is
+exempt the same way; a refresh spends its token (`token_blacklist`, with
+rotation), so a used one is judged like any other bad token.
 A stop is recognised only in its canonical form: JSON or a URL-encoded form in
 UTF-8 or ASCII, at most 64 KiB, carrying only the stop's own fields and an
 optional `note` or `reason`. Anything else on those routes is not a stop. So the
@@ -52,9 +56,44 @@ all, and is allowed without a decision after that. A hostile engine can hold
 all `DEFENDER_MAX_IN_FLIGHT` call slots; every other request then waits out its
 deadline and is allowed, and stops are unaffected.
 
-Failed sign-ins are limited per address and username (`DJANGO_THROTTLE_SIGN_IN`,
-default 10/min). A correct password is refused only when that username has
-failed too often from that address, never because of other traffic.
+### The failsafe service token
+
+A stop client should not need a password sign-in to stop: sign-in is not a
+stop, so the gateway judges it and failed guesses can lock it. Set
+`FAILSAFE_SERVICE_TOKEN` (at least 32 characters, e.g. `openssl rand -hex 32`;
+shorter is treated as unset) and `FAILSAFE_SERVICE_USER` (the username of the
+active admin or analyst account the client acts as). A request that presents
+the token in the `X-Failsafe-Service-Token` header is authenticated as that
+account, before any other credential is looked at, but ONLY when the request is
+a stop or a stop-lane read, and not on the account routes. Anywhere else -- a
+lift, a resume or release draft, an operator demoted or removed, any other read
+or write, the engines' poll, a refresh -- the header is ignored,
+and so is a token that does not match: the request is judged and authenticated
+exactly as if the header were absent. A stolen token can stop things and read
+the stop lane; it cannot start anything, nor remove an operator. The token is compared as HMAC-SHA256
+digests in constant time, and only a match costs a database read. The
+athena-dashboard server will present it on its stops in a follow-up; until then
+it signs in with its service account's password as before.
+
+### Sign-in and the stop lane
+
+Failed password sign-ins are limited, and only failures count: per address and
+username (`DJANGO_THROTTLE_SIGN_IN`, default 10/min), where the username is the
+one authentication looks up (trimmed as SimpleJWT trims it, NFKC-normalised
+and case-folded, so every spelling of one account shares one budget), and per
+address across every username (`DJANGO_THROTTLE_SIGN_IN_ADDRESS`, default
+60/min). An address past either is answered 429 before any password is hashed.
+A successful sign-in clears only its own address-and-username count. So a
+sign-in from an address under a guessing flood can be refused, the operator's
+own included if they share the attacker's address; no stop needs a password
+sign-in (the service token, or an existing session and its refresh).
+
+A stop draft is never throttled, so one account may have at most
+`FAILSAFE_MAX_OUTSTANDING_STOP_DRAFTS` (default 20, at least 1) stop commands
+awaiting signatures; the next is answered 429 naming them, to sign or cancel.
+The command list and the state view list the stop commands awaiting a signature
+first, never cut by their row caps. The state view waits for the engine's live
+state `FAILSAFE_STATE_ENGINE_SECONDS` (default 2) at most.
 
 ## Signed chain outcomes
 
