@@ -217,7 +217,8 @@ REST_FRAMEWORK = {
     # There was no rate limiting anywhere, so the token endpoint accepted
     # unlimited credential guesses. DRF's own two throttles, except that a stop
     # (safety.stops) is never refused and never counted: they answered 429 to a
-    # flooded operator's pause and to the engines' command poll.
+    # flooded operator's pause and to the engines' command poll. Sign-in has
+    # its own limit on failures (safety.sign_in).
     "DEFAULT_THROTTLE_CLASSES": (
         "safety.throttling.StopExemptAnonRateThrottle",
         "safety.throttling.StopExemptUserRateThrottle",
@@ -225,6 +226,10 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DJANGO_THROTTLE_ANON", "30/min"),
         "user": os.environ.get("DJANGO_THROTTLE_USER", "300/min"),
+        # Failed sign-ins of one username from one address (safety.sign_in).
+        # Only failures count, so a flood of anything else never refuses an
+        # operator's correct password.
+        "sign_in": os.environ.get("DJANGO_THROTTLE_SIGN_IN", "10/min"),
     },
     # Without this, DRF's throttles key anonymous callers on the whole raw
     # X-Forwarded-For header, so rotating one header defeated the rate limit

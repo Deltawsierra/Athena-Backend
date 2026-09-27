@@ -37,10 +37,24 @@ but not enforced. Turning enforcement on is a deliberate go-live step.
 
 A stop is never sent to the engine and never refused by it, in either mode, and
 no throttle refuses or counts one. The stops are listed in `safety/stops.py`:
-pause and lift, a claim revoked or contradicted, the failsafe commands, the
-engines' poll, a deployment's automated-dispatch switch, an engagement's status
-or deletion, and an operator demoted or removed. Every other request waits for the engine at most
-`DEFENDER_TIMEOUT_SECONDS` in all, and is allowed without a decision after that.
+pause and lift, a claim revoked or contradicted, a failsafe pause, stand-down or
+terminate drafted (not a resume or release), a failsafe command read, signed or
+cancelled, the engines' poll with its token, a deployment's automated dispatch
+switched off, an engagement's authority withdrawn (moved off running, scope
+emptied, window closed, or deleted), and an operator demoted (never promoted) or
+removed. A token refresh whose refresh token verifies is exempt the same way.
+A stop is recognised only in its canonical form: JSON or a URL-encoded form in
+UTF-8 or ASCII, at most 64 KiB, carrying only the stop's own fields and an
+optional `note` or `reason`. Anything else on those routes is not a stop. So the
+engine no longer sees stops, including stops that will fail authentication.
+Every other request waits for the engine at most `DEFENDER_TIMEOUT_SECONDS` in
+all, and is allowed without a decision after that. A hostile engine can hold
+all `DEFENDER_MAX_IN_FLIGHT` call slots; every other request then waits out its
+deadline and is allowed, and stops are unaffected.
+
+Failed sign-ins are limited per address and username (`DJANGO_THROTTLE_SIGN_IN`,
+default 10/min). A correct password is refused only when that username has
+failed too often from that address, never because of other traffic.
 
 ## Signed chain outcomes
 

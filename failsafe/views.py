@@ -10,7 +10,9 @@ required for stand-down and terminate.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import secrets
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
@@ -41,6 +43,9 @@ from .signing import (
 # and the rest are available to analysts too. The cryptographic two-person rule
 # is enforced separately, on the signatures.
 _ADMIN_ONLY_ACTIONS = {"terminate"}
+
+#: The most commands one list read returns. It was 100.
+COMMAND_LIST_LIMIT = 50
 
 
 def _audit(command, event, request, **detail):
@@ -77,7 +82,9 @@ def commands(request):
             qs = qs.filter(engine_id=engine_id)
         if state:
             qs = qs.filter(status=state)
-        return Response(FailsafeCommandSerializer(qs[:100], many=True).data)
+        # A stop route: no throttle counts this read (safety.stops), so each one
+        # is kept small. Commands awaiting a signature expire within minutes.
+        return Response(FailsafeCommandSerializer(qs[:COMMAND_LIST_LIMIT], many=True).data)
 
     serializer = DraftCommandSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -261,7 +268,21 @@ def poll_token_ok(request):
     provided = request.headers.get("X-Failsafe-Poll-Token")
     if not expected or provided is None:
         return False
-    return hmac.compare_digest(provided.encode(), str(expected).encode())
+    # Two digests of one length, compared in constant time. Comparing the raw
+    # strings returned early on a length mismatch, which told a guesser the
+    # token's length.
+    return hmac.compare_digest(_poll_digest(provided), _poll_digest(expected))
+
+
+#: A per-process key for the poll token's digests: it only has to make the two
+#: sides the same length, so it never needs to be shared or kept.
+_POLL_DIGEST_KEY = secrets.token_bytes(32)
+
+
+def _poll_digest(value):
+    return hmac.new(
+        _POLL_DIGEST_KEY, str(value).encode("utf-8", "surrogatepass"), hashlib.sha256
+    ).digest()
 
 
 @api_view(["GET"])

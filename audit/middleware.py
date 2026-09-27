@@ -1173,6 +1173,9 @@ class DefenderMiddleware:
 
         # A stop is never put to the engine, so no engine -- slow, trickling,
         # or answering block or throttle in enforce mode -- can hold one back.
+        # Judging it is cheap and bounded: it runs before authentication, reads
+        # at most 64 KiB of a UTF-8 or ASCII body, and anything else on a stop
+        # route is not a stop and comes on here (safety.stops).
         if is_stop(request):
             return self.get_response(request)
 
