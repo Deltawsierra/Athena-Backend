@@ -9,6 +9,8 @@ hand-rolled fake, because the body handling is where the defects were and a
 stub carrying `body = b""` cannot reach it.
 """
 
+import io
+import json
 import logging
 from unittest import mock
 
@@ -17,6 +19,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 import django
 import pytest
 import requests
+import urllib3
 from django.conf import settings
 from django.http import HttpResponse
 
@@ -83,16 +86,28 @@ def middleware(settings_override):
 
 
 def engine_says(payload=None, status=200, raises=None):
-    """A stand-in for requests.post."""
+    """A stand-in for requests.post: a real streamed response over a fixed body.
+
+    The middleware reads the answer as a stream, under its deadline, so the
+    stand-in carries bytes rather than a canned .json(). An exception payload
+    stands for a body that is not JSON."""
     if raises is not None:
         return mock.Mock(side_effect=raises)
-    response = mock.Mock()
-    response.status_code = status
     if isinstance(payload, Exception):
-        response.json.side_effect = payload
+        body = b"this is not json"
     else:
-        response.json.return_value = {"action": "allow"} if payload is None else payload
-    return mock.Mock(return_value=response)
+        body = json.dumps({"action": "allow"} if payload is None else payload).encode()
+
+    def answer(*args, **kwargs):
+        # A fresh response per call: a stream is read once.
+        response = requests.Response()
+        response.status_code = status
+        response.raw = urllib3.HTTPResponse(
+            body=io.BytesIO(body), status=status, preload_content=False
+        )
+        return response
+
+    return mock.Mock(side_effect=answer)
 
 
 def logged(caplog):
@@ -120,7 +135,10 @@ def test_the_engine_is_asked_at_the_right_url_on_the_standard_header(factory, mi
     assert args[0] == ENGINE_URL
     assert kwargs["headers"]["X-API-Key"] == "test-operator-key"
     assert "X-OPERATOR-KEY" not in kwargs["headers"]
+    # Each socket operation is bounded by the timeout; the call as a whole is
+    # bounded by the deadline, which needs the answer read as a stream.
     assert kwargs["timeout"] == 0.5
+    assert kwargs["stream"] is True
 
 
 def test_credentials_are_never_forwarded_to_the_engine(factory, middleware):

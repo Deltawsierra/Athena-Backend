@@ -215,10 +215,12 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
     # There was no rate limiting anywhere, so the token endpoint accepted
-    # unlimited credential guesses.
+    # unlimited credential guesses. DRF's own two throttles, except that a stop
+    # (safety.stops) is never refused and never counted: they answered 429 to a
+    # flooded operator's pause and to the engines' command poll.
     "DEFAULT_THROTTLE_CLASSES": (
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "safety.throttling.StopExemptAnonRateThrottle",
+        "safety.throttling.StopExemptUserRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DJANGO_THROTTLE_ANON", "30/min"),
@@ -410,7 +412,18 @@ LOGGING = {
 # -------------------------------------------------------------------
 # These were read through getattr defaults with nothing in settings, so an
 # operator had no way to discover they were tunable.
+#
+# The timeout is a total deadline on one engine call: connecting, sending, and
+# reading the answer. It used to be requests' per-socket timeout, so an engine
+# that sent a byte every 0.3 s held each request for as long as it kept sending.
+# Past the deadline the request is allowed without a decision, as it is when the
+# engine is down (fail open). A stop is never sent to the engine at all
+# (safety.stops).
 DEFENDER_TIMEOUT_SECONDS = float(os.environ.get("DEFENDER_TIMEOUT_SECONDS", 0.5))
+# At most this many engine calls run at once. A call its request stopped waiting
+# for can still be running; a request that finds every slot taken waits for one
+# only until its own deadline.
+DEFENDER_MAX_IN_FLIGHT = int(os.environ.get("DEFENDER_MAX_IN_FLIGHT", 32))
 DEFENDER_FAILURE_ALERT_AFTER = int(os.environ.get("DEFENDER_FAILURE_ALERT_AFTER", 10))
 DEFENDER_FAILURE_WINDOW_SECONDS = int(os.environ.get("DEFENDER_FAILURE_WINDOW_SECONDS", 60))
 DEFENDER_MAX_BODY_BYTES = int(os.environ.get("DEFENDER_MAX_BODY_BYTES", 64 * 1024))

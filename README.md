@@ -35,6 +35,13 @@ Without a key the gateway allows every request and says so in the log.
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
+A stop is never sent to the engine and never refused by it, in either mode, and
+no throttle refuses or counts one. The stops are listed in `safety/stops.py`:
+pause and lift, a claim revoked or contradicted, the failsafe commands, the
+engines' poll, a deployment's automated-dispatch switch, an engagement's status
+or deletion, and an operator demoted or removed. Every other request waits for the engine at most
+`DEFENDER_TIMEOUT_SECONDS` in all, and is allowed without a decision after that.
+
 ## Signed chain outcomes
 
 `POST /api/assurance/deployments/<uuid>/chain-outcomes/observed/` records chain

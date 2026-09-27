@@ -10,11 +10,13 @@ required for stand-down and terminate.
 
 from __future__ import annotations
 
+import hmac
+
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -248,17 +250,37 @@ def audit(request):
     return Response(FailsafeAuditEventSerializer(qs[:200], many=True).data)
 
 
+def poll_token_ok(request):
+    """Whether ``request`` carries the engine's poll token.
+
+    The one check. ``pending`` serves exactly what it passes, and the stop set
+    (safety.stops) exempts exactly what it passes from the gateway and the
+    throttles, so a poll that is served is never throttled and a guess at the
+    token is throttled like any other anonymous request."""
+    expected = getattr(settings, "FAILSAFE_POLL_TOKEN", None)
+    provided = request.headers.get("X-Failsafe-Poll-Token")
+    if not expected or provided is None:
+        return False
+    return hmac.compare_digest(provided.encode(), str(expected).encode())
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])  # engine poll, authenticated by a shared poll token
+# No JWT authentication either: the engine sends none, and a stale bearer header
+# on its request was answered 401 before this view ran, holding back every
+# command it polls for.
+@authentication_classes([])
 def pending(request):
     """The endpoint the engine polls (its control_url). Returns fully-signed,
     unexpired commands as mythos_core.failsafe.Command documents. Authenticated
     by a dedicated poll token, NOT an operator JWT -- the engine is not an
     operator. Re-serving is safe: the engine's nonce ledger applies each command
-    at most once."""
-    expected = getattr(settings, "FAILSAFE_POLL_TOKEN", None)
-    provided = request.headers.get("X-Failsafe-Poll-Token")
-    if not expected or provided != expected:
+    at most once.
+
+    A poll with the token is a stop (safety.stops): no throttle refuses or
+    counts it. One without it is answered 401 and stays under the anonymous
+    throttle, so the token cannot be guessed at speed."""
+    if not poll_token_ok(request):
         return Response({"detail": "poll token required"}, status=status.HTTP_401_UNAUTHORIZED)
 
     engine_id = request.query_params.get("engine_id")
