@@ -616,6 +616,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "deployment %s: recording its blocking-decision dispatch ended the stop's transaction; "
                 "the stop is committed again without the record, and the background run writes it",
                 deployment.pk,
+                logger_name=__name__,
             )
             recorder = None
             decision = recompute_decision(deployment, paused=paused)
@@ -631,6 +632,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 deployment.pk,
                 decision,
                 stored,
+                logger_name=__name__,
             )
         if recorder is None or recorder.owed is not False:
             # Not recorded (the record failed, or took the transaction down): then

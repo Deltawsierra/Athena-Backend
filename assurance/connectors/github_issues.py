@@ -19,15 +19,17 @@ from typing import Any
 
 from django.conf import settings
 
+from ..markers import legacy_labels, marker_for
 from .base import (
+    LOOK_PAGE_SIZE,
     Connector,
     ConnectorConfig,
     ConnectorResult,
+    Hit,
+    LookupRequest,
     Response,
     error_detail,
-    LookupRequest,
     finding_body,
-    finding_marker,
     finding_summary,
     is_success,
 )
@@ -66,6 +68,7 @@ class GitHubIssuesConnector(Connector):
     def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:
         cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
         summary = finding_summary(finding)
+        marker = marker_for(finding)
         url = f"{cfg.base_url.rstrip('/')}/repos/{cfg.owner}/{cfg.repo}/issues"
         headers = {
             "Authorization": f"Bearer {cfg.token}",
@@ -74,43 +77,72 @@ class GitHubIssuesConnector(Connector):
         }
         payload = {
             "title": summary["title"][:256],
-            # The marker in the body as well: a token without push access has its
-            # labels dropped, and the body is where the look then finds it.
-            "body": finding_body(summary) + f"\nAthena marker: {finding_marker(finding)}",
+            # The marker with its tag in the body: what makes this issue verifiably
+            # this installation's (assurance.markers), and where the look finds it
+            # when a token without push access has its labels dropped.
+            "body": finding_body(summary) + f"\n{marker.body_line}",
             # The marker label is how a lost answer or a second runner finds this
             # issue again instead of opening another (find_existing).
-            "labels": ["athena", f"severity:{summary['severity']}", finding_marker(finding)],
+            "labels": ["athena", f"severity:{summary['severity']}", marker.label],
         }
         return url, headers, payload
 
+    def _headers(self) -> dict:
+        cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
+        return {"Authorization": f"Bearer {cfg.token}", "Accept": "application/vnd.github+json"}
+
     def _lookup_requests(self, finding: Any):
-        # First the issues LIST filtered by the marker label: read from the
-        # repository itself, so an issue is there the moment it is created. A
-        # token without push access has its labels silently dropped on create
-        # (GitHub's documented behaviour), so "no labelled issue" is not the last
-        # word: the marker is in the body too, and the search finds it there. The
-        # search index lags a create by seconds; an uncertain push is only taken
-        # as absent long after (see the dispatcher's age rule).
+        # First the issues LIST filtered by a label -- read from the repository
+        # itself, so an issue is there the moment it is created: this marker's
+        # label, then round 2's `athena-<uuid>` and a bare uuid label. Then the
+        # SEARCH for the finding's uuid in bodies: every body this code has ever
+        # written carries it ("Athena finding: <uuid>"), so it finds master's issues
+        # (no marker label) and ones whose labels a token without push access had
+        # dropped (GitHub's documented behaviour). The search index lags a create
+        # by seconds; an uncertain push is only taken as absent long after (see the
+        # dispatcher's age rule). Oldest first, 100 a page.
         cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
         base = cfg.base_url.rstrip("/")
-        headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/vnd.github+json"}
-        marker = finding_marker(finding)
+        listing = {"state": "all", "sort": "created", "direction": "asc", "per_page": LOOK_PAGE_SIZE, "page": 1}
         return [
-            LookupRequest(
-                f"{base}/repos/{cfg.owner}/{cfg.repo}/issues", headers,
-                {"labels": marker, "state": "all", "per_page": 2}, "list", absent_means_next=True,
+            *(
+                LookupRequest(f"{base}/repos/{cfg.owner}/{cfg.repo}/issues", self._headers(), {**listing, "labels": label}, "list")
+                for label in [marker_for(finding).label, *legacy_labels(finding)]
             ),
             LookupRequest(
-                f"{base}/search/issues", headers,
-                {"q": f'repo:{cfg.owner}/{cfg.repo} "{marker}" in:body type:issue', "per_page": 2}, "search",
+                f"{base}/search/issues", self._headers(),
+                {
+                    "q": f'repo:{cfg.owner}/{cfg.repo} "{finding.uuid}" in:body type:issue',
+                    "sort": "created", "order": "asc", "per_page": LOOK_PAGE_SIZE, "page": 1,
+                },
+                "search",
             ),
         ]
 
+    def _fetch_request(self, ref: str):
+        cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
+        return LookupRequest(
+            f"{cfg.base_url.rstrip('/')}/repos/{cfg.owner}/{cfg.repo}/issues/{ref}", self._headers(), {}, "one"
+        )
+
+    @staticmethod
+    def _hit(item: dict) -> Hit:
+        return Hit(str(item.get("number")), item.get("state") == "closed", item.get("created_at"), str(item.get("body") or ""))
+
     def _parse_lookup(self, body: Any, kind: str):
+        if kind == "one":
+            return [self._hit(body)] if isinstance(body, dict) and body.get("number") is not None else None
         items = body.get("items") if kind == "search" and isinstance(body, dict) else body
         if not isinstance(items, list):
             return None
-        return [(str(item.get("number")), item.get("state") == "closed") for item in items]
+        # The list answers pull requests too; a pull request is never the issue.
+        return [self._hit(item) for item in items if isinstance(item, dict) and "pull_request" not in item]
+
+    def _next_page(self, request, body, params, count):
+        items = body.get("items") if request.kind == "search" and isinstance(body, dict) else body
+        if not isinstance(items, list) or len(items) < int(params["per_page"]):
+            return None
+        return {**params, "page": int(params["page"]) + 1}
 
     def _comment_request(self, ref: str, text: str):
         cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]

@@ -41,7 +41,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from assurance import revision, signals, views
+from assurance import oplog, revision, signals, views
 from assurance.admin import DeploymentAdmin
 from assurance.decision import current_decision, decision_support, recompute_decision
 from assurance.dispatch import policy_epoch
@@ -125,7 +125,19 @@ def _bare_pause_beneath_its_log():
     return dep
 
 
+@pytest.fixture(autouse=True)
+def _deferred_logs_written():
+    """The repair of a row behind its log is reported from the log thread, never
+    under the row lock (#303): what an earlier test left queued is written before
+    this one, what it leaves is written before the next, and its reads wait for
+    its own (:func:`_errors`)."""
+    oplog.drain()
+    yield
+    oplog.drain()
+
+
 def _errors(caplog):
+    oplog.drain()
     return [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 

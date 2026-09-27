@@ -168,9 +168,9 @@ class RequestsTransport:
     def __init__(self, timeout: tuple[float, float] = (3.05, 10.0), deadline: float | None = None) -> None:
         self.timeout = timeout
         if deadline is None:
-            from django.conf import settings
+            from ..dispatch import connector_deadline
 
-            deadline = float(getattr(settings, "ASSURANCE_CONNECTOR_DEADLINE_SECONDS", DEFAULT_DEADLINE_SECONDS))
+            deadline = connector_deadline()
         self.deadline = deadline
 
     def post(self, url: str, *, headers: dict, json: dict) -> Response:
@@ -212,19 +212,29 @@ class Lookup:
     """What an adapter found when it looked for the issue a finding may already
     have. ``state`` is:
 
-    - ``"found"`` -- exactly one issue carries the finding's marker (or one of
-      several is the issue already recorded for it); ``external_ref`` names it and
-      ``closed`` says whether it is closed;
-    - ``"absent"`` -- none does;
-    - ``"ambiguous"`` -- more than one does, none of them the one recorded (a
-      label copied onto another issue): never adopted, and never a license to
+    - ``"found"`` -- the issue this installation created for the finding:
+      ``external_ref`` names it, ``closed`` says whether the tracker has closed it,
+      and ``how`` says how it is known -- ``"recorded"`` (the issue the attempt
+      already records), ``"verified"`` (its marker's tag verifies; of several, the
+      one created first), or ``"legacy"`` (the one issue in a format older than
+      tags, created before this installation wrote them);
+    - ``"absent"`` -- no issue of this installation's for it;
+    - ``"ambiguous"`` -- several issues in an older format, all created before
+      tags were written, none verifiable: never adopted, and never a license to
       create another;
-    - ``"unknown"`` -- it could not look, or the answer did not say."""
+    - ``"unknown"`` -- it could not look, or the answer did not say.
+
+    ``ignored``: issues that matched the search and are NOT this installation's --
+    a copied label, a planted body, a tag that does not verify, an older format
+    created after tags were -- named so the caller can say so. They never hold a
+    dispatch and are never adopted."""
 
     state: str
     external_ref: str | None = None
     detail: str = ""
     closed: bool = False
+    how: str = ""
+    ignored: tuple = ()
 
     FOUND = "found"
     ABSENT = "absent"
@@ -232,47 +242,84 @@ class Lookup:
     UNKNOWN = "unknown"
 
     @classmethod
-    def unknown(cls, detail: str) -> Lookup:
-        return cls(cls.UNKNOWN, None, detail)
+    def unknown(cls, detail: str, ignored: tuple = ()) -> Lookup:
+        return cls(cls.UNKNOWN, None, detail, ignored=ignored)
 
 
 @dataclass(frozen=True)
 class LookupRequest:
     """One read an adapter makes to look for a finding's issue. ``kind`` tells its
-    ``_parse_lookup`` which answer shape to expect. ``missing_means_next``: a 404
-    or 410 answer means this system does not serve this read (Jira Cloud has
-    retired ``/rest/api/2/search``; Data Center has no ``/rest/api/3/search/jql``),
-    so the next request is tried. ``absent_means_next``: "none here" is not the
-    last word -- the next request looks another way."""
+    ``_parse_lookup`` which answer shape to expect. ``missing_means_next``: the
+    next request is this one's stand-in, tried only when this one answers 404 or
+    410 (this system does not serve this read: Jira Cloud has retired
+    ``/rest/api/2/search``; Data Center has no ``/rest/api/3/search/jql``).
+    Otherwise every request is made, in order, until one finds the issue."""
 
     url: str
     headers: dict
     params: dict
     kind: str = ""
     missing_means_next: bool = False
-    absent_means_next: bool = False
+
+
+@dataclass(frozen=True)
+class Hit:
+    """One issue a look's answer lists: its id, whether the tracker has closed it,
+    when the provider says it was created, and its text (body and the fields that
+    carry a marker) -- what its marker is checked against."""
+
+    ref: str
+    closed: bool = False
+    created: Any = None
+    text: str = ""
+
+
+#: Issues asked for per page of a look.
+LOOK_PAGE_SIZE = 100
+#: Pages one look reads at most, over all its requests (and its time budget, one
+#: transport deadline, bounds it too).
+LOOK_MAX_PAGES = 50
+
+
+def parse_provider_time(value: Any):
+    """A provider's creation time as an aware UTC datetime, or ``None``: GitHub's
+    ``2026-09-27T01:02:03Z``, Jira's ``2026-09-27T01:02:03.000+0000``, ServiceNow's
+    ``2026-09-27 01:02:03`` (UTC)."""
+    from datetime import datetime, timezone as dt_timezone
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    if len(text) >= 5 and text[-5] in "+-" and text[-4:].isdigit() and text[-3] != ":":
+        text = f"{text[:-2]}:{text[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(text.replace(" ", "T", 1))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt_timezone.utc)
+    return parsed
 
 
 def installation_id() -> str:
-    """This installation's id: ``ASSURANCE_INSTALLATION_ID`` when set -- set it, so
-    it survives a secret-key rotation -- or else one derived from the secret key.
-    Part of every marker, so a database restored into another environment (staging
-    from production, say) never adopts the first environment's issues."""
+    """This installation's id, hashed: the persisted random id
+    (:class:`~assurance.models.AssuranceInstallation`) or, when set,
+    ``ASSURANCE_INSTALLATION_ID``. Never derived from ``SECRET_KEY``."""
     import hashlib
 
-    from django.conf import settings
+    from ..markers import identity
 
-    configured = getattr(settings, "ASSURANCE_INSTALLATION_ID", "") or ""
-    if configured:
-        return hashlib.sha256(f"athena-installation\x1f{configured}".encode()).hexdigest()
-    return hashlib.sha256(f"athena-installation\x1f{settings.SECRET_KEY}".encode()).hexdigest()
+    return hashlib.sha256(f"athena-installation\x1f{identity().installation_id}".encode()).hexdigest()
 
 
 def finding_marker(finding: Any) -> str:
-    """The label an adapter tags a created issue with, so it can find it again:
+    """The label an adapter tags a created issue with, so it can search for it:
     ``athena-<installation>-<finding uuid>``, 50 characters -- GitHub's limit for a
-    label name."""
-    return f"athena-{installation_id()[:6]}-{finding.uuid}"
+    label name. The tag that makes it verifiable is in the body
+    (:func:`assurance.markers.marker_for`)."""
+    from ..markers import marker_for
+
+    return marker_for(finding).label
 
 
 # ---------------------------------------------------------------------------
@@ -470,64 +517,176 @@ class Connector(ABC):
             )
         return self._parse(response)
 
-    def find_existing(self, finding: Any, *, transport: Any, known_ref: str | None = None) -> Lookup:
-        """Look for the issue this finding was already pushed as, so a push whose
-        answer was lost, or a second runner, reuses it instead of creating another.
+    def find_existing(
+        self,
+        finding: Any,
+        *,
+        transport: Any,
+        known_ref: str | None = None,
+        expected: Any = None,
+        legacy: bool = True,
+    ) -> Lookup:
+        """Look for the issue this installation created for this finding, so a push
+        whose answer was lost, or a second runner, reuses it instead of creating
+        another. See :mod:`assurance.markers` for what is adopted and why.
+
+        ``known_ref``: the issue already recorded for the finding -- read directly,
+        so it is found however many copies of it exist. ``expected``: the
+        :class:`~assurance.markers.Marker` whose tag an adopted issue must carry
+        (the one the attempt's push carried; by default, the finding's marker now).
+        ``legacy``: whether an issue in a format older than tags, created before
+        this installation wrote tags, may be taken as this code's -- for a first
+        push, and for an attempt whose push carried an older format; not for one
+        whose push carried a tag, which only a tagged issue can be.
 
         The base cannot look: ``unknown``. An adapter that can overrides
-        :meth:`_lookup_requests` and :meth:`_parse_lookup`. A transport without
-        ``get`` cannot look either, and any error while looking -- a raised error or
-        an error answer -- is ``unknown``, never ``absent``, which would license a
-        second create. ``known_ref``: the issue already recorded for this finding;
-        among several carrying the marker, that one is found, and otherwise
-        several are ``ambiguous``."""
+        :meth:`_lookup_requests`, :meth:`_parse_lookup` and, to page,
+        :meth:`_next_page`. A transport without ``get`` cannot look either, and any
+        error while looking -- a raised error, an error answer, a look that runs
+        out of pages or of time -- is ``unknown``, never ``absent``, which would
+        license a second create. Pages are read oldest issue first, so the first
+        issue whose tag verifies is the original, and the look stops there."""
+        import time as _time
+
         if not self.configured:
             return Lookup.unknown(f"{self.name} not configured")
+        get = getattr(transport, "get", None)
         requests = self._lookup_requests(finding)
         if not requests:
             return Lookup.unknown(f"{self.name} offers no read-back of what it was sent")
-        get = getattr(transport, "get", None)
         if get is None:
             return Lookup.unknown("the transport cannot read")
+        from ..markers import carries_a_tag, identity, marker_for
+
+        ident = identity()
+        expected = expected or marker_for(finding, ident)
+        budget = float(getattr(transport, "deadline", DEFAULT_DEADLINE_SECONDS) or DEFAULT_DEADLINE_SECONDS)
+        began = _time.monotonic()
+        seen: set = set()
+        ignored: list = []
+        older: list = []
+        pages = 0
+
+        def answer(state, ref=None, detail="", closed=False, how=""):
+            return Lookup(state, ref, detail, closed=closed, how=how, ignored=tuple(ignored))
+
+        if known_ref:
+            fetch = self._fetch_request(str(known_ref))
+            if fetch is not None:
+                try:
+                    response = get(fetch.url, headers=fetch.headers, params=fetch.params)
+                    pages += 1
+                    if is_success(response.status_code):
+                        hits = self._parse_lookup(response.json(), "one")
+                        if hits:
+                            closed = hits[0].closed
+                            return answer(
+                                Lookup.FOUND, str(known_ref),
+                                f"{self.name} issue {known_ref}, recorded for this finding, exists "
+                                f"({'closed' if closed else 'open'})",
+                                closed, "recorded",
+                            )
+                    elif response.status_code not in (404, 410):
+                        return Lookup.unknown(error_detail(self.name, response))
+                except Exception as exc:  # noqa: BLE001 - a failed look says nothing
+                    return Lookup.unknown(f"{self.name} look-up failed: {type(exc).__name__}: {exc}")
+
+        stand_in = False
         for i, request in enumerate(requests):
+            if i and requests[i - 1].missing_means_next and not stand_in:
+                continue  # the request before answered: this one only stands in for it
             last = i == len(requests) - 1
-            try:
-                response = get(request.url, headers=request.headers, params=request.params)
-                status = response.status_code
-                if status in (404, 410) and request.missing_means_next and not last:
-                    continue
-                if not is_success(status):
-                    return Lookup.unknown(error_detail(self.name, response))
-                hits = self._parse_lookup(response.json(), request.kind)
-            except Exception as exc:  # noqa: BLE001 - a failed or unreadable look says nothing
-                return Lookup.unknown(f"{self.name} look-up failed: {type(exc).__name__}: {exc}")
-            if hits is None:
-                return Lookup.unknown(f"{self.name} look-up answer had no list of issues")
-            if not hits:
-                if request.absent_means_next and not last:
-                    continue
-                return Lookup(Lookup.ABSENT, None, f"{self.name} has no issue for this finding")
-            chosen = [h for h in hits if known_ref and str(h[0]) == str(known_ref)]
-            if chosen or len(hits) == 1:
-                ref, closed = (chosen or hits)[0]
-                state = "closed" if closed else "open"
-                return Lookup(
-                    Lookup.FOUND, str(ref), f"{self.name} issue {ref} already exists ({state})", closed=closed
-                )
-            refs = ", ".join(str(h[0]) for h in hits)
-            return Lookup(
-                Lookup.AMBIGUOUS, None, f"{self.name}: {len(hits)} issues carry this finding's marker ({refs})"
+            stand_in = False
+            params = dict(request.params)
+            while True:
+                if pages >= LOOK_MAX_PAGES or _time.monotonic() - began > budget:
+                    return Lookup.unknown(
+                        f"{self.name} look-up stopped after {pages} page(s) without finding this "
+                        f"installation's issue (it matched {len(seen)} other issue(s))",
+                        tuple(ignored),
+                    )
+                try:
+                    response = get(request.url, headers=request.headers, params=params)
+                    pages += 1
+                    status = response.status_code
+                    if status in (404, 410) and request.missing_means_next and not last:
+                        stand_in = True
+                        break
+                    if not is_success(status):
+                        return Lookup.unknown(error_detail(self.name, response), tuple(ignored))
+                    body = response.json()
+                    hits = self._parse_lookup(body, request.kind)
+                except Exception as exc:  # noqa: BLE001 - a failed or unreadable look says nothing
+                    return Lookup.unknown(f"{self.name} look-up failed: {type(exc).__name__}: {exc}", tuple(ignored))
+                if hits is None:
+                    return Lookup.unknown(f"{self.name} look-up answer had no list of issues", tuple(ignored))
+                for hit in hits:
+                    ref = str(hit.ref)
+                    if ref in seen:
+                        continue
+                    seen.add(ref)
+                    state = "closed" if hit.closed else "open"
+                    if known_ref and ref == str(known_ref):
+                        return answer(
+                            Lookup.FOUND, ref, f"{self.name} issue {ref}, recorded for this finding, exists ({state})",
+                            hit.closed, "recorded",
+                        )
+                    if expected.verifies(hit.text):
+                        return answer(
+                            Lookup.FOUND, ref,
+                            f"{self.name} issue {ref} already exists ({state}); its marker verifies",
+                            hit.closed, "verified",
+                        )
+                    created = parse_provider_time(hit.created)
+                    if (
+                        legacy
+                        and not carries_a_tag(hit.text)
+                        and created is not None
+                        and ident.since is not None
+                        and created < ident.since
+                    ):
+                        older.append((ref, hit.closed))
+                    else:
+                        ignored.append(ref)
+                params = self._next_page(request, body, params, len(hits))
+                if params is None:
+                    break
+        if len(older) == 1:
+            ref, closed = older[0]
+            return answer(
+                Lookup.FOUND, ref,
+                f"{self.name} issue {ref} already exists ({'closed' if closed else 'open'}); it is in an older "
+                "marker format, created before this installation wrote verifiable markers",
+                closed, "legacy",
             )
-        return Lookup.unknown(f"{self.name} look-up was not answered")
+        if older:
+            refs = ", ".join(r for r, _ in older)
+            return answer(
+                Lookup.AMBIGUOUS, None,
+                f"{self.name}: {len(older)} issues in an older marker format, all created before this "
+                f"installation wrote verifiable markers, carry this finding ({refs}); which is its own "
+                "cannot be told",
+            )
+        return answer(Lookup.ABSENT, None, f"{self.name} has no issue of this installation's for this finding")
 
     def _lookup_requests(self, finding: Any) -> list[LookupRequest]:
-        """The reads that find this finding's issue, in order; empty when this
-        system offers none."""
+        """The reads that find this finding's issue, oldest first, in order; empty
+        when this system offers none."""
         return []
 
-    def _parse_lookup(self, body: Any, kind: str) -> list[tuple[str, bool]] | None:  # pragma: no cover
-        """``[(ref, closed), ...]`` from one look's answer, or ``None`` when the
-        answer does not have the shape expected."""
+    def _fetch_request(self, ref: str) -> LookupRequest | None:
+        """The read of one issue by its id, or ``None`` when this system offers none."""
+        return None
+
+    def _parse_lookup(self, body: Any, kind: str) -> list[Hit] | None:  # pragma: no cover
+        """The :class:`Hit` list of one look's answer (``kind`` ``"one"``: the answer
+        to :meth:`_fetch_request`), or ``None`` when it does not have the shape
+        expected."""
+        return None
+
+    def _next_page(self, request: LookupRequest, body: Any, params: dict, count: int) -> dict | None:
+        """The params for the next page of ``request``'s answer, or ``None`` when
+        this was the last."""
         return None
 
     def comment_on(self, ref: str, text: str, *, transport: Any) -> ConnectorResult | None:

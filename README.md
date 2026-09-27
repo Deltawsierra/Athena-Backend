@@ -108,39 +108,73 @@ stays recorded, and three things retry it:
 
 Only one runner pushes for a deployment at a time, in any process: a run claims
 the row first, and a claim left by a process that died lapses after five minutes.
-Every push is recorded as `sending` before the request goes out. A push whose
-answer was lost is looked for before anything is sent again:
+Every push is recorded as `sending` before the request goes out, with the marker it
+carries. Before a first push, and for a push whose answer was lost, the provider is
+asked for the finding's issue, oldest first, 100 a page:
 
-- **Jira** by the label `athena-<installation>-<finding uuid>`, through
-  `/rest/api/3/search/jql` (Jira Cloud), falling back to `/rest/api/2/search`
-  (Data Center and Server) when the first is missing;
-- **GitHub** by the same label, and by the marker in the issue body (GitHub drops
-  the labels of a token without push access; the create then says so);
-- **ServiceNow** by `correlation_id` and `correlation_display`.
+- **Jira**: one JQL over the marker label, the older labels `athena-<uuid>` and
+  `<uuid>`, and `text ~ "<uuid>"` (every issue Athena ever created says
+  `Athena finding: <uuid>`), through `/rest/api/3/search/jql` (Jira Cloud), falling
+  back to `/rest/api/2/search` (Data Center and Server) when the first is missing;
+- **GitHub**: the issues list by each of those labels, then the search for the uuid
+  in bodies (GitHub drops the labels of a token without push access; the create
+  then says so);
+- **ServiceNow**: `correlation_id`, which every release has sent.
 
-A closed issue that already carries the marker is commented on, not reopened and
-not duplicated. Several issues carrying one marker (a copied label) are never
-adopted: the push is held. Where a push cannot be looked for (Splunk HEC), or is
-held, it stays owed until someone records what happened:
+Each issue Athena creates carries its marker twice: the label
+`athena-<installation>-<finding uuid>`, and the body line
+`Athena marker: <label> <tag>`, where the tag is an HMAC keyed by a secret only this
+backend holds. Only an issue whose tag verifies, or the one already recorded for the
+finding (read directly by its id), is adopted; of several that verify, the one
+created first, since a copy (a Jira clone, a pasted body) is always made after what
+it copies. Anything else the search matches -- a copied label, a planted body, a
+forged tag, another installation's issue -- is ignored and named in a WARNING; it
+never holds a dispatch. An issue in a format older than tags is taken as Athena's
+only if the provider says it was created before this installation began tagging:
+one is adopted; several are held for a person. A push an earlier release made (no
+marker recorded on its attempt) is never read as absent: if nothing is found, it is
+held, not pushed again.
+
+A closed issue for the finding is not reopened and not duplicated: it is commented
+on (on the first push and on a lost answer's alike), and the attempt is recorded
+`sent_to_closed`, with a WARNING and a note on the attempt that the tracker says the
+work is done while the decision still blocks. Where a push cannot be looked for
+(Splunk HEC), or is held, it stays owed until someone records what happened:
 `python manage.py reconcile_dispatch_attempt <attempt uuid> --provider-has-it --by <you>`
 (or `--provider-lacks-it`). The deployment's `dispatch-attempts` read shows what is owed.
 
-Set `ASSURANCE_INSTALLATION_ID` to a stable, per-environment value: it is part of
-every marker, so a database restored into another environment never adopts this
-one's issues. Unset, it is derived from `DJANGO_SECRET_KEY`, and rotating that key
-changes the markers (issues created before cannot then be found by the look).
+The installation id and the marker secret are random, generated once and kept in
+the database (`AssuranceInstallation`); neither is derived from `DJANGO_SECRET_KEY`,
+so rotating that key changes no marker. Set `ASSURANCE_INSTALLATION_ID` in any
+environment restored from another's database (staging from production), so it never
+adopts the first environment's issues.
 
-Settings: `ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS` (default 4) runs push at once
-per process, with at most `ASSURANCE_DISPATCH_MAX_WAITING_RUNS` (default 32) more
-threads waiting; past that nothing recorded is started now, and the next sweep
-starts it. `ASSURANCE_CONNECTOR_DEADLINE_SECONDS` (default 30) bounds each
-connector request in total, including name resolution.
-`ASSURANCE_AUTO_DISPATCH_ENABLED=False` stops all of it without dropping anything owed.
+Settings, read from the environment (see `.env.example`):
+`ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS` (default 4) runs push at once per process,
+with at most `ASSURANCE_DISPATCH_MAX_WAITING_RUNS` (default 32) more threads waiting;
+past that nothing recorded is started now, and the next sweep starts it. A dispatch
+the stop could not record is started past that bound, but never past twice it.
+`ASSURANCE_DISPATCH_SWEEP_SECONDS` (default 300; `0` off).
+`ASSURANCE_CONNECTOR_DEADLINE_SECONDS` (default 30) bounds each connector request in
+total, including name resolution. A value that is not a number fails
+`manage.py check` (`assurance.E303`), is logged once at start, and the default is
+used. `ASSURANCE_AUTO_DISPATCH_ENABLED=False` stops all of it without dropping
+anything owed.
 
-**Rolling back past migration `assurance.0042`** is refused while any dispatch
+Logging. A dispatch that is neither recorded nor started is named at ERROR at once,
+in the stop's own thread, with the `retry_blocking_dispatches --deployment N` command
+to run: one line to stderr (only if stderr can take it without waiting) and to the
+log handlers (passing over any handler another thread is stuck in). Everything else
+on a stop's path is logged from a background thread, through a queue of at most
+1000 records (the oldest are dropped and counted); what is queued at exit is
+written then, for at most 2 s.
+
+**Rolling back past migration `assurance.0043`** is refused while an uncertain
+attempt carries a marker (code before it cannot look for it), and turns
+`sent_to_closed` back into `sent`. **Past `assurance.0042`** it is refused while any
 attempt is `sending`, because code from before it would push those again blind.
 Check with
-`python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome='sending').count())"`,
+`python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome__in=['sending','unknown']).count())"`,
 and settle them first (let a run finish, or use `reconcile_dispatch_attempt`).
 
 ## Secrets

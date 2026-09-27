@@ -13,15 +13,17 @@ from typing import Any
 
 from django.conf import settings
 
+from ..markers import legacy_labels, marker_for
 from .base import (
+    LOOK_PAGE_SIZE,
     Connector,
     ConnectorConfig,
     ConnectorResult,
+    Hit,
+    LookupRequest,
     Response,
     error_detail,
-    LookupRequest,
     finding_body,
-    finding_marker,
     finding_summary,
     is_success,
 )
@@ -68,6 +70,7 @@ class JiraConnector(Connector):
     def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:
         cfg: JiraConfig = self.config  # type: ignore[assignment]
         summary = finding_summary(finding)
+        marker = marker_for(finding)
         url = f"{cfg.base_url.rstrip('/')}/rest/api/2/issue"
         headers = {
             "Authorization": f"Bearer {cfg.token}",
@@ -78,42 +81,83 @@ class JiraConnector(Connector):
             "fields": {
                 "project": {"key": cfg.project_key},
                 "summary": summary["title"][:255],
-                "description": finding_body(summary),
+                # The marker's tag in the description: what makes this issue
+                # verifiably this installation's (assurance.markers).
+                "description": finding_body(summary) + f"\n{marker.body_line}",
                 "issuetype": {"name": cfg.issue_type},
                 "priority": {"name": _PRIORITY.get(summary["severity"], "Medium")},
                 # The marker label is how a lost answer or a second runner finds
                 # this issue again instead of creating another (find_existing).
-                "labels": ["athena", f"severity-{summary['severity']}", finding_marker(finding)],
+                "labels": ["athena", f"severity-{summary['severity']}", marker.label],
             }
         }
         return url, headers, payload
+
+    def _headers(self) -> dict:
+        cfg: JiraConfig = self.config  # type: ignore[assignment]
+        return {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
 
     def _lookup_requests(self, finding: Any):
         # Jira Cloud retired GET /rest/api/2/search (410 Gone, CHANGE-2046) for
         # /rest/api/3/search/jql; Data Center and Server have only the former
         # (404 on the new one). The new one first, the old one when it is missing.
+        # One query finds every format this code has written: this marker's label,
+        # round 2's `athena-<uuid>`, a bare uuid label, and -- for master's issues,
+        # which carry no marker label -- the finding's uuid in their text. Oldest
+        # first, so the original comes before any copy of it.
         cfg: JiraConfig = self.config  # type: ignore[assignment]
         base = cfg.base_url.rstrip("/")
-        headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
+        labels = ", ".join(f'"{label}"' for label in [marker_for(finding).label, *legacy_labels(finding)])
         params = {
-            "jql": f'project = "{cfg.project_key}" AND labels = "{finding_marker(finding)}"',
-            "fields": "status",
-            "maxResults": 2,
+            "jql": (
+                f'project = "{cfg.project_key}" AND (labels in ({labels}) OR text ~ "\\"{finding.uuid}\\"") '
+                "ORDER BY created ASC"
+            ),
+            "fields": "status,created,description",
+            "maxResults": LOOK_PAGE_SIZE,
         }
         return [
-            LookupRequest(f"{base}/rest/api/3/search/jql", headers, dict(params), "jira", missing_means_next=True),
-            LookupRequest(f"{base}/rest/api/2/search", headers, dict(params), "jira"),
+            LookupRequest(f"{base}/rest/api/3/search/jql", self._headers(), dict(params), "v3", missing_means_next=True),
+            LookupRequest(f"{base}/rest/api/2/search", self._headers(), {**params, "startAt": 0}, "v2"),
         ]
 
+    def _fetch_request(self, ref: str):
+        cfg: JiraConfig = self.config  # type: ignore[assignment]
+        return LookupRequest(
+            f"{cfg.base_url.rstrip('/')}/rest/api/2/issue/{ref}", self._headers(), {"fields": "status,created"}, "one"
+        )
+
+    @staticmethod
+    def _hit(issue: dict) -> Hit:
+        import json
+
+        fields = issue.get("fields") or {}
+        category = ((fields.get("status") or {}).get("statusCategory") or {}).get("key")
+        description = fields.get("description")
+        # v3 answers the description as a document (ADF), v2 as text: the marker
+        # line is one run of text either way.
+        text = description if isinstance(description, str) else json.dumps(description or "")
+        return Hit(str(issue.get("key") or issue.get("id")), category == "done", fields.get("created"), text)
+
     def _parse_lookup(self, body: Any, kind: str):
+        if kind == "one":
+            return [self._hit(body)] if isinstance(body, dict) and (body.get("key") or body.get("id")) else None
         issues = body.get("issues") if isinstance(body, dict) else None
         if not isinstance(issues, list):
             return None
-        hits = []
-        for issue in issues:
-            category = (((issue.get("fields") or {}).get("status") or {}).get("statusCategory") or {}).get("key")
-            hits.append((issue.get("key") or issue.get("id"), category == "done"))
-        return hits
+        return [self._hit(issue) for issue in issues if isinstance(issue, dict)]
+
+    def _next_page(self, request, body, params, count):
+        if request.kind == "v3":
+            token = body.get("nextPageToken") if isinstance(body, dict) else None
+            if not token or body.get("isLast"):
+                return None
+            return {**params, "nextPageToken": token}
+        start = int(params.get("startAt", 0)) + count
+        total = body.get("total") if isinstance(body, dict) else None
+        if not count or (isinstance(total, int) and start >= total) or count < int(params["maxResults"]):
+            return None
+        return {**params, "startAt": start}
 
     def _comment_request(self, ref: str, text: str):
         cfg: JiraConfig = self.config  # type: ignore[assignment]

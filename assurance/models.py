@@ -2445,6 +2445,12 @@ class DispatchAttempt(models.Model):
 
     class Outcome(models.TextChoices):
         SENT = "sent", "Sent"
+        # The finding's issue exists, and the tracker has CLOSED it -- it says the
+        # work is done -- while the finding is dispatched again (a blocking
+        # decision, say). Not reopened (a person's call) and not filed twice: it is
+        # commented on, and recorded under this outcome, apart from SENT, so the
+        # operator can see that the tracker and the decision disagree.
+        SENT_TO_CLOSED = "sent_to_closed", "Sent — to an issue the tracker has closed"
         FAILED = "failed", "Failed"
         # The provider may have committed this before the client lost the answer.
         # Neither SENT nor FAILED is true: recording it as FAILED licenses a retry
@@ -2472,8 +2478,8 @@ class DispatchAttempt(models.Model):
         BLOCKING_DECISION = "blocking_decision", "Blocking decision transition"
         MANUAL = "manual", "Manual dispatch"
 
-    #: Outcomes that mean the external system accepted the push — terminal.
-    TERMINAL_OUTCOMES = frozenset({Outcome.SENT})
+    #: Outcomes that mean the external system holds the finding — terminal.
+    TERMINAL_OUTCOMES = frozenset({Outcome.SENT, Outcome.SENT_TO_CLOSED})
 
     #: Outcomes whose truth is not known. NOT terminal (nothing was confirmed) and
     #: NOT retryable (a retry may double-execute) -- the two properties that used to
@@ -2532,6 +2538,14 @@ class DispatchAttempt(models.Model):
     # while it is still unresolved -- which is the state that blocks the retry.
     reconciled_at = models.DateTimeField(null=True, blank=True)
     reconciled_detail = models.TextField(blank=True)
+    # The marker the last push carried (``<label> <tag>``, see
+    # :mod:`assurance.markers`) and its format's version. A look for an uncertain
+    # push searches for THIS marker, and trusts "none found" only when it is the
+    # current format: a push made in another format (every row older than the
+    # field has a blank one) is found by looking in every format this code has
+    # ever written, and is never read as absent, so never pushed again blind.
+    marker = models.CharField(max_length=128, blank=True, default="")
+    marker_version = models.PositiveSmallIntegerField(null=True, blank=True)
     attempts = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -2625,6 +2639,30 @@ class DecisionDispatchDue(models.Model):
 
     def __str__(self) -> str:
         return f"blocking-decision dispatch owed for deployment {self.deployment_id} ({self.runs} run(s))"
+
+
+class AssuranceInstallation(models.Model):
+    """This installation's identity in the systems it writes to: one row.
+
+    ``installation_id`` scopes every marker this installation puts on an issue, so
+    a database restored into another environment -- which sets its own
+    ``ASSURANCE_INSTALLATION_ID``, which overrides this -- never adopts the first
+    one's issues. ``marker_secret`` keys the tag that makes a marker verifiable
+    (:mod:`assurance.markers`): only this backend holds it, so an issue someone
+    else wrote cannot carry a tag that verifies. Both are random, generated once
+    (by the migration that adds this table, or on first use) and never derived
+    from ``SECRET_KEY``, so rotating that key changes no marker. ``created_at`` is
+    when this installation began writing verifiable markers: an issue in an older
+    format that the provider says was created after it is not one this code wrote.
+    Never exposed by any API."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    installation_id = models.CharField(max_length=64)
+    marker_secret = models.CharField(max_length=128)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self) -> str:
+        return "this installation's marker identity"
 
 
 # ---------------------------------------------------------------------------
