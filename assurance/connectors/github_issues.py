@@ -19,7 +19,6 @@ from typing import Any
 
 from django.conf import settings
 
-from ..markers import legacy_labels, marker_for
 from .base import (
     LOOK_PAGE_SIZE,
     Connector,
@@ -55,6 +54,7 @@ class GitHubIssuesConnector(Connector):
     config_class = GitHubIssuesConfig
     secret_field = "token"
     settings_fields = ("base_url", "owner", "repo")
+    destination_fields = ("base_url", "owner", "repo")
 
     @classmethod
     def config_from_settings(cls) -> GitHubIssuesConfig:
@@ -65,10 +65,10 @@ class GitHubIssuesConnector(Connector):
             token=getattr(settings, "CONNECTOR_GITHUB_TOKEN", None),
         )
 
-    def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:
+    def _format_finding(self, finding: Any, note: str = "") -> tuple[str, dict, dict]:
         cfg: GitHubIssuesConfig = self.config  # type: ignore[assignment]
         summary = finding_summary(finding)
-        marker = marker_for(finding)
+        marker = self.marker(finding)
         url = f"{cfg.base_url.rstrip('/')}/repos/{cfg.owner}/{cfg.repo}/issues"
         headers = {
             "Authorization": f"Bearer {cfg.token}",
@@ -80,7 +80,7 @@ class GitHubIssuesConnector(Connector):
             # The marker with its tag in the body: what makes this issue verifiably
             # this installation's (assurance.markers), and where the look finds it
             # when a token without push access has its labels dropped.
-            "body": finding_body(summary) + f"\n{marker.body_line}",
+            "body": finding_body(summary) + (f"\n\n{note}" if note else "") + f"\n{marker.body_line}",
             # The marker label is how a lost answer or a second runner finds this
             # issue again instead of opening another (find_existing).
             "labels": ["athena", f"severity:{summary['severity']}", marker.label],
@@ -107,7 +107,7 @@ class GitHubIssuesConnector(Connector):
         return [
             *(
                 LookupRequest(f"{base}/repos/{cfg.owner}/{cfg.repo}/issues", self._headers(), {**listing, "labels": label}, "list")
-                for label in [marker_for(finding).label, *legacy_labels(finding)]
+                for label in self._labels(finding)
             ),
             LookupRequest(
                 f"{base}/search/issues", self._headers(),

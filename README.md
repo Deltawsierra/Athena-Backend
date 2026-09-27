@@ -123,17 +123,24 @@ asked for the finding's issue, oldest first, 100 a page:
 
 Each issue Athena creates carries its marker twice: the label
 `athena-<installation>-<finding uuid>`, and the body line
-`Athena marker: <label> <tag>`, where the tag is an HMAC keyed by a secret only this
-backend holds. Only an issue whose tag verifies, or the one already recorded for the
-finding (read directly by its id), is adopted; of several that verify, the one
-created first, since a copy (a Jira clone, a pasted body) is always made after what
-it copies. Anything else the search matches -- a copied label, a planted body, a
-forged tag, another installation's issue -- is ignored and named in a WARNING; it
-never holds a dispatch. An issue in a format older than tags is taken as Athena's
-only if the provider says it was created before this installation began tagging:
-one is adopted; several are held for a person. A push an earlier release made (no
-marker recorded on its attempt) is never read as absent: if nothing is found, it is
-held, not pushed again.
+`Athena marker: <label> <tag>`, where the tag is an HMAC, keyed by a secret only this
+backend holds, over the installation id, the connector and its destination (base URL
+plus repository, project or table), the finding and its deployment -- so a tag read
+in one tracker never verifies in another. Only an issue whose tag verifies, or the
+one already recorded for the finding (read directly by its id), is adopted; of
+several that verify, the one created first, since a copy (a Jira clone, a pasted
+body) is always made after what it copies. Anything else the search matches -- a
+copied label, a planted body, a forged tag, another installation's or another
+tracker's tag -- is ignored and named in a WARNING; it never holds a dispatch.
+
+An issue in a format older than tags (master's `Athena finding: <uuid>` body, or an
+earlier label) is never adopted: anyone who can edit an old issue can make it
+mention a finding. One the provider says was created before this installation began
+tagging is a possible duplicate: the ticket filed for the finding names it in its
+body, and a WARNING names it too, so a person can close one of the two. A push an
+earlier release made (no marker recorded on its attempt) is pushed again the same
+way when the look names such issues; when nothing at all is found for it, it is
+held, not pushed again blind.
 
 A closed issue for the finding is not reopened and not duplicated: it is commented
 on (on the first push and on a lost answer's alike), and the attempt is recorded
@@ -145,9 +152,13 @@ work is done while the decision still blocks. Where a push cannot be looked for
 
 The installation id and the marker secret are random, generated once and kept in
 the database (`AssuranceInstallation`); neither is derived from `DJANGO_SECRET_KEY`,
-so rotating that key changes no marker. Set `ASSURANCE_INSTALLATION_ID` in any
-environment restored from another's database (staging from production), so it never
-adopts the first environment's issues.
+so rotating that key changes no marker. `ASSURANCE_INSTALLATION_ID` overrides the id.
+Every id the database has used is kept (`AssuranceInstallationId`) and a marker made
+under any of them verifies, so setting or changing it after go-live files no second
+ticket. A database restored into another environment (staging from production) is
+the same installation, markers and all: to make it a separate one before it pushes
+to a tracker production also uses, give it a new identity with
+`python manage.py shell -c "from assurance.models import AssuranceInstallation as I, AssuranceInstallationId as J; J.objects.all().delete(); I.objects.all().delete()"`.
 
 Settings, read from the environment (see `.env.example`):
 `ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS` (default 4) runs push at once per process,
@@ -161,17 +172,25 @@ total, including name resolution. A value that is not a number fails
 used. `ASSURANCE_AUTO_DISPATCH_ENABLED=False` stops all of it without dropping
 anything owed.
 
-Logging. A dispatch that is neither recorded nor started is named at ERROR at once,
-in the stop's own thread, with the `retry_blocking_dispatches --deployment N` command
-to run: one line to stderr (only if stderr can take it without waiting) and to the
-log handlers (passing over any handler another thread is stuck in). Everything else
-on a stop's path is logged from a background thread, through a queue of at most
-1000 records (the oldest are dropped and counted); what is queued at exit is
+Logging. A stop's thread never writes to a log handler. A dispatch that is neither
+recorded nor started is named at ERROR, with the `retry_blocking_dispatches
+--deployment N` command to run: at once, in the stop's own thread, as one line to
+stderr -- only if stderr can take it without waiting -- and, for the log handlers,
+through the background log thread. When no thread can start, the record waits in
+that queue (bounded, counted) until the next request, sweep or exit starts or runs
+the writer. Everything else on a stop's path goes the same way, through a queue of
+at most 1000 records (the oldest are dropped and counted); what is queued at exit is
 written then, for at most 2 s.
 
-**Rolling back past migration `assurance.0043`** is refused while an uncertain
-attempt carries a marker (code before it cannot look for it), and turns
-`sent_to_closed` back into `sent`. **Past `assurance.0042`** it is refused while any
+**Migration `assurance.0043`** adds `marker` as a nullable column with no default: a
+plain `ADD COLUMN`, so it copies no table and holds the write lock for no time
+whatever the table's size, and code still serving from before it (migrate, then
+restart) goes on recording its attempts, which read as an earlier release's. Code
+deployed AHEAD of it cannot dispatch or push by hand (the columns are missing) until
+it runs; stops are unaffected and what is owed stays recorded.
+**Rolling back past `assurance.0043`** is refused while an uncertain attempt carries
+a marker (code before it cannot look for it), and turns `sent_to_closed` back into
+`sent`. **Past `assurance.0042`** it is refused while any
 attempt is `sending`, because code from before it would push those again blind.
 Check with
 `python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome__in=['sending','unknown']).count())"`,

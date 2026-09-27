@@ -215,19 +215,18 @@ class Lookup:
     - ``"found"`` -- the issue this installation created for the finding:
       ``external_ref`` names it, ``closed`` says whether the tracker has closed it,
       and ``how`` says how it is known -- ``"recorded"`` (the issue the attempt
-      already records), ``"verified"`` (its marker's tag verifies; of several, the
-      one created first), or ``"legacy"`` (the one issue in a format older than
-      tags, created before this installation wrote them);
+      already records) or ``"verified"`` (its marker's tag verifies; of several,
+      the one created first);
     - ``"absent"`` -- no issue of this installation's for it;
-    - ``"ambiguous"`` -- several issues in an older format, all created before
-      tags were written, none verifiable: never adopted, and never a license to
-      create another;
     - ``"unknown"`` -- it could not look, or the answer did not say.
 
     ``ignored``: issues that matched the search and are NOT this installation's --
     a copied label, a planted body, a tag that does not verify, an older format
-    created after tags were -- named so the caller can say so. They never hold a
-    dispatch and are never adopted."""
+    created after tags were -- named so the caller can say so. ``possible``: issues
+    in a format older than tags, created before this installation wrote them, that
+    mention the finding -- an earlier release's issue for it, or an old issue
+    somebody edited to mention it; which cannot be told, so they are never adopted:
+    the ticket filed for the finding names them. Neither ever holds a dispatch."""
 
     state: str
     external_ref: str | None = None
@@ -235,10 +234,10 @@ class Lookup:
     closed: bool = False
     how: str = ""
     ignored: tuple = ()
+    possible: tuple = ()
 
     FOUND = "found"
     ABSENT = "absent"
-    AMBIGUOUS = "ambiguous"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -315,11 +314,11 @@ def installation_id() -> str:
 def finding_marker(finding: Any) -> str:
     """The label an adapter tags a created issue with, so it can search for it:
     ``athena-<installation>-<finding uuid>``, 50 characters -- GitHub's limit for a
-    label name. The tag that makes it verifiable is in the body
-    (:func:`assurance.markers.marker_for`)."""
+    label name. The same for every destination; the tag that makes it verifiable,
+    and binds it to one, is in the body (:func:`assurance.markers.marker_for`)."""
     from ..markers import marker_for
 
-    return marker_for(finding).label
+    return marker_for(finding, scope="").label
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +427,11 @@ class Connector(ABC):
     #: would claim a deduplication nothing performs.
     idempotency_header: str | None = None
 
+    #: The config fields that name where this connector writes -- with its name,
+    #: what a marker's tag binds (:meth:`marker_scope`), so a tag read in one
+    #: tracker, repository or project never verifies in another.
+    destination_fields: tuple[str, ...] = ()
+
     #: Whether delivering one operation twice is harmless to this system -- true
     #: only where the receiver deduplicates on :attr:`idempotency_header`. A push
     #: whose answer was lost may then simply be sent again; anywhere else it waits
@@ -467,6 +471,29 @@ class Connector(ABC):
             kwargs[cls.secret_field] = secret
         return cls.config_class(**kwargs)
 
+    def marker_scope(self) -> str:
+        """This connector and its destination, as a marker's tag binds them: its
+        name and each of :attr:`destination_fields`, trimmed and lower-cased."""
+        parts = [self.name]
+        for field in self.destination_fields:
+            parts.append(str(getattr(self.config, field, "") or "").strip().rstrip("/").lower())
+        return "\x1f".join(parts)
+
+    def marker(self, finding: Any, ident: Any = None) -> Any:
+        """``finding``'s marker for this connector and destination, under the
+        current installation id (:func:`assurance.markers.marker_for`)."""
+        from ..markers import marker_for
+
+        return marker_for(finding, ident, scope=self.marker_scope())
+
+    def _labels(self, finding: Any) -> list[str]:
+        """Every label a look searches on: this installation's marker label under
+        each id it has used, then the older formats' labels."""
+        from ..markers import identity, label_prefix, legacy_labels
+
+        ours = [f"athena-{label_prefix(i)}-{finding.uuid}" for i in identity().all_ids()]
+        return [*ours, *legacy_labels(finding)]
+
     def _not_configured(self) -> ConnectorResult:
         return ConnectorResult(
             ok=False,
@@ -476,7 +503,7 @@ class Connector(ABC):
         )
 
     def push_finding(
-        self, finding: Any, *, transport: Transport, operation_id: str | None = None
+        self, finding: Any, *, transport: Transport, operation_id: str | None = None, note: str = ""
     ) -> ConnectorResult:
         """Carry a finding into the external system as a ticket / issue / event.
 
@@ -486,11 +513,13 @@ class Connector(ABC):
         transport performs the single ``post``, and the adapter parses the
         response. A transport failure is caught and reported as ``ok=False`` — a
         connector never raises out of a push. ``operation_id`` goes out in
-        :attr:`idempotency_header` when this system has one."""
+        :attr:`idempotency_header` when this system has one. ``note``: a line the
+        created issue's body carries (the possible duplicates it was filed beside),
+        for an adapter whose formatter takes one."""
         if not self.configured:
             return self._not_configured()
 
-        url, headers, payload = self._format_finding(finding)
+        url, headers, payload = self._format_finding(finding, note=note) if note else self._format_finding(finding)
         if operation_id and self.idempotency_header:
             headers = {**headers, self.idempotency_header: operation_id}
         try:
@@ -531,13 +560,15 @@ class Connector(ABC):
         another. See :mod:`assurance.markers` for what is adopted and why.
 
         ``known_ref``: the issue already recorded for the finding -- read directly,
-        so it is found however many copies of it exist. ``expected``: the
-        :class:`~assurance.markers.Marker` whose tag an adopted issue must carry
-        (the one the attempt's push carried; by default, the finding's marker now).
-        ``legacy``: whether an issue in a format older than tags, created before
-        this installation wrote tags, may be taken as this code's -- for a first
+        so it is found however many copies of it exist; the only issue adopted
+        without a tag. ``expected``: a :class:`~assurance.markers.Marker` an
+        adopted issue may carry besides this connector's marker under each id this
+        installation has used (the one the attempt's push carried). ``legacy``:
+        whether an issue in a format older than tags, created before this
+        installation wrote tags, is named as a possible duplicate -- for a first
         push, and for an attempt whose push carried an older format; not for one
-        whose push carried a tag, which only a tagged issue can be.
+        whose push carried a tag, which only a tagged issue can be. It is never
+        adopted.
 
         The base cannot look: ``unknown``. An adapter that can overrides
         :meth:`_lookup_requests`, :meth:`_parse_lookup` and, to page,
@@ -556,10 +587,10 @@ class Connector(ABC):
             return Lookup.unknown(f"{self.name} offers no read-back of what it was sent")
         if get is None:
             return Lookup.unknown("the transport cannot read")
-        from ..markers import carries_a_tag, identity, marker_for
+        from ..markers import carries_a_tag, identity, markers_for
 
         ident = identity()
-        expected = expected or marker_for(finding, ident)
+        accepted = [*([expected] if expected is not None else []), *markers_for(finding, ident, scope=self.marker_scope())]
         budget = float(getattr(transport, "deadline", DEFAULT_DEADLINE_SECONDS) or DEFAULT_DEADLINE_SECONDS)
         began = _time.monotonic()
         seen: set = set()
@@ -568,7 +599,7 @@ class Connector(ABC):
         pages = 0
 
         def answer(state, ref=None, detail="", closed=False, how=""):
-            return Lookup(state, ref, detail, closed=closed, how=how, ignored=tuple(ignored))
+            return Lookup(state, ref, detail, closed=closed, how=how, ignored=tuple(ignored), possible=tuple(older))
 
         if known_ref:
             fetch = self._fetch_request(str(known_ref))
@@ -631,7 +662,7 @@ class Connector(ABC):
                             Lookup.FOUND, ref, f"{self.name} issue {ref}, recorded for this finding, exists ({state})",
                             hit.closed, "recorded",
                         )
-                    if expected.verifies(hit.text):
+                    if any(marker.verifies(hit.text) for marker in accepted):
                         return answer(
                             Lookup.FOUND, ref,
                             f"{self.name} issue {ref} already exists ({state}); its marker verifies",
@@ -645,29 +676,19 @@ class Connector(ABC):
                         and ident.since is not None
                         and created < ident.since
                     ):
-                        older.append((ref, hit.closed))
+                        older.append(ref)
                     else:
                         ignored.append(ref)
                 params = self._next_page(request, body, params, len(hits))
                 if params is None:
                     break
-        if len(older) == 1:
-            ref, closed = older[0]
-            return answer(
-                Lookup.FOUND, ref,
-                f"{self.name} issue {ref} already exists ({'closed' if closed else 'open'}); it is in an older "
-                "marker format, created before this installation wrote verifiable markers",
-                closed, "legacy",
-            )
+        detail = f"{self.name} has no issue of this installation's for this finding"
         if older:
-            refs = ", ".join(r for r, _ in older)
-            return answer(
-                Lookup.AMBIGUOUS, None,
-                f"{self.name}: {len(older)} issues in an older marker format, all created before this "
-                f"installation wrote verifiable markers, carry this finding ({refs}); which is its own "
-                "cannot be told",
+            detail += (
+                f"; {len(older)} issue(s) in an older marker format, created before this installation wrote "
+                f"verifiable markers, mention it and may be an earlier release's: {', '.join(older[:20])}"
             )
-        return answer(Lookup.ABSENT, None, f"{self.name} has no issue of this installation's for this finding")
+        return answer(Lookup.ABSENT, None, detail)
 
     def _lookup_requests(self, finding: Any) -> list[LookupRequest]:
         """The reads that find this finding's issue, oldest first, in order; empty

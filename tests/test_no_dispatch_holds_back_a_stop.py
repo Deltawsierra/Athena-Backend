@@ -30,6 +30,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -169,10 +170,8 @@ class FakeRemote:
         """An issue already there. With ``finding``: one this installation created
         for it (its marker label, and the tag in its body); otherwise whatever
         ``labels``, ``body``, ``display`` and ``correlation_id`` say."""
-        from assurance.markers import marker_for
-
         if finding is not None:
-            marker = marker_for(finding)
+            marker = _ours(finding, {"github": "github_issues"}.get(kind, kind))
             labels = [marker.label] if labels is None else labels
             body = f"Athena finding: {finding.uuid}\n{marker.body_line}" if body is None else body
             if kind == "servicenow":
@@ -359,19 +358,39 @@ def _marker(dep):
     return finding_marker(Finding.objects.get(deployment=dep))
 
 
+_ENDPOINTS = {
+    "webhook": {"url": "https://hooks.example/athena"},
+    "jira": {"base_url": "https://jira.example", "project_key": "SEC"},
+    "github_issues": {"base_url": "https://api.github.example", "owner": "acme", "repo": "app"},
+    "servicenow": {"base_url": "https://sn.example", "table": "incident"},
+    "splunk": {"base_url": "https://splunk.example:8088", "index": "athena"},
+}
+
+
+def _ours(finding, connector="jira", ident=None, endpoint=None):
+    """This installation's marker for ``finding`` as ``connector``'s adapter writes
+    it, at the destination the tests bind (or ``endpoint``) -- under ``ident`` when
+    given (another installation's)."""
+    from assurance.connectors import build_connector
+    from assurance.connectors.registry import get_connector_class
+
+    config = get_connector_class(connector).config_from_binding(endpoint or _ENDPOINTS[connector], "tok")
+    return build_connector(connector, config).marker(finding, ident)
+
+
 def _lost(dep, connector="jira", *, outcome=DispatchAttempt.Outcome.UNKNOWN, carried=True, age=None, ref=""):
     """An uncertain attempt for ``dep``'s one finding, as a push whose answer was
     lost leaves it: ``carried`` -- recorded with the marker its push carried, as
-    this release records it -- or not, as every release before recorded it. ``age``
-    in seconds since it was written."""
-    from assurance.markers import MARKER_VERSION, marker_for
+    this release records it -- or not (NULL), as every release before recorded it.
+    ``age`` in seconds since it was written."""
+    from assurance.markers import MARKER_VERSION
 
     finding = Finding.objects.get(deployment=dep)
     attempt = DispatchAttempt.objects.create(
         deployment=dep, finding=finding, connector=connector, outcome=outcome,
         trigger=DispatchAttempt.Trigger.BLOCKING_DECISION, operation_id=dispatch.operation_id(finding, connector),
         policy_epoch=Deployment.Decision.PAUSED, external_ref=ref,
-        marker=marker_for(finding).text if carried else "", marker_version=MARKER_VERSION if carried else None,
+        marker=_ours(finding, connector).text if carried else None, marker_version=MARKER_VERSION if carried else None,
     )
     if age is not None:
         DispatchAttempt.objects.filter(pk=attempt.pk).update(updated_at=timezone.now() - timedelta(seconds=age))
@@ -433,13 +452,7 @@ def _findings(dep, count=2, severity="high"):
 
 def _opted_in(dep, connector="jira", min_severity="high"):
     """A binding with a credential and a policy opting into the decision trigger."""
-    endpoint = {
-        "webhook": {"url": "https://hooks.example/athena"},
-        "jira": {"base_url": "https://jira.example", "project_key": "SEC"},
-        "github_issues": {"base_url": "https://api.github.example", "owner": "acme", "repo": "app"},
-        "servicenow": {"base_url": "https://sn.example", "table": "incident"},
-        "splunk": {"base_url": "https://splunk.example:8088", "index": "athena"},
-    }[connector]
+    endpoint = _ENDPOINTS[connector]
     binding = ConnectorBinding(deployment=dep, connector=connector, enabled=True, endpoint=endpoint)
     binding.set_secret("jira-tok")
     binding.save()
@@ -2294,23 +2307,40 @@ class _Stderr:
         os.close(self.write_fd)
 
 
+class _Sink(logging.Handler):
+    """A log handler that records which thread wrote each record to it, and can be
+    made slow."""
+
+    def __init__(self, seconds=0.0):
+        super().__init__()
+        self.seconds = seconds
+        self.written = []
+
+    def emit(self, record):
+        self.written.append((threading.current_thread(), record.getMessage()))
+        time.sleep(self.seconds)
+
+
 @with_key
-def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_stderr_and_the_log(
+def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_stderr_and_kept_for_the_log(
     monkeypatch, caplog
 ):
     """The process is out of threads and the stop could not record its dispatch:
-    nothing else will ever know it is owed. The ERROR naming the command is written
-    before the call returns -- to stderr and the logger, in this thread -- and does
-    not go through the log thread, which could not start either."""
+    nothing else will ever know it is owed. The ERROR naming the command is on
+    stderr before the call returns, written in this thread. This thread never
+    writes it to a log handler -- a slow sink would hold the stop -- so it waits,
+    queued and counted, for the log thread; once a thread can start, it is written,
+    with its level, its thread and its message."""
     import sys
 
     from assurance import oplog
 
     err = _Stderr()
+    sink = _Sink()
+    logging.getLogger("assurance").addHandler(sink)
+    kept = oplog.KEPT_FOR_WRITER[0]
     monkeypatch.setattr(sys, "__stderr__", err)
-    deferred = []
-    monkeypatch.setattr(oplog, "log_later", lambda *a, **k: deferred.append(a))
-    monkeypatch.setattr(dispatch, "log_later", lambda *a, **k: deferred.append(a))
+    monkeypatch.setattr(oplog, "_PUMP", [])  # no log thread in this process: it could not start either
 
     def refuse(self):
         raise RuntimeError("can't start new thread")
@@ -2318,18 +2348,73 @@ def test_an_unrecorded_dispatch_whose_thread_cannot_start_is_named_at_once_on_st
     monkeypatch.setattr(threading.Thread, "start", refuse)
     try:
         with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+            began = time.monotonic()
             assert dispatch.start_blocking_decision_dispatch(4950, unrecorded=True) == dispatch.NOT_STARTED
-            # No waiting: it is there the moment the call returns.
-            [record] = [r for r in caplog.records if "4950" in r.getMessage()]
-        line = err.text()
+            took = time.monotonic() - began
+            # On stderr the moment the call returns.
+            line = err.text()
+            assert oplog.KEPT_FOR_WRITER[0] == kept + 1
+            here = [m for t, m in sink.written if t is threading.current_thread()]
     finally:
         monkeypatch.undo()
         err.close()
-    message = record.getMessage()
-    assert record.levelno == logging.ERROR and record.threadName == threading.current_thread().name
-    assert "NOT recorded as owed" in message and "retry_blocking_dispatches --deployment 4950" in message
-    assert line.count("\n") == 1 and "retry_blocking_dispatches --deployment 4950" in line and "ERROR" in line
-    assert deferred == [], "it went through the log thread"
+    try:
+        assert took < 0.1, took
+        assert line.count("\n") == 1 and "retry_blocking_dispatches --deployment 4950" in line and "ERROR" in line
+        assert here == [], "the stop's thread wrote to a log handler"
+        # Threads can start again: the next writer writes what was kept.
+        with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+            assert oplog.start_pump()
+            assert _logged(caplog, "retry_blocking_dispatches --deployment 4950")
+        [record] = [r for r in caplog.records if "4950" in r.getMessage()]
+        assert record.levelno == logging.ERROR and record.threadName == threading.current_thread().name
+        assert "NOT recorded as owed" in record.getMessage()
+        assert [t for t, m in sink.written if "4950" in m and t is threading.current_thread()] == []
+    finally:
+        logging.getLogger("assurance").removeHandler(sink)
+
+
+@with_key
+@pytest.mark.parametrize("threads", ["can start", "cannot start"])
+def test_the_line_an_operator_must_see_never_waits_on_a_slow_sink_nobody_is_inside(threads, monkeypatch, caplog):
+    """A log sink that takes 2 s a record, and no thread inside it: free to be
+    written to, and slow. The line is on stderr at once and the call returns at
+    once -- whether or not a thread can start -- because this thread never writes
+    to a handler; the sink gets it from the log thread."""
+    import sys
+
+    from assurance import oplog
+
+    err = _Stderr()
+    sink = _Sink(seconds=2.0)
+    logging.getLogger("assurance").addHandler(sink)
+    monkeypatch.setattr(sys, "__stderr__", err)
+    if threads == "cannot start":
+        monkeypatch.setattr(oplog, "_PUMP", [])
+
+        def refuse(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", refuse)
+    try:
+        with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+            began = time.monotonic()
+            oplog.emit_now(logging.ERROR, "run `manage.py retry_blocking_dispatches --deployment %s`", 9)
+            took = time.monotonic() - began
+            line = err.text()
+    finally:
+        monkeypatch.undo()
+        err.close()
+    try:
+        assert took < 0.1, took
+        assert "--deployment 9" in line
+        with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+            assert oplog.start_pump()
+            assert _logged(caplog, "--deployment 9", timeout=10.0)
+        assert [m for t, m in sink.written if "--deployment 9" in m and t is threading.current_thread()] == []
+        assert any("--deployment 9" in m for _, m in sink.written)
+    finally:
+        logging.getLogger("assurance").removeHandler(sink)
 
 
 def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch, caplog):
@@ -2352,7 +2437,8 @@ def test_the_line_an_operator_must_see_never_waits_on_a_full_stderr(monkeypatch,
         err.close()
     assert took < 0.5, took
     assert oplog.STDERR_SKIPPED[0] == skipped + 1
-    assert "--deployment 7" in caplog.text
+    with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+        assert _logged(caplog, "--deployment 7")
 
 
 @with_key
@@ -2624,8 +2710,8 @@ def test_a_closed_servicenow_record_is_recorded_as_the_tracker_saying_done():
 
 @with_key
 def test_the_installation_id_is_random_persisted_never_the_secret_key_and_the_setting_overrides_it():
-    from assurance.markers import identity, marker_for
-    from assurance.models import AssuranceInstallation
+    from assurance.markers import identity
+    from assurance.models import AssuranceInstallation, AssuranceInstallationId
 
     admin = _admin()
     dep = _scanned(admin)
@@ -2633,20 +2719,51 @@ def test_the_installation_id_is_random_persisted_never_the_secret_key_and_the_se
     finding = Finding.objects.get(deployment=dep)
     row = AssuranceInstallation.objects.get(pk=1)
     assert len(row.installation_id) == 32 and len(row.marker_secret) == 64 and row.created_at is not None
-    here = marker_for(finding)
+    here = _ours(finding)
     assert identity().installation_id == row.installation_id
     assert len(here.label) == 50 and here.label.endswith(str(finding.uuid)) and len(here.tag) == 32
     # Rotating the secret key changes nothing.
     with override_settings(SECRET_KEY="rotated-" + "k" * 40):
-        assert marker_for(finding) == here
-    # The setting overrides the persisted id, label and tag alike.
+        assert _ours(finding) == here
+    # The setting overrides the persisted id, label and tag alike -- and every id
+    # used is kept, the persisted one with it.
     with override_settings(ASSURANCE_INSTALLATION_ID="prod-eu-1"):
-        there = marker_for(finding)
+        there = _ours(finding)
+        assert identity().all_ids() == ("prod-eu-1", row.installation_id)
     assert there.label != here.label and there.tag != here.tag and there.label.endswith(str(finding.uuid))
+    kept = set(AssuranceInstallationId.objects.values_list("installation_id", flat=True))
+    assert kept == {row.installation_id, "prod-eu-1"}
     # Created on first use when no migration made it.
     AssuranceInstallation.objects.all().delete()
     fresh = identity()
     assert fresh.installation_id != row.installation_id and AssuranceInstallation.objects.count() == 1
+
+
+@with_key
+def test_the_tag_binds_the_connector_and_its_destination():
+    """The same finding's tag for another tracker, another repository, project or
+    table, or another base URL, is another tag: one read in one tracker never
+    verifies in another. Case and a trailing slash are not another destination."""
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    finding = Finding.objects.get(deployment=dep)
+    tags = {
+        "jira": _ours(finding, "jira").tag,
+        "jira, another project": _ours(finding, "jira", endpoint={"base_url": "https://jira.example", "project_key": "OPS"}).tag,
+        "jira, another host": _ours(finding, "jira", endpoint={"base_url": "https://jira.other", "project_key": "SEC"}).tag,
+        "github": _ours(finding, "github_issues").tag,
+        "github, another repository": _ours(
+            finding, "github_issues", endpoint={"base_url": "https://api.github.example", "owner": "acme", "repo": "web"}
+        ).tag,
+        "servicenow": _ours(finding, "servicenow").tag,
+        "servicenow, another table": _ours(finding, "servicenow", endpoint={"base_url": "https://sn.example", "table": "problem"}).tag,
+    }
+    assert len(set(tags.values())) == len(tags), tags
+    same = _ours(finding, "jira", endpoint={"base_url": "https://JIRA.example/", "project_key": "sec"})
+    assert same.tag == tags["jira"]
+    # The label is the installation's, the same everywhere: what a look searches on.
+    assert _ours(finding, "jira").label == _ours(finding, "github_issues").label
 
 
 @with_key
@@ -2702,10 +2819,14 @@ _FORMS = [
 @with_key
 @pytest.mark.parametrize("connector_name,form", _FORMS)
 @pytest.mark.parametrize("attempt", ["uncertain", "none (a manual push)"])
-def test_an_issue_an_earlier_release_made_is_found_in_its_format_and_never_filed_twice(connector_name, form, attempt):
-    """An earlier release pushed the finding -- leaving the attempt uncertain, or
-    recording none at all (a manual push). Whatever marker that release wrote, the
-    look finds its issue, and the dispatch ends with that one ticket."""
+def test_an_issue_in_an_older_format_is_never_adopted_and_the_new_ticket_names_it(connector_name, form, attempt, caplog):
+    """An earlier release may have pushed the finding -- leaving the attempt
+    uncertain, or recording none at all (a manual push) -- or somebody edited an old
+    issue to mention it: which, cannot be told, since anyone who can edit an issue
+    can write any older format into it, today. The look finds it, whatever that
+    format; it is never adopted and never holds the dispatch. One ticket is filed,
+    naming it -- in its body, on the attempt and in a WARNING: a possible duplicate,
+    named; never a lost ticket."""
     admin = _admin()
     dep = _owed_pause(admin, connector_name)
     finding = Finding.objects.get(deployment=dep)
@@ -2714,11 +2835,33 @@ def test_an_issue_an_earlier_release_made_is_found_in_its_format_and_never_filed
     remote.add(ref, kind=kind, **fields)
     if attempt == "uncertain":
         _lost(dep, connector_name, carried=False, age=86400)
+    with caplog.at_level(logging.WARNING, logger="assurance.dispatch"):
+        assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+        named = f"Possible duplicate: {connector_name} issue(s) {ref},"
+        assert _logged(caplog, named)
+    row = DispatchAttempt.objects.get(deployment=dep)
+    assert row.outcome == DispatchAttempt.Outcome.SENT and row.external_ref not in ("", ref)
+    assert remote.creates == 1 and named in remote.issues[-1]["body"] and named in row.detail
+    assert remote.for_finding(finding) == [ref, row.external_ref]
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    assert remote.creates == 1
+
+
+@with_key
+@pytest.mark.parametrize("connector_name", ["jira", "github_issues", "servicenow"])
+def test_an_older_format_issue_the_attempt_records_is_the_one_adopted_without_a_tag(connector_name):
+    """An earlier release's push whose attempt records its issue: that issue --
+    read directly by its id -- is the finding's. Nothing is filed."""
+    admin = _admin()
+    dep = _owed_pause(admin, connector_name)
+    finding = Finding.objects.get(deployment=dep)
+    remote = FakeRemote()
+    kind, ref, fields = _older(finding, connector_name, "master")
+    remote.add(ref, kind=kind, **fields)
+    _lost(dep, connector_name, carried=False, age=86400, ref=ref)
     assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
     row = DispatchAttempt.objects.get(deployment=dep)
     assert (row.outcome, row.external_ref, remote.creates) == (DispatchAttempt.Outcome.SENT, ref, 0)
-    assert "older marker format" in (row.reconciled_detail or row.detail)
-    assert remote.for_finding(finding) == [ref]
 
 
 @with_key
@@ -2745,7 +2888,16 @@ def test_an_uncertain_push_an_earlier_release_made_is_held_not_pushed_when_nothi
     assert remote.creates == 1
 
 
-_PLANTS = ["label only", "body only, untagged", "a forged tag", "another installation's", "older format, new", "closed"]
+_PLANTS = [
+    "label only", "body only, untagged", "a forged tag", "another installation's", "older format, new", "closed",
+    "another tracker's tag", "another destination's tag",
+]
+#: For each connector: another connector, and the same one at another destination.
+_ELSEWHERE = {
+    "jira": ("github_issues", {"base_url": "https://jira.example", "project_key": "OPS"}),
+    "github_issues": ("jira", {"base_url": "https://api.github.example", "owner": "acme", "repo": "web"}),
+    "servicenow": ("jira", {"base_url": "https://sn.example", "table": "problem"}),
+}
 
 
 @with_key
@@ -2756,17 +2908,23 @@ _PLANTS = ["label only", "body only, untagged", "a forged tag", "another install
 )
 def test_an_issue_somebody_else_wrote_is_never_adopted_and_never_holds_the_dispatch(connector_name, plant, caplog):
     """Anyone who can open an issue can write a body, and anyone with triage
-    rights can copy a label. Neither can write the tag. An issue carrying the
-    marker without a tag that verifies -- or in an older format, but created after
-    this installation began tagging -- is ignored, named in a WARNING, and the
-    finding's own issue is created."""
-    from assurance.markers import Identity, marker_for
+    rights can copy a label. Neither can write the tag -- and a tag read in another
+    tracker, or at another destination of this one, does not verify here. An issue
+    carrying the marker without a tag that verifies -- or in an older format, but
+    created after this installation began tagging -- is ignored, named in a
+    WARNING, and the finding's own issue is created."""
+    from assurance.markers import Identity
 
     admin = _admin()
     dep = _owed_pause(admin, connector_name)
     finding = Finding.objects.get(deployment=dep)
-    ours = marker_for(finding)
-    theirs = marker_for(finding, Identity("staging", "another secret", None))
+    ours = _ours(finding, connector_name)
+    theirs = _ours(finding, connector_name, Identity("staging", "another secret", None))
+    other_connector, other_endpoint = _ELSEWHERE[connector_name]
+    copied = {
+        "another tracker's tag": _ours(finding, other_connector),
+        "another destination's tag": _ours(finding, connector_name, endpoint=other_endpoint),
+    }.get(plant)
     kind = _KIND[connector_name]
     uuid = str(finding.uuid)
     fields = {
@@ -2776,9 +2934,15 @@ def test_an_issue_somebody_else_wrote_is_never_adopted_and_never_holds_the_dispa
         "another installation's": {"labels": [theirs.label], "body": f"Athena finding: {uuid}\n{theirs.body_line}"},
         "older format, new": {"labels": [f"athena-{uuid}"], "body": f"Athena finding: {uuid}"},
         "closed": {"labels": [ours.label], "body": f"Athena marker: {ours.label}", "closed": True},
+        "another tracker's tag": {"labels": [ours.label], "body": f"Athena finding: {uuid}\n{copied.body_line if copied else ''}"},
+        "another destination's tag": {"labels": [ours.label], "body": f"Athena finding: {uuid}\n{copied.body_line if copied else ''}"},
     }[plant]
     if kind == "servicenow":
-        display = {"a forged tag": f"{ours.label} {'0' * 32}", "another installation's": theirs.text}.get(plant)
+        display = {
+            "a forged tag": f"{ours.label} {'0' * 32}", "another installation's": theirs.text,
+            "another tracker's tag": copied.text if copied else None,
+            "another destination's tag": copied.text if copied else None,
+        }.get(plant)
         fields = {"body": fields["body"], "closed": fields.get("closed", False), "correlation_id": uuid, "display": display}
     planted = {"jira": "EVIL-1", "github": "700", "servicenow": "sys-evil"}[kind]
     remote = FakeRemote()
@@ -2845,53 +3009,104 @@ def test_the_issue_recorded_for_the_finding_is_read_directly_however_many_copies
 
 
 @with_key
-def test_several_issues_an_earlier_release_may_have_made_are_held_and_a_reconciled_hold_is_never_a_third(caplog):
-    """Two issues in an older format, both from before this installation tagged
-    its markers: which is the finding's cannot be told, so nothing is adopted and
-    nothing created -- the only hold a look makes, and no one can make it now. A
-    person attests the provider lacks it; the run that follows holds it again, and
-    the person can reconcile it again. Never a third issue."""
+def test_several_issues_in_an_older_format_never_hold_the_dispatch_and_the_new_ticket_names_them(caplog):
+    """Two old issues that mention the finding -- an earlier release's, or two
+    somebody edited to mention it: which is its own cannot be told, and neither is
+    adopted. Nothing is held: one ticket is filed that names both, and the next run
+    files no other."""
     admin = _admin()
     dep = _owed_pause(admin)
     finding = Finding.objects.get(deployment=dep)
     remote = FakeRemote()
     before = _installed_at() - timedelta(days=3)
-    for ref in ("SEC-1", "OPS-77"):
+    for ref in ("SEC-1", "SEC-77"):
         remote.add(ref, labels=["athena"], body=f"Athena finding: {finding.uuid}", created=before)
-    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
+    with caplog.at_level(logging.WARNING, logger="assurance.dispatch"):
+        for _ in range(2):
+            assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+        assert _logged(caplog, "Possible duplicate: jira issue(s) SEC-1, SEC-77,")
     attempt = DispatchAttempt.objects.get(deployment=dep)
-    assert attempt.outcome == DispatchAttempt.Outcome.UNKNOWN and "2 issues in an older marker format" in attempt.detail
-    call_command(
-        "reconcile_dispatch_attempt", str(attempt.uuid), "--provider-lacks-it", "--by", "ops", stdout=io.StringIO()
-    )
-    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
-    attempt.refresh_from_db()
-    assert attempt.outcome == DispatchAttempt.Outcome.UNKNOWN
-    assert attempt.reconciled_at is None and attempt.is_uncertain, "the hold kept the old reconciliation"
-    assert remote.creates == 0
-    out = io.StringIO()
-    call_command(
-        "reconcile_dispatch_attempt", str(attempt.uuid), "--provider-has-it", "--external-ref", "SEC-1", "--by", "ops",
-        stdout=out,
-    )
-    assert "is now sent" in out.getvalue()
-    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
-    assert remote.creates == 0
+    assert attempt.outcome == DispatchAttempt.Outcome.SENT and attempt.external_ref == "SEC-3"
+    assert remote.creates == 1 and "Possible duplicate: jira issue(s) SEC-1, SEC-77," in remote.issues[-1]["body"]
 
 
 @with_key
-def test_the_marker_belongs_to_this_installation():
-    """A database restored into another environment, which sets its own
-    ASSURANCE_INSTALLATION_ID, pointed at the same tracker: it does not adopt the
-    first environment's issues."""
+@pytest.mark.parametrize("connector_name", ["jira", "github_issues", "servicenow"])
+@pytest.mark.parametrize("before,after", [(None, "prod-eu-1"), ("prod-eu-1", "prod-eu-2")])
+def test_setting_or_changing_the_installation_id_after_go_live_files_no_second_ticket(connector_name, before, after):
+    """Pushed by hand under one installation id -- the manual route records no
+    attempt -- and then ``ASSURANCE_INSTALLATION_ID`` is set, or changed. Every id
+    this database has used is kept, and a marker made under any of them verifies:
+    the look finds the issue, and nothing is filed again."""
+    admin = _admin()
+    dep = _owed_pause(admin, connector_name)
+    finding = Finding.objects.get(deployment=dep)
+    remote = FakeRemote()
+    binding = ConnectorBinding.objects.get(deployment=dep, connector=connector_name)
+    with override_settings(ASSURANCE_INSTALLATION_ID=before or ""):
+        assert binding.build_connector().push_finding(finding, transport=remote).ok
+    ref = remote.issues[-1]["key"]
+    with override_settings(ASSURANCE_INSTALLATION_ID=after):
+        assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    attempt = DispatchAttempt.objects.get(deployment=dep)
+    assert (attempt.outcome, attempt.external_ref, remote.creates) == (DispatchAttempt.Outcome.SENT, ref, 1)
+
+
+@with_key
+def test_a_database_given_a_new_identity_is_another_installation():
+    """A database restored into another environment is the same installation until
+    it is given a new identity (the README's reset): then it adopts none of the
+    first one's issues."""
+    from assurance.models import AssuranceInstallation, AssuranceInstallationId
+
     admin = _admin()
     dep = _owed_pause(admin)
     finding = Finding.objects.get(deployment=dep)
     remote = FakeRemote()
     remote.add("SEC-5", finding)
-    with override_settings(ASSURANCE_INSTALLATION_ID="staging"):
-        assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    AssuranceInstallationId.objects.all().delete()
+    AssuranceInstallation.objects.all().delete()
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
     assert remote.creates == 1 and DispatchAttempt.objects.get(deployment=dep).external_ref != "SEC-5"
+
+
+@with_key
+@pytest.mark.parametrize("connector_name", ["jira", "github_issues", "servicenow"])
+def test_a_lost_push_whose_issue_is_absent_is_pushed_once_and_never_held(connector_name):
+    """A real lost push, through the dispatcher: the connection dies after the
+    request went out, and nothing was created. The attempt records the marker its
+    push carried, so "absent" can be trusted for it: once long enough has passed
+    that the request cannot still land, it is pushed once -- never held for ever
+    as an earlier release's push would be -- and never twice."""
+    from assurance.markers import MARKER_VERSION
+
+    admin = _admin()
+    dep = _owed_pause(admin, connector_name)
+    finding = Finding.objects.get(deployment=dep)
+    remote = FakeRemote()
+    real_post = remote.post
+
+    def lost(url, *, headers, json):
+        raise ConnectionResetError("the connection died before the answer; nothing was created")
+
+    remote.post = lost
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
+    attempt = DispatchAttempt.objects.get(deployment=dep)
+    assert attempt.outcome == DispatchAttempt.Outcome.UNKNOWN
+    assert (attempt.marker, attempt.marker_version) == (_ours(finding, connector_name).text, MARKER_VERSION)
+    remote.post = real_post
+    # Not yet: a request the transport stopped waiting for may still land.
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.OWED
+    assert remote.creates == 0
+    DispatchAttempt.objects.filter(pk=attempt.pk).update(
+        updated_at=timezone.now() - timedelta(seconds=dispatch.CLAIM_SECONDS + 1)
+    )
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    attempt.refresh_from_db()
+    assert attempt.outcome == DispatchAttempt.Outcome.SENT and "held" not in attempt.detail
+    assert remote.creates == 1
+    assert dispatch.run_blocking_decision_dispatch(dep.pk, transport_factory=remote.factory) == dispatch.SETTLED
+    assert remote.creates == 1 and remote.for_finding(finding) == [attempt.external_ref]
 
 
 # ------------------------------------------------------ a halted push is undone
@@ -3173,10 +3388,13 @@ def test_a_setting_that_is_not_a_number_is_an_error_at_start_logged_once_and_the
     assert dispatch_settings() == []
 
 
-def test_the_line_an_operator_must_see_never_waits_behind_a_stalled_log_sink(caplog):
+def test_the_line_an_operator_must_see_never_waits_behind_a_stalled_log_sink(monkeypatch, caplog):
     """A log sink has stalled: a thread is inside it and never comes out. The line
-    is written at once to every other handler (and stderr), and the call does not
-    wait for the stalled one."""
+    is on stderr at once, and the call does not wait for the sink -- this thread
+    never writes to a handler. The handlers get it from the log thread once the
+    sink lets go."""
+    import sys
+
     from assurance import oplog
 
     stall, inside = threading.Event(), threading.Event()
@@ -3186,21 +3404,27 @@ def test_the_line_an_operator_must_see_never_waits_behind_a_stalled_log_sink(cap
             inside.set()
             stall.wait(30)
 
+    err = _Stderr()
     sink = Stalled()
     logging.getLogger("assurance").addHandler(sink)
     stuck = threading.Thread(target=lambda: logging.getLogger("assurance.dispatch").error("into the stalled sink"))
     try:
         stuck.start()
         assert inside.wait(5)
-        skipped = oplog.HANDLERS_SKIPPED[0]
         with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+            monkeypatch.setattr(sys, "__stderr__", err)
             began = time.monotonic()
             oplog.emit_now(logging.ERROR, "run `manage.py retry_blocking_dispatches --deployment %s`", 8)
             took = time.monotonic() - began
-        assert took < 0.5, took
-        assert oplog.HANDLERS_SKIPPED[0] == skipped + 1
-        assert "--deployment 8" in caplog.text
+            line = err.text()
+            monkeypatch.undo()
+            assert took < 0.5, took
+            assert "--deployment 8" in line
+            stall.set()
+            assert _logged(caplog, "--deployment 8")
     finally:
+        monkeypatch.undo()
+        err.close()
         stall.set()
         stuck.join(5)
         logging.getLogger("assurance").removeHandler(sink)
@@ -3377,6 +3601,41 @@ def test_the_first_request_starts_the_sweeper_and_one_that_died_is_started_again
                 thread.join(5)
 
 
+def test_requests_arriving_together_start_one_sweeper(monkeypatch):
+    """Four first requests at once, on an interpreter slow to start a thread: one
+    sweeper is started, not one each."""
+    stop = threading.Event()
+    monkeypatch.setattr(dispatch, "_SWEEPER", [])
+    monkeypatch.setattr(dispatch, "_SWEEPER_RETRY", {})
+    monkeypatch.setattr(dispatch, "_SWEEP_STOP", stop)
+    monkeypatch.setattr(dispatch, "_sweeper", lambda interval, event: event.wait(30))
+    real_start = threading.Thread.start
+    started = []
+
+    def slow_start(self):
+        if self.name == dispatch.SWEEPER_THREAD:
+            started.append(self)
+            time.sleep(0.05)
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", slow_start)
+    go = threading.Event()
+    callers = [threading.Thread(target=lambda: go.wait(5) and dispatch.ensure_owed_sweeper()) for _ in range(4)]
+    try:
+        for caller in callers:
+            real_start(caller)
+        go.set()
+        for caller in callers:
+            caller.join(5)
+        assert len(started) == 1, f"{len(started)} sweepers started"
+        dispatch.ensure_owed_sweeper()
+        assert len(started) == 1 and dispatch._SWEEPER[0][1].is_alive()
+    finally:
+        stop.set()
+        for thread in started:
+            thread.join(5)
+
+
 # ------------------------------------------ unrecorded dispatches: a hard bound
 
 
@@ -3385,20 +3644,27 @@ def test_unrecorded_dispatches_have_a_hard_bound_and_past_it_each_is_named_at_on
     """The owed table cannot be read (the code deployed ahead of its migration):
     every stop is unrecorded. Their threads are started past the bound on waiting
     runs, but never past twice it; each one past that is named at ERROR, in the
-    stop's own thread, at once."""
+    stop's own thread, on stderr, at once -- and in the log, from the log thread."""
+    import sys
+
     released = threading.Event()
     monkeypatch.setattr(dispatch, "_blocking_dispatch_job", lambda pk, **kw: released.wait(HOLD))
     monkeypatch.setattr(dispatch, "_JOBS", {})
+    err = _Stderr()
     try:
         with override_settings(ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS=1, ASSURANCE_DISPATCH_MAX_WAITING_RUNS=1):
             outcomes = [dispatch.start_blocking_decision_dispatch(6000 + n, unrecorded=True) for n in range(6)]
             with caplog.at_level(logging.ERROR, logger="assurance.dispatch"):
+                monkeypatch.setattr(sys, "__stderr__", err)
                 assert dispatch.start_blocking_decision_dispatch(6006, unrecorded=True) == dispatch.FULL
-                # Written before the call returned: no waiting on the log thread.
-                assert "retry_blocking_dispatches --deployment 6006" in caplog.text
+                # On stderr before the call returned.
+                assert "retry_blocking_dispatches --deployment 6006" in err.text()
+                monkeypatch.setattr(sys, "__stderr__", sys.stderr)
+                assert _logged(caplog, "retry_blocking_dispatches --deployment 6006")
         assert outcomes == [dispatch.STARTED] * 4 + [dispatch.FULL] * 2
         assert len(dispatch._JOBS) == 4
     finally:
+        err.close()
         released.set()
         _settle()
 
@@ -3503,3 +3769,34 @@ def test_migrating_back_past_0043_is_refused_while_an_uncertain_attempt_carries_
     DispatchAttempt.objects.filter(pk=closed.pk).update(outcome=DispatchAttempt.Outcome.UNKNOWN)
     with pytest.raises(RuntimeError, match="cannot look for"):
         back(apps, None)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_0043_adds_the_marker_without_copying_the_table_and_older_code_can_still_insert():
+    """0043 adds ``marker`` nullable, with no default: a plain ADD COLUMN, not a
+    copy of the table (which holds the write lock for as long as the copy takes).
+    Code still serving from before it -- a rolling deploy, migrate then restart --
+    inserts attempts without the column; each is read as an earlier release's."""
+    from django.db import connection
+
+    out = io.StringIO()
+    call_command("sqlmigrate", "assurance", "0043", stdout=out)
+    sql = out.getvalue()
+    assert "new__assurance_dispatchattempt" not in sql, "0043 copies the attempts table"
+    assert 'ALTER TABLE "assurance_dispatchattempt" ADD COLUMN "marker" varchar(128) NULL' in sql
+    admin = _admin()
+    dep = _scanned(admin)
+    _findings(dep, count=1)
+    finding = Finding.objects.get(deployment=dep)
+    now = timezone.now()
+    with connection.cursor() as cursor:
+        # The columns code before 0043 writes, and no others.
+        cursor.execute(
+            "INSERT INTO assurance_dispatchattempt (uuid, deployment_id, finding_id, binding_id, connector, outcome, "
+            "trigger, detail, external_ref, operation_id, policy_epoch, reconciled_at, reconciled_detail, attempts, "
+            "created_at, updated_at) VALUES (%s, %s, %s, NULL, 'jira', 'unknown', 'manual', '', '', 'op', 'paused', "
+            "NULL, '', 1, %s, %s)",
+            [uuid.uuid4().hex, dep.pk, finding.pk, now, now],
+        )
+    attempt = DispatchAttempt.objects.get(finding=finding)
+    assert attempt.marker is None and attempt.marker_version is None and attempt.is_uncertain

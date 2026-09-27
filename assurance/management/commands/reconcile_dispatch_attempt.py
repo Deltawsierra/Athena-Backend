@@ -5,7 +5,7 @@ runner that sent it never recorded how it ended. The dispatcher settles those
 itself where the system can be asked -- Jira, GitHub and ServiceNow are searched
 for the finding's issue -- and resends where the system deduplicates (the webhook's
 ``Idempotency-Key``). Where it can do neither (Splunk HEC, a system that could not
-be reached, or several issues carrying one finding's marker), the attempt is held
+be reached, or an earlier release's push of which no issue is found), the attempt is held
 and the blocking-decision dispatch that contains it stays owed until a person has
 looked:
 

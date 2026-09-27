@@ -14,7 +14,7 @@ from typing import Any
 
 from django.conf import settings
 
-from ..markers import BODY_PREFIX, marker_for
+from ..markers import BODY_PREFIX
 from .base import (
     LOOK_PAGE_SIZE,
     Connector,
@@ -56,6 +56,7 @@ class ServiceNowConnector(Connector):
     config_class = ServiceNowConfig
     secret_field = "token"
     settings_fields = ("base_url", "table")
+    destination_fields = ("base_url", "table")
 
     @classmethod
     def config_from_settings(cls) -> ServiceNowConfig:
@@ -65,10 +66,10 @@ class ServiceNowConnector(Connector):
             token=getattr(settings, "CONNECTOR_SERVICENOW_TOKEN", None),
         )
 
-    def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:
+    def _format_finding(self, finding: Any, note: str = "") -> tuple[str, dict, dict]:
         cfg: ServiceNowConfig = self.config  # type: ignore[assignment]
         summary = finding_summary(finding)
-        marker = marker_for(finding)
+        marker = self.marker(finding)
         url = f"{cfg.base_url.rstrip('/')}/api/now/table/{cfg.table}"
         headers = {
             "Authorization": f"Bearer {cfg.token}",
@@ -77,7 +78,7 @@ class ServiceNowConnector(Connector):
         }
         payload = {
             "short_description": summary["title"][:160],
-            "description": finding_body(summary) + f"\n{marker.body_line}",
+            "description": finding_body(summary) + (f"\n\n{note}" if note else "") + f"\n{marker.body_line}",
             "impact": _IMPACT.get(summary["severity"], "2"),
             "urgency": _IMPACT.get(summary["severity"], "2"),
             # A stable correlation id so re-pushing the same finding reconciles to

@@ -2541,10 +2541,13 @@ class DispatchAttempt(models.Model):
     # The marker the last push carried (``<label> <tag>``, see
     # :mod:`assurance.markers`) and its format's version. A look for an uncertain
     # push searches for THIS marker, and trusts "none found" only when it is the
-    # current format: a push made in another format (every row older than the
-    # field has a blank one) is found by looking in every format this code has
-    # ever written, and is never read as absent, so never pushed again blind.
-    marker = models.CharField(max_length=128, blank=True, default="")
+    # current format: a push made in another format -- NULL, as every row older
+    # than the field has it, and every row code before it inserts -- is looked
+    # for in every format this code has ever written, and is held when nothing is
+    # found, never pushed again blind. Nullable, with no default, so adding it is
+    # a plain ADD COLUMN (no table rebuild) and code still serving from before it
+    # can go on inserting attempts.
+    marker = models.CharField(max_length=128, null=True, blank=True)
     marker_version = models.PositiveSmallIntegerField(null=True, blank=True)
     attempts = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2644,10 +2647,9 @@ class DecisionDispatchDue(models.Model):
 class AssuranceInstallation(models.Model):
     """This installation's identity in the systems it writes to: one row.
 
-    ``installation_id`` scopes every marker this installation puts on an issue, so
-    a database restored into another environment -- which sets its own
-    ``ASSURANCE_INSTALLATION_ID``, which overrides this -- never adopts the first
-    one's issues. ``marker_secret`` keys the tag that makes a marker verifiable
+    ``installation_id`` names the installation in every marker it puts on an issue
+    (``ASSURANCE_INSTALLATION_ID``, when set, overrides it; every id used is kept in
+    :class:`AssuranceInstallationId`). ``marker_secret`` keys the tag that makes a marker verifiable
     (:mod:`assurance.markers`): only this backend holds it, so an issue someone
     else wrote cannot carry a tag that verifies. Both are random, generated once
     (by the migration that adds this table, or on first use) and never derived
@@ -2663,6 +2665,21 @@ class AssuranceInstallation(models.Model):
 
     def __str__(self) -> str:
         return "this installation's marker identity"
+
+
+class AssuranceInstallationId(models.Model):
+    """Every installation id this database has written markers under -- the
+    persisted one, and each ``ASSURANCE_INSTALLATION_ID`` it has been given --
+    recorded the first time it is used and never removed. A marker made under any
+    of them is this installation's (:mod:`assurance.markers`), so setting or
+    changing the id after go-live never files a second ticket. Never exposed by
+    any API."""
+
+    installation_id = models.CharField(max_length=64, unique=True)
+    first_used_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self) -> str:
+        return "an installation id this database has used"
 
 
 # ---------------------------------------------------------------------------

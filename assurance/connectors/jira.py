@@ -13,7 +13,6 @@ from typing import Any
 
 from django.conf import settings
 
-from ..markers import legacy_labels, marker_for
 from .base import (
     LOOK_PAGE_SIZE,
     Connector,
@@ -57,6 +56,7 @@ class JiraConnector(Connector):
     config_class = JiraConfig
     secret_field = "token"
     settings_fields = ("base_url", "project_key", "issue_type")
+    destination_fields = ("base_url", "project_key")
 
     @classmethod
     def config_from_settings(cls) -> JiraConfig:
@@ -67,10 +67,10 @@ class JiraConnector(Connector):
             issue_type=getattr(settings, "CONNECTOR_JIRA_ISSUE_TYPE", None) or "Bug",
         )
 
-    def _format_finding(self, finding: Any) -> tuple[str, dict, dict]:
+    def _format_finding(self, finding: Any, note: str = "") -> tuple[str, dict, dict]:
         cfg: JiraConfig = self.config  # type: ignore[assignment]
         summary = finding_summary(finding)
-        marker = marker_for(finding)
+        marker = self.marker(finding)
         url = f"{cfg.base_url.rstrip('/')}/rest/api/2/issue"
         headers = {
             "Authorization": f"Bearer {cfg.token}",
@@ -83,7 +83,7 @@ class JiraConnector(Connector):
                 "summary": summary["title"][:255],
                 # The marker's tag in the description: what makes this issue
                 # verifiably this installation's (assurance.markers).
-                "description": finding_body(summary) + f"\n{marker.body_line}",
+                "description": finding_body(summary) + (f"\n\n{note}" if note else "") + f"\n{marker.body_line}",
                 "issuetype": {"name": cfg.issue_type},
                 "priority": {"name": _PRIORITY.get(summary["severity"], "Medium")},
                 # The marker label is how a lost answer or a second runner finds
@@ -107,7 +107,7 @@ class JiraConnector(Connector):
         # first, so the original comes before any copy of it.
         cfg: JiraConfig = self.config  # type: ignore[assignment]
         base = cfg.base_url.rstrip("/")
-        labels = ", ".join(f'"{label}"' for label in [marker_for(finding).label, *legacy_labels(finding)])
+        labels = ", ".join(f'"{label}"' for label in self._labels(finding))
         params = {
             "jql": (
                 f'project = "{cfg.project_key}" AND (labels in ({labels}) OR text ~ "\\"{finding.uuid}\\"") '

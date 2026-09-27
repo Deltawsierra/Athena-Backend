@@ -51,7 +51,7 @@ from django.db import connections, transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from .markers import MARKER_VERSION, Marker, marker_for
+from .markers import MARKER_VERSION, Marker
 from .models import (
     RESOLVED_FINDING_STATUSES,
     ConnectorBinding,
@@ -284,6 +284,19 @@ def _note_ignored(look, finding, connector_name) -> None:
         )
 
 
+def _possible_note(look, connector_name) -> str:
+    """The line a ticket filed beside possible duplicates carries: which issues an
+    earlier release may have made for the finding. Empty when there are none."""
+    if not look.possible:
+        return ""
+    refs = ", ".join(str(r) for r in look.possible[:20])
+    more = f" and {len(look.possible) - 20} more" if len(look.possible) > 20 else ""
+    return (
+        f"Possible duplicate: {connector_name} issue(s) {refs}{more}, in an older Athena marker format that "
+        "cannot be verified, mention this finding and may be an earlier release's ticket for it. Close one of them."
+    )
+
+
 def _hold(attempt, why: str):
     """Keep an uncertain attempt held, and say why on it (without touching its age)."""
     detail = (
@@ -300,47 +313,51 @@ def _resolve_uncertain(attempt, connector, transport, finding):
     """Settle an attempt whose push may have reached the provider -- one whose
     answer was lost (UNKNOWN), or one recorded as SENDING by a runner that never
     recorded how it ended -- by looking for the issue itself. Returns
-    ``(attempt, closed_ref)``: the attempt SENT with the issue it found, FAILED when
-    the provider certainly has none, or unchanged (held) when the look could not
-    tell; ``closed_ref`` when the issue was found and the tracker has closed it,
-    which the caller records.
+    ``(attempt, closed_ref, look)``: the attempt SENT with the issue it found,
+    FAILED when the provider certainly has none, or unchanged (held) when the look
+    could not tell; ``closed_ref`` when the issue was found and the tracker has
+    closed it, which the caller records; and the look, whose possible duplicates
+    the push that follows names.
 
-    It looks for the marker the push CARRIED (recorded on the attempt). "None
-    found" is trusted only when that is the current, verifiable format: a push
-    made by an earlier release -- no marker recorded -- is looked for in every
-    format this code has written, adopted when it is found, and otherwise held, never
-    pushed again blind."""
-    carried = Marker.parse(attempt.marker) if attempt.marker_version == MARKER_VERSION else None
+    It looks for the marker the push CARRIED (recorded on the attempt), and for
+    this connector's marker under every id this installation has used. "None
+    found" is trusted only when the push carried the current, verifiable format. A
+    push made by an earlier release -- no marker recorded -- is looked for in every
+    format this code has written; an issue in an older format is never adopted
+    (only a recorded one or a verified one is), so when the look names possible
+    duplicates it is pushed again, long enough after, as a ticket that names them;
+    when it finds nothing at all it is held, never pushed again blind."""
+    carried = Marker.parse(attempt.marker or "") if attempt.marker_version == MARKER_VERSION else None
     look = connector.find_existing(
         finding, transport=transport, known_ref=attempt.external_ref or None, expected=carried, legacy=carried is None
     )
     _note_ignored(look, finding, attempt.connector)
     if look.state == look.FOUND:
         if look.closed:
-            return attempt, look.external_ref
+            return attempt, look.external_ref, look
         # This installation's issue for it (its marker verifies, or it is the one
-        # recorded, or the one issue an earlier release made): the push landed.
+        # recorded): the push landed.
         attempt.outcome = DispatchAttempt.Outcome.SENT
         attempt.external_ref = look.external_ref or attempt.external_ref
-    elif look.state == look.ABSENT and carried is None:
+    elif look.state == look.ABSENT and carried is None and not look.possible:
         return _hold(
             attempt,
             "it was pushed by an earlier release, whose marker cannot be verified, and no issue of it was "
             f"found ({look.detail})",
-        ), None
-    elif look.state == look.AMBIGUOUS:
-        return _hold(attempt, look.detail), None
+        ), None, look
     elif look.state == look.ABSENT and timezone.now() - attempt.updated_at > timedelta(seconds=CLAIM_SECONDS):
         # Absent, and long enough after the request that it is not still on its
         # way (a request the transport stopped waiting for can still arrive): it
-        # certainly never landed, so it may be pushed again.
+        # certainly never landed, so it may be pushed again. An earlier release's
+        # push whose look named possible duplicates is pushed again too -- as a
+        # ticket that names them -- never held on issues anyone could have edited.
         attempt.outcome = DispatchAttempt.Outcome.FAILED
     else:
-        return attempt, None
+        return attempt, None, look
     attempt.reconciled_at = timezone.now()
     attempt.reconciled_detail = f"reconciled by looking for the issue: {look.detail}"
     attempt.save(update_fields=["outcome", "external_ref", "reconciled_at", "reconciled_detail", "updated_at"])
-    return attempt, None
+    return attempt, None, look
 
 
 def _closed_issue(finding, binding, connector, transport, ref, *, trigger, before_push, reauthorize=False):
@@ -405,6 +422,9 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
         return existing
     operational = binding.enabled and key_ok and binding.is_operational()
     transport = connector = None
+    # The line the created issue's body carries when the look named possible
+    # duplicates (issues in an older format, never adopted).
+    note = ""
     if existing is not None and existing.is_uncertain:
         # In an UNRESOLVED uncertain state the provider may have committed it, and a
         # blind retry would create a second ticket nobody asked for. That case used
@@ -415,7 +435,8 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
             return existing
         transport = (transport_factory or _default_transport_factory)()
         connector = binding.build_connector()
-        existing, closed_ref = _resolve_uncertain(existing, connector, transport, finding)
+        existing, closed_ref, look = _resolve_uncertain(existing, connector, transport, finding)
+        note = _possible_note(look, binding.connector)
         if closed_ref is not None:
             # The push landed, and the tracker has closed its issue since.
             return _closed_issue(
@@ -519,6 +540,7 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
                 finding, transport=transport, known_ref=(existing.external_ref or None) if existing else None
             )
             _note_ignored(look, finding, binding.connector)
+            note = _possible_note(look, binding.connector)
             if look.state == look.FOUND and not look.closed:
                 return _record(
                     finding,
@@ -529,18 +551,6 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
                     reauthorize=moved is not None,
                     external_ref=look.external_ref,
                 )
-            if look.state == look.AMBIGUOUS:
-                # Several issues an earlier release may have made, none verifiable:
-                # which is this finding's cannot be told, and creating one more would
-                # not settle it. Held, for a person.
-                return _record(
-                    finding,
-                    binding,
-                    trigger=trigger,
-                    outcome=DispatchAttempt.Outcome.UNKNOWN,
-                    detail=f"held, not pushed: {look.detail}; reconcile it (manage.py reconcile_dispatch_attempt)",
-                    reauthorize=moved is not None,
-                )
             if look.state == look.FOUND:
                 return _closed_issue(
                     finding, binding, connector, transport, look.external_ref,
@@ -548,7 +558,7 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
                 )
 
     op = operation_id(finding, binding.connector)
-    marker = marker_for(finding)
+    marker = connector.marker(finding)
     prior = None
     if existing is not None:
         prior = {
@@ -593,7 +603,12 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
         # moved): that is the authority this push is made under.
         sending.policy_epoch = policy_epoch(finding.deployment)
         fields.append("policy_epoch")
-    result = connector.push_finding(finding, transport=transport, operation_id=op)
+    if note:
+        # Filed beside issues an earlier release may have made -- never adopted,
+        # since anyone who can edit an old issue can make it mention the finding:
+        # a possible duplicate, named in the new issue and here, never a lost one.
+        logger.warning("finding %s: %s", finding.uuid, note)
+    result = connector.push_finding(finding, transport=transport, operation_id=op, note=note)
     if result.ok:
         outcome = DispatchAttempt.Outcome.SENT
     elif result.uncertain:
@@ -606,7 +621,7 @@ def _dispatch_one(finding, binding, *, trigger, key_ok, transport_factory, befor
         outcome = DispatchAttempt.Outcome.FAILED
     # The same attempt, finished: the SENDING record above already counted it.
     sending.outcome = outcome
-    sending.detail = result.detail
+    sending.detail = (f"{result.detail}; {note}" if note else result.detail)[:_ERROR_LIMIT]
     sending.external_ref = result.external_ref or ""
     sending.save(update_fields=fields)
     return sending
@@ -862,6 +877,8 @@ FIRST_SWEEP_AFTER = 5.0
 SWEEPER_THREAD = "assurance-sweeper"
 #: This process's sweeper, as ``[(pid, thread)]``.
 _SWEEPER: list = []
+#: Held while a thread of this process starts the sweeper (never waited on).
+_SWEEPER_STARTING = threading.Lock()
 _SWEEP_STOP = threading.Event()
 #: Most owed rows one sweep reads; it claims and starts as many as the bound allows.
 _SWEEP_BATCH = 1000
@@ -896,7 +913,7 @@ def _after_fork_in_child() -> None:
     the child, where that thread does not exist -- run slots others had taken, the
     parent's jobs and the parent's sweeper, which are not running here. All of it
     starts afresh (:mod:`assurance.oplog` does the same for the log queue)."""
-    global _JOBS, _JOBS_LOCK, _SLOTS, _SLOTS_LOCK, _SWEEP_STOP
+    global _JOBS, _JOBS_LOCK, _SLOTS, _SLOTS_LOCK, _SWEEP_STOP, _SWEEPER_STARTING
     _JOBS = {}
     _JOBS_LOCK = threading.Lock()
     _SLOTS = {}
@@ -904,6 +921,7 @@ def _after_fork_in_child() -> None:
     _SWEEPER.clear()
     _SWEEPER_RETRY.clear()
     _SWEEP_STOP = threading.Event()
+    _SWEEPER_STARTING = threading.Lock()
     _NOT_STARTED[0] = 0
     _UNRECORDED_REFUSED[0] = 0
 
@@ -1574,6 +1592,10 @@ def _sweeper(interval: float, stop) -> None:
     if stop.wait(min(interval, FIRST_SWEEP_AFTER)):
         return
     while True:
+        if _oplog._BUF:
+            # Records queued while no thread could start (a stop's ERROR among
+            # them): the log thread is started again to write them.
+            _oplog.start_pump()
         try:
             sweep_owed_blocking_dispatches()
         except Exception:  # noqa: BLE001 - it never raises; if it did, sweep again next time
@@ -1594,7 +1616,18 @@ def start_owed_sweeper() -> bool:
     started it starts its own. A start that fails is tried again on a later call,
     after a backoff that doubles up to :data:`SWEEPER_RETRY_MAX_SECONDS`, and each
     failure is logged once. Starts the log pump too, so it exists before any
-    shortage of threads. Never blocks and never raises."""
+    shortage of threads. Never blocks and never raises. One start at a time per
+    process: a caller that finds another starting it returns at once, so requests
+    arriving together start one sweeper, not one each."""
+    if not _SWEEPER_STARTING.acquire(blocking=False):
+        return False  # another thread of this process is starting it now
+    try:
+        return _start_owed_sweeper()
+    finally:
+        _SWEEPER_STARTING.release()
+
+
+def _start_owed_sweeper() -> bool:
     pid = os.getpid()
     try:
         interval = _sweep_interval()

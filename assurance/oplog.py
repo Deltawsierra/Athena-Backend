@@ -1,10 +1,13 @@
 """Two ways to log from a path that must not wait, chosen by what the line is for.
 
 - :func:`emit_now` -- for what an operator must see to recover work that would
-  otherwise be lost: a dispatch that is neither recorded nor started. Written in
-  the calling thread, at once, and it depends on no other thread: one line to
-  stderr, written only if stderr can take it without waiting, and the same line
-  to the logger's handlers, passing over any handler another thread is stuck in.
+  otherwise be lost: a dispatch that is neither recorded nor started. In the
+  calling thread (a stop's), at once, it writes ONE line to stderr, and only if
+  stderr can take it without waiting (``select``); it never writes to a log
+  handler, whose sink may be slow or stalled. The record for the handlers goes
+  through :func:`log_later`. When no thread can start, it waits in the queue --
+  bounded, and counted in :data:`KEPT_FOR_WRITER` -- until a later request, the
+  sweeper or the exit starts or runs the writer.
 - :func:`log_later` -- for everything else (noise, as far as recovery goes): the
   record is made here, with its time, thread and message, and written by a
   background thread, so a slow or stalled log sink never holds a stop or a lock a
@@ -97,13 +100,14 @@ def start_pump() -> bool:
         return False
 
 
-def log_later(level, msg, *args, exc=False, logger_name=None) -> None:
+def log_later(level, msg, *args, exc=False, logger_name=None) -> bool:
     """Log from the background pump, never here. ``exc``: include the traceback of
-    the exception being handled (as text: no frame is kept alive). Never raises."""
+    the exception being handled (as text: no frame is kept alive). Never raises.
+    Returns whether the pump is running to write it (``False``: it waits, queued)."""
     try:
         target = logging.getLogger(logger_name) if logger_name else logger
         if not target.isEnabledFor(level):
-            return
+            return True
         record = target.makeRecord(target.name, level, "", 0, msg, args, None)
         record.msg, record.args = record.getMessage(), None
         if exc and sys.exc_info()[0] is not None:
@@ -115,8 +119,8 @@ def log_later(level, msg, *args, exc=False, logger_name=None) -> None:
             _BUF.append(record)
             _COND.notify()
     except Exception:  # noqa: BLE001, S110 - never raised into a stop
-        return
-    start_pump()
+        return False
+    return start_pump()
 
 
 def queued() -> int:
@@ -147,44 +151,19 @@ def _write_stderr_now(line: str) -> bool:
         return False
 
 
-#: Handlers :func:`emit_now` passed over because another thread was inside them.
-HANDLERS_SKIPPED = [0]
-
-
-def _handle_without_waiting(target, record) -> None:
-    """``target.handle(record)``, except that a handler another thread is inside
-    -- its lock held: a sink that is slow or stalled -- is passed over rather than
-    waited on (and counted). Each free handler writes the record here."""
-    if target.disabled or not target.filter(record):
-        return
-    current = target
-    while current is not None:
-        for handler in current.handlers:
-            if record.levelno < handler.level:
-                continue
-            lock = getattr(handler, "lock", None)
-            if lock is not None and not lock.acquire(blocking=False):
-                HANDLERS_SKIPPED[0] += 1
-                continue
-            try:
-                if handler.filter(record):
-                    handler.emit(record)
-            except Exception:  # noqa: BLE001, S110 - stderr already has it
-                pass
-            finally:
-                if lock is not None:
-                    lock.release()
-        if not current.propagate:
-            break
-        current = current.parent
+#: Records :func:`emit_now` queued while no writer thread could start: they wait,
+#: bounded, for the next request, sweep or exit to start or run the writer.
+KEPT_FOR_WRITER = [0]
 
 
 def emit_now(level, msg, *args, logger_name=None) -> None:
-    """Write one line an operator must see, here and now, depending on no other
-    thread: to stderr -- only if it can take the line without waiting -- and to the
-    logger's handlers, passing over any handler another thread is inside (a slow
-    or stalled sink), so it never waits behind one. Never raises. Keep ``msg`` to
-    one short line."""
+    """Write one line an operator must see, now, in this thread, depending on no
+    other thread and waiting on nothing: to stderr, only if it can take the line
+    without waiting. This thread never writes to a log handler -- a slow or
+    stalled sink would hold it (a stop's answer) -- so the record for the handlers
+    is queued for the log thread (:func:`log_later`); when no thread can start, it
+    waits there, bounded and counted (:data:`KEPT_FOR_WRITER`). Never raises. Keep
+    ``msg`` to one short line."""
     target = logging.getLogger(logger_name) if logger_name else logger
     try:
         text = msg % args if args else str(msg)
@@ -192,11 +171,8 @@ def emit_now(level, msg, *args, logger_name=None) -> None:
         text = f"{msg} {args!r}"
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     _write_stderr_now(f"{stamp} {logging.getLevelName(level)} {target.name} {text}")
-    try:
-        if target.isEnabledFor(level):
-            _handle_without_waiting(target, target.makeRecord(target.name, level, "", 0, text, None, None))
-    except Exception:  # noqa: BLE001, S110 - stderr already has it
-        pass
+    if not log_later(level, "%s", text, logger_name=logger_name):
+        KEPT_FOR_WRITER[0] += 1
 
 
 def drain(limit: float = 5.0) -> int:

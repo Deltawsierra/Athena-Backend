@@ -7,13 +7,16 @@ from django.db import migrations, models
 
 
 def _create_installation(apps, schema_editor):
-    """This installation's random identity and marker secret, generated once. Never
-    derived from SECRET_KEY: rotating that key must change no marker."""
+    """This installation's random identity and marker secret, generated once, and
+    its id recorded as used. Never derived from SECRET_KEY: rotating that key must
+    change no marker."""
     AssuranceInstallation = apps.get_model("assurance", "AssuranceInstallation")
-    AssuranceInstallation.objects.get_or_create(
+    AssuranceInstallationId = apps.get_model("assurance", "AssuranceInstallationId")
+    row, _ = AssuranceInstallation.objects.get_or_create(
         pk=1,
         defaults={"installation_id": secrets.token_hex(16), "marker_secret": secrets.token_hex(32)},
     )
+    AssuranceInstallationId.objects.get_or_create(installation_id=row.installation_id)
 
 
 def _back_to_0042(apps, schema_editor):
@@ -56,10 +59,22 @@ class Migration(migrations.Migration):
                 ("created_at", models.DateTimeField(default=django.utils.timezone.now)),
             ],
         ),
+        migrations.CreateModel(
+            name="AssuranceInstallationId",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("installation_id", models.CharField(max_length=64, unique=True)),
+                ("first_used_at", models.DateTimeField(default=django.utils.timezone.now)),
+            ],
+        ),
+        # Nullable, with no default: a plain ADD COLUMN on SQLite -- no copy of the
+        # table, so the write lock is held for no time whatever its size -- and code
+        # still serving from before this migration (a rolling deploy: migrate, then
+        # restart) goes on inserting attempts, which read as an older release's.
         migrations.AddField(
             model_name="dispatchattempt",
             name="marker",
-            field=models.CharField(blank=True, default="", max_length=128),
+            field=models.CharField(blank=True, max_length=128, null=True),
         ),
         migrations.AddField(
             model_name="dispatchattempt",
