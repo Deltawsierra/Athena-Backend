@@ -254,8 +254,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       try {
-        // Several restored tabs refresh at once; refreshSession keeps the
-        // session for all of them (refresh-token.ts).
+        // Several restored tabs refresh at once; refreshSession follows the
+        // single-use token chain so each recovers its own session, up to its
+        // retry budget of contending tabs (refresh-token.ts).
         const outcome = await refreshSession(localStorage, postRefresh);
         if (outcome.kind !== "refreshed" || cancelled) return;
 

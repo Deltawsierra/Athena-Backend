@@ -183,3 +183,57 @@ test("a refresh that gets no answer leaves storage as it is", async () => {
   assert.deepEqual(outcome, { kind: "unreachable" });
   assert.equal(store.getItem(REFRESH_TOKEN_KEY), "t0");
 });
+
+// F4 (round 5): four or more tabs restoring at once used to exhaust the
+// three-attempt budget, and a losing tab was signed out even though the session
+// was alive on a newer token. Each tab now follows the single-use token chain
+// far enough to win its own token, so all of them recover.
+test("eight tabs restoring at once all recover their own session", async () => {
+  for (let trial = 0; trial < 20; trial++) {
+    const store = new Storage();
+    store.setItem(REFRESH_TOKEN_KEY, "t0");
+    const live = new Set(["t0"]);
+    const spent = new Set<string>();
+    let issued = 0;
+    const post = (refresh: string): Promise<RefreshAnswer> => {
+      let answer: RefreshAnswer;
+      if (live.has(refresh)) {
+        live.delete(refresh);
+        spent.add(refresh);
+        const next = `t${++issued}`;
+        live.add(next);
+        answer = { ok: true, status: 200, body: { access: `a-${next}`, refresh: next } };
+      } else if (spent.has(refresh)) {
+        answer = { ok: false, status: 401, body: { code: "refresh_token_already_used" } };
+      } else {
+        answer = { ok: false, status: 401, body: { detail: "Token is invalid" } };
+      }
+      return Promise.resolve(answer);
+    };
+    const tabs = Array.from({ length: 8 }, () => refreshSession(store, post, { sleep: quickSleep }));
+    const outcomes = await Promise.all(tabs);
+    assert.deepEqual(outcomes.map((o) => o.kind), Array(8).fill("refreshed"), `trial ${trial}`);
+    const stored = store.getItem(REFRESH_TOKEN_KEY);
+    assert.ok(stored !== null && live.has(stored), `trial ${trial}: the stored token refreshes`);
+  }
+});
+
+// F4 (round 5): a spent token whose successor never arrives (a lost refresh
+// response) used to wait the full 2,000 ms before signing out -- on the stop's
+// 401 path, a stop delayed two seconds. The default wait is shorter now, so the
+// tab gives up promptly; a newer token that IS on its way is still picked up as
+// soon as it is stored (the two-tab tests above).
+test("a spent token whose successor never comes gives up within the shorter default wait", async () => {
+  const store = new Storage();
+  store.setItem(REFRESH_TOKEN_KEY, "t0");
+  const backend = new Backend();
+  backend.live.delete("t0");
+  backend.spent.add("t0");
+  let slept = 0;
+  const outcome = refreshSession(store, backend.post, { sleep: async () => void slept++ });
+  await settle();
+  backend.release(0);
+  assert.deepEqual(await outcome, { kind: "signed-out" });
+  assert.equal(slept, 10, "500 ms / 50 ms polls, not the old 2000 ms / 50 ms = 40");
+  assert.equal(store.getItem(REFRESH_TOKEN_KEY), null);
+});

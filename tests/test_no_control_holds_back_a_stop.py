@@ -56,15 +56,24 @@ stop (L2); a removed or deactivated operator's refresh is not exempt (L3); and
 the service token reads only the stop commands in flight (L4).
 
 Round 5 (the adversary's round-4 findings): what stop drafts cost is bounded
-without refusing one -- a reason is at most 1,000 characters, an account's
-unsigned stop drafts past its limit supersede its oldest and never another
-account's, and each stop-lane read is bounded in bytes and says what it left
-out (H1); reads that differ only in what the view ignores share one computation
-(H2); a draft is reused only for an identical reason (M1); two signatures at
-once both count (M3); identical drafts at once are one row (L1); every stop,
-with every limit saturated, is answered within a stated bound, so a control
-that delays a stop without refusing it fails (L2); and removing an operator
-keeps their engagements.
+without refusing one -- a stop is never refused for its reason length (the bound
+matches the dashboard's 2,000, and a longer stop reason is truncated, not 400'd,
+while a non-stop past it is input validation), an account's unsigned stop drafts
+past its limit supersede its oldest and never another account's, and each
+stop-lane read is bounded in bytes and says what it left out (H1); reads that
+differ only in what the view ignores share one computation (H2); a draft is
+reused only for an identical reason (M1); two signatures at once both count
+(M3); identical drafts at once are one row (L1); every stop, with every limit
+saturated, is answered within a stated bound, so a control that delays a stop
+without refusing it fails (L2); and removing an operator keeps their engagements.
+
+Round 5 (the adversary's round-5 findings): every identical stop draft answered
+200 names a row that stays live, and a taken-back draft is never visible to a
+list read (F1); a superseded but unsigned real stop is revived when validly
+signed, so a count never makes a pending stop unsignable (F2, SAFETY); a stop
+the dashboard can send is never refused for its reason length (F3); and every
+account's newest unsigned stop draft is ranked, so no flood hides another
+account's stand-down from any read (F5).
 """
 
 from __future__ import annotations
@@ -2794,8 +2803,10 @@ def test_enforce_mode_never_refuses_a_valid_refresh(rates, configure, monkeypatc
 # --- The stop lane: no draft refused, none hidden, every read bounded (H1, M2) --
 
 
-def _draft(client, action="pause", engine_id="eng-1"):
-    return client.post("/api/failsafe/commands/", {"action": action, "engine_id": engine_id}, format="json")
+def _draft(client, action="pause", engine_id="eng-1", reason=""):
+    return client.post(
+        "/api/failsafe/commands/", {"action": action, "engine_id": engine_id, "reason": reason}, format="json"
+    )
 
 
 @pytest.mark.django_db
@@ -3209,22 +3220,57 @@ MORE_HEADER = "X-Failsafe-More"
 
 
 @pytest.mark.django_db
-def test_a_reason_past_the_limit_is_a_400_naming_it(rates):
-    """H1 (round 4): a reason was unbounded up to the 64 KiB a stop body may
-    be, so 300 drafts with 60,000-character reasons grew the database 5 MB/s.
-    A reason is at most 1,000 characters: longer is 400, naming the limit --
-    input validation, not a count -- for every action; at the limit, 201."""
+def test_a_stop_is_never_refused_for_its_reason_length(rates, operator_key):
+    """F3 (round 5): the 1,000-character reason limit refused stops the
+    dashboard can send -- its draftCommandSchema allows 2,000, its reason box
+    has no maxLength, and it passed the backend's 400 through. A stop is judged
+    a stop by safety.stops (any text up to the 64 KiB body) and must not then be
+    400'd by the view. The bound now matches the dashboard (2,000); a stop
+    reason within it is stored whole, a longer one is truncated and stored
+    (never refused, and its signing bytes match what is stored); a non-stop past
+    the bound is input validation (400)."""
     from failsafe.models import FailsafeCommand
+    from failsafe.serializers import REASON_LIMIT
 
+    assert REASON_LIMIT == 2000
     client = _client_for(_admin())
-    for action in ("pause", "stand_down", "terminate", "resume"):
-        long = client.post("/api/failsafe/commands/", {"action": action, "engine_id": "e", "reason": "x" * 1001}, format="json")
-        assert long.status_code == 400, action
-        assert long.data["reason"] == ["A reason is at most 1,000 characters."]
-        assert client.post(
-            "/api/failsafe/commands/", {"action": action, "engine_id": f"e-{action}", "reason": "x" * 1000}, format="json"
-        ).status_code == 201
-    assert not FailsafeCommand.objects.filter(engine_id="e").exists()
+    reasons = {
+        "1,001 ASCII": "r" * 1001,
+        "2,000 ASCII (the dashboard's max)": "r" * 2000,
+        "1,001 emoji (2,002 UTF-16 units)": "\U0001f6a8" * 1001,
+        "600 Devanagari clusters (1,200 code points)": "क्" * 600,
+    }
+    for action in ("pause", "stand_down", "terminate"):
+        for label, reason in reasons.items():
+            answer = client.post(
+                "/api/failsafe/commands/",
+                {"action": action, "engine_id": f"e-{action}-{label[:6]}", "reason": reason},
+                format="json",
+            )
+            assert answer.status_code == 201, (action, label, answer.status_code, answer.data)
+            assert answer.data["reason"] == reason  # within the bound: stored whole
+    # A stop reason past the bound is truncated and stored, never refused; the
+    # signing bytes are for the stored reason, so a signature still verifies.
+    huge = "z" * 5000
+    stop = client.post(
+        "/api/failsafe/commands/", {"action": "pause", "engine_id": "e-huge", "reason": huge}, format="json"
+    )
+    assert stop.status_code == 201 and stop.data["reason"] == huge[:REASON_LIMIT]
+    row = FailsafeCommand.objects.get(uuid=stop.data["uuid"])
+    from failsafe.signing import verify_signature
+
+    keyring = {"alice": operator_key.public_key()}
+    sig = operator_key.sign(bytes.fromhex(stop.data["signing_bytes"])).hex()
+    assert verify_signature(row.as_command_dict(), "alice", sig, keyring)
+    # A non-stop draft (resume/release) past the bound is 400 -- input validation.
+    long_resume = client.post(
+        "/api/failsafe/commands/", {"action": "resume", "engine_id": "e", "reason": "r" * 2001}, format="json"
+    )
+    assert long_resume.status_code == 400
+    assert long_resume.data["reason"] == [f"A reason is at most {REASON_LIMIT:,} characters."]
+    assert client.post(
+        "/api/failsafe/commands/", {"action": "resume", "engine_id": "e-ok", "reason": "r" * 2000}, format="json"
+    ).status_code == 201
 
 
 @pytest.mark.django_db
@@ -3234,8 +3280,9 @@ def test_an_accounts_unsigned_stop_drafts_past_its_limit_supersede_its_oldest_an
     the account's limit of unsigned stop drafts, its OLDEST unsigned stop drafts
     are superseded -- recorded as such, with an audit event naming the draft
     that superseded each. Another account's drafts, and this account's draft
-    that already carries a signature, are untouched. A superseded draft is not
-    signable, and drafting it again makes a new one."""
+    that already carries a signature, are untouched. A superseded but unsigned
+    stop is revived when validly signed (round 5, F2), and drafting it again
+    while unsigned makes a new one."""
     from failsafe.models import FailsafeAuditEvent, FailsafeCommand
 
     configure(FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT=5)
@@ -3257,11 +3304,15 @@ def test_an_accounts_unsigned_stop_drafts_past_its_limit_supersede_its_oldest_an
     assert events.count() == 7 and all(e.detail["limit"] == 5 and e.detail["by"] for e in events)
     assert FailsafeCommand.objects.get(uuid=signed["uuid"]).status == "awaiting_signatures"
     assert FailsafeCommand.objects.get(uuid=theirs["uuid"]).status == "awaiting_signatures"
-    # Not signable; drafted again, a new draft, never refused.
+    # A superseded but unsigned stop is revived when validly signed (F2): a
+    # count never makes a real pending stop unsignable. junk-0's pause needs
+    # one signature, so signing it revives it straight to ready.
     old = drafts[0].data
     sig = {"key_id": "alice", "sig": operator_key.sign(bytes.fromhex(old["signing_bytes"])).hex()}
-    refused = client.post(f"/api/failsafe/commands/{old['uuid']}/signatures/", sig, format="json")
-    assert refused.status_code == 409 and "superseded" in refused.data["detail"]
+    revived = client.post(f"/api/failsafe/commands/{old['uuid']}/signatures/", sig, format="json")
+    assert revived.status_code == 200 and revived.data["status"] == "ready"
+    assert FailsafeCommand.objects.get(uuid=old["uuid"]).status == "ready"
+    # Drafted again while unsigned, it is a new draft, never refused.
     again = _draft(client, "pause", "junk-0")
     assert again.status_code == 201 and again.data["uuid"] != old["uuid"]
     # The other account's flood never reaches this one's drafts either.
@@ -3457,13 +3508,15 @@ def test_identical_stop_drafts_sent_at_once_are_one_row(rates, monkeypatch):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_stop_draft_never_reads_while_it_holds_the_write_lock(rates, configure):
+def test_a_stop_draft_holds_the_write_lock_only_across_its_dedupe(rates, configure):
     """A draft flood must not hold SQLite's write lock against a pause. A first
-    fix for L1 looked up and inserted in one IMMEDIATE transaction, with the
-    superseding inside it: during a 4-thread draft flood a pause then took
-    2.9 s. Every read a stop draft makes -- new, reused, or superseding others
-    -- runs outside any transaction, so each write holds the lock for one
-    statement."""
+    fix for L1 looked up, inserted AND SUPERSEDED in one IMMEDIATE transaction;
+    during a 4-thread draft flood a pause then took 2.9 s. The dedupe now runs
+    in a short transaction -- the insert, one indexed look-up for an identical
+    earlier draft, and the take-back if there is one -- so a taken-back row is
+    never visible to a list read (round 5, F1/C4); but superseding, the reused-
+    draft fast path and the audit all run OUTSIDE it, so the write lock is never
+    held across the superseding (the 2.9 s cause) or anything but the dedupe."""
     from django.db import connection
 
     configure(FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT=2)
@@ -3479,8 +3532,151 @@ def test_a_stop_draft_never_reads_while_it_holds_the_write_lock(rates, configure
         codes = [_draft(client, "pause", f"lock-{i}").status_code for i in range(4)]
         codes.append(_draft(client, "pause", "lock-3").status_code)
     assert codes == [201, 201, 201, 201, 200]
-    assert ("UPDATE", False) in seen  # the superseding ran
-    assert [kind for kind, in_transaction in seen if in_transaction and kind == "SELECT"] == []
+    assert ("UPDATE", False) in seen  # the superseding UPDATE ran, outside any transaction
+    assert ("UPDATE", True) not in seen  # never inside one -- the 2.9 s cause
+    # Only the dedupe -- the command's insert, look-up and take-back -- is inside
+    # a transaction; nothing else (no superseding, no audit) is.
+    assert {kind for kind, in_transaction in seen if in_transaction} <= {"INSERT", "SELECT", "DELETE"}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_every_answer_to_identical_drafts_names_a_live_row(rates):
+    """F1 (round 5): the dedupe answered 200 with a uuid it had just deleted.
+    Drafts X<Y<Z at once: Y found X and deleted itself; Z found Y (before Y's
+    delete landed) and answered 200 with Y -- a row Y then deleted. At 8-16
+    identical drafts at once, up to a third of the 200s named a row gone a
+    moment later (GET and signature then 404). Every answer now names the OLDEST
+    identical draft, which never takes itself back, so it stays live; and a list
+    read made during the burst never shows a draft that is then taken back
+    (C4), because a taken-back row is deleted in the transaction that inserted
+    it and never becomes visible."""
+    from failsafe.models import FailsafeCommand
+
+    operator = User.objects.create_user(username=f"race-{uuid.uuid4().hex[:8]}", password="x", role="admin")
+    for n in (8, 16):
+        engine = f"race-{n}-{uuid.uuid4().hex[:6]}"
+        barrier = threading.Barrier(n + 1)
+        answered, listed, stop = [], set(), threading.Event()
+
+        def draft():
+            from django.db import connection
+
+            try:
+                barrier.wait(10)
+                reply = _draft(_client_for(operator), "pause", engine)
+                if reply.status_code in (200, 201):
+                    answered.append(reply.data["uuid"])
+            finally:
+                connection.close()
+
+        def lister():
+            from django.db import connection
+
+            try:
+                barrier.wait(10)
+                while not stop.is_set():
+                    reply = _client_for(operator).get(f"/api/failsafe/commands/?engine_id={engine}")
+                    if reply.status_code == 200:
+                        listed.update(row["uuid"] for row in reply.data)
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=draft) for _ in range(n)] + [threading.Thread(target=lister)]
+        for thread in threads:
+            thread.start()
+        for thread in threads[:n]:
+            thread.join(60)
+        stop.set()
+        threads[n].join(60)
+        live = {str(u) for u in FailsafeCommand.objects.filter(engine_id=engine).values_list("uuid", flat=True)}
+        assert FailsafeCommand.objects.filter(engine_id=engine).count() == 1, n
+        assert len(answered) == n, (n, len(answered))
+        assert set(answered) <= live, (n, set(answered) - live)  # no answer names a deleted row
+        assert listed <= live, (n, listed - live)  # a list read never showed a since-deleted draft
+
+
+@pytest.mark.django_db
+def test_a_signature_revives_a_superseded_stop(rates, operator_key, configure):
+    """F2 (round 5, SAFETY): supersession bounds an account's UNSIGNED stop
+    drafts, but a flood -- or a fleet pause past the limit -- must never turn a
+    real pending stop's signature into 409. A superseded but unsigned stop,
+    validly signed, is revived and takes the signature, so a count never makes a
+    pending stop unsignable; once it carries a signature it is never superseded
+    again. A superseded stop past its window is not revived."""
+    from failsafe.models import FailsafeCommand
+
+    configure(FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT=5)
+    bob = Ed25519PrivateKey.generate()
+    configure(FAILSAFE_OPERATOR_KEYS={
+        "alice": operator_key.public_key().public_bytes_raw().hex(),
+        "bob": bob.public_key().public_bytes_raw().hex(),
+    })
+    client = _client_for(_admin())
+    # A real stand-down drafted first (the oldest), then a fleet pause past the
+    # limit supersedes the account's oldest unsigned drafts -- the real one.
+    real = _draft(client, "stand_down", "prod-1", reason="REAL: exfiltration in progress").data
+    assert [_draft(client, "pause", f"fleet-{i}").status_code for i in range(10)] == [201] * 10
+    assert FailsafeCommand.objects.get(uuid=real["uuid"]).status == "superseded"
+    # alice signs its bytes out of band: the superseded stop is revived.
+    a = {"key_id": "alice", "sig": operator_key.sign(bytes.fromhex(real["signing_bytes"])).hex()}
+    signed = client.post(f"/api/failsafe/commands/{real['uuid']}/signatures/", a, format="json")
+    assert signed.status_code == 200 and signed.data["status"] == "awaiting_signatures"  # needs its second
+    revived = FailsafeCommand.objects.get(uuid=real["uuid"])
+    assert revived.status == "awaiting_signatures" and revived.signed is True
+    # Signed now, a later flood never supersedes it again.
+    for i in range(10, 30):
+        _draft(client, "pause", f"fleet-{i}")
+    assert FailsafeCommand.objects.get(uuid=real["uuid"]).status == "awaiting_signatures"
+    # The second signature makes it ready -- a real stop that a flood could not stop.
+    b = {"key_id": "bob", "sig": bob.sign(bytes.fromhex(real["signing_bytes"])).hex()}
+    ready = client.post(f"/api/failsafe/commands/{real['uuid']}/signatures/", b, format="json")
+    assert ready.status_code == 200 and ready.data["status"] == "ready"
+    # A superseded stop past its window is not revived: its nonce and window are spent.
+    stale = _draft(client, "stand_down", "prod-2", reason="stale").data
+    for i in range(30, 40):
+        _draft(client, "pause", f"fleet-{i}")
+    assert FailsafeCommand.objects.get(uuid=stale["uuid"]).status == "superseded"
+    FailsafeCommand.objects.filter(uuid=stale["uuid"]).update(expires_at="2000-01-01T00:00:00+00:00")
+    a2 = {"key_id": "alice", "sig": operator_key.sign(bytes.fromhex(stale["signing_bytes"])).hex()}
+    refused = client.post(f"/api/failsafe/commands/{stale['uuid']}/signatures/", a2, format="json")
+    assert refused.status_code == 409
+
+
+@pytest.mark.django_db
+def test_every_accounts_newest_stop_draft_is_ranked_however_many_accounts_flood(rates):
+    """F5 (round 5): _awaiting_stops ranked only the newest UNSIGNED_STOP_SCAN
+    unsigned drafts of each action before the per-account round robin, so ten
+    accounts of a hundred distinct-reason drafts each pushed a real stand-down
+    -- older than that many newer drafts -- out of every read (state, the
+    engine-scoped state, and the awaiting list), and the second operator could
+    not find it. Every account's newest unsigned stop draft is ranked now
+    (Max(id) per account), so a real pending stop is always findable."""
+    from failsafe.models import FailsafeCommand
+    from failsafe.views import UNSIGNED_STOP_SCAN
+
+    honest = _admin()
+    real = _draft(_client_for(honest), "stand_down", "prod-1", reason="REAL: second operator please sign").data
+    n_accounts, per = 11, 100
+    assert n_accounts * per > UNSIGNED_STOP_SCAN  # the honest one is older than the newest scanned
+    flooders = [_user("analyst") for _ in range(n_accounts)]
+    FailsafeCommand.objects.bulk_create(
+        [
+            FailsafeCommand(engine_id="prod-1", action="stand_down", nonce=uuid.uuid4().hex, issued_at="t",
+                            expires_at="2999-01-01T00:00:00+00:00", reason=f"junk {a}-{j}",
+                            initiator=flooders[a], required_signatures=2)
+            for a in range(n_accounts)
+            for j in range(per)
+        ],
+        batch_size=500,
+    )
+    total = FailsafeCommand.objects.filter(action="stand_down", status="awaiting_signatures", signed=False).count()
+    assert total == n_accounts * per + 1
+    reader = _client_for(honest)
+    for path in ("/api/failsafe/state/", "/api/failsafe/state/?engine_id=prod-1",
+                 "/api/failsafe/commands/?engine_id=prod-1&status=awaiting_signatures"):
+        answer = reader.get(path)
+        rows = answer.data["awaiting_signatures"] if "state" in path else answer.data
+        assert real["uuid"] in [row["uuid"] for row in rows], path
 
 
 @pytest.mark.django_db
@@ -3504,6 +3700,54 @@ def test_removing_an_operator_keeps_their_engagements_and_unlinks_them(rates):
     assert [(e.name, e.status, e.created_by_id) for e in rows] == [("kept-0", "running", None), ("kept-1", "completed", None)]
     assert set(engagements_visible_to(admin_user).filter(pk__in=[e.pk for e in kept])) == set(rows)
     assert not engagements_visible_to(_user("analyst")).filter(pk__in=[e.pk for e in kept]).exists()
+
+
+@pytest.mark.django_db
+def test_removing_an_operator_a_protected_record_depends_on_deactivates_and_revokes(rates):
+    """Removing an operator is a stop and must never be refused (lead decision,
+    round 5). A MaterialityDecision keeps its decider (decided_by is PROTECT),
+    so deleting an operator who made one raised ProtectedError -- a stop
+    refused. The account is deactivated and its tokens revoked instead, and the
+    answer says so; the record and its attribution are kept."""
+    from datetime import date
+
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    from assurance.models import AssuranceClaim, Deployment, LegalObligation, MaterialityDecision
+
+    leaver = _user("analyst")
+    dep = Deployment.objects.create(name=f"dep-{uuid.uuid4().hex[:6]}")
+    claim = AssuranceClaim.objects.create(
+        deployment=dep, claim_type="data_boundary", statement="s", fingerprint="f",
+        system_fingerprint="sf", policy_version="p", environment="prod",
+    )
+    obligation = LegalObligation.objects.create(
+        jurisdiction="eu", authority_tier="binding", source="src", source_version="1",
+        operative_date=date(2024, 1, 1),
+    )
+    MaterialityDecision.objects.create(
+        claim=claim, obligation=obligation, decided_by=leaver, material=True, rationale="because"
+    )
+    # A tracked (outstanding) refresh token for the operator, to be revoked.
+    refresh = RefreshToken.for_user(leaver)
+    outstanding, _ = OutstandingToken.objects.get_or_create(
+        jti=refresh["jti"],
+        defaults={"user": leaver, "token": str(refresh),
+                  "created_at": timezone.now(), "expires_at": timezone.now() + timedelta(days=1)},
+    )
+    removed = _client_for(_admin()).delete(f"/api/accounts/users/{leaver.pk}/")
+    assert removed.status_code == 200 and removed.data["deactivated"] is True
+    leaver.refresh_from_db()
+    assert leaver.is_active is False  # deactivated: its access and refresh no longer work
+    assert BlacklistedToken.objects.filter(token=outstanding).exists()  # its token is revoked
+    # The record and its attribution are kept -- the protected reference stands.
+    assert User.objects.filter(pk=leaver.pk).exists()
+    assert MaterialityDecision.objects.filter(decided_by=leaver).exists()
+    # An operator nothing protects is still deleted outright (204).
+    plain = _user("analyst")
+    assert _client_for(_admin()).delete(f"/api/accounts/users/{plain.pk}/").status_code == 204
+    assert not User.objects.filter(pk=plain.pk).exists()
 
 
 #: The longest any stop may take through the whole stack with every limit

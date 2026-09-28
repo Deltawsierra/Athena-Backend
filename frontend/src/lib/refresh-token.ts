@@ -18,6 +18,17 @@
  * to be stored before giving up. A refresh that gets no answer at all leaves
  * storage as it is.
  *
+ * Round 5 (F4): with four or more tabs restoring at once, the losing tabs
+ * chase each other down the single-use token chain -- each round one tab wins
+ * a fresh token and the rest re-read and retry with it -- so a tab may need as
+ * many rounds as there are tabs before it wins its own. The retry budget
+ * (`attempts`) is large enough for a realistic tab count, so a contended tab
+ * recovers from the stored newer token rather than being signed out once three
+ * rounds are spent. And the wait for another tab's token is shorter, so a
+ * spent-token 401 whose successor never comes (a lost refresh response) no
+ * longer delays a stop by two seconds before the tab gives up -- while a newer
+ * token that IS on its way is still picked up as soon as it is stored.
+ *
  * Only erasable TypeScript here, so `node --test` runs the test beside it.
  */
 
@@ -46,7 +57,12 @@ export type RefreshOutcome =
   | { kind: "unreachable" };
 
 export interface RefreshOptions {
-  /** How many refreshes one call makes at most, following newer tokens. */
+  /**
+   * How many refreshes one call makes at most, following newer tokens. Each
+   * round another tab has won a fresh token, so this is the largest number of
+   * tabs contending at once that all recover their own session; past it a tab
+   * is signed out and recovers on its next reload from the stored token.
+   */
   attempts?: number;
   /** How long to wait for another tab's newer token after "already used". */
   waitForOtherTabMs?: number;
@@ -109,8 +125,8 @@ export async function refreshSession(
   post: (refresh: string) => Promise<RefreshAnswer>,
   options: RefreshOptions = {},
 ): Promise<RefreshOutcome> {
-  const attempts = options.attempts ?? 3;
-  const waitMs = options.waitForOtherTabMs ?? 2000;
+  const attempts = options.attempts ?? 10;
+  const waitMs = options.waitForOtherTabMs ?? 500;
   const pollMs = options.pollMs ?? 50;
   const sleep = options.sleep ?? defaultSleep;
 
@@ -140,8 +156,10 @@ export async function refreshSession(
     forgetRefreshToken(store, sent);
     return { kind: "signed-out" };
   }
-  // Every attempt was overtaken by another tab's newer token: that tab keeps
-  // the session, and its token stays stored.
+  // Every one of the (many) attempts was overtaken by another tab's newer
+  // token: more tabs contended at once than the budget, so this tab is signed
+  // out for now, but the newest token stays stored and its next reload restores
+  // the session from it.
   return { kind: "signed-out" };
 }
 

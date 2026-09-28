@@ -20,6 +20,7 @@ import threading
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Max
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -225,25 +226,52 @@ def _awaiting_stops(qs, expiry):
     behind every other operator's newest draft rather than in front of it.
 
     Bounded: per stop action, one index read of at most AWAITING_STOP_LIMIT
-    signed keys and one of at most UNSIGNED_STOP_SCAN unsigned ones, then one
-    read of the rows chosen. What that leaves out, stated plainly: an unsigned
-    draft older than UNSIGNED_STOP_SCAN newer unsigned drafts of its action --
-    or ranked below 500 others -- is not in the read, which then says "more".
-    No one account comes near that: it has at most
-    unsigned_stop_drafts_per_account() unsigned stop drafts awaiting a
-    signature (commands), so every other account's are ranked beside them."""
+    signed keys, one of at most UNSIGNED_STOP_SCAN newest unsigned ones, and one
+    grouped read of every account's newest unsigned draft (at most
+    AWAITING_STOP_LIMIT accounts), then one read of the rows chosen.
+
+    Every account's newest unsigned stop draft is ranked, so no flood of other
+    accounts can hide it (round 5, F5). Ranking only the newest UNSIGNED_STOP_SCAN
+    dropped an account whose newest draft was older than that many newer drafts
+    of others -- ten accounts of 100 distinct-reason drafts pushed a real
+    stand-down out of every read, the engine-scoped one included. The grouped
+    read (Max(id) per account -- id is monotonic with creation on SQLite) brings
+    each account's newest back into the first round of the round robin. What is
+    still left out, stated plainly: with more than AWAITING_STOP_LIMIT accounts
+    awaiting a signature, the oldest accounts' newest drafts are past the page,
+    and the read says "more" -- never silently dropped."""
     signed, unsigned, scans_full = [], [], False
     for action in STOP_ACTIONS:
         base = qs.filter(status=_AWAITING, action=action).order_by("-created_at")
         some_signed = list(base.filter(signed=True).values_list("pk", "created_at", "expires_at")[:AWAITING_STOP_LIMIT])
-        some_unsigned = list(
+        recent = list(
             base.filter(signed=False).values_list("pk", "created_at", "expires_at", "initiator_id")[
                 :UNSIGNED_STOP_SCAN
             ]
         )
-        scans_full |= len(some_signed) == AWAITING_STOP_LIMIT or len(some_unsigned) == UNSIGNED_STOP_SCAN
+        # Every account's newest unsigned draft, so no account is dropped even
+        # when its newest is older than the newest UNSIGNED_STOP_SCAN of others.
+        per_account_newest = [
+            row["newest"]
+            for row in qs.filter(status=_AWAITING, action=action, signed=False)
+            .values("initiator_id")
+            .annotate(newest=Max("id"))
+            .order_by("-newest")[:AWAITING_STOP_LIMIT]
+        ]
+        recent_pks = {key[0] for key in recent}
+        extra_pks = [pk for pk in per_account_newest if pk not in recent_pks]
+        extra = (
+            list(qs.filter(pk__in=extra_pks).values_list("pk", "created_at", "expires_at", "initiator_id"))
+            if extra_pks
+            else []
+        )
+        scans_full |= (
+            len(some_signed) == AWAITING_STOP_LIMIT
+            or len(recent) == UNSIGNED_STOP_SCAN
+            or len(per_account_newest) == AWAITING_STOP_LIMIT
+        )
         signed += some_signed
-        unsigned += some_unsigned
+        unsigned += recent + extra
 
     def newest_in_flight(keys):
         live = [key for key in keys if not expiry.due(key[0], _AWAITING, key[2])]
@@ -295,30 +323,43 @@ class _Page:
         return out
 
 
-def _fresh_unsigned_draft(user, engine_id, action, reason, ttl, before=None):
-    """``user``'s newest unsigned draft of ``action`` for ``engine_id`` with the
-    SAME reason and at least half its window left -- made before the draft
-    ``before`` names, when it names one -- or None. One indexed read, and no
-    lock; a read that fails is None, so the draft is made afresh -- a stop draft
-    is never refused. The reason is in the signed bytes, so a draft with another
-    reason is another draft: round 4 returned a "DRILL - do not sign" draft to
-    the dashboard's real pause a second later."""
+def _canonical_unsigned_draft(user, engine_id, action, reason, ttl, before=None):
+    """``user``'s OLDEST fresh unsigned draft of ``action`` for ``engine_id``
+    with the SAME reason -- the canonical row a set of identical drafts dedupes
+    to -- made before the draft ``before`` names, when it names one, or None.
+
+    The OLDEST such draft is the one every identical draft answers with (200),
+    because it is the only one that finds no older identical draft than itself:
+    it never takes itself back, so it is never a mid-deletion victim, and every
+    200 names a row that stays live (round 5, F1). Round 4 answered with the
+    NEWEST draft below the caller's pk, which under a burst was a row its own
+    request deleted a moment later (GET/sign then 404).
+
+    "Fresh" is at least half of ``ttl`` left, judged in Python on each row so a
+    stale oldest draft never shadows a fresher identical one. ``id`` is
+    monotonic with creation on SQLite, so ordering by it is the same order the
+    take-back's ``pk`` comparison uses. One indexed read, and no lock; a read
+    that fails is None, so the draft is made afresh -- a stop draft is never
+    refused. The reason is in the signed bytes, so a draft with another reason
+    is another draft: round 4 returned a "DRILL - do not sign" draft to the
+    dashboard's real pause a second later."""
     try:
         drafts = FailsafeCommand.objects.filter(
             initiator=user, engine_id=engine_id, action=action, status=_AWAITING, signed=False, reason=reason
         )
         if before is not None:
             drafts = drafts.filter(pk__lt=before)
-        drafts = list(drafts.order_by("-created_at")[:1])
+        now = timezone.now()
+        for draft in drafts.order_by("id")[:UNSIGNED_STOP_SCAN]:
+            try:
+                left = (timezone.datetime.fromisoformat(draft.expires_at) - now).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if left >= ttl / 2:
+                return draft
     except Exception:  # noqa: BLE001 - a failed read makes a new draft; it never refuses one
         return None
-    if not drafts:
-        return None
-    try:
-        left = (timezone.datetime.fromisoformat(drafts[0].expires_at) - timezone.now()).total_seconds()
-    except (TypeError, ValueError):
-        return None
-    return drafts[0] if left >= ttl / 2 else None
+    return None
 
 
 class _SharedReads:
@@ -435,8 +476,21 @@ def commands(request):
 
     ttl = int(getattr(settings, "FAILSAFE_COMMAND_TTL_SECONDS", 600))
     reason = serializer.validated_data.get("reason", "")
+    # A stop is never refused for its reason length (round 5, F3): the dashboard
+    # can send a reason up to draftCommandSchema's 2,000, and a stop judged a
+    # stop by safety.stops (any text up to the 64 KiB body) must not then be
+    # 400'd by this view. A reason past REASON_LIMIT is truncated and stored --
+    # the signing bytes are for the stored reason, so a signature still matches.
+    # A NON-stop draft (resume/release) past the bound is input validation.
+    from .serializers import REASON_LIMIT
+
     if action in STOP_ACTIONS:
-        return _stop_draft(request, action, engine_id, reason, ttl)
+        return _stop_draft(request, action, engine_id, reason[:REASON_LIMIT], ttl)
+    if len(reason) > REASON_LIMIT:
+        return Response(
+            {"reason": [f"A reason is at most {REASON_LIMIT:,} characters."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     command, draft = _new_draft(request, action, engine_id, reason, ttl)
     return _drafted(command, draft, status.HTTP_201_CREATED)
@@ -478,27 +532,50 @@ def _stop_draft(request, action, engine_id, reason, ttl):
     (201): another reason, action, engine or account, or one signed, cancelled,
     expired, superseded or past half its window.
 
-    Identical drafts sent at once are one row, where round 4 made up to four:
-    each is inserted on its own, and then looks for an identical fresh draft
-    inserted BEFORE it (on SQLite, the one database this project configures,
-    rows are numbered in the order they are written, so of any two the later
-    one finds the earlier). One that finds one takes its own row back -- it was
-    never answered to anyone, and it is taken back only while it is still
-    unsigned -- and answers with the earlier one (200). No lock is held across
-    the look-up and the insert: every write here is one statement, so a flood
-    of drafts never holds the database's write lock against a pause for longer
-    than one statement does. (Holding it across them, in one transaction,
-    delayed a pause 2.9 s during a draft flood.)
+    Identical drafts sent at once are one row, where round 4 made up to four.
+    Each inserts its row and looks for an identical fresh draft made before it
+    (on SQLite, the one database this project configures, rows are numbered in
+    the order they are written, so of any two the later finds the earlier) in
+    ONE write transaction, and takes its own row back if it finds one -- so a
+    taken-back row is deleted in the same transaction that inserted it and is
+    never visible to a list read (round 5, F1/C4). The look-up returns the
+    OLDEST identical draft, which never finds one older and so never takes
+    itself back: every 200 names that row, which stays live. Only the insert,
+    the look-up and the take-back are in the transaction; superseding and the
+    audit are outside it, so the write lock is held for that dedupe alone and
+    never across the superseding (which, inside it, delayed a pause 2.9 s during
+    a draft flood).
 
     The account's unsigned stop drafts past unsigned_stop_drafts_per_account()
     -- its oldest -- are then superseded (_supersede_past_limit). Only the
-    account's own: one account's flood never supersedes another's drafts."""
-    existing = _fresh_unsigned_draft(request.user, engine_id, action, reason, ttl)
+    account's own: one account's flood never supersedes another's drafts. A
+    superseded but unsigned real stop is never lost: a valid signature revives
+    it (submit_signature), so a count never makes a pending stop unsignable."""
+    existing = _canonical_unsigned_draft(request.user, engine_id, action, reason, ttl)
     if existing is not None:
         return _drafted(existing, existing.as_command_dict(), status.HTTP_200_OK)
-    command, draft = _new_draft(request, action, engine_id, reason, ttl, audit=False)
-    earlier = _fresh_unsigned_draft(request.user, engine_id, action, reason, ttl, before=command.pk)
-    if earlier is not None and _take_back(command):
+    # Insert the row and settle whether it is a duplicate in ONE write
+    # transaction (round 5, F1/C4): a row that is taken back is deleted in the
+    # same transaction that inserted it, so a concurrent list read sees either
+    # nothing or the committed canonical row -- never a mid-deletion victim it
+    # would later find gone. Only the insert, one indexed look-up for an older
+    # identical draft, and the conditional take-back are inside it; the reused-
+    # draft fast path above, superseding and the audit run OUTSIDE, so the write
+    # lock is never held across them (superseding inside it delayed a pause
+    # 2.9 s -- round 5's lock test). The look-up returns the OLDEST identical
+    # draft, which never takes itself back, so it is never another request's
+    # canonical answer.
+    command = earlier = None
+    try:
+        with transaction.atomic():
+            command = _insert_draft(request, action, engine_id, reason, ttl)
+            earlier = _canonical_unsigned_draft(request.user, engine_id, action, reason, ttl, before=command.pk)
+            if earlier is not None:
+                FailsafeCommand.objects.filter(pk=command.pk, status=_AWAITING, signed=False).delete()
+    except Exception:  # noqa: BLE001 - a stop draft is never refused; on any error the row is made afresh
+        logger.exception("could not settle a duplicate stop draft; making it afresh")
+        command, earlier = _insert_draft(request, action, engine_id, reason, ttl), None
+    if earlier is not None:
         return _drafted(earlier, earlier.as_command_dict(), status.HTTP_200_OK)
     superseded = _supersede_past_limit(command)
     actor = request.user if request.user.is_authenticated else None
@@ -518,18 +595,23 @@ def _stop_draft(request, action, engine_id, reason, ttl):
         for pk in superseded
     ]
     FailsafeAuditEvent.objects.bulk_create(events)
-    return _drafted(command, draft, status.HTTP_201_CREATED)
+    return _drafted(command, command.as_command_dict(), status.HTTP_201_CREATED)
 
 
-def _take_back(command):
-    """Delete ``command``, a draft just inserted and never answered, if it is
-    still unsigned and awaiting. Whether it was."""
-    try:
-        deleted, _by_model = FailsafeCommand.objects.filter(pk=command.pk, status=_AWAITING, signed=False).delete()
-        return deleted >= 1
-    except Exception:  # noqa: BLE001 - a draft that cannot be taken back stands; it is never refused
-        logger.exception("could not take back duplicate draft %s", command.uuid)
-        return False
+def _insert_draft(request, action, engine_id, reason, ttl):
+    """A fresh command row for ``request``'s account. The nonce and window are
+    server-set (make_draft); the audit is written by the caller."""
+    draft = make_draft(action, engine_id, reason, ttl)
+    return FailsafeCommand.objects.create(
+        engine_id=draft["engine_id"],
+        action=draft["action"],
+        nonce=draft["nonce"],
+        issued_at=draft["issued_at"],
+        expires_at=draft["expires_at"],
+        reason=draft["reason"],
+        required_signatures=required_signatures(action),
+        initiator=request.user,
+    )
 
 
 def _supersede_past_limit(newest):
@@ -622,11 +704,31 @@ def command_detail(request, cmd_uuid):
     return Response(body)
 
 
+def _signable(command, now=None):
+    """Whether ``command`` may still take a signature: it is awaiting one, or it
+    is a superseded but unsigned stop still inside its window.
+
+    A superseded stop is signable so a count never makes a real pending stop
+    unsignable (round 5, F2, SAFETY): supersession bounds an account's UNSIGNED
+    stop drafts (queue bounding), but a flood -- or a fleet pause past the limit
+    -- must not turn a genuine stop's signature into 409. A valid signature
+    revives it (submit_signature). A superseded draft is always unsigned (a
+    signed one is never superseded), and one past its window is not revived --
+    its nonce and window are spent, so the engine would reject it anyway."""
+    now = now or timezone.now()
+    if command.status == FailsafeCommand.STATUS_AWAITING:
+        return True
+    if command.status == FailsafeCommand.STATUS_SUPERSEDED and not command.signed:
+        return not _due(command.expires_at, now)
+    return False
+
+
 @api_view(["POST"])
 @permission_classes([IsAdminOrAnalyst])
 def submit_signature(request, cmd_uuid):
     command = get_object_or_404(FailsafeCommand, uuid=cmd_uuid)
-    if _expire_if_due(command) or command.status != FailsafeCommand.STATUS_AWAITING:
+    _expire_if_due(command)
+    if not _signable(command):
         return Response(
             {"detail": f"command is {command.status}; not accepting signatures"},
             status=status.HTTP_409_CONFLICT,
@@ -661,7 +763,8 @@ def submit_signature(request, cmd_uuid):
         command = FailsafeCommand.objects.select_for_update().filter(pk=command.pk).first()
         if command is None:
             raise Http404
-        if _expire_if_due(command) or command.status != FailsafeCommand.STATUS_AWAITING:
+        _expire_if_due(command)
+        if not _signable(command):
             return Response(
                 {"detail": f"command is {command.status}; not accepting signatures"},
                 status=status.HTTP_409_CONFLICT,
@@ -671,6 +774,13 @@ def submit_signature(request, cmd_uuid):
                 {"detail": f"{key_id} has already signed"}, status=status.HTTP_409_CONFLICT
             )
 
+        # A superseded but unsigned stop, validly signed, is revived here: it
+        # returns to awaiting a signature and takes this one, so a count never
+        # makes a real pending stop unsignable (round 5, F2, SAFETY). Now that
+        # it carries a signature it is never superseded again.
+        revived = command.status == FailsafeCommand.STATUS_SUPERSEDED
+        if revived:
+            command.status = FailsafeCommand.STATUS_AWAITING
         command.signatures.append({
             "key_id": key_id,
             "sig": sig,
@@ -678,8 +788,9 @@ def submit_signature(request, cmd_uuid):
             "submitted_at": timezone.now().isoformat(),
         })
         command.signed = True
-        command.save(update_fields=["signatures", "signed", "updated_at"])
-        _audit(command, FailsafeAuditEvent.EVENT_SIGNED, request, key_id=key_id)
+        command.save(update_fields=["signatures", "signed", "status", "updated_at"])
+        _audit(command, FailsafeAuditEvent.EVENT_SIGNED, request, key_id=key_id,
+               **({"revived": True} if revived else {}))
 
         valid = distinct_valid_signers(command.as_command_dict(), command.signatures, keyring)
         if len(valid) >= command.required_signatures:
