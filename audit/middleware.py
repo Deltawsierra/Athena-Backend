@@ -14,6 +14,9 @@ import requests
 from django.conf import settings
 from django.core.exceptions import RequestDataTooBig
 from django.http import JsonResponse, UnreadablePostError
+from urllib3.exceptions import HTTPError as Urllib3Error
+
+from safety.stops import is_stop
 
 logger = logging.getLogger(__name__)
 
@@ -1093,6 +1096,11 @@ def _joined(problem, more):
 # in either.
 _SLOW_CHARSETS = frozenset({"punycode", "idna"})
 
+# An engine decision is a few hundred bytes. Its body is read this much at a
+# time, and no more than the limit of it.
+_ANSWER_CHUNK = 4096
+_ANSWER_LIMIT = 64 * 1024
+
 
 def _decoded(raw, encoding):
     """``raw`` in ``encoding``, or ``None`` if it is not read here.
@@ -1113,6 +1121,12 @@ class DefenderMiddleware:
     Thin enforcement layer.
     NO AI logic lives here.
     Calls the Cybersecurity AI Engine and enforces its decision.
+
+    A stop (safety.stops) is never sent to the engine and never refused: it
+    goes straight to its view. Every other request is put to the engine under a
+    total deadline of DEFENDER_TIMEOUT_SECONDS. Without an answer by then, or
+    with no usable answer, the request is allowed and the failure is recorded:
+    this gateway FAILS OPEN, as it always has.
     """
 
     def __init__(self, get_response):
@@ -1124,6 +1138,13 @@ class DefenderMiddleware:
         self.failure_alert_threshold = getattr(settings, "DEFENDER_FAILURE_ALERT_AFTER", 10)
         self.failure_window = getattr(settings, "DEFENDER_FAILURE_WINDOW_SECONDS", 60)
         self.max_body_bytes = getattr(settings, "DEFENDER_MAX_BODY_BYTES", 64 * 1024)
+        # Each engine call runs on its own thread, so the request can stop
+        # waiting at its deadline whatever the engine does -- including sending
+        # its status line and headers a byte at a time, which no read of the
+        # body can bound. The slots bound how many such calls can be left
+        # running at once.
+        self.max_in_flight = max(1, int(getattr(settings, "DEFENDER_MAX_IN_FLIGHT", 32)))
+        self._slots = threading.BoundedSemaphore(self.max_in_flight)
 
         # Failures within a window, not consecutive ones. A counter reset by
         # every success never escalates on a half-dead engine, which is the
@@ -1148,6 +1169,14 @@ class DefenderMiddleware:
 
     def __call__(self, request):
         if request.path.startswith(SKIP_PREFIXES):
+            return self.get_response(request)
+
+        # A stop is never put to the engine, so no engine -- slow, trickling,
+        # or answering block or throttle in enforce mode -- can hold one back.
+        # Judging it is cheap and bounded: it runs before authentication, reads
+        # at most 64 KiB of a UTF-8 or ASCII body, and anything else on a stop
+        # route is not a stop and comes on here (safety.stops).
+        if is_stop(request):
             return self.get_response(request)
 
         meta = getattr(request, "audit_metadata", {})
@@ -1229,7 +1258,57 @@ class DefenderMiddleware:
         request. That is the right default for a gateway, but it used to happen
         in complete silence: a wrong header, an expired key or an engine that
         was simply down turned this defensive layer off and nothing said so.
+
+        The whole call has one deadline, DEFENDER_TIMEOUT_SECONDS from now. It
+        used to be requests' timeout, which bounds each socket operation, not
+        the call: an engine that sent a byte every 0.3 s held every request --
+        and, before stops were exempt, every stop -- for 20.5 s with its body
+        and 30 s with its headers. The call runs on a thread of its own and this
+        request waits for it only until the deadline; the thread reads the
+        answer in a stream and stops reading at the deadline too.
         """
+        deadline = time.monotonic() + self.timeout
+        if not self._slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            self._record_failure(f"all {self.max_in_flight} engine call slots are in use; not asking")
+            return None
+
+        outcome = {}
+        done = threading.Event()
+
+        def call():
+            try:
+                outcome["result"] = self._call_engine(ctx, deadline)
+            except BaseException as exc:  # noqa: BLE001 - handed to the request thread, which raises it as before
+                outcome["error"] = exc
+            finally:
+                self._slots.release()
+                done.set()
+
+        try:
+            threading.Thread(target=call, name="defender-engine-call", daemon=True).start()
+        except RuntimeError as exc:
+            self._slots.release()
+            self._record_failure(f"engine call could not start: {exc.__class__.__name__}")
+            return None
+
+        if not done.wait(max(0.0, deadline - time.monotonic())):
+            self._record_failure(f"engine gave no decision within {self.timeout}s")
+            return None
+        if "error" in outcome:
+            raise outcome["error"]
+
+        decision, problem = outcome["result"]
+        if problem:
+            self._record_failure(problem)
+            return None
+        self._note_success()
+        return decision
+
+    def _call_engine(self, ctx, deadline):
+        """One engine call, on its own thread: (decision, None) or (None, problem).
+
+        It logs nothing and records nothing; the request thread does, so a call
+        that outlives its request cannot report a failure twice."""
         try:
             response = requests.post(
                 f"{self.engine_url}/defend",
@@ -1242,34 +1321,52 @@ class DefenderMiddleware:
                     "Content-Type": "application/json",
                 },
                 timeout=self.timeout,
+                stream=True,
             )
         except requests.RequestException as exc:
-            self._record_failure(f"engine unreachable: {exc.__class__.__name__}")
-            return None
+            return None, f"engine unreachable: {exc.__class__.__name__}"
 
-        if response.status_code == 200:
-            try:
-                decision = response.json()
-            except ValueError:
-                self._record_failure("engine returned a body that is not JSON")
-                return None
+        with response:
+            if response.status_code in (401, 403):
+                return None, "engine refused the operator key (check CYBERENGINE_OPERATOR_KEY)"
+            if response.status_code != 200:
+                return None, f"engine returned HTTP {response.status_code}"
+            raw, problem = self._read_answer(response, deadline)
+        if problem:
+            return None, problem
 
-            # Valid JSON of the wrong shape used to reach decision.get() and
-            # raise, turning a bad engine response into a 500 on every request.
-            if not isinstance(decision, dict):
-                self._record_failure("engine returned a decision that is not an object")
-                return None
+        try:
+            decision = json.loads(raw)
+        except (ValueError, RecursionError):
+            return None, "engine returned a body that is not JSON"
 
-            self._note_success()
-            return decision
+        # Valid JSON of the wrong shape used to reach decision.get() and
+        # raise, turning a bad engine response into a 500 on every request.
+        if not isinstance(decision, dict):
+            return None, "engine returned a decision that is not an object"
+        return decision, None
 
-        if response.status_code in (401, 403):
-            self._record_failure(
-                "engine refused the operator key (check CYBERENGINE_OPERATOR_KEY)"
-            )
-        else:
-            self._record_failure(f"engine returned HTTP {response.status_code}")
-        return None
+    def _read_answer(self, response, deadline):
+        """The answer's body, read as it arrives and no longer than the deadline.
+
+        read1 returns whatever one read of the socket gives, so a body that
+        trickles in is checked against the deadline byte by byte, where a
+        sized read would wait for the whole size."""
+        chunks = []
+        size = 0
+        try:
+            while True:
+                chunk = response.raw.read1(_ANSWER_CHUNK, decode_content=True)
+                if not chunk:
+                    return b"".join(chunks), None
+                size += len(chunk)
+                if size > _ANSWER_LIMIT:
+                    return None, f"engine answer is larger than {_ANSWER_LIMIT} bytes"
+                chunks.append(chunk)
+                if time.monotonic() >= deadline:
+                    return None, f"engine gave no decision within {self.timeout}s"
+        except (requests.RequestException, Urllib3Error, OSError, ValueError) as exc:
+            return None, f"engine answer could not be read: {exc.__class__.__name__}"
 
     def _get_body(self, request):
         """

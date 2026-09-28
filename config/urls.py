@@ -1,9 +1,8 @@
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
-)
+
+from safety.refresh import RefreshView
+from safety.sign_in import SignInView
 
 from .api_views import health
 
@@ -14,8 +13,12 @@ urlpatterns = [
     path("api/health/", health, name="health"),
 
     # Auth / JWT
-    path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    # Failed sign-ins are limited per address and username, not by the shared
+    # anonymous bucket, which any flood from the operator's address emptied.
+    path("api/token/", SignInView.as_view(), name="token_obtain_pair"),
+    # A refresh spends its refresh token exactly once, however many arrive
+    # together with it, and only for an account that exists and is active.
+    path("api/token/refresh/", RefreshView.as_view(), name="token_refresh"),
 
     # Core apps
     path("api/accounts/", include("accounts.urls")),

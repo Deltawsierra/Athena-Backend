@@ -35,6 +35,109 @@ Without a key the gateway allows every request and says so in the log.
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
+A stop is never sent to the engine and never refused by it, in either mode, and
+no throttle refuses or counts one. The stops are listed in `safety/stops.py`:
+a pause (`{"paused": true}`; a lift is start-direction and is not a stop), a
+claim revoked or contradicted, a failsafe pause, stand-down or terminate drafted
+(not a resume or release), a signature on a pause, stand-down or terminate (not
+on a resume or release), a resume or release cancelled (cancelling a pause,
+stand-down or terminate withdraws a stop, so it is not one), the three
+stop-lane reads (the failsafe state, the command list, and a command's detail),
+the engines' poll with its token, a deployment's automated dispatch switched
+off, an engagement's authority withdrawn (moved off running, scope emptied, or
+window closed -- deleting an engagement destroys its record and is not a stop),
+and an operator demoted (never promoted) or removed. A token refresh whose
+refresh token verifies, for an account that exists and is active, and has not
+been spent is exempt the same way; a refresh spends its token exactly once,
+however many refreshes of it arrive together (`safety/refresh.py`), so a used
+one is judged like any other bad token.
+A stop is recognised only in its canonical form: JSON or a URL-encoded form in
+UTF-8 or ASCII, at most 64 KiB, carrying only the stop's own fields and an
+optional `note` or `reason`. Anything else on those routes is not a stop. So the
+engine no longer sees stops, including stops that will fail authentication.
+Every other request waits for the engine at most `DEFENDER_TIMEOUT_SECONDS` in
+all, and is allowed without a decision after that. A hostile engine can hold
+all `DEFENDER_MAX_IN_FLIGHT` call slots; every other request then waits out its
+deadline and is allowed, and stops are unaffected.
+
+### The failsafe service token
+
+A stop client should not need a password sign-in to stop: sign-in is not a
+stop, so the gateway judges it and failed guesses can lock it. Set
+`FAILSAFE_SERVICE_TOKEN` (at least 32 characters, e.g. `openssl rand -hex 32`;
+shorter is treated as unset) and `FAILSAFE_SERVICE_USER` (the username of the
+active admin or analyst account the client acts as). A request that presents
+the token in the `X-Failsafe-Service-Token` header is authenticated as that
+account, before any other credential is looked at, but ONLY when the request is
+a stop or a stop-lane read, and not on the account routes. Anywhere else -- a
+lift, a resume or release draft or signature, a cancel of a pause, stand-down
+or terminate, an engagement deleted, an operator demoted or removed, any other
+read or write, the engines' poll, a refresh -- the header is ignored, and so is
+a token that does not match: the request is judged and authenticated exactly as
+if the header were absent. What the token reads is limited to the pause,
+stand-down and terminate commands in flight, their signing bytes and the
+engine's live state. A stolen token can stop things; it cannot start anything,
+withdraw a stop, destroy a record or remove an operator. The token is compared
+as HMAC-SHA256 digests in constant time, and only a match costs a database
+read; a read of the service account that fails is answered 503 with its reason
+(never 401, which would send a client back to its password). The
+athena-dashboard server will present it on its stops in a follow-up; until then
+it signs in with its service account's password as before, so until then its
+stops still depend on that sign-in.
+
+### Sign-in and the stop lane
+
+Password sign-ins are limited per address and username
+(`DJANGO_THROTTLE_SIGN_IN`, default 10/min), where the username is the one
+authentication looks up (trimmed as SimpleJWT trims it, NFKC-normalised and
+case-folded, so every spelling of one account shares one budget), and per
+address across every username (`DJANGO_THROTTLE_SIGN_IN_ADDRESS`, default
+60/min). Each attempt is counted before its password is hashed, by an atomic
+increment of a row in the database (the `safety` app's one table), so a burst
+of simultaneous attempts, and every worker process, count against one number;
+past either limit the attempt is answered 429 without a hash (and, once the
+window is full, without a write). Only attempts
+that fail stay counted: a successful sign-in gives its attempt back and clears
+its own address-and-username count. If the count cannot be written, the
+sign-in is answered 503 and nothing is hashed. `manage.py check --deploy` warns
+(`safety.W001`) if that database exists only inside one process (an in-memory
+SQLite database). A sign-in from an address under a guessing flood can be
+refused, the operator's own included if they share the attacker's address.
+
+A stop draft is never refused and never throttled. Drafted again by the same
+account while its identical draft (same engine, same action, same reason) is
+unsigned and has at least half its window (`FAILSAFE_COMMAND_TTL_SECONDS`, 600 s)
+left, it returns that draft (200: the same uuid, the same bytes to sign, and the
+window it has left, at least 300 s) instead of adding one; with another reason
+it is a new draft. Identical drafts sent at once are one row. A reason is at
+most 1,000 characters: a longer one is answered 400 naming the limit. One
+account has at most `FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT` (default 100)
+unsigned stop drafts awaiting a signature: a draft past that is made, and the
+account's OLDEST unsigned stop drafts are superseded (status `superseded`, with
+an audit event naming the draft that superseded each; no longer signable; drafted
+again, a new draft). Never another account's, and never one already carrying a
+signature -- but the dashboard's service account is one account, so every
+dashboard user's drafts share its limit. Every draft still adds a row to the
+command history, as every stop adds to the audit trail. The command list and the
+state view list the stop commands awaiting a signature first -- those already
+signed once, then each account's drafts in turn, so a flood from one account lies
+behind every other operator's newest -- at most 500, never cut by the other row
+caps. Every stop-lane read does work bounded by its row limits, whatever the
+number of commands, returns at most `FAILSAFE_STOP_LANE_READ_BYTES` (default
+1,000,000) of commands in that order, says in its `X-Failsafe-More` header (and
+the state view in `more`) whether it left any out, and marks at most 200
+commands expired per read, in one write. Identical stop-lane reads by one
+account at once -- identical in the parameters the view reads, whatever else the
+query string carries -- share one computation; reads of different engines do
+not. The state view waits for the engine's live state
+`FAILSAFE_STATE_ENGINE_SECONDS` (default 2) at most. Two operators signing one
+command at once both count: each signature is added to the command as it is at
+that moment, under the write lock.
+
+Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
+engagements they created are kept, with the creator unlinked; such an engagement
+is visible to admins only.
+
 ## Signed chain outcomes
 
 `POST /api/assurance/deployments/<uuid>/chain-outcomes/observed/` records chain
