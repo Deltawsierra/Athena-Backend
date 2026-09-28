@@ -226,3 +226,211 @@ def test_the_declared_label_is_the_label_and_the_effective_class_is_capped():
     assertion = ProviderAssertion(evidence_class=EvidenceClass.CONFIGURATION_VERIFIED, source=Source.SELF_DECLARED)
     assert assertion.declared_evidence_class == EvidenceClass.CONFIGURATION_VERIFIED
     assert assertion.effective_evidence_class == EvidenceClass.VENDOR_ASSERTED
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the other ways to reach the raw label
+# ---------------------------------------------------------------------------
+#
+# The attribute scan above caught ``assertion.evidence_class``. Round 3's mutants
+# reached the same raw label four other ways and each got past it: the declared
+# label used for a judgment (MN3b, ``effective = assertion.declared_evidence_class``
+# in training reuse), the instance dict (MN3c, ``a.__dict__["evidence_class"]``),
+# a query that returns the column (MN3d, ``values_list("evidence_class")``), and a
+# getattr whose name is built at runtime (MN3e, ``getattr(a, "evidence_" + "class")``).
+
+#: Where the declared label is read, and the dict keys it may be read into: an
+#: echo beside the effective class, or the fingerprint of the declaration. A read
+#: anywhere else -- assigned to a name, compared, returned, passed to a judgment --
+#: is a judgment on the vendor's word.
+_DECLARED_LABEL_ECHOES = {
+    ("assurance/bom.py", "_provider_entry"): {"evidence_class", "evidence_class_label"},
+    ("assurance/boundary.py", "_assertion_map"): {"declared_evidence_class"},
+    ("assurance/fingerprint.py", "_assertion_descriptor"): {"evidence_class"},
+    ("assurance/training_reuse.py", "_posture_dict"): {"declared_evidence_class"},
+    ("assurance/vendor.py", "_assertion_dict"): {"declared_evidence_class"},
+}
+
+#: Every read of an instance's ``__dict__`` (or ``vars()``) in the application
+#: code, by (file, enclosing function): each reads its own model's prior state and
+#: never an evidence class. A new one must be added here with what it reads.
+_INSTANCE_DICT_READS = {
+    ("assurance/models.py", "Deployment.save"): "Deployment",
+    ("assurance/signals.py", "_fanout_input_deleting"): "decision inputs",
+    ("assurance/signals.py", "_fanout_input_deleted"): "decision inputs",
+    ("assurance/signals.py", "_remember_prior_deployment"): "decision inputs",
+    ("assurance/signals.py", "_decision_input_saved"): "decision inputs",
+    ("assurance/signals.py", "_remember_prior_provider_name"): "Provider",
+    ("assurance/signals.py", "_provider_profile_written"): "Provider",
+}
+
+#: Every ``getattr``/``hasattr`` whose attribute name is not a literal, by (file,
+#: enclosing function, receiver): none can be a provider assertion's label. A new
+#: one must be added here with what it reads.
+_RUNTIME_NAMED_READS = {
+    ("assurance/claims.py", "_adopt", "row"): "AssuranceClaim: the caller's copy brought to the row written",
+    ("assurance/claims.py", "_same_reading", "claim"): "AssuranceClaim reading fields",
+    ("assurance/connectors/base.py", "Connector.marker_scope", "self.config"): "connector config",
+    ("assurance/dispatch.py", "_dispatch_one", "existing"): "dispatch row",
+    ("assurance/dispatch.py", "_number_setting", "settings"): "settings",
+    ("assurance/dispatch.py", "settings_problems", "settings"): "settings",
+    ("assurance/latent.py", "_observe_boundary_allows", "boundary"): "DataBoundary",
+    ("assurance/latent.py", "_Evaluation._save", "condition"): "LatentCondition",
+    ("assurance/legal.py", "_legal", "LegalStatus"): "LegalStatus choices",
+    ("assurance/models.py", "_CredentialBinding.__str__", "self"): "credential binding",
+    ("assurance/signals.py", "writes_a_decision_input", "instance"): "decision inputs",
+    ("assurance/signals.py", "_follow", "instance"): "decision inputs' foreign keys",
+    ("assurance/signals.py", "schedule_decision_refresh", "connection"): "connection state",
+    ("assurance/views.py", "_credential_binding_state", "binding"): "credential binding",
+    ("failsafe/views.py", "_setting", "settings"): "settings",
+    ("pentest/report_mythos.py", "_extract.g", "scan"): "scan record",
+    ("safety/stops.py", "is_stop", "request"): "request marker",
+}
+
+#: Query and accessor calls that name a column by string. None may name the label.
+_NAMING_CALLS = {"values", "values_list", "only", "defer", "order_by", "F", "attrgetter"}
+
+
+def _app_trees():
+    for path in sorted(_ROOT.rglob("*.py")):
+        rel = path.relative_to(_ROOT).as_posix()
+        if rel.startswith(("tests/", ".venv/", "venv/", "node_modules/", "frontend/")) or "/migrations/" in rel:
+            continue
+        yield rel, ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _walk_scoped(tree):
+    """``(node, qualname, parents)`` for every node."""
+    stack: list[str] = []
+    parents: list[ast.AST] = []
+
+    def visit(node):
+        scoped = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if scoped:
+            stack.append(node.name)
+        yield node, ".".join(stack), tuple(parents)
+        parents.append(node)
+        for child in ast.iter_child_nodes(node):
+            yield from visit(child)
+        parents.pop()
+        if scoped:
+            stack.pop()
+
+    yield from visit(tree)
+
+
+def _constant_text(node):
+    """The string an expression of literals spells ("evidence_" + "class",
+    f"{'evidence'}_class"), or None where it is not literals alone."""
+    try:
+        if isinstance(node, ast.JoinedStr):
+            return "".join(_constant_text(v.value if isinstance(v, ast.FormattedValue) else v) for v in node.values)
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = _constant_text(node.left), _constant_text(node.right)
+            return left + right if left is not None and right is not None else None
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _echo_key(node, parents):
+    """The dict key a declared-label read is the value of, through calls and
+    attributes only (``EvidenceClass(a.declared_evidence_class).label``); None
+    where it is read any other way."""
+    child = node
+    for parent in reversed(parents):
+        if isinstance(parent, ast.Dict):
+            for key, value in zip(parent.keys, parent.values, strict=True):
+                if value is child and isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    return key.value
+            return None
+        if isinstance(parent, (ast.Call, ast.Attribute)):
+            child = parent
+            continue
+        return None
+    return None
+
+
+def test_the_declared_label_is_read_only_as_an_echo_or_a_fingerprint():
+    wrong = []
+    seen = set()
+    for rel, tree in _app_trees():
+        for node, qual, parents in _walk_scoped(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "declared_evidence_class" and isinstance(node.ctx, ast.Load):
+                if rel == "assurance/models.py":
+                    continue
+                allowed = _DECLARED_LABEL_ECHOES.get((rel, qual))
+                key = _echo_key(node, parents)
+                seen.add((rel, qual))
+                if allowed is None or key not in allowed:
+                    wrong.append(f"{rel}:{node.lineno} in {qual}: declared_evidence_class read as {key!r}")
+    assert wrong == [], (
+        "The declared label read for something other than an echo or a fingerprint. A judgment reads "
+        "effective_evidence_class:\n" + "\n".join(wrong)
+    )
+    assert seen == set(_DECLARED_LABEL_ECHOES), "an echo listed here is gone: take it off the list"
+
+
+def test_no_reader_takes_the_label_through_the_instance_dict():
+    wrong = []
+    for rel, tree in _app_trees():
+        for node, qual, parents in _walk_scoped(tree):
+            dict_read = (isinstance(node, ast.Attribute) and node.attr == "__dict__") or (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "vars"
+            )
+            if not dict_read:
+                continue
+            parent = parents[-1] if parents else None
+            keyed = None
+            if isinstance(parent, ast.Subscript) and parent.value is node:
+                keyed = _constant_text(parent.slice)
+            elif isinstance(parent, ast.Attribute) and isinstance(parents[-2], ast.Call) and parents[-2].args:
+                keyed = _constant_text(parents[-2].args[0])
+            if (keyed and "evidence_class" in keyed) or (rel, qual) not in _INSTANCE_DICT_READS:
+                wrong.append(f"{rel}:{node.lineno} in {qual or '<module>'}: {ast.unparse(parent or node)[:80]}")
+    assert wrong == [], "An instance-dict read not classified, or of an evidence class:\n" + "\n".join(wrong)
+
+
+def test_no_query_or_accessor_names_the_label_by_string():
+    wrong = []
+    for rel, tree in _app_trees():
+        for node, qual, _parents in _walk_scoped(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+            if name not in _NAMING_CALLS:
+                continue
+            texts = [_constant_text(a) for a in node.args] + [k.arg for k in node.keywords if k.arg]
+            if any(t and ("evidence_class" in t) for t in texts):
+                wrong.append(f"{rel}:{node.lineno} in {qual or '<module>'}: {ast.unparse(node)[:100]}")
+    assert wrong == [], "A query or accessor naming an evidence class column by string:\n" + "\n".join(wrong)
+
+
+def test_no_getattr_reaches_the_label_by_a_runtime_name():
+    wrong = []
+    seen = set()
+    for rel, tree in _app_trees():
+        for node, qual, _parents in _walk_scoped(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in ("getattr", "hasattr")
+                and len(node.args) >= 2
+            ):
+                continue
+            name = node.args[1]
+            if isinstance(name, ast.Constant):
+                continue
+            receiver = ast.unparse(node.args[0])
+            spelled = _constant_text(name)
+            if spelled is not None and "evidence_class" in spelled:
+                wrong.append(f"{rel}:{node.lineno} in {qual}: getattr({receiver}, {spelled!r})")
+            elif (rel, qual, receiver) not in _RUNTIME_NAMED_READS:
+                wrong.append(f"{rel}:{node.lineno} in {qual}: getattr({receiver}, {ast.unparse(name)})")
+            else:
+                seen.add((rel, qual, receiver))
+    assert wrong == [], (
+        "A getattr whose name is built at runtime, not classified here (or spelling the label):\n" + "\n".join(wrong)
+    )
+    assert seen == set(_RUNTIME_NAMED_READS), "a runtime-named read listed here is gone: take it off the list"
