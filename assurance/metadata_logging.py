@@ -248,7 +248,10 @@ def _logging_control(asset) -> tuple[bool, str | None, str | None] | None:
         bool(set(_WORD_RE.findall(value)) & _CONTROL_TOKENS) and not _negated(value)
     )
     detail = "logging posture names a redaction / scrubbing control" if names_control else "logging posture declared, no control named"
-    return names_control, assertion.evidence_class, detail
+    # The control is graded at the class the fact carries: its label capped at what
+    # its source can prove (#343). A self-declared "configuration verified" redaction
+    # control is the vendor's word, and a gap.
+    return names_control, assertion.effective_evidence_class, detail
 
 
 def assess_metadata_logging(deployment) -> dict:

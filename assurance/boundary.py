@@ -265,7 +265,7 @@ def _assertion_map(provider) -> dict:
         a.field: {
             "value": a.value,
             "evidence_class": a.effective_evidence_class,
-            "declared_evidence_class": a.evidence_class,
+            "declared_evidence_class": a.declared_evidence_class,
             "source": a.source,
         }
         for a in provider.assertions.all()

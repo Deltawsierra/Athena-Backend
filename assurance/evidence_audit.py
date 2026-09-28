@@ -67,8 +67,16 @@ It can only ever hold a claim BACK, never lift it past its own reading:
 - PASS and INSUFFICIENT_EVIDENCE move nothing. A PASS is the evidence agreeing
   with the claim; it is not a promotion. Upward moves stay where they were: the
   deriver's reading of the graph, and an attributed human transition -- which is
-  now refused where this audit would hold the target status back
-  (:func:`assurance.claims.apply_claim_transition`).
+  refused where it would take the claim ABOVE its reading and this audit would
+  hold the target status back (:func:`refusal_for_transition`).
+
+A hold is on the claim's status, never on its reading. A person may always move
+the reading down -- a downgrade is recorded as the reading under the hold, which
+goes on holding the claim as far as its evidence says -- and may always stop it:
+a contradiction or a withdrawal is never refused, whatever the claim reads or is
+held at, and does no evidence work (:mod:`assurance.claims`). Refusing either
+kept the higher reading under the hold, and a later release landed the claim on
+it, above where it would sit had no evidence been recorded.
 
 Refused ADVERSE evidence still weighs toward incomplete (fail-closed): a stale
 contradiction, or a target that reports its own failure, is not proof of failure
@@ -741,25 +749,121 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     return result
 
 
-def refusal_for_transition(claim: AssuranceClaim, to_status: str, *, now=None) -> str | None:
-    """Why a person may not move ``claim`` to ``to_status`` over its evidence, or
-    ``None`` when they may.
+#: The take-downs (:mod:`safety.stops`). Never refused, and never audited first.
+STOPS = frozenset({Status.CONTRADICTED.value, Status.REVOKED.value})
 
-    A move the audit would hold back at once is refused rather than made and then
-    undone: the claim cannot be read as passing over a contradiction, a load-bearing
-    failure, or refused adverse evidence. A withdrawal (REVOKED) is never refused.
-    The way through is to resolve the evidence -- invalidate an item, with a reason,
-    or record independent evidence that carries weight -- not to choose a reading."""
-    if str(to_status) == Status.REVOKED:
+_NOT_GIVEN = object()
+
+
+def refusal_for_transition(claim: AssuranceClaim, to_status: str, *, now=None, audited=_NOT_GIVEN) -> str | None:
+    """Why a person may not move ``claim`` to ``to_status`` over its evidence, or
+    ``None`` when they may. ``audited``: the audit of ``to_status`` as the reading
+    (:func:`audit_of`), when the caller already has it.
+
+    Refused is a move ABOVE the claim's reading (:func:`reading_status` -- the one
+    under any hold) that the audit would hold back at once: the claim cannot be
+    read as passing over a contradiction, a load-bearing failure, or refused
+    adverse evidence, and the move is refused rather than made and then undone. So
+    is asking for the very reading a hold already keeps, which asks for nothing but
+    the hold's release. The way through is to resolve the evidence -- invalidate an
+    item, with a reason, or record independent evidence that carries weight -- not
+    to choose a reading.
+
+    Never refused: a stop (contradict, revoke), a move to a reading at or below the
+    one the claim has now, and any move off a STALE mark (no reading: see below).
+    That is recorded as the reading, and the evidence goes on holding the claim back
+    as far as it does. Refusing it kept the higher reading under the hold, and the
+    release landed the claim on it -- above a claim with no evidence recorded, which
+    took the downgrade."""
+    to_status = str(to_status)
+    if to_status in STOPS:
         return None
-    result = audit_of(claim, base_status=str(to_status), now=now)
-    if result is None or not result["held"]:
+    reading = reading_status(claim)
+    if reading == Status.STALE:
+        # A stale mark is the machine saying a retest is due, not a reading anyone
+        # holds: a re-derive replaces it with the deriver's reading, whatever that is
+        # (assurance.claims._same_reading). Measured against the mark, a person's
+        # move below the deriver's reading read as a raise and was refused -- and the
+        # re-derive then lifted the claim to the deriver's reading, above a claim with
+        # no evidence, which kept the person's lower one. The move is the reading;
+        # the evidence holds it back as far as it does.
         return None
-    why = "; ".join(result["contradictions"]) or f"the evidence reads {result['verdict']}"
+    if _held_by_audit(claim) and to_status == reading:
+        return _refusal(claim.evidence_audit)
+    if rank(to_status) <= rank(reading) and to_status != reading:
+        return None
+    if audited is _NOT_GIVEN:
+        audited = audit_of(claim, base_status=to_status, now=now)
+    if audited is None or not audited["held"]:
+        return None
+    return _refusal(audited)
+
+
+def _refusal(result: dict) -> str:
+    why = "; ".join(result.get("contradictions") or []) or f"the evidence reads {result.get('verdict')}"
     return _clip(
-        f"The evidence recorded against this claim holds it at {result['status']} "
-        f"({result['verdict']}): {why} Resolve the evidence first -- invalidate an item "
-        "with a reason, or record independent evidence -- rather than choosing a reading."
+        f"The evidence recorded against this claim holds it at {result.get('status')} "
+        f"({result.get('verdict')}): {why.rstrip('.')}. Resolve the evidence first -- invalidate an "
+        "item with a reason, or record independent evidence -- rather than choosing a reading."
+    )
+
+
+def taken_down(audit: dict, stop: str) -> dict:
+    """The stored audit of a claim a person just stopped, where it was holding the
+    claim: the stop is the reading now -- the new base under the hold -- and nothing
+    ranks below it, so the audit holds nothing any more.
+
+    Pure: reads only the stored audit in hand, never the evidence or the route. A
+    stop does no evidence work (:mod:`assurance.claims`). Without it, a claim the
+    evidence held at CONTRADICTED that a person then contradicted kept the older
+    reading under the hold, and a release of the evidence lifted it back there."""
+    if not (audit or {}).get("held"):
+        return audit
+    return {**audit, "base_status": str(stop), "base_confidence": None, "held": False}
+
+
+def served_audit(claim: AssuranceClaim) -> dict:
+    """The claim's stored audit as a reader serves it: marked ``audit_current`` --
+    False, with ``not_current_reason``, when it was taken while the claim read
+    something other than it reads now. A stop (and a stale mark) writes the status
+    without re-running the audit; that audit is not the claim's verdict, and a
+    withdrawal is never audited again. ``{}`` where nothing was audited."""
+    audit = dict(claim.evidence_audit or {})
+    if not audit:
+        return audit
+    current = audit_is_current(claim)
+    audit["audit_current"] = current
+    if not current:
+        audit["not_current_reason"] = _not_current_reason(claim)
+    return audit
+
+
+def audit_is_current(claim: AssuranceClaim) -> bool:
+    """Whether the stored audit is of the claim as it reads now."""
+    audit = claim.evidence_audit or {}
+    return bool(audit) and audit.get("status") == claim.status
+
+
+def current_verdict(claim: AssuranceClaim) -> str | None:
+    """The claim's evidence verdict, or ``None`` where nothing was audited or the
+    stored audit is not current (:func:`served_audit`)."""
+    if not claim.evidence_verdict or not audit_is_current(claim):
+        return None
+    return claim.evidence_verdict
+
+
+def _not_current_reason(claim: AssuranceClaim) -> str:
+    audit = claim.evidence_audit or {}
+    was = audit.get("status") or UNKNOWN
+    if claim.status in _UNAUDITED_STATUSES:
+        return (
+            f"The evidence was last audited while the claim read {was}; the claim is "
+            f"{claim.status} now and is never audited again. This is not its verdict."
+        )
+    return (
+        f"The evidence was last audited while the claim read {was}; it reads {claim.status} "
+        "now, set by a move that does not re-run the audit (a person's stop, a stale mark). "
+        "This is not its verdict; the claim's next audit brings it current."
     )
 
 
@@ -908,18 +1012,31 @@ def record_claim_evidence(
 def invalidate_claim_evidence(item: ClaimEvidence, *, actor, reason: str, now=None) -> ClaimEvidence:
     """Retire an evidence item, attributed and with a reason, and re-audit the
     claim's current version. The only way a person resolves a contradiction: the
-    item stays on the record, and the invalidation is an event on it."""
+    item stays on the record, and the invalidation is an event on it.
+
+    An item already marked invalidated with nobody attributed (a bulk update, a
+    restore, a row whose account was gone before 0045 backfilled its name) retired
+    nothing -- and was refused here as "already invalidated", so nothing could ever
+    retire it. An attributed invalidation now attaches to it: the person and reason
+    are this act's, and the earlier mark is kept in the reason. An attributed
+    invalidation stands and is never re-attributed."""
     reason = (reason or "").strip()
     if actor is None:
         raise EvidenceRefused("an invalidation is attributed to the account that made it")
     if not reason:
         raise EvidenceRefused("an invalidation says why")
-    if item.invalidated_at is not None:
+    if item.invalidated_at is not None and _attributed_invalidation(item):
         raise EvidenceRefused("this evidence was already invalidated")
     username = (getattr(actor, "username", "") or "").strip()
     if not username:
         raise EvidenceRefused("an invalidation is attributed to an account with a name")
     now = now or timezone.now()
+    if item.invalidated_at is not None:
+        earlier = (item.invalidation_reason or "").strip() or "no reason recorded"
+        reason = _clip(
+            f"{reason} (attributing an earlier invalidation nobody was attributed with, "
+            f"marked {item.invalidated_at.isoformat()}: {earlier})"
+        )
     item.invalidated_at = now
     item.invalidation_reason = reason
     item.invalidated_by = actor

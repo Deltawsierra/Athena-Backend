@@ -11,6 +11,7 @@ matching how ``pentest`` already scopes visibility.
 from __future__ import annotations
 
 import logging
+import re
 import uuid as uuidlib
 from contextlib import nullcontext
 
@@ -129,6 +130,10 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+#: A query parameter that is a count: ASCII digits and nothing else. ``int()`` also
+#: takes a sign, surrounding spaces, ``_`` separators and non-ASCII digits.
+_PLAIN_DIGITS = re.compile(r"[0-9]+")
 
 
 def _is_privileged(user) -> bool:
@@ -2185,6 +2190,9 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
     #: the chain-outcome and approved-workflow reads are -- with the whole count
     #: beside the page and ``?offset=`` for the rest.
     EVIDENCE_PAGE_SIZE = 100
+    #: The largest ``?offset=`` the evidence read takes. Past it the value never
+    #: reaches the database: an offset past 2**63 raised IntegrityError there (a 500).
+    EVIDENCE_MAX_OFFSET = 2**31 - 1
 
     def _scoped_claims(self):
         qs = AssuranceClaim.objects.all()
@@ -2249,28 +2257,34 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
 
         Bounded: the newest ``EVIDENCE_PAGE_SIZE`` items from ``?offset=`` (default
         0), with ``evidence_count`` the whole count, ``returned``, ``truncated`` and
-        ``page_size`` beside them. An offset that is not a non-negative integer is a
-        400."""
-        from .evidence_audit import evidence_for
+        ``page_size`` beside them. An offset that is not plain ASCII digits (no sign,
+        no spaces, no separators) no greater than ``EVIDENCE_MAX_OFFSET`` is a 400.
+
+        The stored audit is served marked ``audit_current`` (and, where False, why):
+        a stop writes the claim's status without re-running it, and an audit taken
+        while the claim read something else is never served as its verdict
+        (:func:`assurance.evidence_audit.served_audit`)."""
+        from .evidence_audit import current_verdict, evidence_for, served_audit
 
         raw = request.query_params.get("offset", "0")
-        try:
-            offset = int(raw)
-        except (TypeError, ValueError):
-            offset = -1
-        if offset < 0:
-            return Response({"detail": f"offset must be a non-negative integer, not {raw[:40]!r}."}, status=400)
+        offset = int(raw) if _PLAIN_DIGITS.fullmatch(raw or "") and len(raw) <= 12 else -1
+        if not 0 <= offset <= self.EVIDENCE_MAX_OFFSET:
+            return Response(
+                {"detail": f"offset must be a non-negative integer no greater than "
+                           f"{self.EVIDENCE_MAX_OFFSET}, not {raw[:40]!r}."},
+                status=400,
+            )
         claim = self.get_object()
         recorded = evidence_for(claim).order_by("-created_at", "-pk")
         total = recorded.count()
         page = list(
             recorded.select_related("superseded_by", "invalidated_by")[offset: offset + self.EVIDENCE_PAGE_SIZE]
         )
-        audit = claim.evidence_audit or {}
+        audit = served_audit(claim)
         return Response(
             {
                 "claim": str(claim.uuid),
-                "evidence_verdict": claim.evidence_verdict or None,
+                "evidence_verdict": current_verdict(claim),
                 "evidence_audit": audit,
                 "evidence": ClaimEvidenceSerializer(page, many=True, context={"audit": audit}).data,
                 "evidence_count": total,

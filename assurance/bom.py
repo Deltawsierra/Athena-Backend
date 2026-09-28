@@ -33,7 +33,7 @@ from __future__ import annotations
 from django.utils import timezone
 
 from .graph_refs import in_graph
-from .models import evidence_strength
+from .models import EvidenceClass, evidence_strength
 from .receipt import ALGORITHM, _digest
 from .governance import is_shadow
 
@@ -90,8 +90,9 @@ def _provider_entry(provider) -> dict:
             "field": a.field,
             "field_label": a.get_field_display(),
             "value": a.value,
-            "evidence_class": a.evidence_class,
-            "evidence_class_label": a.get_evidence_class_display(),
+            # The label as declared, echoed; the class it carries is below.
+            "evidence_class": a.declared_evidence_class,
+            "evidence_class_label": EvidenceClass(a.declared_evidence_class).label,
             "source": a.source,
             "source_label": a.get_source_display(),
             # What the fact carries into a claim: its label, capped at what its

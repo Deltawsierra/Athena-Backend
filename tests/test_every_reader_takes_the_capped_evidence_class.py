@@ -143,6 +143,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _NOT_A_PROVIDER_ASSERTION = {
     ("assurance/bundle.py", "_claim_rows", "claim"): "AssuranceClaim",
     ("assurance/claims.py", "_can_verify", "claim"): "AssuranceClaim",
+    ("assurance/claims.py", "_move_reading", "claim"): "AssuranceClaim",
     ("assurance/decision.py", "_decision_from_findings", "f"): "Finding",
     ("assurance/evidence_audit.py", "_intrinsic_reasons", "item"): "ClaimEvidence",
     ("assurance/evidence_audit.py", "audit_of", "claim"): "AssuranceClaim",

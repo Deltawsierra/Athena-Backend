@@ -36,7 +36,9 @@ deriver at every reconcile and every attributed transition. It can hold a claim
 back -- CONTRADICTED on load-bearing failure, UNKNOWN when contested or when
 adverse evidence had to be refused -- and it can never lift one: target-authored,
 stale, wrong-subject or signature-only evidence carries no weight, and a person
-cannot move a claim to a status the evidence would hold back at once.
+cannot move a claim ABOVE its reading to a status the evidence would hold back at
+once. A person can always lower the reading (recorded under the hold) and always
+stop the claim.
 
 The input-fingerprint-change → supersede seam is the cross-version mechanism
 here. Each claim binds to a fingerprint of the inputs ITS deriver reads
@@ -660,9 +662,15 @@ def _status_set_by_a_person(claim: AssuranceClaim) -> bool:
     carries an actor when :func:`apply_claim_transition` made it, and none when a
     derive or an invalidation did. A hold the evidence audit put on it is not a
     move of the reading: a person's status the audit held back is still the
-    person's, read under the hold (:func:`assurance.evidence_audit.reading_status`)."""
+    person's, read under the hold (:func:`assurance.evidence_audit.reading_status`).
+    A person's move that left the status it shows where it was -- a contradiction
+    of a claim the evidence already held at CONTRADICTED -- is still a move of the
+    reading (:attr:`ClaimEvent.CAUSE_PERSON_READING`); other same-status events
+    are not."""
     last_move = (
-        claim.events.exclude(from_status=models.F("to_status"))
+        claim.events.filter(
+            ~models.Q(from_status=models.F("to_status")) | models.Q(cause=ClaimEvent.CAUSE_PERSON_READING)
+        )
         .exclude(cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT)
         .order_by("-pk")
         .first()
@@ -1195,9 +1203,16 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
     Rejects (with :class:`IllegalClaimTransition`) a machine-only target
     (STALE/SUPERSEDED), an illegal jump, and — the HARD RULE — any move into
     VERIFIED that is not backed by configuration/technically-verified, non-vendor
-    evidence. Updates only ``status`` (and ``verified_at`` on a move to VERIFIED)
-    and writes an attributed :class:`ClaimEvent`. Atomic so the change and its audit
-    record land together or not at all."""
+    evidence. Writes an attributed :class:`ClaimEvent`. Atomic so the change and
+    its audit record land together or not at all.
+
+    A STOP -- contradict, revoke -- is never refused, whatever the claim reads or
+    its evidence holds it at (:func:`_take_down`). Every other move is a move of the
+    claim's READING (:func:`assurance.evidence_audit.reading_status`: under an
+    evidence hold, the reading under it), judged from that reading: a move at or
+    below it is recorded, and the evidence goes on holding the claim back as far as
+    it does; a move above it that the evidence would hold back at once is refused
+    (:func:`assurance.evidence_audit.refusal_for_transition`)."""
     to_status = Status(to_status)
     from_status = claim.status
 
@@ -1205,7 +1220,27 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
         raise IllegalClaimTransition(
             f"{to_status} is a machine-only status, not a valid human transition target."
         )
-    if not can_transition(from_status, to_status):
+    # A take-down (revoke, contradict) is a stop (safety.stops), and the evidence has
+    # nothing to say to it: nothing ranks below CONTRADICTED, so the audit can never
+    # hold one back, and a withdrawal is never audited. So it does no evidence work
+    # at all -- no read of the items, of the route serving now, no classification --
+    # and nothing the audit does can refuse it, fail it or make it wait: its cost
+    # used to grow with every item recorded against the claim (400 ms at 3,000),
+    # and an audit that raised refused it.
+    if to_status.value in ea.STOPS:
+        return _take_down(claim, to_status, actor=actor, note=note)
+
+    reading = ea.reading_status(claim)
+    held = reading != from_status
+    if held and to_status == reading:
+        # Asks for nothing but the hold's release: refused with its reason.
+        raise IllegalClaimTransition(ea.refusal_for_transition(claim, to_status))
+    if not can_transition(reading, to_status):
+        if held:
+            raise IllegalClaimTransition(
+                f"{reading} → {to_status} is not a legal claim transition: the claim reads "
+                f"{reading} under the evidence hold at {from_status}."
+            )
         raise IllegalClaimTransition(
             f"{from_status} → {to_status} is not a legal claim transition."
         )
@@ -1214,43 +1249,109 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
             "Cannot verify a claim whose evidence is not configuration/technically "
             "verified, or that rests on vendor assertions."
         )
-    # The evidence recorded against the claim (issue #333): a move the evidence
-    # audit would hold back at once -- a pass over a contradiction, over a
-    # load-bearing failure, or over adverse evidence it had to refuse -- is refused
-    # here, not made and then undone. A person resolves the evidence, not the
-    # reading.
-    #
-    # A take-down (revoke, contradict) is a stop (safety.stops), and the evidence has
-    # nothing to say to it: nothing ranks below CONTRADICTED, so the audit can never
-    # hold one back, and a withdrawal is never audited. So it does no evidence work
-    # at all -- no read of the items, of the route serving now, no classification --
-    # and nothing the audit does can refuse it, fail it or make it wait: its cost
-    # used to grow with every item recorded against the claim (400 ms at 3,000),
-    # and an audit that raised refused it. The stored audit of a contradicted claim
-    # is brought current by the claim's next audit (a re-derive, a record, an
-    # invalidation), which reads the person's CONTRADICTED as the reading.
+    # The evidence recorded against the claim (issue #333), read against the
+    # person's status as the reading. A move above the reading that the audit would
+    # hold back at once -- a pass over a contradiction, over a load-bearing failure,
+    # or over adverse evidence it had to refuse -- is refused here, not made and then
+    # undone: a person resolves the evidence, not the reading.
     now = timezone.now()
-    take_down = to_status in (Status.REVOKED, Status.CONTRADICTED)
-    if not take_down:
-        refusal = ea.refusal_for_transition(claim, to_status, now=now)
-        if refusal:
-            raise IllegalClaimTransition(refusal)
+    audited = ea.audit_of(claim, base_status=to_status.value, now=now)
+    refusal = ea.refusal_for_transition(claim, to_status, now=now, audited=audited)
+    if refusal:
+        raise IllegalClaimTransition(refusal)
+    return _move_reading(claim, to_status, audited, actor=actor, note=note, now=now)
 
-    claim.status = to_status
+
+def _take_down(claim: AssuranceClaim, stop: str, *, actor, note: str) -> ClaimEvent:
+    """A person's contradict or revoke: never refused, and no evidence work.
+
+    Whatever the claim reads, the stop is its reading now. Where the evidence was
+    holding the claim, the stop is recorded as the reading under the hold
+    (:func:`assurance.evidence_audit.taken_down`, from the stored audit in hand):
+    a person's contradiction of a claim the evidence already held at CONTRADICTED
+    was refused as "contradicted -> contradicted", never recorded, and a later
+    release of the evidence lifted the claim to the reading the person had taken
+    down. The stored audit is otherwise left as it was taken, and every reader marks
+    it not current (:func:`assurance.evidence_audit.served_audit`) until the claim's
+    next audit, which reads the stop as the reading.
+
+    A claim already withdrawn stays withdrawn -- no stop outranks a withdrawal --
+    and the stop is recorded on it, attributed. A superseded version is closed
+    history, not a claim anything reads as current: it is refused, naming the
+    version to stop."""
+    from_status = claim.status
+    if from_status == Status.SUPERSEDED:
+        current = AssuranceClaim.objects.filter(
+            deployment_id=claim.deployment_id, fingerprint=claim.fingerprint
+        ).current().first()
+        raise IllegalClaimTransition(
+            "This version is superseded: closed history that nothing reads as current. "
+            + (f"Stop the claim's current version, {current.uuid}." if current is not None
+               else "The claim has no current version.")
+        )
+    if from_status == Status.REVOKED:
+        return ClaimEvent.objects.create(
+            claim=claim, from_status=from_status, to_status=from_status, actor=actor,
+            cause=ClaimEvent.CAUSE_PERSON_READING,
+            note=_clip(f"{note or ''} [{stop} asked for; the claim is already withdrawn, which no stop outranks.]"),
+        )
+    claim.status = stop
     fields = ["status", "updated_at"]
-    if to_status == Status.VERIFIED:
-        claim.verified_at = now
-        fields.append("verified_at")
-    audited = None if take_down else ea.audit_of(claim, base_status=to_status.value, now=now)
+    audit = ea.taken_down(claim.evidence_audit, stop)
+    if audit is not claim.evidence_audit:
+        claim.evidence_audit = audit
+        fields.append("evidence_audit")
+    claim.save(update_fields=fields)
+    return ClaimEvent.objects.create(
+        claim=claim, from_status=from_status, to_status=stop, actor=actor, note=note or "",
+        cause=ClaimEvent.CAUSE_PERSON_READING if from_status == stop else "",
+    )
+
+
+def _move_reading(claim: AssuranceClaim, to_status, audited, *, actor, note: str, now) -> ClaimEvent:
+    """Record a person's move of the claim's reading to ``to_status``, with the
+    evidence audit of it (``audited``, or None where nothing was recorded).
+
+    Where the evidence holds ``to_status`` back -- a downgrade under a hold, which is
+    never refused -- the claim stands where the audit holds it, the person's status
+    is the reading under the hold, and the hold keeps the confidence the reading had
+    before the move (a release restores no more than that). The person's event is
+    followed by the audit's own, so the history shows the person's reading and then
+    what the evidence held it at, and the hold is never read as the person's."""
+    from_status = claim.status
+    was_held = ea.reading_status(claim) != from_status
+    reading_confidence = (claim.evidence_audit or {}).get("base_confidence") if was_held else claim.confidence
+    new_status = to_status.value
+    fields = ["status", "updated_at"]
+    held = audited is not None and audited["held"]
+    if held:
+        audited = {**audited, "base_confidence": reading_confidence}
+        new_status = audited["status"]
     if audited is not None:
-        # The person's status is the reading now, and the audit's answer is
-        # recorded against it. It holds nothing back: a move it would hold back
-        # was refused above.
         claim.evidence_verdict = audited["verdict"]
         claim.evidence_audit = audited
         fields += ["evidence_verdict", "evidence_audit"]
+    if held and new_status != from_status:
+        claim.confidence = _confidence(new_status, claim.evidence_class)
+        fields.append("confidence")
+    elif not held and was_held:
+        # The hold is released onto the person's reading: no more confidence than
+        # the reading carried before the hold.
+        claim.confidence = ea._no_more_than(_confidence(new_status, claim.evidence_class), reading_confidence)
+        fields.append("confidence")
+    claim.status = new_status
+    if new_status == Status.VERIFIED:
+        claim.verified_at = now
+        fields.append("verified_at")
     claim.save(update_fields=fields)
 
-    return ClaimEvent.objects.create(
-        claim=claim, from_status=from_status, to_status=to_status, actor=actor, note=note or ""
+    event = ClaimEvent.objects.create(
+        claim=claim, from_status=from_status, to_status=to_status, actor=actor, note=note or "",
+        cause=ClaimEvent.CAUSE_PERSON_READING if from_status == to_status else "",
     )
+    if new_status != to_status:
+        ClaimEvent.objects.create(
+            claim=claim, from_status=to_status, to_status=new_status, actor=None,
+            cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT, note=ea.audit_note(audited),
+        )
+    return event

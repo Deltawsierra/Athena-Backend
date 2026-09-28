@@ -107,7 +107,8 @@ def _provider_descriptor(provider) -> dict:
             {
                 "field": a.field,
                 "value": a.value,
-                "evidence_class": a.evidence_class,
+                # The label as declared: a relabel is a change to what was declared.
+                "evidence_class": a.declared_evidence_class,
             }
             for a in provider.assertions.all()
         ),

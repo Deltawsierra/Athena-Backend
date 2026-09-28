@@ -169,14 +169,21 @@ def _worst_band(a: str | None, b: str | None) -> str | None:
 
 
 def _assertion_dict(assertion) -> dict:
-    """One declared fact, evidence-graded, with its honest independence flag."""
-    independently = _is_independently_evidenced(assertion.evidence_class, assertion.source)
+    """One declared fact, evidence-graded, with its honest independence flag.
+
+    Graded at the class it carries (``effective_evidence_class``): its label capped
+    at what its source can prove (#343). A self-declared or unsourced fact labelled
+    configuration-verified is the vendor's word and is graded as it; the label it
+    was given is echoed as ``declared_evidence_class``."""
+    effective = assertion.effective_evidence_class
+    independently = _is_independently_evidenced(effective, assertion.source)
     return {
         "field": assertion.field,
         "field_label": assertion.get_field_display(),
         "value": assertion.value,
-        "evidence_class": assertion.evidence_class,
-        "evidence_class_label": assertion.get_evidence_class_display(),
+        "evidence_class": effective,
+        "evidence_class_label": EvidenceClass(effective).label,
+        "declared_evidence_class": assertion.declared_evidence_class,
         "source": assertion.source,
         "source_label": assertion.get_source_display(),
         "independently_evidenced": independently,
@@ -202,9 +209,9 @@ def _vendor_dict(provider, assets: list) -> dict:
     assertions = sorted(provider.assertions.all(), key=lambda a: a.field)
     assertion_dicts = [_assertion_dict(a) for a in assertions]
 
-    classes = [a.evidence_class for a in assertions]
+    classes = [a.effective_evidence_class for a in assertions]
     # The profile's weakest link: a vendor is only as evidenced as its softest
-    # claim (max by strength ordinal = weakest).
+    # claim (max by strength ordinal = weakest), each at the class it carries.
     weakest = max(classes, key=evidence_strength) if classes else None
 
     dependent = sorted(assets, key=lambda a: (a.kind, a.name))

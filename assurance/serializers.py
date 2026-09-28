@@ -343,6 +343,8 @@ class ProviderProfileAssertionSerializer(serializers.ModelSerializer):
         source="get_evidence_class_display", read_only=True
     )
     source_label = serializers.CharField(source="get_source_display", read_only=True)
+    # The label is what the source said; the class the fact carries is beside it.
+    effective_evidence_class = serializers.CharField(read_only=True)
 
     class Meta:
         model = ProviderAssertion
@@ -353,6 +355,7 @@ class ProviderProfileAssertionSerializer(serializers.ModelSerializer):
             "value",
             "evidence_class",
             "evidence_class_label",
+            "effective_evidence_class",
             "source",
             "source_label",
             "notes",
@@ -387,7 +390,9 @@ class ProviderSerializer(serializers.ModelSerializer):
         read_only_fields = ["uuid", "kind_label", "assertions", "profile"]
 
     def get_profile(self, obj) -> dict:
-        classes = [a.evidence_class for a in obj.assertions.all()]
+        # The weakest link as each fact carries it into a claim: its label capped at
+        # what its source can prove (#343), never the label alone.
+        classes = [a.effective_evidence_class for a in obj.assertions.all()]
         weakest = max(classes, key=evidence_strength) if classes else None
         return {"declared_fields": len(classes), "weakest_evidence": weakest}
 
@@ -817,10 +822,13 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
     )
     is_stale = serializers.BooleanField(read_only=True)
     # The evidence audit's answer (issue #333) as stored: one of the five verdicts,
-    # INSUFFICIENT_EVIDENCE among them, or null where no evidence was ever audited.
-    # Never coerced -- not to the status, not to pass or fail.
+    # INSUFFICIENT_EVIDENCE among them, or null where no evidence was ever audited
+    # -- or where the stored audit is not of the claim as it reads now (a stop wrote
+    # the status without re-running it). Never coerced -- not to the status, not to
+    # pass or fail. The audit itself is served marked ``audit_current``.
     evidence_verdict = serializers.SerializerMethodField()
     evidence_verdict_label = serializers.SerializerMethodField()
+    evidence_audit = serializers.SerializerMethodField()
 
     class Meta:
         model = AssuranceClaim
@@ -872,10 +880,17 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         return obj.get_assessment_display() if obj.assessment else None
 
     def get_evidence_verdict(self, obj) -> str | None:
-        return obj.evidence_verdict or None
+        from .evidence_audit import current_verdict
+
+        return current_verdict(obj)
 
     def get_evidence_verdict_label(self, obj) -> str | None:
-        return obj.get_evidence_verdict_display() if obj.evidence_verdict else None
+        return obj.get_evidence_verdict_display() if self.get_evidence_verdict(obj) else None
+
+    def get_evidence_audit(self, obj) -> dict:
+        from .evidence_audit import served_audit
+
+        return served_audit(obj)
 
 
 class ClaimEvidenceSerializer(serializers.ModelSerializer):
@@ -903,12 +918,15 @@ class ClaimEvidenceSerializer(serializers.ModelSerializer):
         ``None`` where no stored audit mentions it."""
         audit = (self.context or {}).get("audit") or {}
         key = str(obj.uuid)
+        # An audit not of the claim as it reads now says how it weighed the item
+        # THEN, and says so (assurance.evidence_audit.served_audit).
+        stale = {"audit_current": False} if audit.get("audit_current") is False else {}
         for entry in audit.get("admitted", []):
             if entry.get("uuid") == key:
-                return {"load_bearing": True, "reasons": []}
+                return {"load_bearing": True, "reasons": [], **stale}
         for entry in audit.get("refused", []):
             if entry.get("uuid") == key:
-                return {"load_bearing": False, "reasons": entry.get("reasons", []), "weighs": entry.get("weighs")}
+                return {"load_bearing": False, "reasons": entry.get("reasons", []), "weighs": entry.get("weighs"), **stale}
         return None
 
 

@@ -283,6 +283,18 @@ class ProviderAssertion(models.Model):
             return self.evidence_class
         return ceiling
 
+    @property
+    def declared_evidence_class(self) -> str:
+        """The label the assertion was given, as given -- what the source SAID it is.
+
+        Only for echoing what was declared beside :attr:`effective_evidence_class`,
+        and for fingerprinting the declaration. Never for a judgment: a posture, a
+        gap, a weakest link, a "verified" or "independently evidenced" flag reads the
+        effective class, or a vendor's word relabelled reads as an observation
+        (#343; ``tests/test_every_reader_takes_the_capped_evidence_class.py`` fails
+        on any other read of the raw label)."""
+        return self.evidence_class
+
 
 # ---------------------------------------------------------------------------
 # Deployment — the AI system under assurance (the sellable unit)
@@ -1728,6 +1740,13 @@ class ClaimEvent(models.Model):
 
     #: :attr:`cause` on a move the evidence audit made (:mod:`assurance.evidence_audit`).
     CAUSE_EVIDENCE_AUDIT = "evidence_audit"
+    #: :attr:`cause` on a person's attributed transition that left the status it
+    #: shows where it was: a contradiction of a claim its evidence already held at
+    #: CONTRADICTED, a downgrade to the status an evidence hold already shows, a
+    #: stop on a claim already withdrawn. It moved the claim's READING (the one
+    #: under any hold), so it is read as a person's move, where every other
+    #: same-status event -- a retest opened, a legal ruling -- is not.
+    CAUSE_PERSON_READING = "person_reading"
 
     class Meta:
         ordering = ["created_at"]

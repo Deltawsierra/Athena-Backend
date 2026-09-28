@@ -197,7 +197,8 @@ def assess_data_lifecycle(deployment) -> dict:
             )
 
     # --- Provider assertions evidence logged / retained / reused / deleted, each
-    # carried at the assertion's TRUE evidence class (never upgraded).
+    # carried at the assertion's TRUE evidence class (never upgraded): its label
+    # capped at what its source can prove (#343, effective_evidence_class).
     seen_providers: set[int] = set()
     for asset in assets:
         provider = getattr(asset, "provider", None)
@@ -213,7 +214,7 @@ def assess_data_lifecycle(deployment) -> dict:
                     name=provider.name,
                     kind_label=f"{provider.get_kind_display()} (provider)",
                     how="declares a logging posture",
-                    evidence_class=logging_a.evidence_class,
+                    evidence_class=logging_a.effective_evidence_class,
                 )
             )
 
@@ -224,7 +225,7 @@ def assess_data_lifecycle(deployment) -> dict:
                     name=provider.name,
                     kind_label=f"{provider.get_kind_display()} (provider)",
                     how="declares a data-retention posture",
-                    evidence_class=retention_a.evidence_class,
+                    evidence_class=retention_a.effective_evidence_class,
                 )
             )
             # A retention assertion evidences DELETION only when it actually names
@@ -245,7 +246,7 @@ def assess_data_lifecycle(deployment) -> dict:
                         name=provider.name,
                         kind_label=f"{provider.get_kind_display()} (provider)",
                         how="retention posture names an erasure / expiry control",
-                        evidence_class=retention_a.evidence_class,
+                        evidence_class=retention_a.effective_evidence_class,
                     )
                 )
 
@@ -259,7 +260,7 @@ def assess_data_lifecycle(deployment) -> dict:
                         name=provider.name,
                         kind_label=f"{provider.get_kind_display()} (provider)",
                         how=how,
-                        evidence_class=a.evidence_class,
+                        evidence_class=a.effective_evidence_class,
                     )
                 )
 
