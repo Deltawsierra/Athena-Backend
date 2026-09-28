@@ -84,14 +84,23 @@ class EngineError(Exception):
     updated, and the value of the field is that it is always the right one: a caller
     branching on a kind that silently means "some other failure" is back to reading
     the message.
+
+    ``run_id`` is the engine's run this failure is about, where the engine named
+    one: the id ``POST /api/scans/{run_id}/abort`` stops. It is carried so that a
+    caller recording the failure can never be the place the only handle on a
+    run was dropped. None when the engine named no run -- or named one whose
+    work, it said, never started (athena-engine #71's 500 ``state: "failed"``,
+    and its 429): there is nothing to stop, and nothing is recorded.
     """
 
-    def __init__(self, message: str, *, kind: str, status: int | None = None) -> None:
+    def __init__(self, message: str, *, kind: str, status: int | None = None,
+                 run_id: str | None = None) -> None:
         super().__init__(message)
         if kind not in ENGINE_FAILURE_KINDS:
             raise ValueError(f"unknown engine failure kind {kind!r}")
         self.kind = kind
         self.status = status
+        self.run_id = run_id
 
 
 class ScanStillRunning(EngineError):
@@ -104,8 +113,49 @@ class ScanStillRunning(EngineError):
     """
 
     def __init__(self, message: str, run_id: str):
-        super().__init__(message, kind=ENGINE_STILL_RUNNING)
-        self.run_id = run_id
+        super().__init__(message, kind=ENGINE_STILL_RUNNING, run_id=run_id)
+
+
+class ScanUncollected(ScanStillRunning):
+    """
+    The engine took the scan, and then could not be read about it.
+
+    A status read that failed -- the engine unreachable, or answering 5xx, which
+    under athena-engine #71 is exactly what a registry answering "database is
+    locked" produces -- says nothing about the run: it may still be scanning the
+    customer. So it is read as a scan still running, with its run id, never as
+    a failed scan with the id thrown away.
+    """
+
+
+def _run_id_of(value) -> str | None:
+    """The id a run is named by, as text, or None when there is no usable one.
+
+    A number is its digits: engine main names a retest's scan record by an
+    integer, and a run id that is read as absent is a run nothing can name.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+#: The one field athena-engine #71 answers every launch with, saying which of
+#: its two shapes this is. Engine main sends no such field. Which contract
+#: answered is read from it and from nothing else -- never guessed from which
+#: keys happen to be present -- and a value that is neither is a shape this
+#: backend does not read.
+ANSWER_FIELD = "answer"
+ANSWER_STATUS = "status"
+ANSWER_VERDICT = "verdict"
+
+#: The states the engine's run registry ends a run in.
+RUN_COMPLETED = "completed"
+RUN_FAILED = "failed"
+RUN_ABORTED = "aborted"
 
 
 class CyberEngineClient:
@@ -172,26 +222,19 @@ class CyberEngineClient:
 
         return body
 
-    def _get(self, path: str) -> dict:
+    def _send_get(self, path: str) -> requests.Response:
+        """The engine's answer to a GET, whatever its status; raises only when there was none."""
         try:
-            resp = requests.get(
+            return requests.get(
                 f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT
             )
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
-        if not (200 <= resp.status_code < 300):
-            raise EngineError(
-                f"Engine error {resp.status_code}: {_excerpt(resp.text)}",
-                kind=ENGINE_REFUSED,
-                status=resp.status_code,
-            )
-
-        return self._read_json(resp, path)
-
-    def _post(self, path: str, payload: dict) -> dict:
+    def _send_post(self, path: str, payload: dict) -> requests.Response:
+        """The engine's answer to a POST, whatever its status; raises only when there was none."""
         try:
-            resp = requests.post(
+            return requests.post(
                 f"{self.base_url}{path}",
                 json=payload,
                 headers=self.headers,
@@ -203,14 +246,41 @@ class CyberEngineClient:
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
-        if not (200 <= resp.status_code < 300):
-            raise EngineError(
-                f"Engine error {resp.status_code}: {_excerpt(resp.text)}",
-                kind=ENGINE_REFUSED,
-                status=resp.status_code,
-            )
+    @staticmethod
+    def _refused(resp: requests.Response) -> EngineError:
+        return EngineError(
+            f"Engine error {resp.status_code}: {_excerpt(resp.text)}",
+            kind=ENGINE_REFUSED,
+            status=resp.status_code,
+        )
 
+    def _get(self, path: str) -> dict:
+        resp = self._send_get(path)
+        if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
         return self._read_json(resp, path)
+
+    def _post(self, path: str, payload: dict) -> dict:
+        resp = self._send_post(path, payload)
+        if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
+        return self._read_json(resp, path)
+
+    @staticmethod
+    def _status_answer(resp: requests.Response) -> dict | None:
+        """A body that is athena-engine #71's ``answer: "status"`` object, or None.
+
+        Read from a non-2xx answer, where #71 still names the run it registered.
+        Anything else -- engine main's error bodies, a proxy's page -- is None,
+        and the caller reads the answer as the refusal it always was.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        if isinstance(body, dict) and body.get(ANSWER_FIELD) == ANSWER_STATUS:
+            return body
+        return None
 
     # --------------------------------------------------
     # ENGINE ENDPOINTS
@@ -256,21 +326,119 @@ class CyberEngineClient:
         eighty-one against a sixty second read timeout — so the ordinary case
         was that the engine tested a customer's live system and we recorded
         "engine unreachable". We submit, and then collect.
+
+        How the answer is read (athena-engine #71, and engine main before it;
+        tests/test_every_launch_answer_is_read_by_its_answer_field.py replays
+        both, as the real engine sent them):
+
+        * Which contract answered is read from ``answer`` alone. #71 marks every
+          scan answer ``answer: "status"``; main sends none. Any other value is
+          a shape this backend does not read: nothing is read from it, and the
+          run it names is carried on the error so it can still be stopped.
+        * Only a 200 is the run's end. A 202 is never "done", whatever ``state``
+          it names: the engine reads the state after it hands the run to its
+          pool, so a scan that finished in between is answered 202
+          ``state: "completed"`` with no result in it. It is collected from
+          ``/api/scans/{run_id}`` like any other.
+        * A finished run is read by its state. Only ``completed`` is findings; a
+          run that ended ``aborted`` (stopped) or ``failed`` is that, and never a
+          scan that completed with nothing found.
+        * A 500 that is a status naming a run is the engine failing AFTER it
+          registered that run. ``state: null``: its work started, it is
+          scanning, stoppable by that id, and records its own end -- it is
+          collected, and if it cannot be collected it is still running, with
+          its id. ``state: "failed"``: its work never started; nothing was sent
+          to the target and there is nothing to stop.
+        * 503 (the launch was not admitted) and 429 (the pool was full) started
+          nothing, and are the refusals they always were.
         """
         payload = {"target": target, "wait_seconds": SCAN_INLINE_WAIT_SECONDS}
         if engagement_ref:
             payload["engagement_ref"] = engagement_ref
 
-        accepted = self._post("/api/scan", payload)
+        resp = self._send_post("/api/scan", payload)
 
-        # A short scan comes back finished on the first request.
-        if accepted.get("done") and accepted.get("result") is not None:
-            return accepted["result"]
-        if "run_id" not in accepted:
-            # An older engine that still answers synchronously.
-            return accepted
+        if resp.status_code == 500:
+            named = self._status_answer(resp)
+            run_id = _run_id_of(named.get("run_id")) if named else None
+            if run_id is not None:
+                if named.get("state") == RUN_FAILED:
+                    raise EngineError(
+                        f"The engine failed before the scan's work started "
+                        f"(run {run_id}): {named.get('error') or 'no error given'}. "
+                        f"Nothing was sent to the target.",
+                        kind=ENGINE_REFUSED,
+                        status=resp.status_code,
+                    )
+                # Its work started: it is scanning the customer, and this id is
+                # the only handle on it.
+                return self.collect_scan(run_id)
 
-        return self.collect_scan(accepted["run_id"])
+        if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
+
+        accepted = self._read_json(resp, "/api/scan")
+        run_id = _run_id_of(accepted.get("run_id"))
+
+        if ANSWER_FIELD in accepted and accepted[ANSWER_FIELD] != ANSWER_STATUS:
+            raise EngineError(
+                f"The engine answered a shape this backend does not read: HTTP "
+                f"{resp.status_code} with answer {accepted[ANSWER_FIELD]!r} to a scan "
+                f"start. Nothing was read from it"
+                + (f"; run {run_id} may still be running, and is stopped by that id."
+                   if run_id else "."),
+                kind=ENGINE_UNREADABLE,
+                status=resp.status_code,
+                run_id=run_id,
+            )
+
+        if resp.status_code == 200:
+            if accepted.get("done") is True:
+                if "state" not in accepted and accepted.get("result") is not None:
+                    # An engine older than the run registry: done, and its result.
+                    return accepted["result"]
+                return self._finished_scan(accepted, run_id)
+            if run_id is None:
+                if ANSWER_FIELD in accepted:
+                    raise EngineError(
+                        "The engine answered a scan start with a status that names no "
+                        "run, so there is nothing to collect. Nothing was read from it.",
+                        kind=ENGINE_UNREADABLE,
+                        status=resp.status_code,
+                    )
+                # An older engine that still answers synchronously.
+                return accepted
+            return self.collect_scan(run_id)
+
+        # A 202 (or any other 2xx): the run is not over, whatever state it names.
+        if run_id is None:
+            raise EngineError(
+                f"The engine accepted the scan (HTTP {resp.status_code}) without naming "
+                f"a run, so there is nothing to collect. Nothing was read from it.",
+                kind=ENGINE_UNREADABLE,
+                status=resp.status_code,
+            )
+        return self.collect_scan(run_id)
+
+    @staticmethod
+    def _finished_scan(status: dict, run_id: str | None) -> dict:
+        """The findings of a run that has ended, or the error that it ended some other way.
+
+        Only ``completed`` is a result. A stopped scan's result is whatever it
+        had when it stopped -- often nothing -- and reading it as findings would
+        record a scan an operator stopped as one that completed and found
+        nothing.
+        """
+        state = status.get("state")
+        if state == RUN_COMPLETED:
+            return status.get("result") or {}
+        result = status.get("result") if isinstance(status.get("result"), dict) else {}
+        raise EngineError(
+            f"Scan {state}: "
+            f"{status.get('reason') or result.get('error') or 'no reason given'}",
+            kind=ENGINE_RUN_FAILED,
+            run_id=run_id,
+        )
 
     def collect_scan(self, run_id: str) -> dict:
         """
@@ -278,21 +446,42 @@ class CyberEngineClient:
 
         Raises ScanStillRunning, carrying the id, if we give up first: the
         scan is still going, and the caller needs the id to record that and
-        collect it later.
+        collect it later. Raises ScanUncollected -- a ScanStillRunning -- when
+        the engine cannot be read about the run: that is not news that the run
+        ended, and the id is kept all the same.
         """
         deadline = time.monotonic() + SCAN_COLLECT_SECONDS
+        path = f"/api/scans/{run_id}"
 
         while True:
-            status = self._get(f"/api/scans/{run_id}")
+            resp = self._send_get_or_uncollected(path, run_id)
 
-            if status.get("done"):
-                if status.get("state") == "completed":
-                    return status.get("result") or {}
+            if resp.status_code == 404:
+                # The engine has no such run: definite, and nothing to stop.
                 raise EngineError(
-                    f"Scan {status.get('state')}: "
-                    f"{status.get('reason') or (status.get('result') or {}).get('error') or 'no reason given'}",
-                    kind=ENGINE_RUN_FAILED,
+                    f"The engine has no scan run {run_id}.",
+                    kind=ENGINE_REFUSED,
+                    status=resp.status_code,
+                    run_id=run_id,
                 )
+            if not (200 <= resp.status_code < 300):
+                raise ScanUncollected(
+                    f"The engine answered {resp.status_code} when asked about scan run "
+                    f"{run_id}; the scan may still be running, and can be collected "
+                    f"later: {_excerpt(resp.text)}",
+                    run_id=run_id,
+                )
+            try:
+                status = self._read_json(resp, path)
+            except EngineError as exc:
+                raise ScanUncollected(
+                    f"The engine's answer about scan run {run_id} could not be read; the "
+                    f"scan may still be running, and can be collected later: {exc}",
+                    run_id=run_id,
+                ) from exc
+
+            if status.get("done") is True:
+                return self._finished_scan(status, run_id)
 
             if time.monotonic() >= deadline:
                 raise ScanStillRunning(
@@ -302,6 +491,16 @@ class CyberEngineClient:
                 )
 
             time.sleep(SCAN_POLL_SECONDS)
+
+    def _send_get_or_uncollected(self, path: str, run_id: str) -> requests.Response:
+        try:
+            return self._send_get(path)
+        except EngineError as exc:
+            raise ScanUncollected(
+                f"The engine could not be reached about scan run {run_id}; the scan may "
+                f"still be running, and can be collected later: {exc}",
+                run_id=run_id,
+            ) from exc
 
     def run_llm_scan(self, payload: dict) -> dict:
         """
@@ -430,18 +629,43 @@ class CyberEngineClient:
 
     def retest_finding(self, twin_id: int, engagement_ref: str,
                        scope: list | None = None, tenant_id: str | None = None) -> dict:
-        """Is a finding still there?
+        """Is a finding still there? The engine's answer, read -- see :func:`read_retest_answer`.
 
         `engagement_ref` is required by the engine: a retest reaches the
         customer's system, and the authority for that has to be named now
         rather than inherited from the decision being retested.
+
+        No ``wait_seconds`` is sent: engine main refuses the field (422) before
+        it starts anything, and athena-engine #71 then waits up to its own cap
+        and answers 202 with the run's status past it, which is read as a run
+        still going -- collect it with :meth:`retest_status`.
         """
         payload = {"twin_id": twin_id, "engagement_ref": engagement_ref}
         if scope:
             payload["scope"] = scope
         if tenant_id:
             payload["tenant_id"] = tenant_id
-        return self._post("/api/remediation/retest", payload)
+        resp = self._send_post("/api/remediation/retest", payload)
+        return read_retest_answer(self, resp)
+
+    def retest_status(self, run_id: str) -> dict:
+        """Where a retest the engine answered 202 (or a 500 that named it) is now.
+
+        Read from ``/api/scans/{run_id}``, the ``status_url`` #71 answers with,
+        built here from the run id rather than followed. See
+        :func:`read_retest_run`.
+        """
+        path = f"/api/scans/{run_id}"
+        resp = self._send_get(path)
+        if not (200 <= resp.status_code < 300):
+            raise EngineError(
+                f"The engine answered {resp.status_code} when asked about retest run "
+                f"{run_id}: {_excerpt(resp.text)}",
+                kind=ENGINE_REFUSED,
+                status=resp.status_code,
+                run_id=run_id,
+            )
+        return read_retest_run(self._read_json(resp, path), run_id)
 
     def evidence_pack(self, reason: str, since: str | None = None, until: str | None = None,
                       run_id: str | None = None, engagement_ref: str | None = None,
@@ -461,3 +685,196 @@ class CyberEngineClient:
             if value:
                 payload[key] = value
         return self._post("/api/evidence/pack", payload)
+
+
+# --------------------------------------------------
+# READING A RETEST
+#
+# A retest is a full scan of the customer's target, and athena-engine #71 made
+# it a run like any other: registered before anything is sent, stoppable by its
+# `run_id`, and answered in exactly two shapes told apart by `answer`. Engine
+# main answers a verdict synchronously, with no `answer`, and its `run_id` is the
+# scan record id -- not an id any stop names. Both are read here, into one
+# reading, so no caller ever reads a raw body and guesses:
+#
+#   {"answer": "verdict", "verdict", "detail", "check", "scan_record_id",
+#    "run_id", "stop_id", "state", "stopped_after_recording", "body"}
+#   {"answer": "status", "phase", "run_id", "stop_id", "state", "reason",
+#    "error", "http_status", "body"}
+#
+# `stop_id` is set only while the run may still be going: it is what a Stop
+# names. `phase` is one of RETEST_PHASES. A retest that was stopped after its
+# check was filed is a verdict -- the check is on the engine's chain and true --
+# with `stopped_after_recording` naming the stop; never "nothing was filed", and
+# never a plain verdict either.
+# --------------------------------------------------
+
+#: The run may still be going: it is stoppable by `stop_id`, and collected with
+#: `CyberEngineClient.retest_status`.
+RETEST_RUNNING = "running"
+#: Stopped before it filed anything: no verdict, no check.
+RETEST_STOPPED = "stopped"
+#: Failed. `started` says whether any of its work began.
+RETEST_FAILED = "failed"
+#: Refused before any work started (a full pool): nothing to stop.
+RETEST_REFUSED = "refused"
+#: Ended without a verdict, for a reason the engine did not name.
+RETEST_ENDED = "ended_without_verdict"
+
+RETEST_PHASES = (RETEST_RUNNING, RETEST_STOPPED, RETEST_FAILED, RETEST_REFUSED, RETEST_ENDED)
+
+
+def _retest_verdict(body: dict, *, scan_record_id, run_id, stop_id, state,
+                    stopped_after_recording) -> dict:
+    return {
+        "answer": ANSWER_VERDICT,
+        "verdict": body.get("verdict"),
+        "detail": body.get("detail"),
+        "check": body.get("check") if isinstance(body.get("check"), dict) else None,
+        "scan_record_id": _run_id_of(scan_record_id),
+        "run_id": run_id,
+        "stop_id": stop_id,
+        "state": state,
+        "stopped_after_recording": stopped_after_recording,
+        "body": body,
+    }
+
+
+def _retest_status(phase: str, *, run_id, state, reason=None, error=None,
+                   http_status=None, body=None, started=True) -> dict:
+    return {
+        "answer": ANSWER_STATUS,
+        "phase": phase,
+        "run_id": run_id,
+        # Only a run that may still be going has anything for a Stop to name.
+        "stop_id": run_id if phase == RETEST_RUNNING else None,
+        "state": state,
+        "reason": reason,
+        "error": error,
+        "http_status": http_status,
+        "started": started,
+        "body": body,
+    }
+
+
+def _status_phase(state, *, http_status: int) -> str:
+    """The phase an `answer: "status"` body is in. A 202 is always running."""
+    if http_status == 202:
+        return RETEST_RUNNING
+    if state == RUN_ABORTED:
+        return RETEST_STOPPED
+    if state == RUN_FAILED:
+        return RETEST_FAILED
+    if state in ("queued", "running", "aborting"):
+        return RETEST_RUNNING
+    return RETEST_ENDED
+
+
+def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> dict:
+    """The engine's answer to ``POST /api/remediation/retest``, read by its ``answer``."""
+    path = "/api/remediation/retest"
+    status = resp.status_code
+
+    if status in (429, 500):
+        named = client._status_answer(resp)
+        run_id = _run_id_of(named.get("run_id")) if named else None
+        if run_id is not None:
+            state = named.get("state")
+            if status == 429:
+                # The pool was full: the run was recorded FAILED and never started.
+                return _retest_status(RETEST_REFUSED, run_id=None, state=state,
+                                      error=named.get("error"), http_status=status,
+                                      body=named, started=False)
+            if state == RUN_FAILED:
+                # Failed after it was registered, before its work started.
+                return _retest_status(RETEST_FAILED, run_id=None, state=state,
+                                      error=named.get("error"), http_status=status,
+                                      body=named, started=False)
+            # Failed after its work started: it is running, stoppable by this id.
+            return _retest_status(RETEST_RUNNING, run_id=run_id, state=state,
+                                  error=named.get("error"), http_status=status, body=named)
+
+    if not (200 <= status < 300):
+        # 503 (not admitted), 4xx, a bare 5xx: nothing this answer says started.
+        raise client._refused(resp)
+
+    body = client._read_json(resp, path)
+    named_run = _run_id_of(body.get("run_id"))
+
+    if ANSWER_FIELD not in body:
+        # Engine main: its verdict, synchronously, with the scan record id under
+        # `run_id` and nothing a stop could name -- the retest is over. Neither
+        # contract answers a 202, or a `scan_record_id`, without `answer`; read as
+        # main's verdict either would be a check filed against an id that may be a
+        # registry run, so neither is read.
+        if status == 202 or "scan_record_id" in body or "verdict" not in body:
+            raise EngineError(
+                f"The engine answered a retest in a shape this backend does not read: "
+                f"HTTP {status} with no `answer`. Nothing was read from it.",
+                kind=ENGINE_UNREADABLE, status=status, run_id=None,
+            )
+        return _retest_verdict(body, scan_record_id=body.get("run_id"), run_id=None,
+                               stop_id=None, state=None, stopped_after_recording=None)
+
+    answer = body[ANSWER_FIELD]
+    if status == 202 and answer != ANSWER_STATUS:
+        raise EngineError(
+            f"The engine answered a retest in a shape this backend does not read: HTTP 202 "
+            f"with answer {answer!r}. A 202 is never a verdict; nothing was read from it.",
+            kind=ENGINE_UNREADABLE, status=status, run_id=named_run,
+        )
+    if answer == ANSWER_VERDICT:
+        state = body.get("state")
+        stopped = body.get("stopped_after_recording")
+        if state not in (None, RUN_COMPLETED) and not stopped:
+            # A verdict on a run that did not complete is one filed before a stop
+            # landed: #71 names the stop. Said, even if it did not.
+            stopped = state
+        return _retest_verdict(body, scan_record_id=body.get("scan_record_id"),
+                               run_id=named_run, stop_id=None, state=state,
+                               stopped_after_recording=stopped or None)
+    if answer == ANSWER_STATUS:
+        return _retest_status(_status_phase(body.get("state"), http_status=status),
+                              run_id=named_run, state=body.get("state"),
+                              reason=body.get("reason"), error=body.get("error"),
+                              http_status=status, body=body)
+    raise EngineError(
+        f"The engine answered a retest in a shape this backend does not read: answer "
+        f"{answer!r} is neither a verdict nor a status. Nothing was read from it.",
+        kind=ENGINE_UNREADABLE, status=status, run_id=named_run,
+    )
+
+
+def read_retest_run(status: dict, run_id: str) -> dict:
+    """A retest run's ``/api/scans/{run_id}`` record, read.
+
+    A verdict only by the rule the engine answers a waiting caller by: the run
+    COMPLETED and its stored result carries one, or it was ABORTED after its
+    check was filed (the result carries the verdict AND that check). A stopped
+    run's stored ``{stopped, scan_incomplete}`` has no verdict and no check: it
+    is a stop, and nothing was filed. A failed run keeps the runner's
+    inconclusive verdict as its result, which is not a verdict on the finding.
+    """
+    state = status.get("state")
+    result = status.get("result") if isinstance(status.get("result"), dict) else None
+    done = status.get("done") is True
+    has_verdict = result is not None and isinstance(result.get("verdict"), str)
+    filed = has_verdict and isinstance(result.get("check"), dict)
+
+    if done and state == RUN_COMPLETED and has_verdict:
+        return _retest_verdict(result, scan_record_id=result.get("scan_record_id"),
+                               run_id=run_id, stop_id=None, state=state,
+                               stopped_after_recording=None)
+    if done and state == RUN_ABORTED and filed:
+        return _retest_verdict(result, scan_record_id=result.get("scan_record_id"),
+                               run_id=run_id, stop_id=None, state=state,
+                               stopped_after_recording=status.get("reason") or state)
+    if not done:
+        return _retest_status(RETEST_RUNNING, run_id=run_id, state=state,
+                              reason=status.get("reason"), body=status)
+    error = None
+    if state == RUN_FAILED:
+        error = (result or {}).get("error") or (result or {}).get("detail") or status.get("reason")
+    phase = {RUN_ABORTED: RETEST_STOPPED, RUN_FAILED: RETEST_FAILED}.get(state, RETEST_ENDED)
+    return _retest_status(phase, run_id=run_id, state=state, reason=status.get("reason"),
+                          error=error, body=status)
