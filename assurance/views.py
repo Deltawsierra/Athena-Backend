@@ -2180,6 +2180,12 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
     lookup_field = "uuid"
     http_method_names = ["get", "post", "head", "options"]
 
+    #: The most evidence objects one read of a claim's evidence returns. Anything
+    #: may be recorded against a claim, so the read is bounded and says so -- as
+    #: the chain-outcome and approved-workflow reads are -- with the whole count
+    #: beside the page and ``?offset=`` for the rest.
+    EVIDENCE_PAGE_SIZE = 100
+
     def _scoped_claims(self):
         qs = AssuranceClaim.objects.all()
         user = self.request.user
@@ -2239,18 +2245,39 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         each with its ten record areas, and the stored evidence audit of the version
         asked for: its verdict -- ``insufficient_evidence`` among them, as itself --
         and how each item was weighed. Recorded is not load-bearing. A read, open to
-        any operator who can see the claim."""
+        any operator who can see the claim.
+
+        Bounded: the newest ``EVIDENCE_PAGE_SIZE`` items from ``?offset=`` (default
+        0), with ``evidence_count`` the whole count, ``returned``, ``truncated`` and
+        ``page_size`` beside them. An offset that is not a non-negative integer is a
+        400."""
         from .evidence_audit import evidence_for
 
+        raw = request.query_params.get("offset", "0")
+        try:
+            offset = int(raw)
+        except (TypeError, ValueError):
+            offset = -1
+        if offset < 0:
+            return Response({"detail": f"offset must be a non-negative integer, not {raw[:40]!r}."}, status=400)
         claim = self.get_object()
-        items = evidence_for(claim).select_related("superseded_by", "invalidated_by")
+        recorded = evidence_for(claim).order_by("-created_at", "-pk")
+        total = recorded.count()
+        page = list(
+            recorded.select_related("superseded_by", "invalidated_by")[offset: offset + self.EVIDENCE_PAGE_SIZE]
+        )
         audit = claim.evidence_audit or {}
         return Response(
             {
                 "claim": str(claim.uuid),
                 "evidence_verdict": claim.evidence_verdict or None,
                 "evidence_audit": audit,
-                "evidence": ClaimEvidenceSerializer(items, many=True, context={"audit": audit}).data,
+                "evidence": ClaimEvidenceSerializer(page, many=True, context={"audit": audit}).data,
+                "evidence_count": total,
+                "returned": len(page),
+                "truncated": offset + len(page) < total,
+                "page_size": self.EVIDENCE_PAGE_SIZE,
+                "offset": offset,
             }
         )
 

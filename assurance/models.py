@@ -254,8 +254,34 @@ class ProviderAssertion(models.Model):
             ),
         ]
 
+    #: The strongest evidence class an assertion from each source can carry into a
+    #: claim (#343), whatever it is labelled. What the source can prove, not what it
+    #: says: only an independent measurement observes a configuration, so only
+    #: ``measured`` reaches the verified grades; a contract proves what was
+    #: contractually stated; a document on file supports a fact without observing
+    #: it; and a self-declared fact -- or one whose source nobody recorded -- is the
+    #: vendor's word, however it is labelled. A label weaker than the ceiling is
+    #: kept as it is: a source never raises a label.
+    SOURCE_CEILING = {
+        Source.MEASURED: EvidenceClass.TECHNICALLY_VERIFIED,
+        Source.CONTRACT: EvidenceClass.CONTRACTUALLY_STATED,
+        Source.VENDOR_DOC: EvidenceClass.DOCUMENT_SUPPORTED,
+        Source.SELF_DECLARED: EvidenceClass.VENDOR_ASSERTED,
+        "": EvidenceClass.VENDOR_ASSERTED,
+    }
+
     def __str__(self) -> str:
         return f"{self.provider.name}: {self.get_field_display()} = {self.value[:40]}"
+
+    @property
+    def effective_evidence_class(self) -> str:
+        """The evidence class this assertion carries into a claim: its label, capped
+        at what its source can prove (:attr:`SOURCE_CEILING`). A source not in the
+        table is no better than the vendor's word."""
+        ceiling = EvidenceClass(self.SOURCE_CEILING.get(self.source or "", EvidenceClass.VENDOR_ASSERTED)).value
+        if evidence_strength(self.evidence_class) >= evidence_strength(ceiling):
+            return self.evidence_class
+        return ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -1809,6 +1835,12 @@ class ClaimEvidence(models.Model):
     invalidated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
+    # Who invalidated it, as the account was named when it acted -- written once, by
+    # assurance.evidence_audit.invalidate_claim_evidence, and what the record reads
+    # back. The foreign key above is nulled when the account is deleted; this is
+    # not, so the attribution survives the account. An item marked invalidated
+    # with no name here retired nothing (assurance.evidence_audit).
+    invalidated_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
     superseded_by = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="supersedes"
     )

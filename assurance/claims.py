@@ -435,8 +435,9 @@ def _derive_ai_bom(deployment) -> dict:
     summary = result["summary"]
     drift = assess_bom_drift(deployment)
 
+    # Each fact at the class its source can prove, never its label alone (#343).
     fact_classes = [
-        f["evidence_class"] for p in providers for f in p["declared_facts"] if f.get("evidence_class")
+        f["effective_evidence_class"] for p in providers for f in p["declared_facts"] if f.get("effective_evidence_class")
     ]
     weakest, _strongest, vendor_asserted = _grade_pool(fact_classes)
 
@@ -584,6 +585,9 @@ def _make_claim(
     confidence = derived["confidence"]
     audit_event = None
     if audited is not None and audited["held"]:
+        # The confidence the reading would carry with no evidence: a release
+        # restores no more than this (assurance.evidence_audit.audit_claim).
+        audited = {**audited, "base_confidence": derived["confidence"]}
         audit_event = (status, audited["status"], ea.audit_note(audited))
         status = audited["status"]
         confidence = _confidence(status, derived["evidence_class"])
@@ -717,8 +721,12 @@ def _refresh_machine_fields(
     audited = None
     if audit_context is not None:
         subject, items = audit_context
+        # The reading the evidence is weighed against is the one a fired condition
+        # leaves: no better than STALE. Read against the deriver's pass instead, a
+        # hold stored that pass as its reading, and releasing it lifted the claim
+        # over a condition that still stands.
         audited = ea.audit(
-            base_status=new_status,
+            base_status=_held_status(new_status) if held else new_status,
             vendor_asserted=derived["vendor_asserted"],
             evidence_class=derived["evidence_class"],
             subject=subject,
@@ -737,6 +745,8 @@ def _refresh_machine_fields(
     claim.vendor_asserted = derived["vendor_asserted"]
     claim.confidence = derived["confidence"]
     if audited is not None:
+        if audited["held"]:
+            audited = {**audited, "base_confidence": derived["confidence"]}
         claim.evidence_verdict = audited["verdict"]
         claim.evidence_audit = audited
         if audited["held"]:
@@ -1005,10 +1015,11 @@ def _derive_claims(dep, now) -> dict:
             inputs=input_fp,
             route=route,
         )
-        # The audit of a NEW version, read against what the deriver reads. Only ever
-        # holds it back (see assurance.evidence_audit).
+        # The audit of a NEW version, read against what the deriver reads -- as a
+        # fired latent condition leaves it, no better than STALE. Only ever holds it
+        # back (see assurance.evidence_audit).
         audited = ea.audit(
-            base_status=derived["status"],
+            base_status=_held_status(derived["status"]) if identity_fp in held else derived["status"],
             vendor_asserted=derived["vendor_asserted"],
             evidence_class=derived["evidence_class"],
             subject=audit_subject,
@@ -1208,17 +1219,29 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
     # load-bearing failure, or over adverse evidence it had to refuse -- is refused
     # here, not made and then undone. A person resolves the evidence, not the
     # reading.
+    #
+    # A take-down (revoke, contradict) is a stop (safety.stops), and the evidence has
+    # nothing to say to it: nothing ranks below CONTRADICTED, so the audit can never
+    # hold one back, and a withdrawal is never audited. So it does no evidence work
+    # at all -- no read of the items, of the route serving now, no classification --
+    # and nothing the audit does can refuse it, fail it or make it wait: its cost
+    # used to grow with every item recorded against the claim (400 ms at 3,000),
+    # and an audit that raised refused it. The stored audit of a contradicted claim
+    # is brought current by the claim's next audit (a re-derive, a record, an
+    # invalidation), which reads the person's CONTRADICTED as the reading.
     now = timezone.now()
-    refusal = ea.refusal_for_transition(claim, to_status, now=now)
-    if refusal:
-        raise IllegalClaimTransition(refusal)
+    take_down = to_status in (Status.REVOKED, Status.CONTRADICTED)
+    if not take_down:
+        refusal = ea.refusal_for_transition(claim, to_status, now=now)
+        if refusal:
+            raise IllegalClaimTransition(refusal)
 
     claim.status = to_status
     fields = ["status", "updated_at"]
     if to_status == Status.VERIFIED:
         claim.verified_at = now
         fields.append("verified_at")
-    audited = ea.audit_of(claim, base_status=to_status.value, now=now) if to_status != Status.REVOKED else None
+    audited = None if take_down else ea.audit_of(claim, base_status=to_status.value, now=now)
     if audited is not None:
         # The person's status is the reading now, and the audit's answer is
         # recorded against it. It holds nothing back: a move it would hold back

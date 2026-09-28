@@ -558,7 +558,12 @@ def _derived_ready():
     for field, value in (("region", "eu-west-1"), ("trains_on_data", "No"), ("subprocessors", "none"), ("shares_data", "No")):
         ProviderAssertion.objects.get_or_create(
             provider=provider, field=field,
-            defaults={"value": value, "evidence_class": EvidenceClass.CONFIGURATION_VERIFIED},
+            # Configuration verified by an independent measurement: a self-declared
+            # label of the same class is the vendor's word and never verifies (#343).
+            defaults={
+                "value": value, "evidence_class": EvidenceClass.CONFIGURATION_VERIFIED,
+                "source": ProviderAssertion.Source.MEASURED,
+            },
         )
     Asset.objects.filter(deployment=dep, kind=Asset.Kind.MODEL).update(provider=provider, metadata={"region": "eu-west-1"})
     if not Asset.objects.filter(deployment=dep, kind=Asset.Kind.MODEL).exists():

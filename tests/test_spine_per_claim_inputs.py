@@ -80,9 +80,11 @@ def _deployment():
     dep = Deployment.objects.create(name="d", owner=owner)
     provider = Provider.objects.create(name="openai", kind=Provider.Kind.MODEL_PROVIDER, region="eu-west-1")
     for field, value in (("region", "eu-west-1"), ("trains_on_data", "No"), ("subprocessors", "None")):
+        # Configuration verified by an independent measurement: a self-declared
+        # label of the same class is the vendor's word and never verifies (#343).
         ProviderAssertion.objects.create(
             provider=provider, field=field, value=value,
-            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED,
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED, source=ProviderAssertion.Source.MEASURED,
         )
     Asset.objects.create(
         deployment=dep, kind=Asset.Kind.MODEL, name="gpt", identifier="gpt",

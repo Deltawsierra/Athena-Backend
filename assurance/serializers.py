@@ -293,6 +293,10 @@ class ProviderAssertionSerializer(serializers.ModelSerializer):
     )
     provider_name = serializers.CharField(source="provider.name", read_only=True)
     updated_by = serializers.CharField(source="updated_by.username", read_only=True, allow_null=True)
+    # The label is accepted as given -- it is what the source said -- and the class
+    # the assertion actually carries into a claim is shown beside it: the label,
+    # capped at what the source can prove (ProviderAssertion.SOURCE_CEILING, #343).
+    effective_evidence_class = serializers.CharField(read_only=True)
 
     class Meta:
         model = ProviderAssertion
@@ -305,13 +309,14 @@ class ProviderAssertionSerializer(serializers.ModelSerializer):
             "value",
             "evidence_class",
             "evidence_class_label",
+            "effective_evidence_class",
             "source",
             "source_label",
             "notes",
             "updated_by",
             "updated_at",
         ]
-        read_only_fields = ["uuid", "provider_name", "updated_by", "updated_at"]
+        read_only_fields = ["uuid", "provider_name", "effective_evidence_class", "updated_by", "updated_at"]
 
     def validate(self, attrs):
         """One assertion per field per provider — the profile holds a single

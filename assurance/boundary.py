@@ -253,11 +253,21 @@ def _region_allowed(declared: str, allowed_regions: list[str]) -> bool:
 
 
 def _assertion_map(provider) -> dict:
-    """{field: {value, evidence_class}} for a provider's declared assertions,
-    read from whatever is prefetched — no query per provider when the caller
-    prefetches ``assets__provider__assertions``."""
+    """{field: {value, evidence_class, declared_evidence_class, source}} for a
+    provider's declared assertions, read from whatever is prefetched — no query per
+    provider when the caller prefetches ``assets__provider__assertions``.
+
+    ``evidence_class`` is what the assertion carries into a claim: its label capped
+    by what its source can prove (``ProviderAssertion.effective_evidence_class``,
+    #343). A self-declared fact labelled configuration-verified is the vendor's word
+    and reads as it; the label it was given is kept beside it."""
     return {
-        a.field: {"value": a.value, "evidence_class": a.evidence_class}
+        a.field: {
+            "value": a.value,
+            "evidence_class": a.effective_evidence_class,
+            "declared_evidence_class": a.evidence_class,
+            "source": a.source,
+        }
         for a in provider.assertions.all()
     }
 

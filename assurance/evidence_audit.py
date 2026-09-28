@@ -18,17 +18,25 @@ named reason, and an item can carry several:
 - its origin is an observer INDEPENDENT of the system under assurance. The
   target's own report of itself is ``target_authored``; an operator's, a vendor's
   or an unknown party's is ``not_independent``;
-- it is live: not past its expiry, not invalidated by a person, not superseded by
-  a successor that itself carries weight, observed at a stated instant that is not
-  in the future;
+- it is live: not past its expiry, not invalidated by a person who is attributed
+  with it, not retired by a successor (below), observed at a stated instant that
+  is not in the future;
 - it names THIS claim: this deployment, this claim type, this component (or no
   component, for a deployment-wide claim), the served route serving now, and the
   input fingerprint of the version being audited;
 - an INDEPENDENT STATE CHECK backs what it asserts. A verified signature says who
   produced the bytes and that they are unaltered; it says nothing about whether
   the observation in them was true or complete. An item whose only warrant is its
-  signature -- or whose "state check" is its own content digest -- asserts an
-  effect nobody checked, and is ``no_independent_state_check``.
+  signature -- or whose "state check" is its own content digest or signer, in
+  any spelling -- asserts an effect nobody checked, and is
+  ``no_independent_state_check``.
+
+A successor retires what it supersedes only when it asserts pass or fail, carries
+weight under every rule above (so it is independent, live, on this subject,
+checked and graded -- the bar a pass must meet), and was observed strictly after
+the item it supersedes. A successor that asserts nothing, that could not carry
+weight, or that saw the subject no later than the item did retires nothing, and
+the audit's ``supersessions`` says which it was.
 
 What the answer is (:func:`audit`)
 ----------------------------------
@@ -50,7 +58,10 @@ What the answer does to the claim
 ---------------------------------
 It can only ever hold a claim BACK, never lift it past its own reading:
 
-- FAIL on load-bearing evidence moves the claim to CONTRADICTED;
+- FAIL on load-bearing evidence moves the claim to CONTRADICTED. A claim whose
+  own reading is an observed pass (SUPPORTED or VERIFIED on technically or
+  configuration verified, non-vendor evidence) is pass-side evidence itself, so a
+  load-bearing fail against it is CONTESTED, not FAIL;
 - CONTESTED, or INCOMPLETE because adverse evidence was refused or is partial,
   holds it at UNKNOWN (``confidence`` None);
 - PASS and INSUFFICIENT_EVIDENCE move nothing. A PASS is the evidence agreeing
@@ -81,6 +92,7 @@ evidence record can establish it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -137,6 +149,18 @@ NAMES_NO_INPUTS = "names_no_inputs"
 NO_INDEPENDENT_STATE_CHECK = "no_independent_state_check"
 STATE_CHECK_IS_THE_RECORD = "state_check_is_the_record_itself"
 UNGRADED = "ungraded"
+#: An item naming a subject that differs from this claim's only in case or spacing.
+#: Subjects bind exactly, so it is not about this claim -- and the audit says it
+#: was a near miss rather than letting it weigh nothing silently. Never neutral on
+#: its own: the naming reason beside it decides what the item weighs.
+SUBJECT_MISMATCH = "subject_mismatch"
+
+# Why a successor did or did not retire the item it supersedes (``supersessions``).
+RETIRES = "retires"
+SUCCESSOR_ASSERTS_NOTHING = "successor_asserts_nothing"
+SUCCESSOR_CARRIES_NO_WEIGHT = "successor_carries_no_weight"
+SUCCESSOR_NOT_OBSERVED_LATER = "successor_not_observed_later"
+SUCCESSOR_NOT_ON_RECORD = "successor_not_on_record"
 
 #: Reasons under which an item is not about this claim at all, or was retired by a
 #: person or a load-bearing successor: it weighs nothing, in either direction.
@@ -175,6 +199,9 @@ ITEM_OUTCOMES = frozenset(
 )
 #: The outcomes that bear against a claim.
 _ADVERSE = frozenset({ClaimVerdict.FAIL.value, ClaimVerdict.INCOMPLETE.value})
+#: The outcomes that assert an effect: the only ones held to a state check and a
+#: grade, and so the only ones a successor may carry to retire what it supersedes.
+_ASSERTING = frozenset({ClaimVerdict.PASS.value, ClaimVerdict.FAIL.value})
 
 #: The statuses the audit never reads or moves: a withdrawal and closed history.
 _UNAUDITED_STATUSES = frozenset({Status.REVOKED.value, Status.SUPERSEDED.value})
@@ -235,6 +262,47 @@ def subject_of(claim: AssuranceClaim, *, route: str, inputs: str | None = None) 
 # Classification -- one item against one claim version
 # ---------------------------------------------------------------------------
 
+#: A leading hash-algorithm label on a digest: ``sha256:``, ``SHA-512=``, ``md5:``.
+_ALGORITHM_PREFIX = re.compile(r"^(?:sha-?(?:1|224|256|384|512)|sha3-(?:224|256|384|512)|blake2[bs]|blake3|md5)[:=]")
+
+
+def _as_reference(value) -> str:
+    """A digest or signer as it is compared: stripped, lower-cased, and without a
+    leading algorithm label, so ``SHA256:7F3A9C``, ``7f3a9c`` and ``sha256:7f3a9c``
+    are one value. Used only to compare, never stored."""
+    text = (value or "").strip().lower()
+    return _ALGORITHM_PREFIX.sub("", text, count=1).strip()
+
+
+def _loose(value) -> str:
+    """A subject value with case and whitespace ignored -- only to tell a near miss
+    from a different subject. Binding is always on the exact value."""
+    return "".join(str(value or "").split()).casefold()
+
+
+def _attributed_invalidation(item: ClaimEvidence) -> bool:
+    """Whether an item's invalidation is one a person is attributed with: the
+    account that made it (as it was named at the time) and a reason. Only
+    :func:`invalidate_claim_evidence` writes that; a row stamped invalidated any
+    other way has retired nothing."""
+    return bool((item.invalidated_by_username or "").strip() and (item.invalidation_reason or "").strip())
+
+
+def _near_misses(item: ClaimEvidence, subject: Subject) -> list[str]:
+    """The subject fields ``item`` names that differ from ``subject``'s only in
+    case or spacing."""
+    pairs = (
+        ("deployment", item.subject_deployment, subject.deployment),
+        ("claim type", item.subject_claim_type, subject.claim_type),
+        ("component", item.subject_asset, subject.asset),
+        ("served route", item.subject_route, subject.route),
+        ("input fingerprint", item.subject_inputs, subject.inputs),
+    )
+    return [
+        name for name, named, own in pairs
+        if named and own and named != own and _loose(named) == _loose(own)
+    ]
+
 
 def _intrinsic_reasons(item: ClaimEvidence, subject: Subject, now) -> list[str]:
     """Every reason ``item`` carries no weight, leaving supersession aside."""
@@ -246,8 +314,9 @@ def _intrinsic_reasons(item: ClaimEvidence, subject: Subject, now) -> list[str]:
     elif item.origin != Origin.INDEPENDENT:
         reasons.append(NOT_INDEPENDENT)
 
-    # Liveness.
-    if item.invalidated_at is not None and item.invalidated_at <= now:
+    # Liveness. An invalidation retires an item only when a person is attributed
+    # with it (see _attributed_invalidation).
+    if item.invalidated_at is not None and item.invalidated_at <= now and _attributed_invalidation(item):
         reasons.append(INVALIDATED)
     if item.expires_at is None or item.expires_at <= now:
         reasons.append(EXPIRED)
@@ -277,16 +346,18 @@ def _intrinsic_reasons(item: ClaimEvidence, subject: Subject, now) -> list[str]:
         reasons.append(NAMES_NO_INPUTS)
     elif item.subject_inputs != subject.inputs:
         reasons.append(TAKEN_AGAINST_OTHER_INPUTS)
+    if _near_misses(item, subject):
+        reasons.append(SUBJECT_MISMATCH)
 
     # Observation: an asserted effect needs an independent check of the state, and
     # a grade that says how it is known. Integrity is not that check.
-    if item.outcome in (ClaimVerdict.PASS.value, ClaimVerdict.FAIL.value):
+    if item.outcome in _ASSERTING:
         check = (item.state_check_ref or "").strip()
         if not check or item.state_checked_at is None:
             reasons.append(NO_INDEPENDENT_STATE_CHECK)
-        elif check in {
-            (item.content_digest or "").strip(),
-            (item.signer or "").strip(),
+        elif _as_reference(check) in {
+            _as_reference(item.content_digest),
+            _as_reference(item.signer),
         } - {""}:
             reasons.append(STATE_CHECK_IS_THE_RECORD)
         if item.evidence_class in _UNGRADED_CLASSES:
@@ -298,28 +369,60 @@ def classify(items, subject: Subject, now) -> dict[int, list[str]]:
     """``{item.pk: reasons}`` for every item; an empty list means load-bearing.
 
     Supersession is decided here, across the set: an item is retired by its
-    successor only when the successor itself carries weight. A successor the
-    target wrote, or one that is stale, cannot retire an independent observation
-    -- or a target could make a contradiction disappear by filing over it."""
+    successor only when the successor asserts pass or fail, itself carries weight
+    under every admission rule, and observed the subject strictly after the item
+    did. A successor the target wrote, one that is stale or unchecked, one that
+    asserts nothing, or an older observation filed over a newer one cannot retire
+    an independent observation -- or a party could make a contradiction disappear
+    by filing over it."""
+    return _weigh(items, subject, now)[0]
+
+
+def _weigh(items, subject: Subject, now) -> tuple[dict[int, list[str]], list[dict]]:
+    """:func:`classify`, and each supersession it judged: ``{evidence, successor,
+    retired, why}``, ``why`` being :data:`RETIRES` or the reason it did not."""
     items = list(items)
     intrinsic = {item.pk: _intrinsic_reasons(item, subject, now) for item in items}
     by_pk = {item.pk: item for item in items}
+
+    def why_not_retired(item, seen) -> str:
+        """Why ``item``'s successor does not retire it, or "" when it does."""
+        successor = by_pk.get(item.superseded_by_id)
+        if successor is None:
+            return SUCCESSOR_NOT_ON_RECORD
+        if successor.outcome not in _ASSERTING:
+            return SUCCESSOR_ASSERTS_NOTHING
+        if not carries_weight(successor.pk, seen + (item.pk,)):
+            return SUCCESSOR_CARRIES_NO_WEIGHT
+        if item.observed_at is None or successor.observed_at is None or successor.observed_at <= item.observed_at:
+            return SUCCESSOR_NOT_OBSERVED_LATER
+        return ""
 
     def carries_weight(pk, seen=()) -> bool:
         item = by_pk.get(pk)
         if item is None or pk in seen or intrinsic[pk]:
             return False
-        successor = item.superseded_by_id
-        return successor is None or not carries_weight(successor, seen + (pk,))
+        return item.superseded_by_id is None or bool(why_not_retired(item, seen))
 
     out: dict[int, list[str]] = {}
+    supersessions: list[dict] = []
     for item in items:
         reasons = list(intrinsic[item.pk])
-        successor = item.superseded_by_id
-        if successor is not None and carries_weight(successor, (item.pk,)):
-            reasons.append(SUPERSEDED)
+        if item.superseded_by_id is not None:
+            why = why_not_retired(item, ())
+            if not why:
+                reasons.append(SUPERSEDED)
+            successor = by_pk.get(item.superseded_by_id)
+            supersessions.append(
+                {
+                    "evidence": str(item.uuid),
+                    "successor": str(successor.uuid) if successor is not None else None,
+                    "retired": not why,
+                    "why": why or RETIRES,
+                }
+            )
         out[item.pk] = reasons
-    return out
+    return out, supersessions
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +466,7 @@ def audit(
     items = list(items)
     if not items or str(base_status) in _UNAUDITED_STATUSES:
         return None
-    reasons = classify(items, subject, now)
+    reasons, supersessions = _weigh(items, subject, now)
 
     admitted = [i for i in items if not reasons[i.pk]]
     refused = [i for i in items if reasons[i.pk]]
@@ -431,6 +534,20 @@ def audit(
         residual.extend(str(u) for u in (i.residual_uncertainty or []))
     if any(NO_INDEPENDENT_STATE_CHECK in reasons[i.pk] and i.signature_verified for i in refused):
         residual.append(SIGNATURE_IS_NOT_TRUTH)
+    for i in refused:
+        near = _near_misses(i, subject)
+        if near:
+            residual.append(
+                f"Evidence {i.uuid} ({i.outcome}) names a {', '.join(near)} that differs from this "
+                "claim's only in case or spacing. Subjects bind exactly, so it weighs nothing here; "
+                "check how it was addressed."
+            )
+    for i in items:
+        if i.invalidated_at is not None and not _attributed_invalidation(i):
+            residual.append(
+                f"Evidence {i.uuid} is marked invalidated, but nobody is attributed with the "
+                "invalidation; it is not retired. Only an attributed invalidation with a reason retires evidence."
+            )
     if verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE:
         residual.append(
             "No evidence that could carry weight was recorded for this claim; this is "
@@ -453,6 +570,7 @@ def audit(
             for i in refused
         ],
         "contradictions": contradictions,
+        "supersessions": supersessions,
         "residual_uncertainty": residual,
         "subject": {"route": subject.route, "inputs": subject.inputs},
         "audited_at": now.isoformat(),
@@ -486,13 +604,65 @@ def evidence_for(claim: AssuranceClaim):
 
 def reading_status(claim: AssuranceClaim) -> str:
     """The claim's status before the audit held it back: what the deriver or a
-    person put there. Only while the claim still reads exactly what the audit held
-    it at: any other writer since -- a STALE mark, a withdrawal, a person -- wrote
-    the reading itself."""
-    audit = claim.evidence_audit or {}
-    if audit.get("held") and claim.status == audit.get("status") and audit.get("base_status"):
-        return audit["base_status"]
+    person put there -- or STALE, where a stale mark reached the reading under the
+    hold (:func:`hold_reading_at_stale`). Only while the claim still reads exactly
+    what the audit held it at: any other writer since -- a STALE mark, a
+    withdrawal, a person -- wrote the reading itself."""
+    if _held_by_audit(claim):
+        return claim.evidence_audit["base_status"]
     return claim.status
+
+
+def _held_by_audit(claim: AssuranceClaim) -> bool:
+    """Whether ``claim`` stands where the evidence audit holds it, below its reading."""
+    audit = claim.evidence_audit or {}
+    return bool(audit.get("held") and claim.status == audit.get("status") and audit.get("base_status"))
+
+
+def _no_more_than(confidence, ceiling):
+    """``confidence``, never above ``ceiling``; ``None`` (no supporting confidence)
+    is the floor either one can impose."""
+    if confidence is None or ceiling is None:
+        return None
+    return min(confidence, ceiling)
+
+
+def hold_reading_at_stale(claim: AssuranceClaim, *, note: str) -> bool:
+    """A writer that marks a claim STALE -- drift, a fired latent condition -- found
+    it held by its evidence at a status it does not soften (CONTRADICTED). The hold
+    stands, and the mark reaches the reading UNDER it: the reading is STALE now, so
+    whatever later releases the hold lands on STALE, never on the reading from
+    before the change.
+
+    It used to stop at the hold: the claim kept its pre-change reading underneath,
+    and an invalidation of the evidence lifted it straight back to that reading
+    (SUPPORTED, with confidence) while the control, with no evidence at all, read
+    STALE. Records a same-status :class:`ClaimEvent` and returns True when it moved
+    the reading; False when the claim is not held, or its reading is already no
+    pass."""
+    if not _held_by_audit(claim):
+        return False
+    audit = claim.evidence_audit
+    if audit["base_status"] in (Status.STALE, Status.CONTRADICTED, Status.REVOKED, Status.SUPERSEDED):
+        return False
+    claim.evidence_audit = {
+        **audit,
+        "base_status": Status.STALE.value,
+        "base_confidence": None,
+        "held": rank(audit["status"]) < rank(Status.STALE),
+    }
+    claim.save(update_fields=["evidence_audit", "updated_at"])
+    ClaimEvent.objects.create(
+        claim=claim,
+        from_status=claim.status,
+        to_status=claim.status,
+        actor=None,
+        note=_clip(
+            f"{note} The evidence still holds the claim at {claim.status}; the reading under "
+            f"the hold was {audit['base_status']} and is now stale."
+        ),
+    )
+    return True
 
 
 def _is_audited(claim: AssuranceClaim) -> bool:
@@ -527,7 +697,11 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     to its own reading -- never above it), writes ``evidence_verdict`` and
     ``evidence_audit``, and records any status move as a :class:`ClaimEvent` with
     ``cause`` evidence_audit and no actor. Returns the audit, or ``None`` when the
-    claim is not current, is withdrawn, or has no evidence recorded against it."""
+    claim is not current, is withdrawn, or has no evidence recorded against it.
+
+    A hold keeps the confidence the reading had before it (``base_confidence``),
+    and a release restores no more than that: evidence never leaves a claim with
+    confidence it would not carry had nothing been recorded against it."""
     from .claims import _confidence
 
     if not _is_audited(claim):
@@ -538,12 +712,21 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
         return None
     old_status = claim.status
     new_status = result["status"]
+    # The confidence the reading carried before any hold: the claim's own while it is
+    # not held, and what the hold recorded while it is (none, if it recorded none).
+    was_held = _held_by_audit(claim)
+    reading_confidence = claim.evidence_audit.get("base_confidence") if was_held else claim.confidence
+    if result["held"]:
+        result = {**result, "base_confidence": reading_confidence}
     claim.evidence_verdict = result["verdict"]
     claim.evidence_audit = result
     fields = ["evidence_verdict", "evidence_audit", "updated_at"]
     if new_status != old_status:
         claim.status = new_status
-        claim.confidence = _confidence(new_status, claim.evidence_class)
+        confidence = _confidence(new_status, claim.evidence_class)
+        if not result["held"]:
+            confidence = _no_more_than(confidence, reading_confidence)
+        claim.confidence = confidence
         fields += ["status", "confidence"]
     claim.save(update_fields=fields)
     if new_status != old_status:
@@ -733,11 +916,17 @@ def invalidate_claim_evidence(item: ClaimEvidence, *, actor, reason: str, now=No
         raise EvidenceRefused("an invalidation says why")
     if item.invalidated_at is not None:
         raise EvidenceRefused("this evidence was already invalidated")
+    username = (getattr(actor, "username", "") or "").strip()
+    if not username:
+        raise EvidenceRefused("an invalidation is attributed to an account with a name")
     now = now or timezone.now()
     item.invalidated_at = now
     item.invalidation_reason = reason
     item.invalidated_by = actor
-    item.save(update_fields=["invalidated_at", "invalidation_reason", "invalidated_by"])
+    # The name the account had when it acted, kept on the row: the attribution
+    # outlives the account (the foreign key is nulled when it is deleted).
+    item.invalidated_by_username = username
+    item.save(update_fields=["invalidated_at", "invalidation_reason", "invalidated_by", "invalidated_by_username"])
     current = (
         AssuranceClaim.objects.filter(deployment_id=item.deployment_id, fingerprint=item.claim_fingerprint)
         .current()
@@ -789,7 +978,8 @@ def evidence_record(item: ClaimEvidence) -> dict:
                 "event": "invalidated",
                 "at": item.invalidated_at.isoformat(),
                 "reason": item.invalidation_reason,
-                "by": getattr(item.invalidated_by, "username", None),
+                "by": item.invalidated_by_username or None,
+                "attributed": _attributed_invalidation(item),
             }
         )
     if item.superseded_by_id is not None:
