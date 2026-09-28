@@ -930,6 +930,12 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
     }
 
 
+class TransactionLostInHook(Exception):
+    """``recompute_decision``'s ``also_in_transaction`` failed in a way that ended,
+    or may have ended, the decision's transaction. Nothing was committed; the caller
+    runs the recompute again without it."""
+
+
 def recompute_decision(
     deployment: Deployment,
     *,
@@ -937,6 +943,7 @@ def recompute_decision(
     brought_current: bool = False,
     claim: str | None = None,
     after_claim: str | None = None,
+    also_in_transaction=None,
 ) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
@@ -975,6 +982,17 @@ def recompute_decision(
     column is still marked: a recompute of the release before since rewrote that
     bare. Either way a recompute the watches did not see landed after they were read,
     and the row is left recognisable.
+
+    ``also_in_transaction``: called with the locked row and the new decision after
+    the decision is written, inside the same transaction, so what it writes commits
+    with the decision or not at all. It must not wait: the recompute route passes
+    the record of a dispatch the decision now owes
+    (:class:`assurance.dispatch.OwedRecorder`), written in a savepoint. If it raises,
+    or leaves the transaction marked for rollback -- SQLite rolls a whole
+    transaction back on some I/O, full-disk, memory and busy errors, and a
+    swallowed error there left the outer block to roll back SILENTLY, undoing a
+    pause the route then reported as done -- this raises
+    :class:`TransactionLostInHook` instead of committing, and nothing is written.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
@@ -1013,6 +1031,15 @@ def recompute_decision(
             # which takes any claim's token away with it.
             decision_policy=claim if keep_foreign else policy_stamp(moved["revision"]),
         )
+        if also_in_transaction is not None:
+            try:
+                also_in_transaction(locked, decision)
+            except Exception as exc:
+                raise TransactionLostInHook(deployment.pk) from exc
+            if transaction.get_rollback():
+                # Committing now would silently commit NOTHING while the caller
+                # reports the decision it computed.
+                raise TransactionLostInHook(deployment.pk)
     deployment.refresh_from_db(
         fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
     )

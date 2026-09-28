@@ -53,7 +53,8 @@ from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
-from .decision import current_decision, decision_support, recompute_decision
+from .decision import TransactionLostInHook, current_decision, decision_support, recompute_decision
+from .dispatch import OwedRecorder, log_later, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
 from .incident import assemble_incident_pack
@@ -72,6 +73,7 @@ from .models import (
     AssuranceClaim,
     ConnectorBinding,
     DataBoundary,
+    DecisionDispatchDue,
     DeclaredComponent,
     Deployment,
     DispatchAttempt,
@@ -592,32 +594,53 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             raise ValidationError({"paused": "Send an object, optionally with a boolean 'paused'."})
         raw_paused = request.data.get("paused")
         paused = None if raw_paused is None else _parse_paused(raw_paused, False)
-        decision = recompute_decision(deployment, paused=paused)
         # Commercial spine: if the decision has entered a blocking state and this
         # deployment's policy opts into it, auto-dispatch its qualifying findings.
-        # Inert-by-default and never fatal — a dispatch error must not break a
-        # decision recompute — so it runs on commit and is wrapped.
-        self._maybe_dispatch_on_blocking_decision(deployment)
-        return Response({"decision": decision, "decision_label": deployment.get_decision_display()})
-
-    def _maybe_dispatch_on_blocking_decision(self, deployment) -> None:
-        """Schedule the blocking-decision dispatch on commit, wrapped so it can
-        never break the recompute. A no-op unless the deployment has an enabled
-        policy that opts into the decision trigger and the decision is blocking."""
-        deployment_pk = deployment.pk
-
-        def _run():
-            try:
-                from .dispatch import dispatch_for_blocking_decision
-
-                fresh = Deployment.objects.get(pk=deployment_pk)
-                dispatch_for_blocking_decision(fresh)
-            except Exception:  # dispatch must never break a recompute
-                logging.getLogger(__name__).exception(
-                    "blocking-decision dispatch failed for deployment %s", deployment_pk
-                )
-
-        transaction.on_commit(_run)
+        #
+        # A pause is a stop, and this answer used to wait for that dispatch: the
+        # hook ran "on commit", which in autocommit is at once, in the request --
+        # every qualifying finding pushed to every connector before the pause
+        # answered, up to thirteen seconds a push against a hung one. Now the stop
+        # only RECORDS it as owed, in its own transaction, and schedules it to run
+        # in the background once this has committed (#303).
+        recorder = OwedRecorder()
+        try:
+            decision = recompute_decision(deployment, paused=paused, also_in_transaction=recorder)
+        except TransactionLostInHook:
+            # Writing the record ended the stop's transaction, so nothing committed.
+            # The stop lands anyway, without it: the background run records what is
+            # owed, and says so at ERROR if it cannot either.
+            # Logged from another thread: a stop never waits on a log sink.
+            log_later(
+                logging.ERROR,
+                "deployment %s: recording its blocking-decision dispatch ended the stop's transaction; "
+                "the stop is committed again without the record, and the background run writes it",
+                deployment.pk,
+                logger_name=__name__,
+            )
+            recorder = None
+            decision = recompute_decision(deployment, paused=paused)
+        # The answer is the decision as committed, not as computed: recompute_decision
+        # read the row back after its transaction (a read, which under WAL waits on no
+        # writer), and that is what goes out. A 200 "paused" over a decision that is
+        # not paused is the failure this read exists to make impossible.
+        stored = deployment.decision
+        if stored != decision:
+            log_later(
+                logging.ERROR,
+                "deployment %s: the recompute computed %r but the stored decision is %r; answering what is stored",
+                deployment.pk,
+                decision,
+                stored,
+                logger_name=__name__,
+            )
+        if recorder is None or recorder.owed is not False:
+            # Not recorded (the record failed, or took the transaction down): then
+            # nothing but this run will ever know it is owed, so it is started even
+            # past the bound on waiting runs, and it records the dispatch first.
+            unrecorded = recorder is None or recorder.owed is None
+            schedule_blocking_decision_dispatch(deployment.pk, unrecorded=unrecorded)
+        return Response({"decision": stored, "decision_label": deployment.get_decision_display()})
 
     @action(detail=True, methods=["get"])
     def receipt(self, request, uuid=None):
@@ -1179,7 +1202,22 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         attempts = DispatchAttempt.objects.filter(deployment=deployment).select_related(
             "finding"
         )
-        return Response({"attempts": [_dispatch_attempt_state(a) for a in attempts]})
+        # The blocking-decision dispatch runs after the stop that asked for it, so
+        # one that has not finished cleanly is shown here rather than only logged.
+        owed = DecisionDispatchDue.objects.filter(deployment=deployment).first()
+        return Response(
+            {
+                "attempts": [_dispatch_attempt_state(a) for a in attempts],
+                "blocking_decision_dispatch_owed": None
+                if owed is None
+                else {
+                    "owed_since": owed.owed_since.isoformat(),
+                    "runs": owed.runs,
+                    "last_run_at": owed.last_run_at.isoformat() if owed.last_run_at else None,
+                    "last_error": owed.last_error,
+                },
+            }
+        )
 
     @action(detail=True, methods=["get", "put", "patch"], url_path="data-boundary")
     def data_boundary(self, request, uuid=None):

@@ -2445,12 +2445,23 @@ class DispatchAttempt(models.Model):
 
     class Outcome(models.TextChoices):
         SENT = "sent", "Sent"
+        # The finding's issue exists, and the tracker has CLOSED it -- it says the
+        # work is done -- while the finding is dispatched again (a blocking
+        # decision, say). Not reopened (a person's call) and not filed twice: it is
+        # commented on, and recorded under this outcome, apart from SENT, so the
+        # operator can see that the tracker and the decision disagree.
+        SENT_TO_CLOSED = "sent_to_closed", "Sent — to an issue the tracker has closed"
         FAILED = "failed", "Failed"
         # The provider may have committed this before the client lost the answer.
         # Neither SENT nor FAILED is true: recording it as FAILED licenses a retry
         # that creates the ticket twice, and recording it as SENT claims a ticket
         # that may not exist. It stays here until reconciliation resolves it.
         UNKNOWN = "unknown", "Unknown — may have been committed"
+        # Written BEFORE the request goes out and replaced by how it ended. One
+        # still SENDING was left by a runner that never recorded the end (it died,
+        # or lost its claim mid-push): the request may have landed, exactly as for
+        # UNKNOWN, and it is held and looked for the same way.
+        SENDING = "sending", "Sending — no answer recorded yet"
         SKIPPED_INERT = "skipped_inert", "Skipped — connector not configured"
         SKIPPED_NO_KEY = "skipped_no_key", "Skipped — no encryption key"
         SKIPPED_DISABLED = "skipped_disabled", "Skipped — binding disabled"
@@ -2467,13 +2478,13 @@ class DispatchAttempt(models.Model):
         BLOCKING_DECISION = "blocking_decision", "Blocking decision transition"
         MANUAL = "manual", "Manual dispatch"
 
-    #: Outcomes that mean the external system accepted the push — terminal.
-    TERMINAL_OUTCOMES = frozenset({Outcome.SENT})
+    #: Outcomes that mean the external system holds the finding — terminal.
+    TERMINAL_OUTCOMES = frozenset({Outcome.SENT, Outcome.SENT_TO_CLOSED})
 
     #: Outcomes whose truth is not known. NOT terminal (nothing was confirmed) and
     #: NOT retryable (a retry may double-execute) -- the two properties that used to
     #: be the same thing. An attempt here waits for reconciliation.
-    UNCERTAIN_OUTCOMES = frozenset({Outcome.UNKNOWN})
+    UNCERTAIN_OUTCOMES = frozenset({Outcome.UNKNOWN, Outcome.SENDING})
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -2527,6 +2538,17 @@ class DispatchAttempt(models.Model):
     # while it is still unresolved -- which is the state that blocks the retry.
     reconciled_at = models.DateTimeField(null=True, blank=True)
     reconciled_detail = models.TextField(blank=True)
+    # The marker the last push carried (``<label> <tag>``, see
+    # :mod:`assurance.markers`) and its format's version. A look for an uncertain
+    # push searches for THIS marker, and trusts "none found" only when it is the
+    # current format: a push made in another format -- NULL, as every row older
+    # than the field has it, and every row code before it inserts -- is looked
+    # for in every format this code has ever written, and is held when nothing is
+    # found, never pushed again blind. Nullable, with no default, so adding it is
+    # a plain ADD COLUMN (no table rebuild) and code still serving from before it
+    # can go on inserting attempts.
+    marker = models.CharField(max_length=128, null=True, blank=True)
+    marker_version = models.PositiveSmallIntegerField(null=True, blank=True)
     attempts = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -2568,6 +2590,96 @@ class DispatchAttempt(models.Model):
 
     def __str__(self) -> str:
         return f"{self.connector} <- finding {self.finding_id}: {self.outcome}"
+
+
+class DecisionDispatchDue(models.Model):
+    """A blocking-decision dispatch that was asked for and has not yet finished
+    cleanly: the durable record that it is still owed.
+
+    The recompute route -- the one that pauses and lifts -- no longer runs the
+    dispatch before it answers (:func:`assurance.dispatch.schedule_blocking_decision_dispatch`).
+    It runs in the background after the stop has committed and answered, so it
+    can no longer hold a stop back; this row is how it is not lost either.
+
+    The STOP writes it, in its own transaction, when the decision it commits is one
+    the deployment's policy dispatches on: in a savepoint, so the stop never fails
+    or waits on it -- and if writing it ends the stop's transaction, the stop is
+    committed again without it and the background run writes it -- and a process
+    that exits right after the stop answers leaves the row behind. A run claims it
+    (``running_until``/``run_token``) before it pushes anything, so no two runners
+    -- the background thread, a process's sweeper, ``manage.py
+    retry_blocking_dispatches``, in any processes -- push for one deployment at
+    once; a claim a crashed runner left behind lapses at ``running_until``. A run
+    deletes the row only once it has finished with nothing left undone (a push
+    failed, uncertain, still recorded as sending, blocked by a missing key or an
+    authority boundary) and no stop has asked again since it began (``requests``).
+    Otherwise it keeps it, with how many runs there have been and what the last one
+    said; the sweeper and the retry command retry every one still here, and the
+    deployment's ``dispatch-attempts`` read shows it.
+
+    Never read by the decision.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.OneToOneField(
+        Deployment, on_delete=models.CASCADE, related_name="decision_dispatch_due"
+    )
+    #: When a stop (or, failing that, a run) first recorded this dispatch as owed.
+    owed_since = models.DateTimeField()
+    #: Runs that have finished without settling it.
+    runs = models.PositiveIntegerField(default=0)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    #: What the last run that did not settle it said: the exception, or the pushes
+    #: it left failed. Human-readable; never a credential.
+    last_error = models.TextField(blank=True)
+    #: How many times a stop has asked for it. A run settles the row only if this
+    #: is what it was when the run began: a stop that asked while it ran is run for.
+    requests = models.PositiveIntegerField(default=1)
+    #: The claim of the run pushing for it now: until when, and whose. Empty when
+    #: no run holds it; a claim past ``running_until`` belongs to a runner that died.
+    running_until = models.DateTimeField(null=True, blank=True)
+    run_token = models.CharField(max_length=32, blank=True, default="")
+
+    def __str__(self) -> str:
+        return f"blocking-decision dispatch owed for deployment {self.deployment_id} ({self.runs} run(s))"
+
+
+class AssuranceInstallation(models.Model):
+    """This installation's identity in the systems it writes to: one row.
+
+    ``installation_id`` names the installation in every marker it puts on an issue
+    (``ASSURANCE_INSTALLATION_ID``, when set, overrides it; every id used is kept in
+    :class:`AssuranceInstallationId`). ``marker_secret`` keys the tag that makes a marker verifiable
+    (:mod:`assurance.markers`): only this backend holds it, so an issue someone
+    else wrote cannot carry a tag that verifies. Both are random, generated once
+    (by the migration that adds this table, or on first use) and never derived
+    from ``SECRET_KEY``, so rotating that key changes no marker. ``created_at`` is
+    when this installation began writing verifiable markers: an issue in an older
+    format that the provider says was created after it is not one this code wrote.
+    Never exposed by any API."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    installation_id = models.CharField(max_length=64)
+    marker_secret = models.CharField(max_length=128)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self) -> str:
+        return "this installation's marker identity"
+
+
+class AssuranceInstallationId(models.Model):
+    """Every installation id this database has written markers under -- the
+    persisted one, and each ``ASSURANCE_INSTALLATION_ID`` it has been given --
+    recorded the first time it is used and never removed. A marker made under any
+    of them is this installation's (:mod:`assurance.markers`), so setting or
+    changing the id after go-live never files a second ticket. Never exposed by
+    any API."""
+
+    installation_id = models.CharField(max_length=64, unique=True)
+    first_used_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self) -> str:
+        return "an installation id this database has used"
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ from .models import (
     Asset,
     ConnectorBinding,
     DataBoundary,
+    DecisionDispatchDue,
     Deployment,
     DispatchAttempt,
     DispatchPolicy,
@@ -295,6 +296,26 @@ class DispatchPolicyAdmin(admin.ModelAdmin):
     list_filter = ("enabled", "min_severity", "on_blocking_decision")
     search_fields = ("deployment__name",)
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(DecisionDispatchDue)
+class DecisionDispatchDueAdmin(admin.ModelAdmin):
+    # Written by the stop that asks for the dispatch and cleared by the run that
+    # settles it; shown so a dispatch that has not finished is seen, and never
+    # edited by hand. `manage.py retry_blocking_dispatches` retries it. Deleting a
+    # row abandons that deployment's owed dispatch: nothing runs it again until a
+    # stop asks for it again.
+    list_display = ("deployment", "owed_since", "runs", "last_run_at", "running_until")
+    search_fields = ("deployment__name",)
+    readonly_fields = (
+        "deployment", "owed_since", "runs", "last_run_at", "last_error", "requests", "running_until", "run_token",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(DispatchAttempt)

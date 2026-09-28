@@ -24,12 +24,17 @@ class FailsafeCommand(models.Model):
     STATUS_CONSUMED = "consumed"
     STATUS_EXPIRED = "expired"
     STATUS_CANCELED = "canceled"
+    # An unsigned stop draft set aside by a newer one of the same account, past
+    # that account's limit of unsigned stop drafts (failsafe.views): no longer
+    # signable; drafting it again makes a new one, which is never refused.
+    STATUS_SUPERSEDED = "superseded"
     STATUS_CHOICES = (
         (STATUS_AWAITING, "Awaiting signatures"),
         (STATUS_READY, "Ready for the engine"),
         (STATUS_CONSUMED, "Consumed by the engine"),
         (STATUS_EXPIRED, "Expired"),
         (STATUS_CANCELED, "Canceled"),
+        (STATUS_SUPERSEDED, "Superseded by a newer draft"),
     )
 
     # Mirrors mythos_core.failsafe.commands.Action; kept as plain strings so this
@@ -57,6 +62,11 @@ class FailsafeCommand(models.Model):
     # count toward the threshold; the raw list is kept for the audit trail.
     signatures = models.JSONField(default=list, blank=True)
     required_signatures = models.PositiveSmallIntegerField(default=1)
+    # Whether any operator has signed it yet: `signatures` is not empty. Kept
+    # beside the list so the stop commands awaiting a signature can be read
+    # with those already carrying one first, by an index, however many
+    # unsigned drafts there are (failsafe.views).
+    signed = models.BooleanField(default=False)
 
     status = models.CharField(
         max_length=32, choices=STATUS_CHOICES, default=STATUS_AWAITING, db_index=True
@@ -78,6 +88,25 @@ class FailsafeCommand(models.Model):
         indexes = [
             models.Index(fields=["engine_id", "status"]),
             models.Index(fields=["status", "expires_at"]),
+            # The stop lane's reads (failsafe.views) each take the newest few
+            # rows of one status -- or of one status, action and signed-ness --
+            # in creation order, with or without an engine: each an index
+            # range read in order, so a read's work is its row limit, not the
+            # number of commands.
+            models.Index(fields=["created_at"], name="fsc_ct"),
+            models.Index(fields=["engine_id", "created_at"], name="fsc_eng_ct"),
+            models.Index(fields=["status", "created_at"], name="fsc_st_ct"),
+            models.Index(fields=["engine_id", "status", "created_at"], name="fsc_eng_st_ct"),
+            models.Index(fields=["status", "action", "signed", "created_at"], name="fsc_st_act_sig_ct"),
+            models.Index(
+                fields=["engine_id", "status", "action", "signed", "created_at"], name="fsc_eng_st_act_sig_ct"
+            ),
+            # An account's unsigned draft of one action for one engine: a stop
+            # draft made again while it is unsigned returns it.
+            models.Index(fields=["initiator", "engine_id", "action", "status", "signed"], name="fsc_draft_lookup"),
+            # An account's unsigned drafts, newest first: those past the
+            # account's limit are superseded by its newest (failsafe.views).
+            models.Index(fields=["initiator", "status", "signed", "created_at"], name="fsc_init_st_sig_ct"),
         ]
 
     def __str__(self):
@@ -133,6 +162,7 @@ class FailsafeAuditEvent(models.Model):
     EVENT_CONSUMED = "consumed"
     EVENT_EXPIRED = "expired"
     EVENT_CANCELED = "canceled"
+    EVENT_SUPERSEDED = "superseded"
     EVENT_CHOICES = (
         (EVENT_DRAFTED, "Drafted"),
         (EVENT_SIGNED, "Signed"),
@@ -142,6 +172,7 @@ class FailsafeAuditEvent(models.Model):
         (EVENT_CONSUMED, "Consumed"),
         (EVENT_EXPIRED, "Expired"),
         (EVENT_CANCELED, "Canceled"),
+        (EVENT_SUPERSEDED, "Superseded by a newer draft"),
     )
 
     id = models.BigAutoField(primary_key=True)

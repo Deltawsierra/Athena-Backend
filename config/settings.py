@@ -20,6 +20,20 @@ def _env_list(name: str, default: str = "") -> list:
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
+def _env_number(name: str, default):
+    """``name`` from the environment as a number of ``default``'s type, or the
+    default when it is unset. A value that is not one is kept as given, so
+    ``manage.py check`` names it and the code that reads it logs it once and uses
+    the default -- rather than every process failing to import its settings."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return type(default)(raw)
+    except ValueError:
+        return raw
+
+
 # DEBUG was hardcoded True with no way to turn it off short of editing this
 # file, so any unhandled exception returned a traceback carrying settings, SQL
 # and local variables. It is now off unless the environment asks for it.
@@ -81,6 +95,11 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "rest_framework_simplejwt",
+    # A refresh spends the refresh token it is given (ROTATE_REFRESH_TOKENS and
+    # BLACKLIST_AFTER_ROTATION below did nothing without this app), so a used
+    # one no longer verifies -- and is no longer exempt from the gateway and
+    # the throttles as a valid refresh (safety.stops).
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
 
     # Local apps
@@ -90,6 +109,9 @@ INSTALLED_APPS = [
     "pentest",
     "failsafe",
     "assurance",
+    # The stop-safety rules (safety.stops); its one table counts sign-in
+    # attempts, shared by every worker (safety.sign_in).
+    "safety",
 ]
 
 # -------------------------------------------------------------------
@@ -190,7 +212,11 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.FormParser",
         "rest_framework.parsers.MultiPartParser",
     ),
+    # The failsafe service token first: it authenticates a stop, and nothing
+    # else, without a password sign-in (safety.service_token). Anywhere else it
+    # is ignored and the JWT decides, as it always has.
     "DEFAULT_AUTHENTICATION_CLASSES": (
+        "safety.service_token.FailsafeServiceTokenAuthentication",
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
@@ -201,14 +227,24 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
     # There was no rate limiting anywhere, so the token endpoint accepted
-    # unlimited credential guesses.
+    # unlimited credential guesses. DRF's own two throttles, except that a stop
+    # (safety.stops) is never refused and never counted: they answered 429 to a
+    # flooded operator's pause and to the engines' command poll. Sign-in has
+    # its own limit on attempts that reach a password hash (safety.sign_in).
     "DEFAULT_THROTTLE_CLASSES": (
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "safety.throttling.StopExemptAnonRateThrottle",
+        "safety.throttling.StopExemptUserRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DJANGO_THROTTLE_ANON", "30/min"),
         "user": os.environ.get("DJANGO_THROTTLE_USER", "300/min"),
+        # Sign-in attempts (safety.sign_in): of one username, as authentication
+        # reads it, from one address; and of every username from one address.
+        # Each attempt is counted in the database before its password is
+        # hashed, atomically and for every worker at once, and refused unhashed
+        # past either limit; a successful sign-in is given back.
+        "sign_in": os.environ.get("DJANGO_THROTTLE_SIGN_IN", "10/min"),
+        "sign_in_address": os.environ.get("DJANGO_THROTTLE_SIGN_IN_ADDRESS", "60/min"),
     },
     # Without this, DRF's throttles key anonymous callers on the whole raw
     # X-Forwarded-For header, so rotating one header defeated the rate limit
@@ -315,6 +351,21 @@ ASSURANCE_CREDENTIAL_KEY = os.environ.get("ASSURANCE_CREDENTIAL_KEY", "")
 # bindings — this only lets an operator disable the whole path at once.
 ASSURANCE_AUTO_DISPATCH_ENABLED = _env_flag("ASSURANCE_AUTO_DISPATCH_ENABLED", default=True)
 
+# This installation's id in the systems it files issues in (assurance.markers).
+# Unset, a random id generated once and kept in the database is used; set it to
+# give a database restored into another environment (staging from production) an
+# id of its own, so it never adopts the first environment's issues. Never derived
+# from DJANGO_SECRET_KEY: rotating that key changes no marker.
+ASSURANCE_INSTALLATION_ID = os.environ.get("ASSURANCE_INSTALLATION_ID", "").strip()
+# The blocking-decision dispatch a stop owes runs in the background (#303): how
+# many runs push at once per process, how many more threads may wait for one, and
+# how often the sweeper retries what is still owed (0 turns it off).
+ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS = _env_number("ASSURANCE_DISPATCH_MAX_CONCURRENT_RUNS", 4)
+ASSURANCE_DISPATCH_MAX_WAITING_RUNS = _env_number("ASSURANCE_DISPATCH_MAX_WAITING_RUNS", 32)
+ASSURANCE_DISPATCH_SWEEP_SECONDS = _env_number("ASSURANCE_DISPATCH_SWEEP_SECONDS", 300.0)
+# The wall-clock limit on one whole connector request, in seconds.
+ASSURANCE_CONNECTOR_DEADLINE_SECONDS = _env_number("ASSURANCE_CONNECTOR_DEADLINE_SECONDS", 30.0)
+
 # -------------------------------------------------------------------
 # FAILSAFE CONTROL PLANE (operator-held pause / stand down / terminate)
 # -------------------------------------------------------------------
@@ -336,6 +387,32 @@ FAILSAFE_COMMAND_TTL_SECONDS = int(os.environ.get("FAILSAFE_COMMAND_TTL_SECONDS"
 # Shared token the engine presents when polling /api/failsafe/pending. The
 # engine is not an operator, so it authenticates with this rather than a JWT.
 FAILSAFE_POLL_TOKEN = os.environ.get("FAILSAFE_POLL_TOKEN")
+
+# The failsafe service credential (safety.service_token): a stop client -- the
+# dashboard's server -- presents this in the X-Failsafe-Service-Token header on
+# a stop, and is authenticated as FAILSAFE_SERVICE_USER without signing in with
+# a password, which a gateway block or a guessing flood could refuse. Accepted
+# ONLY on a request that is a stop, or a read of the stop lane; anywhere else
+# the header is ignored. At least 32 characters (`openssl rand -hex 32`), or it
+# is treated as unset.
+FAILSAFE_SERVICE_TOKEN = os.environ.get("FAILSAFE_SERVICE_TOKEN")
+FAILSAFE_SERVICE_USER = os.environ.get("FAILSAFE_SERVICE_USER")
+
+# How long the failsafe state view waits, in all, for the engine's live
+# governor state before reporting it "not reported". That view is how the
+# dashboard's second operator finds a command to sign, so it is bounded.
+FAILSAFE_STATE_ENGINE_SECONDS = float(os.environ.get("FAILSAFE_STATE_ENGINE_SECONDS", "2.0"))
+
+# The most unsigned stop drafts one account has awaiting a signature. A stop
+# draft is never refused: one past this is made, and that account's OLDEST
+# unsigned stop drafts past it are superseded (never another account's, never
+# one already carrying a signature). The dashboard's service account is one
+# account, so its drafts share this.
+FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT = int(os.environ.get("FAILSAFE_UNSIGNED_STOP_DRAFTS_PER_ACCOUNT", "100"))
+
+# The most bytes of commands one stop-lane read (the failsafe list and state)
+# returns; what it leaves out it says, in X-Failsafe-More (and "more" in state).
+FAILSAFE_STOP_LANE_READ_BYTES = int(os.environ.get("FAILSAFE_STOP_LANE_READ_BYTES", "1000000"))
 
 # -------------------------------------------------------------------
 # AI DEFENDER (SAFE MODE) NOT AI LOGIC JUST A SAFETY SWITCH
@@ -381,7 +458,18 @@ LOGGING = {
 # -------------------------------------------------------------------
 # These were read through getattr defaults with nothing in settings, so an
 # operator had no way to discover they were tunable.
+#
+# The timeout is a total deadline on one engine call: connecting, sending, and
+# reading the answer. It used to be requests' per-socket timeout, so an engine
+# that sent a byte every 0.3 s held each request for as long as it kept sending.
+# Past the deadline the request is allowed without a decision, as it is when the
+# engine is down (fail open). A stop is never sent to the engine at all
+# (safety.stops).
 DEFENDER_TIMEOUT_SECONDS = float(os.environ.get("DEFENDER_TIMEOUT_SECONDS", 0.5))
+# At most this many engine calls run at once. A call its request stopped waiting
+# for can still be running; a request that finds every slot taken waits for one
+# only until its own deadline.
+DEFENDER_MAX_IN_FLIGHT = int(os.environ.get("DEFENDER_MAX_IN_FLIGHT", 32))
 DEFENDER_FAILURE_ALERT_AFTER = int(os.environ.get("DEFENDER_FAILURE_ALERT_AFTER", 10))
 DEFENDER_FAILURE_WINDOW_SECONDS = int(os.environ.get("DEFENDER_FAILURE_WINDOW_SECONDS", 60))
 DEFENDER_MAX_BODY_BYTES = int(os.environ.get("DEFENDER_MAX_BODY_BYTES", 64 * 1024))
