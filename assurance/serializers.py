@@ -916,18 +916,33 @@ class ClaimEvidenceSerializer(serializers.ModelSerializer):
         """How the stored audit of the claim's current version (passed in context as
         ``audit``) weighed this item: ``admitted``, or refused with its reasons, or
         ``None`` where no stored audit mentions it."""
-        audit = (self.context or {}).get("audit") or {}
+        context = self.context or {}
+        audit = context.get("audit") or {}
         key = str(obj.uuid)
         # An audit not of the claim as it reads now says how it weighed the item
         # THEN, and says so (assurance.evidence_audit.served_audit).
         stale = {"audit_current": False} if audit.get("audit_current") is False else {}
-        for entry in audit.get("admitted", []):
-            if entry.get("uuid") == key:
-                return {"load_bearing": True, "reasons": [], **stale}
-        for entry in audit.get("refused", []):
-            if entry.get("uuid") == key:
-                return {"load_bearing": False, "reasons": entry.get("reasons", []), "weighs": entry.get("weighs"), **stale}
+        admitted, refused = self._weighing(context, audit)
+        if key in admitted:
+            return {"load_bearing": True, "reasons": [], **stale}
+        entry = refused.get(key)
+        if entry is not None:
+            return {"load_bearing": False, "reasons": entry.get("reasons", []), "weighs": entry.get("weighs"), **stale}
         return None
+
+    def _weighing(self, context, audit) -> tuple[set, dict]:
+        """The whole weighing (``weighing`` in context: the claim's
+        :class:`~assurance.models.ClaimAuditWeighing`), indexed once per page; the summary's own first
+        entries where no whole weighing was passed."""
+        cached = context.get("_weighing_index")
+        if cached is None:
+            source = context.get("weighing") or audit
+            cached = (
+                {entry.get("uuid") for entry in source.get("admitted", [])},
+                {entry.get("uuid"): entry for entry in source.get("refused", [])},
+            )
+            context["_weighing_index"] = cached
+        return cached
 
 
 class DeploymentSerializer(serializers.ModelSerializer):

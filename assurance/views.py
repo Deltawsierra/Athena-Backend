@@ -35,7 +35,7 @@ from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
 from . import observability, observed_outcomes
 from .bundle import assurance_bundle
-from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
+from .claims import ClaimChanged, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
 from .latent import (
     LatentConditionDuplicate,
@@ -2264,7 +2264,7 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         a stop writes the claim's status without re-running it, and an audit taken
         while the claim read something else is never served as its verdict
         (:func:`assurance.evidence_audit.served_audit`)."""
-        from .evidence_audit import current_verdict, evidence_for, served_audit
+        from .evidence_audit import current_verdict, evidence_for, served_audit, stored_weighing
 
         raw = request.query_params.get("offset", "0")
         offset = int(raw) if _PLAIN_DIGITS.fullmatch(raw or "") and len(raw) <= 12 else -1
@@ -2281,12 +2281,17 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             recorded.select_related("superseded_by", "invalidated_by")[offset: offset + self.EVIDENCE_PAGE_SIZE]
         )
         audit = served_audit(claim)
+        # How the stored audit weighed each item on this page, from the whole
+        # weighing kept beside the bounded summary the claim serves.
+        weighing = stored_weighing(claim)
         return Response(
             {
                 "claim": str(claim.uuid),
                 "evidence_verdict": current_verdict(claim),
                 "evidence_audit": audit,
-                "evidence": ClaimEvidenceSerializer(page, many=True, context={"audit": audit}).data,
+                "evidence": ClaimEvidenceSerializer(
+                    page, many=True, context={"audit": audit, "weighing": weighing or {}}
+                ).data,
                 "evidence_count": total,
                 "returned": len(page),
                 "truncated": offset + len(page) < total,
@@ -2328,17 +2333,26 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             # A contradiction takes a READY down as a revoke does, and waits on no hook
             # either.
             revoke = to_status in (AssuranceClaim.ClaimStatus.REVOKED, AssuranceClaim.ClaimStatus.CONTRADICTED)
+            #
+            # The claim is decided from its row as committed when the move is
+            # written (apply_claim_transition re-reads it under the write lock), not
+            # from the read above: a stop always lands -- on the current version when
+            # it was addressed to a superseded one -- and a person's move read before
+            # a stop or a supersession committed is a 409, never written over it.
             with refresh_deferred(claim.deployment_id) if revoke else nullcontext(), transaction.atomic():
                 event = apply_claim_transition(
                     claim, to_status, actor=request.user, note=request.data.get("note", "")
                 )
                 _refresh_stored_decision(claim.deployment)
+        except ClaimChanged as exc:
+            return Response({"detail": str(exc)}, status=409)
         except IllegalClaimTransition as exc:
             return Response({"detail": str(exc)}, status=400)
+        moved = event.claim
         return Response(
             {
-                "status": claim.status,
-                "status_label": claim.get_status_display(),
+                "status": moved.status,
+                "status_label": moved.get_status_display(),
                 "event": ClaimEventSerializer(event).data,
             }
         )

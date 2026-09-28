@@ -1649,7 +1649,6 @@ class AssuranceClaim(models.Model):
     # recorded but refused and why, the contradictions, the residual uncertainty,
     # and the status the audit read before it held the claim back (``base_status``).
     evidence_audit = models.JSONField(default=dict, blank=True)
-
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1699,6 +1698,28 @@ class AssuranceClaim(models.Model):
 # ---------------------------------------------------------------------------
 # ClaimEvent — one attributed step in an assurance claim's lifecycle (SPINE)
 # ---------------------------------------------------------------------------
+
+
+class ClaimAuditWeighing(models.Model):
+    """The whole per-item weighing of a claim version's evidence audit (issue #333,
+    round 3): every admitted and refused item, every contradiction, supersession
+    and residual line. The claim's ``evidence_audit`` carries a bounded summary of
+    it (``assurance.evidence_audit.audit_summary``).
+
+    Its own table, so no read of a claim row loads it -- not a claim list, not the
+    decision's reads, not a ``select_related("claim")``, not a stop, which rewrites
+    the summary only. Every claim read served these lists whole (1.1 MB at 10,000
+    items) and a stop rewrote them. Read only by the evidence route, for the items
+    on its page."""
+
+    claim = models.OneToOneField(
+        AssuranceClaim, on_delete=models.CASCADE, primary_key=True, related_name="audit_weighing"
+    )
+    items = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"audit weighing of claim {self.claim_id}"
 
 
 class ClaimEvent(models.Model):

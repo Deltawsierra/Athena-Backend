@@ -123,6 +123,20 @@ def _has_column(using, table, column) -> bool:
     return any(col.name == column for col in description)
 
 
+def _has_columns(using, table, columns) -> bool:
+    """Whether ``table`` exists behind ``using`` with every one of ``columns``
+    (:func:`_has_column`, one description for the lot)."""
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    try:
+        with transaction.atomic(using=connection.alias), connection.cursor() as cursor:
+            if table not in connection.introspection.table_names(cursor):
+                return False
+            description = connection.introspection.get_table_description(cursor, table)
+    except DatabaseError:
+        return False
+    return set(columns) <= {col.name for col in description}
+
+
 @receiver(pre_migrate, dispatch_uid="assurance_refuse_a_reverse_past_an_irreversible_step")
 def refuse_a_reverse_past_an_irreversible_step(sender, plan=None, **kwargs):
     """Refuse a ``migrate`` whose plan unapplies an irreversible migration -- BEFORE
@@ -265,7 +279,9 @@ def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
         return False
     if using not in (None, DEFAULT_DB_ALIAS):
         return False
-    from .models import Deployment
+    from django.apps import apps as live_apps
+
+    from .models import AssuranceClaim, Deployment, LatentCondition
 
     if apps is not None:
         try:
@@ -273,11 +289,33 @@ def _the_decision_columns_are_migrated(sender, using, apps) -> bool:
         except LookupError:
             return False
         names = {f.name for f in state._meta.get_fields()}
-        return _DECISION_COLUMNS_ADDED_LAST <= names
+        if not _DECISION_COLUMNS_ADDED_LAST <= names:
+            return False
+        # And every other column the receivers read through the CODE's models: a
+        # rollback below 0044 (`migrate assurance 0043`) left the stamp in place,
+        # the receivers ran, and the fired-hold restore loaded claims through the
+        # current model -- "no such column: assurance_assuranceclaim.evidence_verdict"
+        # -- so the rollback could not complete. A schema behind the code's models
+        # is not one this code may read; nothing here runs on it.
+        for model in live_apps.get_app_config("assurance").get_models():
+            try:
+                state_model = apps.get_model("assurance", model._meta.object_name)
+            except LookupError:
+                return False
+            have = {f.column for f in state_model._meta.concrete_fields}
+            if not {f.column for f in model._meta.concrete_fields} <= have:
+                return False
+        return True
     # `flush` sends post_migrate with no migration state at all, so there is
     # nothing to ask but the database itself -- and a flush of a database left
-    # below the stamp crashed on the column here.
-    return all(_has_column(using, Deployment._meta.db_table, c) for c in _DECISION_COLUMNS_ADDED_LAST)
+    # below the stamp crashed on the column here. The models the receivers load
+    # whole are asked for every column.
+    if not all(_has_column(using, Deployment._meta.db_table, c) for c in _DECISION_COLUMNS_ADDED_LAST):
+        return False
+    return all(
+        _has_columns(using, model._meta.db_table, {f.column for f in model._meta.concrete_fields})
+        for model in (AssuranceClaim, LatentCondition, Deployment)
+    )
 
 
 #: The decision columns the refresh writes that later migrations added. A recompute

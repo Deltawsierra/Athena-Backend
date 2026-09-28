@@ -59,9 +59,11 @@ What the answer does to the claim
 It can only ever hold a claim BACK, never lift it past its own reading:
 
 - FAIL on load-bearing evidence moves the claim to CONTRADICTED. A claim whose
-  own reading is an observed pass (SUPPORTED or VERIFIED on technically or
-  configuration verified, non-vendor evidence) is pass-side evidence itself, so a
-  load-bearing fail against it is CONTESTED, not FAIL;
+  own reading is an observed pass (the DERIVER's SUPPORTED or VERIFIED on
+  technically or configuration verified, non-vendor evidence) is pass-side
+  evidence itself, so a load-bearing fail against it is CONTESTED, not FAIL. A
+  person's label is never evidence: a person's SUPPORTED or VERIFIED is not the
+  pass side, and a contradiction clears only by an attributed invalidation;
 - CONTESTED, or INCOMPLETE because adverse evidence was refused or is partial,
   holds it at UNKNOWN (``confidence`` None);
 - PASS and INSUFFICIENT_EVIDENCE move nothing. A PASS is the evidence agreeing
@@ -106,6 +108,7 @@ from datetime import timedelta
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from .change import EVIDENCE_TTL_DAYS
 from .models import AssuranceClaim, ClaimEvent, ClaimEvidence, ClaimVerdict, EvidenceClass
@@ -134,6 +137,19 @@ CARRIED_AREAS = frozenset({"action", "execution", "finding", "repair"})
 
 #: How far in the future an observation's instant may be before it is refused.
 MAX_CLOCK_SKEW = timedelta(minutes=5)
+
+#: The most entries of each per-item list the claim's stored audit carries. The
+#: lists grow with every item recorded against the claim, and every claim read
+#: served them whole (1.1 MB at 10,000 items) -- as did the stop that rewrote the
+#: audit to take a hold down. The stored audit is a bounded SUMMARY (``counts`` of
+#: each list, ``lists_truncated``), and the whole weighing is kept beside it
+#: (:class:`~assurance.models.ClaimAuditWeighing`, its own table), read only for
+#: the items a page of the evidence route shows.
+AUDIT_LIST_LIMIT = 20
+#: The per-item lists of an audit.
+AUDIT_LISTS = ("admitted", "refused", "contradictions", "supersessions", "residual_uncertainty")
+#: How many items one contradiction line names before it counts the rest.
+_NAMED_IN_A_LINE = 10
 
 # ---------------------------------------------------------------------------
 # Why an item carries no weight. Each is a fact about the item, not a score.
@@ -438,21 +454,37 @@ def _weigh(items, subject: Subject, now) -> tuple[dict[int, list[str]], list[dic
 # ---------------------------------------------------------------------------
 
 
-def _base_side(base_status: str, *, vendor_asserted: bool, evidence_class: str) -> str:
+def _base_side(base_status: str, *, vendor_asserted: bool, evidence_class: str, by_person: bool = False) -> str:
     """Which side the claim's own reading stands on: ``pass`` only for a pass the
-    platform itself observed (not a vendor's word, not an inference), ``fail`` for a
-    contradicted claim, ``stale`` for an expired one, otherwise nothing."""
+    platform itself observed (not a vendor's word, not an inference, and not a
+    person's label), ``fail`` for a contradicted claim, ``stale`` for an expired
+    one, otherwise nothing.
+
+    ``by_person``: the reading is a person's. A person's SUPPORTED or VERIFIED is a
+    judgment, never an observation, so it is never the pass side of a
+    contradiction. It was, and SUPPORTED ranks with PARTIALLY_VERIFIED: under a
+    counted FAIL a person's "lateral" relabel PARTIALLY_VERIFIED -> SUPPORTED turned
+    the verdict from fail to contested and the claim from CONTRADICTED to UNKNOWN,
+    and back again -- a contradiction cleared by nobody's invalidation."""
     if base_status == Status.CONTRADICTED:
         return "fail"
     if base_status == Status.STALE:
         return "stale"
     if (
-        base_status in (Status.SUPPORTED, Status.VERIFIED)
+        not by_person
+        and base_status in (Status.SUPPORTED, Status.VERIFIED)
         and not vendor_asserted
         and evidence_class in _OBSERVED_CLASSES
     ):
         return "pass"
     return ""
+
+
+def _named(refs: list[str]) -> str:
+    """At most :data:`_NAMED_IN_A_LINE` of ``refs``, joined, and how many more."""
+    shown = ", ".join(refs[:_NAMED_IN_A_LINE])
+    more = len(refs) - _NAMED_IN_A_LINE
+    return shown + (f" and {more} more" if more > 0 else "")
 
 
 def audit(
@@ -463,9 +495,12 @@ def audit(
     subject: Subject,
     items,
     now,
+    reading_by_person: bool = False,
 ) -> dict | None:
     """The evidence audit of one claim version, or ``None`` when no evidence was
     recorded against it (nothing to audit: the status is the reading's own).
+    ``reading_by_person``: ``base_status`` is a person's reading, which is never
+    the pass side (:func:`_base_side`).
 
     Pure: reads nothing and writes nothing. Returns the stored form
     (:attr:`AssuranceClaim.evidence_audit`): the verdict, the status the claim is
@@ -497,18 +532,21 @@ def audit(
         if not (set(reasons[i.pk]) & (NEUTRAL_REASONS | ORIGIN_REASONS))
     ]
 
-    side = _base_side(str(base_status), vendor_asserted=vendor_asserted, evidence_class=evidence_class)
+    side = _base_side(
+        str(base_status), vendor_asserted=vendor_asserted, evidence_class=evidence_class, by_person=reading_by_person
+    )
     pass_side = side == "pass" or bool(passes)
     fail_side = side == "fail" or bool(fails)
 
     contradictions: list[str] = []
     if pass_side and fail_side:
         verdict = ClaimVerdict.CONTESTED
-        for_ = [f"evidence {i.uuid}" for i in passes] + (["the claim's own reading"] if side == "pass" else [])
-        against = [f"evidence {i.uuid}" for i in fails] + (["the claim's own reading"] if side == "fail" else [])
+        # The claim's own reading first: a line names only the first few.
+        for_ = (["the claim's own reading"] if side == "pass" else []) + [f"evidence {i.uuid}" for i in passes]
+        against = (["the claim's own reading"] if side == "fail" else []) + [f"evidence {i.uuid}" for i in fails]
         contradictions.append(
-            "Load-bearing evidence disagrees: " + ", ".join(for_) + " reads pass; "
-            + ", ".join(against) + " reads fail. Not resolved to either reading."
+            "Load-bearing evidence disagrees: " + _named(for_) + " reads pass; "
+            + _named(against) + " reads fail. Not resolved to either reading."
         )
     elif fail_side:
         verdict = ClaimVerdict.FAIL
@@ -562,11 +600,29 @@ def audit(
             "the answer, not a failure and not a pass."
         )
 
+    # Until when this audit is the answer: the first instant an item it counted
+    # expires or is retired by an invalidation dated ahead, or a refused item's
+    # reason lapses (observed in the future). Past it, the stored audit is not
+    # served as current (:func:`audit_is_current`): nothing re-audits on expiry.
+    horizons = []
+    for i in items:
+        if i.invalidated_at is not None and i.invalidated_at > now and _attributed_invalidation(i):
+            horizons.append(i.invalidated_at)
+    for i in admitted:
+        if i.expires_at is not None:
+            horizons.append(i.expires_at)
+    for i in refused:
+        if OBSERVED_IN_THE_FUTURE in reasons[i.pk] and i.observed_at is not None:
+            horizons.append(i.observed_at - MAX_CLOCK_SKEW)
+    valid_until = min(horizons).isoformat() if horizons else None
+
     return {
         "verdict": verdict.value,
         "base_status": str(base_status),
         "status": status,
         "held": held,
+        "reading_by_person": bool(reading_by_person),
+        "valid_until": valid_until,
         "admitted": [{"uuid": str(i.uuid), "outcome": i.outcome} for i in admitted],
         "refused": [
             {
@@ -657,6 +713,7 @@ def hold_reading_at_stale(claim: AssuranceClaim, *, note: str) -> bool:
         **audit,
         "base_status": Status.STALE.value,
         "base_confidence": None,
+        "reading_by_person": False,
         "held": rank(audit["status"]) < rank(Status.STALE),
     }
     claim.save(update_fields=["evidence_audit", "updated_at"])
@@ -677,15 +734,28 @@ def _is_audited(claim: AssuranceClaim) -> bool:
     return claim.valid_to is None and claim.effective_to is None and claim.status not in _UNAUDITED_STATUSES
 
 
-def audit_of(claim: AssuranceClaim, *, base_status: str | None = None, now=None, route: str | None = None):
+def audit_of(
+    claim: AssuranceClaim,
+    *,
+    base_status: str | None = None,
+    now=None,
+    route: str | None = None,
+    reading_by_person: bool | None = None,
+):
     """:func:`audit` of a stored claim version, reading its evidence and the route
-    serving now. ``base_status`` defaults to the claim's own reading."""
+    serving now. ``base_status`` defaults to the claim's own reading, and
+    ``reading_by_person`` to whether a person set that reading (read off the
+    claim's lifecycle); a caller auditing a person's move passes both."""
     from .served_route import serving_route_now
 
     now = now or timezone.now()
     items = list(evidence_for(claim))
     if not items:
         return None
+    if reading_by_person is None:
+        from .claims import _status_set_by_a_person
+
+        reading_by_person = base_status is None and _status_set_by_a_person(claim)
     route = route if route is not None else serving_route_now(claim.deployment)
     return audit(
         base_status=base_status if base_status is not None else reading_status(claim),
@@ -694,7 +764,61 @@ def audit_of(claim: AssuranceClaim, *, base_status: str | None = None, now=None,
         subject=subject_of(claim, route=route),
         items=items,
         now=now,
+        reading_by_person=reading_by_person,
     )
+
+
+def audit_summary(result: dict) -> dict:
+    """The stored form of an audit on the claim (:attr:`AssuranceClaim.evidence_audit`):
+    everything but the per-item lists, which are cut to :data:`AUDIT_LIST_LIMIT`
+    entries each, with ``counts`` of every list and ``lists_truncated``. Bounded
+    whatever was recorded, so no claim read -- and no stop, which rewrites it to
+    take a hold down (:func:`taken_down`) -- grows with the evidence."""
+    counts = {key: len(result.get(key) or []) for key in AUDIT_LISTS}
+    summary = {key: value for key, value in result.items() if key not in AUDIT_LISTS}
+    for key in AUDIT_LISTS:
+        summary[key] = list(result.get(key) or [])[:AUDIT_LIST_LIMIT]
+    summary["counts"] = counts
+    summary["lists_truncated"] = any(n > AUDIT_LIST_LIMIT for n in counts.values())
+    return summary
+
+
+def audit_columns(result: dict | None) -> dict:
+    """The claim columns an audit is stored in: the verdict and the bounded summary
+    (:func:`audit_summary`). ``None`` is no audit: both empty. The whole weighing
+    goes beside them (:func:`store_weighing`)."""
+    if result is None:
+        return {"evidence_verdict": "", "evidence_audit": {}}
+    return {"evidence_verdict": result["verdict"], "evidence_audit": audit_summary(result)}
+
+
+def store_audit(claim: AssuranceClaim, result: dict | None) -> list[str]:
+    """Write ``result`` onto ``claim`` (not saved, :func:`audit_columns`); the
+    fields. The caller saves the claim, then :func:`store_weighing`."""
+    columns = audit_columns(result)
+    for field, value in columns.items():
+        setattr(claim, field, value)
+    return list(columns)
+
+
+def store_weighing(claim: AssuranceClaim, result: dict | None) -> None:
+    """Keep ``result``'s whole per-item weighing beside the saved ``claim``
+    (:class:`~assurance.models.ClaimAuditWeighing`); ``None`` removes it."""
+    from .models import ClaimAuditWeighing
+
+    if result is None:
+        ClaimAuditWeighing.objects.filter(claim_id=claim.pk).delete()
+        return
+    ClaimAuditWeighing.objects.update_or_create(
+        claim_id=claim.pk, defaults={"items": {key: list(result.get(key) or []) for key in AUDIT_LISTS}}
+    )
+
+
+def stored_weighing(claim: AssuranceClaim) -> dict:
+    """The whole per-item weighing stored beside ``claim``'s audit, ``{}`` where none."""
+    from .models import ClaimAuditWeighing
+
+    return ClaimAuditWeighing.objects.filter(claim_id=claim.pk).values_list("items", flat=True).first() or {}
 
 
 @transaction.atomic
@@ -726,9 +850,8 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     reading_confidence = claim.evidence_audit.get("base_confidence") if was_held else claim.confidence
     if result["held"]:
         result = {**result, "base_confidence": reading_confidence}
-    claim.evidence_verdict = result["verdict"]
-    claim.evidence_audit = result
-    fields = ["evidence_verdict", "evidence_audit", "updated_at"]
+    fields = [*store_audit(claim, result), "updated_at"]
+    store_weighing(claim, result)
     if new_status != old_status:
         claim.status = new_status
         confidence = _confidence(new_status, claim.evidence_class)
@@ -793,7 +916,7 @@ def refusal_for_transition(claim: AssuranceClaim, to_status: str, *, now=None, a
     if rank(to_status) <= rank(reading) and to_status != reading:
         return None
     if audited is _NOT_GIVEN:
-        audited = audit_of(claim, base_status=to_status, now=now)
+        audited = audit_of(claim, base_status=to_status, now=now, reading_by_person=True)
     if audited is None or not audited["held"]:
         return None
     return _refusal(audited)
@@ -819,7 +942,7 @@ def taken_down(audit: dict, stop: str) -> dict:
     reading under the hold, and a release of the evidence lifted it back there."""
     if not (audit or {}).get("held"):
         return audit
-    return {**audit, "base_status": str(stop), "base_confidence": None, "held": False}
+    return {**audit, "base_status": str(stop), "base_confidence": None, "reading_by_person": True, "held": False}
 
 
 def served_audit(claim: AssuranceClaim) -> dict:
@@ -831,17 +954,53 @@ def served_audit(claim: AssuranceClaim) -> dict:
     audit = dict(claim.evidence_audit or {})
     if not audit:
         return audit
-    current = audit_is_current(claim)
-    audit["audit_current"] = current
-    if not current:
-        audit["not_current_reason"] = _not_current_reason(claim)
+    why = _why_not_current(claim)
+    audit["audit_current"] = not why
+    if why:
+        audit["not_current_reason"] = why
     return audit
 
 
-def audit_is_current(claim: AssuranceClaim) -> bool:
-    """Whether the stored audit is of the claim as it reads now."""
+def audit_is_current(claim: AssuranceClaim, *, now=None) -> bool:
+    """Whether the stored audit is of the claim as it reads now: taken at the
+    status the claim reads, and not past the instant it holds until
+    (``valid_until``: an item it counted has expired since, or a refused item's
+    reason lapsed). Nothing re-audits on expiry, and a stored ``pass`` whose pass
+    had expired was served as current while the audit taken now read
+    ``incomplete``. An audit that does not say until when it holds is not current."""
+    return not _why_not_current(claim, now=now)
+
+
+def _why_not_current(claim: AssuranceClaim, *, now=None) -> str:
+    """Why the stored audit is not current, or "" when it is (:func:`audit_is_current`)."""
     audit = claim.evidence_audit or {}
-    return bool(audit) and audit.get("status") == claim.status
+    if not audit:
+        return "nothing was audited"
+    was = audit.get("status") or UNKNOWN
+    if was != claim.status:
+        if claim.status in _UNAUDITED_STATUSES:
+            return (
+                f"The evidence was last audited while the claim read {was}; the claim is "
+                f"{claim.status} now and is never audited again. This is not its verdict."
+            )
+        return (
+            f"The evidence was last audited while the claim read {was}; it reads {claim.status} "
+            "now, set by a move that does not re-run the audit (a person's stop, a stale mark). "
+            "This is not its verdict; the claim's next audit brings it current."
+        )
+    if "valid_until" not in audit:
+        return (
+            "The stored audit does not say until when it holds (it was taken before audits recorded "
+            "when their evidence expires). This is not a current verdict; the claim's next audit brings it current."
+        )
+    until = parse_datetime(audit["valid_until"]) if audit["valid_until"] else None
+    if until is not None and until <= (now or timezone.now()):
+        return (
+            f"The evidence was audited at {audit.get('audited_at') or UNKNOWN}; at {until.isoformat()} an item it "
+            "weighed expired or the reason it was refused lapsed, so the audit taken now weighs the evidence "
+            "differently. This is not its verdict; the claim's next audit brings it current."
+        )
+    return ""
 
 
 def current_verdict(claim: AssuranceClaim) -> str | None:
@@ -850,21 +1009,6 @@ def current_verdict(claim: AssuranceClaim) -> str | None:
     if not claim.evidence_verdict or not audit_is_current(claim):
         return None
     return claim.evidence_verdict
-
-
-def _not_current_reason(claim: AssuranceClaim) -> str:
-    audit = claim.evidence_audit or {}
-    was = audit.get("status") or UNKNOWN
-    if claim.status in _UNAUDITED_STATUSES:
-        return (
-            f"The evidence was last audited while the claim read {was}; the claim is "
-            f"{claim.status} now and is never audited again. This is not its verdict."
-        )
-    return (
-        f"The evidence was last audited while the claim read {was}; it reads {claim.status} "
-        "now, set by a move that does not re-run the audit (a person's stop, a stale mark). "
-        "This is not its verdict; the claim's next audit brings it current."
-    )
 
 
 # ---------------------------------------------------------------------------

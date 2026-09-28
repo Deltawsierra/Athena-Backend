@@ -597,7 +597,7 @@ def _make_claim(
         status = _held_status(status)
         note = f"Derived; {_HELD}."
     legal = {} if legal_status is None else {"legal_status": legal_status}
-    verdict = {} if audited is None else {"evidence_verdict": audited["verdict"], "evidence_audit": audited}
+    verdict = {} if audited is None else ea.audit_columns(audited)
     claim = AssuranceClaim.objects.create(
         deployment=deployment,
         asset=derived["subject"],
@@ -626,6 +626,8 @@ def _make_claim(
         verified_at=now if status == Status.VERIFIED else None,
         expiration=now + timedelta(days=EVIDENCE_TTL_DAYS),
     )
+    if audited is not None:
+        ea.store_weighing(claim, audited)
     if audit_event is None:
         ClaimEvent.objects.create(
             claim=claim, from_status="", to_status=status, actor=None, note=note
@@ -740,6 +742,9 @@ def _refresh_machine_fields(
             subject=subject,
             items=items,
             now=now,
+            # A person's status that stands on this version is re-audited as a
+            # person's: never the pass side of a contradiction.
+            reading_by_person=human_status,
         )
     if audited is not None and audited["held"]:
         new_status = audited["status"]
@@ -755,15 +760,14 @@ def _refresh_machine_fields(
     if audited is not None:
         if audited["held"]:
             audited = {**audited, "base_confidence": derived["confidence"]}
-        claim.evidence_verdict = audited["verdict"]
-        claim.evidence_audit = audited
+        ea.store_audit(claim, audited)
         if audited["held"]:
             # The evidence holds the claim back: no supporting confidence above it.
             claim.confidence = _confidence(audited["status"], derived["evidence_class"])
     elif audit_context is not None and claim.evidence_audit:
         # Nothing recorded against this identity any more: no verdict to carry.
-        claim.evidence_verdict = ""
-        claim.evidence_audit = {}
+        ea.store_audit(claim, None)
+        ea.store_weighing(claim, None)
     claim.assessment = derived["assessment"]
     claim.supporting_summary = derived["supporting_summary"]
     claim.contradicting_summary = derived["contradicting_summary"]
@@ -778,6 +782,8 @@ def _refresh_machine_fields(
         if new_status == Status.VERIFIED:
             claim.verified_at = now
     claim.save()
+    if audited is not None:
+        ea.store_weighing(claim, audited)
 
     if status_changed:
         by_audit = audited is not None and audited["held"] and new_status == audited["status"]
@@ -1181,6 +1187,48 @@ class IllegalClaimTransition(ValueError):
     clean 400 rather than letting an illegal jump be silently coerced."""
 
 
+class ClaimChanged(IllegalClaimTransition):
+    """A person's move decided from a read of the claim that is no longer the row
+    as committed -- a stop, a supersession or another move landed in between.
+    Nothing was written; the caller re-reads and decides again (a 409). Never
+    raised for a stop: a stop is applied to the row as committed."""
+
+
+def _locked_row(claim: AssuranceClaim) -> AssuranceClaim:
+    """``claim``'s row as committed now, under the write lock: ``select_for_update``
+    where the database has row locks, and on SQLite the database write lock the
+    transaction took at BEGIN (IMMEDIATE, config.settings) -- so no other write
+    lands between this read and the transition's own."""
+    return AssuranceClaim.objects.select_for_update(of=("self",)).get(pk=claim.pk)
+
+
+def _adopt(claim: AssuranceClaim, row: AssuranceClaim) -> None:
+    """Bring the caller's copy of the claim to the row the transition wrote."""
+    if claim is row:
+        return
+    deferred = row.get_deferred_fields()
+    for field in row._meta.concrete_fields:
+        if field.attname not in deferred:
+            setattr(claim, field.attname, getattr(row, field.attname))
+
+
+def _changed_since_read(read: AssuranceClaim, row: AssuranceClaim) -> str:
+    """Why the caller's read of a claim is not the row as committed, or "" when it
+    is: its status, whether it is still the current version, or the reading under
+    its evidence hold moved since it was read."""
+    def reads(claim):
+        reading = ea.reading_status(claim)
+        return claim.status if reading == claim.status else f"{claim.status} (reading {reading} under a hold)"
+
+    if (read.status, ea.reading_status(read), read.valid_to) == (row.status, ea.reading_status(row), row.valid_to):
+        return ""
+    now = "a re-derive superseded this version" if row.valid_to is not None else f"it reads {reads(row)} now"
+    return (
+        f"The claim changed since it was read: it read {reads(read)}, and {now}. Nothing was "
+        "written; re-read the claim and decide again."
+    )
+
+
 def _can_verify(claim: AssuranceClaim) -> bool:
     """Whether a claim MAY read VERIFIED: its (weakest) evidence is
     configuration/technically verified AND it does not rest on vendor assertions
@@ -1214,21 +1262,44 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
     it does; a move above it that the evidence would hold back at once is refused
     (:func:`assurance.evidence_audit.refusal_for_transition`)."""
     to_status = Status(to_status)
-    from_status = claim.status
 
     if to_status in _MACHINE_ONLY_TARGETS:
         raise IllegalClaimTransition(
             f"{to_status} is a machine-only status, not a valid human transition target."
         )
+    # Decided from the row as committed at the moment it is written, never from the
+    # caller's earlier read. The transition route loaded the claim before its
+    # transaction opened; a request that arrived while another write was open read
+    # the claim as it was before that write, waited for the lock, and wrote its
+    # decision over it -- a person's move landed on a revoke that had just
+    # committed, and the claim read partially_verified, un-revoked (round 3, N2).
+    row = _locked_row(claim)
     # A take-down (revoke, contradict) is a stop (safety.stops), and the evidence has
     # nothing to say to it: nothing ranks below CONTRADICTED, so the audit can never
     # hold one back, and a withdrawal is never audited. So it does no evidence work
     # at all -- no read of the items, of the route serving now, no classification --
     # and nothing the audit does can refuse it, fail it or make it wait: its cost
     # used to grow with every item recorded against the claim (400 ms at 3,000),
-    # and an audit that raised refused it.
+    # and an audit that raised refused it. It is applied to the row as committed,
+    # whatever the caller read: a stop is never lost to a race and never refused.
     if to_status.value in ea.STOPS:
-        return _take_down(claim, to_status, actor=actor, note=note)
+        event = _take_down(row, to_status, actor=actor, note=note)
+        _adopt(claim, row)
+        return event
+    # A person's move is a judgment of what they read. Read before a stop, a
+    # supersession or another move committed, it is not a judgment of the claim
+    # as it is: refused, and nothing written over what landed.
+    changed = _changed_since_read(claim, row)
+    if changed:
+        raise ClaimChanged(changed)
+    event = _move(row, to_status, actor=actor, note=note)
+    _adopt(claim, row)
+    return event
+
+
+def _move(claim: AssuranceClaim, to_status, *, actor, note: str) -> ClaimEvent:
+    """A person's non-stop move of the locked, committed row ``claim``."""
+    from_status = claim.status
 
     reading = ea.reading_status(claim)
     held = reading != from_status
@@ -1255,7 +1326,7 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
     # or over adverse evidence it had to refuse -- is refused here, not made and then
     # undone: a person resolves the evidence, not the reading.
     now = timezone.now()
-    audited = ea.audit_of(claim, base_status=to_status.value, now=now)
+    audited = ea.audit_of(claim, base_status=to_status.value, now=now, reading_by_person=True)
     refusal = ea.refusal_for_transition(claim, to_status, now=now, audited=audited)
     if refusal:
         raise IllegalClaimTransition(refusal)
@@ -1276,19 +1347,26 @@ def _take_down(claim: AssuranceClaim, stop: str, *, actor, note: str) -> ClaimEv
     next audit, which reads the stop as the reading.
 
     A claim already withdrawn stays withdrawn -- no stop outranks a withdrawal --
-    and the stop is recorded on it, attributed. A superseded version is closed
-    history, not a claim anything reads as current: it is refused, naming the
-    version to stop."""
+    and the stop is recorded on it, attributed.
+
+    A stop addressed to a SUPERSEDED version is applied to the claim identity's
+    CURRENT version, and the event says which version it was addressed to. It only
+    lowers assurance, so there is nothing to ask the person first: it was a 400
+    naming the version to stop instead, and the claim everything reads stayed
+    un-stopped -- also when a re-derive superseded the version while the stop was
+    in flight (round 3, R1/N1). With no current version to stop, it is recorded on
+    the version it was addressed to, which stays closed history."""
     from_status = claim.status
-    if from_status == Status.SUPERSEDED:
-        current = AssuranceClaim.objects.filter(
-            deployment_id=claim.deployment_id, fingerprint=claim.fingerprint
-        ).current().first()
-        raise IllegalClaimTransition(
-            "This version is superseded: closed history that nothing reads as current. "
-            + (f"Stop the claim's current version, {current.uuid}." if current is not None
-               else "The claim has no current version.")
-        )
+    if from_status == Status.SUPERSEDED or claim.valid_to is not None:
+        addressed = f"[addressed to superseded {claim.uuid}]"
+        current = _current_row_of(claim)
+        if current is None:
+            return ClaimEvent.objects.create(
+                claim=claim, from_status=from_status, to_status=from_status, actor=actor,
+                cause=ClaimEvent.CAUSE_PERSON_READING,
+                note=_clip(f"{note or ''} {addressed} [{stop} asked for; the claim has no current version.]"),
+            )
+        return _take_down(current, stop, actor=actor, note=_clip(f"{note or ''} {addressed}".strip()))
     if from_status == Status.REVOKED:
         return ClaimEvent.objects.create(
             claim=claim, from_status=from_status, to_status=from_status, actor=actor,
@@ -1306,6 +1384,26 @@ def _take_down(claim: AssuranceClaim, stop: str, *, actor, note: str) -> ClaimEv
         claim=claim, from_status=from_status, to_status=stop, actor=actor, note=note or "",
         cause=ClaimEvent.CAUSE_PERSON_READING if from_status == stop else "",
     )
+
+
+def _current_row_of(claim: AssuranceClaim) -> AssuranceClaim | None:
+    """The current version of ``claim``'s identity, locked as :func:`_locked_row`
+    locks. Read again where a row lock waited on a writer that closed it (another
+    database's re-derive; SQLite's transaction already holds the write lock)."""
+    for _attempt in range(3):
+        current = (
+            AssuranceClaim.objects.select_for_update(of=("self",))
+            .filter(deployment_id=claim.deployment_id, fingerprint=claim.fingerprint)
+            .current()
+            .first()
+        )
+        if current is not None:
+            return current
+        if not AssuranceClaim.objects.filter(
+            deployment_id=claim.deployment_id, fingerprint=claim.fingerprint
+        ).current().exists():
+            return None
+    return None
 
 
 def _move_reading(claim: AssuranceClaim, to_status, audited, *, actor, note: str, now) -> ClaimEvent:
@@ -1328,9 +1426,7 @@ def _move_reading(claim: AssuranceClaim, to_status, audited, *, actor, note: str
         audited = {**audited, "base_confidence": reading_confidence}
         new_status = audited["status"]
     if audited is not None:
-        claim.evidence_verdict = audited["verdict"]
-        claim.evidence_audit = audited
-        fields += ["evidence_verdict", "evidence_audit"]
+        fields += ea.store_audit(claim, audited)
     if held and new_status != from_status:
         claim.confidence = _confidence(new_status, claim.evidence_class)
         fields.append("confidence")
@@ -1344,6 +1440,8 @@ def _move_reading(claim: AssuranceClaim, to_status, audited, *, actor, note: str
         claim.verified_at = now
         fields.append("verified_at")
     claim.save(update_fields=fields)
+    if audited is not None:
+        ea.store_weighing(claim, audited)
 
     event = ClaimEvent.objects.create(
         claim=claim, from_status=from_status, to_status=to_status, actor=actor, note=note or "",
