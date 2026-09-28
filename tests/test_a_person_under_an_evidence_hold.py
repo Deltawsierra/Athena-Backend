@@ -300,6 +300,40 @@ def test_a_person_still_cannot_take_the_reading_the_evidence_holds_the_claim_bac
     assert claim.status == Status.CONTRADICTED and ea.reading_status(claim) == Status.UNKNOWN
 
 
+def test_a_persons_move_off_a_stale_mark_is_the_reading_and_a_re_derive_does_not_lift_past_it():
+    """Found by the fuzz at 700 seeds (seed 55). A drift marked both claims STALE --
+    a retest due, no reading -- and a person moved both to PARTIALLY_VERIFIED. Read
+    against the mark, that was a raise the evidence would hold, and it was refused;
+    once the evidence was resolved a re-derive replaced the mark with the deriver's
+    VERIFIED, above the control, which kept the person's lower reading."""
+    (control_dep, control), (hostile_dep, hostile) = _pair("stale-mark", principals=True)
+    against = _record(hostile, outcome=V.FAIL.value, origin=Origin.TARGET.value)
+    assert hostile.status == Status.UNKNOWN and hostile.evidence_audit["held"] is True
+    for dep in (control_dep, hostile_dep):
+        Asset.objects.create(
+            deployment=dep, kind=Asset.Kind.AGENT, name="a1", identifier="a1",
+            classification=Asset.Classification.APPROVED, metadata={"tools": []},
+        )
+        check_invalidations(dep)
+        Asset.objects.filter(deployment=dep, identifier="a1").delete()
+        check_invalidations(dep)
+    control, hostile = _current(control_dep), _current(hostile_dep)
+    assert control.status == hostile.status == Status.STALE
+
+    for claim in (control, hostile):
+        apply_claim_transition(claim, Status.PARTIALLY_VERIFIED, actor=_person(), note="partly checked")
+    _no_higher_than(hostile, control)
+    assert ea.reading_status(hostile) == Status.PARTIALLY_VERIFIED
+
+    ea.invalidate_claim_evidence(against, actor=_person("reviewer"), reason="the target's own report")
+    derive_claims(control_dep)
+    derive_claims(hostile_dep)
+    control, hostile = _current(control_dep), _current(hostile_dep)
+    assert control.status == Status.PARTIALLY_VERIFIED
+    assert hostile.status == Status.PARTIALLY_VERIFIED
+    _no_higher_than(hostile, control)
+
+
 # ---------------------------------------------------------------------------
 # 3. The differential fuzz: evidence never lifts a claim above its control
 # ---------------------------------------------------------------------------
