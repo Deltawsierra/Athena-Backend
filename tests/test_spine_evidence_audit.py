@@ -375,14 +375,34 @@ def test_a_contradicted_claim_is_contested_by_passing_evidence_not_lifted_by_it(
 
 @pytest.mark.parametrize("to_status", [Status.SUPPORTED, Status.PARTIALLY_VERIFIED, Status.VERIFIED])
 def test_a_person_cannot_choose_the_favourable_reading_over_a_contradiction(to_status):
+    """A person cannot choose a HIGHER reading than the claim has under an evidence
+    hold. Until round 2 this test also refused SUPPORTED and PARTIALLY_VERIFIED on
+    a contested VERIFIED claim: readings BELOW its own, not the favourable ones.
+    Refusing them kept VERIFIED under the hold, and a release lifted the claim
+    above a control that took the downgrade; a downgrade is now recorded as the
+    reading under the hold (tests/test_a_person_under_an_evidence_hold.py)."""
     claim = _access_claim(_deployment())
     _record(claim, outcome=V.FAIL.value)
-    assert claim.status == Status.UNKNOWN
+    assert claim.status == Status.UNKNOWN  # contested: held below its VERIFIED reading
 
+    # Asking for the reading it already has under the hold asks only for a release.
+    with pytest.raises(IllegalClaimTransition, match="Resolve the evidence"):
+        apply_claim_transition(claim, Status.VERIFIED, actor=_user("hopeful"), note="release it")
+
+    # A person lowers the reading: accepted. The failure now stands alone, and holds
+    # the claim lower still.
+    apply_claim_transition(claim, Status.UNKNOWN, actor=_user("doubter"), note="less sure now")
+    claim.refresh_from_db()
+    held_at = claim.status
+    assert ea.rank(held_at) <= ea.rank(Status.UNKNOWN)
+    assert ea.reading_status(claim) == Status.UNKNOWN
+
+    # And cannot then choose a higher one over the failure.
     with pytest.raises(IllegalClaimTransition, match="Resolve the evidence"):
         apply_claim_transition(claim, to_status, actor=_user("reviewer"), note="looks fine to me")
     claim.refresh_from_db()
-    assert claim.status == Status.UNKNOWN
+    assert claim.status == held_at
+    assert ea.reading_status(claim) == Status.UNKNOWN
 
 
 def test_a_person_may_always_withdraw_a_contested_claim():
