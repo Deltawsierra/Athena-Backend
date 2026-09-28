@@ -414,6 +414,7 @@ NOT_STOPS = {
     "claim-list": _get(),
     "claim-detail": _get(),
     "claim-events": _get(),
+    "claim-evidence": _get(),
     "claim-declare-latent-condition": {
         "POST": (
             "declares a watch that may mark the claim stale later; it adds a check "

@@ -115,6 +115,7 @@ from .serializers import (
     AssetSerializer,
     AssuranceClaimSerializer,
     ClaimEventSerializer,
+    ClaimEvidenceSerializer,
     DataBoundarySerializer,
     DeclaredComponentSerializer,
     DeploymentSerializer,
@@ -2231,6 +2232,27 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         claim = self.get_object()
         events = claim.events.select_related("actor").all()
         return Response(ClaimEventSerializer(events, many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="evidence")
+    def evidence(self, request, uuid=None):
+        """The evidence objects recorded against this claim's identity (issue #333),
+        each with its ten record areas, and the stored evidence audit of the version
+        asked for: its verdict -- ``insufficient_evidence`` among them, as itself --
+        and how each item was weighed. Recorded is not load-bearing. A read, open to
+        any operator who can see the claim."""
+        from .evidence_audit import evidence_for
+
+        claim = self.get_object()
+        items = evidence_for(claim).select_related("superseded_by", "invalidated_by")
+        audit = claim.evidence_audit or {}
+        return Response(
+            {
+                "claim": str(claim.uuid),
+                "evidence_verdict": claim.evidence_verdict or None,
+                "evidence_audit": audit,
+                "evidence": ClaimEvidenceSerializer(items, many=True, context={"audit": audit}).data,
+            }
+        )
 
     @action(detail=True, methods=["post"], url_path="transition")
     def transition(self, request, uuid=None):

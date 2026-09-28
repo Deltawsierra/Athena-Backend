@@ -1341,6 +1341,33 @@ class LegalStatus(models.TextChoices):
     STALE = "legally_stale", "Legally stale"
 
 
+class ClaimVerdict(models.TextChoices):
+    """The Claim-area answer of the SPINE record (issue #333): what the evidence
+    establishes about a claim, as distinct from the claim's lifecycle ``status``.
+
+    Every value is disjoint from every :class:`AssuranceClaim.ClaimStatus` value,
+    for the reason :class:`LegalStatus` gives: a verdict written into the status
+    column, or filtered against it, is then an error or an empty result rather
+    than the wrong rows, quietly.
+
+    INSUFFICIENT_EVIDENCE is first-class and terminal. It is not FAIL (nothing was
+    shown false), not INCOMPLETE (nothing that bears on the claim was refused or is
+    partial), and never coerced to either: a bounded "we cannot say" is the honest
+    answer when nothing that could carry weight was recorded.
+    """
+
+    PASS = "pass", "Pass"
+    FAIL = "fail", "Fail"
+    # Evidence bearing on the claim was recorded and could not be used -- stale,
+    # target-authored, unchecked -- or says itself that it is partial. The claim
+    # cannot pass on it.
+    INCOMPLETE = "incomplete", "Incomplete"
+    # Load-bearing evidence on both sides. Never resolved to the favourable
+    # reading: the contradiction is recorded and the claim is held.
+    CONTESTED = "contested", "Contested"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence", "Insufficient evidence"
+
+
 class AssuranceClaimQuerySet(models.QuerySet):
     """Where "current" is defined, once.
 
@@ -1570,6 +1597,21 @@ class AssuranceClaim(models.Model):
     verified_at = models.DateTimeField(null=True, blank=True)
     expiration = models.DateTimeField(null=True, blank=True)
 
+    # The evidence audit's answer (issue #333, :mod:`assurance.evidence_audit`):
+    # what the claim's reading and the evidence recorded against it establish
+    # together, in the Claim-area vocabulary -- pass / fail / incomplete / contested
+    # / insufficient_evidence. Blank only on a row no audit has read: "not audited",
+    # which is never read as any of the five. INSUFFICIENT_EVIDENCE is a terminal
+    # answer in its own right and is stored as itself, never folded into fail or
+    # into the status column's "unknown".
+    evidence_verdict = models.CharField(
+        max_length=32, choices=ClaimVerdict.choices, blank=True, default=""
+    )
+    # How that answer was reached: which evidence carried weight, which was
+    # recorded but refused and why, the contradictions, the residual uncertainty,
+    # and the status the audit read before it held the claim back (``base_status``).
+    evidence_audit = models.JSONField(default=dict, blank=True)
+
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1651,7 +1693,15 @@ class ClaimEvent(models.Model):
         related_name="claim_events",
     )
     note = models.TextField(blank=True)
+    # What moved the claim, where that is not a derive, a person, or any of the
+    # older writers (all blank). The evidence audit marks its own moves, so a
+    # status a person set and the audit then held back is still read as the
+    # person's once the evidence holding it is resolved.
+    cause = models.CharField(max_length=32, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    #: :attr:`cause` on a move the evidence audit made (:mod:`assurance.evidence_audit`).
+    CAUSE_EVIDENCE_AUDIT = "evidence_audit"
 
     class Meta:
         ordering = ["created_at"]
@@ -1659,6 +1709,137 @@ class ClaimEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.from_status or '∅'} → {self.to_status} on claim {self.claim_id}"
+
+
+# ---------------------------------------------------------------------------
+# ClaimEvidence — one scan-derived evidence object recorded against a claim (#333)
+# ---------------------------------------------------------------------------
+
+
+class ClaimEvidence(models.Model):
+    """One evidence object recorded against an assurance claim, and what it names.
+
+    The SPINE record (issue #333) binds ten areas to each evidence object --
+    Identity, Authority, Inputs, Action, Execution, Observation, Finding,
+    Responsibility, Repair, Claim -- and :func:`assurance.evidence_audit.evidence_record`
+    reads them back off this row, every area present, the ones nothing recorded
+    reading ``unknown``. The columns are the areas the audit decides on; ``areas``
+    holds the four it only carries (action, execution, finding, repair).
+
+    RECORDED IS NOT LOAD-BEARING. Anything may be recorded; what carries weight is
+    decided by :func:`assurance.evidence_audit.classify` each time a claim is
+    audited, against the claim as it stands then. Evidence the target authored,
+    evidence past its expiry or taken against inputs that have since moved,
+    evidence naming another deployment, claim, component or served route, and
+    evidence whose only warrant is a signature is kept here and refused there, with
+    the reason.
+
+    Bound to the claim's IDENTITY (``claim_fingerprint``), not to one version: a
+    re-derive that opens a new version for the same inputs must not shed the
+    contradiction recorded against the last one. Whether an item is about the
+    version being audited is what ``subject_inputs`` answers.
+    """
+
+    class Origin(models.TextChoices):
+        # An observer independent of the system under assurance: an Athena or
+        # Achilles scan, an assessor. The only origin that can carry weight.
+        INDEPENDENT = "independent", "Independent observer"
+        OPERATOR = "operator", "Deploying organisation's operator"
+        VENDOR = "vendor", "Vendor / provider"
+        # The system under assurance itself: its own logs, its self-report, a
+        # verdict its own agent wrote. Recorded, never load-bearing.
+        TARGET = "target", "The system under assurance itself"
+        UNKNOWN = "unknown", "Unknown"
+
+    class AccountKind(models.TextChoices):
+        # Which KIND of account acted. Never a person: an account registered to a
+        # person is still an account, and a key, a token or a session can act for
+        # it with nobody at the keyboard.
+        HUMAN_USER = "human_user", "Account registered to a person"
+        SERVICE_ACCOUNT = "service_account", "Service account"
+        UNKNOWN = "unknown", "Unknown"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # Where it was recorded: the deployment whose claim it was recorded against.
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="claim_evidence"
+    )
+    claim_fingerprint = models.CharField(max_length=64, db_index=True)
+    # The version that was current when it was recorded -- provenance only; the
+    # audit reads the identity above.
+    recorded_against = models.ForeignKey(
+        AssuranceClaim, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    # Identity -- what the evidence says it is about. Blank means it names nothing,
+    # which is never read as naming this claim.
+    subject_deployment = models.CharField(max_length=64, blank=True)
+    subject_claim_type = models.CharField(max_length=32, blank=True)
+    subject_asset = models.CharField(max_length=64, blank=True)
+    subject_route = models.CharField(max_length=64, blank=True)
+    # Inputs -- the claim input fingerprint it was taken against.
+    subject_inputs = models.CharField(max_length=64, blank=True)
+
+    # Authority -- who produced these bytes, and whether a signature over them
+    # verified. A signature is provenance: it never makes the content true.
+    origin = models.CharField(max_length=16, choices=Origin.choices, default=Origin.UNKNOWN)
+    signer = models.CharField(max_length=255, blank=True)
+    signature_verified = models.BooleanField(default=False)
+    content_digest = models.CharField(max_length=128, blank=True)
+
+    # Observation -- what it says, how strongly, when, and the independent check of
+    # the state it asserts. An item with no state check asserts an effect nobody
+    # looked at.
+    outcome = models.CharField(max_length=32, choices=ClaimVerdict.choices)
+    evidence_class = models.CharField(
+        max_length=32, choices=EvidenceClass.choices, default=EvidenceClass.UNKNOWN
+    )
+    observed_at = models.DateTimeField(null=True, blank=True)
+    state_check_ref = models.CharField(max_length=255, blank=True)
+    state_checked_at = models.DateTimeField(null=True, blank=True)
+
+    # Claim -- the conditions it holds under, what it leaves uncertain, when it
+    # expires, and what invalidated it.
+    conditions = models.JSONField(default=list, blank=True)
+    residual_uncertainty = models.JSONField(default=list, blank=True)
+    expires_at = models.DateTimeField()
+    invalidated_at = models.DateTimeField(null=True, blank=True)
+    invalidation_reason = models.TextField(blank=True)
+    invalidated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    superseded_by = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="supersedes"
+    )
+
+    # Responsibility -- account, device, organisation and person, each its own
+    # fact. ``actor_human`` is set only with ``human_identified_by``: a signed
+    # commit or a service account's action names an account, never a person.
+    actor_account = models.CharField(max_length=255, blank=True)
+    actor_account_kind = models.CharField(
+        max_length=16, choices=AccountKind.choices, default=AccountKind.UNKNOWN
+    )
+    actor_device = models.CharField(max_length=255, blank=True)
+    actor_organization = models.CharField(max_length=255, blank=True)
+    actor_human = models.CharField(max_length=255, blank=True)
+    human_identified_by = models.CharField(max_length=255, blank=True)
+    # The platform account that recorded the row, which is not who produced it.
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    # Action, Execution, Finding, Repair -- carried, not decided on.
+    areas = models.JSONField(default=dict, blank=True)
+    summary = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+        indexes = [models.Index(fields=["deployment", "claim_fingerprint"])]
+
+    def __str__(self) -> str:
+        return f"{self.origin} {self.outcome} evidence on claim {self.claim_fingerprint[:12]}"
 
 
 # ---------------------------------------------------------------------------

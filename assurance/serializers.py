@@ -20,6 +20,7 @@ from .models import (
     Asset,
     AssuranceClaim,
     ClaimEvent,
+    ClaimEvidence,
     DataBoundary,
     DeclaredComponent,
     Deployment,
@@ -712,6 +713,7 @@ class ClaimEventSerializer(serializers.ModelSerializer):
     from_status_label = serializers.CharField(source="get_from_status_display", read_only=True)
     to_status_label = serializers.CharField(source="get_to_status_display", read_only=True)
     actor = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+    attribution = serializers.SerializerMethodField()
 
     class Meta:
         model = ClaimEvent
@@ -722,10 +724,26 @@ class ClaimEventSerializer(serializers.ModelSerializer):
             "to_status",
             "to_status_label",
             "actor",
+            "attribution",
+            "cause",
             "note",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_attribution(self, obj) -> dict:
+        """What ``actor`` is (issue #333): the platform ACCOUNT that made the move,
+        never a person. A session or a token acts as an account with nobody's intent
+        shown, so the event names the account and says intent is not established.
+        No actor is a machine move (a derive, an invalidation, the evidence audit)."""
+        if obj.actor_id is None:
+            return {"kind": "machine", "account": None, "human": None, "personal_intent": "not_established"}
+        return {
+            "kind": "account",
+            "account": obj.actor.username,
+            "human": None,
+            "personal_intent": "not_established",
+        }
 
 
 class RetestRequirementSerializer(serializers.ModelSerializer):
@@ -793,6 +811,11 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         source="superseded_by.uuid", read_only=True, allow_null=True
     )
     is_stale = serializers.BooleanField(read_only=True)
+    # The evidence audit's answer (issue #333) as stored: one of the five verdicts,
+    # INSUFFICIENT_EVIDENCE among them, or null where no evidence was ever audited.
+    # Never coerced -- not to the status, not to pass or fail.
+    evidence_verdict = serializers.SerializerMethodField()
+    evidence_verdict_label = serializers.SerializerMethodField()
 
     class Meta:
         model = AssuranceClaim
@@ -824,6 +847,9 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
             "human_owner",
             "receipt_digest",
             "is_stale",
+            "evidence_verdict",
+            "evidence_verdict_label",
+            "evidence_audit",
             "valid_from",
             "valid_to",
             "verified_at",
@@ -839,6 +865,46 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         # None-safe: an unassessed deployment has no decision, and an absent
         # decision is never read as "ready".
         return obj.get_assessment_display() if obj.assessment else None
+
+    def get_evidence_verdict(self, obj) -> str | None:
+        return obj.evidence_verdict or None
+
+    def get_evidence_verdict_label(self, obj) -> str | None:
+        return obj.get_evidence_verdict_display() if obj.evidence_verdict else None
+
+
+class ClaimEvidenceSerializer(serializers.ModelSerializer):
+    """One evidence object recorded against a claim (issue #333), read-only: its ten
+    record areas as :func:`assurance.evidence_audit.evidence_record` reads them, and
+    how the audit of the claim's current version weighed it. Recorded is not
+    load-bearing -- ``weighed`` says which."""
+
+    record = serializers.SerializerMethodField()
+    weighed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClaimEvidence
+        fields = ["uuid", "outcome", "origin", "evidence_class", "record", "weighed", "created_at"]
+        read_only_fields = fields
+
+    def get_record(self, obj) -> dict:
+        from .evidence_audit import evidence_record
+
+        return evidence_record(obj)
+
+    def get_weighed(self, obj) -> dict | None:
+        """How the stored audit of the claim's current version (passed in context as
+        ``audit``) weighed this item: ``admitted``, or refused with its reasons, or
+        ``None`` where no stored audit mentions it."""
+        audit = (self.context or {}).get("audit") or {}
+        key = str(obj.uuid)
+        for entry in audit.get("admitted", []):
+            if entry.get("uuid") == key:
+                return {"load_bearing": True, "reasons": []}
+        for entry in audit.get("refused", []):
+            if entry.get("uuid") == key:
+                return {"load_bearing": False, "reasons": entry.get("reasons", []), "weighs": entry.get("weighs")}
+        return None
 
 
 class DeploymentSerializer(serializers.ModelSerializer):

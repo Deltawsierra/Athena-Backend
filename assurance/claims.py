@@ -31,6 +31,13 @@ Three parts:
   STALE/SUPERSEDED be a human target, and HARD-refuses any move into VERIFIED that
   is not backed by configuration/technically-verified, non-vendor evidence.
 
+Recorded evidence (issue #333, :mod:`assurance.evidence_audit`) is read beside the
+deriver at every reconcile and every attributed transition. It can hold a claim
+back -- CONTRADICTED on load-bearing failure, UNKNOWN when contested or when
+adverse evidence had to be refused -- and it can never lift one: target-authored,
+stale, wrong-subject or signature-only evidence carries no weight, and a person
+cannot move a claim to a status the evidence would hold back at once.
+
 The input-fingerprint-change → supersede seam is the cross-version mechanism
 here. Each claim binds to a fingerprint of the inputs ITS deriver reads
 (:data:`assurance.fingerprint.CLAIM_INPUTS`), so a change versions exactly the
@@ -69,6 +76,7 @@ from .models import (
     LATENT_LIVE_STATES,
     AssuranceClaim,
     ClaimEvent,
+    ClaimEvidence,
     Deployment,
     EvidenceClass,
     LatentCondition,
@@ -76,6 +84,8 @@ from .models import (
 )
 from .legal import ruling_for_next_version
 from .receipt import build_assurance_receipt
+from .served_route import served_route_fingerprint
+from . import evidence_audit as ea
 
 Status = AssuranceClaim.ClaimStatus
 ClaimType = AssuranceClaim.ClaimType
@@ -560,18 +570,28 @@ def _held_status(status: str) -> str:
 
 def _make_claim(
     deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest, derived, now,
-    human_owner=None, legal_status=None, held=False,
+    human_owner=None, legal_status=None, held=False, audited=None,
 ) -> AssuranceClaim:
     """Create a new CURRENT claim version from a deriver's output, and seed its
     lifecycle with a ``∅ → status`` :class:`ClaimEvent`. ``legal_status`` is the
     version it replaces' (see :func:`_supersede`); a first version is not assessed.
-    ``held``: a fired latent condition holds this claim, so it opens at STALE."""
+    ``held``: a fired latent condition holds this claim, so it opens at STALE.
+    ``audited``: the evidence audit of this version (:mod:`assurance.evidence_audit`)
+    -- it opens at the status the audit holds it at, with the audit's own event, and
+    carries the verdict; never above what the deriver reads."""
     status = derived["status"]
     note = "Derived"
+    confidence = derived["confidence"]
+    audit_event = None
+    if audited is not None and audited["held"]:
+        audit_event = (status, audited["status"], ea.audit_note(audited))
+        status = audited["status"]
+        confidence = _confidence(status, derived["evidence_class"])
     if held and _held_status(status) != status:
         status = _held_status(status)
         note = f"Derived; {_HELD}."
     legal = {} if legal_status is None else {"legal_status": legal_status}
+    verdict = {} if audited is None else {"evidence_verdict": audited["verdict"], "evidence_audit": audited}
     claim = AssuranceClaim.objects.create(
         deployment=deployment,
         asset=derived["subject"],
@@ -584,7 +604,7 @@ def _make_claim(
         environment=deployment.environment,
         status=status,
         evidence_class=derived["evidence_class"],
-        confidence=derived["confidence"],
+        confidence=confidence,
         vendor_asserted=derived["vendor_asserted"],
         assessment=derived["assessment"],
         supporting_summary=derived["supporting_summary"],
@@ -593,15 +613,35 @@ def _make_claim(
         receipt_digest=receipt_digest,
         human_owner=human_owner,
         **legal,
+        **verdict,
         valid_from=now,
         first_seen=now,
         last_seen=now,
         verified_at=now if status == Status.VERIFIED else None,
         expiration=now + timedelta(days=EVIDENCE_TTL_DAYS),
     )
-    ClaimEvent.objects.create(
-        claim=claim, from_status="", to_status=status, actor=None, note=note
-    )
+    if audit_event is None:
+        ClaimEvent.objects.create(
+            claim=claim, from_status="", to_status=status, actor=None, note=note
+        )
+    else:
+        # What the deriver read, then what the evidence held it at: the version's
+        # history shows both, and the hold is marked as the audit's, so it is
+        # never read as the reading itself.
+        read, audit_status, audit_note = audit_event
+        ClaimEvent.objects.create(claim=claim, from_status="", to_status=read, actor=None, note="Derived")
+        ClaimEvent.objects.create(
+            claim=claim,
+            from_status=read,
+            to_status=audit_status,
+            actor=None,
+            cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT,
+            note=audit_note,
+        )
+        if status != audit_status:
+            ClaimEvent.objects.create(
+                claim=claim, from_status=audit_status, to_status=status, actor=None, note=note
+            )
     return claim
 
 
@@ -614,14 +654,19 @@ def _status_set_by_a_person(claim: AssuranceClaim) -> bool:
 
     Read from the claim's own lifecycle: the latest event that CHANGED its status
     carries an actor when :func:`apply_claim_transition` made it, and none when a
-    derive or an invalidation did."""
+    derive or an invalidation did. A hold the evidence audit put on it is not a
+    move of the reading: a person's status the audit held back is still the
+    person's, read under the hold (:func:`assurance.evidence_audit.reading_status`)."""
     last_move = (
-        claim.events.exclude(from_status=models.F("to_status")).order_by("-pk").first()
+        claim.events.exclude(from_status=models.F("to_status"))
+        .exclude(cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT)
+        .order_by("-pk")
+        .first()
     )
     return bool(
         last_move is not None
         and last_move.actor_id is not None
-        and last_move.to_status == claim.status
+        and last_move.to_status == ea.reading_status(claim)
     )
 
 
@@ -632,18 +677,25 @@ def _same_reading(claim: AssuranceClaim, derived, *, human_status: bool = False)
     deriver produces: a STALE mark (evidence expired, or a retest pending) and a
     status a person set (``human_status``). Every other status must match
     exactly. The machine's own reading -- evidence class, vendor reliance, the two
-    summaries -- must always match."""
+    summaries -- must always match.
+
+    A status the evidence audit holds the claim at is not a reading either: the
+    reading under the hold is compared (:func:`assurance.evidence_audit.reading_status`),
+    so recorded evidence holds a version back in place rather than superseding it on
+    every re-derive."""
+    reading = ea.reading_status(claim)
     if (
         not human_status
-        and claim.status != Status.STALE
-        and claim.status != derived["status"]
+        and reading != Status.STALE
+        and reading != derived["status"]
     ):
         return False
     return all(getattr(claim, field) == derived[field] for field in _READING_FIELDS)
 
 
 def _refresh_machine_fields(
-    claim: AssuranceClaim, derived, receipt_digest, now, *, human_status: bool = False, held: bool = False
+    claim: AssuranceClaim, derived, receipt_digest, now, *, human_status: bool = False, held: bool = False,
+    audit_context=None,
 ) -> bool:
     """Refresh a current claim's MACHINE fields in place (system state unchanged),
     preserving every human field -- including a status a person set, which stands
@@ -654,10 +706,28 @@ def _refresh_machine_fields(
     ``held``: a fired latent condition holds this claim, and it reads no better
     than STALE whatever the deriver -- or a person -- reads. The STALE mark the
     firing left used to be read as "whatever the deriver says now", and a re-derive
-    turned it straight back into VERIFIED with the precondition still true."""
+    turned it straight back into VERIFIED with the precondition still true.
+
+    ``audit_context``: ``(subject, items)`` for the evidence audit of this version
+    (:mod:`assurance.evidence_audit`), read against the reading -- the deriver's, or
+    the person's under any hold -- and held back where the evidence says so."""
     old_status = claim.status
-    new_status = old_status if human_status else derived["status"]
+    new_status = ea.reading_status(claim) if human_status else derived["status"]
     note = "Re-derived"
+    audited = None
+    if audit_context is not None:
+        subject, items = audit_context
+        audited = ea.audit(
+            base_status=new_status,
+            vendor_asserted=derived["vendor_asserted"],
+            evidence_class=derived["evidence_class"],
+            subject=subject,
+            items=items,
+            now=now,
+        )
+    if audited is not None and audited["held"]:
+        new_status = audited["status"]
+        note = ea.audit_note(audited)
     if held and _held_status(new_status) != new_status:
         new_status = _held_status(new_status)
         note = f"Re-derived; {_HELD}."
@@ -666,6 +736,16 @@ def _refresh_machine_fields(
     claim.evidence_class = derived["evidence_class"]
     claim.vendor_asserted = derived["vendor_asserted"]
     claim.confidence = derived["confidence"]
+    if audited is not None:
+        claim.evidence_verdict = audited["verdict"]
+        claim.evidence_audit = audited
+        if audited["held"]:
+            # The evidence holds the claim back: no supporting confidence above it.
+            claim.confidence = _confidence(audited["status"], derived["evidence_class"])
+    elif audit_context is not None and claim.evidence_audit:
+        # Nothing recorded against this identity any more: no verdict to carry.
+        claim.evidence_verdict = ""
+        claim.evidence_audit = {}
     claim.assessment = derived["assessment"]
     claim.supporting_summary = derived["supporting_summary"]
     claim.contradicting_summary = derived["contradicting_summary"]
@@ -682,8 +762,10 @@ def _refresh_machine_fields(
     claim.save()
 
     if status_changed:
+        by_audit = audited is not None and audited["held"] and new_status == audited["status"]
         ClaimEvent.objects.create(
-            claim=claim, from_status=old_status, to_status=new_status, actor=None, note=note
+            claim=claim, from_status=old_status, to_status=new_status, actor=None, note=note,
+            cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT if by_audit else "",
         )
     return True
 
@@ -777,7 +859,7 @@ def record_retroactive_claim(
 
 def _supersede(
     current: AssuranceClaim, deployment, *, identity_fp, system_fp, input_fp, pol_version, receipt_digest,
-    derived, now, note, held=False,
+    derived, now, note, held=False, audited=None,
 ) -> None:
     """Close the current version (``valid_to`` set, status SUPERSEDED, its own
     ClaimEvent), open a new current version bound to the new system state, and link
@@ -811,6 +893,7 @@ def _supersede(
         # person's materiality ruling and any review still pending.
         legal_status=ruling_for_next_version(current),
         held=held,
+        audited=audited,
     )
     current.superseded_by = new_claim
     current.save(update_fields=["superseded_by", "updated_at"])
@@ -822,6 +905,15 @@ def _supersede(
     LatentCondition.objects.filter(claim=current, state__in=LATENT_LIVE_STATES).update(
         claim=new_claim, updated_at=now
     )
+
+
+def _evidence_by_identity(deployment) -> dict[str, list]:
+    """The evidence recorded against each claim identity on ``deployment``, in one
+    query, oldest first (:class:`~assurance.models.ClaimEvidence`)."""
+    grouped: dict[str, list] = {}
+    for item in ClaimEvidence.objects.filter(deployment=deployment).order_by("created_at", "pk"):
+        grouped.setdefault(item.claim_fingerprint, []).append(item)
+    return grouped
 
 
 def _mark_stale(deployment, now) -> int:
@@ -885,6 +977,11 @@ def _derive_claims(dep, now) -> dict:
     # Read once, before anything moves: a supersede below carries each fired
     # condition to the claim's new version, and the identity it holds is the same.
     held = held_by_fired_conditions(dep)
+    # The evidence recorded against each claim identity (issue #333), read once,
+    # and the route serving now that each item must name. The route is read off the
+    # prefetched graph: no query per asset.
+    evidence = _evidence_by_identity(dep)
+    route = served_route_fingerprint(dep) if evidence else ""
 
     counts = {"created": 0, "updated": 0, "superseded": 0, "stale": 0}
 
@@ -900,6 +997,24 @@ def _derive_claims(dep, now) -> dict:
             .current()
             .first()
         )
+        items = evidence.get(identity_fp, [])
+        audit_subject = ea.Subject(
+            deployment=str(dep.uuid),
+            claim_type=derived["claim_type"],
+            asset=subject_key,
+            inputs=input_fp,
+            route=route,
+        )
+        # The audit of a NEW version, read against what the deriver reads. Only ever
+        # holds it back (see assurance.evidence_audit).
+        audited = ea.audit(
+            base_status=derived["status"],
+            vendor_asserted=derived["vendor_asserted"],
+            evidence_class=derived["evidence_class"],
+            subject=audit_subject,
+            items=items,
+            now=now,
+        )
 
         if current is None:
             _make_claim(
@@ -912,6 +1027,7 @@ def _derive_claims(dep, now) -> dict:
                 derived=derived,
                 now=now,
                 held=identity_fp in held,
+                audited=audited,
             )
             counts["created"] += 1
             continue
@@ -947,7 +1063,8 @@ def _derive_claims(dep, now) -> dict:
                 # for the whole deployment.
                 current.input_fingerprint = input_fp
             if _refresh_machine_fields(
-                current, derived, receipt_digest, now, human_status=human_status, held=identity_fp in held
+                current, derived, receipt_digest, now, human_status=human_status, held=identity_fp in held,
+                audit_context=(audit_subject, items),
             ):
                 counts["updated"] += 1
         else:
@@ -983,6 +1100,7 @@ def _derive_claims(dep, now) -> dict:
                 now=now,
                 note=note,
                 held=identity_fp in held,
+                audited=audited,
             )
             counts["superseded"] += 1
 
@@ -1085,12 +1203,29 @@ def apply_claim_transition(claim: AssuranceClaim, to_status: str, *, actor, note
             "Cannot verify a claim whose evidence is not configuration/technically "
             "verified, or that rests on vendor assertions."
         )
+    # The evidence recorded against the claim (issue #333): a move the evidence
+    # audit would hold back at once -- a pass over a contradiction, over a
+    # load-bearing failure, or over adverse evidence it had to refuse -- is refused
+    # here, not made and then undone. A person resolves the evidence, not the
+    # reading.
+    now = timezone.now()
+    refusal = ea.refusal_for_transition(claim, to_status, now=now)
+    if refusal:
+        raise IllegalClaimTransition(refusal)
 
     claim.status = to_status
     fields = ["status", "updated_at"]
     if to_status == Status.VERIFIED:
-        claim.verified_at = timezone.now()
+        claim.verified_at = now
         fields.append("verified_at")
+    audited = ea.audit_of(claim, base_status=to_status.value, now=now) if to_status != Status.REVOKED else None
+    if audited is not None:
+        # The person's status is the reading now, and the audit's answer is
+        # recorded against it. It holds nothing back: a move it would hold back
+        # was refused above.
+        claim.evidence_verdict = audited["verdict"]
+        claim.evidence_audit = audited
+        fields += ["evidence_verdict", "evidence_audit"]
     claim.save(update_fields=fields)
 
     return ClaimEvent.objects.create(
