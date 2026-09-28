@@ -238,6 +238,14 @@ ATTEST_REVIEW = "review"
 ATTEST_BLOCKED = "blocked"
 ATTEST_UNOBSERVABLE = "unobservable"
 
+ATTEST_VERDICTS = (ATTEST_UNCHANGED, ATTEST_REVIEW, ATTEST_BLOCKED, ATTEST_UNOBSERVABLE)
+
+# athena-engine #71 marks every launch answer with `answer`, and an attestation
+# answers 2xx only as `answer: "verdict"`. Engine main sends no `answer`. A route
+# answer carrying any other value is not a verdict, whatever else it holds.
+_ANSWER_FIELD = "answer"
+_ANSWER_VERDICT = "verdict"
+
 # How many routes one preflight will measure. Each is a live round trip to a
 # customer endpoint, and a gate that hangs is a gate somebody switches off. The
 # cap is reported when it bites (see `_attest_routes`) rather than silently
@@ -301,9 +309,24 @@ def _attest_routes(client, deployment, tenant_id=None) -> dict[str, Any]:
         measurable = measurable[:MAX_ATTESTED_ROUTES]
 
     routes = []
+    # The name each answer was asked under: the gate's own record of which route
+    # it is, rather than whatever the answer says its name is.
+    asked = [name for name, _ in measurable]
     for name, url in measurable:
         try:
-            routes.append(client.attestation_check(name, url, tenant_id=tenant_id))
+            answer = client.attestation_check(name, url, tenant_id=tenant_id)
+            if not isinstance(answer, dict):
+                # Kept, as what it was, under the route it answered for: an answer
+                # that is not an object is not a verdict, and it must not crash
+                # the gate or vanish from the record either.
+                answer = {
+                    "name": name,
+                    "url": url,
+                    "verdict": None,
+                    "detail": "the engine's answer for this route was not an object",
+                    "engine_answer": answer,
+                }
+            routes.append(answer)
         except EngineError as exc:
             # A route the engine could not be asked about is unobserved, not
             # unchanged. The egress allowlist refusing a host lands here too, and
@@ -322,8 +345,12 @@ def _attest_routes(client, deployment, tenant_id=None) -> dict[str, Any]:
 
     return {
         "verdict": _attest_verdict(routes, unmeasurable, truncated),
-        "detail": _attest_detail(routes, unmeasurable, truncated),
+        "detail": _attest_detail(routes, unmeasurable, truncated, asked),
         "routes": routes,
+        # The routes the engine answered for without a verdict this gate can read.
+        # Named apart from `routes` so the reason can say THAT is why the gate
+        # reads review -- not a moved route, and not a coverage gap.
+        "verdict_missing": _verdict_missing(routes, asked),
         # Carried separately and counted, because these are the routes the gate
         # did NOT check. Folding them into `routes` would let a coverage hole be
         # read as a measurement.
@@ -333,6 +360,47 @@ def _attest_routes(client, deployment, tenant_id=None) -> dict[str, Any]:
     }
 
 
+def _route_verdict(route: Any) -> tuple[str | None, str | None]:
+    """A route answer's verdict, or (None, why there is none this gate can read).
+
+    #334: this read ``str(route.get("verdict") or "")`` and then treated "" as
+    no objection, so an answer with no verdict, or a null one, made a route read
+    UNCHANGED -- "1 serving route(s) match their baseline" -- when nothing had
+    said so. An absent verdict is not a verdict of unchanged. Nor is a word this
+    gate does not know, a verdict that is not a word, an answer that is not an
+    object, or an answer whose ``answer`` field says it is not a verdict.
+    """
+    if not isinstance(route, dict):
+        return None, "was not an object"
+    if _ANSWER_FIELD in route and route[_ANSWER_FIELD] != _ANSWER_VERDICT:
+        return None, f"was answer {route[_ANSWER_FIELD]!r}, not a verdict"
+    if "verdict" not in route:
+        return None, "carried no verdict"
+    verdict = route["verdict"]
+    if verdict is None:
+        return None, "carried a null verdict"
+    if not isinstance(verdict, str):
+        return None, f"carried a verdict that is not a word ({type(verdict).__name__})"
+    if verdict not in ATTEST_VERDICTS:
+        return None, f"carried a verdict this gate does not know ({verdict[:40]!r})"
+    return verdict, None
+
+
+def _asked_name(route: Any, asked: list | None, index: int):
+    if asked is not None and index < len(asked):
+        return asked[index]
+    return route.get("name") if isinstance(route, dict) else None
+
+
+def _verdict_missing(routes, asked: list | None = None) -> list[dict[str, Any]]:
+    missing = []
+    for index, route in enumerate(routes):
+        verdict, why = _route_verdict(route)
+        if verdict is None:
+            missing.append({"name": _asked_name(route, asked, index), "why": why})
+    return missing
+
+
 def _attest_verdict(routes, unmeasurable, truncated) -> str:
     """The worst thing seen, and an unmeasured route is not a good thing seen.
 
@@ -340,27 +408,32 @@ def _attest_verdict(routes, unmeasurable, truncated) -> str:
     deployment with nothing serving inference reads ``unchanged`` -- there was
     nothing to measure and that is a true answer -- while one whose routes could
     not be read reads ``unobservable``, which is not.
+
+    A route whose answer carries no verdict this gate can read is review: the
+    engine was asked and said nothing usable, so it establishes nothing either
+    way. It is never unchanged.
     """
-    verdicts = {str(r.get("verdict") or "") for r in routes}
-    if ATTEST_BLOCKED in verdicts or any(r.get("blocking") for r in routes):
+    verdicts = [_route_verdict(r)[0] for r in routes]
+    if ATTEST_BLOCKED in verdicts or any(isinstance(r, dict) and r.get("blocking") for r in routes):
         return ATTEST_BLOCKED
     if ATTEST_UNOBSERVABLE in verdicts or unmeasurable or truncated:
         return ATTEST_UNOBSERVABLE
-    if ATTEST_REVIEW in verdicts:
-        return ATTEST_REVIEW
-    # A verdict this module does not recognise is not a pass. The engine's
-    # replies are external data and an unknown word must not widen the gate.
-    unknown = verdicts - {ATTEST_UNCHANGED, ""}
-    if unknown:
+    if None in verdicts or ATTEST_REVIEW in verdicts:
         return ATTEST_REVIEW
     return ATTEST_UNCHANGED
 
 
-def _attest_detail(routes, unmeasurable, truncated) -> str:
+def _attest_detail(routes, unmeasurable, truncated, asked: list | None = None) -> str:
     parts = []
-    for route in routes:
-        verdict = str(route.get("verdict") or "")
-        if verdict and verdict != ATTEST_UNCHANGED:
+    for index, route in enumerate(routes):
+        verdict, why = _route_verdict(route)
+        name = _asked_name(route, asked, index)
+        if verdict is None:
+            parts.append(
+                f"{name}: the engine's answer {why}, so nothing was established "
+                f"about whether this route moved"
+            )
+        elif verdict != ATTEST_UNCHANGED:
             parts.append(f"{route.get('name')}: {route.get('detail') or verdict}")
     if unmeasurable:
         parts.append(
@@ -407,15 +480,22 @@ def _detail(answer: Any, nested: str | None = None) -> str:
     return detail if isinstance(detail, str) else "no detail given"
 
 
-def _attest_reason(attestation: Any, verdict: str | None) -> str | None:
+def _attest_reason(attestation: Any, verdict: str | None,
+                   gate_mode: str = "observe") -> str | None:
     """Why the attestation half is holding this scan at review, or None.
 
-    Three states that are not the same fact, and each says which it is. An
+    Four states that are not the same fact, and each says which it is. An
     earlier version of this had three branches that all appended the engine's
     generic detail, so two of them were decoration: deleting either changed
     nothing, which a mutation proved. Worse than dead code -- an operator
     reading "route attestation: ..." could not tell a coverage gap from a moved
     baseline from a reply nobody could parse, and those call for different work.
+
+    The fourth (#334): a route the engine answered for without a verdict this
+    gate can read. That is neither a moved route ("drift") nor a route nobody
+    could measure ("coverage"), and it used to read as neither -- it read as
+    unchanged. It is named as what it is, and under observe the reason says the
+    gate refuses nothing in that mode rather than implying it held anything.
     """
     if verdict is None:
         # An answer we cannot read is not an answer that said yes, and it is a
@@ -424,14 +504,34 @@ def _attest_reason(attestation: Any, verdict: str | None) -> str | None:
             "route attestation: the engine's answer was not a report, so nothing "
             "was established about the routes this scan will touch"
         )
-    if verdict == ATTEST_UNCHANGED:
-        return None
+
+    raw_missing = attestation.get("verdict_missing") if isinstance(attestation, dict) else None
+    missing = [m for m in raw_missing if isinstance(m, dict)] if isinstance(raw_missing, list) else []
+    parts = []
+    if missing or verdict not in ATTEST_VERDICTS:
+        if missing:
+            which = "; ".join(f"{m.get('name')}: {m.get('why')}" for m in missing[:MAX_ATTESTED_ROUTES])
+            said = f"{len(missing)} route(s) answered without a verdict this gate can read ({which})"
+        else:
+            said = f"the attestation carried a verdict this gate does not know ({str(verdict)[:40]!r})"
+        consequence = (
+            "observe mode: this is reported, and nothing is refused in this mode"
+            if gate_mode != "enforce"
+            else "so the gate reads review, never ok"
+        )
+        parts.append(
+            f"route attestation (missing verdict): {said}, so nothing was "
+            f"established about whether they moved -- {consequence}"
+        )
+        if verdict not in ATTEST_VERDICTS:
+            return parts[0]
+
     if verdict == ATTEST_UNOBSERVABLE:
         # Routes we could not measure. Review rather than block: not being able
         # to look is a coverage gap, not evidence of drift, and blocking on it
         # would make the first deployment with an un-probeable route unable to
         # scan at all -- which is how a gate gets switched off.
-        missing = (
+        missing_count = (
             attestation.get("not_measured_count")
             if isinstance(attestation, dict)
             else None
@@ -446,15 +546,26 @@ def _attest_reason(attestation: Any, verdict: str | None) -> str | None:
         # from the engine's reply -- is reported as unknown rather than coerced
         # into a reassuring zero.
         counted = (
-            f"{missing} not measured"
-            if isinstance(missing, int) and not isinstance(missing, bool)
+            f"{missing_count} not measured"
+            if isinstance(missing_count, int) and not isinstance(missing_count, bool)
             else "an unknown number not measured"
         )
-        return (
+        parts.append(
             f"route attestation (coverage): {measured} route(s) measured, "
             f"{counted} -- {_detail(attestation)}"
         )
-    return f"route attestation (drift): {_detail(attestation)}"
+    elif verdict == ATTEST_REVIEW:
+        # Drift only when something the engine measured asked for review: a
+        # review that is only the missing verdicts above is not a moved route.
+        routes = attestation.get("routes") if isinstance(attestation, dict) else None
+        drifted = (
+            any(_route_verdict(r)[0] == ATTEST_REVIEW for r in routes)
+            if isinstance(routes, list) and routes
+            else not missing
+        )
+        if drifted:
+            parts.append(f"route attestation (drift): {_detail(attestation)}")
+    return "; ".join(parts) or None
 
 
 def _decide(report: dict[str, Any]):
@@ -501,7 +612,8 @@ def _decide(report: dict[str, Any]):
         reasons.append(
             f"extension gate: {_detail(report.get('extensions'), nested='review')}"
         )
-    attest_reason = _attest_reason(attestation, attest_verdict)
+    attest_reason = _attest_reason(attestation, attest_verdict,
+                                   report.get("mode") or mode())
     if attest_reason:
         reasons.append(attest_reason)
     if unattributed:
