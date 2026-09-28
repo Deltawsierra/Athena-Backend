@@ -52,6 +52,7 @@ from assurance.models import (
     LatentCondition,
     Provider,
     ProviderAssertion,
+    evidence_strength,
 )
 from tests.test_spine_evidence_audit import (
     _access_claim,
@@ -551,6 +552,26 @@ def test_a_boundary_claim_takes_no_stronger_evidence_than_the_assertions_source_
     assert claim.evidence_class == evidence_class
     assert claim.vendor_asserted is vendor_asserted
     assert (claim.verified_at is not None) is (status == Status.VERIFIED)
+
+
+@pytest.mark.parametrize(
+    "source, evidence_class, vendor_asserted",
+    [
+        (Source.MEASURED, EvidenceClass.CONFIGURATION_VERIFIED, False),
+        (Source.SELF_DECLARED, EvidenceClass.VENDOR_ASSERTED, True),
+    ],
+)
+def test_the_ai_bom_claim_takes_no_stronger_evidence_than_the_assertions_source_proves(
+    source, evidence_class, vendor_asserted
+):
+    """The same labels read by the AI-BOM deriver: it never verifies, but a
+    self-declared configuration_verified label gave it vendor_asserted False and
+    0.88 confidence -- the vendor's word, graded as an observation."""
+    claim = _boundary_claim(source)
+    bom = _current(claim.deployment, ClaimType.AI_BOM)
+    assert bom.evidence_class == evidence_class
+    assert bom.vendor_asserted is vendor_asserted
+    assert bom.confidence == pytest.approx(round(1.0 - 0.12 * evidence_strength(evidence_class), 2))
 
 
 def test_a_weaker_label_is_never_raised_by_a_strong_source():
