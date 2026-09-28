@@ -1,0 +1,41 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "scan-queue-full",
+  "exchanges": [
+    {
+      "note": "the scan, refused by a full worker queue (429): nothing started",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 429,
+      "body": {
+        "answer": "status",
+        "run_id": "f09acea4-3724-40a5-82ab-159d80233af2",
+        "state": "failed",
+        "reason": null,
+        "error": "1 scans already accepted (1 running, 0 may wait)",
+        "status_url": "/api/scans/f09acea4-3724-40a5-82ab-159d80233af2"
+      },
+      "headers": {
+        "retry-after": "30",
+        "x-run-id": "f09acea4-3724-40a5-82ab-159d80233af2"
+      }
+    }
+  ]
+}

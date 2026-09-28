@@ -1,0 +1,46 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "scan-not-admitted",
+  "exchanges": [
+    {
+      "note": "the launch, whose admission could not be read from the abort registry: 503, nothing registered",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 503,
+      "body": {
+        "detail": "the abort registry could not be read (OperationalError), so this launch was not admitted"
+      },
+      "headers": {
+        "retry-after": "5"
+      }
+    },
+    {
+      "note": "the engine's live list: nothing was registered",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/active"
+      },
+      "status": 200,
+      "body": {
+        "active": []
+      }
+    }
+  ]
+}

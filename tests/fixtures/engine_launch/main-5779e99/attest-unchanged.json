@@ -1,0 +1,173 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "5779e99eae1085f96e6c27ce28dbd950d8200aba",
+    "contract": "main"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "attest-unchanged",
+  "exchanges": [
+    {
+      "note": "setup: the route's baseline, taken from the same offline facts",
+      "request": {
+        "method": "POST",
+        "path": "/api/attestation/baseline",
+        "body": {
+          "name": "gateway",
+          "url": "https://offline.invalid/v1/chat"
+        }
+      },
+      "status": 201,
+      "body": {
+        "id": 1,
+        "tenant": "default",
+        "name": "gateway",
+        "kind": "baseline",
+        "url": "https://offline.invalid/v1/chat",
+        "observed": {
+          "host": "offline.invalid",
+          "port": 443,
+          "scheme": "https",
+          "addresses": [
+            "192.0.2.10"
+          ],
+          "address": "192.0.2.10",
+          "encrypted": true,
+          "certificate": "sha256:abababababababababababababababababababababababababababababababab",
+          "issuer": [
+            [
+              "commonName",
+              "Offline Test CA"
+            ],
+            [
+              "organizationName",
+              "Offline"
+            ]
+          ],
+          "subject_names": [
+            "offline.invalid"
+          ],
+          "not_before": "Jan  1 00:00:00 2026 GMT",
+          "not_after": "Jan  1 00:00:00 2036 GMT",
+          "tls_version": "TLSv1.3",
+          "cipher": "TLS_AES_256_GCM_SHA384",
+          "alpn": null
+        },
+        "declared": null,
+        "behaviour": null,
+        "verdict": "unchanged",
+        "detail": "approved as the baseline for this endpoint",
+        "recorded_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "recorded_at": "2026-09-28T20:49:17.406246+00:00",
+        "route_digest": "sha256:2c4b50f7487e3002d3f562951e4901029f678b5e5c5346c5e04a47222b195441"
+      }
+    },
+    {
+      "note": "the route measured against its baseline: verdict unchanged",
+      "request": {
+        "method": "POST",
+        "path": "/api/attestation/check",
+        "body": {
+          "name": "gateway",
+          "url": "https://offline.invalid/v1/chat"
+        }
+      },
+      "status": 201,
+      "body": {
+        "verdict": "unchanged",
+        "detail": "the endpoint is the one that was approved; and the endpoint was not asked the probe set, so nothing here says whether the way it answers has changed",
+        "blocking": [],
+        "advisory": [],
+        "declared_changes": [],
+        "baseline_digest": "sha256:2c4b50f7487e3002d3f562951e4901029f678b5e5c5346c5e04a47222b195441",
+        "current_digest": "sha256:2c4b50f7487e3002d3f562951e4901029f678b5e5c5346c5e04a47222b195441",
+        "name": "gateway",
+        "url": "https://offline.invalid/v1/chat",
+        "observed": {
+          "host": "offline.invalid",
+          "port": 443,
+          "scheme": "https",
+          "addresses": [
+            "192.0.2.10"
+          ],
+          "address": "192.0.2.10",
+          "encrypted": true,
+          "certificate": "sha256:abababababababababababababababababababababababababababababababab",
+          "issuer": [
+            [
+              "commonName",
+              "Offline Test CA"
+            ],
+            [
+              "organizationName",
+              "Offline"
+            ]
+          ],
+          "subject_names": [
+            "offline.invalid"
+          ],
+          "not_before": "Jan  1 00:00:00 2026 GMT",
+          "not_after": "Jan  1 00:00:00 2036 GMT",
+          "tls_version": "TLSv1.3",
+          "cipher": "TLS_AES_256_GCM_SHA384",
+          "alpn": null
+        },
+        "baseline_id": 1,
+        "behaviour": {
+          "verdict": "unprobed",
+          "detail": "the endpoint was not asked the probe set, so nothing here says whether the way it answers has changed",
+          "fingerprint": null,
+          "baseline": null
+        },
+        "recorded": {
+          "id": 2,
+          "tenant": "default",
+          "name": "gateway",
+          "kind": "observation",
+          "url": "https://offline.invalid/v1/chat",
+          "observed": {
+            "host": "offline.invalid",
+            "port": 443,
+            "scheme": "https",
+            "addresses": [
+              "192.0.2.10"
+            ],
+            "address": "192.0.2.10",
+            "encrypted": true,
+            "certificate": "sha256:abababababababababababababababababababababababababababababababab",
+            "issuer": [
+              [
+                "commonName",
+                "Offline Test CA"
+              ],
+              [
+                "organizationName",
+                "Offline"
+              ]
+            ],
+            "subject_names": [
+              "offline.invalid"
+            ],
+            "not_before": "Jan  1 00:00:00 2026 GMT",
+            "not_after": "Jan  1 00:00:00 2036 GMT",
+            "tls_version": "TLSv1.3",
+            "cipher": "TLS_AES_256_GCM_SHA384",
+            "alpn": null
+          },
+          "declared": null,
+          "behaviour": null,
+          "verdict": "unchanged",
+          "detail": "the endpoint is the one that was approved; and the endpoint was not asked the probe set, so nothing here says whether the way it answers has changed",
+          "recorded_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+          "recorded_at": "2026-09-28T20:49:17.436669+00:00",
+          "route_digest": "sha256:2c4b50f7487e3002d3f562951e4901029f678b5e5c5346c5e04a47222b195441"
+        }
+      }
+    }
+  ]
+}

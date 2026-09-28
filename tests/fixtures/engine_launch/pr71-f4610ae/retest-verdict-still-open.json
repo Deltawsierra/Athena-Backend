@@ -1,0 +1,159 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "retest-verdict-still-open",
+  "exchanges": [
+    {
+      "note": "setup: the scan that found the finding (answered finished inside the 20 s wait)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 200,
+      "body": {
+        "run_id": "9ed3ec32-c628-4a66-8569-ba1af5025d18",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:46:53.609419+00:00",
+        "updated_at": "2026-09-28T20:46:53.622894+00:00",
+        "finished_at": "2026-09-28T20:46:53.622894+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 400,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        },
+        "answer": "status",
+        "status_url": "/api/scans/9ed3ec32-c628-4a66-8569-ba1af5025d18"
+      }
+    },
+    {
+      "note": "the retest, answered inside the engine's inline wait with a still_open verdict (201)",
+      "request": {
+        "method": "POST",
+        "path": "/api/remediation/retest",
+        "body": {
+          "twin_id": 1,
+          "engagement_ref": "42",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 201,
+      "body": {
+        "twin_id": 1,
+        "verdict": "still_open",
+        "detail": "xss is still reported against https://offline.invalid/",
+        "target": "https://offline.invalid/",
+        "finding_type": "xss",
+        "inventory_digest": null,
+        "run_id": "d75d1c90-9762-423e-9d81-10bd615253df",
+        "scan_record_id": 731,
+        "check": {
+          "id": 1,
+          "tenant": "default",
+          "twin_id": 1,
+          "target": "https://offline.invalid/",
+          "finding_type": "xss",
+          "verdict": "still_open",
+          "detail": "xss is still reported against https://offline.invalid/",
+          "inventory_digest": null,
+          "run_id": 731,
+          "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+          "checked_at": "2026-09-28T20:46:53.700399+00:00"
+        },
+        "answer": "verdict",
+        "state": "completed",
+        "status_url": "/api/scans/d75d1c90-9762-423e-9d81-10bd615253df"
+      }
+    },
+    {
+      "note": "the same run read from its status_url",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/d75d1c90-9762-423e-9d81-10bd615253df"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "d75d1c90-9762-423e-9d81-10bd615253df",
+        "target": "https://offline.invalid/",
+        "kind": "retest",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:46:53.691101+00:00",
+        "updated_at": "2026-09-28T20:46:53.709936+00:00",
+        "finished_at": "2026-09-28T20:46:53.709936+00:00",
+        "done": true,
+        "result": {
+          "twin_id": 1,
+          "verdict": "still_open",
+          "detail": "xss is still reported against https://offline.invalid/",
+          "target": "https://offline.invalid/",
+          "finding_type": "xss",
+          "inventory_digest": null,
+          "run_id": "d75d1c90-9762-423e-9d81-10bd615253df",
+          "scan_record_id": 731,
+          "check": {
+            "id": 1,
+            "tenant": "default",
+            "twin_id": 1,
+            "target": "https://offline.invalid/",
+            "finding_type": "xss",
+            "verdict": "still_open",
+            "detail": "xss is still reported against https://offline.invalid/",
+            "inventory_digest": null,
+            "run_id": 731,
+            "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+            "checked_at": "2026-09-28T20:46:53.700399+00:00"
+          }
+        }
+      }
+    }
+  ]
+}
