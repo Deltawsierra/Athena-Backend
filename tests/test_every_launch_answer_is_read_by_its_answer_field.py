@@ -1126,3 +1126,206 @@ def test_a_status_read_that_says_done_with_no_end_state_is_still_running_with_it
 
     assert raised.value.run_id == launch["body"]["run_id"]
 
+
+
+# ---------------------------------------------------------------------------
+# Round 5 (E3): the round-4 rules on every launch path. A run not known to have
+# ended is running WITH its stop id; X-Run-Id is honoured whenever the body names
+# no run. All derived from the recordings, one thing changed.
+# ---------------------------------------------------------------------------
+
+
+def _retest_launch(scenario, **change):
+    launch = copy.deepcopy(launch_of(load(PR71, scenario), "/api/remediation/retest"))
+    launch["body"].update(change)
+    return launch
+
+
+@pytest.mark.parametrize("state", [None, _DROP, "starting", "Running"])
+def test_a_retest_status_with_no_or_an_unknown_end_state_is_running_with_its_stop(engine, state):
+    """A 200 `answer: "status"` whose `state` was lost, or is one this backend does
+    not know, says nothing about whether the run ended. It was read
+    `ended_without_verdict` with `stop_id` None: the only stop handle dropped."""
+    launch = _retest_launch("retest-stopped-while-waiting")
+    assert launch["status"] == 200 and launch["body"]["answer"] == "status"
+    if state is _DROP:
+        launch["body"].pop("state")
+    else:
+        launch["body"]["state"] = state
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == launch["body"]["run_id"]
+
+
+def test_a_retest_status_that_completed_without_a_verdict_is_still_ended_with_nothing_to_stop(engine):
+    launch = _retest_launch("retest-stopped-while-waiting", state="completed")
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "ended_without_verdict"
+    assert reading["stop_id"] is None
+
+
+@pytest.mark.parametrize("state", ["starting", "Running", "aborting", "queued"])
+def test_a_retest_verdict_whose_run_state_is_not_an_end_keeps_its_stop_and_is_not_marked_stopped(engine, state):
+    """E3, and the killer for C12 (`aborting` read as an end): a verdict whose run
+    reads a state that is not an end -- going, a stop not landed yet, or one this
+    backend does not know -- was marked stopped_after_recording that state, a stop
+    nobody made, and lost its stop handle."""
+    launch = _retest_launch("retest-stopped-after-recording", state=state)
+    launch["body"].pop("stopped_after_recording", None)
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["answer"] == "verdict"
+    assert reading["stopped_after_recording"] is None
+    assert reading["stop_id"] == launch["body"]["run_id"]
+
+
+@pytest.mark.parametrize("state", [None, _DROP, "starting"])
+def test_a_retest_run_record_done_with_no_or_an_unknown_end_state_is_running_with_its_stop(engine, state):
+    fx = load(PR71, "retest-running-then-verdict")
+    launch = launch_of(fx, "/api/remediation/retest")
+    read = copy.deepcopy(reads_of(fx)[-1])
+    read["body"]["done"] = True
+    if state is _DROP:
+        read["body"].pop("state")
+    else:
+        read["body"]["state"] = state
+    engine([launch, read])
+
+    first = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+    reading = client().retest_status(first["stop_id"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == launch["body"]["run_id"]
+
+
+@pytest.mark.parametrize("status, body", [
+    (202, "<html>gateway page</html>"),
+    (200, "{\"truncated"),
+])
+def test_a_retest_2xx_whose_body_cannot_be_read_is_running_by_its_x_run_id(engine, status, body):
+    """Killer for C15 (an unreadable 2xx with X-Run-Id raises): the engine took the
+    retest and named its run in the header."""
+    launch = {**_retest_launch("retest-running-then-verdict"), "status": status, "body": body,
+              "headers": {"x-run-id": "rt-9"}}
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == "rt-9"
+
+
+@pytest.mark.parametrize("status", [202, 200])
+def test_a_retest_status_naming_no_run_is_running_by_its_x_run_id(engine, status):
+    """The body lost its `run_id`; the header names the run: never refused, and
+    never a run with no stop handle."""
+    launch = _retest_launch("retest-running-then-verdict")
+    launch["status"] = status
+    launch["body"].pop("run_id")
+    launch["headers"] = {"x-run-id": "rt-9"}
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == "rt-9"
+
+
+@pytest.mark.parametrize("status, body", [
+    (502, "<html>502 Bad Gateway</html>"),
+    (500, {"answer": "status", "state": None, "error": "database is locked"}),
+    (200, {"error": "upstream reset"}),
+])
+def test_a_retest_answer_whose_body_names_no_run_is_running_by_its_x_run_id(engine, status, body):
+    launch = {**_retest_launch("retest-running-then-verdict"), "status": status, "body": body,
+              "headers": {"x-run-id": "rt-9"}}
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == "rt-9"
+
+
+def test_a_retest_refusal_whose_body_names_its_run_is_still_read_by_the_body(engine):
+    """#71's 429 names its run in the body and the header: the body says it never
+    started, and nothing is left to stop."""
+    fx, replay, launch, reading = _retest(engine, PR71, "retest-queue-full")
+    assert launch["headers"]["x-run-id"] == launch["body"]["run_id"]
+    assert reading["phase"] == "refused"
+    assert reading["stop_id"] is None
+
+
+def _scan_with_header(status, body, *, where=PR71, scenario="scan-running-then-completed"):
+    fx = load(where, scenario)
+    launch = copy.deepcopy(launch_of(fx, "/api/scan"))
+    run_id = launch["body"]["run_id"]
+    launch["status"] = status
+    launch["body"] = body(copy.deepcopy(launch["body"])) if callable(body) else body
+    launch["headers"] = {"x-run-id": run_id}
+    return fx, launch, run_id
+
+
+def _without_run(body):
+    body.pop("run_id")
+    return body
+
+
+@pytest.mark.parametrize("status, body", [
+    (500, lambda b: {"answer": "status", "state": None, "error": "database is locked"}),
+    (202, _without_run),
+    (200, lambda b: {"error": "upstream reset"}),
+    (502, "<html>502 Bad Gateway</html>"),
+    (504, "gateway timeout"),
+], ids=["500-status-no-run", "202-status-no-run", "200-proxy-json", "502-proxy-page", "504-proxy-text"])
+def test_a_scan_answer_whose_body_names_no_run_is_collected_by_its_x_run_id(engine, status, body):
+    """E3: each was a refusal, a failure, or -- the 200 with no `answer` -- an old
+    engine's synchronous result: "upstream reset" recorded as a completed scan, while
+    the run the header names may be scanning the customer."""
+    fx, launch, run_id = _scan_with_header(status, body)
+    replay = engine([launch, *reads_of(fx)])
+
+    result = client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+
+    assert result == reads_of(fx)[-1]["body"]["result"]
+    assert ("GET", f"/api/scans/{run_id}", None) in replay.sent
+
+
+def test_a_scan_answer_naming_no_run_whose_x_run_id_cannot_be_collected_stays_pending_with_it(
+        engine, analyst, engagement, monkeypatch):
+    """End to end through the scan view: a 502 proxy page with the engine's X-Run-Id.
+    It was recorded FAILED with no run id."""
+    from pentest.models import PentestScan
+
+    fx, launch, run_id = _scan_with_header(502, "<html>502 Bad Gateway</html>")
+    engine([launch, reads_of(fx)[0]])
+    monkeypatch.setattr(cec, "SCAN_COLLECT_SECONDS", 0)
+
+    response = scan_through_view(analyst, engagement)
+
+    assert response.status_code == 202
+    scan = PentestScan.objects.get(uuid=response.data["scan_id"])
+    assert scan.status == PentestScan.STATUS_PENDING
+    assert scan.engine_run_id == run_id
+
+
+def test_a_scan_refusal_whose_body_names_its_run_is_still_read_by_the_body(engine):
+    """#71's 429 and its 500 `state: "failed"` name their run in the body and in the
+    header: they never started, and are the refusals they were."""
+    for scenario in ("scan-queue-full", "scan-failed-before-start"):
+        fx = load(PR71, scenario)
+        launch = launch_of(fx, "/api/scan")
+        assert launch["headers"]["x-run-id"] == launch["body"]["run_id"]
+        replay = engine([launch])
+        with pytest.raises(EngineError) as raised:
+            client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+        assert raised.value.run_id is None
+        assert [m for m, _, _ in replay.sent] == ["POST"]
