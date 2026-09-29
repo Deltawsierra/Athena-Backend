@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test frontend/src/lib/refresh-token.test.ts"
+    "test": "node --test frontend/src/lib/refresh-token.test.ts frontend/src/lib/idempotency.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
