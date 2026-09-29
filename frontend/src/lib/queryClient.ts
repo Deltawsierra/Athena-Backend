@@ -76,22 +76,35 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+/**
+ * Send a request and hand back whatever answered, refusals included, so the
+ * caller can read each answer for what it is. `extra`: headers of its own (an
+ * Idempotency-Key). A 401 refreshed and sent again carries them unchanged.
+ */
+export async function apiSend(
+  method: string,
+  url: string,
+  data?: unknown | undefined,
+  extra: Record<string, string> = {},
+): Promise<Response> {
+  const headers: Record<string, string> = { ...extra };
+  if (data) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  return fetchWithAuth(url, {
+    method,
+    headers,
+    body: data ? JSON.stringify(data) : undefined,
+  });
+}
+
 export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const headers: Record<string, string> = {};
-  if (data) {
-    headers["Content-Type"] = "application/json";
-  }
-
-  const res = await fetchWithAuth(url, {
-    method,
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
-  });
-
+  const res = await apiSend(method, url, data);
   await throwIfResNotOk(res);
   return res;
 }

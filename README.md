@@ -284,6 +284,9 @@ overrides only the database, mail and throttling. The engine contract tests in
 `tests/test_engine_contract.py` skip unless `CYBERENGINE_URL` and
 `CYBERENGINE_OPERATOR_KEY` are set, because they need a live engine.
 
+The frontend's tests run with `npm test` (`node --test`, Node 22.6 or later):
+`frontend/src/lib/refresh-token.test.ts` and `frontend/src/lib/idempotency.test.ts`.
+
 ## Before deploying
 
 ```bash
@@ -409,6 +412,53 @@ attempt is `sending`, because code from before it would push those again blind.
 Check with
 `python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome__in=['sending','unknown']).count())"`,
 and settle them first (let a run finish, or use `reconcile_dispatch_attempt`).
+
+## Retries and duplicates
+
+A request sent again -- its answer was lost, or the client stopped waiting -- must
+not do its work twice. What each operation that reaches outside this backend does
+(`tests/test_firing_twice_makes_one_effect.py` fires each one twice):
+
+- **A scan launch** (`POST /api/pentest/scan/`, `/api/pentest/llm-scan/`), **a report
+  resent** (`POST /api/pentest/scans/<uuid>/email/`) and **a finding pushed to a
+  tracker by hand** (`POST /api/assurance/deployments/<uuid>/connectors/<name>/push/`)
+  take an `Idempotency-Key` header, 1 to 255 printable ASCII characters. The first
+  request with a key is recorded for that account and route, with a digest of the
+  request (body, query and the scan or deployment it names) and the answer it got.
+  The same key and request again is given that answer (`Idempotent-Replayed: true`)
+  and starts nothing. While the first has no answer recorded -- still running, or it
+  raised or died first -- it is 409, its outcome unknown; the same key with another
+  request is 422. Authentication and the route's permissions are checked on every
+  request, a replay included. Keys are kept 24 h (`IDEMPOTENCY_KEY_TTL_SECONDS`), at
+  most 1,000 per account, oldest forgotten first (`IDEMPOTENCY_KEYS_PER_ACCOUNT`), and
+  an answer is kept whole up to 1 MiB (`IDEMPOTENCY_MAX_RESPONSE_BYTES`; a larger one is
+  replayed as its status and top-level fields). A forgotten key is a new request.
+  **Without a key nothing changes: a request sent again scans again, mails the report
+  again or files a second ticket.** The athena-dashboard server does not send one yet.
+  This backend's own frontend does, on the one keyed route it calls (the Penetration
+  Testing page's Start Scan, `frontend/src/pages/pentest.tsx` through
+  `frontend/src/lib/idempotency.ts`). Each press gets its own key. The key is sent
+  again only with the same request, and only while that request's outcome is unknown:
+  its answer never arrived, or the backend answered 409. A replayed answer is shown
+  as that scan's answer, never as a new scan, and a 202 is shown as still running,
+  never as complete. A 409 says the scan may or may not have started and points to
+  the scans list, which is read again. A 422, or a 400 about the key, is shown as a
+  bug in the page. Nothing is sent again with a new key on its own. The frontend
+  calls none of the other three keyed routes (`frontend/src/lib/idempotency.test.ts`
+  fails on a call to one that does not send its key).
+- **Automated dispatch** is one `DispatchAttempt` per finding and connector (above):
+  pushed once, looked for by its marker after a lost answer rather than pushed again,
+  and sent to a webhook with its operation id as `Idempotency-Key`. A blocking-decision
+  dispatch asked for by several pauses is one owed row.
+- **Claims**: a re-derive with nothing moved writes no version and no event; an
+  invalidation check run again opens no second retest; a person's move sent twice is
+  refused the second time (400); an evidence item invalidated twice is refused the
+  second time.
+- **Stops are never deduplicated.** A pause, revoke, contradiction, stand-down,
+  terminate, an engagement's authority withdrawn, an operator demoted or removed is
+  processed every time it arrives, with or without a key: the key is never read on a
+  stop route (`safety.stops`). A revoke or contradiction sent again is recorded again
+  on the claim; its status moves once.
 
 ## Secrets
 
