@@ -259,10 +259,11 @@ def test_the_failsafe_state_view_answers_within_its_deadline_while_another_threa
     admin = _client(_person("fs-admin2"))
     admin.get("/api/failsafe/state/")  # warm
     thread, started, box = _reading_a_truncated_answer_on_another_thread()
+    # Timed from the reader's start: the request is issued as soon as it runs (on
+    # c59045b even this thread's wait on the start event sat behind the regex).
+    began = time.perf_counter()
     thread.start()
     assert started.wait(5)
-
-    began = time.perf_counter()
     response = admin.get("/api/failsafe/state/")
     took = time.perf_counter() - began
     thread.join(60)
@@ -295,9 +296,12 @@ def test_a_contradiction_issued_while_another_thread_reads_a_truncated_answer_la
     assert alone_response.status_code == 200
 
     thread, started, box = _reading_a_truncated_answer_on_another_thread()
+    # Timed from the reader's start, as above.
+    began = time.perf_counter()
     thread.start()
     assert started.wait(5)
-    response, took = contradict(claim, "stop")
+    response, _own = contradict(claim, "stop")
+    took = time.perf_counter() - began
     thread.join(60)
 
     assert response.status_code == 200, response.content
