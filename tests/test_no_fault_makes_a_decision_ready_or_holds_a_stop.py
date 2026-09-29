@@ -328,11 +328,14 @@ MATRIX: dict[str, dict[str, tuple[str, str]]] = {
             ),
             **{
                 "revoke/contradict": (
-                    HELD,
-                    "each lands in time; the decision can be neither recomputed nor held (both read "
-                    "the log), so it is marked unrecomputed: every publishing read refuses while the "
-                    "log cannot be read, and recomputes once it can (was fail-OPEN: rolled back "
-                    "behind a 500)",
+                    LEFT_OUT,
+                    "medium: each take-down lands in time (200; was fail-OPEN: rolled back behind a "
+                    "500) and says the decision could be neither recomputed nor held -- both read the "
+                    "log. While the log cannot be read every publishing read refuses; once it can, the "
+                    "stored READY stands, stamped, beside the contradicted claim until the deployment's "
+                    "next refresh. Marking it for every read to recompute needs a write of its policy "
+                    "column that reads no log: a second writer of the decision columns, which "
+                    "tests/test_a_stale_save_cannot_write_the_decision_back.py holds to one",
                 ),
                 "dispatch-off": (
                     HELD,
@@ -357,7 +360,7 @@ MATRIX: dict[str, dict[str, tuple[str, str]]] = {
                 "revoke/contradict": (
                     LEFT_OUT,
                     "medium: each take-down lands in time (200) and says the decision could be "
-                    "neither recomputed, held nor marked; the stored READY stands, stamped, beside the "
+                    "neither recomputed nor held; the stored READY stands, stamped, beside the "
                     "contradicted claim until the deployment's next refresh -- a take-down schedules "
                     "none. Needs a refresh that outlives the fault without holding the stop",
                 )
@@ -1126,16 +1129,14 @@ def test_no_fault_holds_a_pause(fault, chaos):
 
 
 #: What each take-down's answer says of the decision it moved, per fault:
-#: ("recomputed", None), or (how it was left, the words naming what the recompute
-#: met) -- "held" where it was held (decision.hold_unrecomputed), "marked" where it
-#: could not be held and is marked so that every publishing read recomputes it.
+#: ("recomputed", None), or ("held", the words naming what the recompute met) -- held
+#: where no recompute reached it (decision.hold_unrecomputed).
 TAKE_DOWN = {
     "findings-read-raises": ("held", "could not be recomputed (OperationalError)"),
     "retests-read-raises": ("held", "could not be recomputed (OperationalError)"),
     "latent-read-raises": ("held", "could not be recomputed (OperationalError)"),
     "coverage-read-raises": ("held", "could not be recomputed (OperationalError)"),
     "chains-read-raises": ("held", "could not be recomputed (OperationalError)"),
-    "pause-state-unreadable": ("marked", "could not be recomputed (OperationalError)"),
     "policy-unreadable-or-garbage": ("recomputed", None),
     "policy-changes-mid-evaluation": ("recomputed", None),
     "keyring-unreadable": ("recomputed", None),
@@ -1171,7 +1172,7 @@ def test_no_fault_holds_a_revoke_or_a_contradiction(fault, chaos):
         assert took < STOP_WITHIN_S, f"{fault}: the {what} took {took:.3f}s"
         assert answer.status_code == 200, f"{fault}: the {what} answered {answer.status_code}: {answer.content[:300]}"
     # Each answer says what became of the decision: recomputed, or held -- never
-    # READY -- or marked for every publishing read to recompute; naming what it met.
+    # READY -- naming what the recompute met.
     left, words = TAKE_DOWN[fault]
     for what, answer in (("revoke", revoke), ("contradiction", contradict)):
         body = answer.json()

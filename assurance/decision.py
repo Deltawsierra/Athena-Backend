@@ -962,6 +962,21 @@ class TransactionLostInHook(Exception):
     runs the recompute again without it."""
 
 
+#: Where a stored decision is held when it could not be recomputed
+#: (``recompute_decision(unrecomputed=...)``): the state this vocabulary already reads
+#: an input nobody can read as -- a declared precondition that cannot be read, or
+#: whose evaluation failed, caps here too (:data:`CLAIM_CAPS`). The vocabulary has no
+#: "could not be computed" of its own, and READY_RESTRICTED or READY would be a
+#: decision nothing computed. Not the worst state: that would say something was
+#: found, and nothing was.
+UNRECOMPUTED_HOLD = Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+#: What the policy column of a decision held that way holds, before why: never a
+#: policy stamp (``<pin>@r<revision>``), so every publishing read recomputes it
+#: (:func:`current_decision`) and it stands only until one can.
+UNRECOMPUTED_PREFIX = "unrecomputed:"
+
+
 def recompute_decision(
     deployment: Deployment,
     *,
@@ -970,6 +985,7 @@ def recompute_decision(
     claim: str | None = None,
     after_claim: str | None = None,
     also_in_transaction=None,
+    unrecomputed: str | None = None,
 ) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
@@ -1019,6 +1035,16 @@ def recompute_decision(
     swallowed error there left the outer block to roll back SILENTLY, undoing a
     pause the route then reported as done -- this raises
     :class:`TransactionLostInHook` instead of committing, and nothing is written.
+
+    ``unrecomputed``: why the decision could not be computed, for a stop that has
+    landed while the recompute of the decision it moved failed (a claim taken down,
+    ``assurance.views._take_down``). Nothing is read and no rule applied: the decision
+    is held at :data:`UNRECOMPUTED_HOLD`, or where it stands if that is worse -- a
+    pause stays a pause, a NOT_RECOMMENDED is not lifted -- so it is never READY and
+    never better than before. Its policy column names why (:data:`UNRECOMPUTED_PREFIX`)
+    and is never a stamp, so the first publishing read recomputes it, and while that
+    cannot either the read fails rather than publish a decision nothing computed.
+    Through this writer, as every write of the decision columns is.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
@@ -1050,9 +1076,16 @@ def recompute_decision(
         # and every publishing read served it as current -- a READY_RESTRICTED the
         # rules in force hold at needs-remediation. Taken before, the stamp names the
         # rules it read, and a publishing read recomputes it under the ones in force.
-        pin = None if hold_pause else _current_policy_pin()
-        parts = None if hold_pause else read_decision_parts(locked, keyring=keyring)
-        decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
+        #
+        # A decision held where no recompute could reach (`unrecomputed`) reads no input
+        # and no rule, as a pause does not.
+        reads = not hold_pause and unrecomputed is None
+        pin = _current_policy_pin() if reads else None
+        parts = read_decision_parts(locked, keyring=keyring) if reads else None
+        if unrecomputed is not None:
+            decision = Deployment.Decision.PAUSED if hold_pause else _worse(in_force.decision, UNRECOMPUTED_HOLD)
+        else:
+            decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
         moved = accept_transition(locked, to_decision=decision, in_force=in_force)
         Deployment.objects.filter(pk=locked.pk).update(
             # Marked as this release's (`keyring_stamp`): the release before rewrites
@@ -1062,8 +1095,12 @@ def recompute_decision(
             decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
             # The rules this was computed under, AND the revision it stands at. Kept
             # recognisable, no stamp: the claim's token for a claim, else nothing --
-            # which takes any claim's token away with it.
-            decision_policy=claim if keep_foreign else policy_stamp(moved["revision"], pin=pin),
+            # which takes any claim's token away with it. A held decision names why.
+            decision_policy=(
+                f"{UNRECOMPUTED_PREFIX}{unrecomputed}"[:80]
+                if unrecomputed is not None
+                else claim if keep_foreign else policy_stamp(moved["revision"], pin=pin)
+            ),
         )
         if also_in_transaction is not None:
             try:
@@ -1083,65 +1120,15 @@ def recompute_decision(
     return decision
 
 
-#: Where a stored decision is held when it could not be recomputed
-#: (:func:`hold_unrecomputed`): the state this vocabulary already reads an input
-#: nobody can read as -- a declared precondition that cannot be read, or whose
-#: evaluation failed, caps here too (:data:`CLAIM_CAPS`). The vocabulary has no
-#: "could not be computed" of its own, and READY_RESTRICTED or READY would be a
-#: decision nothing computed. Not the worst state: that would say something was
-#: found, and nothing was.
-UNRECOMPUTED_HOLD = Deployment.Decision.NEEDS_MORE_EVIDENCE
-
-#: What the policy column of a decision held that way holds, before why: never a
-#: policy stamp (``<pin>@r<revision>``), so every publishing read recomputes it
-#: (:func:`current_decision`) and it stands only until one can.
-UNRECOMPUTED_PREFIX = "unrecomputed:"
-
-
 def hold_unrecomputed(deployment: Deployment, *, reason: str) -> str | None:
-    """Hold ``deployment``'s stored decision where a recompute could not reach it,
-    through the one writer; return the decision held.
+    """Hold ``deployment``'s stored decision where a recompute could not reach it, and
+    return the decision held: the one writer's ``unrecomputed`` move
+    (:func:`recompute_decision`), which reads no input and applies no rule.
 
-    For a stop whose own move committed while the decision it moved could not be
-    recomputed (a claim revoked or contradicted while a table the decision reads
-    could not be read). The decision is held at :data:`UNRECOMPUTED_HOLD`, or where
-    it already stands if that is worse -- a pause stays a pause, a NOT_RECOMMENDED
-    is not lifted -- so it is never READY and never better than before. It is left
-    unstamped, its policy column naming why (:data:`UNRECOMPUTED_PREFIX`), so the
-    first publishing read after recomputes it; while that cannot either, the read
-    fails rather than publish a decision nothing computed.
-
-    Written in its own savepoint by the caller: this is a write like any other, and
-    a database that refuses it leaves the decision as it stood."""
-    from .revision import accept_transition, decision_in_force
-
-    with transaction.atomic():
-        locked = Deployment.objects.select_for_update().get(pk=deployment.pk)
-        in_force = decision_in_force(locked)
-        held = _worse(in_force.decision, UNRECOMPUTED_HOLD)
-        accept_transition(locked, to_decision=held, in_force=in_force)
-        Deployment.objects.filter(pk=locked.pk).update(
-            decision_valid_until=None,
-            decision_policy=f"{UNRECOMPUTED_PREFIX}{reason}"[:80],
-        )
-    deployment.refresh_from_db(
-        fields=["decision", "decision_revision", "decision_keyring", "decision_valid_until", "decision_policy"]
-    )
-    deployment.logged_revision = deployment.decision_revision
-    return held
-
-
-def mark_unrecomputed(deployment: Deployment, *, reason: str) -> None:
-    """Leave ``deployment``'s stored decision as it stands, marked as one no rule
-    computed since its inputs moved: its policy column names why
-    (:data:`UNRECOMPUTED_PREFIX`), never a stamp, so every publishing read recomputes
-    it (:func:`current_decision`) and fails rather than publish it while it cannot.
-
-    Where :func:`hold_unrecomputed` cannot be written -- it reads the transition log,
-    and that is what could not be read. One column of the row, and no transition: the
-    decision did not move."""
-    Deployment.objects.filter(pk=deployment.pk).update(decision_policy=f"{UNRECOMPUTED_PREFIX}{reason}"[:80])
-    deployment.decision_policy = f"{UNRECOMPUTED_PREFIX}{reason}"[:80]
+    Its own name because it is not the refresh: a take-down whose recompute failed
+    holds the decision through this, and the recompute's failure -- a table the
+    decision reads that cannot be read, a rule that raises -- is not this one's."""
+    return recompute_decision(deployment, unrecomputed=reason)
 
 
 def _current_policy_pin() -> str:

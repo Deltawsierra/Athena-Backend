@@ -268,7 +268,8 @@ What does not hold, and is named in `MATRIX` with its severity: a database that
 refuses every write records no stop (each answers 500 and claims nothing). A pause
 cannot land while the transition log cannot be read or the decision cannot be
 written; the failsafe relay still does. A take-down while the decision cannot be
-written lands, but leaves the stored decision as it was until the next refresh.
+written, or its transition log read, lands, but leaves the stored decision as it was
+until the next refresh.
 
 ## Tests
 

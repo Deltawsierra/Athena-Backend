@@ -59,7 +59,6 @@ from .decision import (
     current_decision,
     decision_support,
     hold_unrecomputed,
-    mark_unrecomputed,
     recompute_decision,
 )
 from .dispatch import OwedRecorder, log_later, schedule_blocking_decision_dispatch
@@ -279,9 +278,8 @@ def _take_down(claim, to_status, *, actor, note):
     a stop dropped by a read the stop never needed. It now runs in a savepoint of that
     transaction (:func:`_decision_a_take_down_moved`): one that fails is rolled back
     alone, the decision is held where no recompute reached it -- never READY, never
-    lifted (:func:`assurance.decision.hold_unrecomputed`), or, where even that cannot
-    be written, marked for every publishing read to recompute -- and the answer says
-    the move landed and the decision could not be recomputed.
+    lifted (:func:`assurance.decision.hold_unrecomputed`) -- and the answer says the
+    move landed and the decision could not be recomputed.
 
     Where the database ended the whole transaction instead (:class:`_TakeDownLost`),
     the move is made again in a transaction of its own with less decision work, down
@@ -310,12 +308,10 @@ def _take_down(claim, to_status, *, actor, note):
 
 def _decision_a_take_down_moved(deployment, attempt: str, why: str | None) -> dict:
     """Write the decision a take-down moved, in savepoints of the take-down's own
-    transaction: recomputed (``attempt`` "recompute"); else held
-    (:func:`assurance.decision.hold_unrecomputed`); else, where the hold cannot be
-    written either, left as it stands and marked for every publishing read to
-    recompute (:func:`assurance.decision.mark_unrecomputed`). What the answer says of
-    it -- the error's type only: its message can carry another tenant's detail, and
-    goes to the log.
+    transaction: recomputed (``attempt`` "recompute"); else held where no recompute
+    reached it (:func:`assurance.decision.hold_unrecomputed`, the one writer); else
+    left as it stands, and said so. What the answer says of it -- the error's type
+    only: its message can carry another tenant's detail, and goes to the log.
 
     Raises :class:`_TakeDownLost` when a write that failed took the transaction with
     it: carried on, the take-down would be reported and never committed."""
@@ -350,38 +346,14 @@ def _decision_a_take_down_moved(deployment, attempt: str, why: str | None) -> di
                 "ready, never better than it stood -- until the first read that can recomputes it."
             ),
         }
-    except Exception as exc:  # noqa: BLE001 - a hold the database refused leaves the decision to be marked
+    except Exception as exc:  # noqa: BLE001 - a hold the database refused leaves the decision as it stood
         unheld = type(exc).__name__
         log_later(
             logging.ERROR,
-            "deployment %s: the decision a claim take-down moved could not be held either (%s)",
-            deployment.pk,
-            unheld,
-            exc=True,
-            logger_name=__name__,
-        )
-        if transaction.get_rollback():
-            raise _TakeDownLost(why) from exc
-    try:
-        with transaction.atomic():
-            mark_unrecomputed(deployment, reason=why)
-        return {
-            "decision_recomputed": False,
-            "decision": None,
-            "decision_unrecomputed": (
-                f"The decision could not be recomputed ({why}), nor held ({unheld}); it is marked "
-                "unrecomputed, so no read publishes it as it stands, and the first read that can "
-                "recomputes it."
-            ),
-        }
-    except Exception as exc:  # noqa: BLE001 - a mark the database refused leaves the decision as it stood
-        unmarked = type(exc).__name__
-        log_later(
-            logging.ERROR,
-            "deployment %s: the decision a claim take-down moved could not be marked either (%s); "
+            "deployment %s: the decision a claim take-down moved could not be held either (%s); "
             "it stands as it was until the deployment's next refresh",
             deployment.pk,
-            unmarked,
+            unheld,
             exc=True,
             logger_name=__name__,
         )
@@ -391,9 +363,8 @@ def _decision_a_take_down_moved(deployment, attempt: str, why: str | None) -> di
         "decision_recomputed": False,
         "decision": None,
         "decision_unrecomputed": (
-            f"The decision could not be recomputed ({why}), held ({unheld}) or marked "
-            f"({unmarked}); the stored decision stands as it was until the deployment's next "
-            "refresh."
+            f"The decision could not be recomputed ({why}), nor held ({unheld}); the stored "
+            "decision stands as it was until the deployment's next refresh."
         ),
     }
 
