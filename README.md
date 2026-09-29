@@ -261,8 +261,9 @@ bound. Its `MATRIX` is the full table. What each fault reads as:
 - The outcome keyring unreadable: no chain outcome can be shown signed, and the
   decision reads `needs_more_evidence` until the keyring is back.
 - The rules are module constants, so no policy file is read. The pin is read before
-  any rule is applied: a rule that moves during an evaluation leaves that decision
-  unstamped, and it is recomputed under the rules in force.
+  any rule is applied, so a decision is stamped with the rules it was read under. One
+  computed while a rule moved names the old rules, and the first publishing read
+  recomputes it under the rules in force.
 
 What does not hold, and is named in `MATRIX` with its severity: a database that
 refuses every write records no stop (each answers 500 and claims nothing). A pause
