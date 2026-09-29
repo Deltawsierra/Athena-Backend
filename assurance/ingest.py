@@ -214,7 +214,14 @@ def _findings_payload(engine_response: Any) -> tuple[list[dict], bool]:
         findings = engine_response.get("results")
     if not isinstance(findings, list):
         return [], False
-    return [f for f in findings if isinstance(f, dict) and not f.get("internal")], True
+    readable = [f for f in findings if isinstance(f, dict)]
+    if findings and not readable:
+        # A list with nothing in it this side can read is no report either -- not a
+        # report of nothing found. Read as the engine's `findings: []`, an answer
+        # nobody could read was recorded as a clean completed scan, and the
+        # deployment read READY on it.
+        return [], False
+    return [f for f in readable if not f.get("internal")], True
 
 
 # The ``coverage`` key on an engine response carries TWO independent statements,

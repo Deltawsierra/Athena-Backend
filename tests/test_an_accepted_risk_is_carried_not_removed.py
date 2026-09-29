@@ -460,6 +460,10 @@ _NOT_RULES = {
     "computed under is the pin",
     ("assurance.decision", "_CLAIM_PREFIX"): "which refresh claimed another writer's decision while it reads "
     "the watches; no decision is computed from it",
+    ("assurance.decision", "UNRECOMPUTED_HOLD"): "where a decision nothing could compute is held; it carries no "
+    "stamp, so every publishing read recomputes it under the rules the pin names",
+    ("assurance.decision", "UNRECOMPUTED_PREFIX"): "which marker the policy column of a held decision carries; "
+    "no decision is computed from it",
     ("assurance.decision", "RESOLVED_FINDING_STATUSES"): "imported only to be bound to _RESOLVED_STATUSES, "
     "which the code reads and the pin names",
     ("assurance.decision", "_READINESS_ORDER"): "read once, at import, into _READINESS_RANK -- which "
