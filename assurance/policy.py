@@ -41,6 +41,8 @@ from __future__ import annotations
 # the pin is taken, so a rule changed there -- in a release, or by a test -- is the
 # rule named here. Names imported at load time were copies the decision code no
 # longer read, and changing the rule left the pin where it was.
+from mythos_core import evidence as _core_evidence
+
 from . import change as _change
 from . import composition as _composition
 from . import coverage as _coverage
@@ -112,8 +114,13 @@ def _policy_document() -> dict:
             "severity_order": [_value(s) for s in _models.SEVERITY_ORDER],
             # Strongest first: a finding's evidence class is its weakest evidence
             # row's by this order (assurance.models.evidence_strength), and that is
-            # what the unverified set below is matched against.
-            "evidence_strength_order": [_value(e) for e in _models.EVIDENCE_STRENGTH_ORDER],
+            # what the unverified set below is matched against. The order is
+            # mythos-core's evidence-class table (roadmap P2.7): evidence_strength
+            # reads each class's rank from mythos_core.evidence at every call, so
+            # the pin reads the core's own tuple -- the object the rank is taken
+            # from -- and not this app's copy of it. The same eight classes in the
+            # same order as the copy this app kept before, so the pin is unchanged.
+            "evidence_strength_order": [_value(e) for e in _core_evidence.EVIDENCE_CLASSES],
             # Worst active finding severity -> decision (assurance.decision
             # ._decision_from_findings): the first threshold reached decides.
             "severity_thresholds": {

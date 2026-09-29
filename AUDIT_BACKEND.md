@@ -10,7 +10,7 @@ claims by executing code against the project venv (`tests/settings_test.py`).
 Review of the current tree — the earlier audit had gone stale and is corrected
 below.
 
-## Status at `master` 958e0ac (29 Sep 2026)
+## Status at `master` 180a093 (29 Sep 2026)
 
 Everything below this section is the 2026-09-18 reading, kept as written apart
 from the two lines named at the end of this section. Every item it left open has
@@ -39,10 +39,10 @@ This is not a new audit: nothing else was re-read for a count.
 
 Two other lines were out of date and are corrected in place: the connector bullet
 under "Clean bill", and the receipt version in the policy-pinning bullet. The
-scope line at the top lists what was read on 2026-09-18. Twenty modules of
+scope line at the top lists what was read on 2026-09-18. Twenty-one modules of
 `assurance/` were added after that date (among them `composition`,
-`workflow_chains`, `served_route`, `coverage`, `evidence_audit` and
-`vendor_packet`), and this file does not cover them.
+`workflow_chains`, `served_route`, `coverage`, `evidence_audit`,
+`vendor_packet` and `claim_confidence`), and this file does not cover them.
 
 ## What the previous audit got wrong (now corrected)
 
