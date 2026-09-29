@@ -86,11 +86,23 @@ _State = IdempotencyRecord.State
 _reported: set = set()
 
 
+def _configured() -> dict:
+    """The three bounds as configured -- ``None`` where unset -- each read by its own
+    name."""
+    return {
+        "IDEMPOTENCY_KEY_TTL_SECONDS": getattr(settings, "IDEMPOTENCY_KEY_TTL_SECONDS", None),
+        "IDEMPOTENCY_KEYS_PER_ACCOUNT": getattr(settings, "IDEMPOTENCY_KEYS_PER_ACCOUNT", None),
+        "IDEMPOTENCY_MAX_RESPONSE_BYTES": getattr(settings, "IDEMPOTENCY_MAX_RESPONSE_BYTES", None),
+    }
+
+
 def bound(name: str) -> int:
     """The bound ``name`` (one of :data:`BOUNDS`) as configured, or its default when
-    the setting is not a positive whole number (said once, at ERROR)."""
+    the setting is unset or not a positive whole number (said once, at ERROR)."""
     default = BOUNDS[name]
-    raw = getattr(settings, name, default)
+    raw = _configured()[name]
+    if raw is None:
+        return default
     try:
         value = int(raw) if not isinstance(raw, bool) else 0
     except (TypeError, ValueError):
