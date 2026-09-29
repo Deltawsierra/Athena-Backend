@@ -19,6 +19,17 @@ of them later. After every move:
 
 At the end every hostile item is invalidated, attributed, and both re-derived:
 STUCK -- a hold no attributed act lifts -- is a violation too.
+
+Round 4 adds what a server path holding a claim it read earlier does (c4b_fuzz):
+a person reads the claim and keeps the copy ("snap"); later, evidence is recorded
+from that copy ("stale_ev": a failure, or a pass successor over a live failure --
+the hostile world only) and a stop is decided from it ("stale_stop"). And:
+
+- STOP-LIFTED: a claim that read a person's stop (or a withdrawal) before any move
+  that is not a person's reads it after -- no evidence, no copy, no re-derive and
+  no drift lifts a stop (a person's stop carries to the version a drift opens:
+  owner decision, round 4);
+- STALE-STOP: a stop decided from a copy leaves the CURRENT version at the stop.
 """
 
 from __future__ import annotations
@@ -32,6 +43,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
+from assurance import claims as claims_module
 from assurance import evidence_audit as ea
 from assurance.claims import IllegalClaimTransition, apply_claim_transition, derive_claims
 from assurance.invalidation import check_invalidations
@@ -68,7 +80,7 @@ _EVIDENCE_OPS = [
 ]
 _WORLD_OPS = [
     "drift", "derive", "derive", "fire", "clear", "restore", "withdraw", "person", "person", "person",
-    "stop", "undrift", "check",
+    "stop", "undrift", "check", "snap", "snap", "stale_ev", "stale_ev", "stale_stop",
 ]
 
 
@@ -85,10 +97,12 @@ class _Rollback(Exception):
 
 
 class _World:
-    def __init__(self, name, principals):
+    def __init__(self, name, principals, *, hostile=False):
         self.dep = Deployment.objects.create(name=name, owner=_person("owner"))
         claim = _access_claim(self.dep, principals=principals)
         self.drifted = 0
+        self.hostile = hostile
+        self.snap = None
         declare_condition(
             claim, kind=LatentCondition.Kind.ASSET_APPEARS, subject="intruder",
             description="holds only while nothing named intruder is on the deployment.", declared_by=_person(),
@@ -129,6 +143,40 @@ class _World:
             except Exception as exc:  # noqa: BLE001 -- an already-withdrawn condition is refused; same in both worlds
                 return "wd-" + type(exc).__name__
             return "ok"
+        elif op == "snap":
+            self.snap = self.claim()
+            return "ok"
+        elif op == "stale_ev":
+            # A server path records evidence against the claim it read earlier.
+            copy = self.snap
+            if not self.hostile:
+                return "n/a"
+            if copy is None:
+                return "skip"
+            live_fails = [
+                i for i in ea.evidence_for(copy)
+                if i.outcome == V.FAIL and i.superseded_by_id is None and i.invalidated_at is None
+            ]
+            try:
+                if live_fails:
+                    ea.record_claim_evidence(
+                        copy, supersedes=live_fails[0],
+                        **_good(copy, outcome=V.PASS.value, observed_at=timezone.now() - timedelta(seconds=30)),
+                    )
+                else:
+                    ea.record_claim_evidence(copy, **_good(copy, outcome=V.FAIL.value))
+                return "ok"
+            except ea.EvidenceRefused:
+                return "refused"
+        elif op == "stale_stop":
+            claim = self.snap or self.claim()
+            if claim is None:
+                return "none"
+            try:
+                apply_claim_transition(claim, arg, actor=_person(), note="from a copy")
+                return "ok"
+            except Exception as exc:  # noqa: BLE001 -- any failure of a stop is the finding
+                return f"EXC-{type(exc).__name__}:{str(exc)[:80]}"
         elif op in ("person", "stop"):
             claim = self.claim()
             if claim is None:
@@ -204,8 +252,38 @@ class _World:
         return "ok"
 
 
+def _stopped(claim):
+    """The stop a claim reads -- a withdrawal, or a person's contradiction -- or None."""
+    if claim is None:
+        return None
+    if claim.status == Status.REVOKED:
+        return Status.REVOKED
+    if (
+        claim.status == Status.CONTRADICTED
+        and ea.reading_status(claim) == Status.CONTRADICTED
+        and claims_module._status_set_by_a_person(claim)
+    ):
+        return Status.CONTRADICTED
+    return None
+
+
+def _lifted(before, after):
+    """STOP-LIFTED: a stop read before a move that is not a person's, not read after."""
+    if before is None:
+        return False
+    if after is None:
+        return True
+    return after.status != Status.REVOKED and (before == Status.REVOKED or after.status != Status.CONTRADICTED)
+
+
 def _check(control, hostile, op, arg, r_control, r_hostile):
     bad = []
+    if op == "stale_stop":
+        for tag, result, claim in (("control", r_control, control), ("hostile", r_hostile, hostile)):
+            if result not in ("ok", "none"):
+                bad.append(f"STOP-REFUSED-{tag}:{result}")
+            elif claim is not None and result == "ok" and claim.status not in (arg, Status.REVOKED):
+                bad.append(f"STALE-STOP-{tag}:{claim.status}")
     if op == "stop":
         for tag, result in (("control", r_control), ("hostile", r_hostile)):
             if result not in ("ok", "none"):
@@ -224,9 +302,10 @@ def _check(control, hostile, op, arg, r_control, r_hostile):
 def _fuzz_one(seed):
     rng = random.Random(seed)
     principals = rng.random() < 0.5
-    control, hostile = _World(f"c{seed}", principals), _World(f"h{seed}", principals)
+    control, hostile = _World(f"c{seed}", principals), _World(f"h{seed}", principals, hostile=True)
     trace = []
     for _step in range(_FUZZ_LENGTH):
+        stopped = (_stopped(control.claim()), _stopped(hostile.claim()))
         if rng.random() < 0.45:
             op = rng.choice(_EVIDENCE_OPS)
             result = hostile.evidence(op, rng)
@@ -234,8 +313,8 @@ def _fuzz_one(seed):
             arg, r_control, r_hostile = None, "", result
         else:
             op = rng.choice(_WORLD_OPS)
-            arg = rng.choice(_MOVES) if op == "person" else (rng.choice(_STOPS) if op == "stop" else None)
-            if op == "stop" and rng.random() < 0.85:
+            arg = rng.choice(_MOVES) if op == "person" else (rng.choice(_STOPS) if op in ("stop", "stale_stop") else None)
+            if op in ("stop", "stale_stop") and rng.random() < 0.85:
                 arg = Status.CONTRADICTED  # a withdrawal ends the run's interest; keep it rarer
             before = hostile.claim()
             reading = ea.reading_status(before) if before is not None else None
@@ -245,6 +324,10 @@ def _fuzz_one(seed):
             if op == "person" and r_hostile == "refused" and reading and ea.rank(arg) < ea.rank(reading):
                 return seed, ["DOWN-REFUSED"], trace
         bad = _check(control.claim(), hostile.claim(), op, arg, r_control, r_hostile)
+        if op != "person":
+            for tag, world, was in (("control", control, stopped[0]), ("hostile", hostile, stopped[1])):
+                if _lifted(was, world.claim()):
+                    bad.append(f"STOP-LIFTED-{tag}:{was}->{getattr(world.claim(), 'status', None)}")
         if bad:
             return seed, bad, trace
     claim = hostile.claim()

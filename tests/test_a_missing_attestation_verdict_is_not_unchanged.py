@@ -112,9 +112,13 @@ def test_the_recorded_answers_are_unchanged_as_recorded():
 @pytest.mark.parametrize("where", [PR71, MAIN])
 @pytest.mark.parametrize("label, derive, why", DERIVED)
 def test_an_answer_with_no_readable_verdict_is_review_never_unchanged(where, label, derive, why):
+    """The route was not measured: the attestation reads unobservable (round 4) --
+    never unchanged, and never review, a route measured and found moved -- and it
+    is counted with the routes the gate did not check. The gate reads review."""
     client, report = attest([derive(recorded(where))])
 
-    assert report["verdict"] == "review", label
+    assert report["verdict"] == "unobservable", label
+    assert report["not_measured_count"] == 1
     assert report["verdict_missing"] == [{"name": "gateway", "why": mock.ANY}]
     assert why in report["verdict_missing"][0]["why"], report["verdict_missing"]
     assert "match their baseline" not in report["detail"]
@@ -127,7 +131,7 @@ def test_an_answer_with_no_readable_verdict_is_review_never_unchanged(where, lab
 def test_an_answer_that_is_not_an_object_is_review_and_does_not_crash_the_gate(answer):
     _, report = attest([answer])
 
-    assert report["verdict"] == "review"
+    assert report["verdict"] == "unobservable"
     assert report["verdict_missing"] == [{"name": "gateway", "why": "carried a null verdict"}]
     # Kept, as what it was, under the route it answered for.
     assert report["routes"][0]["engine_answer"] == answer
@@ -138,7 +142,8 @@ def test_one_route_without_a_verdict_holds_a_gate_whose_other_routes_are_unchang
     real = recorded(PR71)
     _, report = attest([real, _without_verdict(real)], "a", "b")
 
-    assert report["verdict"] == "review"
+    assert report["verdict"] == "unobservable"
+    assert report["not_measured_count"] == 1
     assert [m["name"] for m in report["verdict_missing"]] == ["b"]
 
 
@@ -250,3 +255,56 @@ def test_nothing_on_a_stop_path_reaches_the_preflight_gate():
         "pentest/management/commands/approve_deployment.py",
         "pentest/views.py",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Round 4: under enforce, a missing verdict is held as an unobservable route is
+# ---------------------------------------------------------------------------
+
+
+def _unobservable(answer):
+    """The recorded answer as the gate records a route the engine could not
+    measure (`_attest_routes`, an EngineError)."""
+    return {"name": answer.get("name"), "url": answer.get("url"), "verdict": "unobservable",
+            "detail": "the engine could not measure this route", "blocking": [], "advisory": []}
+
+
+@pytest.mark.parametrize("setting", ["enforce", "observe"])
+def test_a_missing_verdict_is_held_exactly_as_an_unobservable_route_is(settings, setting):
+    """A route answered without a verdict was not checked. Under enforce it read
+    `review` -- the vocabulary of a route the engine measured and found moved -- so
+    the scan went ahead as if the route had been checked. It now reads as a route
+    nobody could measure: the attestation `unobservable`, the route counted as not
+    measured, and the gate does with it exactly what it does with an unobservable
+    route (review: the verdict is recorded on the scan; review never refuses).
+    Under observe it is reported and nothing is refused."""
+    settings.CYBERENGINE_ASSURANCE_MODE = setting
+    real = recorded(PR71)
+
+    def gate(route_answer):
+        client = mock.Mock()
+        client.assurance_check.return_value = {"verdict": "unchanged", "detail": "ok"}
+        client.extension_review.return_value = {"review": {"verdict": "ok", "detail": "ok"}}
+        client.unattributed_effects.return_value = {"effects": []}
+        client.attestation_check.return_value = route_answer
+        preflight.clear_cache()
+        try:
+            with mock.patch.object(preflight, "deployment_for_routes", return_value=_dep("gateway")), \
+                    mock.patch("assurance.served_route.serves_inference", return_value=True):
+                return preflight.check(client, force=True)
+        finally:
+            preflight.clear_cache()
+
+    missing = gate(_without_verdict(real))
+    unobservable = gate(_unobservable(real))
+
+    assert missing["attestation"]["verdict"] == unobservable["attestation"]["verdict"] == "unobservable"
+    assert missing["attestation"]["not_measured_count"] == 1
+    assert missing["verdict"] == unobservable["verdict"] == "review"
+    assert "match their baseline" not in missing["detail"]
+    assert "route attestation (missing verdict)" in missing["detail"]
+    if setting == "enforce":
+        assert "count as not measured" in missing["detail"]
+    else:
+        assert "nothing is refused in this mode" in missing["detail"]
+

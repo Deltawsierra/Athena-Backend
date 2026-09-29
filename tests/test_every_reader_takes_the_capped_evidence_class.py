@@ -147,7 +147,7 @@ _NOT_A_PROVIDER_ASSERTION = {
     ("assurance/decision.py", "_decision_from_findings", "f"): "Finding",
     ("assurance/evidence_audit.py", "_intrinsic_reasons", "item"): "ClaimEvidence",
     ("assurance/evidence_audit.py", "audit_of", "claim"): "AssuranceClaim",
-    ("assurance/evidence_audit.py", "audit_claim", "claim"): "AssuranceClaim",
+    ("assurance/evidence_audit.py", "_write_audit", "claim"): "AssuranceClaim",
     ("assurance/evidence_audit.py", "evidence_record", "item"): "ClaimEvidence",
     ("assurance/fingerprint.py", "_provider_descriptor", "provider"): "Provider",
     ("assurance/incident.py", "_evidence", "finding"): "Finding",

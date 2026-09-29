@@ -54,10 +54,12 @@ from ai_engine.services import cyberengine_client as cec
 from ai_engine.services.cyberengine_client import (
     ENGINE_REFUSED,
     ENGINE_RUN_FAILED,
+    ENGINE_STILL_RUNNING,
     ENGINE_UNREADABLE,
     CyberEngineClient,
     EngineError,
     ScanStillRunning,
+    ScanUncollected,
 )
 
 pytestmark = pytest.mark.django_db
@@ -500,17 +502,20 @@ def test_a_launch_that_started_nothing_is_a_refusal_naming_nothing(engine, where
 def test_a_scan_answer_in_a_shape_this_backend_does_not_read_is_not_read(engine, answer):
     """Derived: #71's 202 with `answer` changed to a value no engine sends on this
     route. Nothing is read from it -- no state, no result, no collection -- and
-    the run it names is carried, so it can still be stopped."""
+    the run it names is carried, so it can still be stopped. Round 4: the run may
+    still be scanning, so it is the scan still running (ScanUncollected), never a
+    failed one."""
     fx = load(PR71, "scan-running-then-completed")
     launch = copy.deepcopy(launch_of(fx, "/api/scan"))
     launch["body"]["answer"] = answer
     replay = engine([launch] + reads_of(fx))
 
-    with pytest.raises(EngineError) as raised:
+    with pytest.raises(ScanUncollected) as raised:
         client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
 
-    assert raised.value.kind == ENGINE_UNREADABLE
+    assert raised.value.kind == ENGINE_STILL_RUNNING
     assert "a shape this backend does not read" in str(raised.value)
+    assert "may still be running" in str(raised.value)
     assert raised.value.run_id == launch["body"]["run_id"]
     assert [m for m, _, _ in replay.sent] == ["POST"]
 
@@ -603,7 +608,9 @@ def test_the_view_records_a_stopped_scan_as_failed_with_its_run_not_as_completed
 
 def test_the_view_keeps_the_run_an_unreadable_answer_names(engine, analyst, engagement):
     """Derived, as above. The answer is not read; the run it names may be going,
-    and its id is kept on the scan so it can be found and stopped."""
+    and its id is kept on the scan so it can be found and stopped. Round 4: the
+    scan stays PENDING, as one the engine could not be read about -- recorded
+    FAILED, it read as over while the engine may still be running it."""
     from pentest.models import PentestScan
 
     fx = load(PR71, "scan-running-then-completed")
@@ -613,11 +620,13 @@ def test_the_view_keeps_the_run_an_unreadable_answer_names(engine, analyst, enga
 
     response = scan_through_view(analyst, engagement)
 
-    assert response.status_code == 502
+    assert response.status_code == 202
     scan = PentestScan.objects.get(uuid=response.data["scan_id"])
-    assert scan.status == PentestScan.STATUS_FAILED
+    assert scan.status == PentestScan.STATUS_PENDING
     assert scan.engine_run_id == launch["body"]["run_id"]
-    assert "does not read" in scan.error_message
+    assert response.data["engine_run_id"] == launch["body"]["run_id"]
+    assert "does not read" in response.data["detail"]
+    assert "may still be running" in response.data["detail"]
 
 
 def test_the_view_records_nothing_for_a_run_whose_work_never_started(engine, analyst, engagement):
@@ -855,3 +864,265 @@ def test_an_attestation_still_measuring_is_unobserved_not_unchanged(engine):
     assert report["verdict"] == "unobservable"
     assert report["routes"][0]["verdict"] == "unobservable"
     assert "503" in report["routes"][0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Round 4: an answer that says nothing about a run's end is not its end
+# ---------------------------------------------------------------------------
+
+
+def _derived(where, scenario, path, **change):
+    fx = load(where, scenario)
+    launch = copy.deepcopy(launch_of(fx, path))
+    for key, value in change.items():
+        if value is _DROP:
+            launch["body"].pop(key, None)
+        else:
+            launch["body"][key] = value
+    return fx, launch
+
+
+_DROP = object()
+
+
+@pytest.mark.parametrize("state", [_DROP, None, "running", "stopping"])
+def test_a_finished_pr71_status_with_no_end_state_is_not_an_old_engines_result(engine, state):
+    """Derived: #71's 200 "stopped while waiting" with `state` dropped (or null, or
+    not an end). The contract is read from `answer` alone: it is #71's status, and
+    it says nothing about how the run ended. Read as an engine older than the run
+    registry, its result became a COMPLETED scan with nothing found -- a stopped
+    scan recorded clean."""
+    _, launch = _derived(PR71, "scan-stopped-while-waiting", "/api/scan", state=state)
+    assert launch["body"]["answer"] == "status" and launch["body"].get("result") is not None
+    replay = engine([launch])
+
+    with pytest.raises(ScanUncollected) as raised:
+        client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+
+    assert raised.value.run_id == launch["body"]["run_id"]
+    assert "may still be running" in str(raised.value)
+    assert [m for m, _, _ in replay.sent] == ["POST"]
+
+
+def test_the_view_keeps_a_finished_status_with_no_end_state_pending_never_completed(engine, analyst, engagement):
+    from pentest.models import PentestScan
+
+    _, launch = _derived(PR71, "scan-stopped-while-waiting", "/api/scan", state=_DROP)
+    engine([launch])
+
+    response = scan_through_view(analyst, engagement)
+
+    assert response.status_code == 202
+    scan = PentestScan.objects.get(uuid=response.data["scan_id"])
+    assert scan.status == PentestScan.STATUS_PENDING
+    assert scan.engine_run_id == launch["body"]["run_id"]
+    assert not scan.pdf_file
+
+
+def test_an_engine_older_than_the_run_registry_is_still_read_as_its_result(engine):
+    """The negative control: no `answer`, no `state`, done, a result -- the engine
+    before the run registry. Its result is the findings, as it always was."""
+    _, launch = _derived(MAIN, "scan-finished-inline", "/api/scan", state=_DROP, run_id=_DROP)
+    engine([launch])
+
+    assert client().run_scan(TARGET, engagement_ref=ENGAGEMENT) == launch["body"]["result"]
+
+
+def test_a_pr71_status_on_a_200_that_names_no_run_is_not_a_synchronous_result(engine):
+    """B4. #71's 200 status, not done, naming no run: nothing to collect, and never
+    the synchronous answer of an older engine."""
+    _, launch = _derived(PR71, "scan-running-then-completed", "/api/scan", run_id=_DROP)
+    launch["status"] = 200
+    launch["body"]["done"] = False
+    engine([launch])
+
+    with pytest.raises(EngineError) as raised:
+        client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+
+    assert raised.value.kind == ENGINE_UNREADABLE
+    assert "names no" in str(raised.value)
+
+
+@pytest.mark.parametrize("code", [502, 503, 500])
+def test_a_status_read_that_answers_5xx_is_a_scan_still_running_with_its_id(engine, code, analyst, engagement):
+    """B1. The status read failing says nothing about the run: it is still running,
+    with its id -- pending on the scan, never FAILED."""
+    from pentest.models import PentestScan
+
+    fx = load(PR71, "scan-running-then-completed")
+    launch = launch_of(fx, "/api/scan")
+    engine([launch, {"request": {"method": "GET", "path": f"/api/scans/{launch['body']['run_id']}"},
+                     "status": code, "body": {"detail": "database is locked"}, "note": "derived"}])
+
+    with pytest.raises(ScanUncollected) as raised:
+        client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+    assert raised.value.run_id == launch["body"]["run_id"]
+
+    engine([launch, {"request": {"method": "GET", "path": f"/api/scans/{launch['body']['run_id']}"},
+                     "status": code, "body": {"detail": "database is locked"}, "note": "derived"}])
+    response = scan_through_view(analyst, engagement)
+    assert response.status_code == 202
+    assert PentestScan.objects.get(uuid=response.data["scan_id"]).status == PentestScan.STATUS_PENDING
+
+
+_DEEP = "[" * 200_000 + "]" * 200_000
+
+
+@pytest.mark.parametrize("status", [200, 202, 500])
+def test_a_body_nested_past_any_answer_is_unreadable_never_a_recursion_error(engine, status):
+    """Derived: a body nested 200,000 deep. It raised RecursionError -- not a
+    ValueError -- past every reader, out of the view as a 500, the scan left
+    pending with no run id."""
+    fx = load(PR71, "scan-running-then-completed")
+    launch = copy.deepcopy(launch_of(fx, "/api/scan"))
+    launch["status"] = status
+    launch["body"] = _DEEP
+    engine([launch])
+
+    with pytest.raises(EngineError) as raised:
+        client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+
+    assert not isinstance(raised.value.__cause__, RecursionError)
+    if status != 500:
+        assert raised.value.kind == ENGINE_UNREADABLE
+
+
+def test_a_status_naming_its_run_with_one_field_nested_too_deep_keeps_the_run_by_its_header(engine, analyst, engagement):
+    """Derived: #71's 202 naming its run, one field nested 200,000 deep, and the
+    run in X-Run-Id. The body is unreadable; the header still names the run, which
+    may be scanning: pending with that id."""
+    from pentest.models import PentestScan
+
+    fx = load(PR71, "scan-running-then-completed")
+    launch = copy.deepcopy(launch_of(fx, "/api/scan"))
+    run_id = launch["body"]["run_id"]
+    launch["body"] = json.dumps({**launch["body"], "x": 0})[:-1] + ', "deep": ' + _DEEP + "}"
+    launch["headers"] = {"X-Run-Id": run_id}
+    engine([launch])
+
+    response = scan_through_view(analyst, engagement)
+
+    assert response.status_code == 202
+    scan = PentestScan.objects.get(uuid=response.data["scan_id"])
+    assert scan.status == PentestScan.STATUS_PENDING
+    assert scan.engine_run_id == run_id
+
+
+def test_a_500_whose_body_a_proxy_replaced_is_collected_by_its_x_run_id(engine, analyst, engagement, monkeypatch):
+    """Derived: #71's 500 `state: null` with its body replaced by a proxy's HTML
+    page, the engine's X-Run-Id kept. It was recorded FAILED with no run id; the run
+    may be scanning -- collected by the header's id, and pending with it when it
+    cannot be read."""
+    from pentest.models import PentestScan
+
+    fx = load(PR71, "scan-failed-after-registration")
+    launch = copy.deepcopy(launch_of(fx, "/api/scan"))
+    run_id = launch["body"]["run_id"]
+    launch["body"] = "<html>502 Bad Gateway</html>"
+    assert launch["headers"]["x-run-id"] == run_id
+    engine([launch, reads_of(fx)[0]])
+    monkeypatch.setattr(cec, "SCAN_COLLECT_SECONDS", 0)
+
+    response = scan_through_view(analyst, engagement)
+
+    assert response.status_code == 202
+    scan = PentestScan.objects.get(uuid=response.data["scan_id"])
+    assert scan.status == PentestScan.STATUS_PENDING
+    assert scan.engine_run_id == run_id
+
+
+def test_a_retest_500_whose_body_a_proxy_replaced_is_running_by_its_x_run_id(engine):
+    fx = load(PR71, "retest-failed-after-registration")
+    launch = copy.deepcopy(launch_of(fx, "/api/remediation/retest"))
+    launch["body"] = "<html>502 Bad Gateway</html>"
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == launch["headers"]["x-run-id"]
+
+
+def test_a_retest_verdict_whose_run_still_reads_running_is_not_marked_stopped(engine):
+    """Derived: #71's verdict with `state: "running"` and no stop named. It was
+    marked stopped_after_recording "running" -- a stop nobody made. Its run may
+    still be going: read on, stoppable by its id."""
+    fx = load(PR71, "retest-stopped-after-recording")
+    launch = copy.deepcopy(launch_of(fx, "/api/remediation/retest"))
+    launch["body"]["state"] = "running"
+    launch["body"].pop("stopped_after_recording", None)
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["answer"] == "verdict"
+    assert reading["stopped_after_recording"] is None
+    assert reading["stop_id"] == launch["body"]["run_id"]
+
+
+def test_a_retest_verdict_on_a_run_that_did_not_complete_is_marked_stopped_even_unnamed(engine):
+    """B5. #71's verdict on a run that ended aborted, with no stop named: it is a
+    verdict filed before a stop landed, and says so."""
+    fx = load(PR71, "retest-stopped-after-recording")
+    launch = copy.deepcopy(launch_of(fx, "/api/remediation/retest"))
+    launch["body"].pop("stopped_after_recording", None)
+    assert launch["body"]["state"] == "aborted"
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["stopped_after_recording"] == "aborted"
+    assert reading["stop_id"] is None
+
+
+@pytest.mark.parametrize("run_id", [_DROP, "   ", None])
+def test_a_202_retest_status_naming_no_run_is_refused_and_says_there_is_no_stop_handle(engine, run_id):
+    fx = load(PR71, "retest-running-then-verdict")
+    launch = copy.deepcopy(launch_of(fx, "/api/remediation/retest"))
+    if run_id is _DROP:
+        launch["body"].pop("run_id")
+    else:
+        launch["body"]["run_id"] = run_id
+    engine([launch])
+
+    with pytest.raises(EngineError) as raised:
+        client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert raised.value.kind == ENGINE_UNREADABLE
+    assert "no stop handle" in str(raised.value)
+
+
+def test_a_retest_status_whose_run_is_aborting_is_still_running_and_stoppable(engine):
+    """B3. `aborting` is a run whose stop has not landed yet: still going, and
+    stoppable by its id -- never read as ended."""
+    fx = load(PR71, "retest-stopped-while-waiting")
+    launch = copy.deepcopy(launch_of(fx, "/api/remediation/retest"))
+    launch["body"]["state"] = "aborting"
+    engine([launch])
+
+    reading = client().retest_finding(1, ENGAGEMENT, scope=["offline.invalid"])
+
+    assert reading["phase"] == "running"
+    assert reading["stop_id"] == launch["body"]["run_id"]
+
+
+@pytest.mark.parametrize("state", [_DROP, None, "running"])
+def test_a_status_read_that_says_done_with_no_end_state_is_still_running_with_its_id(engine, state):
+    """Derived: #71's 202 collected, the status read answering `done: true` with its
+    end state dropped (or null, or not an end). It says nothing about how the run
+    ended: still running, with its id -- never a failed scan ("Scan None")."""
+    fx = load(PR71, "scan-running-then-completed")
+    launch = launch_of(fx, "/api/scan")
+    read = copy.deepcopy(reads_of(fx)[-1])
+    if state is _DROP:
+        read["body"].pop("state")
+    else:
+        read["body"]["state"] = state
+    assert read["body"]["done"] is True
+    engine([launch, read])
+
+    with pytest.raises(ScanUncollected) as raised:
+        client().run_scan(TARGET, engagement_ref=ENGAGEMENT)
+
+    assert raised.value.run_id == launch["body"]["run_id"]
+
