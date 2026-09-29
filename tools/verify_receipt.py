@@ -3,9 +3,10 @@
 
     python verify_receipt.py RECEIPT.json --keyring KEYRING.json [--evidence EVIDENCE.json]
     python verify_receipt.py RECEIPT.json --public-key KEY.b64
+    python verify_receipt.py RECEIPT.json --keyring KEYRING.json --max-age SECONDS
     python verify_receipt.py RECEIPT.json          # an unsigned copy: checked, then refused
 
-Written from ``docs/receipt-spec/v4.0.md``, not from this repository's code, and it
+Written from ``docs/receipt-spec/v4.1.md``, not from this repository's code, and it
 imports nothing from it: the Python standard library, plus ``cryptography`` for
 Ed25519 -- the one crypto library athena-backend already depends on. Copy this file
 anywhere and run it.
@@ -29,6 +30,11 @@ form the specification gives (section 5.3). With it the root is recomputed from 
 evidence; without it the root is bound by the digest and the signature but not
 re-derived, and the output says so.
 
+``--max-age SECONDS`` is your freshness policy. From 4.1 a signed receipt carries the
+time it was issued, under the signature; with ``--max-age`` a receipt issued longer
+ago than that is refused (``stale``), and so is one that carries no signed time at
+all (``no_signed_time``: 4.0 and older), because its age cannot be read.
+
 Exit status:
   0  VERIFIED.
   1  REFUSED. The first line names the reason, one of the specification's refusal
@@ -39,9 +45,9 @@ Exit status:
 
 VERIFIED establishes integrity and provenance: this is the assurance state
 athena-backend recorded, unaltered since the holder of the named key signed it. It
-does not establish that the assessment is correct or the system safe, and it does
-not establish WHEN: a signed receipt carries no signing time (specification,
-section 1).
+does not establish that the assessment is correct or the system safe. Nor does it
+establish when the state held: the issue time it shows is the issuer's clock when it
+had the receipt signed, and a 4.0 receipt carries none (specification, section 1).
 """
 
 from __future__ import annotations
@@ -54,8 +60,9 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-SPEC = "docs/receipt-spec/v4.0.md"
+SPEC = "docs/receipt-spec/v4.1.md"
 
 #: The DSSE payload type an assurance-receipt signature is bound to.
 RECEIPT_TYPE = "application/vnd.mythos.assurance-receipt+json"
@@ -78,17 +85,25 @@ HASHED: dict[str, frozenset[str]] = {
     "mythos.assurance.receipt/3.0": frozenset(_V2),
     "mythos.assurance.receipt/3.1": frozenset(_V2),
     "mythos.assurance.receipt/4.0": frozenset((*_V2, "chains")),
+    "mythos.assurance.receipt/4.1": frozenset((*_V2, "chains")),
 }
-CURRENT = "mythos.assurance.receipt/4.0"
+CURRENT = "mythos.assurance.receipt/4.1"
 
 #: The receipt's report on itself: present from 3.1, outside the digest and outside
 #: the signature. A receipt cannot make itself signed; only an envelope can.
 SELF_REPORT = ("signed", "signature", "unsigned_reason")
-_SELF_REPORTING = frozenset({"mythos.assurance.receipt/3.1", "mythos.assurance.receipt/4.0"})
+_SELF_REPORTING = frozenset(
+    {"mythos.assurance.receipt/3.1", "mythos.assurance.receipt/4.0", "mythos.assurance.receipt/4.1"}
+)
 
-#: Top-level members no digest covers. ``algorithm`` and ``digest`` are covered by
-#: the signature; the other four by nothing.
-OUTSIDE_DIGEST = ("algorithm", "digest", "computed_at", *SELF_REPORT)
+#: The signed form's issue time: from 4.1, in the signed form only, inside the
+#: signature and outside the digest.
+SIGNED_ONLY = ("issued_at",)
+_ISSUED = frozenset({"mythos.assurance.receipt/4.1"})
+
+#: Top-level members no digest covers. ``algorithm``, ``digest`` and ``issued_at``
+#: are covered by the signature; the other four by nothing.
+OUTSIDE_DIGEST = ("algorithm", "digest", "computed_at", *SIGNED_ONLY, *SELF_REPORT)
 #: Left out of the signed copy, and so out of every envelope.
 NOT_SIGNED = ("computed_at", *SELF_REPORT)
 
@@ -112,9 +127,13 @@ REFUSALS: dict[str, str] = {
     "wrong_key": "the signature is not by a key you gave the verifier",
     "revoked_key": "the signature is by a key the keyring has revoked",
     "bad_signature": "the signature does not check out over the payload",
+    "no_signed_time": "--max-age was given and the receipt carries no signed issue time (4.0 and older)",
+    "stale": "the receipt was issued longer ago than the --max-age given",
 }
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+#: ``issued_at``'s one form: RFC 3339, UTC, whole seconds.
+_ISSUED_AT = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 _STRUCTURE = re.compile(r'[\[\]{}"\\]')
 _ENVELOPE_MEMBERS = frozenset({"envelope_version", "payloadType", "payload", "signatures"})
 
@@ -347,6 +366,18 @@ def _has_non_integer_number(value: object) -> bool:
     return False
 
 
+def _issued(value: object) -> datetime | None:
+    """``issued_at`` as the instant it names, or None when it is not in the one form the
+    specification gives (``YYYY-MM-DDTHH:MM:SSZ``) or names no real time."""
+    match = _ISSUED_AT.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    try:
+        return datetime(*(int(part) for part in match.groups()), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 def _check_structure(receipt: dict, form: str) -> str:
     """Steps 5 and 6: the version, then the members that version defines."""
     version = receipt.get("receipt_version")
@@ -362,6 +393,8 @@ def _check_structure(receipt: dict, form: str) -> str:
         expected.add("computed_at")
         if version in _SELF_REPORTING:
             expected.update(SELF_REPORT)
+    elif version in _ISSUED:
+        expected.update(SIGNED_ONLY)
     missing = sorted(expected - receipt.keys())
     extra = sorted(receipt.keys() - expected)
     if missing or extra:
@@ -386,6 +419,12 @@ def _check_structure(receipt: dict, form: str) -> str:
             "the receipt reports a signature of its own. A receipt cannot sign itself -- "
             "only an envelope around it can -- so `signed` must be false, `signature` "
             "null and `unsigned_reason` said",
+        )
+    if form == "signed" and version in _ISSUED and _issued(receipt["issued_at"]) is None:
+        raise Refused(
+            "malformed",
+            f"issued_at is {_show(receipt['issued_at'])}, not a UTC time in the one form the "
+            "specification gives (YYYY-MM-DDTHH:MM:SSZ)",
         )
     if _has_non_integer_number(receipt):
         raise Refused("malformed", "a receipt's numbers are integers; this one carries a fraction or an exponent")
@@ -562,29 +601,71 @@ def _evidence(raw: bytes) -> tuple[str, list]:
 # -------------------------------------------------------------------------- verify
 
 
+def _age(issued: datetime, now: datetime) -> str:
+    """How the issue time stands against this machine's clock, in whole seconds. A time
+    ahead of the clock is said as that, never as an age of 0."""
+    seconds = (now - issued).total_seconds()
+    if seconds >= 0:
+        return f"{int(seconds)} s before this machine's clock"
+    return f"{int(-seconds) or 1} s AHEAD of this machine's clock: one of the two clocks is wrong"
+
+
+def _check_age(version: str, issued: datetime | None, max_age: int, now: datetime) -> None:
+    """Step 10, only when a maximum age is given: the reader's freshness policy."""
+    if issued is None:
+        raise Refused(
+            "no_signed_time",
+            f"--max-age {max_age} was given, and a {version} receipt carries no signed issue "
+            "time, so its age cannot be read and it cannot be shown to be fresh. Receipts "
+            "signed from 4.1 on carry one: fetch the receipt again from the signed route",
+        )
+    age = (now - issued).total_seconds()
+    if age > max_age:
+        raise Refused(
+            "stale",
+            f"issued at {issued.isoformat().replace('+00:00', 'Z')} by the issuer's clock, "
+            f"{int(age)} s before this machine's clock; --max-age allows {max_age} s. The "
+            "state it attests may have moved since: fetch the receipt again from the signed "
+            "route to see the state now",
+        )
+
+
 def verify(
     artifact: bytes,
     *,
     keyring: bytes | None = None,
     public_key: bytes | None = None,
     evidence: bytes | None = None,
+    max_age: int | None = None,
+    now: datetime | None = None,
 ) -> Verdict:
     """Run the specification's verification algorithm (section 7) over the bytes of
-    a receipt file and, optionally, a keyring or public key and an evidence file.
+    a receipt file and, optionally, a keyring or public key, an evidence file, and a
+    maximum age in seconds. ``now`` is this machine's clock (an aware datetime) unless
+    a caller holds it.
 
     Raises :class:`CannotRun` for what exit status 2 means; every other outcome is a
     :class:`Verdict`."""
     if keyring is not None and public_key is not None:
         raise CannotRun("give a keyring or a public key, not both")
+    if max_age is not None and (type(max_age) is not int or max_age < 0):
+        raise CannotRun("--max-age is a whole number of seconds, 0 or more")
     trusted = _trusted(keyring, public_key)
     evidence_set = None if evidence is None else _evidence(evidence)
+    clock = datetime.now(timezone.utc) if now is None else now
     try:
-        return _verify(artifact, trusted, evidence_set)
+        return _verify(artifact, trusted, evidence_set, max_age, clock)
     except Refused as refusal:
         return Verdict(False, refusal.reason, (refusal.detail,))
 
 
-def _verify(artifact: bytes, trusted: dict | None, evidence_set: tuple[str, list] | None) -> Verdict:
+def _verify(
+    artifact: bytes,
+    trusted: dict | None,
+    evidence_set: tuple[str, list] | None,
+    max_age: int | None,
+    now: datetime,
+) -> Verdict:
     envelope, receipt, form, served = _classify(_read_artifact(artifact))
     payload = b""
     if envelope is not None:
@@ -617,6 +698,20 @@ def _verify(artifact: bytes, trusted: dict | None, evidence_set: tuple[str, list
             "receipt (--keyring or --public-key)"
         )
     key_id, status = _check_signature(envelope, payload, trusted)
+    # Read only now: before the signature checks out, the time is anyone's.
+    issued = _issued(receipt["issued_at"]) if version in _ISSUED else None
+    if max_age is not None:
+        _check_age(version, issued, max_age, now)
+    short = version.rsplit("/", 1)[1]
+    if issued is None:
+        issued_line = f"not signed ({short}): a {short} receipt carries no signing time"
+        when = f"A {short} receipt carries no signing time at all."
+    else:
+        issued_line = f"{receipt['issued_at']} by the issuer's clock, {_age(issued, now)}"
+        when = (
+            "`issued at` is the issuer's clock when it had this receipt signed; how old is "
+            "too old is the reader's policy (--max-age)."
+        )
     system = receipt.get("system") if isinstance(receipt.get("system"), dict) else {}
     result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
     lines = [
@@ -625,10 +720,10 @@ def _verify(artifact: bytes, trusted: dict | None, evidence_set: tuple[str, list
         f"decision  {_show(result.get('decision'))}",
         f"digest    {receipt['digest']}",
         f"signer    {key_id} ({status})",
+        f"issued at {issued_line}",
         f"evidence  {evidence_line}",
         "This establishes integrity and provenance only: not that the assessment is "
-        "correct or the system safe, and not when -- a signed receipt carries no "
-        "signing time.",
+        "correct or the system safe, and not when the state held. " + when,
     ]
     if status == "retired":
         lines.insert(5, "note      the key has since been rotated out; a retired key still verifies what it signed")
@@ -658,6 +753,13 @@ def main(argv: list[str] | None = None) -> int:
     keys.add_argument("--keyring", help="the engine's published keyring (JSON), fetched out of band")
     keys.add_argument("--public-key", help="a file holding one base64 Ed25519 public key, obtained out of band")
     parser.add_argument("--evidence", help="the evidence the receipt's evidence root covers (spec section 5.3)")
+    parser.add_argument(
+        "--max-age",
+        type=int,
+        metavar="SECONDS",
+        help="refuse a receipt issued longer ago than this, by its signed issue time, and one that "
+        "carries no signed time (4.0 and older)",
+    )
     args = parser.parse_args(argv)
     try:
         verdict = verify(
@@ -665,6 +767,7 @@ def main(argv: list[str] | None = None) -> int:
             keyring=_read(args.keyring) if args.keyring else None,
             public_key=_read(args.public_key) if args.public_key else None,
             evidence=_read(args.evidence) if args.evidence else None,
+            max_age=args.max_age,
         )
     except CannotRun as exc:
         print(f"CANNOT RUN: {exc}", file=sys.stderr)
