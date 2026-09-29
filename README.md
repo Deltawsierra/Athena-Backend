@@ -232,6 +232,32 @@ assurance policy pins the table's order of the classes, so a change to that orde
 moves the policy pin. The order is the one this service kept before, so the pin
 did not move.
 
+## Verifying a receipt
+
+`GET /api/assurance/deployments/<uuid>/signed-assurance-receipt/` returns a
+deployment's Assurance Receipt beside the DSSE envelope the engine signed it in.
+`assurance-receipt/` returns the unsigned copy. The receipt is specified in
+[`docs/receipt-spec/`](docs/receipt-spec/README.md); the current version is
+`mythos.assurance.receipt/4.0`. The specification covers every member, the
+canonical form and digests, the signature, the verification steps with every
+refusal, and how older versions are read. Anyone can verify a receipt offline with
+the specification and `tools/verify_receipt.py`, which needs only Python and
+`cryptography`:
+
+```bash
+python tools/verify_receipt.py signed-receipt.json --keyring keyring.json
+```
+
+Take the keyring from the engine's `GET /api/assurance/keyring` (this backend does
+not serve it), out of band from the receipt. The exit status is 0 when the receipt
+is verified, 1 when it is refused (the first line names the reason), and 2 when the
+verifier could not run. A verified receipt attests integrity and provenance only.
+It does not say the assessment is correct, and it does not say when: a signed
+receipt carries no signing time. `tests/test_receipt_spec_conformance.py` builds
+vectors from the real routes. It holds the verifier to the backend's own answer on
+every check the backend makes, and to the known signer on the signature, which the
+backend never checks.
+
 ## Tests
 
 ```bash
