@@ -112,6 +112,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .change import EVIDENCE_TTL_DAYS
+from .claim_confidence import claim_confidence, confidence_basis
 from .models import AssuranceClaim, ClaimEvent, ClaimEvidence, ClaimVerdict, EvidenceClass
 
 Status = AssuranceClaim.ClaimStatus
@@ -684,14 +685,6 @@ def _held_by_audit(claim: AssuranceClaim) -> bool:
     return bool(audit.get("held") and claim.status == audit.get("status") and audit.get("base_status"))
 
 
-def _no_more_than(confidence, ceiling):
-    """``confidence``, never above ``ceiling``; ``None`` (no supporting confidence)
-    is the floor either one can impose."""
-    if confidence is None or ceiling is None:
-        return None
-    return min(confidence, ceiling)
-
-
 def hold_reading_at_stale(claim: AssuranceClaim, *, note: str) -> bool:
     """A writer that marks a claim STALE -- drift, a fired latent condition -- found
     it held by its evidence at a status it does not soften (CONTRADICTED). The hold
@@ -906,9 +899,10 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     ``cause`` evidence_audit and no actor. Returns the audit, or ``None`` when the
     claim is not current, is withdrawn, or has no evidence recorded against it.
 
-    A hold keeps the confidence the reading had before it (``base_confidence``),
-    and a release restores no more than that: evidence never leaves a claim with
-    confidence it would not carry had nothing been recorded against it.
+    A hold carries no confidence and records the one its reading carries
+    (``base_confidence``); a release lands on the reading with the confidence of
+    its status (:mod:`assurance.claim_confidence`), exactly what it would carry had
+    nothing been recorded against it -- never more.
 
     Decided from the claim's row as COMMITTED, never from the caller's copy: an
     ingest holding a claim it read before a revoke or a contradiction committed
@@ -993,28 +987,27 @@ def _record_unsettled(claim: AssuranceClaim, now) -> None:
 
 def _write_audit(claim: AssuranceClaim, result: dict | None) -> dict | None:
     """Write ``result``, the audit of the locked, committed row ``claim``, onto it
-    (:func:`audit_claim`)."""
-    from .claims import _confidence
+    (:func:`audit_claim`).
 
+    The confidence written is the one the status the claim stands at carries, for its
+    evidence class (:mod:`assurance.claim_confidence`): none under a hold, and on a
+    release the confidence of the reading it lands on -- the one the reading carries
+    with no evidence recorded at all, which the hold records as ``base_confidence``."""
     if result is None:
         return None
     old_status = claim.status
     new_status = result["status"]
-    # The confidence the reading carried before any hold: the claim's own while it is
-    # not held, and what the hold recorded while it is (none, if it recorded none).
-    was_held = _held_by_audit(claim)
-    reading_confidence = claim.evidence_audit.get("base_confidence") if was_held else claim.confidence
     if result["held"]:
-        result = {**result, "base_confidence": reading_confidence}
+        result = {**result, "base_confidence": claim_confidence(result["base_status"], claim.evidence_class)}
     fields = [*store_audit(claim, result), "updated_at"]
     store_weighing(claim, result)
+    confidence = claim_confidence(new_status, claim.evidence_class)
     if new_status != old_status:
         claim.status = new_status
-        confidence = _confidence(new_status, claim.evidence_class)
-        if not result["held"]:
-            confidence = _no_more_than(confidence, reading_confidence)
+        fields.append("status")
+    if new_status != old_status or confidence != claim.confidence:
         claim.confidence = confidence
-        fields += ["status", "confidence"]
+        fields.append("confidence")
     claim.save(update_fields=fields)
     if new_status != old_status:
         ClaimEvent.objects.create(
@@ -1114,6 +1107,12 @@ def served_audit(claim: AssuranceClaim) -> dict:
     audit["audit_current"] = not why
     if why:
         audit["not_current_reason"] = why
+    if "base_confidence" in audit:
+        # The confidence the reading under a hold carries is served like every other
+        # confidence: with what it is (assurance.claim_confidence).
+        audit["base_confidence_basis"] = confidence_basis(
+            audit.get("base_status") or "", claim.evidence_class, audit["base_confidence"]
+        )
     return audit
 
 

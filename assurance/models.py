@@ -24,6 +24,7 @@ from django.conf import settings
 from django.db import models, router
 from django.db.models import Q
 from django.utils import timezone
+from mythos_core import evidence as core_evidence
 
 from . import composition
 
@@ -58,9 +59,11 @@ def severity_rank(severity: str) -> int:
 
 class EvidenceClass(models.TextChoices):
     """How strongly a conclusion is actually known — the discipline that keeps
-    Mythos from turning assumptions into facts. Ordered strongest to weakest;
-    ``strength()`` gives the ordinal so a caller can take the *weakest* evidence
-    behind a finding as its honest confidence floor."""
+    Mythos from turning assumptions into facts. Declared strongest to weakest;
+    :func:`evidence_strength` gives the ordinal so a caller can take the *weakest*
+    evidence behind a finding as its honest confidence floor. The classes, their
+    order, their strengths and their qualitative readings are mythos-core's
+    (:mod:`mythos_core.evidence`); these are the same names as this app's choices."""
 
     TECHNICALLY_VERIFIED = "technically_verified", "Technically verified"
     CONFIGURATION_VERIFIED = "configuration_verified", "Configuration verified"
@@ -72,70 +75,64 @@ class EvidenceClass(models.TextChoices):
     NOT_DOCUMENTED = "not_documented", "Not documented"
 
 
-# Strongest → weakest. Index = strength ordinal (0 is strongest).
-EVIDENCE_STRENGTH_ORDER = (
-    EvidenceClass.TECHNICALLY_VERIFIED,
-    EvidenceClass.CONFIGURATION_VERIFIED,
-    EvidenceClass.DOCUMENT_SUPPORTED,
-    EvidenceClass.CONTRACTUALLY_STATED,
-    EvidenceClass.VENDOR_ASSERTED,
-    EvidenceClass.PARTIALLY_VERIFIED,
-    EvidenceClass.UNKNOWN,
-    EvidenceClass.NOT_DOCUMENTED,
-)
+# ONE evidence vocabulary (roadmap P2.7). This app used to keep its own copy of the
+# evidence-class ladder -- the order of the classes, their qualitative words, and,
+# in assurance.claims, a strength of max(0.1, 1.0 - 0.12 * rank) -- a second
+# mapping from evidence to strength that no reader of mythos-core would find. The
+# ladder is mythos-core's now (mythos_core.evidence, Mythos-Core#31): the order of
+# the classes (EVIDENCE_CLASSES), each one's rank (evidence_class_rank), its
+# ordinal strength (strength_from_evidence_class) and its qualitative reading
+# (QUALITATIVE_LABELS), written out once there as a table. Every reading here goes
+# to that module at the moment it is taken, so this app and every engine that reads
+# the table rank a class the same way.
+#
+# The qualitative reading -- Observed / Reproduced / Inferred / Hypothesized /
+# Unknown, the words of research and training material -- is a reading of the
+# ordinal model, which is canonical: what the code computes with, what the
+# weakest-link rule ranks, and what a receipt records. It maps one way only, and
+# deliberately not one-to-one: "Observed" is what Mythos saw for itself, "Inferred"
+# what it was told, and "Reproduced" has no class of its own, because reproduction
+# is a property of how a finding was established, not of its evidence class.
 
 
-# The five-way qualitative vocabulary -- Observed / Reproduced / Inferred /
-# Hypothesized / Unknown -- used in research and training material, mapped onto the
-# ordinal classes above. Two vocabularies for one idea drift apart the moment
-# nobody writes down how they line up, and then a curriculum and a product report
-# use the same word for different strengths of claim.
-#
-# The ORDINAL model above is canonical: it is what the code computes with, what the
-# weakest-link rule ranks, and what a receipt records. The qualitative labels are a
-# reading of it, never a second source of truth, which is why this maps one way
-# only. Reading back would invite writing a label into a field that stores a class.
-#
-# The mapping is deliberately not one-to-one, because the two vocabularies do not
-# carve the world the same way: "Observed" covers everything Mythos saw for itself
-# (a live probe or a read of the running configuration), while everything it was
-# merely told -- a document, a contract, a vendor's word -- is "Inferred", because
-# it is a conclusion drawn from someone else's statement rather than an
-# observation. "Reproduced" has no class of its own: reproduction is a property of
-# how a finding was established (twice, independently), not of the evidence class,
-# and asserting it from a class alone would be inventing a fact.
-QUALITATIVE_EVIDENCE_LABELS = {
-    EvidenceClass.TECHNICALLY_VERIFIED: "Observed",
-    EvidenceClass.CONFIGURATION_VERIFIED: "Observed",
-    EvidenceClass.DOCUMENT_SUPPORTED: "Inferred",
-    EvidenceClass.CONTRACTUALLY_STATED: "Inferred",
-    EvidenceClass.VENDOR_ASSERTED: "Inferred",
-    EvidenceClass.PARTIALLY_VERIFIED: "Hypothesized",
-    EvidenceClass.UNKNOWN: "Unknown",
-    EvidenceClass.NOT_DOCUMENTED: "Unknown",
-}
+def __getattr__(name: str):
+    """The two names this module used to define as its own copies of the table,
+    read from mythos-core at the moment they are asked for (PEP 562), so neither is
+    ever a copy:
+
+    - ``EVIDENCE_STRENGTH_ORDER``: the classes strongest to weakest, as this app's
+      choices (index = strength ordinal, 0 is strongest). For iterating the classes
+      in order; the rank itself is :func:`evidence_strength`, and the assurance
+      policy pins the core's own tuple (assurance.policy).
+    - ``QUALITATIVE_EVIDENCE_LABELS``: the core's read-only class -> reading table.
+
+    Read here rather than when Django loads this app: a mythos-core older than the
+    table (Mythos-Core#31) then fails where the table is read, and the suite's pin
+    guard (tests/conftest.py) still gets to say which core was loaded and which one
+    is pinned."""
+    if name == "EVIDENCE_STRENGTH_ORDER":
+        return tuple(EvidenceClass(value) for value in core_evidence.EVIDENCE_CLASSES)
+    if name == "QUALITATIVE_EVIDENCE_LABELS":
+        return core_evidence.QUALITATIVE_LABELS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def qualitative_evidence_label(classification: str) -> str:
-    """The qualitative reading of an evidence class, for prose and curricula.
+    """The qualitative reading of an evidence class, for prose and curricula, from
+    mythos-core's table (:func:`mythos_core.evidence.qualitative_label`).
 
     Unrecognised input reads as "Unknown" -- the same direction
     :func:`evidence_strength` fails in, so a label nobody defined never reads as a
     stronger claim than the evidence supports.
     """
-    try:
-        return QUALITATIVE_EVIDENCE_LABELS[EvidenceClass(classification)]
-    except (ValueError, KeyError):
-        return "Unknown"
+    return core_evidence.qualitative_label(classification)
 
 
 def evidence_strength(classification: str) -> int:
-    """Ordinal for an evidence class (0 = strongest). Unknown values sort weakest
-    so an unrecognised label never reads as strong evidence."""
-    try:
-        return EVIDENCE_STRENGTH_ORDER.index(EvidenceClass(classification))
-    except (ValueError, KeyError):
-        return len(EVIDENCE_STRENGTH_ORDER)
+    """Ordinal for an evidence class (0 = strongest), from mythos-core's table
+    (:func:`mythos_core.evidence.evidence_class_rank`), read at every call. Unknown
+    values sort weakest so an unrecognised label never reads as strong evidence."""
+    return core_evidence.evidence_class_rank(classification)
 
 
 # ---------------------------------------------------------------------------

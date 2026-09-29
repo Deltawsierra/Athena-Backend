@@ -857,6 +857,13 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         signed, beside a receipt that said otherwise. See
         :func:`assurance.receipt.envelope_over`.
 
+        That includes how deeply the payload nests. The client bounds the depth of
+        the engine's answer, but the payload is a string inside it, so
+        ``envelope_over`` applies the same bound to it before anything is parsed: a
+        payload nested past it reads unsigned, with the limit as the reason in this
+        service's words -- where it used to read unsigned with the parser's own
+        RecursionError sentence.
+
         WHAT IS SIGNED is the receipt's signable projection
         (:func:`assurance.receipt.signable_receipt`), not the payload
         ``assurance-receipt`` serves. The full payload carries a ``computed_at``

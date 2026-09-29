@@ -53,6 +53,7 @@ from django.utils import timezone
 
 from . import evidence_audit as ea
 from . import observability as obs
+from .claim_confidence import claim_confidence
 from .claims import Status, held_by_fired_conditions
 from .fingerprint import (
     CLAIM_INPUTS,
@@ -163,7 +164,10 @@ def _mark_row_stale(claim, *, note: str) -> None:
         return
     old_status = claim.status
     claim.status = Status.STALE
-    claim.save(update_fields=["status", "updated_at"])
+    # A claim a retest is due on stands on no current evidence: the confidence of the
+    # status written (none), never the one it carried before the change.
+    claim.confidence = claim_confidence(claim.status, claim.evidence_class)
+    claim.save(update_fields=["status", "confidence", "updated_at"])
     ClaimEvent.objects.create(
         claim=claim,
         from_status=old_status,

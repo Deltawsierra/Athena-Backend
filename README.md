@@ -176,9 +176,60 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   trusts.
 - `unknown`: typed in without saying what it rests on.
 
-A held Achilles signed still counts as demonstrated, so trusting an Achilles key
-in the keyring lets a permit check move a deployment to `ready`. Whether it
-should is an open decision, not a settled one.
+A held Achilles signed still counts as demonstrated: the composition's own rule
+reads `ready`. What the chains contribute to the deployment decision is less.
+Where an approved workflow holds on an authorization check alone, or on a `held`
+signed by an engine this platform has not classified, they contribute
+`ready_restricted` at best (`CHAIN_CAPS` in `assurance/workflow_chains.py`, an
+owner default, #278). One such workflow is enough, whatever the others show. A
+`held` signed by Athena is not capped.
+
+## Claim confidence
+
+Every assurance claim the API serves (`/api/assurance/claims/`, and each
+deployment's `assurance-claims/`) carries a `confidence` and, beside it, a
+`confidence_basis`. The confidence is not a probability that the claim is true.
+It is the ordinal strength of the weakest class of evidence supporting the claim,
+as mythos-core's evidence-class table gives it
+(`mythos_core.evidence.strength_from_evidence_class`, Mythos-Core#31). mythos-core
+keeps that table once for the whole platform, and only the order of its values
+means anything.
+This service used to compute the number with a formula of its own,
+`max(0.1, 1.0 - 0.12 * rank)`. The table has the same values, so no derived
+claim's number changed.
+
+The confidence follows the claim's status, whoever set it:
+
+- `supported`, `partially_verified` or `verified`: the table's strength for the
+  claim's evidence class.
+- `unknown`, `contradicted`, `stale`, `revoked` or `draft`: none (`null`), never
+  `0`.
+
+A person who moves a claim gets the confidence of the status they set, and a
+re-derive that keeps their status keeps it. Moving a derived `contradicted` claim
+back to `supported` gives it the strength of its evidence class. Moving a claim to
+`unknown` takes the confidence away. Before this, both moves kept the deriver's
+confidence for the deriver's status. A stale mark (expired evidence, drift, a
+declared condition that fired) and an evidence hold carry none. When a hold is
+released, the claim lands on its reading with that reading's confidence. A
+superseded version keeps what it carried when it was closed.
+
+`confidence_basis` says what the number is. With a number, it gives mythos-core's
+basis line, the evidence class and the table. With no number, it starts `none: `
+and says why. The evidence audit served with a claim says the same of the
+confidence of the reading under a hold (`base_confidence`, beside
+`base_confidence_basis`).
+
+Migration `assurance.0048` recomputes the stored confidence of every claim still
+believed, and the base confidence under every evidence hold. It leaves superseded
+versions as they were closed. Rolling it back does nothing.
+
+The rank a finding's weakest evidence is taken by
+(`assurance.models.evidence_strength`) and the qualitative reading of a class
+(Observed, Inferred, Hypothesized, Unknown) come from the same table. The
+assurance policy pins the table's order of the classes, so a change to that order
+moves the policy pin. The order is the one this service kept before, so the pin
+did not move.
 
 ## Tests
 
