@@ -176,9 +176,13 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   trusts.
 - `unknown`: typed in without saying what it rests on.
 
-A held Achilles signed still counts as demonstrated, so trusting an Achilles key
-in the keyring lets a permit check move a deployment to `ready`. Whether it
-should is an open decision, not a settled one.
+A held Achilles signed still counts as demonstrated: the composition's own rule
+reads `ready`. What the chains contribute to the deployment decision is less.
+Where an approved workflow holds on an authorization check alone, or on a `held`
+signed by an engine this platform has not classified, they contribute
+`ready_restricted` at best (`CHAIN_CAPS` in `assurance/workflow_chains.py`, an
+owner default, #278). One such workflow is enough, whatever the others show. A
+`held` signed by Athena is not capped.
 
 ## Tests
 
