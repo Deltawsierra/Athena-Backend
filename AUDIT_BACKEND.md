@@ -188,7 +188,10 @@ the write contract clients depend on.
   `invalidation.check_invalidations` (a policy change invalidates a decision and
   opens an attributed retest, off a pass to STALE), and surfaced on
   `decision_support` and in the assurance receipt (standard bumped to
-  `…/1.1` by that change; `RECEIPT_VERSION` is now `…/4.0`). It never
+  `…/1.1` by that change; `RECEIPT_VERSION` is now `…/4.1`). The pin embeds
+  `receipt.HASHED_CONTENT_VERSION` (`…/4.0`), the version that introduced the
+  receipt's hashed content, not `RECEIPT_VERSION`, so the 4.1 step (a signed
+  issue time) left the pin where it was. It never
   fabricates a pass and never softens a CONTRADICTED claim.
 - **Receipt / fingerprint determinism.** Canonical JSON (sorted keys, compact
   separators), evidence rows and finding digests sorted (Merkle-style), every

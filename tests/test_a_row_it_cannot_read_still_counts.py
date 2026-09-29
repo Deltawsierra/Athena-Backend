@@ -213,7 +213,9 @@ def test_the_same_gap_signs_identically():
 
 
 def test_the_receipt_version_moved_when_the_coverage_block_gained_required_fields():
-    assert RECEIPT_VERSION == "mythos.assurance.receipt/4.0"
+    # 4.1: the signed form's issue time, outside the digest -- MINOR, by 3.1's rule.
+    assert RECEIPT_VERSION == "mythos.assurance.receipt/4.1"
+    assert "mythos.assurance.receipt/4.0" in SUPERSEDED_VERSIONS
     assert "mythos.assurance.receipt/2.0" in SUPERSEDED_VERSIONS
     assert "mythos.assurance.receipt/3.1" in SUPERSEDED_VERSIONS
     # 3.0 is superseded too now: 3.1 added signed/signature/unsigned_reason. Those

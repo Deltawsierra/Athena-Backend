@@ -11,10 +11,11 @@ The engine now has the signer (athena-engine #61: DSSE envelope bound to the
 document kind, a keyring whose retired keys still verify). This is the call.
 
 Signed on read, not stored. The receipt is deterministic over stable content, so
-signing at read time yields the same envelope for the same state and there is
-nothing to go stale. A STORED signature over an older assurance state, served
-beside a current receipt, would vouch for something other than what the reader is
-looking at -- which is the failure mode this whole project exists to remove.
+signing at read time yields the same digest for the same state, in an envelope that
+says when it was issued (4.1), and there is nothing to go stale. A STORED signature
+over an older assurance state, served beside a current receipt, would vouch for
+something other than what the reader is looking at -- which is the failure mode this
+whole project exists to remove.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -55,6 +57,9 @@ User = get_user_model()
 
 #: Any well-formed uuid; `reverse` only needs the shape, and this test wants no rows.
 _UUID = "00000000-0000-0000-0000-000000000001"
+
+#: The backend's clock, held where a test compares two signed documents whole.
+_HELD = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 def _user(name="analyst", role=None):
@@ -159,6 +164,9 @@ def test_the_receipt_is_sent_to_the_engine_and_the_envelope_comes_back(monkeypat
     signer = _Signer()
     _engine(monkeypatch, signer)
     dep = _deployment(_user())
+    # The backend's clock held, so the document signed and the one rebuilt below are
+    # issued at one time and can be compared whole.
+    monkeypatch.setattr(receipt, "_utc_now", lambda: _HELD)
 
     resp = _fetch(dep, _user("reader"))
 
@@ -168,11 +176,13 @@ def test_the_receipt_is_sent_to_the_engine_and_the_envelope_comes_back(monkeypat
     assert resp.data["envelope"]["payloadType"].endswith("assurance-receipt+json")
 
     # What was signed is the receipt this deployment actually produces -- not a
-    # re-derivation, not a different document. Compared against the PROJECTION,
+    # re-derivation, not a different document. Compared against the SIGNED FORM,
     # because a whole-dict comparison against `build_assurance_receipt` cannot
     # succeed: `computed_at` is a wall clock and two builds are microseconds apart.
-    # That is the same reason the projection exists, not a concession to the test.
+    # That is the same reason the signed form leaves it out, not a concession to the
+    # test.
     assert signer.signed == receipt.signable_receipt(receipt.build_assurance_receipt(dep))
+    assert signer.signed["issued_at"] == "2026-01-02T03:04:05Z"
     # And the response serves the signed bytes themselves, not a second document.
     assert resp.data["receipt"] == signer.signed
 
@@ -382,23 +392,39 @@ def test_the_signed_bytes_do_not_deny_their_own_signature(monkeypatch):
         assert field not in signer.signed, f"{field} must not be inside the signed bytes"
 
 
-def test_the_same_state_signs_to_the_same_bytes(monkeypatch):
-    """The route's whole claim for signing on read instead of storing is that an
-    unchanged deployment yields the same envelope every time -- which is what makes
-    "did anything change?" answerable by comparing two envelopes. `computed_at`
-    alone would break it, and the break would be invisible: every envelope verifies
-    fine, they just never match."""
+def test_the_same_state_signs_to_the_same_digest_and_differs_only_by_its_time(monkeypatch):
+    """Two signings of an unchanged deployment carry ONE DIGEST, and differ by the
+    time each was issued and by nothing else.
+
+    This used to be `test_the_same_state_signs_to_the_same_bytes`, and it pinned the
+    signed document as identical on every read. Ed25519 is deterministic, so the
+    envelope was identical too: a signed `ready` from before a regression was, byte
+    for byte, the signature the same state would get today, and a retired key goes on
+    verifying it for ever. That was the defect (docs/receipt-spec/v4.0.md, sections 1
+    and 10), pinned in place as a guarantee.
+
+    This is the truth that replaces it, not a relaxation of it. The question the old
+    test protected -- "did anything change?" -- is answered by `digest`, which no
+    clock enters and which this still pins exactly, against the unsigned copy's too.
+    What moved is the one member that must: `issued_at`, asserted to be exactly the
+    backend's clock at each signing. Every other member of the two signed documents
+    is still asserted equal."""
     signer = _Signer()
     _engine(monkeypatch, signer)
     dep = _deployment(_user())
 
+    monkeypatch.setattr(receipt, "_utc_now", lambda: _HELD)
     first = _fetch(dep, _user("a")).data["receipt"]
+    monkeypatch.setattr(receipt, "_utc_now", lambda: _HELD + timedelta(days=30))
     second = _fetch(dep, _user("b")).data["receipt"]
 
-    assert first == second
-    # Not vacuous: the full payload DOES carry the field that would have broken it.
-    # Asserting two builds' clocks differ would itself be a test that can fail for
-    # the wrong reason, so the claim is made structurally instead.
+    assert first["digest"] == second["digest"] == receipt.build_assurance_receipt(dep)["digest"]
+    assert (first["issued_at"], second["issued_at"]) == ("2026-01-02T03:04:05Z", "2026-02-01T03:04:05Z")
+    assert {k: v for k, v in first.items() if k != "issued_at"} == {
+        k: v for k, v in second.items() if k != "issued_at"
+    }
+    # The render clock is still not what is signed: the full payload carries it, the
+    # signed form carries the issue time instead.
     assert "computed_at" in receipt.build_assurance_receipt(dep)
     assert "computed_at" not in first
 
@@ -440,7 +466,8 @@ def test_the_unsigned_reason_points_at_the_signed_copy():
 def test_the_projection_keeps_everything_else():
     """It is a projection, not a rewrite: one dict comprehension over a deny-list,
     so a field added to the receipt tomorrow is signed without anyone remembering
-    to add it here."""
+    to add it here -- plus the one member the signed form adds, the time it is
+    issued (4.1)."""
     full = {
         "a": 1,
         "digest": "d",
@@ -452,7 +479,11 @@ def test_the_projection_keeps_everything_else():
         # from NOT_SIGNED_OVER changed nothing here.
         "unsigned_reason": "because",
     }
-    assert receipt.signable_receipt(full) == {"a": 1, "digest": "d"}
+    assert receipt.signable_receipt(full, issued_at=_HELD) == {
+        "a": 1,
+        "digest": "d",
+        "issued_at": "2026-01-02T03:04:05Z",
+    }
 
 
 def test_the_route_is_actually_routed():

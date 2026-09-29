@@ -28,7 +28,10 @@ The Assurance Receipt as a standard (commercial spine)
 :func:`build_assurance_receipt` lifts the bare deployment digest into a
 **versioned, documented, portable** assurance receipt — the roadmap tuple made
 machine-readable: *system X, version Y, validated against policy Z, evidence set
-E, time T, environment C, result R*. It binds, into one deterministic payload:
+E, time T, environment C, result R*. Time T is the signed form's ``issued_at``
+(4.1): when this backend handed the receipt to be signed, inside the signature and
+outside the digest (:func:`signable_receipt`). Before 4.1 nothing signed carried a
+time at all. It binds, into one deterministic payload:
 
 - the **version** of the receipt standard (:data:`RECEIPT_VERSION`), so a
   consumer knows exactly which schema it is reading;
@@ -112,6 +115,7 @@ import base64
 import binascii
 import hashlib
 import json
+from datetime import UTC, datetime
 
 from django.utils import timezone
 
@@ -150,20 +154,29 @@ NOT_SIGNED_OVER = ("computed_at", "signed", "signature", "unsigned_reason")
 #: a reader comparing the signed copy against the unsigned one will find fields
 #: missing and is owed the reason without reading this source file.
 NOT_SIGNED_OVER_REASON = (
-    "`computed_at` is a wall clock outside the digest: signing it would make two "
-    "signatures over the SAME assurance state differ, so 'has anything changed?' "
-    "could no longer be answered by comparing envelopes. `signed`, `signature` and "
-    "`unsigned_reason` are a document's self-report about whether it is signed, "
-    "which is false the moment it is signed -- whether an artifact carries a "
-    "signature is a property of the envelope around it, not a claim the content "
-    "can make about itself. Neither group is inside `digest`, so the signed copy "
-    "and the unsigned one carry the identical `digest` and are checkably the same "
-    "assurance state."
+    "`computed_at` is when the unsigned copy was rendered, and nothing signs it. The "
+    "signed copy carries its own time instead: `issued_at`, when this backend handed "
+    "it to be signed, inside the signature and outside `digest`. So two signings of "
+    "the SAME assurance state carry the same `digest` and differ by their `issued_at` "
+    "alone: 'has anything changed?' is answered by comparing digests, and 'when was "
+    "this issued?' by the signed time. `signed`, `signature` and `unsigned_reason` are "
+    "a document's self-report about whether it is signed, which is false the moment "
+    "it is signed -- whether an artifact carries a signature is a property of the "
+    "envelope around it, not a claim the content can make about itself. None of these "
+    "is inside `digest`, so the signed copy and the unsigned one carry the identical "
+    "`digest` and are checkably the same assurance state."
 )
+
+#: What the signed form carries that the full form does not: the time it was issued
+#: (4.1), stamped by :func:`signable_receipt` when this backend hands the receipt to
+#: be signed. Inside the signature, OUTSIDE ``digest``: the same state digests the
+#: same whenever it is signed. Not in the full form, which nothing signs.
+SIGNED_FORM_ONLY = ("issued_at",)
 
 # The version of the Assurance Receipt standard this module emits. A stable
 # string a consumer keys on to know which schema (below) it is reading; bump it
-# only when the stable, hashed shape of the receipt changes.
+# when the receipt's shape changes: MAJOR for hashed content, MINOR for what sits
+# outside the digest (3.1, 4.1).
 #   1.1 — added the pinned evaluator ``policy_version`` to the hashed content, so
 #         the receipt records not just the declared boundary ("policy Z") but the
 #         rule set the decision was actually made under.
@@ -188,7 +201,17 @@ NOT_SIGNED_OVER_REASON = (
 #         counts. MAJOR, for the reason 2.0 was: it is new HASHED content, so a 3.1
 #         digest and a 4.0 digest of the same state differ, and a consumer comparing
 #         them has to be told the shapes are not the same.
-RECEIPT_VERSION = "mythos.assurance.receipt/4.0"
+#   4.1 — the signed form carries ``issued_at``, the time this backend handed it to
+#         be signed, inside the signature and OUTSIDE the digest
+#         (:data:`SIGNED_FORM_ONLY`). MINOR, by the rule 3.1 set: no hashed member
+#         was added, removed or retyped. One hashed VALUE does move: the version
+#         string is itself hashed, so the 4.1 digest of a state is its 4.0 digest
+#         with ``receipt_version`` changed. At 3.1 two moved -- the policy pin then
+#         embedded the stamped version, so ``policy_version`` moved too -- and
+#         "IDENTICAL" above was true of neither. :data:`HASHED_CONTENT_VERSION` is
+#         why it is one now.
+RECEIPT_VERSION = "mythos.assurance.receipt/4.1"
+_VERSION_4_0 = "mythos.assurance.receipt/4.0"
 _VERSION_3_1 = "mythos.assurance.receipt/3.1"
 _VERSION_3_0 = "mythos.assurance.receipt/3.0"
 _VERSION_2_0 = "mythos.assurance.receipt/2.0"
@@ -200,8 +223,17 @@ _VERSION_2_0 = "mythos.assurance.receipt/2.0"
 # is the lookup; :data:`RECEIPT_SCHEMA` stays the current one so existing
 # callers are unaffected.
 SUPERSEDED_VERSIONS = (
-    "mythos.assurance.receipt/1.1", _VERSION_2_0, _VERSION_3_0, _VERSION_3_1,
+    "mythos.assurance.receipt/1.1", _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0,
 )
+
+#: The version that introduced the HASHED content this module emits: 4.0, which added
+#: ``chains``. A MINOR step changes only what sits outside the digest, so it leaves
+#: this where it is; a MAJOR step moves it. :mod:`assurance.policy` pins THIS as its
+#: ``evaluator_standard``, not :data:`RECEIPT_VERSION`. The policy pin is what every
+#: claim and stored decision is bound to, and pinning the stamped version made 4.1 --
+#: a signed time, no rule touched -- move it: every claim superseded as "Assurance
+#: policy changed" and every stored decision recomputed, for a change to no policy.
+HASHED_CONTENT_VERSION = _VERSION_4_0
 
 
 def _digest(payload: dict) -> str:
@@ -298,7 +330,8 @@ def deployment_receipt(deployment) -> dict:
 # descriptions) rather than a full validator: it travels with the receipt so a
 # consuming system can introspect the fields without parsing this docstring. It
 # describes the CANONICAL, HASHED content plus the two metadata fields that ride
-# outside the hash (``digest`` itself and ``computed_at``).
+# outside the hash (``digest`` itself and ``computed_at``), and the signed form's
+# ``issued_at`` (:data:`SIGNED_FORM_ONLY`), which the full form does not carry.
 RECEIPT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": RECEIPT_VERSION,
@@ -634,14 +667,29 @@ RECEIPT_SCHEMA = {
             "type": "string",
             "description": (
                 "The top-level SHA-256 over every field above except algorithm, "
-                "digest, computed_at and the signature fields -- reproducible, no "
-                "timestamp inside. This is the value a signature is taken over."
+                "digest, computed_at, issued_at and the signature fields -- "
+                "reproducible, no timestamp inside. This is the value a signature is "
+                "taken over."
             ),
         },
         "computed_at": {
             "type": "string",
             "format": "date-time",
             "description": "When this receipt was rendered — metadata only, OUTSIDE the digest.",
+        },
+        "issued_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+            "description": (
+                "SIGNED FORM ONLY, from 4.1: when this backend handed the receipt to be "
+                "signed, by its own clock -- RFC 3339, UTC, whole seconds. Inside the "
+                "signature and OUTSIDE the digest, so the same state digests the same "
+                "whenever it is signed and two signings of it differ by this alone. The "
+                "issuer's clock, not proof of when the state held: a reader applies its "
+                "own freshness policy. The full form does not carry it; nothing signs "
+                "that copy, and its computed_at is when it was rendered."
+            ),
         },
         "signed": {
             "type": "boolean",
@@ -706,6 +754,8 @@ _VERSION_1_1 = "mythos.assurance.receipt/1.1"
 
 #: What each version added, newest first.
 _ADDED_IN = (
+    # 4.1: the signed form's issue time, outside the digest.
+    (_VERSION_4_0, {"fields": SIGNED_FORM_ONLY, "coverage": ()}),
     # 4.0: the chain composition.
     (_VERSION_3_1, {"fields": ("chains",), "coverage": ()}),
     # 3.1: whether the receipt is signed, outside the digest.
@@ -760,6 +810,7 @@ def _schema_before(version: str) -> dict:
     }
 
 
+_SCHEMA_4_0 = _schema_before(_VERSION_4_0)
 _SCHEMA_3_1 = _schema_before(_VERSION_3_1)
 _SCHEMA_3_0 = _schema_before(_VERSION_3_0)
 _SCHEMA_2_0 = _schema_before(_VERSION_2_0)
@@ -767,6 +818,7 @@ _SCHEMA_1_1 = _schema_before(_VERSION_1_1)
 
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_4_0: _SCHEMA_4_0,
     _VERSION_3_1: _SCHEMA_3_1,
     _VERSION_3_0: _SCHEMA_3_0,
     _VERSION_2_0: _SCHEMA_2_0,
@@ -969,7 +1021,9 @@ def build_assurance_receipt(deployment) -> dict:
     (*system, version, policy, evidence, time, environment, result*) as one
     deterministic, portable, signable payload. See :data:`RECEIPT_SCHEMA` for the
     machine-readable shape and the module docstring for what it does and does not
-    attest.
+    attest. The *time* is the signed form's: :func:`signable_receipt` stamps
+    ``issued_at`` when the receipt is handed to be signed. This full form carries no
+    signed time -- its ``computed_at`` is when it was rendered, and nothing signs it.
 
     It attests **integrity and provenance** — that this is the assurance state
     that was recorded, unaltered — and never that the conclusions are true or the
@@ -1297,24 +1351,48 @@ def envelope_over(document: dict, envelope: object) -> dict:
     return envelope
 
 
-def signable_receipt(receipt: dict) -> dict:
-    """The projection of an Assurance Receipt that a signature covers.
+def _utc_now() -> datetime:
+    """This backend's clock, in UTC. A function of its own so a test can hold it."""
+    return datetime.now(UTC)
+
+
+def _issue_time(moment: datetime) -> str:
+    """``moment`` as ``issued_at`` is written: RFC 3339, UTC, whole seconds, ``Z``.
+
+    A naive datetime names no instant -- read as local time it would sign a time
+    off by the host's offset -- so it is refused rather than guessed."""
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("an issue time must be an aware datetime; a naive one names no instant")
+    return moment.astimezone(UTC).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
+
+
+def signable_receipt(receipt: dict, *, issued_at: datetime | None = None) -> dict:
+    """The form of an Assurance Receipt that a signature covers: the receipt less
+    :data:`NOT_SIGNED_OVER`, plus the time it is issued (:data:`SIGNED_FORM_ONLY`).
 
     ``build_assurance_receipt`` returns a payload built for a human auditor
     holding the JSON and nothing else, so it carries two things a signature must
-    not: the wall clock it was computed at, and its own report of whether it is
+    not: the wall clock it was rendered at, and its own report of whether it is
     signed. Signing the whole dict would produce an artifact whose signed bytes
     say ``"signed": false`` -- a signature over the assertion that there is no
-    signature -- and an envelope that differs on every read of an unchanged
-    deployment, which destroys the one comparison an envelope is good for.
+    signature.
 
-    Both excluded groups are already OUTSIDE ``digest``, which is computed over
-    the stable content alone. So this projection carries the same ``digest`` as
-    the full payload: the signed copy and the copy served by ``assurance-receipt``
-    are checkably the same assurance state, and an auditor can hold either.
+    What it did not carry, until 4.1, was ANY time under the signature: the render
+    clock was dropped and nothing replaced it, so one state signed to the same
+    bytes on every day, and a retired key goes on verifying what it signed. A
+    signed ``ready`` from before a regression verified for ever. So this stamps
+    ``issued_at`` -- ``issued_at`` if given, else this backend's clock now, which on
+    the signed route is the moment the receipt is handed to the engine -- inside
+    the signature. It is the issuer's clock, not proof of when the state held; a
+    reader applies its own freshness policy.
 
-    Deterministic by construction: two calls to ``build_assurance_receipt`` for an
-    unchanged deployment differ only in ``computed_at``, so their projections are
-    equal, and the engine returns the same envelope for both.
+    Every excluded member, and ``issued_at``, is OUTSIDE ``digest``, which is
+    computed over the stable content alone. So this form carries the same
+    ``digest`` as the full payload -- the signed copy and the copy served by
+    ``assurance-receipt`` are checkably the same assurance state -- and two
+    signings of an unchanged deployment carry one digest and differ by their
+    ``issued_at`` alone.
     """
-    return {k: v for k, v in receipt.items() if k not in NOT_SIGNED_OVER}
+    signable = {k: v for k, v in receipt.items() if k not in NOT_SIGNED_OVER}
+    signable["issued_at"] = _issue_time(_utc_now() if issued_at is None else issued_at)
+    return signable
