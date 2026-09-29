@@ -269,7 +269,9 @@ refuses every write records no stop (each answers 500 and claims nothing). A pau
 cannot land while the transition log cannot be read or the decision cannot be
 written; the failsafe relay still does. A take-down while the decision cannot be
 written, or its transition log read, lands, but leaves the stored decision as it was
-until the next refresh.
+until the next refresh. An engine answer that holds readable findings beside rows
+this side cannot read ingests the readable ones and drops the rest uncounted, so
+one `info` finding beside unreadable rows reads `ready`.
 
 ## Tests
 

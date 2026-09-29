@@ -147,6 +147,7 @@ FAULTS = (
     # The engine's scan signals.
     "engine-unreachable",
     "engine-answers-garbage",
+    "engine-answers-partly-garbage",
     "engine-answers-slowly",
     # The composition rule the chains are read through.
     "composition-raises",
@@ -204,6 +205,10 @@ WHAT = {
     "engine-answers-garbage": (
         "the engine's scan answer is a findings list holding nothing this side can read "
         "(rows that are not objects), ingested as a completed scan"
+    ),
+    "engine-answers-partly-garbage": (
+        "the engine's scan answer is a findings list holding one readable finding (info) beside "
+        "rows this side cannot read, ingested as a completed scan"
     ),
     "engine-answers-slowly": f"every request to the engine answers only after {ENGINE_HANG_S:.0f} s, then times out",
     "composition-raises": "the rule the workflow chains compose by raises (RuntimeError)",
@@ -278,6 +283,18 @@ _INHERENT = (
     "nothing. What keeps stops landing is that nothing holds the write lock long "
     "(tests/test_nothing_that_watches_holds_back_a_stop.py); the engine's own stops -- its "
     "failsafe, its scan abort -- write nothing here"
+)
+
+
+_PARTLY_UNREADABLE = (
+    LEFT_OUT,
+    "high (honesty): the readable row is ingested and the unreadable ones are dropped uncounted, "
+    "so the answer reads as a clean completed scan -- ready (probe: one info row beside two "
+    "unreadable rows, on a deployment nothing had assessed; one low row beside them reads "
+    "ready_restricted). Counting them as partial evidence is a decision this slice does not make: "
+    "the cap that exists, evidence_incomplete, says in its name, help text and note that the scan "
+    "stopped before it finished, and a field of its own is a migration. The same defect as "
+    "coverage-record-corrupted, in the findings rows",
 )
 
 
@@ -419,6 +436,12 @@ MATRIX: dict[str, dict[str, tuple[str, str]]] = {
         ),
         "recompute": (CLOSED, "not yet assessed (was fail-OPEN: ready)"),
         "receipt": (CLOSED, "not yet assessed (was fail-OPEN: ready)"),
+        **_stops(),
+    },
+    "engine-answers-partly-garbage": {
+        "decision-support": _PARTLY_UNREADABLE,
+        "recompute": _PARTLY_UNREADABLE,
+        "receipt": _PARTLY_UNREADABLE,
         **_stops(),
     },
     "engine-answers-slowly": {
@@ -762,10 +785,13 @@ class Chaos:
                 a_year_ago = self.t0 - timedelta(days=365)
                 ConnectorBinding.objects.filter(deployment=dep).update(updated_at=a_year_ago)
                 PostureBinding.objects.filter(deployment=dep).update(updated_at=a_year_ago)
-        elif fault == "engine-answers-garbage":
+        elif fault in ("engine-answers-garbage", "engine-answers-partly-garbage"):
+            rows = ["not a finding", 7, None]
+            if fault == "engine-answers-partly-garbage":
+                rows = [{"type": "t", "title": "info one", "severity": "info"}, "not a finding", 7]
             scan = PentestScan.objects.create(
                 user=self.admin, target_url=TARGET, consent=True, status=PentestScan.STATUS_COMPLETED,
-                engine_response={"findings": ["not a finding", 7, None]},
+                engine_response={"findings": rows},
             )
             ingest_scan(scan, deployment=Deployment.objects.get(pk=dep.pk))
         elif fault == "composition-raises":
@@ -1148,6 +1174,7 @@ TAKE_DOWN = {
     "keyring-unreadable": ("recomputed", None),
     "engine-unreachable": ("recomputed", None),
     "engine-answers-garbage": ("recomputed", None),
+    "engine-answers-partly-garbage": ("recomputed", None),
     "engine-answers-slowly": ("recomputed", None),
     "composition-raises": ("held", "could not be recomputed (RuntimeError)"),
     "coverage-record-corrupted": ("recomputed", None),
