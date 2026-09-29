@@ -445,6 +445,28 @@ def accepted_risk_signal(deployment: Deployment, *, now) -> dict:
     }
 
 
+def decision_now(deployment: Deployment):
+    """The moment ``deployment``'s decision is judged at: the clock, but never earlier
+    than the moment its own record was last written (``updated_at``).
+
+    Time moves the decision where no write does -- a risk accepted until a moment that
+    has passed -- so the decision reads the clock, and a clock that steps back (an NTP
+    correction, a machine restored from a snapshot, a host set wrong) used to take the
+    decision back with it: an acceptance the record had already seen lapse, and had
+    recorded the lapse of, read as standing again, and a recompute wrote READY_RESTRICTED
+    over the NEEDS_MORE_EVIDENCE it had recorded. Every write of the record stamps
+    ``updated_at`` with the clock as it read then -- the decision's own write among
+    them (:func:`assurance.revision._write`) -- so no moment the record has been
+    judged at is ever judged again as not yet reached. A clock read ahead only makes
+    an acceptance lapse early, which holds the decision back, never lifts it.
+
+    A step back that nothing wrote across is not seen: the record holds no later
+    moment to be held to."""
+    now = timezone.now()
+    written = getattr(deployment, "updated_at", None)
+    return written if written is not None and written > now else now
+
+
 def _acceptance_covers(finding: Finding) -> bool:
     """Whether the severity accepted covers the finding's severity now. An
     acceptance that recorded none covers nothing, and a severity this platform does
@@ -554,7 +576,7 @@ def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING, now=No
         # is what closes the tear. A census read later would describe a
         # different moment from the composition it is published beside.
         chain_provenance=read_chain_provenance(deployment),
-        accepted_risk=accepted_risk_signal(deployment, now=now or timezone.now()),
+        accepted_risk=accepted_risk_signal(deployment, now=now or decision_now(deployment)),
     )
 
 
@@ -735,6 +757,10 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
     from .revision import published_decision
 
     with transaction.atomic():
+        # The pin of the rules the parts are read under, taken before them: a rule
+        # that moved while they were read is not named beside a decision it did not
+        # compute (see recompute_decision).
+        pin = policy_pin(deployment)
         parts = read_decision_parts(deployment)
         # Read inside the same transaction as the parts, so the revision names the
         # moment the parts describe rather than a later one. The pause is the
@@ -909,7 +935,7 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         "paused": paused,
         # The assurance policy this decision is made under — pinned so a later
         # change to the rules can tell whether the policy still holds.
-        "policy_version": policy_pin(deployment),
+        "policy_version": pin,
         "claims": {
             "has_claims": signal["has_claims"],
             "retest_pending": signal["retest_pending"],
@@ -936,6 +962,21 @@ class TransactionLostInHook(Exception):
     runs the recompute again without it."""
 
 
+#: Where a stored decision is held when it could not be recomputed
+#: (``recompute_decision(unrecomputed=...)``): the state this vocabulary already reads
+#: an input nobody can read as -- a declared precondition that cannot be read, or
+#: whose evaluation failed, caps here too (:data:`CLAIM_CAPS`). The vocabulary has no
+#: "could not be computed" of its own, and READY_RESTRICTED or READY would be a
+#: decision nothing computed. Not the worst state: that would say something was
+#: found, and nothing was.
+UNRECOMPUTED_HOLD = Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+#: What the policy column of a decision held that way holds, before why: never a
+#: policy stamp (``<pin>@r<revision>``), so every publishing read recomputes it
+#: (:func:`current_decision`) and it stands only until one can.
+UNRECOMPUTED_PREFIX = "unrecomputed:"
+
+
 def recompute_decision(
     deployment: Deployment,
     *,
@@ -944,6 +985,7 @@ def recompute_decision(
     claim: str | None = None,
     after_claim: str | None = None,
     also_in_transaction=None,
+    unrecomputed: str | None = None,
 ) -> str | None:
     """Compute and persist the deployment's decision. Returns the new decision
     (``None`` for a deployment neither findings nor claims have assessed).
@@ -993,6 +1035,16 @@ def recompute_decision(
     swallowed error there left the outer block to roll back SILENTLY, undoing a
     pause the route then reported as done -- this raises
     :class:`TransactionLostInHook` instead of committing, and nothing is written.
+
+    ``unrecomputed``: why the decision could not be computed, for a stop that has
+    landed while the recompute of the decision it moved failed (a claim taken down,
+    ``assurance.views._take_down``). Nothing is read and no rule applied: the decision
+    is held at :data:`UNRECOMPUTED_HOLD`, or where it stands if that is worse -- a
+    pause stays a pause, a NOT_RECOMMENDED is not lifted -- so it is never READY and
+    never better than before. Its policy column names why (:data:`UNRECOMPUTED_PREFIX`)
+    and is never a stamp, so the first publishing read recomputes it, and while that
+    cannot either the read fails rather than publish a decision nothing computed.
+    Through this writer, as every write of the decision columns is.
     """
     from . import observed_outcomes
     from .revision import accept_transition, decision_in_force
@@ -1017,8 +1069,23 @@ def recompute_decision(
         # computed under the old keys was stamped as current under the new ones.
         # Read once, so the decision and the moment it stops holding come from the
         # same reading. A pause reads nothing, and nothing about it expires.
-        parts = None if hold_pause else read_decision_parts(locked, keyring=keyring)
-        decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
+        #
+        # The rules' pin likewise, and BEFORE any rule is applied: the stamp names the
+        # rules the decision was read under. Taken after, a rule that moved during the
+        # evaluation stamped a decision the old rules computed as the new rules' own,
+        # and every publishing read served it as current -- a READY_RESTRICTED the
+        # rules in force hold at needs-remediation. Taken before, the stamp names the
+        # rules it read, and a publishing read recomputes it under the ones in force.
+        #
+        # A decision held where no recompute could reach (`unrecomputed`) reads no input
+        # and no rule, as a pause does not.
+        reads = not hold_pause and unrecomputed is None
+        pin = _current_policy_pin() if reads else None
+        parts = read_decision_parts(locked, keyring=keyring) if reads else None
+        if unrecomputed is not None:
+            decision = Deployment.Decision.PAUSED if hold_pause else _worse(in_force.decision, UNRECOMPUTED_HOLD)
+        else:
+            decision = compute_decision(locked, paused=hold_pause, parts=parts, keyring=keyring)
         moved = accept_transition(locked, to_decision=decision, in_force=in_force)
         Deployment.objects.filter(pk=locked.pk).update(
             # Marked as this release's (`keyring_stamp`): the release before rewrites
@@ -1028,8 +1095,12 @@ def recompute_decision(
             decision_valid_until=parts.accepted_risk["valid_until"] if parts is not None else None,
             # The rules this was computed under, AND the revision it stands at. Kept
             # recognisable, no stamp: the claim's token for a claim, else nothing --
-            # which takes any claim's token away with it.
-            decision_policy=claim if keep_foreign else policy_stamp(moved["revision"]),
+            # which takes any claim's token away with it. A held decision names why.
+            decision_policy=(
+                f"{UNRECOMPUTED_PREFIX}{unrecomputed}"[:80]
+                if unrecomputed is not None
+                else claim if keep_foreign else policy_stamp(moved["revision"], pin=pin)
+            ),
         )
         if also_in_transaction is not None:
             try:
@@ -1047,6 +1118,17 @@ def recompute_decision(
     # reading -- so publishing this instance next asks the log nothing.
     deployment.logged_revision = deployment.decision_revision
     return decision
+
+
+def hold_unrecomputed(deployment: Deployment, *, reason: str) -> str | None:
+    """Hold ``deployment``'s stored decision where a recompute could not reach it, and
+    return the decision held: the one writer's ``unrecomputed`` move
+    (:func:`recompute_decision`), which reads no input and applies no rule.
+
+    Its own name because it is not the refresh: a take-down whose recompute failed
+    holds the decision through this, and the recompute's failure -- a table the
+    decision reads that cannot be read, a rule that raises -- is not this one's."""
+    return recompute_decision(deployment, unrecomputed=reason)
 
 
 def _current_policy_pin() -> str:
@@ -1363,7 +1445,7 @@ def current_decision(deployment: Deployment) -> str | None:
     # the stamp: read first, a decision another writer left was recomputed here --
     # and stamped -- without the watches that writer made true being read.
     valid_until = getattr(deployment, "decision_valid_until", None)
-    if valid_until is not None and timezone.now() >= valid_until:
+    if valid_until is not None and decision_now(deployment) >= valid_until:
         recompute_decision(deployment)
         return deployment.decision
     if deployment.decision_keyring == keyring_stamp(observed_outcomes.keyring_fingerprint()):

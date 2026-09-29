@@ -119,17 +119,26 @@ def _checks_section(deployment: Deployment) -> dict[str, Any]:
     this module exists to prevent, so the flag is first in the dict and the
     counts are all None when it is False.
     """
-    stored = deployment.check_coverage if isinstance(deployment.check_coverage, dict) else {}
+    raw = deployment.check_coverage
+    stored = raw if isinstance(raw, dict) else {}
     rows = stored.get("checks")
     unreadable = stored.get("unreadable")
     unreadable = unreadable if isinstance(unreadable, int) and unreadable > 0 else 0
-    if not isinstance(rows, list):
-        rows = []
-    # Defensive, and asymmetrically so on purpose: `check_coverage` is type-guarded
-    # above but nothing guarded its rows, so a fixture load, a data migration or a
-    # shell session could put a string in the list and crash the decision, the
-    # receipt and the API on a `.get`.
-    rows = [r for r in rows if isinstance(r, dict)]
+    # A stored record this side cannot read -- a fixture load, a data migration or a
+    # shell session can put anything in the column -- is a record of checks whose
+    # outcome is unknown, and it is COUNTED, as `_reported_checks` counts an engine's
+    # row it cannot read. It used to be dropped: a record whose every row had become
+    # a string read as "no engine reported", which caps nothing, and the gap a
+    # readable record held the decision at read READY. Never a crash on a `.get`
+    # either: only the rows that are objects are read.
+    if raw and not isinstance(raw, dict):
+        unreadable += 1
+    if rows is not None and not isinstance(rows, list):
+        unreadable += 1
+    rows = rows if isinstance(rows, list) else []
+    readable = [r for r in rows if isinstance(r, dict)]
+    unreadable += len(rows) - len(readable)
+    rows = readable
     if not rows and not unreadable:
         return {
             "reported": False,

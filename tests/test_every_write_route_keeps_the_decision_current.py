@@ -13,7 +13,9 @@ A route that MOVES the decision is performed, and then every surface that publis
 the decision must publish one -- and a different one from before, so the agreement
 is not the vacuous kind. It is performed again with the refresh made to fail, and
 the write must not be recorded: that is what "in the same transaction" means, and
-it is the only outside view of it.
+it is the only outside view of it. The one exception is a stop that is not the
+decision's own write -- a claim taken down -- which lands with the decision held
+where the refresh could not reach it: no stop is dropped for its decision.
 
 A route that CANNOT move the decision says why, and is performed with every model
 the decision is computed from watched: it must write none of them.
@@ -590,12 +592,26 @@ def test_a_route_that_moves_the_decision_leaves_every_surface_on_the_new_one(rou
     assert after != before, f"the write did not move the decision ({before}), so this proved nothing"
 
 
+#: The routes in MOVES whose write is a stop (safety.stops) that is not the decision's
+#: own write: a claim taken down. No stop is dropped for the decision it moves.
+TAKE_DOWNS = frozenset({("ClaimViewSet", "transition", "post")})
+
+
 @pytest.mark.parametrize("route", sorted(MOVES), ids=lambda r: f"{r[0]}.{r[1]}.{r[2]}")
 def test_a_write_whose_refresh_fails_is_not_recorded(route, monkeypatch):
     """The write and the refresh are one transaction: a refresh that fails (a lock
     timeout, "database is locked") takes the write with it. A write that stood
     without its refresh is the stale decision this file is about, and one a signed
-    outcome's retry could never repair -- the envelope is refused as a replay."""
+    outcome's retry could never repair -- the envelope is refused as a replay.
+
+    Except a take-down. A claim revoked or contradicted is a stop, and this test held
+    that a contradiction whose refresh failed was not recorded: the stop dropped
+    behind a 500 by a read it never needed (the Phase 4 chaos suite,
+    tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py). It lands, and the
+    decision it moved, which could not be recomputed, is held where the refresh did
+    not reach -- never READY, and not the decision from before it -- until the first
+    read that can recomputes it. The pause is in MOVES too, and is the decision's own
+    write: nothing of it stands without it."""
     from assurance import views
 
     dep, write = MOVES[route]()
@@ -608,10 +624,20 @@ def test_a_write_whose_refresh_fails_is_not_recorded(route, monkeypatch):
     real = views.recompute_decision
     monkeypatch.setattr(views, "recompute_decision", fails)
     client.raise_request_exception = False
-    assert write(client).status_code == 500
+    answer = write(client)
     # Put back by hand: `monkeypatch.undo()` would also withdraw the keyring the
     # fixture configured, and move every signed chain's decision with it.
     monkeypatch.setattr(views, "recompute_decision", real)
+    if route in TAKE_DOWNS:
+        assert answer.status_code == 200, answer.content
+        body = answer.json()
+        assert body["decision_recomputed"] is False, body
+        assert body["decision"] not in (Deployment.Decision.READY, Deployment.Decision.READY_RESTRICTED), body
+        after = one_decision(dep, client)
+        assert after != before
+        assert after not in (Deployment.Decision.READY, Deployment.Decision.READY_RESTRICTED)
+        return
+    assert answer.status_code == 500
     assert one_decision(dep, client) == before
 
 
