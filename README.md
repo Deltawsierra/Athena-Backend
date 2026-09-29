@@ -211,7 +211,9 @@ superseded version keeps what it carried when it was closed.
 
 `confidence_basis` says what the number is. With a number, it gives mythos-core's
 basis line, the evidence class and the table. With no number, it starts `none: `
-and says why.
+and says why. The evidence audit served with a claim says the same of the
+confidence of the reading under a hold (`base_confidence`, beside
+`base_confidence_basis`).
 
 Migration `assurance.0048` recomputes the stored confidence of every claim still
 believed, and the base confidence under every evidence hold. It leaves superseded

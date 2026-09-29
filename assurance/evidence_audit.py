@@ -112,7 +112,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .change import EVIDENCE_TTL_DAYS
-from .claim_confidence import claim_confidence
+from .claim_confidence import claim_confidence, confidence_basis
 from .models import AssuranceClaim, ClaimEvent, ClaimEvidence, ClaimVerdict, EvidenceClass
 
 Status = AssuranceClaim.ClaimStatus
@@ -1107,6 +1107,12 @@ def served_audit(claim: AssuranceClaim) -> dict:
     audit["audit_current"] = not why
     if why:
         audit["not_current_reason"] = why
+    if "base_confidence" in audit:
+        # The confidence the reading under a hold carries is served like every other
+        # confidence: with what it is (assurance.claim_confidence).
+        audit["base_confidence_basis"] = confidence_basis(
+            audit.get("base_status") or "", claim.evidence_class, audit["base_confidence"]
+        )
     return audit
 
 

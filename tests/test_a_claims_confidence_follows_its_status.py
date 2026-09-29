@@ -229,6 +229,24 @@ def test_every_confidence_is_served_with_its_basis():
     assert (detail["confidence"], detail["confidence_basis"]) == (data["confidence"], data["confidence_basis"])
 
 
+@pytest.mark.django_db
+def test_the_confidence_under_an_evidence_hold_is_served_with_its_basis_too():
+    """The served evidence audit carries the confidence of the reading under a hold
+    (``base_confidence``); it is served with what it is, as the claim's own is.
+    Before, a bare number there too."""
+    from assurance import evidence_audit as ea
+    from tests.test_spine_evidence_audit import _good
+
+    claim = _access_claim(_deployment("held-basis"))
+    ea.record_claim_evidence(claim, **_good(claim, outcome="fail"))
+    served = _served(claim)
+    audit = served["evidence_audit"]
+    assert audit["held"] is True and served["confidence"] is None
+    assert audit["base_confidence"] == _strength(CONFIGURATION_VERIFIED)
+    assert audit["base_confidence_basis"].startswith(core_evidence.CLASS_BASIS)
+    assert f"{CONFIGURATION_VERIFIED!r}" in audit["base_confidence_basis"]
+
+
 def test_the_basis_says_why_there_is_none_and_never_calls_a_stray_number_the_tables():
     from assurance.claim_confidence import confidence_basis
 
