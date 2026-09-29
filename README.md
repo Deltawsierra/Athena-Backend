@@ -187,8 +187,9 @@ deployment's `assurance-claims/`) carries a `confidence` and, beside it, a
 `confidence_basis`. The confidence is not a probability that the claim is true.
 It is the ordinal strength of the weakest class of evidence supporting the claim,
 as mythos-core's evidence-class table gives it
-(`mythos_core.evidence.strength_from_evidence_class`, Mythos-Core#31). Every Mythos
-engine reads that one table, and only the order of its values means anything.
+(`mythos_core.evidence.strength_from_evidence_class`, Mythos-Core#31). mythos-core
+keeps that table once for the whole platform, and only the order of its values
+means anything.
 This service used to compute the number with a formula of its own,
 `max(0.1, 1.0 - 0.12 * rank)`. The table has the same values, so no derived
 claim's number changed.
@@ -221,9 +222,10 @@ versions as they were closed. Rolling it back does nothing.
 
 The rank a finding's weakest evidence is taken by
 (`assurance.models.evidence_strength`) and the qualitative reading of a class
-(Observed, Inferred, Hypothesized, Unknown) come from the same table. The assurance policy pins the
-table's order of the classes, so a change to that order moves the policy pin. The
-order is the one this service kept before, so the pin did not move.
+(Observed, Inferred, Hypothesized, Unknown) come from the same table. The
+assurance policy pins the table's order of the classes, so a change to that order
+moves the policy pin. The order is the one this service kept before, so the pin
+did not move.
 
 ## Tests
 
