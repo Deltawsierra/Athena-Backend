@@ -16,7 +16,9 @@ Three parts:
   contradiction/unknown; a declared fact that breaks a declared rule is
   CONTRADICTED; an undeclared/unassessed input is UNKNOWN; ``confidence`` is
   ``None`` for UNKNOWN (never ``0``); ``evidence_class`` is the weakest supporting
-  class; and a claim resting on vendor assertions caps at SUPPORTED.
+  class; and a claim resting on vendor assertions caps at SUPPORTED. The
+  confidence is mythos-core's strength for that class, and follows the status
+  whoever sets it (:mod:`assurance.claim_confidence`).
 
 - **:func:`derive_claims`** — the idempotent, transactional reconciler. For each
   deriver it computes the stable identity fingerprint and the current system
@@ -67,6 +69,7 @@ from .bom_drift import assess_bom_drift
 from .boundary import assess_boundary
 from .capability import RISK_HIGH
 from .change import EVIDENCE_TTL_DAYS, age_days
+from .claim_confidence import claim_confidence
 from .fingerprint import (
     claim_input_fingerprints,
     claim_state_moved,
@@ -122,18 +125,6 @@ def _grade_pool(classes: list[str]) -> tuple[str, str | None, bool]:
     strongest = min(classes, key=evidence_strength)
     vendor = evidence_strength(strongest) >= evidence_strength(EvidenceClass.VENDOR_ASSERTED.value)
     return weakest, strongest, vendor
-
-
-def _confidence(status: str, evidence_class: str) -> float | None:
-    """Confidence in the positive claim, derived from how strongly it is supported.
-
-    ``None`` whenever the claim is not standing on supporting evidence — for
-    UNKNOWN (invariant 2: never ``0`` as a pass) and for CONTRADICTED (a false
-    statement has no supporting confidence). Otherwise a value in (0, 1] that falls
-    as the weakest supporting evidence weakens — never zero."""
-    if status not in (Status.SUPPORTED, Status.VERIFIED, Status.PARTIALLY_VERIFIED):
-        return None
-    return round(max(0.1, 1.0 - 0.12 * evidence_strength(evidence_class)), 2)
 
 
 def _clip(text: str, limit: int = 500) -> str:
@@ -208,7 +199,7 @@ def _derive_data_boundary(deployment) -> dict:
         "status": status.value,
         "evidence_class": evidence_class,
         "vendor_asserted": vendor_asserted,
-        "confidence": _confidence(status, evidence_class),
+        "confidence": claim_confidence(status, evidence_class),
         "assessment": deployment.decision,
         "supporting_summary": _clip(supporting),
         "contradicting_summary": _clip(" ".join(contradicting_bits)),
@@ -409,7 +400,7 @@ def _derive_effective_access(deployment) -> dict:
         "status": status.value,
         "evidence_class": evidence_class,
         "vendor_asserted": vendor_asserted,
-        "confidence": _confidence(status, evidence_class),
+        "confidence": claim_confidence(status, evidence_class),
         "assessment": deployment.decision,
         "supporting_summary": _clip(supporting),
         "contradicting_summary": _clip(" ".join(contradicting_bits)),
@@ -488,7 +479,7 @@ def _derive_ai_bom(deployment) -> dict:
         "status": status.value,
         "evidence_class": evidence_class,
         "vendor_asserted": vendor_asserted,
-        "confidence": _confidence(status, evidence_class),
+        "confidence": claim_confidence(status, evidence_class),
         "assessment": deployment.decision,
         "supporting_summary": _clip(supporting),
         "contradicting_summary": _clip(" ".join(contradicting_bits)),
@@ -589,22 +580,24 @@ def _make_claim(
     holds nothing (nothing ranks below a stop)."""
     status = derived["status"]
     note = "Derived"
-    confidence = derived["confidence"]
     audit_event = None
     if carried is not None:
         stop_event, _carried_from = carried
         status = stop_event.to_status
-        confidence = _confidence(status, derived["evidence_class"])
     elif audited is not None and audited["held"]:
-        # The confidence the reading would carry with no evidence: a release
-        # restores no more than this (assurance.evidence_audit.audit_claim).
-        audited = {**audited, "base_confidence": derived["confidence"]}
+        # The confidence the reading under the hold carries -- the one it would carry
+        # with no evidence recorded, read for its status like every confidence
+        # (assurance.claim_confidence) -- recorded with the hold.
+        audited = {**audited, "base_confidence": claim_confidence(audited["base_status"], derived["evidence_class"])}
         audit_event = (status, audited["status"], ea.audit_note(audited))
         status = audited["status"]
-        confidence = _confidence(status, derived["evidence_class"])
     if carried is None and held and _held_status(status) != status:
         status = _held_status(status)
         note = f"Derived; {_HELD}."
+    # The confidence of the status the version opens at -- the deriver's, the audit's
+    # hold, a fired condition's STALE, or a person's stop carried to it -- and never
+    # the deriver's for a status the version does not open at.
+    confidence = claim_confidence(status, derived["evidence_class"])
     legal = {} if legal_status is None else {"legal_status": legal_status}
     verdict = {} if audited is None else ea.audit_columns(audited)
     claim = AssuranceClaim.objects.create(
@@ -841,14 +834,15 @@ def _refresh_machine_fields(
     claim.statement = derived["statement"]
     claim.evidence_class = derived["evidence_class"]
     claim.vendor_asserted = derived["vendor_asserted"]
-    claim.confidence = derived["confidence"]
     if audited is not None:
         if audited["held"]:
-            audited = {**audited, "base_confidence": derived["confidence"]}
+            # The confidence the reading under the hold carries -- the deriver's, or
+            # a person's status standing on this version -- recorded with the hold.
+            audited = {
+                **audited,
+                "base_confidence": claim_confidence(audited["base_status"], derived["evidence_class"]),
+            }
         ea.store_audit(claim, audited)
-        if audited["held"]:
-            # The evidence holds the claim back: no supporting confidence above it.
-            claim.confidence = _confidence(audited["status"], derived["evidence_class"])
     elif audit_context is not None and claim.evidence_audit:
         # Nothing recorded against this identity any more: no verdict to carry.
         ea.store_audit(claim, None)
@@ -861,10 +855,14 @@ def _refresh_machine_fields(
     claim.last_seen = now
     claim.expiration = now + timedelta(days=EVIDENCE_TTL_DAYS)
 
-    if new_status in ea.STOPS:
-        # A stop -- the deriver's or a person's standing on this version -- carries
-        # no confidence (see :func:`_take_down`).
-        claim.confidence = None
+    # The confidence of the status the claim reads after this refresh, whoever set
+    # it (assurance.claim_confidence). A person's status standing on this version
+    # carries the strength for ITS status: it used to be given the deriver's
+    # confidence for the deriver's status, so a person's SUPPORTED over a derived
+    # CONTRADICTED read None and a person's UNKNOWN over a derived VERIFIED read
+    # 0.88. An evidence hold, a fired condition's STALE and a stop -- the deriver's
+    # or a person's (see :func:`_take_down`) -- carry none.
+    claim.confidence = claim_confidence(new_status, derived["evidence_class"])
     status_changed = new_status != old_status
     if status_changed:
         claim.status = new_status
@@ -894,13 +892,17 @@ def record_retroactive_claim(
     status,
     evidence_class,
     subject=None,
-    confidence=None,
     vendor_asserted=False,
     supporting_summary="",
     contradicting_summary="",
     now=None,
 ) -> AssuranceClaim:
     """Record something learned NOW about a window that has already closed.
+
+    Its confidence is read for its status and evidence class like every claim's
+    (:mod:`assurance.claim_confidence`). It used to take a ``confidence=`` argument,
+    a number the caller typed in beside the evidence class it contradicted or
+    repeated; no caller passed one, and none can now.
 
     The case the single temporal axis could not express: an audit log arrives
     late, a provider discloses a configuration that was in force last week, a
@@ -945,7 +947,7 @@ def record_retroactive_claim(
         environment=deployment.environment,
         status=status,
         evidence_class=evidence_class,
-        confidence=confidence,
+        confidence=claim_confidence(status, evidence_class),
         vendor_asserted=vendor_asserted,
         supporting_summary=supporting_summary,
         contradicting_summary=contradicting_summary,
@@ -1050,7 +1052,10 @@ def _mark_stale(deployment, now) -> int:
         if days is not None and days >= EVIDENCE_TTL_DAYS:
             old_status = claim.status
             claim.status = Status.STALE
-            claim.save(update_fields=["status", "updated_at"])
+            # Expired evidence supports nothing now: the confidence of the status
+            # written (none), never the one the claim carried before it expired.
+            claim.confidence = claim_confidence(claim.status, claim.evidence_class)
+            claim.save(update_fields=["status", "confidence", "updated_at"])
             ClaimEvent.objects.create(
                 claim=claim,
                 from_status=old_status,
@@ -1692,30 +1697,30 @@ def _move_reading(claim: AssuranceClaim, to_status, audited, *, actor, note: str
     evidence audit of it (``audited``, or None where nothing was recorded).
 
     Where the evidence holds ``to_status`` back -- a downgrade under a hold, which is
-    never refused -- the claim stands where the audit holds it, the person's status
-    is the reading under the hold, and the hold keeps the confidence the reading had
-    before the move (a release restores no more than that). The person's event is
-    followed by the audit's own, so the history shows the person's reading and then
-    what the evidence held it at, and the hold is never read as the person's."""
+    never refused -- the claim stands where the audit holds it, and the person's
+    status is the reading under the hold. The person's event is followed by the
+    audit's own, so the history shows the person's reading and then what the evidence
+    held it at, and the hold is never read as the person's.
+
+    The confidence is the one the status the claim now stands at carries -- the
+    person's, or the hold's -- for the claim's evidence class
+    (:mod:`assurance.claim_confidence`), and the hold records the one the person's
+    reading carries, which is what a release lands on. It used to be written only
+    where a hold moved the status, so a person's move left the confidence the claim
+    had before it: a claim moved to UNKNOWN kept the deriver's 0.88, and one moved
+    back to SUPPORTED over a derived CONTRADICTED read None. Neither reading is above
+    the same move with no evidence recorded: that move reads the confidence of the
+    person's status, and a hold reads that of a status no higher."""
     from_status = claim.status
-    was_held = ea.reading_status(claim) != from_status
-    reading_confidence = (claim.evidence_audit or {}).get("base_confidence") if was_held else claim.confidence
     new_status = to_status.value
-    fields = ["status", "updated_at"]
+    fields = ["status", "confidence", "updated_at"]
     held = audited is not None and audited["held"]
     if held:
-        audited = {**audited, "base_confidence": reading_confidence}
+        audited = {**audited, "base_confidence": claim_confidence(audited["base_status"], claim.evidence_class)}
         new_status = audited["status"]
     if audited is not None:
         fields += ea.store_audit(claim, audited)
-    if held and new_status != from_status:
-        claim.confidence = _confidence(new_status, claim.evidence_class)
-        fields.append("confidence")
-    elif not held and was_held:
-        # The hold is released onto the person's reading: no more confidence than
-        # the reading carried before the hold.
-        claim.confidence = ea._no_more_than(_confidence(new_status, claim.evidence_class), reading_confidence)
-        fields.append("confidence")
+    claim.confidence = claim_confidence(new_status, claim.evidence_class)
     claim.status = new_status
     if new_status == Status.VERIFIED:
         claim.verified_at = now

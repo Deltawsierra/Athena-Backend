@@ -421,7 +421,11 @@ _GOVERNING = [
     # what an unsigned basis counts as. A reordered severity scale moved the decision
     # of the same stored inputs and left the pin where it was.
     ("assurance.models", "SEVERITY_ORDER", None),
-    ("assurance.models", "EVIDENCE_STRENGTH_ORDER", None),
+    # The evidence-class order a finding's weakest evidence is read with is
+    # mythos-core's table (P2.7): assurance.models.evidence_strength reads each rank
+    # from it at every call, so it is that tuple the pin must move with -- not the
+    # copy assurance.models takes of it at import, which nothing ranks with.
+    ("mythos_core.evidence", "EVIDENCE_CLASSES", None),
     ("assurance.composition", "READINESS_ORDER", None),
     ("assurance.composition", "_RANK", None),
     ("assurance.workflow_chains", "READINESS_ORDER", None),

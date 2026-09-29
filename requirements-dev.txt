@@ -29,8 +29,8 @@ pytest-django>=4.8
 # sessions -- the remote answers 403 for refs/tags/*; see Mythos-Core#10). What
 # the pins since 539538c added is written out beside the pin in requirements.txt:
 # Mythos-Core#24 to #36, the outcome verifier (#27, #28, #34) and the
-# evidence-class table (#31) chief among them for this service. This pin and
-# the one in requirements.txt must name
+# evidence-class table claims read their confidence from (#31) chief among them
+# for this service. This pin and the one in requirements.txt must name
 # the SAME commit -- two files that can drift apart would install two different
 # foundations for the same service, and tests/test_mythos_core_pin.py fails if
 # they ever disagree.

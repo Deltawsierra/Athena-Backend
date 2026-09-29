@@ -35,6 +35,7 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from mythos_core.evidence import strength_from_evidence_class
 from rest_framework.test import APIClient
 
 from assurance import evidence_audit as ea
@@ -52,7 +53,6 @@ from assurance.models import (
     LatentCondition,
     Provider,
     ProviderAssertion,
-    evidence_strength,
 )
 from tests.test_spine_evidence_audit import (
     _access_claim,
@@ -191,18 +191,22 @@ def test_a_re_derive_under_a_fired_condition_keeps_the_reading_under_an_evidence
 
 
 def test_a_released_hold_never_carries_more_confidence_than_the_reading_had():
-    """A person's SUPPORTED over a deriver's UNKNOWN carries no confidence. Held by
-    a failure and released by an invalidation, it came back with 0.28: confidence
-    the evidence put there, which no evidence at all would not have."""
+    """A person's SUPPORTED over a deriver's UNKNOWN carries the strength of its
+    evidence class, as the same SUPPORTED carries it with no evidence recorded (P2.7:
+    a confidence follows the status a person sets). Held by a failure it carries
+    none; released by an invalidation it comes back with the control's -- never
+    more. Before P2.7 the person's SUPPORTED carried none, and the release came
+    back with 0.28 above it: confidence the evidence put there."""
     _, control = _person_supported("conf-control")
-    assert control.confidence is None
+    assert control.confidence == strength_from_evidence_class(control.evidence_class)
 
     _, claim = _person_supported("conf-held")
     fail = _record(claim, outcome=V.FAIL.value)
+    assert claim.status == Status.CONTRADICTED and claim.confidence is None
     ea.invalidate_claim_evidence(fail, actor=_user("releaser"), reason="probe hit staging")
     claim.refresh_from_db()
     assert claim.status == control.status == Status.SUPPORTED
-    assert claim.confidence is None
+    assert claim.confidence == control.confidence
 
     # And a derived VERIFIED keeps its own confidence through a hold and release.
     verified = _access_claim(_deployment("conf-verified"))
@@ -571,7 +575,8 @@ def test_the_ai_bom_claim_takes_no_stronger_evidence_than_the_assertions_source_
     bom = _current(claim.deployment, ClaimType.AI_BOM)
     assert bom.evidence_class == evidence_class
     assert bom.vendor_asserted is vendor_asserted
-    assert bom.confidence == pytest.approx(round(1.0 - 0.12 * evidence_strength(evidence_class), 2))
+    # The strength mythos-core's class table gives the capped class, and no other.
+    assert bom.confidence == strength_from_evidence_class(evidence_class)
 
 
 def test_a_weaker_label_is_never_raised_by_a_strong_source():

@@ -161,9 +161,10 @@ zopfli==0.2.3.post1
 #
 # Mythos-Core#31 -- mythos_core.evidence holds the evidence-class table: the rank
 # of each class, its ordinal strength, its qualitative reading and CLASS_BASIS.
-# This service still computes a claim's confidence and ranks evidence classes
-# with a copy of its own (assurance.claims._confidence, assurance.models
-# .evidence_strength); roadmap P2.7 retires that copy for this table.
+# This service computed a claim's confidence and ranked evidence classes with a
+# copy of its own; it reads all of them from that table now (roadmap P2.7:
+# assurance/claim_confidence.py, assurance.models.evidence_strength), and the
+# assurance policy pins the table's order of the classes.
 #
 # Mythos-Core#32, #33, #36 -- failsafe fixes on the engine side: the control poll
 # reaches a control plane on a private address, a terminate's attestation leaves
