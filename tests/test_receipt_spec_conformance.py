@@ -68,6 +68,7 @@ from assurance.models import (
 )
 from assurance.views import DeploymentViewSet, FindingViewSet
 from tests.decision_surfaces import stamped_under_the_rules_in_force
+from tests.receipt_schema_reading import shapes_read
 
 ROOT = Path(__file__).resolve().parent.parent
 VERIFIER_PATH = ROOT / "tools" / "verify_receipt.py"
@@ -118,8 +119,17 @@ VECTORS = (
     ("signed 4.1 receipt, issued longer ago than --max-age", "stale", True),
     ("signed 4.0 receipt, which carries no issue time", "verified", False),
     ("signed 4.0 receipt under --max-age", "no_signed_time", True),
+    # Every version ever emitted reads back: generated from git, at the commits that
+    # emitted them (tests/fixtures/receipts), never typed in.
+    ("1.0 unsigned copy, as #27 emitted it", "unsigned", False),
+    ("2.0 unsigned copy, as #56 emitted it", "unsigned", False),
+    ("2.0 unsigned copy, as #67 emitted it", "unsigned", False),
+    ("a signed claim of a 2.0 receipt, a version no route ever signed", "never_signed", False),
     ("an evidence hash altered after the receipt was issued", "evidence_mismatch", False),
 )
+
+#: The old-version vectors: what each commit's own route emitted (generate.py).
+RECEIPT_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "receipts"
 
 #: The backend's clock, held while the vectors are signed.
 ISSUED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -314,11 +324,13 @@ def _class_of(refused: receipt.NotAnEnvelope) -> str:
     return "not_an_envelope"
 
 
-def _backend_on_receipt(document: dict, form: str) -> str | None:
+def _backend_on_receipt(document: dict, form: str, signed_claim: bool = False) -> str | None:
     try:
         schema = receipt.receipt_schema(document.get("receipt_version"))
     except receipt.UnknownReceiptVersion:
         return "unknown_version"
+    if signed_claim and document["receipt_version"] in receipt.NEVER_SIGNED:
+        return "never_signed"
     defined, required = set(schema["properties"]), set(schema["required"])
     # What the signed form adds (4.1: the issue time), where this version defines it.
     signed_only = set(receipt.SIGNED_FORM_ONLY) & defined
@@ -332,6 +344,10 @@ def _backend_on_receipt(document: dict, form: str) -> str | None:
     for name, rule in schema["properties"].items():
         if "const" in rule and name in document and document[name] != rule["const"]:
             return "malformed"
+    # One level into each object member, and 2.0's coverage exactly one of the two
+    # shapes 2.0 was emitted in.
+    if shapes_read(schema, document) is None:
+        return "malformed"
     outside = ("algorithm", "digest", *receipt.NOT_SIGNED_OVER, *receipt.SIGNED_FORM_ONLY)
     hashed = {k: v for k, v in document.items() if k not in outside}
     if receipt._digest(hashed) != document["digest"]:
@@ -359,7 +375,7 @@ def _backend(artifact: bytes, *, sent: dict | None = None, evidence_of: Deployme
             receipt.envelope_over(document, envelope)
         except receipt.NotAnEnvelope as refused:
             return _class_of(refused)
-    answer = _backend_on_receipt(document, form)
+    answer = _backend_on_receipt(document, form, signed_claim=envelope is not None)
     if answer is None and evidence_of is not None:
         stored = receipt.deployment_receipt(
             Deployment.objects.prefetch_related("findings__evidence").get(pk=evidence_of.pk)
@@ -451,6 +467,16 @@ def vectors(monkeypatch):
 
     four_oh = _edited(signed, as_four_oh)
 
+    # The old versions, as their commits emitted them (tests/fixtures/receipts).
+    def emitted(directory: str) -> bytes:
+        return (RECEIPT_FIXTURES / directory / "assurance-receipt.json").read_bytes()
+
+    as_27, as_56, as_67 = emitted("pr27-673a40b"), emitted("pr56-fdf77bf"), emitted("pr67-87e83e7")
+    # #67's 2.0 receipt in its signed form, genuinely signed by the key the keyring
+    # trusts and served as the signed route serves one: only its version is wrong.
+    two_oh = {k: v for k, v in json.loads(as_67).items() if k != "computed_at"}
+    signed_two_oh = _edited(signed, lambda r: r.update(receipt=two_oh, envelope=_sign(_engine_bytes(two_oh), signer)))
+
     evidence = _evidence_file(dep, reader)
     built = {
         "signed receipt": Vector(signed, _backend(signed), ring),
@@ -490,6 +516,18 @@ def vectors(monkeypatch):
             four_oh, _backend(four_oh), ring, shows="issued at not signed (4.0)"
         ),
         "signed 4.0 receipt under --max-age": Vector(four_oh, _backend(four_oh), ring, max_age=3600),
+        "1.0 unsigned copy, as #27 emitted it": Vector(
+            as_27, _backend(as_27), shows="receipt   mythos.assurance.receipt/1.0, as emitted by #27 (673a40b)"
+        ),
+        "2.0 unsigned copy, as #56 emitted it": Vector(
+            as_56, _backend(as_56), shows="receipt   mythos.assurance.receipt/2.0, as emitted by #56 (fdf77bf)"
+        ),
+        "2.0 unsigned copy, as #67 emitted it": Vector(
+            as_67, _backend(as_67), shows="receipt   mythos.assurance.receipt/2.0, as emitted by #67 (87e83e7)"
+        ),
+        "a signed claim of a 2.0 receipt, a version no route ever signed": Vector(
+            signed_two_oh, _backend(signed_two_oh), ring
+        ),
     }
     # Last, because it changes the stored evidence: the receipt was issued before.
     stored = Evidence.objects.get(finding__deployment=dep, content_hash="2" * 64)
@@ -652,6 +690,28 @@ def test_the_spec_is_the_version_the_code_emits_and_names_every_version_it_reads
         assert (version in verifier._ISSUED) == issues, version
         assert f"`{version}`" in text, version
 
+    # Who emitted each shape, what each lacks, 2.0's two coverages and the versions no
+    # route ever signed: the verifier's tables are the backend's, shape for shape.
+    assert set(verifier.NEVER_SIGNED) == set(receipt.NEVER_SIGNED)
+    assert len(verifier.EMITTED) == len(receipt.EMITTED_AS)
+    for (version, shape), emitted_as in verifier.EMITTED.items():
+        key = receipt._VERSION_2_0_AS_56 if shape == "#56" else version
+        assert receipt.EMITTED_AS[key] == emitted_as, (version, shape)
+    branches = receipt.receipt_schema("mythos.assurance.receipt/2.0")["properties"]["coverage"]["oneOf"]
+    by_pr = {branch["title"].split(" as emitted by ", 1)[1].split(" ", 1)[0]: branch for branch in branches}
+    assert {pr: set(members) for pr, members in verifier.COVERAGE_2_0.items()} == {
+        pr: set(branch["required"]) for pr, branch in by_pr.items()
+    }
+    shapes = list(verifier.EMITTED)
+    for version, shape in shapes:
+        said = receipt.receipt_schema(version).get("lacks", [])
+        if shape == "#56":
+            said = [*by_pr["#56"]["lacks"], *said]
+        later = shapes[shapes.index((version, shape)) + 1:]
+        assert [(list(verifier.ADDED[newer][0]), verifier.ADDED[newer][1]) for newer in later] == [
+            (lack["members"], lack["means"]) for lack in said
+        ], (version, shape)
+
 
 def _schema_paths(schema: dict, prefix: str = "") -> list[str]:
     paths = []
@@ -703,11 +763,13 @@ def test_every_version_the_backend_describes_is_read_and_one_it_does_not_is_refu
     """Section 8. An older receipt is the current one without what every later version
     added -- exactly how ``receipt_schema`` derives the older schemas -- digested by the
     backend's own ``_digest``. The verifier reads each, and refuses it only for being
-    unsigned, as every copy of that age is.
+    unsigned, as every copy of that age is. (The genuine receipts the old commits
+    emitted are vectors above, generated from git; these are derived.)
 
-    1.0 is the other half: #27 served it, #42 replaced it, and the registry has never
-    described it since. The backend refuses to describe it and the verifier refuses to
-    read it -- a refusal, never a misreading, and the gap the hand-back names."""
+    1.0 is among them now. #27 served it, #42 replaced it, and until the receipts #27
+    emitted were read back from git no registry described it: the backend refused to
+    describe it and the verifier to read it. What stays refused is a version NOTHING
+    emitted -- 1.2, between 1.1 and 2.0 -- by both, and never read as the nearest one."""
     reader = _user("auditor")
     current = json.loads(_served(_deployment(reader), "assurance_receipt", reader))
 
@@ -728,9 +790,8 @@ def test_every_version_the_backend_describes_is_read_and_one_it_does_not_is_refu
         assert (answer.verified, answer.reason) == (False, "unsigned"), (version, answer.lines)
         assert _backend(json.dumps(older).encode()) == "unsigned", version
 
-    one_zero = as_of("mythos.assurance.receipt/1.0", receipt.receipt_schema("mythos.assurance.receipt/1.1"))
-    one_zero.pop("policy_version")
-    one_zero["digest"] = receipt._digest({k: v for k, v in one_zero.items() if k not in verifier.OUTSIDE_DIGEST})
+    never = as_of("mythos.assurance.receipt/1.2", receipt.receipt_schema("mythos.assurance.receipt/1.1"))
     with pytest.raises(receipt.UnknownReceiptVersion):
-        receipt.receipt_schema("mythos.assurance.receipt/1.0")
-    assert verifier.verify(json.dumps(one_zero).encode()).reason == "unknown_version"
+        receipt.receipt_schema("mythos.assurance.receipt/1.2")
+    assert verifier.verify(json.dumps(never).encode()).reason == "unknown_version"
+    assert _backend(json.dumps(never).encode()) == "unknown_version"
