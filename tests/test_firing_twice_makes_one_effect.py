@@ -107,14 +107,19 @@ _KEY_LAYER = (
 MATRIX = {
     "engine-scan-start": Boundary(
         "POST /api/pentest/scan/: a PentestScan row, then the engine's POST /api/scan -- a scan "
-        "of the customer's live system -- and the report e-mailed",
+        "of the customer's live system -- and the report e-mailed; and POST "
+        "/api/pentest/scans/<uuid>/reconcile/, which sends a launch whose answer was lost again",
         "none: every request made a row and started an engine scan",
-        _KEY_LAYER,
+        _KEY_LAYER + "; and every engine launch of a scan carries the scan's own Idempotency-Key "
+        "(PentestScan.launch_key), which athena-engine #77 answers once",
         "with the key: one row, one engine scan, one e-mail; the replay answers what the first "
-        "was answered (Idempotent-Replayed). Without a key: unchanged -- a retry scans again",
+        "was answered (Idempotent-Replayed). Without a key: unchanged -- a retry scans again. A "
+        "launch whose engine answer was lost is UNKNOWN, and a reconcile sent again and again "
+        "adopts the first launch's run: one engine scan",
         (
             "test_a_scan_launch_replayed_with_its_key_starts_one_engine_scan",
             "test_a_scan_launch_whose_engine_answer_was_lost_is_not_launched_again_by_its_replay",
+            "test_a_lost_launch_reconciled_again_and_again_scans_the_customer_once",
             "test_a_scan_replayed_after_its_engagement_was_withdrawn_starts_nothing",
             "test_a_scan_replayed_by_an_account_demoted_since_is_refused_before_any_record",
             "test_the_same_key_with_another_request_is_refused_and_starts_nothing",
@@ -122,6 +127,16 @@ MATRIX = {
             "test_a_launch_that_raised_before_it_recorded_an_answer_reads_as_unknown",
             "test_a_scan_launch_without_a_key_is_unchanged_and_its_retry_scans_again",
         ),
+    ),
+    "engine-scan-stop": Boundary(
+        "A scan's Stop: the engine's POST /api/scans/{run_id}/abort for exactly the scan's run -- "
+        "from POST /api/pentest/scans/<uuid>/stop/, from a launch or reconcile that names the run a "
+        "Stop is owed on, and from manage.py deliver_owed_stops",
+        "none: no scan Stop existed",
+        "none: a stop is never deduplicated (safety.stops); the engine's abort of one run by its id "
+        "is safe to send again, and carries no Idempotency-Key",
+        "each Stop sends the abort for that run again, and only for that run: never abort-all",
+        ("test_a_scan_stop_sent_twice_is_sent_to_its_run_each_time",),
     ),
     "engine-llm-scan-start": Boundary(
         "POST /api/pentest/llm-scan/: a PentestScan row, then the engine's POST /api/llm-scan -- a "
@@ -321,7 +336,8 @@ SITES = {
     "pentest/views.py::run_llm_pentest_scan::PentestScan.objects.create": "engine-llm-scan-start",
     "pentest/views.py::run_llm_pentest_scan::run_llm_scan": "engine-llm-scan-start",
     "pentest/views.py::run_pentest_scan::PentestScan.objects.create": "engine-scan-start",
-    "pentest/views.py::run_pentest_scan::run_scan": "engine-scan-start",
+    "pentest/views.py::_send_launch::run_scan": "engine-scan-start",
+    "pentest/views.py::_send_stop::abort_scan": "engine-scan-stop",
     "pentest/views_llm.py::PentestLLMScanView.post::PentestScan.objects.create": "llm-scan-view-unrouted",
     "pentest/views_llm.py::PentestLLMScanView.post::run_llm_scan": "llm-scan-view-unrouted",
 }
@@ -489,21 +505,29 @@ class FakeEngine:
         self.during = {}
         self.defend = None
         self.scan_answer = _recorded_scan_answer()
+        #: As athena-engine #77 keeps them: each Idempotency-Key's recorded answer to a
+        #: scan launch, given again, marked replayed, to the same key.
+        self.keys = {}
+        #: The runs this engine started, by id (the scans of the customer), and the
+        #: headers of every request, by method and path.
+        self.runs = {}
+        self.headers = []
 
     def count(self, method, path):
         return sum(1 for m, p, _ in self.calls if (m, p) == (method, path))
 
     def post(self, url, json=None, headers=None, timeout=None, **_kwargs):  # noqa: A002 - requests' own name
-        return self._answer("POST", url, json)
+        return self._answer("POST", url, json, headers)
 
     def get(self, url, headers=None, timeout=None, params=None, **_kwargs):
-        return self._answer("GET", url, None)
+        return self._answer("GET", url, None, headers)
 
-    def _answer(self, method, url, body):
+    def _answer(self, method, url, body, headers=None):
         if not url.startswith(self.base):
             raise requests.ConnectionError(f"nothing is reachable from this test: {url}")
         path = url[len(self.base):].split("?")[0]
         self.calls.append((method, path, body))
+        self.headers.append((method, path, dict(headers or {})))
         if path in self.during:
             self.during.pop(path)()
         if path == "/defend":
@@ -512,14 +536,31 @@ class FakeEngine:
             return self.defend()
         if (method, path) in self.lost:
             # The request arrived and was acted on; its answer never came back.
+            self._route(method, path, headers)
             raise rex.ReadTimeout("the engine's answer never came back")
-        return self._route(method, path)
+        return self._route(method, path, headers)
 
-    def _route(self, method, path):
+    def _route(self, method, path, headers=None):
         if (method, path) == ("POST", "/api/scan"):
+            key = (headers or {}).get("Idempotency-Key")
+            if key in self.keys:
+                return _http(200, copy.deepcopy(self.keys[key]), {"Idempotent-Replayed": "true"})
             answer = copy.deepcopy(self.scan_answer)
             answer["run_id"] = str(uuid.uuid4())
+            self.runs[answer["run_id"]] = copy.deepcopy(answer)
+            if key is not None:
+                self.keys[key] = copy.deepcopy(answer)
             return _http(200, answer)
+        if method == "GET" and path.removeprefix("/api/scans/") in self.runs:
+            return _http(200, self.runs[path.removeprefix("/api/scans/")])
+        if method == "POST" and path.startswith("/api/scans/") and path.endswith("/abort"):
+            run = self.runs.get(path.removeprefix("/api/scans/").removesuffix("/abort"))
+            if run is None:
+                return _http(404, {"detail": "No such scan run"})
+            if run["state"] in ("completed", "failed", "aborted"):
+                return _http(200, {"run_id": run["run_id"], "state": run["state"], "detail": "not running"})
+            run["state"] = "aborting"
+            return _http(200, {"run_id": run["run_id"], "state": "aborting", "reason": "x", "recorded": True})
         if (method, path) == ("POST", "/api/llm-scan"):
             return _http(200, {"results": [{"type": "system_prompt_extraction", "severity": "high",
                                             "message": "the system prompt was disclosed"}]})
@@ -780,9 +821,10 @@ def test_a_scan_launch_replayed_with_its_key_starts_one_engine_scan(engine, scan
 
 def test_a_scan_launch_whose_engine_answer_was_lost_is_not_launched_again_by_its_replay(engine, scan_path):
     """A retry after a lost acknowledgement: the engine took the launch and its answer
-    never came back. The route records what it can (the scan's failure, with its
-    reason -- tests/test_compounding.py pins that a lost answer closes the row) and the
-    replay answers that record: it never launches a second scan."""
+    never came back. The route records what it knows -- whether the engine started a
+    run is unknown (#363: it was recorded FAILED, which licenses a second launch) --
+    and the replay answers that record: it never launches a second scan. The engine
+    was sent the scan's own key, which is how a reconcile asks it what became of it."""
     analyst = _user()
     client = _client(analyst)
     body = _scan_body(_engagement(analyst))
@@ -791,11 +833,47 @@ def test_a_scan_launch_whose_engine_answer_was_lost_is_not_launched_again_by_its
     first = client.post(SCAN_URL, body, format="json", **{KEY: "lost-1"})
     replay = client.post(SCAN_URL, body, format="json", **{KEY: "lost-1"})
 
-    assert first.status_code == 502
+    assert first.status_code == 202, first.content
+    assert first.json()["status"] == PentestScan.STATUS_UNKNOWN
     assert engine.count("POST", "/api/scan") == 1, "a retry after a lost answer launched a second scan"
-    assert replay.status_code == 502
+    assert replay.status_code == 202
     assert replay.json() == first.json()
-    assert PentestScan.objects.count() == 1
+    (scan,) = PentestScan.objects.all()
+    assert scan.status == PentestScan.STATUS_UNKNOWN
+    assert [h.get("Idempotency-Key") for m, p, h in engine.headers if (m, p) == ("POST", "/api/scan")] == [
+        scan.launch_key
+    ]
+
+
+def test_a_lost_launch_reconciled_again_and_again_scans_the_customer_once(engine, scan_path):
+    """The engine took the launch and its answer was lost; the first reconcile's answer
+    is lost too; the second is read. Three sends of the same launch, each with the
+    scan's own key: one scan of the customer (one run), which is adopted, and the scan
+    completes with that run's findings. Asked once more, nothing is sent."""
+    analyst = _user()
+    client = _client(analyst)
+    engine.lost.add(("POST", "/api/scan"))
+    first = client.post(SCAN_URL, _scan_body(_engagement(analyst)), format="json")
+    scan = PentestScan.objects.get(uuid=first.json()["scan_id"])
+    reconcile = f"/api/pentest/scans/{scan.uuid}/reconcile/"
+
+    again = client.post(reconcile, format="json")
+    engine.lost.clear()
+    read = client.post(reconcile, format="json")
+    after = client.post(reconcile, format="json")
+
+    assert (first.status_code, again.status_code, read.status_code, after.status_code) == (202, 202, 200, 409)
+    assert engine.count("POST", "/api/scan") == 3
+    assert len(engine.runs) == 1, "a reconcile scanned the customer a second time"
+    (run_id,) = engine.runs
+    assert {h.get("Idempotency-Key") for m, p, h in engine.headers if (m, p) == ("POST", "/api/scan")} == {
+        scan.launch_key
+    }
+    scan.refresh_from_db()
+    assert scan.status == PentestScan.STATUS_COMPLETED
+    assert scan.engine_run_id == run_id
+    assert read.json()["result"] == engine.runs[run_id]["result"]
+    assert mail.outbox == [], "a reconcile mailed the report the launch's request asked for"
 
 
 def test_a_scan_replayed_after_its_engagement_was_withdrawn_starts_nothing(engine, scan_path):
@@ -1151,6 +1229,34 @@ def test_a_pause_replayed_owes_one_dispatch_and_files_one_ticket(credential_key)
     dispatch.retry_owed_blocking_dispatches(transport_factory=lambda: tracker)
 
     assert tracker.creates == 1
+
+
+# ===========================================================================
+# engine-scan-stop
+# ===========================================================================
+
+
+def test_a_scan_stop_sent_twice_is_sent_to_its_run_each_time(engine):
+    """A stop is never deduplicated: each Stop sends the abort for the scan's run again
+    -- key or no key -- for that run only, never abort-all, and never with an
+    Idempotency-Key of its own."""
+    analyst = _user()
+    client = _client(analyst)
+    live = copy.deepcopy(engine.scan_answer)
+    live.update(run_id="run-live", state="running", done=False)
+    engine.runs["run-live"] = live
+    scan = PentestScan.objects.create(
+        user=analyst, target_url=TARGET, consent=True, status=PentestScan.STATUS_PENDING, engine_run_id="run-live"
+    )
+
+    first = client.post(f"/api/pentest/scans/{scan.uuid}/stop/", {}, format="json", **{KEY: "stop-1"})
+    second = client.post(f"/api/pentest/scans/{scan.uuid}/stop/", {}, format="json", **{KEY: "stop-1"})
+
+    assert (first.status_code, second.status_code) == (200, 200), (first.content, second.content)
+    aborts = [(p, h) for m, p, h in engine.headers if m == "POST" and "/abort" in p]
+    assert [p for p, _ in aborts] == ["/api/scans/run-live/abort"] * 2
+    assert not any("Idempotency-Key" in h for _, h in aborts)
+    assert second.json()["stop"]["state"] == "delivered"
 
 
 # ===========================================================================

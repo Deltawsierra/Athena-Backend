@@ -114,7 +114,7 @@ def test_a_scan_answer_cut_off_inside_a_string_is_refused_as_unreadable_at_once(
     in well under a millisecond, took 9 s at 64 KB."""
     body = SHAPES[shape]
     engine = CyberEngineClient("http://engine.invalid", "k")
-    engine._send_post = lambda path, payload: _response(200, body)
+    engine._send_post = lambda path, payload, headers=None: _response(200, body)
 
     def launch():
         with pytest.raises(EngineError) as raised:
@@ -237,7 +237,7 @@ def _reading_a_truncated_answer_on_another_thread():
     """Another thread of the worker reads a truncated 64 KB scan answer, as E2's did.
     Returns (thread, started event)."""
     engine = CyberEngineClient("http://engine.invalid", "k")
-    engine._send_post = lambda path, payload: _response(200, _captured_page(64 * KB))
+    engine._send_post = lambda path, payload, headers=None: _response(200, _captured_page(64 * KB))
     started = threading.Event()
     box = {}
 

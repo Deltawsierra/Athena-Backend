@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from ai_engine.services.cyberengine_client import ENGINE_UNREACHABLE, EngineError
+from ai_engine.services.cyberengine_client import ENGINE_UNREACHABLE, EngineError, LaunchOutcomeUnknown
 from pentest import views
 from pentest.models import Engagement, PentestScan
 
@@ -71,7 +71,15 @@ def side_effects():
         "completed": rows.filter(status=PentestScan.STATUS_COMPLETED).count(),
         "failed": rows.filter(status=PentestScan.STATUS_FAILED).count(),
         "pending": rows.filter(status=PentestScan.STATUS_PENDING).count(),
+        "unknown": rows.filter(status=PentestScan.STATUS_UNKNOWN).count(),
     }
+
+#: What CyberEngineClient.run_scan raises when the launch was sent and its answer
+#: never came back (a read timeout): the engine may have started a run (#363).
+READ_TIMED_OUT = LaunchOutcomeUnknown(
+    "The launch was sent and no answer came back (ReadTimeout): it may have reached the engine, "
+    "which may have started a run."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,19 +106,40 @@ def test_a_refused_authorisation_leaves_nothing_behind(
     )
 
     assert response.status_code == 403, label
-    assert side_effects() == {"rows": 0, "completed": 0, "failed": 0, "pending": 0}, label
+    assert side_effects() == {"rows": 0, "completed": 0, "failed": 0, "pending": 0, "unknown": 0}, label
 
 
-def test_an_engine_that_never_answers_leaves_a_failed_row_not_a_pending_one(
+def test_an_engine_that_never_answers_leaves_an_unknown_row_not_a_pending_or_failed_one(
     factory, analyst, engagement
 ):
     """
     A scan stuck in a non-terminal state is worse than no row: it says
     "still running" forever. The row is created before the request goes out,
     so it must be closed out on every path back.
+
+    An engine that never answered may have started the scan (#363): the row is
+    closed out as UNKNOWN, with its reason, never FAILED -- which licensed a
+    second launch -- and never left pending, which says it is running.
     """
     engine = mock.Mock()
-    engine.run_scan.side_effect = EngineError("Read timed out", kind=ENGINE_UNREACHABLE)
+    engine.run_scan.side_effect = READ_TIMED_OUT
+
+    response = launch(
+        factory, analyst,
+        {"url": IN_SCOPE, "consent": True, "engagement_id": engagement.pk},
+        engine=engine,
+    )
+
+    assert response.status_code == 202
+    assert response.data["status"] == PentestScan.STATUS_UNKNOWN
+    assert side_effects() == {"rows": 1, "completed": 0, "failed": 0, "pending": 0, "unknown": 1}
+
+
+def test_an_engine_that_could_not_be_reached_leaves_a_failed_row(factory, analyst, engagement):
+    """A launch that certainly never reached the engine -- the connection was never
+    made -- started nothing: FAILED, as it always was."""
+    engine = mock.Mock()
+    engine.run_scan.side_effect = EngineError("Engine unreachable: connection refused", kind=ENGINE_UNREACHABLE)
 
     response = launch(
         factory, analyst,
@@ -119,7 +148,7 @@ def test_an_engine_that_never_answers_leaves_a_failed_row_not_a_pending_one(
     )
 
     assert response.status_code == 502
-    assert side_effects() == {"rows": 1, "completed": 0, "failed": 1, "pending": 0}
+    assert side_effects() == {"rows": 1, "completed": 0, "failed": 1, "pending": 0, "unknown": 0}
 
 
 def test_an_engine_refusal_and_a_revocation_at_the_same_time(factory, analyst, engagement):
@@ -142,7 +171,7 @@ def test_an_engine_refusal_and_a_revocation_at_the_same_time(factory, analyst, e
     )
 
     assert response.status_code == 502
-    assert side_effects() == {"rows": 1, "completed": 0, "failed": 1, "pending": 0}
+    assert side_effects() == {"rows": 1, "completed": 0, "failed": 1, "pending": 0, "unknown": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +195,7 @@ def test_a_mixed_burst_answers_each_arm_the_way_it_would_alone(factory, analyst,
     def run_scan(_url, **_kwargs):
         mode = getattr(behaviour, "mode", "ok")
         if mode == "timeout":
-            raise EngineError("Read timed out", kind=ENGINE_UNREACHABLE)
+            raise READ_TIMED_OUT
         if mode == "refuse":
             return {"results": [{"type": "error", "message": "Refused by egress policy"}]}
         return {"results": [{"type": "info"}]}
@@ -181,7 +210,7 @@ def test_a_mixed_burst_answers_each_arm_the_way_it_would_alone(factory, analyst,
         arms.append(("no engagement", "ok", {"url": IN_SCOPE, "consent": True}, 403))
         arms.append(("malformed body", "ok", [], 400))
         arms.append(("engine timeout", "timeout", {"url": IN_SCOPE, "consent": True,
-                                                   "engagement_id": engagement.pk}, 502))
+                                                   "engagement_id": engagement.pk}, 202))
         arms.append(("engine refusal", "refuse", {"url": IN_SCOPE, "consent": True,
                                                   "engagement_id": engagement.pk}, 502))
         arms.append(("happy path", "ok", {"url": IN_SCOPE, "consent": True,
@@ -221,8 +250,10 @@ def test_a_mixed_burst_answers_each_arm_the_way_it_would_alone(factory, analyst,
     state = side_effects()
     assert state["pending"] == 0, "a scan was left in a non-terminal state"
     assert state["completed"] == 4, state
-    # Four timeouts and four engine refusals, each of which records a failure.
-    assert state["failed"] == 8, state
+    # Four engine refusals, each of which records a failure; four timeouts, each
+    # of which records an unknown outcome (the engine may have started the scan).
+    assert state["failed"] == 4, state
+    assert state["unknown"] == 4, state
     assert state["rows"] == 12, state
 
     # Every row points at the engagement that authorised it, and that
