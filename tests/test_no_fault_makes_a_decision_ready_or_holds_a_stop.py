@@ -274,8 +274,8 @@ _RECEIPT_READS_NONE_OF_IT = (
 
 
 _INHERENT = (
-    "inherent: a database that refuses every write records no stop. Answers 500 in time and "
-    "claims nothing. What keeps stops landing is that nothing holds the write lock long "
+    "inherent: a database that refuses every write records no stop. Answers 500 and claims "
+    "nothing. What keeps stops landing is that nothing holds the write lock long "
     "(tests/test_nothing_that_watches_holds_back_a_stop.py); the engine's own stops -- its "
     "failsafe, its scan abort -- write nothing here"
 )
@@ -294,9 +294,9 @@ MATRIX: dict[str, dict[str, tuple[str, str]]] = {
         receipt=_RECEIPT_READS_NONE_OF_IT,
         **{"revoke/contradict": (
             LEFT_OUT,
-            "inherent: the take-down's own claim cannot be read, so it cannot be moved -- 500 in "
-            "time, nothing claimed. Every other stop is HELD under this fault; the pause is the "
-            "stop that outlives it",
+            "inherent: the take-down's own claim cannot be read, so it cannot be moved -- 500, "
+            "nothing claimed. Every other stop is HELD under this fault; the pause is the stop "
+            "that outlives it",
         )},
     ),
     "retests-read-raises": _read_raises(receipt=_RECEIPT_READS_NONE_OF_IT),
@@ -320,11 +320,11 @@ MATRIX: dict[str, dict[str, tuple[str, str]]] = {
         **_stops(
             pause=(
                 LEFT_OUT,
-                "medium: the pause numbers its move from the log it cannot read -- 500 in time, not "
+                "medium: the pause numbers its move from the log it cannot read -- 500, not "
                 "recorded, nothing claimed. A savepoint'd read falling back to the row's own reading "
                 "(the log's unique revision still guarding a row behind it) would land it, at two "
-                "statements added to every stop; a fault on that table refuses its INSERT too. The "
-                "failsafe relay is HELD under it",
+                "statements added to every stop; a fault that corrupts that table would likely "
+                "refuse its INSERT too. The failsafe relay is HELD under it",
             ),
             **{
                 "revoke/contradict": (
@@ -352,17 +352,18 @@ MATRIX: dict[str, dict[str, tuple[str, str]]] = {
         **_stops(
             pause=(
                 LEFT_OUT,
-                "inherent: the pause IS a write of the stored decision -- 500 in time, not "
-                "recorded, nothing claimed. The failsafe relay and the dispatch kill switch are "
+                "inherent: the pause IS a write of the stored decision -- 500, not recorded, "
+                "nothing claimed. The failsafe relay and the dispatch kill switch are "
                 "HELD under it",
             ),
             **{
                 "revoke/contradict": (
                     LEFT_OUT,
                     "medium: each take-down lands in time (200) and says the decision could be "
-                    "neither recomputed nor held; the stored READY stands, stamped, beside the "
-                    "contradicted claim until the deployment's next refresh -- a take-down schedules "
-                    "none. Needs a refresh that outlives the fault without holding the stop",
+                    "neither recomputed nor held; every publishing read serves the stored READY, "
+                    "stamped, beside the contradicted claim -- while the fault lasts and after it -- "
+                    "until the deployment's next refresh: a take-down schedules none. Needs a refresh "
+                    "that outlives the fault without holding the stop",
                 )
             },
         ),
@@ -597,6 +598,11 @@ class Chaos:
         self.tmp = tmp_path
         self.admin = _admin()
         self.client = _client(self.admin)
+        # A process's first request loads the URLconf and every view module it names:
+        # 1.4 s here, once per process, whatever the request -- the first stop of a
+        # fresh process measured it, under every fault alike. That is no stop's work
+        # under a fault, so it is paid here, untimed, and the bound measures the stop.
+        self.client.get("/api/assurance/deployments/")
         self.t0 = timezone.now()
         real_now = timezone.now
         self._now = None
