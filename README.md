@@ -493,6 +493,15 @@ the scan stays `unknown`. A reconcile mails no report. Only `unknown` scans are
 reconciled. Not covered: the LLM scan's launch (`/api/llm-scan`, a route athena-engine
 does not serve) carries no engine key and is not reconciled.
 
+**While a Stop is owed on the scan, a reconcile sends nothing to the engine** -- not
+the launch, not the preflight gate's check -- and answers 409 saying why. When the
+engine never saw the first send, the resend is that launch: it would start the scan
+the Stop stops, and athena-engine offers no lookup by launch key that cannot launch.
+The scan stays `unknown` and the Stop owed. A reconcile claims the resend in one
+statement, only while no Stop is owed (the scan reads `pending` while the resend is
+out), so a Stop asked before the claim holds it back, and one asked after it is a Stop
+asked while a launch is under way (below).
+
 ### A scan's Stop
 
 `POST /api/pentest/scans/<uuid>/stop/` (an admin or analyst who can see the scan)
@@ -505,14 +514,23 @@ had already ended, or it has no such run), or 202 while it is owed.
 
 A Stop is owed while the scan names no run -- its launch's answer was lost, or the
 launch is still waiting for the engine's answer -- and while the engine cannot be
-reached. The scan's read (`GET /api/pentest/scans/<uuid>/`) says so: `stop.state` is
-`owed` or `delivered`, beside the engine's answer. It is sent to exactly that run the
-moment the run is named: by the launch as the engine names it, before anything is
-collected; by a reconcile; by the next Stop; and by
+reached. The Stop's answer and the scan's read (`GET /api/pentest/scans/<uuid>/`) say
+so plainly: `stop.state` is `owed`, and `stop.detail` says the Stop is not delivered
+and has not stopped the run (or, where the engine did not answer the abort, that the
+run is not known to be stopped). `stop_saved` in the answer says only that the Stop
+is kept on the scan. It is sent to exactly the run the moment the run is named: by
+the launch -- a first one, or a reconcile already sending -- as the engine names it,
+before anything is collected; by the next Stop; and by
 `python manage.py deliver_owed_stops`, which sends every owed Stop whose scan names a
 run and exits non-zero while any is owed. Run that on a schedule too, like
 `retry_blocking_dispatches`. A Stop never sends a launch again to learn the run: a
 stop starts nothing.
+
+A Stop owed on an `unknown` launch names no run and holds every reconcile back, so it
+stays owed: if the launch reached the engine, that run is not stopped by it. Nothing
+here can deliver it until athena-engine offers a lookup by launch key that can never
+launch; with one, a reconcile would look up first, and an owed Stop would be sent
+whenever the lookup names a run.
 
 **Migration `pentest.0019`** adds the Stop's three columns as nullable (a plain
 `ADD COLUMN` each) and the `unknown` status. Rolling it back drops the Stop record of

@@ -550,35 +550,56 @@ def test_every_call_that_launches_a_scan_passes_the_scans_key():
 # ===========================================================================
 
 
-def test_a_stop_on_an_unknown_launch_is_owed_and_sent_to_exactly_the_run_the_reconcile_names(engine):
-    """The SAFETY RULE end to end. The Stop is recorded at once and owed: the run
-    cannot be named, and a stop never sends a launch to learn it. The reconcile names
-    the run, and the engine receives the abort for exactly that run -- never
-    abort-all -- with no key. The scan ends as the stopped run it is."""
+def test_a_stop_on_an_unknown_launch_is_owed_and_says_its_run_is_not_stopped(engine):
+    """The Stop is recorded at once and owed: the launch's answer was lost, so the
+    engine has named no run to stop, and a stop never sends a launch to learn one.
+    Its answer and the scan's read say so plainly -- owed, not delivered, and a run
+    the launch may have started is not stopped by it -- and nothing reads as
+    stopped or contained."""
     client, _response, scan = _lost_launch(engine)
-    (run_id,) = engine.runs
+    before = len(engine.requests)
 
     stopped = _stop(client, scan)
     read = client.get(f"/api/pentest/scans/{scan.uuid}/")
 
     assert stopped.status_code == 202, stopped.content
-    assert stopped.json()["stop"]["state"] == "owed"
-    assert read.json()["stop"]["state"] == "owed"
-    assert engine.aborts() == []
-    assert len(engine.launches) == 1, "the stop sent a launch"
+    body = stopped.json()
+    for stop in (body["stop"], read.json()["stop"]):
+        assert (stop["state"], stop["delivered_at"]) == ("owed", None)
+        assert "Owed, not delivered" in stop["detail"]
+        assert "this Stop has not stopped its run" in stop["detail"]
+    assert (body["status"], body["engine_run_id"], body["stop_saved"]) == (UNKNOWN, None, True)
+    assert [p for _m, p, _h in engine.requests[before:] if p.startswith("/api/")] == [], (
+        "the stop sent something to the engine"
+    )
+
+
+@pytest.mark.parametrize("first", ["gateway-502-before-engine", "lost-reset"])
+def test_a_reconcile_sends_nothing_to_the_engine_while_a_stop_is_owed(engine, first):
+    """HIGH (#119 review). With a Stop owed and a launch the engine never saw, the
+    resend WAS that launch: the reconcile started the scan the operator had stopped,
+    and the owed Stop landed up to the engine's inline wait later. While a Stop is
+    owed a reconcile sends the engine nothing -- #77 offers no lookup by launch key
+    that cannot launch -- and answers 409 saying why. The scan stays unknown, the
+    Stop owed."""
+    client, _response, scan = _lost_launch(engine, first)
+    runs = set(engine.runs)
+    assert _stop(client, scan).status_code == 202
+    before = len(engine.requests)
 
     reconciled = _reconcile(client, scan)
 
-    assert engine.aborts() == [f"/api/scans/{run_id}/abort"]
-    abort_headers = [h for m, p, h in engine.requests if p.endswith("/abort")]
-    assert not any("Idempotency-Key" in h for h in abort_headers)
-    assert all("abort-all" not in p for _m, p, _h in engine.requests)
+    sent = [(m, p) for m, p, _h in engine.requests[before:] if p.startswith("/api/")]
+    assert ("POST", "/api/scan") not in sent, "the reconcile sent a launch while a Stop was owed"
+    assert sent == []
+    assert set(engine.runs) == runs, "the reconcile started the scan the operator had stopped"
+    assert reconciled.status_code == 409, reconciled.content
+    said = reconciled.json()["error"]
+    for words in ("a Stop is owed on this scan", "could start the scan it stops",
+                  "no lookup by launch key that cannot launch", "Nothing was sent to the engine"):
+        assert words in said
     scan.refresh_from_db()
-    assert scan.stop_delivered_at is not None and not scan.stop_owed
-    assert scan.engine_run_id == run_id
-    assert scan.status == PentestScan.STATUS_FAILED and "aborted" in scan.error_message
-    assert reconciled.status_code == 502, reconciled.content
-    assert len(engine.runs) == 1
+    assert scan.status == UNKNOWN and scan.stop_owed
 
 
 def test_a_stop_while_the_engine_cannot_be_reached_is_owed_not_lost(engine, settings, monkeypatch):
@@ -610,22 +631,26 @@ def test_a_stop_while_the_engine_cannot_be_reached_is_owed_not_lost(engine, sett
     assert client.get(f"/api/pentest/scans/{scan.uuid}/").json()["stop"]["state"] == "delivered"
 
 
-def test_a_stop_owed_through_a_reconcile_that_could_not_reach_the_engine_is_delivered_by_the_next(engine, settings):
+def test_a_stop_owed_on_an_unknown_launch_holds_every_reconcile_back_reachable_or_not(engine, settings):
+    """Restated (#119 review). This said a Stop owed through a reconcile that could not
+    reach the engine was delivered by the next reconcile -- which it was, by sending
+    the launch again to learn the run. While a Stop is owed no reconcile sends
+    anything, whether the engine can be reached or not: both are refused before
+    anything is sent, the Stop stays owed and the scan unknown."""
     client, _response, scan = _lost_launch(engine)
-    (run_id,) = engine.runs
     assert _stop(client, scan).status_code == 202
-    settings.CYBERENGINE_URL = _closed_port_url()
+    launches = len(engine.launches)
 
-    assert _reconcile(client, scan).status_code == 202
+    settings.CYBERENGINE_URL = _closed_port_url()
+    unreachable = _reconcile(client, scan)
+    settings.CYBERENGINE_URL = engine.base
+    reachable = _reconcile(client, scan)
+
+    assert (unreachable.status_code, reachable.status_code) == (409, 409), (unreachable.content, reachable.content)
+    assert len(engine.launches) == launches, "a reconcile sent the launch again while the Stop was owed"
+    assert engine.aborts() == []
     scan.refresh_from_db()
     assert scan.status == UNKNOWN and scan.stop_owed
-
-    settings.CYBERENGINE_URL = engine.base
-    _reconcile(client, scan)
-
-    assert engine.aborts() == [f"/api/scans/{run_id}/abort"]
-    scan.refresh_from_db()
-    assert not scan.stop_owed
 
 
 def test_a_stop_on_a_scan_that_ended_naming_no_run_has_nothing_to_stop(engine, settings):
@@ -678,6 +703,47 @@ def test_a_stop_asked_while_the_launch_waits_is_sent_the_moment_the_engine_names
     assert not scan.stop_owed
     assert scan.status == PentestScan.STATUS_FAILED and "aborted" in scan.error_message
     assert response.status_code == 502
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_stop_asked_while_a_reconcile_is_sending_is_sent_to_exactly_the_run_it_names(engine):
+    """The other order: the reconcile was already sending when the Stop arrived (the
+    engine never saw the first send, so the resend is the scan's first run). That is
+    a Stop asked while a launch is under way: owed while no run is named, and sent to
+    exactly the run the moment the engine names it -- never abort-all, no key."""
+    analyst = _analyst()
+    client = _client(analyst)
+    engine.modes.append("gateway-502-before-engine")
+    _response, scan = _launch(client, _engagement(analyst))
+    assert scan.status == UNKNOWN and engine.runs == {}
+    stops = []
+
+    def stop_arrives(run_id):
+        # On the engine's own thread, while the reconcile waits for its answer.
+        try:
+            request = APIRequestFactory().post(f"/api/pentest/scans/{scan.uuid}/stop/", {}, format="json")
+            force_authenticate(request, user=analyst)
+            from pentest import views
+
+            stops.append(views.stop_pentest_scan(request, scan_id=scan.uuid))
+        finally:
+            connection.close()
+
+    engine.before_answer = stop_arrives
+    engine.finish_on_read = False
+
+    reconciled = _reconcile(client, scan)
+
+    (run_id,) = engine.runs
+    assert [s.status_code for s in stops] == [202], "the stop was not owed while the run was unnamed"
+    assert engine.aborts() == [f"/api/scans/{run_id}/abort"]
+    first_read = next(i for i, (m, p, _h) in enumerate(engine.requests) if m == "GET")
+    first_abort = next(i for i, (m, p, _h) in enumerate(engine.requests) if p.endswith("/abort"))
+    assert first_abort < first_read, "the run was collected before the owed stop was sent"
+    scan.refresh_from_db()
+    assert not scan.stop_owed
+    assert scan.status == PentestScan.STATUS_FAILED and "aborted" in scan.error_message
+    assert reconciled.status_code == 502, reconciled.content
 
 
 # ===========================================================================
