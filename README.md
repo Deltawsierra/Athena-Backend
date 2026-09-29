@@ -268,6 +268,9 @@ overrides only the database, mail and throttling. The engine contract tests in
 `tests/test_engine_contract.py` skip unless `CYBERENGINE_URL` and
 `CYBERENGINE_OPERATOR_KEY` are set, because they need a live engine.
 
+The frontend's tests run with `npm test` (`node --test`, Node 22.6 or later):
+`frontend/src/lib/refresh-token.test.ts` and `frontend/src/lib/idempotency.test.ts`.
+
 ## Before deploying
 
 ```bash
@@ -416,6 +419,17 @@ not do its work twice. What each operation that reaches outside this backend doe
   replayed as its status and top-level fields). A forgotten key is a new request.
   **Without a key nothing changes: a request sent again scans again, mails the report
   again or files a second ticket.** The athena-dashboard server does not send one yet.
+  This backend's own frontend does, on the one keyed route it calls (the Penetration
+  Testing page's Start Scan, `frontend/src/pages/pentest.tsx` through
+  `frontend/src/lib/idempotency.ts`). Each press gets its own key. The key is sent
+  again only with the same request, and only while that request's outcome is unknown:
+  its answer never arrived, or the backend answered 409. A replayed answer is shown
+  as that scan's answer, never as a new scan, and a 202 is shown as still running,
+  never as complete. A 409 says the scan may or may not have started and points to
+  the scans list, which is read again. A 422, or a 400 about the key, is shown as a
+  bug in the page. Nothing is sent again with a new key on its own. The frontend
+  calls none of the other three keyed routes (`frontend/src/lib/idempotency.test.ts`
+  fails on a call to one that does not send its key).
 - **Automated dispatch** is one `DispatchAttempt` per finding and connector (above):
   pushed once, looked for by its marker after a lost answer rather than pushed again,
   and sent to a webhook with its operation id as `Idempotency-Key`. A blocking-decision
