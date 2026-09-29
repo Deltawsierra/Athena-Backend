@@ -2248,7 +2248,7 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         who made it, from where to where, and why. A read — open to any operator
         who can see the claim."""
         claim = self.get_object()
-        events = claim.events.select_related("actor").all()
+        events = claim.events.select_related("actor", "carried_from").all()
         return Response(ClaimEventSerializer(events, many=True).data)
 
     @action(detail=True, methods=["get"], url_path="evidence")

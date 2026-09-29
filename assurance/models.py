@@ -1751,6 +1751,23 @@ class ClaimEvent(models.Model):
         blank=True,
         related_name="claim_events",
     )
+    # Whether a person made this event, and the name their account had when they
+    # did -- written once, when the event is (:meth:`save`), and never read back off
+    # the account. ``actor`` above is nulled when the account is deleted; these are
+    # not, so the attribution outlives it. Every "is this a person's move" check
+    # reads ``by_person`` (``assurance.claims._persons_move``): it read ``actor``,
+    # and removing an operator (DELETE /api/accounts/users/<id>/, 204) turned every
+    # stop they had made into the machine's -- the next re-derive lifted each one,
+    # with no event naming anyone (round 5, B2).
+    by_person = models.BooleanField(default=False, editable=False)
+    actor_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    # A person's stop carried to the version a re-derive opened: the person's OWN
+    # act it carries (never a carried copy of it), so a chain of carries names the
+    # original stop and its note is that stop's note once, not a chain of suffixes
+    # clipped away (round 5, B1).
+    carried_from = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="+", editable=False
+    )
     note = models.TextField(blank=True)
     # What moved the claim, where that is not a derive, a person, or any of the
     # older writers (all blank). The evidence audit marks its own moves, so a
@@ -1772,6 +1789,17 @@ class ClaimEvent(models.Model):
     class Meta:
         ordering = ["created_at"]
         indexes = [models.Index(fields=["claim", "created_at"])]
+
+    def save(self, *args, **kwargs):
+        # An event a person's account made is a person's, recorded as the event is
+        # written: the flag and the account's name then stand whatever happens to the
+        # account. Never cleared here -- a carried stop names the person with no
+        # account row left to point at.
+        if self._state.adding and self.actor_id is not None:
+            self.by_person = True
+            if not self.actor_username:
+                self.actor_username = (getattr(self.actor, "username", "") or "")[:150]
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.from_status or '∅'} → {self.to_status} on claim {self.claim_id}"

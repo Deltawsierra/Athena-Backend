@@ -587,7 +587,8 @@ def test_a_claim_event_names_the_account_never_a_person():
     data = ClaimEventSerializer(event).data
     assert data["actor"] == "svc-bot"
     assert data["attribution"] == {
-        "kind": "account", "account": "svc-bot", "human": None, "personal_intent": "not_established",
+        "kind": "account", "account": "svc-bot", "account_removed": False, "carried_from_event": None,
+        "human": None, "personal_intent": "not_established",
     }
 
 

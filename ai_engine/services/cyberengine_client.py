@@ -151,27 +151,76 @@ def _run_id_of(value) -> str | None:
 #: its run id dropped (round 4, E1).
 MAX_JSON_DEPTH = 64
 
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+#: The most of an engine answer this backend will look at, in bytes. A body longer
+#: than this is unreadable: it is neither scanned nor parsed, whatever it says. The
+#: engine's answers are a few kilobytes; a finding list is the largest of them. The
+#: bound is what keeps the depth check (below) and the parser a bounded amount of
+#: work on any answer, whoever sent it.
+MAX_PARSE_BODY = int(getattr(django_settings, "CYBERENGINE_MAX_PARSE_BODY", 8 * 1024 * 1024))
+
+#: The bound for an answer read on the stop lane (:meth:`CyberEngineClient.failsafe_state`,
+#: read by the failsafe state view, safety.stops): the engine's governor state is
+#: three fields. Nothing on the stop lane waits on parsing more than this.
+MAX_STOP_LANE_BODY = 64 * 1024
+
+#: The characters that move the depth check's state: brackets, and a string's
+#: quotes and escapes. Everything else is skipped by the regex engine in one
+#: linear search, never looked at from Python.
+_JSON_STRUCTURE = re.compile(r'[\[\]{}"\\]')
 
 
-def _nesting_depth(text: str) -> int:
-    """How deeply ``text`` nests arrays and objects, strings ignored. Linear, and
-    never recursive."""
+def _nesting_depth(text: str, limit: int = MAX_JSON_DEPTH) -> int:
+    """How deeply ``text`` nests arrays and objects, strings ignored: one linear
+    pass, never recursive, that stops as soon as the depth passes ``limit`` (and
+    returns that depth).
+
+    A character scanner. It tracks whether it is inside a string and whether the
+    next character is escaped, and counts brackets only outside strings. A string
+    that never ends -- a body cut off inside one -- is inside a string to the end.
+
+    It was a regex that stripped strings first (``"(?:[^"\\\\]|\\\\.)*"``). On a body
+    cut off inside a string that carries escaped quotes -- a truncated finding
+    whose evidence is a captured page, ``<a href=\\"...\\">`` -- every escaped
+    quote started a match that ran to the end and failed: quadratic, and held the
+    GIL throughout. A 62 KB answer took 12.7 s, and the failsafe state view (a
+    stop-lane read with a 2 s deadline) and a contradiction on another thread of the
+    worker both waited it out (round 5, E1/E2)."""
     depth = deepest = 0
-    for char in _JSON_STRING.sub("", text):
-        if char in "[{":
+    in_string = False
+    escaped_until = -1
+    for match in _JSON_STRUCTURE.finditer(text):
+        at = match.start()
+        if at < escaped_until:
+            # The character after a backslash inside a string: escaped, whatever it is.
+            continue
+        char = match.group()
+        if in_string:
+            if char == "\\":
+                escaped_until = at + 2
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
             depth += 1
             if depth > deepest:
                 deepest = depth
+                if deepest > limit:
+                    return deepest
         elif char in "]}":
             depth -= 1
     return deepest
 
 
-def _json_of(resp: requests.Response):
-    """``resp``'s body as JSON, or ValueError when it cannot be read: not JSON, or
-    nested past :data:`MAX_JSON_DEPTH` (checked before it is parsed, and a
-    RecursionError from the parser is the same answer)."""
+def _json_of(resp: requests.Response, *, max_body: int | None = None):
+    """``resp``'s body as JSON, or ValueError when it cannot be read: longer than
+    ``max_body`` bytes (:data:`MAX_PARSE_BODY` by default: neither scanned nor
+    parsed), not JSON, or nested past :data:`MAX_JSON_DEPTH` (checked before it is
+    parsed, and a RecursionError from the parser is the same answer)."""
+    limit = MAX_PARSE_BODY if max_body is None else max_body
+    content = resp.content or b""
+    if len(content) > limit:
+        raise ValueError(f"the body is {len(content)} bytes, past the {limit} this backend reads")
     text = resp.text
     if _nesting_depth(text) > MAX_JSON_DEPTH:
         raise ValueError(f"the body nests deeper than {MAX_JSON_DEPTH} levels")
@@ -188,6 +237,24 @@ def _header_run_id(resp: requests.Response) -> str | None:
     return _run_id_of((resp.headers or {}).get("X-Run-Id"))
 
 
+def _body_run_id(resp: requests.Response) -> str | None:
+    """The run ``resp``'s body names in ``run_id``, whatever its shape, or None: an
+    unreadable body, or a readable one that names no run.
+
+    Round 5 (E3): the engine's ``X-Run-Id`` is honoured WHENEVER the body names no
+    run -- not only when the body cannot be read. A proxy's own JSON or HTML page
+    on a 200 or a 502, and a #71 status whose ``run_id`` was lost, all name no run
+    while the header does; each was read as a refusal, a failure or (a 200 with no
+    ``answer``) an old engine's synchronous result, and the only handle on a run
+    that may be scanning the customer was dropped. A body that names its run is
+    read by what it says (a 429's or a failed-before-start 500's run never started)."""
+    try:
+        body = _json_of(resp)
+    except ValueError:
+        return None
+    return _run_id_of(body.get("run_id")) if isinstance(body, dict) else None
+
+
 #: The one field athena-engine #71 answers every launch with, saying which of
 #: its two shapes this is. Engine main sends no such field. Which contract
 #: answered is read from it and from nothing else -- never guessed from which
@@ -201,10 +268,11 @@ ANSWER_VERDICT = "verdict"
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"
 RUN_ABORTED = "aborted"
-#: The states a run has ended in; any other state is a run not known to have ended.
+#: The states a run has ended in; any other state -- going (``queued``, ``running``,
+#: ``aborting``: a stop not landed yet), none, or one this backend does not know --
+#: is a run not known to have ended, which may still be going and is stoppable by
+#: its id.
 _RUN_ENDS = (RUN_COMPLETED, RUN_FAILED, RUN_ABORTED)
-#: The states of a run that may still be going: stoppable by its id.
-_RUN_GOING = ("queued", "running", "aborting")
 
 
 class CyberEngineClient:
@@ -233,7 +301,7 @@ class CyberEngineClient:
             api_key=settings.CYBERENGINE_OPERATOR_KEY,
         )
 
-    def _read_json(self, resp: requests.Response, path: str) -> dict:
+    def _read_json(self, resp: requests.Response, path: str, *, max_body: int | None = None) -> dict:
         """
         The body of a successful engine response, as the object it must be.
 
@@ -252,7 +320,7 @@ class CyberEngineClient:
         and surfaces as an AttributeError with no mention of the engine.
         """
         try:
-            body = _json_of(resp)
+            body = _json_of(resp, max_body=max_body)
         except ValueError as exc:
             raise EngineError(
                 f"Engine returned a body that is not JSON from {path} "
@@ -303,11 +371,11 @@ class CyberEngineClient:
             status=resp.status_code,
         )
 
-    def _get(self, path: str) -> dict:
+    def _get(self, path: str, *, max_body: int | None = None) -> dict:
         resp = self._send_get(path)
         if not (200 <= resp.status_code < 300):
             raise self._refused(resp)
-        return self._read_json(resp, path)
+        return self._read_json(resp, path, max_body=max_body)
 
     def _post(self, path: str, payload: dict) -> dict:
         resp = self._send_post(path, payload)
@@ -410,12 +478,12 @@ class CyberEngineClient:
         if resp.status_code == 500:
             named = self._status_answer(resp)
             run_id = _run_id_of(named.get("run_id")) if named else None
-            if named is None and _header_run_id(resp) is not None:
-                # A 500 whose body cannot be read -- a proxy replaced it with its own
-                # page -- that still carries #71's X-Run-Id: a run was registered,
-                # and whether its work started is unknown. Collected like a 500
-                # whose state is null: read, it says how it ended; unreadable, it
-                # is still running, with its id.
+            if run_id is None and _header_run_id(resp) is not None:
+                # A 500 whose body names no run -- a proxy replaced it with its own
+                # page, or #71's status lost its `run_id` -- that still carries #71's
+                # X-Run-Id: a run was registered, and whether its work started is
+                # unknown. Collected like a 500 whose state is null: read, it says how
+                # it ended; unreadable, it is still running, with its id.
                 return self.collect_scan(_header_run_id(resp))
             if run_id is not None:
                 if named.get("state") == RUN_FAILED:
@@ -431,6 +499,11 @@ class CyberEngineClient:
                 return self.collect_scan(run_id)
 
         if not (200 <= resp.status_code < 300):
+            if _header_run_id(resp) is not None and _body_run_id(resp) is None:
+                # Any other refusal whose body names no run -- a 502 proxy page --
+                # while the engine's X-Run-Id names one: the engine registered that
+                # run, and nothing here says it did not start. Collected by that id.
+                return self.collect_scan(_header_run_id(resp))
             raise self._refused(resp)
 
         try:
@@ -442,6 +515,13 @@ class CyberEngineClient:
                 raise self._unread(resp.status_code, _header_run_id(resp), str(exc)) from exc
             raise
         run_id = _run_id_of(accepted.get("run_id"))
+        if run_id is None and _header_run_id(resp) is not None:
+            # The body names no run and the engine's X-Run-Id does: a #71 202 or
+            # status whose `run_id` was lost, or a proxy's own JSON on a 200 (read as
+            # an old engine's synchronous result, it recorded "upstream reset" as a
+            # completed scan). Collected by the header's id: read, the run says how
+            # it ended; unreadable, it is still running, with its id.
+            return self.collect_scan(_header_run_id(resp))
 
         if ANSWER_FIELD in accepted and accepted[ANSWER_FIELD] != ANSWER_STATUS:
             said = f"HTTP {resp.status_code} with answer {accepted[ANSWER_FIELD]!r}"
@@ -705,8 +785,11 @@ class CyberEngineClient:
         itself: {enabled, engine_id, state}, where state is running / paused /
         stood_down / terminated, or null when the failsafe is disabled there.
         The control plane surfaces this so the operator console shows what the
-        engine is actually doing rather than what was last commanded."""
-        return self._get("/api/failsafe/state")
+        engine is actually doing rather than what was last commanded.
+
+        A stop-lane read (the failsafe state view, safety.stops): an answer longer
+        than :data:`MAX_STOP_LANE_BODY` is unreadable, never scanned or parsed."""
+        return self._get("/api/failsafe/state", max_body=MAX_STOP_LANE_BODY)
 
     def unattributed_effects(self, limit: int = 100) -> dict:
         """Effects the engine caused with no authority in force.
@@ -854,16 +937,23 @@ def _retest_status(phase: str, *, run_id, state, reason=None, error=None,
 
 
 def _status_phase(state, *, http_status: int) -> str:
-    """The phase an `answer: "status"` body is in. A 202 is always running."""
+    """The phase an `answer: "status"` body is in. A 202 is always running.
+
+    Only an end state the registry names is an end: ``aborted`` stopped, ``failed``
+    failed, ``completed`` ended without a verdict. Any other state -- going, none at
+    all, or one this backend does not know (``starting``, ``Running``) -- is a run
+    not known to have ended: running, and stoppable by its id. It was read as
+    ``ended_without_verdict`` with no stop id: a run that may still be scanning the
+    customer, with its only stop handle dropped (round 5, E3)."""
     if http_status == 202:
         return RETEST_RUNNING
     if state == RUN_ABORTED:
         return RETEST_STOPPED
     if state == RUN_FAILED:
         return RETEST_FAILED
-    if state in ("queued", "running", "aborting"):
-        return RETEST_RUNNING
-    return RETEST_ENDED
+    if state == RUN_COMPLETED:
+        return RETEST_ENDED
+    return RETEST_RUNNING
 
 
 def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> dict:
@@ -871,16 +961,19 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
     path = "/api/remediation/retest"
     status = resp.status_code
 
+    header_run = _header_run_id(resp)
+    if not (200 <= status < 300) and header_run is not None and _body_run_id(resp) is None:
+        # A refusal whose body names no run -- a proxy replaced it with its own page,
+        # or #71's status lost its `run_id` -- still carrying #71's X-Run-Id: a run
+        # was registered, and whether its work started is unknown -- running,
+        # stoppable by that id, until it is read.
+        return _retest_status(RETEST_RUNNING, run_id=header_run, state=None,
+                              error="the engine's answer names no run; its X-Run-Id does",
+                              http_status=status, body=None)
+
     if status in (429, 500):
         named = client._status_answer(resp)
         run_id = _run_id_of(named.get("run_id")) if named else None
-        if status == 500 and named is None and _header_run_id(resp) is not None:
-            # A 500 whose body a proxy replaced, still carrying #71's X-Run-Id: a run
-            # was registered, and whether its work started is unknown -- running,
-            # stoppable by that id, until it is read.
-            return _retest_status(RETEST_RUNNING, run_id=_header_run_id(resp), state=None,
-                                  error="the engine's answer could not be read", http_status=status,
-                                  body=None)
         if run_id is not None:
             state = named.get("state")
             if status == 429:
@@ -904,14 +997,27 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
     try:
         body = client._read_json(resp, path)
     except EngineError:
-        if _header_run_id(resp) is None:
+        if header_run is None:
             raise
         # The engine took the retest and named its run in X-Run-Id; the body saying
         # what it is cannot be read. It may still be running, and is stopped by that id.
-        return _retest_status(RETEST_RUNNING, run_id=_header_run_id(resp), state=None,
+        return _retest_status(RETEST_RUNNING, run_id=header_run, state=None,
                               error="the engine's answer could not be read", http_status=status,
                               body=None)
     named_run = _run_id_of(body.get("run_id"))
+    if header_run is not None:
+        if ANSWER_FIELD not in body:
+            # No `answer` to say what this body is (engine main never sends
+            # X-Run-Id): a proxy's own JSON, or #71's answer with its `answer` lost.
+            # The header names the run: not known to have ended -- running,
+            # stoppable by that id.
+            return _retest_status(RETEST_RUNNING, run_id=header_run, state=body.get("state"),
+                                  error="the engine's answer names no run; its X-Run-Id does",
+                                  http_status=status, body=body)
+        if named_run is None:
+            # A 202, a status or a verdict whose `run_id` was lost: the run is the
+            # one the header names, read by what the body says of it.
+            named_run = header_run
 
     if ANSWER_FIELD not in body:
         # Engine main: its verdict, synchronously, with the scan record id under
@@ -938,16 +1044,18 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
     if answer == ANSWER_VERDICT:
         state = body.get("state")
         stopped = body.get("stopped_after_recording")
-        if state in _RUN_GOING:
-            # A verdict whose run still reads as going has not been stopped: it is
-            # read on (stoppable by its run id), never marked stopped after
-            # recording -- which said a stop had landed that nobody made.
+        if state not in (None, *_RUN_ENDS):
+            # A verdict whose run still reads as going -- or reads a state this
+            # backend does not know (`starting`, `Running`) -- has not been known to
+            # stop: it is read on (stoppable by its run id), never marked stopped
+            # after recording, which said a stop had landed that nobody made and
+            # dropped the stop handle (round 5, E3).
             return _retest_verdict(body, scan_record_id=body.get("scan_record_id"),
                                    run_id=named_run, stop_id=named_run, state=state,
                                    stopped_after_recording=None)
-        if state not in (None, RUN_COMPLETED) and not stopped:
-            # A verdict on a run that did not complete is one filed before a stop
-            # landed: #71 names the stop. Said, even if it did not.
+        if state in (RUN_ABORTED, RUN_FAILED) and not stopped:
+            # A verdict on a run that ended without completing is one filed before a
+            # stop landed: #71 names the stop. Said, even if it did not.
             stopped = state
         return _retest_verdict(body, scan_record_id=body.get("scan_record_id"),
                                run_id=named_run, stop_id=None, state=state,
@@ -999,7 +1107,10 @@ def read_retest_run(status: dict, run_id: str) -> dict:
         return _retest_verdict(result, scan_record_id=result.get("scan_record_id"),
                                run_id=run_id, stop_id=None, state=state,
                                stopped_after_recording=status.get("reason") or state)
-    if not done:
+    if not done or state not in _RUN_ENDS:
+        # Not done -- or "done" with no end state, or one this backend does not know:
+        # not known to have ended. Running, stoppable by its id; it was read as
+        # ended_without_verdict with no stop id (round 5, E3).
         return _retest_status(RETEST_RUNNING, run_id=run_id, state=state,
                               reason=status.get("reason"), body=status)
     error = None

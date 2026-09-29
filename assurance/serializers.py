@@ -722,7 +722,7 @@ class ClaimEventSerializer(serializers.ModelSerializer):
 
     from_status_label = serializers.CharField(source="get_from_status_display", read_only=True)
     to_status_label = serializers.CharField(source="get_to_status_display", read_only=True)
-    actor = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+    actor = serializers.SerializerMethodField()
     attribution = serializers.SerializerMethodField()
 
     class Meta:
@@ -741,16 +741,27 @@ class ClaimEventSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def get_actor(self, obj) -> str | None:
+        """The name the account had when it made the move (kept on the event, so it
+        outlives the account), or None for a machine move."""
+        if not obj.by_person:
+            return None
+        return obj.actor_username or (obj.actor.username if obj.actor_id is not None else None)
+
     def get_attribution(self, obj) -> dict:
         """What ``actor`` is (issue #333): the platform ACCOUNT that made the move,
         never a person. A session or a token acts as an account with nobody's intent
         shown, so the event names the account and says intent is not established.
-        No actor is a machine move (a derive, an invalidation, the evidence audit)."""
-        if obj.actor_id is None:
+        A machine move (a derive, an invalidation, the evidence audit) has none.
+        An account since removed is still named, as it was named when it acted, and
+        ``account_removed`` says so: its move was a person's, and stays one."""
+        if not obj.by_person:
             return {"kind": "machine", "account": None, "human": None, "personal_intent": "not_established"}
         return {
             "kind": "account",
-            "account": obj.actor.username,
+            "account": self.get_actor(obj),
+            "account_removed": obj.actor_id is None,
+            "carried_from_event": str(obj.carried_from.uuid) if obj.carried_from_id is not None else None,
             "human": None,
             "personal_intent": "not_established",
         }

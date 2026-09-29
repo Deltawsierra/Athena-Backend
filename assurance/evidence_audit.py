@@ -107,7 +107,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Count, Max
+from django.db.models import Count, Max, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -830,7 +830,9 @@ def stored_weighing(claim: AssuranceClaim) -> dict:
 
 #: How many times an audit taken outside the write lock is taken again because the
 #: claim, or the evidence recorded against it, moved before it could be written.
-#: Past that it is taken once more under the lock (:func:`audit_claim`).
+#: Past that the evidence is NOT weighed under the lock: the stored audit is marked
+#: unsettled -- no verdict, and the reason -- until the claim's next audit
+#: (:func:`audit_claim`).
 AUDIT_ATTEMPTS = 5
 
 
@@ -856,25 +858,47 @@ def claim_token(claim: AssuranceClaim) -> tuple:
 
 def evidence_token(deployment_id, fingerprint: str | None = None) -> tuple:
     """The evidence recorded against a claim identity (every identity on the
-    deployment when ``fingerprint`` is None), as one aggregate read off the index:
-    equal, and no item was recorded since. The only evidence read a write takes
-    under the lock.
+    deployment when ``fingerprint`` is None), as one aggregate: equal, and no item
+    was recorded, invalidated, attributed or marked superseded since. The only
+    evidence read a write takes under the lock.
 
-    An invalidation, or a successor's mark on what it supersedes, writes no new item
-    -- and needs no token: each is followed by its own audit, which writes the
-    claim's row, and a writer reads the claim's row BEFORE the evidence. So either
-    the evidence it read already has the change, or the change's audit writes the
-    row after this writer read it -- and the writer finds the row moved and reads
-    again (:func:`claim_token`)."""
+    An invalidation writes no new item, and it is counted here all the same: how
+    many items are marked invalidated and how many of those are attributed, and the
+    latest invalidation instant (an attributed invalidation is stamped with its own
+    instant, :func:`invalidate_claim_evidence`); so are the successors' marks. This
+    said an invalidation needed no token because its own audit writes the claim's
+    row -- but that audit is a separate transaction, and it may find the version it
+    read already superseded (it then audits the identity's current version,
+    :func:`audit_claim`) or never run at all. A re-derive planned before an
+    attributed invalidation committed and written after it opened its new version
+    from the evidence as it was: VERIFIED/pass with ``audit_current`` true while an
+    audit taken then read UNKNOWN/contested (round 5, A1-A3)."""
     items = ClaimEvidence.objects.filter(deployment_id=deployment_id)
     if fingerprint is not None:
         items = items.filter(claim_fingerprint=fingerprint)
-    agg = items.aggregate(n=Count("pk"), last=Max("pk"))
-    return (agg["n"], agg["last"])
+    agg = items.aggregate(
+        n=Count("pk"),
+        last=Max("pk"),
+        invalidated=Count("pk", filter=Q(invalidated_at__isnull=False)),
+        attributed=Count("pk", filter=Q(invalidated_at__isnull=False) & ~Q(invalidated_by_username="")),
+        last_invalidated=Max("invalidated_at"),
+        superseded=Count("pk", filter=Q(superseded_by__isnull=False)),
+    )
+    return (agg["n"], agg["last"], agg["invalidated"], agg["attributed"], agg["last_invalidated"], agg["superseded"])
 
 
 def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
-    """Audit a CURRENT claim version in place and write the answer onto it.
+    """Audit a CURRENT claim version in place and write the answer onto it -- or,
+    where the version was superseded before its audit ran, the claim identity's
+    current version.
+
+    An ingest or an invalidation audits the version it recorded against, in a
+    transaction of its own after its write committed. A re-derive that superseded
+    that version in between left the new version unweighed: the audit found its
+    version closed and returned None, and the new version read VERIFIED/pass with
+    ``audit_current`` true while an audit taken then read UNKNOWN/contested (round
+    5, A1-A3). The caller's copy is brought to its own row; the audit is the current
+    version's.
 
     Holds the claim back (or releases a hold its evidence no longer supports, back
     to its own reading -- never above it), writes ``evidence_verdict`` and
@@ -897,10 +921,35 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     short transaction only if neither the row nor the evidence moved meanwhile
     (:func:`claim_token`, :func:`evidence_token`); if either did -- a stop landed --
     it is read and taken again, and the stop is what it reads. The caller's copy is
-    brought to the row written."""
+    brought to the row written.
+
+    Past :data:`AUDIT_ATTEMPTS` overtaken weighings the evidence is NOT weighed under
+    the lock: that weighing grows with the evidence, and a stop issued while it ran
+    waited it out (601 ms at 5,000 items, round 5, C1). The stored audit is marked
+    unsettled instead (:func:`_record_unsettled`): no verdict, not current, with the
+    reason. A hold it had stands as it was -- releasing one unweighed would lift the
+    claim -- and the claim's next audit settles it."""
+    now = now or timezone.now()
+    written = _audit_in_place(claim, now)
+    for _hop in range(3):
+        if written is not None or claim.valid_to is None:
+            break
+        current = (
+            AssuranceClaim.objects.filter(deployment_id=claim.deployment_id, fingerprint=claim.fingerprint)
+            .current()
+            .first()
+        )
+        if current is None:
+            break
+        claim = current
+        written = _audit_in_place(claim, now)
+    return written
+
+
+def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
+    """:func:`audit_claim` of the version ``claim`` names, and no other."""
     from .claims import _adopt, _locked_row
 
-    now = now or timezone.now()
     for _attempt in range(AUDIT_ATTEMPTS):
         read = AssuranceClaim.objects.select_related("deployment").get(pk=claim.pk)
         if not _is_audited(read):
@@ -914,12 +963,32 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
                 written = _write_audit(row, result)
                 _adopt(claim, row)
                 return written
-    # Moved under every attempt: taken once more under the lock, from the row as it is.
+    # Moved under every attempt: never weighed under the lock (a stop would wait on
+    # it). Marked unsettled on the row as it is, under the lock, and nothing else.
     with transaction.atomic():
         row = _locked_row(claim)
-        written = _write_audit(row, audit_of(row, now=now)) if _is_audited(row) else None
+        if _is_audited(row):
+            _record_unsettled(row, now)
     _adopt(claim, row)
-    return written
+    return None
+
+
+#: Why a stored audit is unsettled (:func:`_record_unsettled`).
+UNSETTLED = (
+    "The evidence could not be weighed: the claim or the evidence recorded against it moved before "
+    f"each of {AUDIT_ATTEMPTS} weighings could be written, and the evidence is never weighed under the "
+    "write lock (a stop would wait on it). No verdict; the claim's next audit brings it current."
+)
+
+
+def _record_unsettled(claim: AssuranceClaim, now) -> None:
+    """Mark the stored audit of the locked, committed row ``claim`` unsettled: no
+    verdict, and every reader serves it not current with :data:`UNSETTLED`. Reads
+    nothing but the row. Everything else the stored audit says is kept -- a hold it
+    had, and the reading and confidence under it -- so nothing moves the claim."""
+    claim.evidence_audit = {**(claim.evidence_audit or {}), "unsettled": UNSETTLED, "unsettled_at": now.isoformat()}
+    claim.evidence_verdict = ""
+    claim.save(update_fields=["evidence_audit", "evidence_verdict", "updated_at"])
 
 
 def _write_audit(claim: AssuranceClaim, result: dict | None) -> dict | None:
@@ -1063,6 +1132,8 @@ def _why_not_current(claim: AssuranceClaim, *, now=None) -> str:
     audit = claim.evidence_audit or {}
     if not audit:
         return "nothing was audited"
+    if audit.get("unsettled"):
+        return str(audit["unsettled"])
     was = audit.get("status") or UNKNOWN
     if was != claim.status:
         if claim.status in _UNAUDITED_STATUSES:
@@ -1293,8 +1364,11 @@ def invalidate_claim_evidence(item: ClaimEvidence, *, actor, reason: str, now=No
     caller's copy: a copy read before another person's invalidation committed was
     re-attributed to the later person, their reason written over the first
     (round 4, X1c). The claim is then audited from its committed row
-    (:func:`audit_claim`), weighing the evidence outside the lock. The caller's copy
-    is brought to the row written."""
+    (:func:`audit_claim`), weighing the evidence outside the lock -- the claim
+    identity's CURRENT version, even when a re-derive superseded the version read
+    here before that audit ran (round 5, A1-A3); and a re-derive planned before
+    this commits sees it in the evidence token and plans that claim again
+    (:func:`evidence_token`). The caller's copy is brought to the row written."""
     reason = (reason or "").strip()
     if actor is None:
         raise EvidenceRefused("an invalidation is attributed to the account that made it")

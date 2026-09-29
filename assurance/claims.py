@@ -641,6 +641,8 @@ def _make_claim(
         # What the deriver read, then the person's stop carried onto it: the stop is
         # the version's reading, a person's, and it lifts only by a person's act.
         stop_event, carried_from = carried
+        # The person's OWN act, wherever along a chain of carries it was made.
+        original = stop_event.carried_from or stop_event
         ClaimEvent.objects.create(
             claim=claim, from_status="", to_status=derived["status"], actor=None, note="Derived"
         )
@@ -648,13 +650,12 @@ def _make_claim(
             claim=claim,
             from_status=derived["status"],
             to_status=status,
-            actor_id=stop_event.actor_id,
+            actor_id=original.actor_id,
+            by_person=True,
+            actor_username=original.actor_username,
+            carried_from=original,
             cause=ClaimEvent.CAUSE_PERSON_READING if derived["status"] == status else "",
-            note=_clip(
-                f"{stop_event.note or ''} [carried from {carried_from.uuid}: a person's stop on the "
-                "version this one supersedes stands on it until a person lifts it; no evidence "
-                "and no re-derive lifts it.]".strip()
-            ),
+            note=_carried_note(original, carried_from),
         )
     elif audit_event is None:
         ClaimEvent.objects.create(
@@ -681,6 +682,25 @@ def _make_claim(
     return claim
 
 
+def _carried_note(original: ClaimEvent, carried_from: AssuranceClaim) -> str:
+    """The note of a person's stop carried to a new version: the person's own note,
+    clipped to leave room, then where it was carried from and whose act it is --
+    never clipped. It was the previous carried note plus a suffix, clipped to 500
+    characters: a long note carried with no "carried from" at all, and along a chain
+    of drifts the version it came from stopped being named from the fourth carry on
+    (round 5, B1)."""
+    made_on = AssuranceClaim.objects.filter(pk=original.claim_id).values_list("uuid", flat=True).first()
+    by = original.actor_username or "an account since removed"
+    carried = (
+        f"[carried from {carried_from.uuid}: the stop {by} made on version {made_on} (event {original.uuid}) "
+        "stands on this version until a person lifts it; no evidence and no re-derive lifts it.]"
+    )
+    own = (original.note or "").strip()
+    if not own:
+        return carried
+    return f"{_clip(own, max(1, 500 - len(carried) - 1))} {carried}"
+
+
 #: The fields that are a claim's reading: what it says, how strongly, and why.
 _READING_FIELDS = ("evidence_class", "vendor_asserted", "supporting_summary", "contradicting_summary")
 
@@ -702,7 +722,12 @@ def _status_set_by_a_person(claim: AssuranceClaim) -> bool:
 
 def _persons_move(claim: AssuranceClaim) -> ClaimEvent | None:
     """The person's event that set the claim's current reading, or None when the
-    machine set it (:func:`_status_set_by_a_person`)."""
+    machine set it (:func:`_status_set_by_a_person`).
+
+    A person's event is one a person made (:attr:`ClaimEvent.by_person`, written
+    with the event), never one that still has an account row: ``actor`` is nulled
+    when the account is deleted, and reading it turned a removed operator's stop
+    into the machine's reading -- the next re-derive lifted it (round 5, B2)."""
     last_move = (
         claim.events.filter(
             ~models.Q(from_status=models.F("to_status")) | models.Q(cause=ClaimEvent.CAUSE_PERSON_READING)
@@ -711,7 +736,7 @@ def _persons_move(claim: AssuranceClaim) -> ClaimEvent | None:
         .order_by("-pk")
         .first()
     )
-    if last_move is not None and last_move.actor_id is not None and last_move.to_status == ea.reading_status(claim):
+    if last_move is not None and last_move.by_person and last_move.to_status == ea.reading_status(claim):
         return last_move
     return None
 
@@ -836,6 +861,10 @@ def _refresh_machine_fields(
     claim.last_seen = now
     claim.expiration = now + timedelta(days=EVIDENCE_TTL_DAYS)
 
+    if new_status in ea.STOPS:
+        # A stop -- the deriver's or a person's standing on this version -- carries
+        # no confidence (see :func:`_take_down`).
+        claim.confidence = None
     status_changed = new_status != old_status
     if status_changed:
         claim.status = new_status
@@ -993,11 +1022,15 @@ def _supersede(
     )
 
 
-def _evidence_by_identity(deployment) -> dict[str, list]:
-    """The evidence recorded against each claim identity on ``deployment``, in one
-    query, oldest first (:class:`~assurance.models.ClaimEvidence`)."""
+def _evidence_by_identity(deployment, fingerprint: str | None = None) -> dict[str, list]:
+    """The evidence recorded against each claim identity on ``deployment`` (only
+    ``fingerprint``'s, when given), in one query, oldest first
+    (:class:`~assurance.models.ClaimEvidence`)."""
     grouped: dict[str, list] = {}
-    for item in ClaimEvidence.objects.filter(deployment=deployment).order_by("created_at", "pk"):
+    items = ClaimEvidence.objects.filter(deployment=deployment)
+    if fingerprint is not None:
+        items = items.filter(claim_fingerprint=fingerprint)
+    for item in items.order_by("created_at", "pk"):
         grouped.setdefault(item.claim_fingerprint, []).append(item)
     return grouped
 
@@ -1029,17 +1062,16 @@ def _mark_stale(deployment, now) -> int:
     return count
 
 
-#: How many times a re-derive is planned again because a claim it read, the evidence
-#: recorded against the deployment, or a fired condition moved before its plan
-#: could be written (:func:`derive_claims`).
+#: How many times a re-derive checks its plan against what is committed, and plans
+#: again what moved, before it gives up (:func:`derive_claims`).
 DERIVE_ATTEMPTS = 5
 
 
 class ClaimsKeptMoving(RuntimeError):
-    """Every plan of a re-derive was overtaken by a write to what it read before it
-    could be written. Nothing was written: the claims read what those writes left,
-    and the caller asks again. Never raised to a stop -- a stop is one of the writes
-    that overtook it, and it stands."""
+    """Every check of a re-derive's plan found a claim it writes -- or the evidence
+    or a fired condition on one -- moved since it was planned. Nothing was written:
+    the claims read what those writes left, and the caller asks again. Never raised
+    to a stop -- a stop is one of the writes that overtook it, and it stands."""
 
 
 def derive_claims(deployment, *, now=None, then=None) -> dict:
@@ -1061,13 +1093,20 @@ def derive_claims(deployment, *, now=None, then=None) -> dict:
     database's: a stop arriving during a re-derive waited all of that out -- and past
     the busy timeout the stop was LOST (round 4, W1). So the plan -- what each claim
     becomes, and the audit of it -- is taken with no transaction open, and written
-    in one short transaction only if nothing it read has moved: the current version
-    of every claim identity (:func:`assurance.evidence_audit.claim_token`), the
-    evidence (:func:`assurance.evidence_audit.evidence_token`) and the fired
-    conditions. If anything did -- a stop landed -- nothing is written and the plan
-    is taken again from what is committed now, so the stop is what the re-derive
-    reads and is never overwritten. Past :data:`DERIVE_ATTEMPTS` plans,
-    :class:`ClaimsKeptMoving`.
+    in one short transaction only if nothing it read about the claims it writes has
+    moved: for each claim identity, its current version
+    (:func:`assurance.evidence_audit.claim_token`), the evidence recorded against it
+    and every invalidation of that evidence
+    (:func:`assurance.evidence_audit.evidence_token`), and whether a fired condition
+    holds it. If anything did -- a stop landed, an item was invalidated -- nothing is
+    written, and the steps that moved are planned again from what is committed now,
+    so the stop is what the re-derive reads and is never overwritten. The steps that
+    did not move keep their plan: a person triaging ANOTHER claim of the deployment
+    overtook the whole plan, which was taken again from scratch -- at 10,000 items
+    each re-plan outlasted the gap between the person's moves, and every recompute
+    ended 409 while the drift it was asked to apply never reached the claim (round
+    5, D1). Past :data:`DERIVE_ATTEMPTS` checks, :class:`ClaimsKeptMoving`, with
+    nothing written.
 
     A plan is of the deployment's state as it was read. A write to an input landing
     between the read and the write is what it would be had it landed just after the
@@ -1075,20 +1114,22 @@ def derive_claims(deployment, *, now=None, then=None) -> dict:
 
     Query-light: it re-fetches the deployment once with the prefetches every
     assessment, the fingerprint and the receipt need."""
-    now = now or timezone.now()
     with obs.span(obs.PLAN, component="derive_claims", subject=str(deployment.pk)):
-        for _attempt in range(DERIVE_ATTEMPTS):
-            plan = _plan_derive(deployment, now)
+        plan = _plan_derive(deployment, now)
+        for attempt in range(DERIVE_ATTEMPTS):
             with transaction.atomic():
-                if _plan_still_holds(plan):
+                moved = _moved_steps(plan)
+                if not moved:
                     counts = _write_plan(plan)
                     if then is not None:
                         then()
                     return counts
+            if attempt + 1 < DERIVE_ATTEMPTS:
+                _plan_again(plan, moved)
     raise ClaimsKeptMoving(
         f"The claims of deployment {deployment.pk} kept changing while they were re-derived "
-        f"({DERIVE_ATTEMPTS} plans, each overtaken by a write to what it read). Nothing was "
-        "written; re-derive again."
+        f"({DERIVE_ATTEMPTS} checks, each finding a claim the re-derive writes moved since it was "
+        "planned). Nothing was written; re-derive again."
     )
 
 
@@ -1097,14 +1138,26 @@ class _Plan:
 
     def __init__(self, dep, now):
         self.dep = dep
-        self.now = now
+        # The caller's instant, or -- when it named none -- the instant each step's
+        # evidence was read (:func:`_plan_derive`, :func:`_plan_again`).
+        self.fixed_now = now is not None
+        self.now = now or timezone.now()
         self.steps: list[dict] = []
+        self.route = None
+
+    def weighed_now(self) -> None:
+        """The evidence was just read: weigh it as of now. An invalidation the read
+        saw is then in the audit's past, never "dated ahead" -- an instant taken
+        before the read counted an invalidation committed in between as one that
+        has not taken effect yet."""
+        if not self.fixed_now:
+            self.now = timezone.now()
 
 
 def _plan_derive(deployment, now) -> _Plan:
     """Everything :func:`derive_claims` decides, read and computed with no write
-    lock held: the derivers, the fingerprints, the receipt, and the evidence audit
-    of every claim it writes."""
+    lock held: the derivers, the fingerprints, the receipt, and a step for each
+    claim identity (:func:`_plan_step`). ``now``: the caller's instant, or None."""
     plan = _Plan(_prefetched(deployment), now)
     dep = plan.dep
     plan.system_fp = compute_system_fingerprint(dep)
@@ -1120,163 +1173,203 @@ def _plan_derive(deployment, now) -> _Plan:
         subject = derived["subject"]
         subject_key = str(subject.uuid) if subject is not None else ""
         readings.append((derived, subject_key, _identity_fingerprint(dep, derived["claim_type"], subject_key)))
-    # The claims, then the evidence. An item recorded after the claims were read is
-    # followed by its own audit, a write to its claim's row -- which this plan then
-    # finds moved -- or it is in what was read here; its token catches the rest.
+    # The claims, then the evidence: each identity's token, then the items. An item
+    # recorded after the claims were read is followed by its own audit, a write to
+    # its claim's row -- which the check then finds moved -- or it is in what was
+    # read here; its token catches the rest, and an invalidation too.
     currents = {
         claim.fingerprint: claim
         for claim in AssuranceClaim.objects.filter(
             deployment=dep, fingerprint__in=[identity_fp for _, _, identity_fp in readings]
         ).current()
     }
-    # The evidence recorded against each claim identity (issue #333), read once --
-    # after its token, so an item recorded in between moves the token -- and the
-    # route serving now that each item must name. The route is read off the
-    # prefetched graph: no query per asset.
-    plan.evidence = ea.evidence_token(dep.pk)
+    tokens = {identity_fp: ea.evidence_token(dep.pk, identity_fp) for _, _, identity_fp in readings}
     evidence = _evidence_by_identity(dep)
-    route = served_route_fingerprint(dep) if evidence else ""
-
+    plan.weighed_now()
     for derived, subject_key, identity_fp in readings:
-        input_fp = plan.input_fps.get(derived["claim_type"], plan.system_fp)
-        held = identity_fp in plan.held
-        current = currents.get(identity_fp)
-        items = evidence.get(identity_fp, [])
-        audit_subject = ea.Subject(
-            deployment=str(dep.uuid),
-            claim_type=derived["claim_type"],
-            asset=subject_key,
-            inputs=input_fp,
-            route=route,
+        step = {"identity_fp": identity_fp, "derived": derived, "subject_key": subject_key}
+        _plan_step(
+            plan, step, current=currents.get(identity_fp), evidence=tokens[identity_fp],
+            items=evidence.get(identity_fp, []), held=identity_fp in plan.held,
         )
-        step = {
-            "identity_fp": identity_fp,
-            "input_fp": input_fp,
-            "derived": derived,
-            "held": held,
-            "token": None if current is None else ea.claim_token(current),
-        }
         plan.steps.append(step)
-
-        def audit_new(base_status, *, by_person=False, derived=derived, items=items, audit_subject=audit_subject):
-            # The audit of a NEW version, read against what the deriver reads -- as a
-            # fired latent condition leaves it, no better than STALE -- or against a
-            # person's stop carried to it. Only ever holds it back.
-            return ea.audit(
-                base_status=base_status,
-                vendor_asserted=derived["vendor_asserted"],
-                evidence_class=derived["evidence_class"],
-                subject=audit_subject,
-                items=items,
-                now=now,
-                reading_by_person=by_person,
-            )
-
-        derived_base = _held_status(derived["status"]) if held else derived["status"]
-        if current is None:
-            step.update(action="create", audited=audit_new(derived_base))
-            continue
-
-        # A human REVOKED claim is a withdrawal; a re-derive never touches it — not
-        # its status, not its last_seen, not a supersede.
-        if current.status == Status.REVOKED:
-            step.update(action="keep")
-            continue
-
-        # A claim is bound to BOTH the inputs it rests on and the policy it was
-        # assessed under. It is refreshed in place only while both still hold; a
-        # change to either supersedes it and opens a new current version bound to
-        # the change. A change to an input this claim does not read is not a change
-        # to this claim: it used to supersede every claim on the deployment at once.
-        state_moved = claim_state_moved(current, system_fp=plan.system_fp, input_fps=plan.input_fps)
-        policy_moved = current.policy_version != plan.pol_version
-        # A person's verdict on this version -- a claim moved to CONTRADICTED with
-        # "we know it leaks" -- is not the machine's reading drifting. It stands on
-        # this version while the inputs and policy it was set against hold, and a
-        # re-derivation refreshes the machine's fields around it. It used to be
-        # overwritten in place, and for one round was superseded with a note
-        # blaming a gap in CLAIM_INPUTS; neither was true. When the inputs or the
-        # policy move, the version is superseded as always -- and a person's STOP
-        # carries to the new version (:func:`_persons_stop`).
-        human_status = _status_set_by_a_person(current)
-        reading_moved = not (state_moved or policy_moved) and not _same_reading(
-            current, derived, human_status=human_status
-        )
-        if not (state_moved or policy_moved or reading_moved):
-            audited = _refresh_audit(
-                current, derived, now, human_status=human_status, held=held, audit_context=(audit_subject, items),
-            )
-            step.update(
-                action="refresh",
-                human_status=human_status,
-                audit_context=(audit_subject, items),
-                audited=audited,
-                # Read and compared here, outside the lock: a weighing the audit
-                # leaves as it was is not written again (its size grows with the
-                # evidence). The row's token guards it -- every writer of a
-                # weighing writes its claim.
-                weighing_unchanged=audited is not None and ea.stored_weighing(current) == ea.weighing_of(audited),
-            )
-            continue
-
-        if state_moved and policy_moved:
-            note = "The inputs this claim rests on and the assurance policy both changed; version superseded."
-        elif state_moved:
-            note = "The inputs this claim rests on changed; version superseded."
-        elif policy_moved:
-            note = "Assurance policy changed; version superseded."
-        else:
-            # Neither the inputs this claim is bound to nor the policy moved,
-            # and the deriver reads something else now. Refreshing in place
-            # would rewrite the version's verdict under it -- one version
-            # spanning two readings, with no supersede and no retest. That is
-            # what a gap in CLAIM_INPUTS looks like from here, and a row bound
-            # before per-claim fingerprints lands here too when its system
-            # state holds but its reading does not. Either way a reading that
-            # moved is a new version, and the note says why, so the gap is
-            # visible in the claim's own history rather than silent.
-            note = (
-                "The reading changed though no input this claim is bound to did; "
-                "version superseded."
-            )
-        stop = _persons_stop(current)
-        step.update(
-            action="supersede",
-            note=note,
-            carried_stop=stop,
-            audited=audit_new(derived_base) if stop is None else audit_new(stop.to_status, by_person=True),
-        )
     return plan
 
 
-def _plan_still_holds(plan: _Plan) -> bool:
-    """Whether nothing ``plan`` read has moved: under the write lock, the current
-    version of each claim identity as the plan read it (or still none), the same
-    evidence and the same fired conditions. Keeps each locked row on its step."""
-    if held_by_fired_conditions(plan.dep) != plan.held:
-        return False
-    if ea.evidence_token(plan.dep.pk) != plan.evidence:
-        return False
+def _plan_again(plan: _Plan, moved: list[dict]) -> None:
+    """Plan again, from what is committed now, only the ``moved`` steps (outside the
+    write lock): each one's current version, then its evidence token, then its
+    items, and whether a fired condition holds it. The deployment's inputs, the
+    derivers' readings and the receipt stay as the plan read them."""
+    held = held_by_fired_conditions(plan.dep)
+    for step in moved:
+        identity_fp = step["identity_fp"]
+        current = (
+            AssuranceClaim.objects.filter(deployment=plan.dep, fingerprint=identity_fp).current().first()
+        )
+        evidence = ea.evidence_token(plan.dep.pk, identity_fp)
+        items = _evidence_by_identity(plan.dep, identity_fp).get(identity_fp, [])
+        plan.weighed_now()
+        _plan_step(plan, step, current=current, evidence=evidence, items=items, held=identity_fp in held)
+
+
+def _plan_step(plan: _Plan, step: dict, *, current, evidence, items, held: bool) -> None:
+    """What one claim identity becomes (``step``, updated in place), and what it was
+    decided from: the current version as read (its token), the evidence token and
+    items, and whether a fired condition holds the claim."""
+    now, dep = plan.now, plan.dep
+    derived, subject_key = step["derived"], step["subject_key"]
+    input_fp = plan.input_fps.get(derived["claim_type"], plan.system_fp)
+    if items and plan.route is None:
+        # The route serving now, which each item must name: read off the prefetched
+        # graph, no query per asset, and only once evidence is recorded at all.
+        plan.route = served_route_fingerprint(dep)
+    audit_subject = ea.Subject(
+        deployment=str(dep.uuid),
+        claim_type=derived["claim_type"],
+        asset=subject_key,
+        inputs=input_fp,
+        route=plan.route or "",
+    )
+    for key in ("action", "audited", "human_status", "audit_context", "weighing_unchanged", "note", "carried_stop"):
+        step.pop(key, None)
+    step.update(
+        input_fp=input_fp,
+        held=held,
+        token=None if current is None else ea.claim_token(current),
+        evidence=evidence,
+    )
+
+    def audit_new(base_status, *, by_person=False):
+        # The audit of a NEW version, read against what the deriver reads -- as a
+        # fired latent condition leaves it, no better than STALE -- or against a
+        # person's stop carried to it. Only ever holds it back.
+        return ea.audit(
+            base_status=base_status,
+            vendor_asserted=derived["vendor_asserted"],
+            evidence_class=derived["evidence_class"],
+            subject=audit_subject,
+            items=items,
+            now=now,
+            reading_by_person=by_person,
+        )
+
+    derived_base = _held_status(derived["status"]) if held else derived["status"]
+    if current is None:
+        step.update(action="create", audited=audit_new(derived_base))
+        return
+
+    # A human REVOKED claim is a withdrawal; a re-derive never touches it — not
+    # its status, not its last_seen, not a supersede.
+    if current.status == Status.REVOKED:
+        step.update(action="keep")
+        return
+
+    # A claim is bound to BOTH the inputs it rests on and the policy it was
+    # assessed under. It is refreshed in place only while both still hold; a
+    # change to either supersedes it and opens a new current version bound to
+    # the change. A change to an input this claim does not read is not a change
+    # to this claim: it used to supersede every claim on the deployment at once.
+    state_moved = claim_state_moved(current, system_fp=plan.system_fp, input_fps=plan.input_fps)
+    policy_moved = current.policy_version != plan.pol_version
+    # A person's verdict on this version -- a claim moved to CONTRADICTED with
+    # "we know it leaks" -- is not the machine's reading drifting. It stands on
+    # this version while the inputs and policy it was set against hold, and a
+    # re-derivation refreshes the machine's fields around it. It used to be
+    # overwritten in place, and for one round was superseded with a note
+    # blaming a gap in CLAIM_INPUTS; neither was true. When the inputs or the
+    # policy move, the version is superseded as always -- and a person's STOP
+    # carries to the new version (:func:`_persons_stop`).
+    human_status = _status_set_by_a_person(current)
+    reading_moved = not (state_moved or policy_moved) and not _same_reading(
+        current, derived, human_status=human_status
+    )
+    if not (state_moved or policy_moved or reading_moved):
+        audited = _refresh_audit(
+            current, derived, now, human_status=human_status, held=held, audit_context=(audit_subject, items),
+        )
+        step.update(
+            action="refresh",
+            human_status=human_status,
+            audit_context=(audit_subject, items),
+            audited=audited,
+            # Read and compared here, outside the lock: a weighing the audit
+            # leaves as it was is not written again (its size grows with the
+            # evidence). The row's token guards it -- every writer of a
+            # weighing writes its claim.
+            weighing_unchanged=audited is not None and ea.stored_weighing(current) == ea.weighing_of(audited),
+        )
+        return
+
+    if state_moved and policy_moved:
+        note = "The inputs this claim rests on and the assurance policy both changed; version superseded."
+    elif state_moved:
+        note = "The inputs this claim rests on changed; version superseded."
+    elif policy_moved:
+        note = "Assurance policy changed; version superseded."
+    else:
+        # Neither the inputs this claim is bound to nor the policy moved,
+        # and the deriver reads something else now. Refreshing in place
+        # would rewrite the version's verdict under it -- one version
+        # spanning two readings, with no supersede and no retest. That is
+        # what a gap in CLAIM_INPUTS looks like from here, and a row bound
+        # before per-claim fingerprints lands here too when its system
+        # state holds but its reading does not. Either way a reading that
+        # moved is a new version, and the note says why, so the gap is
+        # visible in the claim's own history rather than silent.
+        note = (
+            "The reading changed though no input this claim is bound to did; "
+            "version superseded."
+        )
+    stop = _persons_stop(current)
+    step.update(
+        action="supersede",
+        note=note,
+        carried_stop=stop,
+        audited=audit_new(derived_base) if stop is None else audit_new(stop.to_status, by_person=True),
+    )
+
+
+def _moved_steps(plan: _Plan) -> list[dict]:
+    """The steps of ``plan`` whose claim identity moved since they were planned, read
+    under the write lock: its current version (or still none), the evidence recorded
+    against it and every invalidation of it, and whether a fired condition holds it.
+    Only the identities the plan WRITES are checked -- a REVOKED claim it keeps is
+    never written -- and nothing else on the deployment is: a move on another claim
+    moves only that claim's step. Keeps each locked row on its step; ``[]`` means the
+    plan holds and may be written."""
+    held_now = held_by_fired_conditions(plan.dep)
+    moved = []
     for step in plan.steps:
+        if step["action"] == "keep":
+            continue
+        identity_fp = step["identity_fp"]
         row = (
             AssuranceClaim.objects.select_for_update(of=("self",))
-            .filter(deployment=plan.dep, fingerprint=step["identity_fp"])
+            .filter(deployment=plan.dep, fingerprint=identity_fp)
             .current()
             .first()
         )
-        if (None if row is None else ea.claim_token(row)) != step["token"]:
-            return False
+        if (
+            (None if row is None else ea.claim_token(row)) != step["token"]
+            or ea.evidence_token(plan.dep.pk, identity_fp) != step["evidence"]
+            or (identity_fp in held_now) != step["held"]
+        ):
+            moved.append(step)
+            continue
         step["row"] = row
-    return True
+    if not moved:
+        plan.held = held_now
+    return moved
 
 
 def _write_plan(plan: _Plan) -> dict:
     """Write ``plan`` (:func:`derive_claims`), under the write lock, onto the rows
-    :func:`_plan_still_holds` found unmoved."""
+    :func:`_moved_steps` found unmoved."""
     dep, now = plan.dep, plan.now
     counts = {"created": 0, "updated": 0, "superseded": 0, "stale": 0}
     for step in plan.steps:
-        action, derived, row = step["action"], step["derived"], step["row"]
+        action, derived, row = step["action"], step["derived"], step.get("row")
         common = dict(
             identity_fp=step["identity_fp"],
             system_fp=plan.system_fp,
@@ -1553,7 +1646,11 @@ def _take_down(claim: AssuranceClaim, stop: str, *, actor, note: str) -> ClaimEv
             note=_clip(f"{note or ''} [{stop} asked for; the claim is already withdrawn, which no stop outranks.]"),
         )
     claim.status = stop
-    fields = ["status", "updated_at"]
+    # A stop carries no confidence, on every version: the deriver's CONTRADICTED
+    # reads None, and a person's kept the machine's 0.88 until a carry dropped it
+    # and a refresh brought it back (round 5, item 8).
+    claim.confidence = None
+    fields = ["status", "confidence", "updated_at"]
     audit = ea.taken_down(claim.evidence_audit, stop)
     if audit is not claim.evidence_audit:
         claim.evidence_audit = audit
