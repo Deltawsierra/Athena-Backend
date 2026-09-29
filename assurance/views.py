@@ -11,6 +11,7 @@ matching how ``pentest`` already scopes visibility.
 from __future__ import annotations
 
 import logging
+import re
 import uuid as uuidlib
 from contextlib import nullcontext
 
@@ -34,7 +35,7 @@ from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
 from . import observability, observed_outcomes
 from .bundle import assurance_bundle
-from .claims import IllegalClaimTransition, apply_claim_transition, derive_claims
+from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
 from .latent import (
     LatentConditionDuplicate,
@@ -115,6 +116,7 @@ from .serializers import (
     AssetSerializer,
     AssuranceClaimSerializer,
     ClaimEventSerializer,
+    ClaimEvidenceSerializer,
     DataBoundarySerializer,
     DeclaredComponentSerializer,
     DeploymentSerializer,
@@ -128,6 +130,10 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+#: A query parameter that is a count: ASCII digits and nothing else. ``int()`` also
+#: takes a sign, surrounding spaces, ``_`` separators and non-ASCII digits.
+_PLAIN_DIGITS = re.compile(r"[0-9]+")
 
 
 def _is_privileged(user) -> bool:
@@ -2045,10 +2051,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # moves the decision -- and the stored one is what the receipt, the bundle
         # and decision-support's revision publish. One transaction: the claims
         # committed first and the refresh ran after, so a reader in between saw
-        # the new claims beside the old decision under one revision.
-        with transaction.atomic():
-            counts = derive_claims(deployment)
-            _refresh_stored_decision(deployment)
+        # the new claims beside the old decision under one revision. It is the
+        # transaction that WRITES the claims (``then``): the re-derive is planned
+        # outside any transaction, so a stop arriving during it never waits on the
+        # evidence it reads (derive_claims).
+        try:
+            counts = derive_claims(deployment, then=lambda: _refresh_stored_decision(deployment))
+        except ClaimsKeptMoving as exc:
+            return Response({"detail": str(exc)}, status=409)
         return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="retest-requirements")
@@ -2179,6 +2189,15 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
     lookup_field = "uuid"
     http_method_names = ["get", "post", "head", "options"]
 
+    #: The most evidence objects one read of a claim's evidence returns. Anything
+    #: may be recorded against a claim, so the read is bounded and says so -- as
+    #: the chain-outcome and approved-workflow reads are -- with the whole count
+    #: beside the page and ``?offset=`` for the rest.
+    EVIDENCE_PAGE_SIZE = 100
+    #: The largest ``?offset=`` the evidence read takes. Past it the value never
+    #: reaches the database: an offset past 2**63 raised IntegrityError there (a 500).
+    EVIDENCE_MAX_OFFSET = 2**31 - 1
+
     def _scoped_claims(self):
         qs = AssuranceClaim.objects.all()
         user = self.request.user
@@ -2229,8 +2248,61 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         who made it, from where to where, and why. A read — open to any operator
         who can see the claim."""
         claim = self.get_object()
-        events = claim.events.select_related("actor").all()
+        events = claim.events.select_related("actor", "carried_from").all()
         return Response(ClaimEventSerializer(events, many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="evidence")
+    def evidence(self, request, uuid=None):
+        """The evidence objects recorded against this claim's identity (issue #333),
+        each with its ten record areas, and the stored evidence audit of the version
+        asked for: its verdict -- ``insufficient_evidence`` among them, as itself --
+        and how each item was weighed. Recorded is not load-bearing. A read, open to
+        any operator who can see the claim.
+
+        Bounded: the newest ``EVIDENCE_PAGE_SIZE`` items from ``?offset=`` (default
+        0), with ``evidence_count`` the whole count, ``returned``, ``truncated`` and
+        ``page_size`` beside them. An offset that is not plain ASCII digits (no sign,
+        no spaces, no separators) no greater than ``EVIDENCE_MAX_OFFSET`` is a 400.
+
+        The stored audit is served marked ``audit_current`` (and, where False, why):
+        a stop writes the claim's status without re-running it, and an audit taken
+        while the claim read something else is never served as its verdict
+        (:func:`assurance.evidence_audit.served_audit`)."""
+        from .evidence_audit import current_verdict, evidence_for, served_audit, stored_weighing
+
+        raw = request.query_params.get("offset", "0")
+        offset = int(raw) if _PLAIN_DIGITS.fullmatch(raw or "") and len(raw) <= 12 else -1
+        if not 0 <= offset <= self.EVIDENCE_MAX_OFFSET:
+            return Response(
+                {"detail": f"offset must be a non-negative integer no greater than "
+                           f"{self.EVIDENCE_MAX_OFFSET}, not {raw[:40]!r}."},
+                status=400,
+            )
+        claim = self.get_object()
+        recorded = evidence_for(claim).order_by("-created_at", "-pk")
+        total = recorded.count()
+        page = list(
+            recorded.select_related("superseded_by", "invalidated_by")[offset: offset + self.EVIDENCE_PAGE_SIZE]
+        )
+        audit = served_audit(claim)
+        # How the stored audit weighed each item on this page, from the whole
+        # weighing kept beside the bounded summary the claim serves.
+        weighing = stored_weighing(claim)
+        return Response(
+            {
+                "claim": str(claim.uuid),
+                "evidence_verdict": current_verdict(claim),
+                "evidence_audit": audit,
+                "evidence": ClaimEvidenceSerializer(
+                    page, many=True, context={"audit": audit, "weighing": weighing or {}}
+                ).data,
+                "evidence_count": total,
+                "returned": len(page),
+                "truncated": offset + len(page) < total,
+                "page_size": self.EVIDENCE_PAGE_SIZE,
+                "offset": offset,
+            }
+        )
 
     @action(detail=True, methods=["post"], url_path="transition")
     def transition(self, request, uuid=None):
@@ -2265,17 +2337,26 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             # A contradiction takes a READY down as a revoke does, and waits on no hook
             # either.
             revoke = to_status in (AssuranceClaim.ClaimStatus.REVOKED, AssuranceClaim.ClaimStatus.CONTRADICTED)
+            #
+            # The claim is decided from its row as committed when the move is
+            # written (apply_claim_transition re-reads it under the write lock), not
+            # from the read above: a stop always lands -- on the current version when
+            # it was addressed to a superseded one -- and a person's move read before
+            # a stop or a supersession committed is a 409, never written over it.
             with refresh_deferred(claim.deployment_id) if revoke else nullcontext(), transaction.atomic():
                 event = apply_claim_transition(
                     claim, to_status, actor=request.user, note=request.data.get("note", "")
                 )
                 _refresh_stored_decision(claim.deployment)
+        except ClaimChanged as exc:
+            return Response({"detail": str(exc)}, status=409)
         except IllegalClaimTransition as exc:
             return Response({"detail": str(exc)}, status=400)
+        moved = event.claim
         return Response(
             {
-                "status": claim.status,
-                "status_label": claim.get_status_display(),
+                "status": moved.status,
+                "status_label": moved.get_status_display(),
                 "event": ClaimEventSerializer(event).data,
             }
         )

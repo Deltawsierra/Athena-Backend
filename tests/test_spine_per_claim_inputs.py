@@ -80,9 +80,11 @@ def _deployment():
     dep = Deployment.objects.create(name="d", owner=owner)
     provider = Provider.objects.create(name="openai", kind=Provider.Kind.MODEL_PROVIDER, region="eu-west-1")
     for field, value in (("region", "eu-west-1"), ("trains_on_data", "No"), ("subprocessors", "None")):
+        # Configuration verified by an independent measurement: a self-declared
+        # label of the same class is the vendor's word and never verifies (#343).
         ProviderAssertion.objects.create(
             provider=provider, field=field, value=value,
-            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED,
+            evidence_class=EvidenceClass.CONFIGURATION_VERIFIED, source=ProviderAssertion.Source.MEASURED,
         )
     Asset.objects.create(
         deployment=dep, kind=Asset.Kind.MODEL, name="gpt", identifier="gpt",
@@ -893,13 +895,19 @@ def test_a_persons_verdict_stands_on_its_version_through_a_re_derive():
     assert not claim.events.filter(note__contains="no input this claim is bound to").exists()
 
 
-def test_a_persons_verdict_ends_with_the_state_it_was_about():
+def test_a_persons_stop_is_carried_to_the_version_the_state_change_opens():
+    """Owner decision (#333 round 4): a person's STOP is not a verdict that ends
+    with the state it was about. It used to: the version was superseded when the
+    input moved, and the new one opened at the deriver's reading -- the stop lifted
+    with no one lifting it. The new version opens at the stop, attributed to the
+    person, carried from the version it was on; only a person lifts it."""
     from assurance.claims import apply_claim_transition
 
     dep = _deployment()
     derive_claims(dep)
     claim = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
-    apply_claim_transition(claim, Status.CONTRADICTED, actor=_person(), note="we know it leaks")
+    person = _person()
+    apply_claim_transition(claim, Status.CONTRADICTED, actor=person, note="we know it leaks")
     _widen_boundary(dep)
 
     counts = derive_claims(dep)
@@ -907,7 +915,10 @@ def test_a_persons_verdict_ends_with_the_state_it_was_about():
     assert counts["superseded"] == 1
     current = AssuranceClaim.objects.filter(deployment=dep, claim_type=BOUNDARY).current().get()
     assert current.pk != claim.pk
-    assert current.status != Status.CONTRADICTED
+    assert current.status == Status.CONTRADICTED
+    carried = current.events.exclude(actor=None).order_by("-pk").first()
+    assert carried.actor_id == person.pk
+    assert f"carried from {claim.uuid}" in carried.note
 
 
 def test_a_status_the_machine_did_not_derive_and_no_person_set_is_versioned():

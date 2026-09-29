@@ -1,0 +1,61 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "attest-unobservable",
+  "exchanges": [
+    {
+      "note": "a route whose URL no reader can parse: recorded unobservable, nothing resolved",
+      "request": {
+        "method": "POST",
+        "path": "/api/attestation/check",
+        "body": {
+          "name": "gateway",
+          "url": "http://[abc/v1/chat"
+        }
+      },
+      "status": 201,
+      "body": {
+        "name": "gateway",
+        "url": "http://[abc/v1/chat",
+        "verdict": "unobservable",
+        "detail": "the host part of 'http://[abc/v1/chat' cannot be parsed ('Invalid IPv6 URL'), so no single host and port can be read from it",
+        "blocking": [],
+        "advisory": [],
+        "declared_changes": [],
+        "observed": null,
+        "baseline_id": null,
+        "recorded": {
+          "id": 1,
+          "tenant": "default",
+          "name": "gateway",
+          "kind": "observation",
+          "url": "http://[abc/v1/chat",
+          "observed": {
+            "host": "",
+            "unobservable": "the host part of 'http://[abc/v1/chat' cannot be parsed ('Invalid IPv6 URL'), so no single host and port can be read from it"
+          },
+          "declared": null,
+          "behaviour": null,
+          "verdict": "unobservable",
+          "detail": "the host part of 'http://[abc/v1/chat' cannot be parsed ('Invalid IPv6 URL'), so no single host and port can be read from it",
+          "recorded_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+          "recorded_at": "2026-09-28T20:46:55.652965+00:00",
+          "route_digest": "sha256:b1a0bd09b570808c34b0aaff6d59b45fe784dd67525b4fc568e20aae9d63e97e"
+        },
+        "answer": "verdict",
+        "run_id": "143acfb1-4883-4c5b-b8b6-1562dd994d48",
+        "state": "completed",
+        "status_url": "/api/attestation/runs/143acfb1-4883-4c5b-b8b6-1562dd994d48"
+      }
+    }
+  ]
+}

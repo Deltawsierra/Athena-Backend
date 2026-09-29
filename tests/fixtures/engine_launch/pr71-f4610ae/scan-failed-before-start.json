@@ -1,0 +1,63 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "scan-failed-before-start",
+  "exchanges": [
+    {
+      "note": "the scan, whose hand-over to the pool failed: 500 status, state failed, nothing started",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 500,
+      "body": {
+        "answer": "status",
+        "run_id": "4df57950-28a3-4258-84b2-23635139711d",
+        "state": "failed",
+        "reason": null,
+        "error": "ValueError: the pool is misconfigured",
+        "status_url": "/api/scans/4df57950-28a3-4258-84b2-23635139711d"
+      },
+      "headers": {
+        "x-run-id": "4df57950-28a3-4258-84b2-23635139711d"
+      }
+    },
+    {
+      "note": "its status read: failed",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/4df57950-28a3-4258-84b2-23635139711d"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "4df57950-28a3-4258-84b2-23635139711d",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "failed",
+        "reason": null,
+        "started_at": "2026-09-28T20:46:56.244812+00:00",
+        "updated_at": "2026-09-28T20:46:56.247522+00:00",
+        "finished_at": "2026-09-28T20:46:56.247522+00:00",
+        "done": true,
+        "result": {
+          "error": "the launch failed before its work started: ValueError: the pool is misconfigured"
+        }
+      }
+    }
+  ]
+}

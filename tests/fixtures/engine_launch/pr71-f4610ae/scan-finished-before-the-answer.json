@@ -1,0 +1,90 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "scan-finished-before-the-answer",
+  "exchanges": [
+    {
+      "note": "the scan, which ended between the end of the route's inline wait and its state read: 202 whose state already reads completed, and no result in it",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "8c9bda92-27a1-4238-a88c-cf327149b3a6",
+        "state": "completed",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/8c9bda92-27a1-4238-a88c-cf327149b3a6",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    },
+    {
+      "note": "its status read: the findings the 202 did not carry",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/8c9bda92-27a1-4238-a88c-cf327149b3a6"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "8c9bda92-27a1-4238-a88c-cf327149b3a6",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:46:52.255950+00:00",
+        "updated_at": "2026-09-28T20:46:52.262382+00:00",
+        "finished_at": "2026-09-28T20:46:52.262382+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 702,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        }
+      }
+    }
+  ]
+}

@@ -73,13 +73,17 @@ def _user(name="analyst", role=None):
     return User.objects.create_user(username=name, password="x", role=role or User.Roles.ANALYST)
 
 
-def _provider(name, *, kind=Provider.Kind.MODEL_PROVIDER, ev=EvidenceClass.VENDOR_ASSERTED, **assertions):
+def _provider(
+    name, *, kind=Provider.Kind.MODEL_PROVIDER, ev=EvidenceClass.VENDOR_ASSERTED,
+    source=ProviderAssertion.Source.SELF_DECLARED, **assertions,
+):
     """Create a provider and one graded assertion per keyword (field=value), at the
-    given evidence class — mirroring the boundary suite's fixture so `region=...`,
-    `trains_on_data=...` etc. become real ProviderAssertion rows."""
+    given evidence class and source — mirroring the boundary suite's fixture so
+    `region=...`, `trains_on_data=...` etc. become real ProviderAssertion rows.
+    ``source`` defaults to the model's own default, the vendor's word."""
     p = Provider.objects.create(name=name, kind=kind)
     for field, value in assertions.items():
-        ProviderAssertion.objects.create(provider=p, field=field, value=value, evidence_class=ev)
+        ProviderAssertion.objects.create(provider=p, field=field, value=value, evidence_class=ev, source=source)
     return p
 
 
@@ -244,10 +248,14 @@ def test_vendor_asserted_boundary_caps_at_supported_never_verified():
 
 
 def test_configuration_verified_boundary_can_reach_verified():
+    # Configuration verified by an independent measurement -- the one source that
+    # observes it (#343: a self-declared label of the same class never verifies;
+    # tests/test_evidence_never_lifts_a_claim.py).
     dep = Deployment.objects.create(name="d", owner=_user())
     p = _provider(
         "EU Model Co",
         ev=EvidenceClass.CONFIGURATION_VERIFIED,
+        source=ProviderAssertion.Source.MEASURED,
         region="eu-west-1",
         trains_on_data="No",
         subprocessors="none",

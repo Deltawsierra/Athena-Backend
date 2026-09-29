@@ -96,15 +96,19 @@ def _posture_dict(assertion, field: str, kind: str, label: str) -> dict:
     """One reuse posture from a provider assertion, carried at its true evidence
     class, with an honest ``verified`` flag that never upgrades a vendor claim."""
     posture = _posture(field, kind, assertion.value)
-    verified = _is_independently_evidenced(assertion.evidence_class, assertion.source)
+    # At the class the fact carries: its label capped at what its source can prove
+    # (#343), so a relabelled vendor claim is never "verified".
+    effective = assertion.effective_evidence_class
+    verified = _is_independently_evidenced(effective, assertion.source)
     return {
         "field": assertion.field,
         "field_label": assertion.get_field_display(),
         "concern": label,
         "value": assertion.value,
         "posture": posture,
-        "evidence_class": assertion.evidence_class,
-        "evidence_class_label": assertion.get_evidence_class_display(),
+        "evidence_class": effective,
+        "evidence_class_label": EvidenceClass(effective).label,
+        "declared_evidence_class": assertion.declared_evidence_class,
         "source": assertion.source,
         "source_label": assertion.get_source_display(),
         # Verified only when independently evidenced — a vendor claim never upgrades.

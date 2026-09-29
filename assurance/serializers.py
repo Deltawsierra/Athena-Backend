@@ -20,6 +20,7 @@ from .models import (
     Asset,
     AssuranceClaim,
     ClaimEvent,
+    ClaimEvidence,
     DataBoundary,
     DeclaredComponent,
     Deployment,
@@ -292,6 +293,10 @@ class ProviderAssertionSerializer(serializers.ModelSerializer):
     )
     provider_name = serializers.CharField(source="provider.name", read_only=True)
     updated_by = serializers.CharField(source="updated_by.username", read_only=True, allow_null=True)
+    # The label is accepted as given -- it is what the source said -- and the class
+    # the assertion actually carries into a claim is shown beside it: the label,
+    # capped at what the source can prove (ProviderAssertion.SOURCE_CEILING, #343).
+    effective_evidence_class = serializers.CharField(read_only=True)
 
     class Meta:
         model = ProviderAssertion
@@ -304,13 +309,14 @@ class ProviderAssertionSerializer(serializers.ModelSerializer):
             "value",
             "evidence_class",
             "evidence_class_label",
+            "effective_evidence_class",
             "source",
             "source_label",
             "notes",
             "updated_by",
             "updated_at",
         ]
-        read_only_fields = ["uuid", "provider_name", "updated_by", "updated_at"]
+        read_only_fields = ["uuid", "provider_name", "effective_evidence_class", "updated_by", "updated_at"]
 
     def validate(self, attrs):
         """One assertion per field per provider — the profile holds a single
@@ -337,6 +343,8 @@ class ProviderProfileAssertionSerializer(serializers.ModelSerializer):
         source="get_evidence_class_display", read_only=True
     )
     source_label = serializers.CharField(source="get_source_display", read_only=True)
+    # The label is what the source said; the class the fact carries is beside it.
+    effective_evidence_class = serializers.CharField(read_only=True)
 
     class Meta:
         model = ProviderAssertion
@@ -347,6 +355,7 @@ class ProviderProfileAssertionSerializer(serializers.ModelSerializer):
             "value",
             "evidence_class",
             "evidence_class_label",
+            "effective_evidence_class",
             "source",
             "source_label",
             "notes",
@@ -381,7 +390,9 @@ class ProviderSerializer(serializers.ModelSerializer):
         read_only_fields = ["uuid", "kind_label", "assertions", "profile"]
 
     def get_profile(self, obj) -> dict:
-        classes = [a.evidence_class for a in obj.assertions.all()]
+        # The weakest link as each fact carries it into a claim: its label capped at
+        # what its source can prove (#343), never the label alone.
+        classes = [a.effective_evidence_class for a in obj.assertions.all()]
         weakest = max(classes, key=evidence_strength) if classes else None
         return {"declared_fields": len(classes), "weakest_evidence": weakest}
 
@@ -711,7 +722,8 @@ class ClaimEventSerializer(serializers.ModelSerializer):
 
     from_status_label = serializers.CharField(source="get_from_status_display", read_only=True)
     to_status_label = serializers.CharField(source="get_to_status_display", read_only=True)
-    actor = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+    actor = serializers.SerializerMethodField()
+    attribution = serializers.SerializerMethodField()
 
     class Meta:
         model = ClaimEvent
@@ -722,10 +734,37 @@ class ClaimEventSerializer(serializers.ModelSerializer):
             "to_status",
             "to_status_label",
             "actor",
+            "attribution",
+            "cause",
             "note",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_actor(self, obj) -> str | None:
+        """The name the account had when it made the move (kept on the event, so it
+        outlives the account), or None for a machine move."""
+        if not obj.by_person:
+            return None
+        return obj.actor_username or (obj.actor.username if obj.actor_id is not None else None)
+
+    def get_attribution(self, obj) -> dict:
+        """What ``actor`` is (issue #333): the platform ACCOUNT that made the move,
+        never a person. A session or a token acts as an account with nobody's intent
+        shown, so the event names the account and says intent is not established.
+        A machine move (a derive, an invalidation, the evidence audit) has none.
+        An account since removed is still named, as it was named when it acted, and
+        ``account_removed`` says so: its move was a person's, and stays one."""
+        if not obj.by_person:
+            return {"kind": "machine", "account": None, "human": None, "personal_intent": "not_established"}
+        return {
+            "kind": "account",
+            "account": self.get_actor(obj),
+            "account_removed": obj.actor_id is None,
+            "carried_from_event": str(obj.carried_from.uuid) if obj.carried_from_id is not None else None,
+            "human": None,
+            "personal_intent": "not_established",
+        }
 
 
 class RetestRequirementSerializer(serializers.ModelSerializer):
@@ -793,6 +832,14 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         source="superseded_by.uuid", read_only=True, allow_null=True
     )
     is_stale = serializers.BooleanField(read_only=True)
+    # The evidence audit's answer (issue #333) as stored: one of the five verdicts,
+    # INSUFFICIENT_EVIDENCE among them, or null where no evidence was ever audited
+    # -- or where the stored audit is not of the claim as it reads now (a stop wrote
+    # the status without re-running it). Never coerced -- not to the status, not to
+    # pass or fail. The audit itself is served marked ``audit_current``.
+    evidence_verdict = serializers.SerializerMethodField()
+    evidence_verdict_label = serializers.SerializerMethodField()
+    evidence_audit = serializers.SerializerMethodField()
 
     class Meta:
         model = AssuranceClaim
@@ -824,6 +871,9 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
             "human_owner",
             "receipt_digest",
             "is_stale",
+            "evidence_verdict",
+            "evidence_verdict_label",
+            "evidence_audit",
             "valid_from",
             "valid_to",
             "verified_at",
@@ -839,6 +889,71 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         # None-safe: an unassessed deployment has no decision, and an absent
         # decision is never read as "ready".
         return obj.get_assessment_display() if obj.assessment else None
+
+    def get_evidence_verdict(self, obj) -> str | None:
+        from .evidence_audit import current_verdict
+
+        return current_verdict(obj)
+
+    def get_evidence_verdict_label(self, obj) -> str | None:
+        return obj.get_evidence_verdict_display() if self.get_evidence_verdict(obj) else None
+
+    def get_evidence_audit(self, obj) -> dict:
+        from .evidence_audit import served_audit
+
+        return served_audit(obj)
+
+
+class ClaimEvidenceSerializer(serializers.ModelSerializer):
+    """One evidence object recorded against a claim (issue #333), read-only: its ten
+    record areas as :func:`assurance.evidence_audit.evidence_record` reads them, and
+    how the audit of the claim's current version weighed it. Recorded is not
+    load-bearing -- ``weighed`` says which."""
+
+    record = serializers.SerializerMethodField()
+    weighed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClaimEvidence
+        fields = ["uuid", "outcome", "origin", "evidence_class", "record", "weighed", "created_at"]
+        read_only_fields = fields
+
+    def get_record(self, obj) -> dict:
+        from .evidence_audit import evidence_record
+
+        return evidence_record(obj)
+
+    def get_weighed(self, obj) -> dict | None:
+        """How the stored audit of the claim's current version (passed in context as
+        ``audit``) weighed this item: ``admitted``, or refused with its reasons, or
+        ``None`` where no stored audit mentions it."""
+        context = self.context or {}
+        audit = context.get("audit") or {}
+        key = str(obj.uuid)
+        # An audit not of the claim as it reads now says how it weighed the item
+        # THEN, and says so (assurance.evidence_audit.served_audit).
+        stale = {"audit_current": False} if audit.get("audit_current") is False else {}
+        admitted, refused = self._weighing(context, audit)
+        if key in admitted:
+            return {"load_bearing": True, "reasons": [], **stale}
+        entry = refused.get(key)
+        if entry is not None:
+            return {"load_bearing": False, "reasons": entry.get("reasons", []), "weighs": entry.get("weighs"), **stale}
+        return None
+
+    def _weighing(self, context, audit) -> tuple[set, dict]:
+        """The whole weighing (``weighing`` in context: the claim's
+        :class:`~assurance.models.ClaimAuditWeighing`), indexed once per page; the summary's own first
+        entries where no whole weighing was passed."""
+        cached = context.get("_weighing_index")
+        if cached is None:
+            source = context.get("weighing") or audit
+            cached = (
+                {entry.get("uuid") for entry in source.get("admitted", [])},
+                {entry.get("uuid"): entry for entry in source.get("refused", [])},
+            )
+            context["_weighing_index"] = cached
+        return cached
 
 
 class DeploymentSerializer(serializers.ModelSerializer):

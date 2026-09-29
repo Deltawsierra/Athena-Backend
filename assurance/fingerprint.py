@@ -97,21 +97,37 @@ def _asset_descriptor(asset) -> dict:
     }
 
 
+def _assertion_descriptor(a) -> dict:
+    """One graded assertion: field, value, the label as declared, and -- wherever
+    its source caps that label (#343) -- the class it carries into a claim.
+
+    The source is state. Hashing the label alone, withdrawing the trust root
+    (``measured`` -> ``self_declared``, label kept) changed no fingerprint: no
+    drift, no retest, and the claim kept reading VERIFIED until some later full
+    re-derive. An assertion whose source does not cap its label hashes exactly as
+    it did before; only one it caps moves, and those already read differently
+    since #343."""
+    entry = {
+        "field": a.field,
+        "value": a.value,
+        # The label as declared: a relabel is a change to what was declared.
+        "evidence_class": a.declared_evidence_class,
+    }
+    effective = a.effective_evidence_class
+    if effective != entry["evidence_class"]:
+        entry["effective_evidence_class"] = effective
+    return entry
+
+
 def _provider_descriptor(provider) -> dict:
     """One provider reduced to its declared assurance posture: identity, region,
-    and each graded assertion (field / value / evidence class), sorted. The
-    evidence class is in the descriptor because a fact moving from vendor-asserted
-    to verified is a state change that should re-open a claim."""
+    and each graded assertion (field / value / evidence class, and the class its
+    source caps it at), sorted. The evidence class is in the descriptor because a
+    fact moving from vendor-asserted to verified is a state change that should
+    re-open a claim -- and so is its source withdrawing what it could prove."""
     assertions = sorted(
-        (
-            {
-                "field": a.field,
-                "value": a.value,
-                "evidence_class": a.evidence_class,
-            }
-            for a in provider.assertions.all()
-        ),
-        key=lambda a: (a["field"], a["value"], a["evidence_class"]),
+        (_assertion_descriptor(a) for a in provider.assertions.all()),
+        key=lambda a: (a["field"], a["value"], a["evidence_class"], a.get("effective_evidence_class", "")),
     )
     return {
         "name": provider.name,

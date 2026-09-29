@@ -1,0 +1,124 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "5779e99eae1085f96e6c27ce28dbd950d8200aba",
+    "contract": "main"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "retest-stopped-while-waiting",
+  "exchanges": [
+    {
+      "note": "setup: the scan that found the finding (answered finished inside the 20 s wait)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 200,
+      "body": {
+        "run_id": "d7937f41-e9dd-45c3-9f99-a28f16afa853",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:49:16.056987+00:00",
+        "updated_at": "2026-09-28T20:49:16.084953+00:00",
+        "finished_at": "2026-09-28T20:49:16.084953+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 400,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        }
+      }
+    },
+    {
+      "note": "the retest's answer: stopped during the engine's inline wait",
+      "request": {
+        "method": "POST",
+        "path": "/api/remediation/retest",
+        "body": {
+          "twin_id": 1,
+          "engagement_ref": "42",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 201,
+      "body": {
+        "twin_id": 1,
+        "verdict": "inconclusive",
+        "detail": "xss was not reported, but the retest scan does not record whether it was authenticated, so it cannot be said to have looked where the finding was, so its absence does not establish that it was fixed",
+        "target": "https://offline.invalid/",
+        "finding_type": "xss",
+        "inventory_digest": null,
+        "run_id": 720,
+        "check": {
+          "id": 1,
+          "tenant": "default",
+          "twin_id": 1,
+          "target": "https://offline.invalid/",
+          "finding_type": "xss",
+          "verdict": "inconclusive",
+          "detail": "xss was not reported, but the retest scan does not record whether it was authenticated, so it cannot be said to have looked where the finding was, so its absence does not establish that it was fixed",
+          "inventory_digest": null,
+          "run_id": 720,
+          "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+          "checked_at": "2026-09-28T20:49:16.283690+00:00"
+        }
+      }
+    },
+    {
+      "note": "the Stop, sent by the id on the engine's live list",
+      "request": {
+        "method": "POST",
+        "path": "/api/scans/22d8cadb-1998-425d-89c8-da896c528eea/abort",
+        "body": {}
+      },
+      "status": 200,
+      "body": {
+        "run_id": "22d8cadb-1998-425d-89c8-da896c528eea",
+        "state": "aborting",
+        "reason": "stopped by an operator"
+      }
+    }
+  ]
+}

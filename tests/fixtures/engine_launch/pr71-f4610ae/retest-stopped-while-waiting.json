@@ -1,0 +1,143 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "retest-stopped-while-waiting",
+  "exchanges": [
+    {
+      "note": "setup: the scan that found the finding (answered finished inside the 20 s wait)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "wait_seconds": 20.0,
+          "engagement_ref": "42"
+        }
+      },
+      "status": 200,
+      "body": {
+        "run_id": "fa8b7e94-76b9-44f4-8b1d-2e0808d828a2",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:46:53.996025+00:00",
+        "updated_at": "2026-09-28T20:46:54.007218+00:00",
+        "finished_at": "2026-09-28T20:46:54.007218+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 400,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        },
+        "answer": "status",
+        "status_url": "/api/scans/fa8b7e94-76b9-44f4-8b1d-2e0808d828a2"
+      }
+    },
+    {
+      "note": "the retest's answer: stopped during the engine's inline wait",
+      "request": {
+        "method": "POST",
+        "path": "/api/remediation/retest",
+        "body": {
+          "twin_id": 1,
+          "engagement_ref": "42",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 200,
+      "body": {
+        "answer": "status",
+        "run_id": "cb057cab-f2cf-4fd2-b3b3-5a0205f9595f",
+        "state": "aborted",
+        "reason": "stopped by an operator",
+        "error": null,
+        "status_url": "/api/scans/cb057cab-f2cf-4fd2-b3b3-5a0205f9595f"
+      }
+    },
+    {
+      "note": "the Stop, sent by the id on the engine's live list",
+      "request": {
+        "method": "POST",
+        "path": "/api/scans/cb057cab-f2cf-4fd2-b3b3-5a0205f9595f/abort",
+        "body": {}
+      },
+      "status": 200,
+      "body": {
+        "run_id": "cb057cab-f2cf-4fd2-b3b3-5a0205f9595f",
+        "state": "aborting",
+        "reason": "stopped by an operator",
+        "recorded": true
+      }
+    },
+    {
+      "note": "its status read: aborted, with the stored {stopped, scan_incomplete} and no verdict",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/cb057cab-f2cf-4fd2-b3b3-5a0205f9595f"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "cb057cab-f2cf-4fd2-b3b3-5a0205f9595f",
+        "target": "https://offline.invalid/",
+        "kind": "retest",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "aborted",
+        "reason": "stopped by an operator",
+        "started_at": "2026-09-28T20:46:54.079047+00:00",
+        "updated_at": "2026-09-28T20:46:54.111977+00:00",
+        "finished_at": "2026-09-28T20:46:54.111977+00:00",
+        "done": true,
+        "result": {
+          "twin_id": 1,
+          "target": "https://offline.invalid/",
+          "finding_type": "xss",
+          "inventory_digest": null,
+          "run_id": "cb057cab-f2cf-4fd2-b3b3-5a0205f9595f",
+          "scan_record_id": 720,
+          "stopped": "stopped by an operator",
+          "scan_incomplete": true
+        }
+      }
+    }
+  ]
+}

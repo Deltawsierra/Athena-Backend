@@ -33,7 +33,7 @@ from __future__ import annotations
 from django.utils import timezone
 
 from .graph_refs import in_graph
-from .models import evidence_strength
+from .models import EvidenceClass, evidence_strength
 from .receipt import ALGORITHM, _digest
 from .governance import is_shadow
 
@@ -90,15 +90,19 @@ def _provider_entry(provider) -> dict:
             "field": a.field,
             "field_label": a.get_field_display(),
             "value": a.value,
-            "evidence_class": a.evidence_class,
-            "evidence_class_label": a.get_evidence_class_display(),
+            # The label as declared, echoed; the class it carries is below.
+            "evidence_class": a.declared_evidence_class,
+            "evidence_class_label": EvidenceClass(a.declared_evidence_class).label,
             "source": a.source,
             "source_label": a.get_source_display(),
+            # What the fact carries into a claim: its label, capped at what its
+            # source can prove (#343). The weakest link is read off this.
+            "effective_evidence_class": a.effective_evidence_class,
         }
         for a in assertions
     ]
     declared.sort(key=lambda d: d["field"])
-    classes = [a.evidence_class for a in assertions]
+    classes = [a.effective_evidence_class for a in assertions]
     weakest = max(classes, key=evidence_strength) if classes else None
     return {
         "uuid": str(provider.uuid),
@@ -140,7 +144,7 @@ def build_ai_bom(deployment) -> dict:
     providers.sort(key=lambda p: (p["kind"], p["name"]))
 
     # The BOM's weakest link overall: the softest evidence among all provider facts.
-    all_evidence = [f["evidence_class"] for p in providers for f in p["declared_facts"]]
+    all_evidence = [f["effective_evidence_class"] for p in providers for f in p["declared_facts"]]
     weakest_overall = max(all_evidence, key=evidence_strength) if all_evidence else None
 
     summary = {

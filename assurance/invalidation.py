@@ -51,6 +51,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
+from . import evidence_audit as ea
 from . import observability as obs
 from .claims import Status, held_by_fired_conditions
 from .fingerprint import (
@@ -137,8 +138,28 @@ def _mark_stale(claim, now, *, note: str = "System state changed; claim invalida
     """Move a drifted claim away from a pass to STALE ("a retest is due"), through
     the same status seam Phase 1 uses, and attribute it. Skips a claim whose status
     must not be softened (see ``_STALE_SKIP``) -- including one already STALE, so a
-    caller that marks the same claim instance twice writes one event."""
+    caller that marks the same claim instance twice writes one event.
+
+    A CONTRADICTED claim that its recorded evidence holds there (issue #333) keeps
+    its status, and the mark reaches the reading under the hold instead
+    (:func:`assurance.evidence_audit.hold_reading_at_stale`): a release of the hold
+    lands on STALE, never on the reading from before the change.
+
+    Decided from the claim's row as committed, under the write lock -- a stop or a
+    withdrawal that committed after the caller read the claim is what it reads --
+    and the caller's copy is brought to the row written."""
+    from .claims import _adopt, _locked_row
+
+    with transaction.atomic():
+        row = _locked_row(claim)
+        _mark_row_stale(row, note=note)
+    _adopt(claim, row)
+
+
+def _mark_row_stale(claim, *, note: str) -> None:
     if claim.status in _STALE_SKIP:
+        if claim.status == Status.CONTRADICTED:
+            ea.hold_reading_at_stale(claim, note=note)
         return
     old_status = claim.status
     claim.status = Status.STALE

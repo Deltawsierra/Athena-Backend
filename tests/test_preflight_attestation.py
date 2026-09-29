@@ -307,7 +307,10 @@ def test_a_verdict_this_module_does_not_recognise_is_not_a_pass():
         }
     )
 
-    assert preflight._attest_routes(client, dep)["verdict"] == "review"
+    # Round 4: a word the gate does not know is no verdict -- the route was not
+    # measured, as one the engine could not be asked about (never review, a route
+    # measured and found moved; never unchanged).
+    assert preflight._attest_routes(client, dep)["verdict"] == "unobservable"
 
 
 def test_the_route_cap_is_reported_rather_than_silently_shortening_the_answer():

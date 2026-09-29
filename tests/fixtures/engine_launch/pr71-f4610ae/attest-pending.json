@@ -1,0 +1,73 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
+  },
+  "generated_by": "tests/fixtures/engine_launch/generate.py",
+  "scenario": "attest-pending",
+  "exchanges": [
+    {
+      "note": "a route still being measured when the engine's 30 s inline wait ended: 503 status",
+      "request": {
+        "method": "POST",
+        "path": "/api/attestation/check",
+        "body": {
+          "name": "gateway",
+          "url": "https://offline.invalid/v1/chat"
+        }
+      },
+      "status": 503,
+      "body": {
+        "answer": "status",
+        "run_id": "8e9a9cc1-693f-43e7-a487-069897b45374",
+        "state": "running",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/attestation/runs/8e9a9cc1-693f-43e7-a487-069897b45374",
+        "detail": "the attestation is running: nothing has been measured yet; collect it from status_url"
+      },
+      "headers": {
+        "retry-after": "5",
+        "x-run-id": "8e9a9cc1-693f-43e7-a487-069897b45374"
+      }
+    },
+    {
+      "note": "Stop, by the run_id the 503 named",
+      "request": {
+        "method": "POST",
+        "path": "/api/scans/8e9a9cc1-693f-43e7-a487-069897b45374/abort",
+        "body": {}
+      },
+      "status": 200,
+      "body": {
+        "run_id": "8e9a9cc1-693f-43e7-a487-069897b45374",
+        "state": "aborting",
+        "reason": "stopped by an operator",
+        "recorded": true
+      }
+    },
+    {
+      "note": "its status_url once stopped: 409, nothing measured",
+      "request": {
+        "method": "GET",
+        "path": "/api/attestation/runs/8e9a9cc1-693f-43e7-a487-069897b45374"
+      },
+      "status": 409,
+      "body": {
+        "answer": "status",
+        "run_id": "8e9a9cc1-693f-43e7-a487-069897b45374",
+        "state": "aborted",
+        "reason": "stopped by an operator",
+        "error": null,
+        "status_url": "/api/attestation/runs/8e9a9cc1-693f-43e7-a487-069897b45374",
+        "detail": "the attestation was stopped before it measured anything: stopped by an operator"
+      }
+    }
+  ]
+}
