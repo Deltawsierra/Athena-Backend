@@ -143,7 +143,20 @@ def _mark_stale(claim, now, *, note: str = "System state changed; claim invalida
     A CONTRADICTED claim that its recorded evidence holds there (issue #333) keeps
     its status, and the mark reaches the reading under the hold instead
     (:func:`assurance.evidence_audit.hold_reading_at_stale`): a release of the hold
-    lands on STALE, never on the reading from before the change."""
+    lands on STALE, never on the reading from before the change.
+
+    Decided from the claim's row as committed, under the write lock -- a stop or a
+    withdrawal that committed after the caller read the claim is what it reads --
+    and the caller's copy is brought to the row written."""
+    from .claims import _adopt, _locked_row
+
+    with transaction.atomic():
+        row = _locked_row(claim)
+        _mark_row_stale(row, note=note)
+    _adopt(claim, row)
+
+
+def _mark_row_stale(claim, *, note: str) -> None:
     if claim.status in _STALE_SKIP:
         if claim.status == Status.CONTRADICTED:
             ea.hold_reading_at_stale(claim, note=note)

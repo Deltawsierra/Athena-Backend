@@ -343,6 +343,7 @@ def _attest_routes(client, deployment, tenant_id=None) -> dict[str, Any]:
                 }
             )
 
+    missing = _verdict_missing(routes, asked)
     return {
         "verdict": _attest_verdict(routes, unmeasurable, truncated),
         "detail": _attest_detail(routes, unmeasurable, truncated, asked),
@@ -350,12 +351,13 @@ def _attest_routes(client, deployment, tenant_id=None) -> dict[str, Any]:
         # The routes the engine answered for without a verdict this gate can read.
         # Named apart from `routes` so the reason can say THAT is why the gate
         # reads review -- not a moved route, and not a coverage gap.
-        "verdict_missing": _verdict_missing(routes, asked),
+        "verdict_missing": missing,
         # Carried separately and counted, because these are the routes the gate
         # did NOT check. Folding them into `routes` would let a coverage hole be
-        # read as a measurement.
+        # read as a measurement. A route answered without a verdict was not
+        # checked either, and is counted with them.
         "unmeasurable": unmeasurable,
-        "not_measured_count": len(unmeasurable) + len(truncated),
+        "not_measured_count": len(unmeasurable) + len(truncated) + len(missing),
         "truncated": truncated,
     }
 
@@ -409,16 +411,21 @@ def _attest_verdict(routes, unmeasurable, truncated) -> str:
     nothing to measure and that is a true answer -- while one whose routes could
     not be read reads ``unobservable``, which is not.
 
-    A route whose answer carries no verdict this gate can read is review: the
-    engine was asked and said nothing usable, so it establishes nothing either
-    way. It is never unchanged.
+    A route whose answer carries no verdict this gate can read was not measured:
+    the engine was asked and said nothing usable, so it establishes nothing either
+    way. It reads ``unobservable``, as a route nobody could measure does -- never
+    unchanged, and never ``review`` either, which is a route the engine measured and
+    found moved: read so, the gate held the scan as though the route had been
+    checked (round 4). Under enforce the gate treats it exactly as it treats an
+    unobservable route (:func:`_decide`: review, recorded on the scan, never
+    refused); under observe it is reported and nothing is refused.
     """
     verdicts = [_route_verdict(r)[0] for r in routes]
     if ATTEST_BLOCKED in verdicts or any(isinstance(r, dict) and r.get("blocking") for r in routes):
         return ATTEST_BLOCKED
-    if ATTEST_UNOBSERVABLE in verdicts or unmeasurable or truncated:
+    if ATTEST_UNOBSERVABLE in verdicts or None in verdicts or unmeasurable or truncated:
         return ATTEST_UNOBSERVABLE
-    if None in verdicts or ATTEST_REVIEW in verdicts:
+    if ATTEST_REVIEW in verdicts:
         return ATTEST_REVIEW
     return ATTEST_UNCHANGED
 
@@ -517,7 +524,10 @@ def _attest_reason(attestation: Any, verdict: str | None,
         consequence = (
             "observe mode: this is reported, and nothing is refused in this mode"
             if gate_mode != "enforce"
-            else "so the gate reads review, never ok"
+            else (
+                "they count as not measured, as a route nobody could measure does, so the gate "
+                "reads review, never ok"
+            )
         )
         parts.append(
             f"route attestation (missing verdict): {said}, so nothing was "
@@ -526,7 +536,9 @@ def _attest_reason(attestation: Any, verdict: str | None,
         if verdict not in ATTEST_VERDICTS:
             return parts[0]
 
-    if verdict == ATTEST_UNOBSERVABLE:
+    # Unobservable only because routes answered without a verdict is said above, as
+    # what it is -- not a coverage gap.
+    if verdict == ATTEST_UNOBSERVABLE and not _only_missing(attestation, missing):
         # Routes we could not measure. Review rather than block: not being able
         # to look is a coverage gap, not evidence of drift, and blocking on it
         # would make the first deployment with an un-probeable route unable to
@@ -554,18 +566,31 @@ def _attest_reason(attestation: Any, verdict: str | None,
             f"route attestation (coverage): {measured} route(s) measured, "
             f"{counted} -- {_detail(attestation)}"
         )
-    elif verdict == ATTEST_REVIEW:
-        # Drift only when something the engine measured asked for review: a
-        # review that is only the missing verdicts above is not a moved route.
-        routes = attestation.get("routes") if isinstance(attestation, dict) else None
-        drifted = (
-            any(_route_verdict(r)[0] == ATTEST_REVIEW for r in routes)
-            if isinstance(routes, list) and routes
-            else not missing
-        )
-        if drifted:
-            parts.append(f"route attestation (drift): {_detail(attestation)}")
+    # Drift only when something the engine measured asked for review: a review
+    # that is only the missing verdicts above is not a moved route. A moved route
+    # is said beside routes that were not measured, too.
+    routes = attestation.get("routes") if isinstance(attestation, dict) else None
+    if isinstance(routes, list) and routes:
+        drifted = any(_route_verdict(r)[0] == ATTEST_REVIEW for r in routes)
+    else:
+        drifted = verdict == ATTEST_REVIEW and not missing
+    if drifted:
+        parts.append(f"route attestation (drift): {_detail(attestation)}")
     return "; ".join(parts) or None
+
+
+def _only_missing(attestation: Any, missing: list) -> bool:
+    """Whether every route the attestation did not measure is one that answered
+    without a verdict: no route nobody could measure, none cut by the cap, and no
+    route the engine itself called unobservable."""
+    if not isinstance(attestation, dict):
+        return False
+    routes = attestation.get("routes")
+    if attestation.get("unmeasurable") or attestation.get("truncated"):
+        return False
+    if isinstance(routes, list) and any(_route_verdict(r)[0] == ATTEST_UNOBSERVABLE for r in routes):
+        return False
+    return bool(missing)
 
 
 def _decide(report: dict[str, Any]):

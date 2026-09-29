@@ -1,3 +1,4 @@
+import re
 import time
 
 import requests
@@ -143,6 +144,50 @@ def _run_id_of(value) -> str | None:
     return None
 
 
+#: How deeply an engine answer may nest before it is unreadable. The engine's
+#: answers nest a handful of levels; a body nested deeper is not one of them, and
+#: parsed it raised RecursionError -- not a ValueError, so straight past every
+#: reader here and out of the scan view as a 500 with the scan left pending and
+#: its run id dropped (round 4, E1).
+MAX_JSON_DEPTH = 64
+
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _nesting_depth(text: str) -> int:
+    """How deeply ``text`` nests arrays and objects, strings ignored. Linear, and
+    never recursive."""
+    depth = deepest = 0
+    for char in _JSON_STRING.sub("", text):
+        if char in "[{":
+            depth += 1
+            if depth > deepest:
+                deepest = depth
+        elif char in "]}":
+            depth -= 1
+    return deepest
+
+
+def _json_of(resp: requests.Response):
+    """``resp``'s body as JSON, or ValueError when it cannot be read: not JSON, or
+    nested past :data:`MAX_JSON_DEPTH` (checked before it is parsed, and a
+    RecursionError from the parser is the same answer)."""
+    text = resp.text
+    if _nesting_depth(text) > MAX_JSON_DEPTH:
+        raise ValueError(f"the body nests deeper than {MAX_JSON_DEPTH} levels")
+    try:
+        return resp.json()
+    except RecursionError as exc:
+        raise ValueError("the body nests too deeply to be read") from exc
+
+
+def _header_run_id(resp: requests.Response) -> str | None:
+    """The run #71 names in ``X-Run-Id``. Read where the body cannot be: a proxy
+    that replaced a 500's body with its own page keeps the engine's headers, and
+    the header is then the only handle on a run that may be scanning the customer."""
+    return _run_id_of((resp.headers or {}).get("X-Run-Id"))
+
+
 #: The one field athena-engine #71 answers every launch with, saying which of
 #: its two shapes this is. Engine main sends no such field. Which contract
 #: answered is read from it and from nothing else -- never guessed from which
@@ -156,6 +201,10 @@ ANSWER_VERDICT = "verdict"
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"
 RUN_ABORTED = "aborted"
+#: The states a run has ended in; any other state is a run not known to have ended.
+_RUN_ENDS = (RUN_COMPLETED, RUN_FAILED, RUN_ABORTED)
+#: The states of a run that may still be going: stoppable by its id.
+_RUN_GOING = ("queued", "running", "aborting")
 
 
 class CyberEngineClient:
@@ -203,7 +252,7 @@ class CyberEngineClient:
         and surfaces as an AttributeError with no mention of the engine.
         """
         try:
-            body = resp.json()
+            body = _json_of(resp)
         except ValueError as exc:
             raise EngineError(
                 f"Engine returned a body that is not JSON from {path} "
@@ -275,7 +324,7 @@ class CyberEngineClient:
         and the caller reads the answer as the refusal it always was.
         """
         try:
-            body = resp.json()
+            body = _json_of(resp)
         except ValueError:
             return None
         if isinstance(body, dict) and body.get(ANSWER_FIELD) == ANSWER_STATUS:
@@ -361,6 +410,13 @@ class CyberEngineClient:
         if resp.status_code == 500:
             named = self._status_answer(resp)
             run_id = _run_id_of(named.get("run_id")) if named else None
+            if named is None and _header_run_id(resp) is not None:
+                # A 500 whose body cannot be read -- a proxy replaced it with its own
+                # page -- that still carries #71's X-Run-Id: a run was registered,
+                # and whether its work started is unknown. Collected like a 500
+                # whose state is null: read, it says how it ended; unreadable, it
+                # is still running, with its id.
+                return self.collect_scan(_header_run_id(resp))
             if run_id is not None:
                 if named.get("state") == RUN_FAILED:
                     raise EngineError(
@@ -377,26 +433,51 @@ class CyberEngineClient:
         if not (200 <= resp.status_code < 300):
             raise self._refused(resp)
 
-        accepted = self._read_json(resp, "/api/scan")
+        try:
+            accepted = self._read_json(resp, "/api/scan")
+        except EngineError as exc:
+            if _header_run_id(resp) is not None:
+                # The engine took the scan and named its run, and the body saying
+                # so cannot be read: not a failed scan -- it may be scanning now.
+                raise self._unread(resp.status_code, _header_run_id(resp), str(exc)) from exc
+            raise
         run_id = _run_id_of(accepted.get("run_id"))
 
         if ANSWER_FIELD in accepted and accepted[ANSWER_FIELD] != ANSWER_STATUS:
+            said = f"HTTP {resp.status_code} with answer {accepted[ANSWER_FIELD]!r}"
+            if run_id is not None:
+                # It names a run: whatever else it is, that run may be scanning the
+                # customer. Kept pending with its id -- recorded FAILED, the scan
+                # read as over while the engine may still be running it.
+                raise self._unread(resp.status_code, run_id, said)
             raise EngineError(
-                f"The engine answered a shape this backend does not read: HTTP "
-                f"{resp.status_code} with answer {accepted[ANSWER_FIELD]!r} to a scan "
-                f"start. Nothing was read from it"
-                + (f"; run {run_id} may still be running, and is stopped by that id."
-                   if run_id else "."),
+                f"The engine answered a shape this backend does not read: {said} to a scan "
+                f"start. Nothing was read from it.",
                 kind=ENGINE_UNREADABLE,
                 status=resp.status_code,
-                run_id=run_id,
             )
 
         if resp.status_code == 200:
             if accepted.get("done") is True:
-                if "state" not in accepted and accepted.get("result") is not None:
-                    # An engine older than the run registry: done, and its result.
-                    return accepted["result"]
+                if ANSWER_FIELD not in accepted:
+                    if "state" not in accepted and accepted.get("result") is not None:
+                        # An engine older than the run registry: done, and its result.
+                        return accepted["result"]
+                elif accepted.get("state") not in _RUN_ENDS:
+                    # A #71 status is read by its `answer`, and it says how the run
+                    # ended in `state`. With no end state it says nothing about the
+                    # run -- never an old engine's result, whatever it carries: a
+                    # stopped scan whose `state` was lost read as COMPLETED, clean.
+                    if run_id is not None:
+                        raise self._unread(
+                            resp.status_code, run_id, f"a finished status with no end state ({accepted.get('state')!r})"
+                        )
+                    raise EngineError(
+                        "The engine answered a scan start with a finished status that names "
+                        "neither its run nor how it ended. Nothing was read from it.",
+                        kind=ENGINE_UNREADABLE,
+                        status=resp.status_code,
+                    )
                 return self._finished_scan(accepted, run_id)
             if run_id is None:
                 if ANSWER_FIELD in accepted:
@@ -421,15 +502,30 @@ class CyberEngineClient:
         return self.collect_scan(run_id)
 
     @staticmethod
-    def _finished_scan(status: dict, run_id: str | None) -> dict:
+    def _unread(http_status: int | None, run_id: str, said: str) -> "ScanUncollected":
+        """An answer about run ``run_id`` that this backend cannot read: the run is
+        read as still running, with its id -- never as a failed scan -- because the
+        answer says nothing about whether it ended."""
+        return ScanUncollected(
+            f"The engine answered a shape this backend does not read ({said}) about scan run "
+            f"{run_id}. Nothing was read from it: the scan may still be running, is stopped by "
+            f"that id, and can be collected later.",
+            run_id=run_id,
+        )
+
+    @classmethod
+    def _finished_scan(cls, status: dict, run_id: str | None) -> dict:
         """The findings of a run that has ended, or the error that it ended some other way.
 
         Only ``completed`` is a result. A stopped scan's result is whatever it
         had when it stopped -- often nothing -- and reading it as findings would
         record a scan an operator stopped as one that completed and found
-        nothing.
+        nothing. A run said to be done with no end state this backend reads is not
+        known to have ended: it is still running, with its id.
         """
         state = status.get("state")
+        if state not in _RUN_ENDS and run_id is not None:
+            raise cls._unread(None, run_id, f"done, with state {state!r}")
         if state == RUN_COMPLETED:
             return status.get("result") or {}
         result = status.get("result") if isinstance(status.get("result"), dict) else {}
@@ -778,6 +874,13 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
     if status in (429, 500):
         named = client._status_answer(resp)
         run_id = _run_id_of(named.get("run_id")) if named else None
+        if status == 500 and named is None and _header_run_id(resp) is not None:
+            # A 500 whose body a proxy replaced, still carrying #71's X-Run-Id: a run
+            # was registered, and whether its work started is unknown -- running,
+            # stoppable by that id, until it is read.
+            return _retest_status(RETEST_RUNNING, run_id=_header_run_id(resp), state=None,
+                                  error="the engine's answer could not be read", http_status=status,
+                                  body=None)
         if run_id is not None:
             state = named.get("state")
             if status == 429:
@@ -798,7 +901,16 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
         # 503 (not admitted), 4xx, a bare 5xx: nothing this answer says started.
         raise client._refused(resp)
 
-    body = client._read_json(resp, path)
+    try:
+        body = client._read_json(resp, path)
+    except EngineError:
+        if _header_run_id(resp) is None:
+            raise
+        # The engine took the retest and named its run in X-Run-Id; the body saying
+        # what it is cannot be read. It may still be running, and is stopped by that id.
+        return _retest_status(RETEST_RUNNING, run_id=_header_run_id(resp), state=None,
+                              error="the engine's answer could not be read", http_status=status,
+                              body=None)
     named_run = _run_id_of(body.get("run_id"))
 
     if ANSWER_FIELD not in body:
@@ -826,6 +938,13 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
     if answer == ANSWER_VERDICT:
         state = body.get("state")
         stopped = body.get("stopped_after_recording")
+        if state in _RUN_GOING:
+            # A verdict whose run still reads as going has not been stopped: it is
+            # read on (stoppable by its run id), never marked stopped after
+            # recording -- which said a stop had landed that nobody made.
+            return _retest_verdict(body, scan_record_id=body.get("scan_record_id"),
+                                   run_id=named_run, stop_id=named_run, state=state,
+                                   stopped_after_recording=None)
         if state not in (None, RUN_COMPLETED) and not stopped:
             # A verdict on a run that did not complete is one filed before a stop
             # landed: #71 names the stop. Said, even if it did not.
@@ -834,7 +953,18 @@ def read_retest_answer(client: CyberEngineClient, resp: requests.Response) -> di
                                run_id=named_run, stop_id=None, state=state,
                                stopped_after_recording=stopped or None)
     if answer == ANSWER_STATUS:
-        return _retest_status(_status_phase(body.get("state"), http_status=status),
+        phase = _status_phase(body.get("state"), http_status=status)
+        if phase == RETEST_RUNNING and named_run is None:
+            # Running, by its own account, and naming no run: nothing can collect it,
+            # and nothing here can stop it. Refused as a scan start naming no run is,
+            # and the missing stop handle is said.
+            raise EngineError(
+                f"The engine answered a retest HTTP {status} as running without naming its run, "
+                "so there is nothing to collect -- and no stop handle: nothing here can stop it. "
+                "Nothing was read from it.",
+                kind=ENGINE_UNREADABLE, status=status, run_id=None,
+            )
+        return _retest_status(phase,
                               run_id=named_run, state=body.get("state"),
                               reason=body.get("reason"), error=body.get("error"),
                               http_status=status, body=body)

@@ -35,7 +35,7 @@ from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
 from . import observability, observed_outcomes
 from .bundle import assurance_bundle
-from .claims import ClaimChanged, IllegalClaimTransition, apply_claim_transition, derive_claims
+from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
 from .latent import (
     LatentConditionDuplicate,
@@ -2051,10 +2051,14 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         # moves the decision -- and the stored one is what the receipt, the bundle
         # and decision-support's revision publish. One transaction: the claims
         # committed first and the refresh ran after, so a reader in between saw
-        # the new claims beside the old decision under one revision.
-        with transaction.atomic():
-            counts = derive_claims(deployment)
-            _refresh_stored_decision(deployment)
+        # the new claims beside the old decision under one revision. It is the
+        # transaction that WRITES the claims (``then``): the re-derive is planned
+        # outside any transaction, so a stop arriving during it never waits on the
+        # evidence it reads (derive_claims).
+        try:
+            counts = derive_claims(deployment, then=lambda: _refresh_stored_decision(deployment))
+        except ClaimsKeptMoving as exc:
+            return Response({"detail": str(exc)}, status=409)
         return Response(counts)
 
     @action(detail=True, methods=["get"], url_path="retest-requirements")

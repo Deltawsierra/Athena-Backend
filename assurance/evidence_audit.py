@@ -107,6 +107,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Count, Max
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -801,17 +802,23 @@ def store_audit(claim: AssuranceClaim, result: dict | None) -> list[str]:
     return list(columns)
 
 
+def weighing_of(result: dict) -> dict:
+    """The whole per-item weighing of an audit, as :func:`store_weighing` keeps it."""
+    return {key: list(result.get(key) or []) for key in AUDIT_LISTS}
+
+
 def store_weighing(claim: AssuranceClaim, result: dict | None) -> None:
     """Keep ``result``'s whole per-item weighing beside the saved ``claim``
-    (:class:`~assurance.models.ClaimAuditWeighing`); ``None`` removes it."""
+    (:class:`~assurance.models.ClaimAuditWeighing`); ``None`` removes it. Written
+    over the stored one without reading it back (it grows with the evidence)."""
     from .models import ClaimAuditWeighing
 
     if result is None:
         ClaimAuditWeighing.objects.filter(claim_id=claim.pk).delete()
         return
-    ClaimAuditWeighing.objects.update_or_create(
-        claim_id=claim.pk, defaults={"items": {key: list(result.get(key) or []) for key in AUDIT_LISTS}}
-    )
+    items = weighing_of(result)
+    if not ClaimAuditWeighing.objects.filter(claim_id=claim.pk).update(items=items, updated_at=timezone.now()):
+        ClaimAuditWeighing.objects.create(claim_id=claim.pk, items=items)
 
 
 def stored_weighing(claim: AssuranceClaim) -> dict:
@@ -821,7 +828,51 @@ def stored_weighing(claim: AssuranceClaim) -> dict:
     return ClaimAuditWeighing.objects.filter(claim_id=claim.pk).values_list("items", flat=True).first() or {}
 
 
-@transaction.atomic
+#: How many times an audit taken outside the write lock is taken again because the
+#: claim, or the evidence recorded against it, moved before it could be written.
+#: Past that it is taken once more under the lock (:func:`audit_claim`).
+AUDIT_ATTEMPTS = 5
+
+
+def claim_token(claim: AssuranceClaim) -> tuple:
+    """What a write decided from a read of ``claim`` compares against the row under
+    the write lock: equal, and nothing has written the claim since it was read --
+    no stop, no person, no supersession, no other audit (every writer moves
+    ``updated_at``; the columns a decision reads are compared as well)."""
+    return (
+        claim.pk,
+        claim.status,
+        claim.valid_to,
+        claim.effective_to,
+        claim.updated_at,
+        claim.confidence,
+        claim.evidence_verdict,
+        claim.evidence_audit,
+        claim.legal_status,
+        claim.input_fingerprint,
+        claim.policy_version,
+    )
+
+
+def evidence_token(deployment_id, fingerprint: str | None = None) -> tuple:
+    """The evidence recorded against a claim identity (every identity on the
+    deployment when ``fingerprint`` is None), as one aggregate read off the index:
+    equal, and no item was recorded since. The only evidence read a write takes
+    under the lock.
+
+    An invalidation, or a successor's mark on what it supersedes, writes no new item
+    -- and needs no token: each is followed by its own audit, which writes the
+    claim's row, and a writer reads the claim's row BEFORE the evidence. So either
+    the evidence it read already has the change, or the change's audit writes the
+    row after this writer read it -- and the writer finds the row moved and reads
+    again (:func:`claim_token`)."""
+    items = ClaimEvidence.objects.filter(deployment_id=deployment_id)
+    if fingerprint is not None:
+        items = items.filter(claim_fingerprint=fingerprint)
+    agg = items.aggregate(n=Count("pk"), last=Max("pk"))
+    return (agg["n"], agg["last"])
+
+
 def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     """Audit a CURRENT claim version in place and write the answer onto it.
 
@@ -833,13 +884,49 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
 
     A hold keeps the confidence the reading had before it (``base_confidence``),
     and a release restores no more than that: evidence never leaves a claim with
-    confidence it would not carry had nothing been recorded against it."""
+    confidence it would not carry had nothing been recorded against it.
+
+    Decided from the claim's row as COMMITTED, never from the caller's copy: an
+    ingest holding a claim it read before a revoke or a contradiction committed
+    audited that copy and wrote the answer over the stop -- a withdrawn claim read
+    VERIFIED again, a contradicted one VERIFIED above a claim with no evidence
+    (round 4, X1). And the evidence is weighed OUTSIDE the write lock: the audit
+    reads every item recorded against the identity, and SQLite's write lock is the
+    whole database's, so a stop anywhere waited out an audit whose cost grows with
+    the evidence. The row is read, the audit taken, and the answer written in a
+    short transaction only if neither the row nor the evidence moved meanwhile
+    (:func:`claim_token`, :func:`evidence_token`); if either did -- a stop landed --
+    it is read and taken again, and the stop is what it reads. The caller's copy is
+    brought to the row written."""
+    from .claims import _adopt, _locked_row
+
+    now = now or timezone.now()
+    for _attempt in range(AUDIT_ATTEMPTS):
+        read = AssuranceClaim.objects.select_related("deployment").get(pk=claim.pk)
+        if not _is_audited(read):
+            _adopt(claim, read)
+            return None
+        evidence = evidence_token(read.deployment_id, read.fingerprint)
+        result = audit_of(read, now=now)
+        with transaction.atomic():
+            row = _locked_row(read)
+            if claim_token(row) == claim_token(read) and evidence_token(row.deployment_id, row.fingerprint) == evidence:
+                written = _write_audit(row, result)
+                _adopt(claim, row)
+                return written
+    # Moved under every attempt: taken once more under the lock, from the row as it is.
+    with transaction.atomic():
+        row = _locked_row(claim)
+        written = _write_audit(row, audit_of(row, now=now)) if _is_audited(row) else None
+    _adopt(claim, row)
+    return written
+
+
+def _write_audit(claim: AssuranceClaim, result: dict | None) -> dict | None:
+    """Write ``result``, the audit of the locked, committed row ``claim``, onto it
+    (:func:`audit_claim`)."""
     from .claims import _confidence
 
-    if not _is_audited(claim):
-        return None
-    now = now or timezone.now()
-    result = audit_of(claim, now=now)
     if result is None:
         return None
     old_status = claim.status
@@ -1030,7 +1117,6 @@ def _choice(value, choices, name: str) -> str:
     return value
 
 
-@transaction.atomic
 def record_claim_evidence(
     claim: AssuranceClaim,
     *,
@@ -1074,10 +1160,18 @@ def record_claim_evidence(
     that is not current, or withdrawn.
 
     ``expires_at`` defaults to the observation instant (or now) plus the evidence
-    TTL: evidence is never recorded as good forever."""
+    TTL: evidence is never recorded as good forever.
+
+    Whether the claim is current and unwithdrawn -- and what the item supersedes --
+    is read from the rows as committed, under the write lock, never from the
+    caller's copies: an ingest holding a claim it read before a revoke committed
+    recorded against it and audited that copy, and the withdrawal was undone
+    (round 4, X1a/X1b). The item is written in that short transaction, and the
+    claim is then audited from its committed row (:func:`audit_claim`), weighing the
+    evidence outside the lock."""
+    from .claims import _locked_row
+
     now = now or timezone.now()
-    if not _is_audited(claim):
-        raise EvidenceRefused("evidence is recorded only against a current, unwithdrawn claim version")
     if outcome not in ITEM_OUTCOMES:
         raise EvidenceRefused(f"outcome {outcome!r} is not one an evidence item can carry ({sorted(ITEM_OUTCOMES)})")
     _choice(origin, Origin.values, "origin")
@@ -1107,11 +1201,43 @@ def record_claim_evidence(
             "or an account names an account, never who was at it"
         )
 
-    if supersedes is not None and (
-        supersedes.deployment_id != claim.deployment_id or supersedes.claim_fingerprint != claim.fingerprint
-    ):
-        raise EvidenceRefused("an item supersedes only evidence recorded against the same claim")
+    with transaction.atomic():
+        row = _locked_row(claim)
+        if not _is_audited(row):
+            raise EvidenceRefused("evidence is recorded only against a current, unwithdrawn claim version")
+        if supersedes is not None:
+            supersedes = (
+                ClaimEvidence.objects.select_for_update(of=("self",)).filter(pk=supersedes.pk).first()
+            )
+            if supersedes is None or (
+                supersedes.deployment_id != row.deployment_id or supersedes.claim_fingerprint != row.fingerprint
+            ):
+                raise EvidenceRefused("an item supersedes only evidence recorded against the same claim")
+        item = _create_item(
+            row, supersedes=supersedes, subject_deployment=subject_deployment,
+            subject_claim_type=subject_claim_type, subject_asset=subject_asset, subject_route=subject_route,
+            subject_inputs=subject_inputs, origin=origin, signer=signer, signature_verified=signature_verified,
+            content_digest=content_digest, outcome=outcome, evidence_class=evidence_class,
+            observed_at=observed_at, expires_at=expires_at, state_check_ref=state_check_ref,
+            state_checked_at=state_checked_at, conditions=conditions,
+            residual_uncertainty=residual_uncertainty, actor_account=actor_account,
+            actor_account_kind=actor_account_kind, actor_device=actor_device,
+            actor_organization=actor_organization, actor_human=actor_human,
+            human_identified_by=human_identified_by, recorded_by=recorded_by, areas=areas, summary=summary,
+            now=now,
+        )
+    audit_claim(claim, now=now)
+    return item
 
+
+def _create_item(
+    claim, *, supersedes, subject_deployment, subject_claim_type, subject_asset, subject_route, subject_inputs,
+    origin, signer, signature_verified, content_digest, outcome, evidence_class, observed_at, expires_at,
+    state_check_ref, state_checked_at, conditions, residual_uncertainty, actor_account, actor_account_kind,
+    actor_device, actor_organization, actor_human, human_identified_by, recorded_by, areas, summary, now,
+) -> ClaimEvidence:
+    """Write one evidence item against the locked, committed row ``claim``
+    (:func:`record_claim_evidence`), and mark what it supersedes."""
     item = ClaimEvidence.objects.create(
         deployment_id=claim.deployment_id,
         claim_fingerprint=claim.fingerprint,
@@ -1148,11 +1274,9 @@ def record_claim_evidence(
         # Recorded, not decided: whether the successor retires it is the audit's
         # question (a successor that carries no weight retires nothing).
         ClaimEvidence.objects.filter(pk=supersedes.pk).update(superseded_by=item)
-    audit_claim(claim, now=now)
     return item
 
 
-@transaction.atomic
 def invalidate_claim_evidence(item: ClaimEvidence, *, actor, reason: str, now=None) -> ClaimEvidence:
     """Retire an evidence item, attributed and with a reason, and re-audit the
     claim's current version. The only way a person resolves a contradiction: the
@@ -1163,36 +1287,46 @@ def invalidate_claim_evidence(item: ClaimEvidence, *, actor, reason: str, now=No
     nothing -- and was refused here as "already invalidated", so nothing could ever
     retire it. An attributed invalidation now attaches to it: the person and reason
     are this act's, and the earlier mark is kept in the reason. An attributed
-    invalidation stands and is never re-attributed."""
+    invalidation stands and is never re-attributed.
+
+    Decided from the item's row as committed, under the write lock, never from the
+    caller's copy: a copy read before another person's invalidation committed was
+    re-attributed to the later person, their reason written over the first
+    (round 4, X1c). The claim is then audited from its committed row
+    (:func:`audit_claim`), weighing the evidence outside the lock. The caller's copy
+    is brought to the row written."""
     reason = (reason or "").strip()
     if actor is None:
         raise EvidenceRefused("an invalidation is attributed to the account that made it")
     if not reason:
         raise EvidenceRefused("an invalidation says why")
-    if item.invalidated_at is not None and _attributed_invalidation(item):
-        raise EvidenceRefused("this evidence was already invalidated")
     username = (getattr(actor, "username", "") or "").strip()
     if not username:
         raise EvidenceRefused("an invalidation is attributed to an account with a name")
     now = now or timezone.now()
-    if item.invalidated_at is not None:
-        earlier = (item.invalidation_reason or "").strip() or "no reason recorded"
-        reason = _clip(
-            f"{reason} (attributing an earlier invalidation nobody was attributed with, "
-            f"marked {item.invalidated_at.isoformat()}: {earlier})"
+    with transaction.atomic():
+        row = ClaimEvidence.objects.select_for_update(of=("self",)).get(pk=item.pk)
+        if row.invalidated_at is not None and _attributed_invalidation(row):
+            raise EvidenceRefused("this evidence was already invalidated")
+        if row.invalidated_at is not None:
+            earlier = (row.invalidation_reason or "").strip() or "no reason recorded"
+            reason = _clip(
+                f"{reason} (attributing an earlier invalidation nobody was attributed with, "
+                f"marked {row.invalidated_at.isoformat()}: {earlier})"
+            )
+        row.invalidated_at = now
+        row.invalidation_reason = reason
+        row.invalidated_by = actor
+        # The name the account had when it acted, kept on the row: the attribution
+        # outlives the account (the foreign key is nulled when it is deleted).
+        row.invalidated_by_username = username
+        row.save(update_fields=["invalidated_at", "invalidation_reason", "invalidated_by", "invalidated_by_username"])
+        current = (
+            AssuranceClaim.objects.filter(deployment_id=row.deployment_id, fingerprint=row.claim_fingerprint)
+            .current()
+            .first()
         )
-    item.invalidated_at = now
-    item.invalidation_reason = reason
-    item.invalidated_by = actor
-    # The name the account had when it acted, kept on the row: the attribution
-    # outlives the account (the foreign key is nulled when it is deleted).
-    item.invalidated_by_username = username
-    item.save(update_fields=["invalidated_at", "invalidation_reason", "invalidated_by", "invalidated_by_username"])
-    current = (
-        AssuranceClaim.objects.filter(deployment_id=item.deployment_id, fingerprint=item.claim_fingerprint)
-        .current()
-        .first()
-    )
+    item.refresh_from_db()
     if current is not None:
         audit_claim(current, now=now)
     return item
