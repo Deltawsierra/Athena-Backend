@@ -237,7 +237,7 @@ did not move.
 deployment's Assurance Receipt beside the DSSE envelope the engine signed it in.
 `assurance-receipt/` returns the unsigned copy. The receipt is specified in
 [`docs/receipt-spec/`](docs/receipt-spec/README.md); the current version is
-`mythos.assurance.receipt/4.0`. The specification covers every member, the
+`mythos.assurance.receipt/4.1`. The specification covers every member, the
 canonical form and digests, the signature, the verification steps with every
 refusal, and how older versions are read. Anyone can verify a receipt offline with
 the specification and `tools/verify_receipt.py`, which needs only Python and
@@ -245,17 +245,26 @@ the specification and `tools/verify_receipt.py`, which needs only Python and
 
 ```bash
 python tools/verify_receipt.py signed-receipt.json --keyring keyring.json
+python tools/verify_receipt.py signed-receipt.json --keyring keyring.json --max-age 86400
 ```
 
 Take the keyring from the engine's `GET /api/assurance/keyring` (this backend does
 not serve it), out of band from the receipt. The exit status is 0 when the receipt
 is verified, 1 when it is refused (the first line names the reason), and 2 when the
-verifier could not run. A verified receipt attests integrity and provenance only.
-It does not say the assessment is correct, and it does not say when: a signed
-receipt carries no signing time. `tests/test_receipt_spec_conformance.py` builds
-vectors from the real routes. It holds the verifier to the backend's own answer on
-every check the backend makes, and to the known signer on the signature, which the
-backend never checks.
+verifier could not run. A verified receipt attests integrity and provenance only,
+and does not say the assessment is correct.
+
+A signed 4.1 receipt carries the time it was issued, `issued_at`, inside the
+signature: this backend's clock when it had the receipt signed, in UTC. An
+`issued_at` edited after signing fails the signature, and the verifier prints the
+signed time. It is the issuer's clock, not proof of when the state held, and how
+old is too old is the reader's call: `--max-age SECONDS` refuses a receipt issued
+longer ago than that (`stale`), and a 4.0 receipt, which carries no signed time
+(`no_signed_time`). A 4.0 receipt still verifies, and the verifier says its issue
+time is not signed. `tests/test_receipt_spec_conformance.py` builds vectors from
+the real routes. It holds the verifier to the backend's own answer on every check
+the backend makes, and to the known signer and the known issue time on the
+signature and the age, which the backend never checks.
 
 ## Tests
 
