@@ -312,19 +312,26 @@ def test_an_engine_timeout_still_leaves_a_record_of_the_attempt(factory, analyst
     the sixty second default makes the ordinary case for a slow target — meant
     the engine ran live-fire tests against a customer and the platform kept no
     record of who authorised it.
+
+    The record says what is known (#363): the engine may have started the scan,
+    so it is UNKNOWN, with the reason -- never FAILED, which licensed a second
+    launch of a scan that may be running.
     """
-    from ai_engine.services.cyberengine_client import ENGINE_UNREACHABLE, EngineError
+    from ai_engine.services.cyberengine_client import LaunchOutcomeUnknown
 
     engine = mock.Mock()
-    engine.run_scan.side_effect = EngineError("Read timed out", kind=ENGINE_UNREACHABLE)
+    engine.run_scan.side_effect = LaunchOutcomeUnknown(
+        "The launch was sent and no answer came back (ReadTimeout): it may have reached the "
+        "engine, which may have started a run."
+    )
 
     response = scan_through(factory, analyst, engagement, engine)
 
-    assert response.status_code == 502
+    assert response.status_code == 202
     scan = PentestScan.objects.get(uuid=response.data["scan_id"])
-    assert scan.status == PentestScan.STATUS_FAILED
+    assert scan.status == PentestScan.STATUS_UNKNOWN
     assert scan.engagement == engagement
-    assert "Read timed out" in scan.error_message
+    assert "ReadTimeout" in scan.error_message
 
 
 @pytest.mark.parametrize("state", [PentestScan.STATUS_FAILED, PentestScan.STATUS_PENDING])
