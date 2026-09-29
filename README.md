@@ -317,6 +317,42 @@ Check with
 `python manage.py shell -c "from assurance.models import DispatchAttempt as A; print(A.objects.filter(outcome__in=['sending','unknown']).count())"`,
 and settle them first (let a run finish, or use `reconcile_dispatch_attempt`).
 
+## Retries and duplicates
+
+A request sent again -- its answer was lost, or the client stopped waiting -- must
+not do its work twice. What each operation that reaches outside this backend does
+(`tests/test_firing_twice_makes_one_effect.py` fires each one twice):
+
+- **A scan launch** (`POST /api/pentest/scan/`, `/api/pentest/llm-scan/`), **a report
+  resent** (`POST /api/pentest/scans/<uuid>/email/`) and **a finding pushed to a
+  tracker by hand** (`POST /api/assurance/deployments/<uuid>/connectors/<name>/push/`)
+  take an `Idempotency-Key` header, 1 to 255 printable ASCII characters. The first
+  request with a key is recorded for that account and route, with a digest of the
+  request (body, query and the scan or deployment it names) and the answer it got.
+  The same key and request again is given that answer (`Idempotent-Replayed: true`)
+  and starts nothing. While the first has no answer recorded -- still running, or it
+  raised or died first -- it is 409, its outcome unknown; the same key with another
+  request is 422. Authentication and the route's permissions are checked on every
+  request, a replay included. Keys are kept 24 h (`IDEMPOTENCY_KEY_TTL_SECONDS`), at
+  most 1,000 per account, oldest forgotten first (`IDEMPOTENCY_KEYS_PER_ACCOUNT`), and
+  an answer is kept whole up to 1 MiB (`IDEMPOTENCY_MAX_RESPONSE_BYTES`; a larger one is
+  replayed as its status and top-level fields). A forgotten key is a new request.
+  **Without a key nothing changes: a request sent again scans again, mails the report
+  again or files a second ticket.** The athena-dashboard server does not send one yet.
+- **Automated dispatch** is one `DispatchAttempt` per finding and connector (above):
+  pushed once, looked for by its marker after a lost answer rather than pushed again,
+  and sent to a webhook with its operation id as `Idempotency-Key`. A blocking-decision
+  dispatch asked for by several pauses is one owed row.
+- **Claims**: a re-derive with nothing moved writes no version and no event; an
+  invalidation check run again opens no second retest; a person's move sent twice is
+  refused the second time (400); an evidence item invalidated twice is refused the
+  second time.
+- **Stops are never deduplicated.** A pause, revoke, contradiction, stand-down,
+  terminate, an engagement's authority withdrawn, an operator demoted or removed is
+  processed every time it arrives, with or without a key: the key is never read on a
+  stop route (`safety.stops`). A revoke or contradiction sent again is recorded again
+  on the claim; its status moves once.
+
 ## Secrets
 
 Nothing belongs in source. A Google app password for the company mailbox and a
