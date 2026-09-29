@@ -186,7 +186,9 @@ SIGNED_FORM_ONLY = ("issued_at",)
 #         so every 1.1 digest differs from the 2.0 digest of the same state. A
 #         consumer that silently compared the two would report a change that did
 #         not happen, which is why the version is IN the hashed content and a
-#         reader is expected to key on it.
+#         reader is expected to key on it. Then #67, the same day, added the check
+#         axis to ``coverage`` WITHOUT a new version string: 2.0 was emitted in two
+#         shapes, and the 2.0 schema reads both and names each (_both_2_0_shapes).
 #   3.0 — added ``checks_gap_fingerprint`` and ``checks_reported_at`` to
 #         ``coverage``: which checks fell short, and when that was measured.
 #   3.1 — the three fields that say whether the receipt is signed. A MINOR bump,
@@ -215,15 +217,45 @@ _VERSION_4_0 = "mythos.assurance.receipt/4.0"
 _VERSION_3_1 = "mythos.assurance.receipt/3.1"
 _VERSION_3_0 = "mythos.assurance.receipt/3.0"
 _VERSION_2_0 = "mythos.assurance.receipt/2.0"
+_VERSION_1_1 = "mythos.assurance.receipt/1.1"
+_VERSION_1_0 = "mythos.assurance.receipt/1.0"
+
+#: 2.0 was emitted in two shapes under one version string. #56 (fdf77bf) gave
+#: ``coverage`` five members; #67 (87e83e7), the same day and still as 2.0, added the
+#: check axis. ``_VERSION_2_0`` names #67's, the shape the 2.0 schema has always
+#: described; this key names #56's. It is not a version string -- the receipt carries
+#: 2.0's -- and ``receipt_schema`` does not take it: the published 2.0 schema reads
+#: both shapes and names each (:func:`_both_2_0_shapes`).
+_VERSION_2_0_AS_56 = "mythos.assurance.receipt/2.0 as emitted by #56"
+
+#: Who emitted each shape, and when: the name a reader is given for what they hold.
+EMITTED_AS = {
+    _VERSION_1_0: "#27 (673a40b), 17 Sep 2026, until #42",
+    _VERSION_1_1: "#42 (5ed69be), 18 Sep 2026, until #56",
+    _VERSION_2_0_AS_56: "#56 (fdf77bf), 22 Sep 2026, until #67",
+    _VERSION_2_0: "#67 (87e83e7), 22 Sep 2026, until #70",
+    _VERSION_3_0: "#70 (99bc3d9), 22 Sep 2026, until #87",
+    _VERSION_3_1: "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
+    _VERSION_4_0: "#105 (7985460), 26 Sep 2026, until #118",
+    RECEIPT_VERSION: "#118 (d81e9cb), 29 Sep 2026, and since",
+}
+
+#: The versions no route ever signed. Receipts were first signed under 3.1, by #96
+#: (51484fb), which added the signed route; nothing before it asked the engine to sign
+#: a receipt. So a signature over a receipt of one of these was not made by
+#: athena-backend's signed route, whoever holds the key -- the engine signs any
+#: document an operator hands it -- and a reader is told so rather than VERIFIED.
+NEVER_SIGNED = (_VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0)
 
 # Every receipt version this module can describe. A receipt in the wild carries
 # its own ``receipt_version``, and an auditor holding a 1.1 receipt still needs
 # the schema that reads it -- "versioned" is worth nothing if the previous
 # version's shape is only recoverable from git history. :func:`receipt_schema`
 # is the lookup; :data:`RECEIPT_SCHEMA` stays the current one so existing
-# callers are unaffected.
+# callers are unaffected. Every version ever emitted is here: 1.0 was left out
+# until the receipts #27 emitted were read back from git (tests/fixtures/receipts).
 SUPERSEDED_VERSIONS = (
-    "mythos.assurance.receipt/1.1", _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0,
+    _VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0,
 )
 
 #: The version that introduced the HASHED content this module emits: 4.0, which added
@@ -750,37 +782,76 @@ RECEIPT_SCHEMA = {
 # published to read it, the failure `UnknownReceiptVersion` exists to prevent,
 # arriving through the front door. So what each version added is written down
 # once, below, and each older schema subtracts the union of everything after it.
-_VERSION_1_1 = "mythos.assurance.receipt/1.1"
+#
+# Each schema also SAYS what its receipts lack -- the members every later shape
+# added, and what a receipt without them cannot say (``lacks``) -- and whether any
+# route ever signed one (``never_signed``). A reader of a 1.0 receipt is told it
+# names no policy and carries no signed time; left to infer it, they would infer
+# from the current schema, which describes a receipt they do not hold.
 
-#: What each version added, newest first.
+#: What each shape added over the one before it, newest first: (the shape before,
+#: what was added). ``means`` is what a receipt without those members cannot say.
 _ADDED_IN = (
     # 4.1: the signed form's issue time, outside the digest.
-    (_VERSION_4_0, {"fields": SIGNED_FORM_ONLY, "coverage": ()}),
+    (_VERSION_4_0, {
+        "in": RECEIPT_VERSION, "fields": SIGNED_FORM_ONLY, "coverage": (),
+        "means": "a signed issue time: when the receipt was handed to be signed",
+    }),
     # 4.0: the chain composition.
-    (_VERSION_3_1, {"fields": ("chains",), "coverage": ()}),
+    (_VERSION_3_1, {
+        "in": _VERSION_4_0, "fields": ("chains",), "coverage": (),
+        "means": "how the approved workflow chains composed into the decision",
+    }),
     # 3.1: whether the receipt is signed, outside the digest.
-    (_VERSION_3_0, {"fields": ("signed", "signature", "unsigned_reason"), "coverage": ()}),
+    (_VERSION_3_0, {
+        "in": _VERSION_3_1, "fields": ("signed", "signature", "unsigned_reason"), "coverage": (),
+        "means": "its own word that it is unsigned",
+    }),
     # 3.0: which checks fell short, and when that was measured.
-    (_VERSION_2_0, {"fields": (), "coverage": ("checks_gap_fingerprint", "checks_reported_at")}),
-    # 2.0: what actually ran, and what was never looked at. (The four check-axis
-    # counts inside `coverage` joined it under 2.0 without a version change, which
-    # is why the 2.0 schema carries them.)
-    (_VERSION_1_1, {"fields": ("served_route", "coverage"), "coverage": ()}),
+    (_VERSION_2_0, {
+        "in": _VERSION_3_0, "fields": (), "coverage": ("checks_gap_fingerprint", "checks_reported_at"),
+        "means": "which checks fell short, and when that was reported",
+    }),
+    # 2.0 as #67 emitted it: the check axis, under the same version string.
+    (_VERSION_2_0_AS_56, {
+        "in": _VERSION_2_0, "fields": (),
+        "coverage": ("checks_reported", "checks_total", "checks_performed", "checks_complete"),
+        "means": "whether any engine said which checks it ran, and how many ran",
+    }),
+    # 2.0 as #56 emitted it: what actually ran, and what was never looked at.
+    (_VERSION_1_1, {
+        "in": _VERSION_2_0_AS_56, "fields": ("served_route", "coverage"), "coverage": (),
+        "means": "what actually ran, and what was and was not assessed",
+    }),
+    # 1.1: the pinned rules the decision was made under.
+    (_VERSION_1_0, {
+        "in": _VERSION_1_1, "fields": ("policy_version",), "coverage": (),
+        "means": "the pinned rules the decision was made under",
+    }),
 )
 
 
-def _schema_before(version: str) -> dict:
-    """The schema a ``version`` receipt has: the current one without everything a
-    later version added."""
+def _schema_before(key: str) -> dict:
+    """The schema a receipt of shape ``key`` has: the current one without everything
+    a later shape added, with what it therefore lacks and whether any route ever
+    signed one said in it (``lacks``, ``never_signed``)."""
     dropped: set[str] = set()
     dropped_coverage: set[str] = set()
+    lacks: list[dict] = []
     for older, added in _ADDED_IN:
         dropped.update(added["fields"])
         dropped_coverage.update(added["coverage"])
-        if older == version:
+        lacks.append({
+            "members": [*added["fields"], *(f"coverage.{member}" for member in added["coverage"])],
+            "added_by": EMITTED_AS[added["in"]].split(" ", 1)[0],
+            "means": added["means"],
+        })
+        if older == key:
             break
     else:
-        raise KeyError(version)
+        raise KeyError(key)
+    # The version string the receipt carries: #56's 2.0 carries 2.0's.
+    version = _VERSION_2_0 if key == _VERSION_2_0_AS_56 else key
 
     properties = {
         k: v for k, v in RECEIPT_SCHEMA["properties"].items() if k not in dropped
@@ -807,14 +878,54 @@ def _schema_before(version: str) -> dict:
         "$id": version,
         "properties": properties,
         "required": [r for r in RECEIPT_SCHEMA["required"] if r not in dropped],
+        "lacks": lacks[::-1],
+        "never_signed": version in NEVER_SIGNED,
     }
+
+
+#: What ``coverage.critical_gap`` meant as #56 emitted it (fdf77bf,
+#: assurance/receipt.py): before the check axis, a check that did not run could not
+#: make a gap critical. #67 widened it under the same version string.
+_CRITICAL_GAP_AS_56 = "A declared or high-risk component was never assessed."
+
+
+def _both_2_0_shapes() -> dict:
+    """2.0's published schema, which reads both shapes 2.0 was emitted in and names
+    each.
+
+    ``coverage`` describes every member either shape carried, requires the five both
+    carried, and must be exactly ONE of the two (``oneOf``, each branch titled with
+    who emitted it): a #56 receipt is read as #56's, a #67 receipt as #67's, and a
+    mixture neither emitted as neither. The 2.0 schema used to be #67's alone, so it
+    refused every receipt #56 emitted, and a reader of one was left to guess why.
+    """
+    as_67, as_56 = _schema_before(_VERSION_2_0), _schema_before(_VERSION_2_0_AS_56)
+    coverage_67 = as_67["properties"]["coverage"]
+    coverage_56 = as_56["properties"]["coverage"]
+    check_axis = [member for member in coverage_67["required"] if member not in coverage_56["required"]]
+    branch_56 = {
+        "title": f"{_VERSION_2_0} as emitted by {EMITTED_AS[_VERSION_2_0_AS_56]}",
+        "required": list(coverage_56["required"]),
+        "not": {"anyOf": [{"required": [member]} for member in check_axis]},
+        "properties": {
+            "critical_gap": {**coverage_56["properties"]["critical_gap"], "description": _CRITICAL_GAP_AS_56},
+        },
+        "lacks": [lack for lack in as_56["lacks"] if lack not in as_67["lacks"]],
+    }
+    branch_67 = {
+        "title": f"{_VERSION_2_0} as emitted by {EMITTED_AS[_VERSION_2_0]}",
+        "required": list(coverage_67["required"]),
+    }
+    coverage = {**coverage_67, "required": list(coverage_56["required"]), "oneOf": [branch_56, branch_67]}
+    return {**as_67, "properties": {**as_67["properties"], "coverage": coverage}}
 
 
 _SCHEMA_4_0 = _schema_before(_VERSION_4_0)
 _SCHEMA_3_1 = _schema_before(_VERSION_3_1)
 _SCHEMA_3_0 = _schema_before(_VERSION_3_0)
-_SCHEMA_2_0 = _schema_before(_VERSION_2_0)
+_SCHEMA_2_0 = _both_2_0_shapes()
 _SCHEMA_1_1 = _schema_before(_VERSION_1_1)
+_SCHEMA_1_0 = _schema_before(_VERSION_1_0)
 
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
@@ -823,6 +934,7 @@ _SCHEMAS = {
     _VERSION_3_0: _SCHEMA_3_0,
     _VERSION_2_0: _SCHEMA_2_0,
     _VERSION_1_1: _SCHEMA_1_1,
+    _VERSION_1_0: _SCHEMA_1_0,
 }
 
 
@@ -842,6 +954,9 @@ def receipt_schema(version: str | None = None) -> dict:
     A receipt in the wild carries its own ``receipt_version``, so a consumer reads
     that and asks here. An unknown version raises :class:`UnknownReceiptVersion`
     and names what is available, because a wrong schema is worse than no schema.
+    Every version ever emitted is described, 1.0 included, and 2.0's schema reads
+    both shapes 2.0 was emitted in and names each (:func:`_both_2_0_shapes`). An
+    older schema says what its receipts lack and whether any route ever signed one.
     """
     if version is None:
         return RECEIPT_SCHEMA

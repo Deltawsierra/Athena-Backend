@@ -15,9 +15,8 @@ signed receipt carries no signing time.
 | Receipt version | Specification | Status |
 |---|---|---|
 | `mythos.assurance.receipt/4.1` | [v4.1.md](v4.1.md) | Current: what `RECEIPT_VERSION` emits. |
-| `mythos.assurance.receipt/4.0` | [v4.0.md](v4.0.md), and [v4.1.md, section 8](v4.1.md#8-versions) | Superseded, still readable. The verifier reads it and shows its issue time as not signed; the backend's `receipt_schema(version)` still describes it. |
-| `mythos.assurance.receipt/3.1`, `3.0`, `2.0`, `1.1` | [v4.1.md, section 8](v4.1.md#8-versions) | Superseded, still readable. The verifier reads them, and the backend's `receipt_schema(version)` still describes them. |
-| `mythos.assurance.receipt/1.0` | [v4.1.md, section 10](v4.1.md#10-known-limitations-of-41) | Superseded and not readable: refused as an unknown version. |
+| `mythos.assurance.receipt/4.0` | [v4.0.md](v4.0.md), and [v4.1.md, section 8.3](v4.1.md#83-every-version-ever-emitted-and-what-it-lacks) | Superseded, still readable. The verifier reads it and shows its issue time as not signed; the backend's `receipt_schema(version)` still describes it. v4.0.md's section 5.1 example prints the characters where the canonical bytes are their `\uXXXX` escapes, and its 6.2 names the six characters by the character; v4.1.md's are the bytes. |
+| `mythos.assurance.receipt/3.1`, `3.0`, `2.0`, `1.1`, `1.0` | [v4.1.md, section 8.3](v4.1.md#83-every-version-ever-emitted-and-what-it-lacks) | Superseded, still readable: every version ever emitted, 2.0 in both shapes it was emitted in (#56's and #67's), each named. The verifier reads them and says what each lacks; the backend's `receipt_schema(version)` describes them, with what each lacks and whether any route ever signed one. No route signed a receipt before 3.1. |
 
 Each new receipt version adds a file here, and the older files stay
 ([v4.1.md, section 8.4](v4.1.md#84-the-rule-for-the-next-version)).

@@ -19,6 +19,11 @@ RECEIPT.json is one of these, saved as it was served:
   unsigned copy;
 * a DSSE envelope on its own, as the engine returns one.
 
+It reads every receipt version ever emitted (specification, section 8.3), 1.0 and
+both shapes of 2.0 included, names each with who emitted it, and says what it lacks
+against the current version. A signature over a version no route ever signed
+(every version before 3.1) is refused (``never_signed``).
+
 Keys come from you, never from the receipt. ``--keyring`` is the engine's published
 keyring (``GET /api/assurance/keyring`` on the ENGINE; this backend does not serve
 it). ``--public-key`` is a file holding one base64 Ed25519 public key you obtained
@@ -78,8 +83,10 @@ MAX_DEPTH = 64
 _BASE = (
     "receipt_version", "policy_version", "system", "result", "policy", "evidence", "assessments",
 )
+_V1_0 = tuple(member for member in _BASE if member != "policy_version")
 _V2 = (*_BASE, "served_route", "coverage")
 HASHED: dict[str, frozenset[str]] = {
+    "mythos.assurance.receipt/1.0": frozenset(_V1_0),
     "mythos.assurance.receipt/1.1": frozenset(_BASE),
     "mythos.assurance.receipt/2.0": frozenset(_V2),
     "mythos.assurance.receipt/3.0": frozenset(_V2),
@@ -107,6 +114,59 @@ OUTSIDE_DIGEST = ("algorithm", "digest", "computed_at", *SIGNED_ONLY, *SELF_REPO
 #: Left out of the signed copy, and so out of every envelope.
 NOT_SIGNED = ("computed_at", *SELF_REPORT)
 
+#: 2.0's ``coverage``, in each shape 2.0 was emitted in (specification, section 8.3).
+#: The version string does not say which; the members do, and a coverage that is
+#: neither is not read as either.
+_COVERAGE_56 = frozenset({"expected", "observed", "assessed", "verdict", "critical_gap"})
+COVERAGE_2_0: dict[str, frozenset[str]] = {
+    "#56": _COVERAGE_56,
+    "#67": _COVERAGE_56 | {"checks_reported", "checks_total", "checks_performed", "checks_complete"},
+}
+
+#: Every shape a receipt was ever emitted in, oldest first, and who emitted it and when
+#: (specification, section 8.2): (version, shape) -> the name a reader is given. A
+#: version emitted in one shape has no shape name; 2.0's are its two PRs.
+EMITTED: dict[tuple[str, str | None], str] = {
+    ("mythos.assurance.receipt/1.0", None): "#27 (673a40b), 17 Sep 2026, until #42",
+    ("mythos.assurance.receipt/1.1", None): "#42 (5ed69be), 18 Sep 2026, until #56",
+    ("mythos.assurance.receipt/2.0", "#56"): "#56 (fdf77bf), 22 Sep 2026, until #67",
+    ("mythos.assurance.receipt/2.0", "#67"): "#67 (87e83e7), 22 Sep 2026, until #70",
+    ("mythos.assurance.receipt/3.0", None): "#70 (99bc3d9), 22 Sep 2026, until #87",
+    ("mythos.assurance.receipt/3.1", None): "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
+    ("mythos.assurance.receipt/4.0", None): "#105 (7985460), 26 Sep 2026, until #118",
+    ("mythos.assurance.receipt/4.1", None): "#118 (d81e9cb), 29 Sep 2026, and since",
+}
+
+#: What each shape added over the one before it: its members, and what a receipt
+#: without them cannot say. A receipt lacks every row after its own shape's, and is
+#: told so -- never left to read the current specification as a description of it.
+ADDED: dict[tuple[str, str | None], tuple[tuple[str, ...], str]] = {
+    ("mythos.assurance.receipt/1.1", None): (("policy_version",), "the pinned rules the decision was made under"),
+    ("mythos.assurance.receipt/2.0", "#56"): (
+        ("served_route", "coverage"),
+        "what actually ran, and what was and was not assessed",
+    ),
+    ("mythos.assurance.receipt/2.0", "#67"): (
+        ("coverage.checks_reported", "coverage.checks_total", "coverage.checks_performed", "coverage.checks_complete"),
+        "whether any engine said which checks it ran, and how many ran",
+    ),
+    ("mythos.assurance.receipt/3.0", None): (
+        ("coverage.checks_gap_fingerprint", "coverage.checks_reported_at"),
+        "which checks fell short, and when that was reported",
+    ),
+    ("mythos.assurance.receipt/3.1", None): (("signed", "signature", "unsigned_reason"), "its own word that it is unsigned"),
+    ("mythos.assurance.receipt/4.0", None): (("chains",), "how the approved workflow chains composed into the decision"),
+    ("mythos.assurance.receipt/4.1", None): (("issued_at",), "a signed issue time: when the receipt was handed to be signed"),
+}
+
+#: The versions no route ever signed: receipts were first signed under 3.1, by #96
+#: (51484fb). A signature over one of these was not made by athena-backend's signed
+#: route, whoever holds the key.
+NEVER_SIGNED = frozenset(
+    {"mythos.assurance.receipt/1.0", "mythos.assurance.receipt/1.1", "mythos.assurance.receipt/2.0",
+     "mythos.assurance.receipt/3.0"}
+)
+
 #: Key statuses in the engine's keyring. A retired key still verifies what it
 #: signed; a revoked key verifies nothing.
 _VERIFYING = ("active", "retired")
@@ -121,6 +181,7 @@ REFUSALS: dict[str, str] = {
     "not_an_envelope": "the envelope is not a DSSE envelope over an assurance receipt",
     "different_document": "the receipt served beside the envelope is not the one inside it",
     "unknown_version": "a receipt version this specification does not describe",
+    "never_signed": "an envelope over a receipt of a version no route ever signed (every version before 3.1)",
     "digest_mismatch": "the digest does not match the receipt's own content",
     "evidence_mismatch": "the evidence supplied does not reproduce the receipt's evidence root",
     "unsigned": "nothing signs this receipt",
@@ -139,12 +200,14 @@ _ENVELOPE_MEMBERS = frozenset({"envelope_version", "payloadType", "payload", "si
 
 
 class Refused(Exception):
-    """The receipt does not verify, for a reason in :data:`REFUSALS`."""
+    """The receipt does not verify, for a reason in :data:`REFUSALS`. ``lines`` say what
+    was read before the refusal, when that is worth saying (an older version, named)."""
 
-    def __init__(self, reason: str, detail: str) -> None:
+    def __init__(self, reason: str, detail: str, lines: tuple[str, ...] = ()) -> None:
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        self.lines = lines
 
 
 class CannotRun(Exception):
@@ -378,8 +441,9 @@ def _issued(value: object) -> datetime | None:
         return None
 
 
-def _check_structure(receipt: dict, form: str) -> str:
-    """Steps 5 and 6: the version, then the members that version defines."""
+def _check_structure(receipt: dict, form: str, signed_claim: bool) -> tuple[str, str | None]:
+    """Steps 5 and 6: the version, then the members that version defines. Returns the
+    version and, for a version emitted in two shapes (2.0), which one this is."""
     version = receipt.get("receipt_version")
     if not isinstance(version, str) or version not in HASHED:
         known = ", ".join(sorted(HASHED))
@@ -387,6 +451,13 @@ def _check_structure(receipt: dict, form: str) -> str:
             "unknown_version",
             f"the receipt names version {_show(version)}; this verifier reads {known}. A "
             "version it does not know is refused, never read as one it does",
+        )
+    if signed_claim and version in NEVER_SIGNED:
+        raise Refused(
+            "never_signed",
+            f"this envelope signs a {version} receipt, and no route ever signed one: receipts "
+            "were first signed under 3.1, by #96 (51484fb). The signature was not made by "
+            "athena-backend's signed route, whoever holds the key",
         )
     expected = set(HASHED[version]) | {"algorithm", "digest"}
     if form == "full":
@@ -426,9 +497,31 @@ def _check_structure(receipt: dict, form: str) -> str:
             f"issued_at is {_show(receipt['issued_at'])}, not a UTC time in the one form the "
             "specification gives (YYYY-MM-DDTHH:MM:SSZ)",
         )
+    shape = None
+    if version == "mythos.assurance.receipt/2.0":
+        coverage = receipt["coverage"]
+        members = frozenset(coverage) if isinstance(coverage, dict) else frozenset()
+        shape = next((name for name, shaped in COVERAGE_2_0.items() if members == shaped), None)
+        if shape is None:
+            raise Refused(
+                "malformed",
+                f"coverage has the members {_show(sorted(members))}. 2.0 was emitted with the five "
+                "#56 gave it or the nine #67 gave it, and this is neither: it is not read as either",
+            )
     if _has_non_integer_number(receipt):
         raise Refused("malformed", "a receipt's numbers are integers; this one carries a fraction or an exponent")
-    return version
+    return version, shape
+
+
+def _reading(version: str, shape: str | None) -> tuple[str, ...]:
+    """What was read, named: who emitted this shape and when, then each member it lacks
+    and what a receipt without it cannot say (specification, section 8.3)."""
+    shapes = list(EMITTED)
+    later = shapes[shapes.index((version, shape)) + 1:]
+    return (
+        f"receipt   {version}, as emitted by {EMITTED[(version, shape)]}",
+        *(f"lacks     {', '.join(ADDED[newer][0])}: {ADDED[newer][1]}" for newer in later),
+    )
 
 
 def _check_digest(receipt: dict, version: str) -> None:
@@ -656,7 +749,7 @@ def verify(
     try:
         return _verify(artifact, trusted, evidence_set, max_age, clock)
     except Refused as refusal:
-        return Verdict(False, refusal.reason, (refusal.detail,))
+        return Verdict(False, refusal.reason, (refusal.detail, *refusal.lines))
 
 
 def _verify(
@@ -677,7 +770,29 @@ def _verify(
                 "signature does not attest the copy you were shown",
             )
         receipt = inside
-    version = _check_structure(receipt, form)
+    version, shape = _check_structure(receipt, form, envelope is not None)
+    reading = _reading(version, shape)
+    try:
+        return _verified(receipt, version, reading, envelope, payload, trusted, evidence_set, max_age, now)
+    except Refused as refusal:
+        if version == CURRENT:
+            raise
+        # An older version is named, with what it lacks, whatever it is refused for.
+        raise Refused(refusal.reason, refusal.detail, (*refusal.lines, *reading)) from None
+
+
+def _verified(
+    receipt: dict,
+    version: str,
+    reading: tuple[str, ...],
+    envelope: dict | None,
+    payload: bytes,
+    trusted: dict | None,
+    evidence_set: tuple[str, list] | None,
+    max_age: int | None,
+    now: datetime,
+) -> Verdict:
+    """Steps 7 to 10, over a receipt whose version and members were read."""
     _check_digest(receipt, version)
     evidence_line = (
         "not re-derived (no --evidence given); bound by the digest"
@@ -685,11 +800,24 @@ def _verify(
         else _check_evidence(receipt, evidence_set)
     )
     if envelope is None:
+        consistent = (
+            "Its digest matches its content, which shows only that this copy is internally "
+            "consistent: anyone can recompute a digest, so it says nothing about who produced "
+            "the receipt."
+        )
+        if version in NEVER_SIGNED:
+            # There is no signed copy of this receipt to fetch: pointing at one would send
+            # the reader to a receipt of the state NOW, in the current version.
+            raise Refused(
+                "unsigned",
+                f"nothing signs this receipt, and nothing ever signed a {version} receipt: "
+                f"receipts were first signed under 3.1, by #96 (51484fb). {consistent} The "
+                "signed route (GET .../signed-assurance-receipt/) serves the deployment's "
+                f"state as it is now, in {CURRENT}, not this one.",
+            )
         raise Refused(
             "unsigned",
-            "nothing signs this receipt. Its digest matches its content, which shows only "
-            "that this copy is internally consistent: anyone can recompute a digest, so it "
-            "says nothing about who produced the receipt. Fetch the signed copy "
+            f"nothing signs this receipt. {consistent} Fetch the signed copy "
             "(GET .../signed-assurance-receipt/) and verify that.",
         )
     if trusted is None:
@@ -715,12 +843,13 @@ def _verify(
     system = receipt.get("system") if isinstance(receipt.get("system"), dict) else {}
     result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
     lines = [
-        f"receipt   {version}",
+        reading[0],
         f"system    {_show(system.get('name'))} ({_show(system.get('uuid'))}, {_show(system.get('environment'))})",
         f"decision  {_show(result.get('decision'))}",
         f"digest    {receipt['digest']}",
         f"signer    {key_id} ({status})",
         f"issued at {issued_line}",
+        *reading[1:],
         f"evidence  {evidence_line}",
         "This establishes integrity and provenance only: not that the assessment is "
         "correct or the system safe, and not when the state held. " + when,

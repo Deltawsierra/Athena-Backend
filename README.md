@@ -261,9 +261,20 @@ signed time. It is the issuer's clock, not proof of when the state held, and how
 old is too old is the reader's call: `--max-age SECONDS` refuses a receipt issued
 longer ago than that (`stale`), and a 4.0 receipt, which carries no signed time
 (`no_signed_time`). A 4.0 receipt still verifies, and the verifier says its issue
-time is not signed. `tests/test_receipt_spec_conformance.py` builds vectors from
-the real routes. It holds the verifier to the backend's own answer on every check
-the backend makes, and to the known signer and the known issue time on the
+time is not signed.
+
+Every receipt version ever emitted reads back, 1.0 included. The verifier and
+`receipt_schema(version)` name each one and who emitted it, and say what it lacks
+against the current version. 2.0 was emitted in two shapes under one version string
+(#56's five-member `coverage` and #67's nine), and each is read and named as the one
+it is. No route signed a receipt before 3.1, so an envelope over a 1.0, 1.1, 2.0 or
+3.0 receipt is refused (`never_signed`). `tests/fixtures/receipts/` holds a 1.0
+receipt and one of each 2.0 shape, generated from the commits that emitted them
+(`generate.py`, with each vector's provenance beside it).
+
+`tests/test_receipt_spec_conformance.py` builds vectors from the real routes and
+from those fixtures. It holds the verifier to the backend's own answer on every
+check the backend makes, and to the known signer and the known issue time on the
 signature and the age, which the backend never checks.
 
 ## Tests
