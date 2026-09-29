@@ -90,6 +90,7 @@ from .models import (
 )
 from .chain_registry import ChainBirthRefused, register_birth, registry_posture
 from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
+from idempotency.layer import idempotent
 
 from .receipt import (
     NOT_SIGNED_OVER,
@@ -988,6 +989,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
         return Response({"connectors": rows})
 
     @action(detail=True, methods=["post"], url_path=r"connectors/(?P<connector>[\w-]+)/push")
+    @idempotent("deployment-connector-push")
     def connector_push(self, request, uuid=None, connector=None):
         """Push one of the deployment's findings OUT into an external system as a
         ticket / issue / event (commercial spine). Admin-only: it is an outbound
