@@ -121,6 +121,8 @@ from ai_engine.services.cyberengine_client import (
     ENGINE_STILL_RUNNING,
     ENGINE_UNREACHABLE,
     ENGINE_UNREADABLE,
+    MAX_JSON_DEPTH,
+    _nesting_depth,
 )
 
 ALGORITHM = "sha256"
@@ -1194,11 +1196,26 @@ def envelope_over(document: dict, envelope: object) -> dict:
       and at least one signature entry carrying a non-empty ``keyid`` and ``sig``.
       A signature list that is empty, or entries missing either field, is a
       document nobody signed.
+    * Nesting: the payload is a STRING inside the engine's answer, so the depth
+      bound the client puts on the answer (:data:`MAX_JSON_DEPTH`, read before
+      anything is parsed) never saw it. It is measured here with the client's own
+      linear scan, which stops at the first bracket past the limit, before
+      ``json.loads`` runs. A payload of a hundred thousand ``[`` made the parser
+      raise RecursionError -- not a ValueError, so out of this function, whose
+      contract is that it raises NotAnEnvelope for anything that is not an envelope
+      over ``document``. The route did not answer 500, but only because
+      RecursionError happens to be a RuntimeError and the route names RuntimeError
+      for another reason; the reason it then served was the interpreter's own
+      sentence. Now a payload nested past the bound is refused as NotAnEnvelope, in
+      words that name the limit and never the payload -- and a parser or a
+      comparison that overruns its stack anyway (a stack nearly spent when the route
+      is called) is refused the same way.
     * Containment: the base64 payload decodes to JSON EQUAL to ``document``.
       Compared as decoded objects rather than as bytes: the claim worth making is
       "the envelope contains the document we sent", and a signer is entitled to
       re-serialise it. Byte equality would refuse a correct envelope over a
-      different key order.
+      different key order. After the nesting check the comparison recurses at most
+      :data:`MAX_JSON_DEPTH` levels, whatever the signer sent.
     * NOT the signature. That needs the keyring, and checking it here would make
       this route the thing it says it is not -- a checker that trusts the signer's
       own report establishes only that the engine agrees with itself.
@@ -1235,12 +1252,44 @@ def envelope_over(document: dict, envelope: object) -> dict:
     if not isinstance(raw, str):
         raise NotAnEnvelope("the envelope carries no base64 payload to compare")
     try:
-        inside = json.loads(base64.b64decode(raw, validate=True))
+        decoded = base64.b64decode(raw, validate=True)
+        # Decoded the way ``json.loads(bytes)`` decodes (a byte-order mark, UTF-16
+        # and UTF-32 included), so the nesting scan below reads exactly the text the
+        # parser would have read.
+        text = decoded.decode(json.detect_encoding(decoded), "surrogatepass")
     except (ValueError, binascii.Error) as unreadable:
         raise NotAnEnvelope(
             f"the envelope's payload is not readable JSON: {unreadable.__class__.__name__}"
         ) from unreadable
-    if inside != document:
+    # THE BOUND ON THE ANSWER NEVER SAW THIS. The engine's answer is depth-checked
+    # before it is parsed (the client's `_json_of`), but the payload is a string
+    # inside it, so nesting arrived here unchecked. Refused in our words, naming the
+    # limit and never the payload; and the scan is linear and stops at the first
+    # bracket past the limit, so a hostile payload costs what a small one does.
+    if _nesting_depth(text) > MAX_JSON_DEPTH:
+        raise NotAnEnvelope(
+            f"the envelope's payload nests deeper than {MAX_JSON_DEPTH} levels, so it "
+            "is not read; a signature over something this service cannot read does "
+            "not attest this receipt"
+        )
+    try:
+        inside = json.loads(text)
+        # In the same handler as the parse. Past the scan above the comparison
+        # recurses at most MAX_JSON_DEPTH levels, but a stack that is nearly spent
+        # when the route is called can still overrun it, and containment that could
+        # not be established is unsigned: never signed, and never an exception that
+        # is not NotAnEnvelope.
+        differs = inside != document
+    except RecursionError as too_deep:
+        raise NotAnEnvelope(
+            "the envelope's payload nests too deeply to be read and compared with the "
+            "document sent to be signed"
+        ) from too_deep
+    except ValueError as unreadable:
+        raise NotAnEnvelope(
+            f"the envelope's payload is not readable JSON: {unreadable.__class__.__name__}"
+        ) from unreadable
+    if differs:
         raise NotAnEnvelope(
             "the envelope is over a DIFFERENT document than the one sent to be "
             "signed, so the signature does not attest this receipt"

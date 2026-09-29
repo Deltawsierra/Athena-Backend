@@ -21,16 +21,20 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import pytest
 from django.contrib.auth import get_user_model
-from rest_framework.test import APIRequestFactory, force_authenticate
+from django.urls import reverse
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from ai_engine.services.cyberengine_client import (
     ENGINE_REFUSED,
     ENGINE_UNREACHABLE,
+    MAX_JSON_DEPTH,
     CyberEngineClient,
     EngineError,
+    _nesting_depth,
 )
 from assurance import receipt, views
 from assurance.models import (
@@ -59,9 +63,9 @@ def _user(name="analyst", role=None):
     )
 
 
-def _deployment(owner):
+def _deployment(owner, name="checkout-assistant"):
     dep = Deployment.objects.create(
-        name="checkout-assistant",
+        name=name,
         owner=owner,
         environment=Deployment.Environment.PRODUCTION,
         decision=Deployment.Decision.NEEDS_MORE_EVIDENCE,
@@ -814,3 +818,346 @@ def test_an_unreachable_engine_is_classified_unreachable_at_every_call(monkeypat
             attempt()
         assert raised.value.kind == ENGINE_UNREACHABLE
         assert raised.value.status is None
+
+
+# ------------------- a payload nested past what any engine answer may nest -------
+#
+# `envelope_over` read the signer's payload with a bare `json.loads` and caught
+# `(ValueError, binascii.Error)`. The parser reports nesting past its stack as
+# RecursionError, which is neither, so it left `envelope_over` -- whose contract is
+# that it raises NotAnEnvelope for anything that is not an envelope over the
+# document.
+#
+# Measured through the real route, that was NOT a 500, and only by an accident of
+# ancestry: RecursionError is a RuntimeError, and the route names RuntimeError for a
+# different reason (`from_settings` refusing). So the read answered "unsigned", and
+# `unsigned_reason_for` -- which publishes `str(exc)` for anything that is not an
+# EngineError -- served the interpreter's own sentence as the reason: "maximum
+# recursion depth exceeded while decoding a JSON array from a unicode string". That
+# is not this service's words, names no cause a reader can act on, and reads as a
+# fault in this backend when the fault is in the signer's payload.
+#
+# The engine's OUTER answer has been depth-checked since round 4 (the client's
+# `_json_of`), but the payload is a string INSIDE it, so its nesting was never
+# looked at. It is bounded now by the same limit, read by the same linear scan,
+# before anything is parsed, and what is refused says so in our words.
+
+#: What "well under a second" means for a case that must not do real work. A request
+#: below measures about 20 to 30 ms (it builds a receipt from the database; the first
+#: request of a process about 250 ms), and the check on its own a few milliseconds.
+#: The bound is generous on purpose: it exists to catch a scan that is quadratic or
+#: reads the whole of a hostile payload, not to grade a machine. No sleeps anywhere:
+#: the bound is on the work.
+_WELL_UNDER_A_SECOND = 1.0
+
+#: A string only a hostile payload carries. If it is ever served or logged, the
+#: reason has quoted the payload.
+_CANARY = "canary-7f3a9c-from-the-signers-payload"
+
+
+def _arrays(depth):
+    return "[" * depth + "]" * depth
+
+
+def _objects(depth):
+    return '{"a":' * depth + "1" + "}" * depth
+
+
+def _document_with_a_field_nested(document, arrays):
+    """The signed document's own JSON but for one field: ``digest`` becomes ``arrays``
+    levels of nesting, and a canary rides beside it. Everything a reader glances at is
+    what was sent; only the nesting gives it away.
+
+    Built as TEXT. ``json.dumps`` of the real structure is recursive too, and would
+    raise before the case began."""
+    head = json.dumps(
+        {**document, "digest": None, "note": _CANARY}, sort_keys=True, separators=(",", ":")
+    )
+    marker = '"digest":null'
+    assert head.count(marker) == 1
+    return head.replace(marker, '"digest":' + _arrays(arrays))
+
+
+def _envelope_carrying(document, payload):
+    """An envelope that is well formed in every respect but its payload, which is
+    ``payload`` (text, encoded as UTF-8, or the bytes themselves): the version, the
+    payload type and a signature entry are what an honest signer sends, so the payload
+    is the only thing left to make the route refuse it."""
+    if isinstance(payload, str):
+        payload = payload.encode()
+    envelope = _envelope_over(document)
+    envelope["payload"] = base64.b64encode(payload).decode()
+    return envelope
+
+
+class _SignsWith:
+    """A signer whose payload is whatever ``build(document)`` says."""
+
+    def __init__(self, build):
+        self.build = build
+
+    def sign_assurance_receipt(self, payload):
+        return _envelope_carrying(payload, self.build(payload))
+
+
+def _timed(call):
+    """``call()`` and the seconds it took. Wrap ONLY the request: the fixtures that
+    build users and deployments are outside it on purpose. ``create_user`` hashes a
+    password, which costs about a second, and a bound that includes it measures the
+    hasher, not the route."""
+    started = time.perf_counter()
+    result = call()
+    return result, time.perf_counter() - started
+
+
+#: Every one nests past MAX_JSON_DEPTH, in a different way.
+_PAST_THE_LIMIT = {
+    "arrays-100000-deep": lambda document: _arrays(100_000),
+    "objects-100000-deep": lambda document: _objects(100_000),
+    "opened-and-never-closed": lambda document: "[" * 100_000,
+    # The parser sniffs the encoding, so a scan that read the wrong text would let
+    # this one through: the payload picks the encoding.
+    "arrays-100000-deep-in-utf-16": lambda document: _arrays(100_000).encode("utf-16"),
+    "one-past-the-limit": lambda document: _arrays(MAX_JSON_DEPTH + 1),
+    "the-document-with-one-field-nested-past-it": lambda document: (
+        _document_with_a_field_nested(document, 100_000)
+    ),
+}
+
+
+@pytest.mark.parametrize("build", list(_PAST_THE_LIMIT.values()), ids=list(_PAST_THE_LIMIT))
+def test_a_payload_nested_past_the_limit_reads_unsigned_with_the_depth_as_the_reason(
+    monkeypatch, caplog, build
+):
+    """THE FIX, at the route. Master answered 200 unsigned here too, but with the
+    interpreter's sentence as the reason (see the note above) -- and for
+    ``one-past-the-limit``, which the parser reads without trouble, with "DIFFERENT
+    document", which is the wrong reason: a payload the bound refuses is refused for
+    its nesting.
+
+    The reason is this service's own words and names the LIMIT, never the payload or
+    the parser, and the receipt beside it is still there and still correct."""
+    _engine(monkeypatch, _SignsWith(build))
+    dep = _deployment(_user())
+    reader = _user("reader")
+
+    with caplog.at_level("WARNING", logger="assurance.views"):
+        resp, took = _timed(lambda: _fetch(dep, reader))
+
+    assert resp.status_code == 200
+    assert resp.data["signed"] is False
+    assert resp.data["envelope"] is None, (
+        "an envelope alongside signed=False is a receipt that looks signed"
+    )
+    assert f"deeper than {MAX_JSON_DEPTH} levels" in resp.data["reason"]
+    assert resp.data["receipt"]["digest"] == receipt.build_assurance_receipt(dep)["digest"]
+
+    # Not the interpreter's words: that sentence is what master served.
+    assert "recursion" not in resp.data["reason"].lower()
+
+    # The payload is the signer's text. It is not the reader's business and not the
+    # log's: asserted over the WHOLE response and every log line, not over `reason`.
+    served = json.dumps(resp.data, default=str)
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert _CANARY not in served
+    assert _CANARY not in logged
+    assert "[[[" not in resp.data["reason"] and '{"a"' not in resp.data["reason"]
+    assert "NotAnEnvelope" in logged, "the operator still gets the reason in the log"
+
+    assert took < _WELL_UNDER_A_SECOND, f"took {took:.3f}s"
+
+
+#: Every one nests up to MAX_JSON_DEPTH and no further, and none of them is the
+#: document. `at-the-limit` is the deepest a payload may be and still be read.
+_UP_TO_THE_LIMIT = {
+    "arrays-one-under": lambda document: _arrays(MAX_JSON_DEPTH - 1),
+    "arrays-at-the-limit": lambda document: _arrays(MAX_JSON_DEPTH),
+    # The document's own keys and values, with `digest` nested. One container is the
+    # document itself, so the field carries the rest of the depth.
+    "the-document-with-one-field-nested-one-under": lambda document: (
+        _document_with_a_field_nested(document, MAX_JSON_DEPTH - 2)
+    ),
+    "the-document-with-one-field-nested-at-the-limit": lambda document: (
+        _document_with_a_field_nested(document, MAX_JSON_DEPTH - 1)
+    ),
+}
+
+
+@pytest.mark.parametrize("build", list(_UP_TO_THE_LIMIT.values()), ids=list(_UP_TO_THE_LIMIT))
+def test_a_payload_that_nests_up_to_the_limit_is_read_and_refused_as_a_different_document(
+    monkeypatch, build
+):
+    """The other side of the bound. A payload that nests right up to the limit is
+    READ -- parsed and compared -- and, differing from the document, refused for THAT
+    reason. It is not refused for its nesting, and the comparison it reaches is
+    bounded by the limit rather than by the stack.
+
+    Green on master as well, by construction: the bound is new, so nothing that was
+    read before it is refused by it. This is what keeps the fix from over-refusing --
+    from an off-by-one that turns the limit into a depth of 63."""
+    _engine(monkeypatch, _SignsWith(build))
+    dep = _deployment(_user())
+    reader = _user("reader")
+
+    resp, took = _timed(lambda: _fetch(dep, reader))
+
+    assert resp.status_code == 200
+    assert resp.data["signed"] is False
+    assert resp.data["envelope"] is None
+    assert "DIFFERENT document" in resp.data["reason"]
+    assert "deeper than" not in resp.data["reason"]
+    assert resp.data["receipt"]["digest"] == receipt.build_assurance_receipt(dep)["digest"]
+    assert took < _WELL_UNDER_A_SECOND, f"took {took:.3f}s"
+
+
+def test_brackets_inside_strings_are_not_nesting(monkeypatch):
+    """The control that keeps the bound honest. It reads STRUCTURE. A deployment whose
+    NAME is two hundred brackets -- `system.name` is user-supplied and rides inside
+    the signed document -- has a receipt whose text is full of `[` and `{` and nests a
+    handful of levels. A check that counted bracket characters, or that stopped
+    reading at the first quote, would refuse the honest signer, and an honest
+    envelope reading unsigned is the opposite failure."""
+    signer = _Signer()
+    _engine(monkeypatch, signer)
+    name = "[{" * 100
+    dep = _deployment(_user(), name=name)
+
+    resp = _fetch(dep, _user("reader"))
+
+    assert resp.data["signed"] is True
+    assert resp.data["reason"] is None
+    assert resp.data["envelope"] is not None
+    assert resp.data["receipt"]["system"]["name"] == name
+    # Not vacuous: the bytes that were signed really do carry the brackets.
+    assert json.dumps(signer.signed).count("[") >= 100
+
+
+def test_a_real_receipt_nests_far_inside_the_bound():
+    """Why the engine-answer limit is safe to apply to the payload. An honest receipt
+    nests a handful of levels; if it ever grew toward the bound, the route would start
+    reading a VALID envelope as unsigned, and nothing else would say so. Half the bound
+    is the tripwire, so the growth is noticed before it breaks signing."""
+    document = receipt.signable_receipt(receipt.build_assurance_receipt(_deployment(_user())))
+    depth = _nesting_depth(json.dumps(document), limit=10 * MAX_JSON_DEPTH)
+
+    assert 1 <= depth <= MAX_JSON_DEPTH // 2, (
+        f"a receipt nests {depth} levels; the signed route reads {MAX_JSON_DEPTH} at most"
+    )
+
+
+def test_a_payload_nested_past_the_limit_is_unsigned_and_not_a_500_through_the_real_url_stack(
+    monkeypatch,
+):
+    """The cases above call the view directly, where an exception that escaped it would
+    reach the caller. In production that is a 500. This one drives the real URL and the
+    real handler, so the status code itself is what is asserted: a hostile payload must
+    never be a 500. Nor does that now rest on `RecursionError` happening to be a
+    `RuntimeError` -- `envelope_over` raises only NotAnEnvelope (see the tests below)."""
+    _engine(monkeypatch, _SignsWith(lambda document: _arrays(100_000)))
+    dep = _deployment(_user())
+    client = APIClient()
+    client.force_authenticate(user=_user("reader"))
+    client.raise_request_exception = False
+    url = reverse("deployment-signed-assurance-receipt", kwargs={"uuid": str(dep.uuid)})
+
+    # No timing bound here, unlike the direct-view cases: the real stack includes
+    # middleware that makes its own outbound attempt to a Defender engine, so a
+    # bound would measure the network, not this route.
+    response = client.get(url)
+
+    assert response.status_code == 200, f"the route answered {response.status_code}"
+    body = response.json()
+    assert body["signed"] is False
+    assert body["envelope"] is None
+    assert f"deeper than {MAX_JSON_DEPTH} levels" in body["reason"]
+    assert "recursion" not in body["reason"].lower()
+    assert body["receipt"]["digest"] == receipt.build_assurance_receipt(dep)["digest"]
+
+
+def test_a_payload_far_past_the_limit_is_refused_without_reading_all_of_it():
+    """The scan stops at the first bracket past the limit, so ten million of them cost
+    what sixty-five do. A scan that measured the whole payload first is what this
+    catches: on this input it would take over two seconds (the depth pass runs at about
+    a quarter of a microsecond per bracket), and a hostile signer would choose the
+    input."""
+    document = {"a": 1}
+    envelope = _envelope_carrying(document, "[" * 10_000_000)
+
+    started = time.perf_counter()
+    with pytest.raises(receipt.NotAnEnvelope, match=f"deeper than {MAX_JSON_DEPTH} levels"):
+        receipt.envelope_over(document, envelope)
+    took = time.perf_counter() - started
+
+    assert took < _WELL_UNDER_A_SECOND, f"took {took:.3f}s"
+
+
+def test_a_payload_at_the_limit_that_equals_the_document_is_still_signed():
+    """The accept side of the boundary, through the REAL comparison: a document that
+    nests exactly MAX_JSON_DEPTH levels, and an envelope over it, is returned as it
+    came. The bound is `>`, not `>=`, and the comparison recurses MAX_JSON_DEPTH deep
+    -- the most it ever can after the bound."""
+    document = {"deep": json.loads(_arrays(MAX_JSON_DEPTH - 1))}
+    assert _nesting_depth(json.dumps(document), limit=MAX_JSON_DEPTH + 1) == MAX_JSON_DEPTH
+    envelope = _envelope_over(document)
+
+    assert receipt.envelope_over(document, envelope) is envelope
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+def test_a_payload_in_another_unicode_encoding_is_read_as_json_reads_it(monkeypatch, encoding):
+    """`json.loads(bytes)` sniffs a byte-order mark and reads UTF-16 and UTF-32, and the
+    route accepted an envelope whose payload was any of them. The nesting scan decodes
+    the same way, so it and the parser always read the same text -- which is also why
+    the UTF-16 case above cannot slip past it. Unchanged for an honest payload, and green
+    on master."""
+
+    class _Encodes:
+        def sign_assurance_receipt(self, payload):
+            return _envelope_carrying(payload, json.dumps(payload).encode(encoding))
+
+    _engine(monkeypatch, _Encodes())
+    resp = _fetch(_deployment(_user()), _user("reader"))
+
+    assert resp.data["signed"] is True, resp.data["reason"]
+    assert resp.data["envelope"] is not None
+
+
+def test_a_parser_that_runs_out_of_stack_anyway_is_still_not_an_envelope(monkeypatch):
+    """The bound makes this unreachable for a payload. It is not the only thing between
+    a hostile signer and the interpreter's sentence being served as the reason: a stack
+    already nearly spent when the route is called, a limit changed later, a scanner
+    bug -- any of them lets `json.loads` recurse, and RecursionError is not a
+    ValueError.
+
+    The parser is replaced, because a real overrun cannot be produced portably: from
+    3.12 the C parser's recursion is no longer governed by `sys.setrecursionlimit`."""
+
+    def _out_of_stack(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    monkeypatch.setattr(json, "loads", _out_of_stack)
+    document = {"a": 1}
+
+    with pytest.raises(receipt.NotAnEnvelope, match="too deeply") as refused:
+        receipt.envelope_over(document, _envelope_over(document))
+
+    assert "maximum recursion depth" not in str(refused.value), "the parser's words do not travel"
+
+
+def test_a_comparison_that_runs_out_of_stack_is_still_not_an_envelope():
+    """The same, for the comparison. After the bound it recurses at most
+    MAX_JSON_DEPTH levels; a comparison that overruns anyway is containment not
+    established, which reads unsigned -- never signed, and never anything but
+    NotAnEnvelope."""
+
+    class _Unbounded(dict):
+        def __ne__(self, other):
+            raise RecursionError("maximum recursion depth exceeded in comparison")
+
+        __eq__ = __ne__
+        __hash__ = None
+
+    document = _Unbounded(a=1)
+
+    with pytest.raises(receipt.NotAnEnvelope, match="too deeply"):
+        receipt.envelope_over(document, _envelope_over(document))
