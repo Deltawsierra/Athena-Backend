@@ -35,6 +35,16 @@ Without a key the gateway allows every request and says so in the log.
 `DEFENDER_MONITOR_ONLY` defaults to on: block and throttle decisions are logged
 but not enforced. Turning enforcement on is a deliberate go-live step.
 
+The engine client (`ai_engine/services/cyberengine_client.py`) bounds every answer
+it parses. An answer longer than 8 MiB is not parsed at all. Every other answer is
+checked for nesting depth in one linear pass before it is parsed: an answer cut off
+inside a string used to take seconds to reject, and blocked every other thread of
+the worker while it did. An answer that fails either check is reported as
+unreadable. A scan or retest answer may name no run in its body while the engine's
+`X-Run-Id` header names one. The run is then kept under the header's id. A scan is
+collected by that id and, while it cannot be collected, stays pending under it. A
+retest whose answer names no end state reads as running, stoppable by that id.
+
 A stop is never sent to the engine and never refused by it, in either mode, and
 no throttle refuses or counts one. The stops are listed in `safety/stops.py`:
 a pause (`{"paused": true}`; a lift is start-direction and is not a stop), a
@@ -130,13 +140,21 @@ commands expired per read, in one write. Identical stop-lane reads by one
 account at once -- identical in the parameters the view reads, whatever else the
 query string carries -- share one computation; reads of different engines do
 not. The state view waits for the engine's live state
-`FAILSAFE_STATE_ENGINE_SECONDS` (default 2) at most. Two operators signing one
-command at once both count: each signature is added to the command as it is at
+`FAILSAFE_STATE_ENGINE_SECONDS` (default 2) at most, and reads at most 64 KiB of
+the engine's answer; a longer answer reads as not reported. Two operators signing
+one command at once both count: each signature is added to the command as it is at
 that moment, under the write lock.
 
 Removing an operator (`DELETE /api/accounts/users/<id>/`) is a stop. The
 engagements they created are kept, with the creator unlinked; such an engagement
-is visible to admins only.
+is visible to admins only. A contradiction they made on an assurance claim stays
+in force, and stays theirs. Each claim event records, when it is written, that a
+person made it and the name their account had (`by_person`, `actor_username`,
+migration `assurance.0047`). So removing the account no longer turns their stop
+into the machine's reading for the next re-derive to lift. `0047` fills both
+fields for the events of every account that still exists. An account removed
+before `0047` has no name left to copy, and its events read as the machine's.
+Rolling back past `0047` drops the snapshot.
 
 ## Signed chain outcomes
 

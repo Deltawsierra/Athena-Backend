@@ -1731,7 +1731,9 @@ class ClaimEvent(models.Model):
     :class:`RemediationEvent` exactly rather than inventing a second attribution
     mechanism. ``from_status`` is blank only for a synthetic seed event (a claim's
     first appearance, ``∅ → status``); ``actor`` is null for a machine derivation,
-    which reads as "not human-attributed", never as "no one did it"."""
+    which reads as "not human-attributed", never as "no one did it" -- and null as
+    well for a person's event whose account has since been removed. ``by_person``
+    and ``actor_username``, written with the event, say which (round 5, B2)."""
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
