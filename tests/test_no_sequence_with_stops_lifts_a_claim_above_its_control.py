@@ -42,6 +42,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
+from mythos_core.evidence import strength_from_evidence_class
 
 from assurance import claims as claims_module
 from assurance import evidence_audit as ea
@@ -365,15 +366,16 @@ def test_no_sequence_with_stops_supersession_and_latent_holds_lifts_a_claim_abov
 
 def _pair(name):
     """Two deployments whose EFFECTIVE_ACCESS claim derives UNKNOWN (no supporting
-    confidence), each read SUPPORTED by a person: the person's move carries no
-    confidence, so the control stays at none."""
+    confidence), each read SUPPORTED by a person: the person's move carries the
+    strength of the claim's evidence class, as every confidence follows the status
+    it is carried under (P2.7). Before P2.7 it carried none."""
     out = []
     for world in ("control", "hostile"):
         dep = Deployment.objects.create(name=f"{name}-{world}", owner=_person("owner"))
         claim = _access_claim(dep, principals=False)
         apply_claim_transition(claim, Status.SUPPORTED, actor=_person(), note="reviewed")
         claim.refresh_from_db()
-        assert claim.confidence is None
+        assert claim.confidence == strength_from_evidence_class(claim.evidence_class)
         out.append(claim)
     return out
 
@@ -388,9 +390,11 @@ def test_a_hold_a_persons_move_releases_restores_no_more_confidence_than_the_rea
     """MN2c. Under a hold, a person moves the reading and the evidence taken now no
     longer holds it -- a successor observed ahead of the audit's clock has since
     become admissible and retires the failure. The release lands on the person's
-    reading with no more confidence than the reading carried: none, like the
-    control. Uncapped, it took the full confidence of the status (a claim with no
-    supporting confidence above the control)."""
+    reading with the confidence that reading carries with no evidence recorded: the
+    control's, which made the same move. Before P2.7 a person's move carried no
+    confidence, the control read none, and an uncapped release read the full
+    strength of the status above it; now both read the strength of the person's
+    status, and never the hostile one above the control."""
     control, hostile = _pair("mn2c")
     audited_at = timezone.now() - timedelta(hours=1)
     fail = ea.record_claim_evidence(
@@ -410,28 +414,32 @@ def test_a_hold_a_persons_move_releases_restores_no_more_confidence_than_the_rea
 
     _move_both((control, hostile), Status.PARTIALLY_VERIFIED)
 
-    assert hostile.status == Status.PARTIALLY_VERIFIED
+    assert hostile.status == control.status == Status.PARTIALLY_VERIFIED
     assert hostile.evidence_audit.get("held") is False
-    assert hostile.confidence is None
+    assert hostile.confidence == control.confidence == strength_from_evidence_class(hostile.evidence_class)
     assert _conf(hostile.confidence) <= _conf(control.confidence)
 
 
 def test_a_persons_move_under_a_hold_keeps_the_readings_confidence_as_the_holds_base():
-    """MN2f. A person's move recorded under a hold keeps, as the hold's base, the
-    confidence the reading had -- none here -- never the confidence of the status
-    moved to. The later attributed release restores no more than that."""
+    """MN2f. A person's move recorded under a hold records, as the hold's base, the
+    confidence of the reading it records -- the person's status, the one the control
+    carries after the same move with no evidence -- and the claim under the hold
+    carries none. The later attributed release lands on that reading with that
+    confidence and no more. (Before P2.7 a person's move carried no confidence, so
+    the base was none and the control read none.)"""
     control, hostile = _pair("mn2f")
     fail = ea.record_claim_evidence(hostile, **_good(hostile, outcome=V.FAIL.value))
     hostile.refresh_from_db()
     assert hostile.status == Status.CONTRADICTED
 
     _move_both((control, hostile), Status.PARTIALLY_VERIFIED)
-    assert hostile.status == Status.CONTRADICTED
+    assert hostile.status == Status.CONTRADICTED and hostile.confidence is None
     assert hostile.evidence_audit["base_status"] == Status.PARTIALLY_VERIFIED
-    assert hostile.evidence_audit["base_confidence"] is None
+    assert hostile.evidence_audit["base_confidence"] == control.confidence
+    assert control.confidence == strength_from_evidence_class(control.evidence_class)
 
     ea.invalidate_claim_evidence(fail, actor=_person("reviewer"), reason="probe hit staging")
     hostile.refresh_from_db()
     assert hostile.status == Status.PARTIALLY_VERIFIED
-    assert hostile.confidence is None
+    assert hostile.confidence == control.confidence
     assert _conf(hostile.confidence) <= _conf(control.confidence)

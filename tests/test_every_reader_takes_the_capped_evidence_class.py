@@ -143,17 +143,21 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _NOT_A_PROVIDER_ASSERTION = {
     ("assurance/bundle.py", "_claim_rows", "claim"): "AssuranceClaim",
     ("assurance/claims.py", "_can_verify", "claim"): "AssuranceClaim",
+    ("assurance/claims.py", "_mark_stale", "claim"): "AssuranceClaim",
     ("assurance/claims.py", "_move_reading", "claim"): "AssuranceClaim",
     ("assurance/decision.py", "_decision_from_findings", "f"): "Finding",
     ("assurance/evidence_audit.py", "_intrinsic_reasons", "item"): "ClaimEvidence",
     ("assurance/evidence_audit.py", "audit_of", "claim"): "AssuranceClaim",
     ("assurance/evidence_audit.py", "_write_audit", "claim"): "AssuranceClaim",
+    ("assurance/evidence_audit.py", "served_audit", "claim"): "AssuranceClaim",
     ("assurance/evidence_audit.py", "evidence_record", "item"): "ClaimEvidence",
     ("assurance/fingerprint.py", "_provider_descriptor", "provider"): "Provider",
     ("assurance/incident.py", "_evidence", "finding"): "Finding",
+    ("assurance/invalidation.py", "_mark_row_stale", "claim"): "AssuranceClaim",
     ("assurance/posture/base.py", "PostureFinding.as_dict", "self"): "PostureFinding",
     ("assurance/posture/base.py", "_weakest_evidence", "f"): "PostureFinding",
     ("assurance/roi.py", "_evidence_and_findings", "finding"): "Finding",
+    ("assurance/serializers.py", "AssuranceClaimSerializer.get_confidence_basis", "obj"): "AssuranceClaim",
     ("assurance/unknowns.py", "_derive_finding_unknowns", "finding"): "Finding",
 }
 

@@ -13,6 +13,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .change import CHANGE_LABELS, age_days, change_status, is_stale
+from .claim_confidence import confidence_basis as claim_confidence_basis
 from .composition import EVIDENCE_LABELS, evidence_kind
 from .receipt import finding_receipt
 from .models import (
@@ -832,6 +833,11 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         source="superseded_by.uuid", read_only=True, allow_null=True
     )
     is_stale = serializers.BooleanField(read_only=True)
+    # What ``confidence`` is, in one line (roadmap P2.7): with a number, that it is
+    # ordinal and not a probability, the evidence class it is read for and the
+    # mythos-core table it is read from; with none, "none: " and why, by the claim's
+    # status. Served beside every confidence, so a number never travels without it.
+    confidence_basis = serializers.SerializerMethodField()
     # The evidence audit's answer (issue #333) as stored: one of the five verdicts,
     # INSUFFICIENT_EVIDENCE among them, or null where no evidence was ever audited
     # -- or where the stored audit is not of the claim as it reads now (a stop wrote
@@ -861,6 +867,7 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
             "evidence_class",
             "evidence_class_label",
             "confidence",
+            "confidence_basis",
             "vendor_asserted",
             "assessment",
             "assessment_label",
@@ -889,6 +896,9 @@ class AssuranceClaimSerializer(serializers.ModelSerializer):
         # None-safe: an unassessed deployment has no decision, and an absent
         # decision is never read as "ready".
         return obj.get_assessment_display() if obj.assessment else None
+
+    def get_confidence_basis(self, obj) -> str:
+        return claim_confidence_basis(obj.status, obj.evidence_class, obj.confidence)
 
     def get_evidence_verdict(self, obj) -> str | None:
         from .evidence_audit import current_verdict
