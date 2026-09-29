@@ -10,6 +10,40 @@ claims by executing code against the project venv (`tests/settings_test.py`).
 Review of the current tree — the earlier audit had gone stale and is corrected
 below.
 
+## Status at `master` 180a093 (29 Sep 2026)
+
+Everything below this section is the 2026-09-18 reading, kept as written apart
+from the two lines named at the end of this section. Every item it left open has
+since been fixed on `master`, and by the rule stated below a fixed finding is not
+carried forward as open:
+
+- **L1 (machine classification is create-only) — fixed** (`a41911a`).
+  `Asset.classification_source` (migration `0013`) records who set a
+  classification. `_get_or_refresh` refreshes a machine-derived one and leaves a
+  human-set one alone, so a host that leaves scope is downgraded to `unmanaged`.
+  The admin marks a classification changed by hand as `human`.
+- **L2 (latest-scan boundary over only-visible findings) — fixed** (`a41911a`).
+  `FindingViewSet.get_serializer_context` computes `latest_seen_by_deployment`
+  over all findings; row visibility stays scoped by `_scoped_findings`.
+- **L3 and O2 (`DataBoundary` PUT is not a true replace) — fixed** (`129e563`).
+  PUT resets an omitted field to the model default; PATCH merges.
+- **L4 (O(findings) queries in `derive_assets`) — fixed** (`f710246`). The
+  endpoint assets are loaded once, created with `bulk_create` and refreshed with
+  `bulk_update`, and the findings are re-parented with one `bulk_update`.
+- **O1 (`"n/a"`, `"tbd"`, `"unknown"` read as sharing) — fixed** (`a41911a`).
+  `_declares_ignorance` sends an ignorance marker to the unknown branch for
+  region, training and sharing.
+
+None of the six is open, so the counts under "Counts by severity" no longer hold.
+This is not a new audit: nothing else was re-read for a count.
+
+Two other lines were out of date and are corrected in place: the connector bullet
+under "Clean bill", and the receipt version in the policy-pinning bullet. The
+scope line at the top lists what was read on 2026-09-18. Twenty-one modules of
+`assurance/` were added after that date (among them `composition`,
+`workflow_chains`, `served_route`, `coverage`, `evidence_audit`,
+`vendor_packet` and `claim_confidence`), and this file does not cover them.
+
 ## What the previous audit got wrong (now corrected)
 
 The prior version of this file was written against an older tree and is no longer
@@ -43,7 +77,7 @@ scope note was already false:
 
 Fixed findings are **not** carried forward as if open.
 
-## Counts by severity (current tree)
+## Counts by severity (tree of 2026-09-18)
 
 - CRITICAL: 0
 - HIGH: 0
@@ -154,7 +188,8 @@ the write contract clients depend on.
   `invalidation.check_invalidations` (a policy change invalidates a decision and
   opens an attributed retest, off a pass to STALE), and surfaced on
   `decision_support` and in the assurance receipt (standard bumped to
-  `…/1.1`). It never fabricates a pass and never softens a CONTRADICTED claim.
+  `…/1.1` by that change; `RECEIPT_VERSION` is now `…/4.0`). It never
+  fabricates a pass and never softens a CONTRADICTED claim.
 - **Receipt / fingerprint determinism.** Canonical JSON (sorted keys, compact
   separators), evidence rows and finding digests sorted (Merkle-style), every
   timestamp kept *outside* the hash. Same DB state ⇒ same digest and same system
@@ -170,12 +205,14 @@ the write contract clients depend on.
   deployment (guarded on `.exists()` over *all* findings); PAUSED overrides; the
   claim cap can only hold a decision back, never improve it; active set excludes
   closed/accepted/false-positive; evidence prefetched (no N+1).
-- **Connector honesty (dispatch deliberately NOT built).** An unconfigured
+- **Connector honesty (inert without configuration).** An unconfigured
   connector is inert: `push_finding` short-circuits before any transport touch and
   returns `ok=False, "<name> not configured"`; the base config is
   never-configured, so a connector with no override cannot look ready. Live
-  automated dispatch / posture fetching is an explicit deferred follow-up, absent
-  by design.
+  automated dispatch and posture fetching were not built when this was written.
+  They are now (`58f10e7`: `ConnectorBinding`, `PostureBinding`, `DispatchPolicy`,
+  `DispatchAttempt`, `assurance/dispatch.py`, `ASSURANCE_AUTO_DISPATCH_ENABLED`),
+  and this audit did not read them.
 - **Idempotent, non-destructive ingest.** Stable fingerprints (`signature_id`
   preferred, else type+descriptor); re-ingest refreshes engine-owned fields and
   never clobbers human `status`/`owner`; the on-commit signal is exception-swallowed
