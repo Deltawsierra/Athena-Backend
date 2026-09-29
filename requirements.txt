@@ -154,4 +154,27 @@ zopfli==0.2.3.post1
 # Mythos-Core#29 -- documentation only: a signed held establishes which engine
 # said so and when, not that the effect happened. assurance.composition reads an
 # Achilles held as an authorization check for exactly that reason.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@c568674113350f855fbd0acabcc9924c20de33e7
+#
+# Mythos-Core#30 -- a URL whose host no parser can read is refused by the egress
+# guard with the parser's reason instead of raising. This service does not import
+# the egress guard.
+#
+# Mythos-Core#31 -- mythos_core.evidence holds the evidence-class table: the rank
+# of each class, its ordinal strength, its qualitative reading and CLASS_BASIS.
+# This service still computes a claim's confidence and ranks evidence classes
+# with a copy of its own (assurance.claims._confidence, assurance.models
+# .evidence_strength); roadmap P2.7 retires that copy for this table.
+#
+# Mythos-Core#32, #33, #36 -- failsafe fixes on the engine side: the control poll
+# reaches a control plane on a private address, a terminate's attestation leaves
+# and nothing waits on it, and every stand-down (not only the first) drops the
+# engine's footholds. This service runs no Governor and no control loop; it
+# drafts and relays the commands those engines obey.
+#
+# Mythos-Core#34 -- a public key no private key stands behind (small-order,
+# mixed-order, off the curve or non-canonical) is refused wherever one is
+# loaded, mythos_core.keycheck. TrustedKey is one of those places, so the outcome
+# keyring assurance/observed_outcomes.py loads refuses a mixed-order key as well.
+#
+# Mythos-Core#35 -- documentation only: the owner's written freeze exceptions.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@c3c6c191554f37ccba5224ee880516f3861b89bc
