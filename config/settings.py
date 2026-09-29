@@ -112,6 +112,9 @@ INSTALLED_APPS = [
     # The stop-safety rules (safety.stops); its one table counts sign-in
     # attempts, shared by every worker (safety.sign_in).
     "safety",
+    # Idempotency-Key on the routes that start something outside this backend
+    # (idempotency.layer); never on a stop route.
+    "idempotency",
 ]
 
 # -------------------------------------------------------------------
@@ -365,6 +368,19 @@ ASSURANCE_DISPATCH_MAX_WAITING_RUNS = _env_number("ASSURANCE_DISPATCH_MAX_WAITIN
 ASSURANCE_DISPATCH_SWEEP_SECONDS = _env_number("ASSURANCE_DISPATCH_SWEEP_SECONDS", 300.0)
 # The wall-clock limit on one whole connector request, in seconds.
 ASSURANCE_CONNECTOR_DEADLINE_SECONDS = _env_number("ASSURANCE_CONNECTOR_DEADLINE_SECONDS", 30.0)
+
+# -------------------------------------------------------------------
+# IDEMPOTENCY KEYS (idempotency.layer)
+# -------------------------------------------------------------------
+# The bounds of the Idempotency-Key store on the scan launches, a report resent and
+# a finding pushed by hand: how long a key is kept (seconds), how many one account
+# keeps (its oldest forgotten first), and the largest answer kept whole for a replay
+# (bytes; a larger one is replayed as its status and top-level fields). A key
+# forgotten is a new request. A value that is not a positive whole number is logged
+# once and the default is used.
+IDEMPOTENCY_KEY_TTL_SECONDS = _env_number("IDEMPOTENCY_KEY_TTL_SECONDS", 24 * 60 * 60)
+IDEMPOTENCY_KEYS_PER_ACCOUNT = _env_number("IDEMPOTENCY_KEYS_PER_ACCOUNT", 1000)
+IDEMPOTENCY_MAX_RESPONSE_BYTES = _env_number("IDEMPOTENCY_MAX_RESPONSE_BYTES", 1024 * 1024)
 
 # -------------------------------------------------------------------
 # FAILSAFE CONTROL PLANE (operator-held pause / stand down / terminate)
