@@ -852,6 +852,28 @@ class Finding(models.Model):
     def __str__(self) -> str:
         return f"{self.title} [{self.severity}]"
 
+    def clean(self):
+        # The admin's form reads the retest-closure gate before it saves, so a
+        # refused close is shown on the form rather than raised from the save.
+        from django.core.exceptions import ValidationError
+
+        from .retest_closure import ClosureRefused, enforce
+
+        super().clean()
+        try:
+            enforce(self)
+        except ClosureRefused as exc:
+            raise ValidationError(exc.reasons) from exc
+
+    def save(self, *args, **kwargs):
+        # FREEZE.md: closure is effect-backed only. Every write of a retest-required
+        # finding to CLOSED, or its remediation to RESOLVED, passes the one gate in
+        # assurance.retest_closure; a refusal leaves the row as it was.
+        from .retest_closure import enforce
+
+        enforce(self, kwargs.get("update_fields"))
+        super().save(*args, **kwargs)
+
     @property
     def evidence_class(self) -> str:
         """The finding's honest evidence class: the *weakest* class among its
@@ -2367,6 +2389,48 @@ class RetestRequirement(models.Model):
         """Whether the obligation is still outstanding — no fresh derivation has
         yet rebound the claim to the changed state and satisfied it."""
         return self.resolved_at is None
+
+
+# ---------------------------------------------------------------------------
+# RetestClosureEvidence — what a retest-gated closure stands on
+# ---------------------------------------------------------------------------
+
+
+class RetestClosureEvidence(models.Model):
+    """One retest run behind a retest-gated closure (``assurance.retest_closure``).
+
+    ``fixtures`` holds the four fixture classes -- ``vulnerable``, ``repaired``,
+    ``benign``, each ``{"ran": bool, "outcome": "passed"|"failed"|"errored"}``, and
+    ``incomplete_repair``, one such run per named pattern -- as one JSON document
+    rather than nine child rows: the gate reads and judges the run whole, a record
+    is written once and never edited, and a document that does not have that shape
+    is itself a refusal ("unreadable"), where child rows could be half-written.
+    ``origin`` and ``content_digest`` carry provenance as :class:`ClaimEvidence`
+    does. Append-only: the latest record for a finding is the one the gate reads,
+    so a later run that was fooled outranks an earlier one that was not."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    finding = models.ForeignKey(Finding, on_delete=models.CASCADE, related_name="closure_evidence")
+    fixtures = models.JSONField(default=dict, blank=True)
+    origin = models.CharField(
+        max_length=16, choices=ClaimEvidence.Origin.choices, default=ClaimEvidence.Origin.UNKNOWN
+    )
+    # Digest of the retest run's own artifact (its log, its report): provenance,
+    # never the artifact itself.
+    content_digest = models.CharField(max_length=128, blank=True)
+    summary = models.TextField(blank=True)
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+        indexes = [models.Index(fields=["finding", "created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.origin} retest closure evidence for finding {self.finding_id}"
 
 
 # ---------------------------------------------------------------------------

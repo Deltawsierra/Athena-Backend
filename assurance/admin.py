@@ -183,8 +183,10 @@ class FindingAdmin(_RefreshesTheStoredDecision, admin.ModelAdmin):
     search_fields = ("title", "finding_type", "location")
     inlines = [EvidenceInline, RemediationEventInline]
     # Recorded from the finding when a person accepts it here, never typed: it is
-    # what the acceptance covers (Finding.risk_accepted_severity).
-    readonly_fields = ("risk_accepted_severity",)
+    # what the acceptance covers (Finding.risk_accepted_severity). `retest_required`
+    # is the engine's (ingest sets it): unticking it here would take a finding out
+    # of the retest-closure gate (assurance.retest_closure) one save before closing it.
+    readonly_fields = ("risk_accepted_severity", "retest_required")
 
     def save_model(self, request, obj, form, change):
         # An acceptance made or renewed here covers the severity the finding has

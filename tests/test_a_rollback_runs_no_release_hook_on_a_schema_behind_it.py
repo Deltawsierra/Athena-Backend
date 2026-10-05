@@ -34,6 +34,7 @@ def _state_apps(target):
 
 #: The assurance migrations above 0043, newest first: the order a rollback unapplies them.
 _ABOVE_0043 = (
+    "0049_retest_closure_evidence",
     "0048_claim_confidence_follows_its_status",
     "0047_claim_event_person_snapshot",
     "0046_claim_audit_weighing",

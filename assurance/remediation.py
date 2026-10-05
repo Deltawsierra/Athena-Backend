@@ -72,7 +72,14 @@ def apply_transition(
             f"{from_state} → {to_state} is not a legal remediation transition."
         )
     finding.remediation_state = to_state
-    finding.save(update_fields=["remediation_state", "updated_at"])
+    try:
+        # RESOLVED on a retest-required finding passes the retest-closure gate in
+        # the save (assurance.retest_closure); a refusal leaves the caller's copy
+        # where the row is.
+        finding.save(update_fields=["remediation_state", "updated_at"])
+    except Exception:
+        finding.remediation_state = from_state
+        raise
     return RemediationEvent.objects.create(
         finding=finding,
         from_state=from_state,
