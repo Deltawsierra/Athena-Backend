@@ -16,6 +16,7 @@ from .change import CHANGE_LABELS, age_days, change_status, is_stale
 from .claim_confidence import confidence_basis as claim_confidence_basis
 from .composition import EVIDENCE_LABELS, evidence_kind
 from .receipt import finding_receipt
+from .retest_closure import closure_standing
 from .models import (
     ApprovedWorkflow,
     Asset,
@@ -134,9 +135,17 @@ class FindingSerializer(serializers.ModelSerializer):
     # about a state that exists *because* its wrong reading is easy. The caveat
     # beside it is served from the same table for the same reason.
     status_label = serializers.CharField(source="get_status_display", read_only=True)
+    # What a closure of this finding stands on: the closure gate's own verdict
+    # (assurance.retest_closure), per finding. "verified_closed" is the only
+    # standing that says a closure is effect-backed; a closed finding that asked
+    # for no retest reads "closed_without_retest", never verified.
+    closure = serializers.SerializerMethodField()
 
     def get_status_must_not_imply(self, obj) -> str | None:
         return Finding.MUST_NOT_IMPLY.get(obj.status)
+
+    def get_closure(self, obj) -> dict:
+        return closure_standing(obj)
 
     class Meta:
         model = Finding
@@ -164,6 +173,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "control_mapping",
             "location",
             "retest_required",
+            "closure",
             "evidence_class",
             "evidence",
             "asset_uuid",

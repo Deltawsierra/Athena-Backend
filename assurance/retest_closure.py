@@ -117,17 +117,107 @@ def fixture_reasons(fixtures) -> list[str]:
     return reasons
 
 
+def latest_record(finding):
+    """The latest :class:`RetestClosureEvidence` of ``finding`` -- the one the gate
+    reads -- or None. Read from the prefetched records when a list view prefetched
+    them (``closure_evidence``), so serving the closure standing of a page of
+    findings is one query, not one per finding."""
+    from .models import RetestClosureEvidence
+
+    if finding.pk is None:
+        return None
+    cached = getattr(finding, "_prefetched_objects_cache", {}).get("closure_evidence")
+    if cached is not None:
+        records = list(cached)
+        return max(records, key=lambda r: (r.created_at, r.pk)) if records else None
+    return RetestClosureEvidence.objects.filter(finding_id=finding.pk).order_by("-created_at", "-pk").first()
+
+
+#: What a reader is told a finding's closure stands on (:func:`closure_standing`).
+VERIFIED_CLOSED = "verified_closed"
+CLOSABLE = "closable"
+NOT_CLOSABLE = "not_closable"
+CLOSED_UNVERIFIED = "closed_without_retest"
+NOT_GATED = "not_retest_gated"
+
+
+def closure_standing(finding) -> dict:
+    """What a closure of ``finding`` stands on, as a reader is served it: the gate's
+    own verdict (:func:`refusal_reasons`) per finding, never a second judgement.
+
+    ``standing``:
+
+    - ``verified_closed``   -- closed or resolved, retest-gated, and its latest
+      closure evidence carries the closure now (every fixture class and pattern
+      ran with the outcome a closure needs, an independent observer's, after the
+      finding was last seen). The only standing that says a closure is effect-backed.
+    - ``closable``          -- open, retest-gated, and its latest evidence would
+      carry a closure if one were made now.
+    - ``not_closable``      -- retest-gated, and the evidence would not carry a
+      closure: ``reasons`` names every reason, as the gate would refuse. A closed
+      finding reads this when its evidence no longer carries it (seen again since).
+    - ``closed_without_retest`` -- closed or resolved without asking for a retest:
+      a disposition, never an effect-backed closure, and said so.
+    - ``not_retest_gated``  -- open, and no retest was asked for.
+
+    ``evidence`` is the latest record's provenance and, per fixture class and
+    pattern, whether it ran and how it came out -- or None when there is none.
+    Pure reads; never writes."""
+    from .models import Finding
+
+    record = latest_record(finding)
+    closed = finding.status == Finding.Status.CLOSED or (
+        finding.remediation_state == Finding.RemediationState.RESOLVED
+    )
+    reasons = refusal_reasons(finding) if finding.retest_required else []
+    if not finding.retest_required:
+        standing = CLOSED_UNVERIFIED if closed else NOT_GATED
+    elif reasons:
+        standing = NOT_CLOSABLE
+    else:
+        standing = VERIFIED_CLOSED if closed else CLOSABLE
+    # Built with keywords: the retest flag is READ here and served, never written.
+    # test_no_code_path_writes_a_findings_disposition_past_save pins that only
+    # ingest writes it, by matching the flag as a quoted dict key or an assignment.
+    return dict(
+        standing=standing,
+        retest_required=bool(finding.retest_required),
+        reasons=reasons,
+        evidence=None if record is None else _served_record(record),
+    )
+
+
+def _run_of(entry) -> dict:
+    if not isinstance(entry, dict) or not isinstance(entry.get("ran"), bool):
+        return {"ran": None, "outcome": "unreadable"}
+    return {"ran": entry["ran"], "outcome": entry.get("outcome") if entry["ran"] else None}
+
+
+def _served_record(record) -> dict:
+    fixtures = record.fixtures if isinstance(record.fixtures, dict) else {}
+    patterns = fixtures.get(INCOMPLETE_REPAIR)
+    return {
+        "uuid": str(record.uuid),
+        "origin": record.origin,
+        "content_digest": record.content_digest,
+        "recorded_at": record.created_at.isoformat(),
+        "fixtures": {
+            **{name: _run_of(fixtures.get(name)) for name in (VULNERABLE, REPAIRED, BENIGN)},
+            INCOMPLETE_REPAIR: {
+                pattern: _run_of(patterns.get(pattern) if isinstance(patterns, dict) else None)
+                for pattern in INCOMPLETE_REPAIR_PATTERNS
+            },
+        },
+    }
+
+
 def refusal_reasons(finding, *, last_seen=None) -> list[str]:
     """Why ``finding`` may not be closed on its latest closure evidence; empty when
     it may. ``last_seen`` is the latest observation of the defect (defaults to the
     finding's own)."""
-    from .models import ClaimEvidence, RetestClosureEvidence
+    from .models import ClaimEvidence
 
-    record = None
-    if finding.pk is not None:
-        record = (
-            RetestClosureEvidence.objects.filter(finding_id=finding.pk).order_by("-created_at", "-pk").first()
-        )
+    record = latest_record(finding)
     if record is None:
         return [
             "no closure evidence recorded: a retest-gated closure needs the vulnerable, repaired, "

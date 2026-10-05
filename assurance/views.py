@@ -2932,7 +2932,8 @@ class FindingViewSet(
         qs = (
             self._scoped_findings()
             .select_related("deployment", "asset", "owner", "assignee")
-            .prefetch_related("evidence")
+            # The closure standing reads each finding's latest closure evidence.
+            .prefetch_related("evidence", "closure_evidence")
         )
         severity = self.request.query_params.get("severity")
         if severity:
