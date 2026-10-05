@@ -921,8 +921,9 @@ def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     the lock: that weighing grows with the evidence, and a stop issued while it ran
     waited it out (601 ms at 5,000 items, round 5, C1). The stored audit is marked
     unsettled instead (:func:`_record_unsettled`): no verdict, not current, with the
-    reason. A hold it had stands as it was -- releasing one unweighed would lift the
-    claim -- and the claim's next audit settles it."""
+    reason -- and the claim is held at UNKNOWN until an audit settles it, unless it
+    already reads no higher or is held already (a hold it had stands as it was:
+    releasing one unweighed would lift the claim). The claim's next audit settles it."""
     now = now or timezone.now()
     written = _audit_in_place(claim, now)
     for _hop in range(3):
@@ -971,18 +972,63 @@ def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
 UNSETTLED = (
     "The evidence could not be weighed: the claim or the evidence recorded against it moved before "
     f"each of {AUDIT_ATTEMPTS} weighings could be written, and the evidence is never weighed under the "
-    "write lock (a stop would wait on it). No verdict; the claim's next audit brings it current."
+    "write lock (a stop would wait on it). No verdict, so no pass: a claim reading above unknown is "
+    "held at unknown until its next audit brings it current."
 )
 
 
 def _record_unsettled(claim: AssuranceClaim, now) -> None:
     """Mark the stored audit of the locked, committed row ``claim`` unsettled: no
     verdict, and every reader serves it not current with :data:`UNSETTLED`. Reads
-    nothing but the row. Everything else the stored audit says is kept -- a hold it
-    had, and the reading and confidence under it -- so nothing moves the claim."""
-    claim.evidence_audit = {**(claim.evidence_audit or {}), "unsettled": UNSETTLED, "unsettled_at": now.isoformat()}
+    nothing but the row -- the evidence is never weighed here.
+
+    And it HOLDS the claim until an audit settles it (owner's decision, 5 Oct, on
+    #108): evidence nobody could weigh cannot vouch for a pass, and a FAIL among it
+    must not stand behind a VERIFIED in the meantime. A claim reading above
+    UNKNOWN -- SUPPORTED, PARTIALLY_VERIFIED, VERIFIED -- is held at UNKNOWN, the
+    hold an audit puts on evidence it cannot resolve, with its reading kept under
+    the hold (``base_status``) and the move recorded as a ClaimEvent. A claim
+    already held stays as it was: releasing a hold unweighed would lift it. One
+    already at or below UNKNOWN is not moved: a hold never lifts a claim. The
+    claim's next audit settles it, through the hold, as any audit does
+    (:func:`audit_claim`): released to its reading if the evidence supports it,
+    held where the evidence puts it if not.
+
+    Only the row is written, under the lock the caller holds, in time that does not
+    grow with the evidence: a stop is never held up by it."""
+    audit = dict(claim.evidence_audit or {})
+    fields = ["evidence_audit", "evidence_verdict", "updated_at"]
+    reading = claim.status
+    hold = not _held_by_audit(claim) and rank(Status.UNKNOWN.value) < rank(reading)
+    if hold:
+        audit.update(
+            {
+                "verdict": "",
+                "base_status": str(reading),
+                "base_confidence": claim_confidence(reading, claim.evidence_class),
+                "status": Status.UNKNOWN.value,
+                "held": True,
+            }
+        )
+        claim.status = Status.UNKNOWN.value
+        claim.confidence = claim_confidence(Status.UNKNOWN.value, claim.evidence_class)
+        fields += ["status", "confidence"]
+    audit.update({"unsettled": UNSETTLED, "unsettled_at": now.isoformat()})
+    claim.evidence_audit = audit
     claim.evidence_verdict = ""
-    claim.save(update_fields=["evidence_audit", "evidence_verdict", "updated_at"])
+    claim.save(update_fields=fields)
+    if hold:
+        ClaimEvent.objects.create(
+            claim=claim,
+            from_status=reading,
+            to_status=Status.UNKNOWN.value,
+            actor=None,
+            cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT,
+            note=_clip(
+                f"Evidence audit unsettled; held at {Status.UNKNOWN.value} until the evidence "
+                f"is weighed. {UNSETTLED}"
+            ),
+        )
 
 
 def _write_audit(claim: AssuranceClaim, result: dict | None) -> dict | None:
@@ -1072,7 +1118,11 @@ def refusal_for_transition(claim: AssuranceClaim, to_status: str, *, now=None, a
 
 
 def _refusal(result: dict) -> str:
-    why = "; ".join(result.get("contradictions") or []) or f"the evidence reads {result.get('verdict')}"
+    why = (
+        result.get("unsettled")
+        or "; ".join(result.get("contradictions") or [])
+        or f"the evidence reads {result.get('verdict')}"
+    )
     return _clip(
         f"The evidence recorded against this claim holds it at {result.get('status')} "
         f"({result.get('verdict')}): {why.rstrip('.')}. Resolve the evidence first -- invalidate an "

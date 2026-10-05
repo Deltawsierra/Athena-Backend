@@ -77,8 +77,11 @@ def test_an_audit_overtaken_at_every_weighing_is_marked_unsettled_and_never_weig
     served = ea.served_audit(current)
     assert served["audit_current"] is False
     assert "could not be weighed" in served["not_current_reason"]
-    # Nothing moved the claim: it was not weighed, so nothing held or released it.
-    assert current.status == Status.VERIFIED
+    # Unweighed evidence vouches for no pass: the claim is held at UNKNOWN, its
+    # reading kept under the hold, until an audit settles it (owner, 5 Oct, #108).
+    assert current.status == Status.UNKNOWN
+    assert ea._held_by_audit(current)
+    assert ea.reading_status(current) == Status.VERIFIED
 
     # The claim's next audit settles it.
     monkeypatch.undo()
