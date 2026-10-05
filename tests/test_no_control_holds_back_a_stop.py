@@ -126,6 +126,7 @@ EXPECTED_STOPS = {
     "failsafe:pending": {"GET"},
     "deployment-dispatch-policy": {"PUT"},
     "pentest:engagement_detail": {"PATCH"},
+    "pentest:stop_pentest_scan": {"POST"},
     "accounts:user-set-role": {"PATCH"},
     "accounts:user-detail": {"DELETE"},
 }
@@ -155,6 +156,7 @@ RECOMPUTE = f"/api/assurance/deployments/{U}/recompute/"
 TRANSITION = f"/api/assurance/claims/{U}/transition/"
 DISPATCH = f"/api/assurance/deployments/{U}/dispatch-policy/"
 ENGAGEMENT = "/api/pentest/engagements/7/"
+SCAN_STOP = f"/api/pentest/scans/{U}/stop/"
 SET_ROLE = "/api/accounts/users/7/set_role/"
 PAST = "2000-01-01T00:00:00Z"
 FUTURE = "2999-01-01T00:00:00Z"
@@ -202,6 +204,7 @@ STOP_REQUESTS = [
     ("pentest:engagement_detail", "PATCH", ENGAGEMENT, {"status": "paused"}, {}),
     ("pentest:engagement_detail", "PATCH", ENGAGEMENT, {"testing_window_end": PAST}, {}),
     ("pentest:engagement_detail", "PATCH", ENGAGEMENT, {"scope_hosts": []}, {}),
+    ("pentest:stop_pentest_scan", "POST", SCAN_STOP, {}, {}),
     ("accounts:user-set-role", "PATCH", SET_ROLE, {"role": "viewer"}, {}),
     ("accounts:user-detail", "DELETE", "/api/accounts/users/7/", None, {}),
     ("token_refresh", "POST", "/api/token/refresh/", _fresh_refresh, {}),
@@ -582,6 +585,7 @@ EXPECTED_STOP_PERMISSIONS = {
     "failsafe:state": {"accounts.permissions.IsAdminOrAnalyst"},
     "failsafe:submit-signature": {"accounts.permissions.IsAdminOrAnalyst"},
     "pentest:engagement_detail": {"accounts.permissions.IsAdminOrAnalyst"},
+    "pentest:stop_pentest_scan": {"accounts.permissions.IsAdminOrAnalyst"},
     "token_refresh": set(),
 }
 #: SHA-256 of the WSGI and ASGI entry points, as reviewed: each wraps Django's
@@ -1565,9 +1569,13 @@ def _every_stop(client, operator, operator_key, anonymous=APIClient):
     with."""
     from rest_framework_simplejwt.tokens import RefreshToken
 
-    from pentest.models import Engagement
+    from pentest.models import Engagement, PentestScan
 
     to_pause, to_revoke, to_contradict, to_switch_off = (_deployment() for _ in range(4))
+    # A scan whose launch's answer was lost: its Stop is owed (202) and sends nothing.
+    lost = PentestScan.objects.create(
+        user=operator, target_url="https://client.example/", consent=True, status=PentestScan.STATUS_UNKNOWN
+    )
     engine_id = f"athena-{uuid.uuid4().hex[:8]}"
     # A pause to read and sign (a draft of a stop is a stop too), and a resume
     # to cancel: cancelling a resume keeps the engine stopped.
@@ -1597,6 +1605,7 @@ def _every_stop(client, operator, operator_key, anonymous=APIClient):
         "engagement paused": client.patch(f"/api/pentest/engagements/{engagements[0].pk}/", {"status": "paused"}, format="json").status_code,
         "engagement window closed": client.patch(f"/api/pentest/engagements/{engagements[1].pk}/", {"testing_window_end": past}, format="json").status_code,
         "engagement scope emptied": client.patch(f"/api/pentest/engagements/{engagements[2].pk}/", {"scope_hosts": []}, format="json").status_code,
+        "scan stop": client.post(f"/api/pentest/scans/{lost.uuid}/stop/", {}, format="json").status_code,
         "operator demoted": client.patch(f"/api/accounts/users/{colleague.pk}/set_role/", {"role": "viewer"}, format="json").status_code,
         "admin demoted to analyst": client.patch(f"/api/accounts/users/{deputy.pk}/set_role/", {"role": "analyst"}, format="json").status_code,
         "operator removed": client.delete(f"/api/accounts/users/{leaver.pk}/").status_code,
@@ -1621,6 +1630,7 @@ EVERY_STOP = {
     "engagement paused": ("pentest:engagement_detail", "PATCH", 200),
     "engagement window closed": ("pentest:engagement_detail", "PATCH", 200),
     "engagement scope emptied": ("pentest:engagement_detail", "PATCH", 200),
+    "scan stop": ("pentest:stop_pentest_scan", "POST", 202),
     "operator demoted": ("accounts:user-set-role", "PATCH", 200),
     "admin demoted to analyst": ("accounts:user-set-role", "PATCH", 200),
     "operator removed": ("accounts:user-detail", "DELETE", 204),

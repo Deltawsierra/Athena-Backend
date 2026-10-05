@@ -356,6 +356,9 @@ STOP_ROUTES = {
     # destroys the record of what was authorised, and a PATCH to a status that
     # is not running withdraws the same authority and keeps the record.
     "pentest:engagement_detail": {"PATCH": _authority_withdrawn},
+    # A scan's Stop: its run on the engine aborted, or owed until the run is named.
+    # Every request on it is a stop; it never sends a launch.
+    "pentest:stop_pentest_scan": {"POST": always},
     # An operator's access taken away: demoted, or removed.
     "accounts:user-set-role": {"PATCH": _demotion},
     "accounts:user-detail": {"DELETE": always},
@@ -541,6 +544,12 @@ NOT_STOPS = {
     "pentest:run_llm_pentest_scan": {"POST": "launches a scan: the work a stop would stop"},
     "pentest:list_pentest_scans": _get(),
     "pentest:detail_pentest_scan": _get(),
+    "pentest:reconcile_pentest_scan": {
+        "POST": (
+            "sends a launch whose answer was lost again, with the scan's own key: when the engine "
+            "never saw the first send it starts the scan, so it is launch-direction"
+        )
+    },
     "pentest:download_scan_pdf": _get("renders a scan report as a PDF: a read that changes nothing"),
     "pentest:resend_scan_email": {"POST": "sends a scan report again by email: it stops nothing"},
     "pentest:pentest_scan_status": _get(),

@@ -1,0 +1,18 @@
+{
+  "django": "5.2.17",
+  "emitted_by": {
+    "commit": "87e83e73344241d4c3c36fe878fd59a8c3ec39ec",
+    "pr": "#67"
+  },
+  "generated_by": "tests/fixtures/receipts/generate.py",
+  "mythos_core": {
+    "imported_tree_sha256": "21f011b507494491bac0d4e42922857b822db9507c4a858267f9fb5d39a3a271",
+    "pinned_by_requirements": "git+https://github.com/Deltawsierra/Mythos-Core@5bb35e266a436e99430aff3cce9e3b5e1f90a749"
+  },
+  "python": "3.11.15",
+  "receipt_version": "mythos.assurance.receipt/2.0",
+  "route": "GET /api/assurance/deployments/<uuid>/assurance-receipt/",
+  "sha256": "36ecb83846951b4e1c45538f78076cb6f62b14dc9d936562f44f01bb577f8a82",
+  "shape": "#67",
+  "vector": "assurance-receipt.json"
+}

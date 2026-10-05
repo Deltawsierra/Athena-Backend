@@ -51,7 +51,7 @@ from . import graph_refs as _graph_refs
 from . import models as _models
 from . import served_route as _served_route
 from . import workflow_chains as _workflow_chains
-from .receipt import RECEIPT_VERSION, _digest
+from .receipt import HASHED_CONTENT_VERSION, _digest
 
 # The version of the assurance-policy standard this module emits. A stable string a
 # consumer keys on; bump it on a *deliberate* policy change. The pin below also
@@ -97,10 +97,14 @@ def _policy_document() -> dict:
     composition = _composition
     return {
         "policy_version": POLICY_VERSION,
-        # The rule-set / evaluator standard the decision is expressed in — the same
-        # version the assurance receipt is stamped with, so a claim's policy and the
-        # receipt that backs it never disagree about which evaluator ran.
-        "evaluator_standard": RECEIPT_VERSION,
+        # The rule-set / evaluator standard the decision is expressed in — the
+        # receipt version that introduced the hashed content the receipt carries, so
+        # a claim's policy and the receipt that backs it never disagree about which
+        # evaluator ran. Not the version the receipt is stamped with: a MINOR step
+        # (4.1, a signed issue time) changes nothing a decision is made of, and
+        # pinning it moved this pin -- every claim superseded, every stored decision
+        # recomputed -- for a policy that did not change.
+        "evaluator_standard": HASHED_CONTENT_VERSION,
         # The six-state decision rules (see assurance.decision).
         "decision": {
             # Best to worst: the order every "worse of" is taken in.

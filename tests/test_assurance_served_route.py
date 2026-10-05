@@ -561,7 +561,9 @@ def test_the_receipt_declares_the_new_major_version():
     # same rule that made the earlier ones major.
     #
     # 4.0 added `chains`, which IS hashed: major, by that same rule.
-    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/4.0"
+    #
+    # 4.1 put the issue time in the signed form, outside the digest: minor, by 3.1's.
+    assert receipt_mod.RECEIPT_VERSION == "mythos.assurance.receipt/4.1"
 
 
 def test_the_schema_requires_the_two_new_blocks():

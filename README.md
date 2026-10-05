@@ -56,7 +56,8 @@ stop-lane reads (the failsafe state, the command list, and a command's detail),
 the engines' poll with its token, a deployment's automated dispatch switched
 off, an engagement's authority withdrawn (moved off running, scope emptied, or
 window closed -- deleting an engagement destroys its record and is not a stop),
-and an operator demoted (never promoted) or removed. A token refresh whose
+a scan's Stop (`POST /api/pentest/scans/<uuid>/stop/`, below), and an operator
+demoted (never promoted) or removed. A token refresh whose
 refresh token verifies, for an account that exists and is active, and has not
 been spent is exempt the same way; a refresh spends its token exactly once,
 however many refreshes of it arrive together (`safety/refresh.py`), so a used
@@ -274,6 +275,52 @@ until the next refresh. An engine answer that holds readable findings beside row
 this side cannot read ingests the readable ones and drops the rest uncounted, so
 one `info` finding beside unreadable rows reads `ready`.
 
+## Verifying a receipt
+
+`GET /api/assurance/deployments/<uuid>/signed-assurance-receipt/` returns a
+deployment's Assurance Receipt beside the DSSE envelope the engine signed it in.
+`assurance-receipt/` returns the unsigned copy. The receipt is specified in
+[`docs/receipt-spec/`](docs/receipt-spec/README.md); the current version is
+`mythos.assurance.receipt/4.1`. The specification covers every member, the
+canonical form and digests, the signature, the verification steps with every
+refusal, and how older versions are read. Anyone can verify a receipt offline with
+the specification and `tools/verify_receipt.py`, which needs only Python and
+`cryptography`:
+
+```bash
+python tools/verify_receipt.py signed-receipt.json --keyring keyring.json
+python tools/verify_receipt.py signed-receipt.json --keyring keyring.json --max-age 86400
+```
+
+Take the keyring from the engine's `GET /api/assurance/keyring` (this backend does
+not serve it), out of band from the receipt. The exit status is 0 when the receipt
+is verified, 1 when it is refused (the first line names the reason), and 2 when the
+verifier could not run. A verified receipt attests integrity and provenance only,
+and does not say the assessment is correct.
+
+A signed 4.1 receipt carries the time it was issued, `issued_at`, inside the
+signature: this backend's clock when it had the receipt signed, in UTC. An
+`issued_at` edited after signing fails the signature, and the verifier prints the
+signed time. It is the issuer's clock, not proof of when the state held, and how
+old is too old is the reader's call: `--max-age SECONDS` refuses a receipt issued
+longer ago than that (`stale`), and a 4.0 receipt, which carries no signed time
+(`no_signed_time`). A 4.0 receipt still verifies, and the verifier says its issue
+time is not signed.
+
+Every receipt version ever emitted reads back, 1.0 included. The verifier and
+`receipt_schema(version)` name each one and who emitted it, and say what it lacks
+against the current version. 2.0 was emitted in two shapes under one version string
+(#56's five-member `coverage` and #67's nine), and each is read and named as the one
+it is. No route signed a receipt before 3.1, so an envelope over a 1.0, 1.1, 2.0 or
+3.0 receipt is refused (`never_signed`). `tests/fixtures/receipts/` holds a 1.0
+receipt and one of each 2.0 shape, generated from the commits that emitted them
+(`generate.py`, with each vector's provenance beside it).
+
+`tests/test_receipt_spec_conformance.py` builds vectors from the real routes and
+from those fixtures. It holds the verifier to the backend's own answer on every
+check the backend makes, and to the known signer and the known issue time on the
+signature and the age, which the backend never checks.
+
 ## Tests
 
 ```bash
@@ -456,10 +503,103 @@ not do its work twice. What each operation that reaches outside this backend doe
   refused the second time (400); an evidence item invalidated twice is refused the
   second time.
 - **Stops are never deduplicated.** A pause, revoke, contradiction, stand-down,
-  terminate, an engagement's authority withdrawn, an operator demoted or removed is
-  processed every time it arrives, with or without a key: the key is never read on a
-  stop route (`safety.stops`). A revoke or contradiction sent again is recorded again
-  on the claim; its status moves once.
+  terminate, an engagement's authority withdrawn, a scan's Stop, an operator demoted
+  or removed is processed every time it arrives, with or without a key: the key is
+  never read on a stop route (`safety.stops`). A revoke or contradiction sent again is
+  recorded again on the claim; its status moves once.
+
+### A scan launch whose engine answer was lost
+
+The backend's launch of a scan on the engine (`POST /api/scan`) carries an
+`Idempotency-Key` of its own: the scan's, one per scan record, made from its uuid
+(`PentestScan.launch_key`). It is not the key a client sends this backend. That one
+keeps a request to this backend from running twice; this one keeps one scan's launch
+from starting two runs on the engine, which answers the same key and request with
+the first launch's answer and starts nothing (athena-engine #77). A stop never
+carries one.
+
+What the launch's answer records on the scan:
+
+| What happened to the launch | The scan reads |
+|---|---|
+| The connection to the engine was never made: refused, no route, the name did not resolve, the connect timed out | `failed`: nothing was sent |
+| The engine refused it (a 503 or other refusal it wrote, a 429), or its run ended failed or stopped | `failed`, with the run id where the engine named one |
+| The engine named a run that is still going, or named one in an answer this backend cannot read | `pending`, with the run id |
+| The request was written and no answer the engine wrote came back: the read timed out, the connection broke, a gateway answered 502 or 504, or a 5xx carried nothing the engine wrote | `unknown`, with the reason in `error_message` |
+
+`unknown` is never `failed`: the engine may have started a run, and a failure would
+license launching it again. The launch answers it 202 with `status: "unknown"` and
+the reason. (The Penetration Testing page shows any 202 as still running; it does not
+read `status` yet.) An unknown scan is not ingested and has no report.
+
+It is reconciled by `POST /api/pentest/scans/<uuid>/reconcile/`: the same launch,
+sent again with the same key.
+
+- The engine replays the first launch's answer: its run is adopted and read as it
+  stands now -- `pending` while it runs, `completed` with its findings and report,
+  `failed` if it failed or was stopped.
+- The engine holds the key with no answer recorded (409), or for another request
+  (422): still `unknown`, and it says so.
+- The engine refuses the resend before it reads the key (it is paused, stood down or
+  terminated; the scope or engagement was withdrawn), or cannot be reached: still
+  `unknown`, naming the refusal. A refusal of the resend says nothing about the first
+  send.
+- The engine answers as to a new launch: it never saw the first send, and this run is
+  the scan's first and only one.
+- A refusal naming a run that never started (a full pool): `failed`, as at launch.
+
+Nothing sends a launch again on its own -- not a read of the scan, not a timer. A
+reconcile is asked for by an admin or analyst who can see the scan, and is judged as
+a launch is: the engagement must still authorise the target, the target must still
+be in bounds, and the preflight gate is asked again. Otherwise nothing is sent and
+the scan stays `unknown`. A reconcile mails no report. Only `unknown` scans are
+reconciled. Not covered: the LLM scan's launch (`/api/llm-scan`, a route athena-engine
+does not serve) carries no engine key and is not reconciled.
+
+**While a Stop is owed on the scan, a reconcile sends nothing to the engine** -- not
+the launch, not the preflight gate's check -- and answers 409 saying why. When the
+engine never saw the first send, the resend is that launch: it would start the scan
+the Stop stops, and athena-engine offers no lookup by launch key that cannot launch.
+The scan stays `unknown` and the Stop owed. A reconcile claims the resend in one
+statement, only while no Stop is owed (the scan reads `pending` while the resend is
+out), so a Stop asked before the claim holds it back, and one asked after it is a Stop
+asked while a launch is under way (below).
+
+### A scan's Stop
+
+`POST /api/pentest/scans/<uuid>/stop/` (an admin or analyst who can see the scan)
+stops the scan's run on the engine: `POST /api/scans/{run_id}/abort` for exactly that
+run, never `abort-all`. It is a stop (`safety/stops.py`): no gateway or throttle holds
+it back, the failsafe service token is accepted on it, and it is processed every time
+it is sent. It is recorded on the scan before anything is sent to the engine, and
+answered 200 once the engine has answered it for the run (it stopped the run, the run
+had already ended, or it has no such run), or 202 while it is owed.
+
+A Stop is owed while the scan names no run -- its launch's answer was lost, or the
+launch is still waiting for the engine's answer -- and while the engine cannot be
+reached. The Stop's answer and the scan's read (`GET /api/pentest/scans/<uuid>/`) say
+so plainly: `stop.state` is `owed`, and `stop.detail` says the Stop is not delivered
+and has not stopped the run (or, where the engine did not answer the abort, that the
+run is not known to be stopped). `stop_saved` in the answer says only that the Stop
+is kept on the scan. It is sent to exactly the run the moment the run is named: by
+the launch -- a first one, or a reconcile already sending -- as the engine names it,
+before anything is collected; by the next Stop; and by
+`python manage.py deliver_owed_stops`, which sends every owed Stop whose scan names a
+run and exits non-zero while any is owed. Run that on a schedule too, like
+`retry_blocking_dispatches`. A Stop never sends a launch again to learn the run: a
+stop starts nothing.
+
+A Stop owed on an `unknown` launch names no run and holds every reconcile back, so it
+stays owed: if the launch reached the engine, that run is not stopped by it. Nothing
+here can deliver it until athena-engine offers a lookup by launch key that can never
+launch; with one, a reconcile would look up first, and an owed Stop would be sent
+whenever the lookup names a run.
+
+**Migration `pentest.0019`** adds the Stop's three columns as nullable (a plain
+`ADD COLUMN` each) and the `unknown` status. Rolling it back drops the Stop record of
+every scan, owed Stops included: run `deliver_owed_stops` until it exits zero first.
+Code from before it reads an `unknown` scan as neither pending nor completed, so it
+makes no report of one and ingests nothing from it.
 
 ## Secrets
 

@@ -1,9 +1,12 @@
 import re
 import time
+from urllib.parse import quote
 
 import requests
 from django.conf import settings as django_settings
 from django.conf import settings
+from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
+from urllib3.exceptions import ProxyError as _ProxyConnectError
 
 
 # (connect, read). Overridable so a long scan can be given more room without
@@ -63,6 +66,9 @@ ENGINE_REFUSED = "refused"
 ENGINE_UNREADABLE = "unreadable"
 ENGINE_RUN_FAILED = "run_failed"
 ENGINE_STILL_RUNNING = "still_running"
+#: A scan launch whose answer this process never read, although the request may
+#: have reached the engine: see :class:`LaunchOutcomeUnknown`. Never a failure.
+ENGINE_OUTCOME_UNKNOWN = "outcome_unknown"
 
 ENGINE_FAILURE_KINDS = (
     ENGINE_UNREACHABLE,
@@ -70,7 +76,15 @@ ENGINE_FAILURE_KINDS = (
     ENGINE_UNREADABLE,
     ENGINE_RUN_FAILED,
     ENGINE_STILL_RUNNING,
+    ENGINE_OUTCOME_UNKNOWN,
 )
+
+#: The header a scan launch carries its key in, and the one the engine marks a
+#: replayed answer with (athena-engine #77, engine/utils/idempotency.py).
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+REPLAYED_HEADER = "Idempotent-Replayed"
+#: The object #77 puts on a 409 or 422 about a key it already holds.
+KEY_RECORD = "idempotency"
 
 
 class EngineError(Exception):
@@ -127,6 +141,58 @@ class ScanUncollected(ScanStillRunning):
     customer. So it is read as a scan still running, with its run id, never as
     a failed scan with the id thrown away.
     """
+
+
+class LaunchOutcomeUnknown(EngineError):
+    """A scan launch that may have reached the engine, and whose answer was lost.
+
+    The request was written, or may have been, and no answer the engine wrote came
+    back: the read timed out, the connection broke after the request went out, a
+    gateway answered 502 or 504 in the engine's place, or a 5xx carried nothing the
+    engine wrote. The engine may have registered a run and be scanning the customer.
+    So this is never a failed scan -- FAILED on a timeout after the commit licenses a
+    second launch (P3.8) -- and never a started one. It is UNKNOWN until it is
+    reconciled: the same launch sent again with the same Idempotency-Key, which
+    athena-engine #77 answers with the first launch's answer and starts nothing.
+
+    A launch that certainly never reached the engine (the connection was never
+    made) is not this: it is ``ENGINE_UNREACHABLE``, and nothing was sent.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message, kind=ENGINE_OUTCOME_UNKNOWN, status=status)
+
+
+#: What ``requests`` raises before it opens any connection: nothing was sent.
+_RAISED_BEFORE_CONNECTING = (
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.URLRequired,
+    requests.exceptions.MissingSchema,
+    requests.exceptions.InvalidSchema,
+    requests.exceptions.InvalidURL,
+    requests.exceptions.InvalidHeader,
+    requests.exceptions.InvalidJSONError,
+)
+
+
+def _never_reached_the_engine(exc: BaseException | None) -> bool:
+    """Whether ``exc`` proves that a request never left this process for the engine.
+
+    Only a connection that was never made proves it: refused, no route to the host,
+    a name that did not resolve, a connect that timed out -- to the engine, or to a
+    proxy in front of it -- and a request ``requests`` refused to prepare. Anything
+    else can come after the request's bytes were written: a read that timed out, a
+    reset, a body that broke off, a TLS failure (which cannot be placed before or
+    after the write). None of those says the engine did not get it."""
+    if isinstance(exc, _RAISED_BEFORE_CONNECTING):
+        return True
+    if not isinstance(exc, requests.exceptions.ConnectionError):
+        return False
+    # requests wraps urllib3's MaxRetryError, whose `reason` is what failed.
+    reason = getattr(exc.args[0], "reason", None) if exc.args else None
+    if isinstance(reason, _ProxyConnectError):
+        reason = getattr(reason, "original_error", None)
+    return isinstance(reason, (NewConnectionError, ConnectTimeoutError))
 
 
 def _run_id_of(value) -> str | None:
@@ -348,13 +414,14 @@ class CyberEngineClient:
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
-    def _send_post(self, path: str, payload: dict) -> requests.Response:
-        """The engine's answer to a POST, whatever its status; raises only when there was none."""
+    def _send_post(self, path: str, payload: dict, headers: dict | None = None) -> requests.Response:
+        """The engine's answer to a POST, whatever its status; raises only when there was
+        none. ``headers`` are sent beside the client's own."""
         try:
             return requests.post(
                 f"{self.base_url}{path}",
                 json=payload,
-                headers=self.headers,
+                headers={**self.headers, **headers} if headers else self.headers,
                 # A connect and read pair. This was a single value of 1000 seconds,
                 # commented as preventing worker starvation, which is what it
                 # caused: one hung engine call pinned a worker for 17 minutes.
@@ -399,6 +466,60 @@ class CyberEngineClient:
             return body
         return None
 
+    def _collect(self, run_id: str, on_run) -> dict:
+        """Collect a run the engine named for a launch, once ``on_run`` has it."""
+        if on_run is not None:
+            on_run(run_id)
+        return self.collect_scan(run_id)
+
+    @staticmethod
+    def _key_held(resp: requests.Response) -> str | None:
+        """Why the outcome is unknown, when ``resp`` is athena-engine #77 saying it holds
+        this launch's key already -- a 409 (no answer recorded under it: still in
+        flight, or it raised before it answered) or a 422 (held for another request)
+        carrying its ``idempotency`` record. Either names no run. None otherwise."""
+        if resp.status_code not in (409, 422):
+            return None
+        try:
+            body = _json_of(resp)
+        except ValueError:
+            return None
+        record = body.get(KEY_RECORD) if isinstance(body, dict) else None
+        if not isinstance(record, dict):
+            return None
+        held = "with no answer recorded" if resp.status_code == 409 else "for a different request"
+        return (
+            f"The engine holds this launch's Idempotency-Key {held} (HTTP {resp.status_code}, "
+            f"state {record.get('state')!r} since {record.get('since')!r}). It names no run, "
+            f"so whether the launch started one is still unknown."
+        )
+
+    @staticmethod
+    def _said(resp: requests.Response) -> str:
+        """The reason the engine gave for a refusal, in at most MAX_BODY_EXCERPT
+        characters, or a note that it gave none this backend can read."""
+        try:
+            body = _json_of(resp)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            for field in ("detail", "error"):
+                if isinstance(body.get(field), str) and body[field].strip():
+                    return _excerpt(body[field])
+        return "no reason this backend can read"
+
+    @staticmethod
+    def _engine_wrote(resp: requests.Response) -> bool:
+        """Whether a 5xx is an answer the engine wrote. A 502 or 504 is a gateway's
+        (the engine answers neither to a launch), and a body that is not a readable
+        JSON object is not the engine's either: the launch may have reached it."""
+        if resp.status_code in (502, 504):
+            return False
+        try:
+            return isinstance(_json_of(resp), dict)
+        except ValueError:
+            return False
+
     # --------------------------------------------------
     # ENGINE ENDPOINTS
     # --------------------------------------------------
@@ -434,7 +555,9 @@ class CyberEngineClient:
         """
         return self._get("/api/assurance/keyring")
 
-    def run_scan(self, target: str, engagement_ref: str | None = None) -> dict:
+    def run_scan(self, target: str, engagement_ref: str | None = None, *,
+                 idempotency_key: str | None = None, resend: bool = False,
+                 on_run=None) -> dict:
         """
         Run a scan and return its findings.
 
@@ -468,12 +591,80 @@ class CyberEngineClient:
           to the target and there is nothing to stop.
         * 503 (the launch was not admitted) and 429 (the pool was full) started
           nothing, and are the refusals they always were.
+
+        A launch whose answer was lost (P3.8, athena-engine #77). The launch is sent
+        with ``idempotency_key`` -- the scan's own, one per scan record
+        (``PentestScan.launch_key``) -- in ``Idempotency-Key``. When no answer the
+        engine wrote comes back -- the connection broke after the request went out,
+        the read timed out, a gateway answered 502 or 504, a 5xx carried nothing
+        readable -- the request may have reached the engine and started a run: that
+        is :class:`LaunchOutcomeUnknown`, never a failure. Only a connection that was
+        never made is ``ENGINE_UNREACHABLE``: certainly not sent.
+
+        ``resend=True`` sends that launch again, unchanged, to learn what became of
+        it. The engine answers the same key and request with the FIRST launch's
+        answer, marked ``Idempotent-Replayed: true``, and starts nothing: the run it
+        names is adopted and read from its record as it stands now. A 409 or 422
+        carrying #77's ``idempotency`` record -- the key held with no answer recorded,
+        or for another request -- names no run, and the outcome stays unknown. So does
+        a resend refused before the engine read its key (#77 admits first: a paused
+        engine, a withdrawn scope) and one that never reached the engine: neither says
+        anything about the first send. A resend the engine had no record of is
+        answered as a new launch: that run is the scan's first and only one.
+
+        ``on_run(run_id)`` is called as soon as the engine names a run that may still
+        be going, before it is collected, so the caller can keep the id where a Stop
+        finds it.
         """
         payload = {"target": target, "wait_seconds": SCAN_INLINE_WAIT_SECONDS}
         if engagement_ref:
             payload["engagement_ref"] = engagement_ref
 
-        resp = self._send_post("/api/scan", payload)
+        try:
+            resp = self._send_post(
+                "/api/scan", payload,
+                headers={IDEMPOTENCY_HEADER: idempotency_key} if idempotency_key else None,
+            )
+        except EngineError as exc:
+            cause = exc.__cause__
+            if resend:
+                raise LaunchOutcomeUnknown(
+                    f"The launch was sent again to learn what became of it, and that send "
+                    f"failed ({cause.__class__.__name__}), so whether the first send started a "
+                    f"run is still unknown."
+                ) from cause
+            if _never_reached_the_engine(cause):
+                raise
+            raise LaunchOutcomeUnknown(
+                f"The launch was sent and no answer came back ({cause.__class__.__name__}): it "
+                f"may have reached the engine, which may have started a run."
+            ) from cause
+
+        held = self._key_held(resp)
+        if held is not None:
+            raise LaunchOutcomeUnknown(held, status=resp.status_code)
+        if resp.status_code >= 500 and _header_run_id(resp) is None and not self._engine_wrote(resp):
+            raise LaunchOutcomeUnknown(
+                f"The launch was answered {resp.status_code} with nothing the engine wrote: it "
+                f"may have reached the engine, which may have started a run.",
+                status=resp.status_code,
+            )
+        if resend and not (200 <= resp.status_code < 300) and _header_run_id(resp) is None \
+                and _body_run_id(resp) is None:
+            raise LaunchOutcomeUnknown(
+                f"The launch was sent again and the engine refused that send before it read "
+                f"the key ({resp.status_code}: {self._said(resp)}). That says nothing about the "
+                f"first send, so whether it started a run is still unknown.",
+                status=resp.status_code,
+            )
+
+        replayed = (resp.headers or {}).get(REPLAYED_HEADER) == "true"
+        if replayed and 200 <= resp.status_code < 300:
+            first_run = _body_run_id(resp) or _header_run_id(resp)
+            if first_run is not None:
+                # The FIRST launch's answer, as it was given, naming its run; one past
+                # the engine's size bound is not whole. The run is read as it stands.
+                return self._collect(first_run, on_run)
 
         if resp.status_code == 500:
             named = self._status_answer(resp)
@@ -484,7 +675,7 @@ class CyberEngineClient:
                 # X-Run-Id: a run was registered, and whether its work started is
                 # unknown. Collected like a 500 whose state is null: read, it says how
                 # it ended; unreadable, it is still running, with its id.
-                return self.collect_scan(_header_run_id(resp))
+                return self._collect(_header_run_id(resp), on_run)
             if run_id is not None:
                 if named.get("state") == RUN_FAILED:
                     raise EngineError(
@@ -496,14 +687,14 @@ class CyberEngineClient:
                     )
                 # Its work started: it is scanning the customer, and this id is
                 # the only handle on it.
-                return self.collect_scan(run_id)
+                return self._collect(run_id, on_run)
 
         if not (200 <= resp.status_code < 300):
             if _header_run_id(resp) is not None and _body_run_id(resp) is None:
                 # Any other refusal whose body names no run -- a 502 proxy page --
                 # while the engine's X-Run-Id names one: the engine registered that
                 # run, and nothing here says it did not start. Collected by that id.
-                return self.collect_scan(_header_run_id(resp))
+                return self._collect(_header_run_id(resp), on_run)
             raise self._refused(resp)
 
         try:
@@ -521,7 +712,7 @@ class CyberEngineClient:
             # an old engine's synchronous result, it recorded "upstream reset" as a
             # completed scan). Collected by the header's id: read, the run says how
             # it ended; unreadable, it is still running, with its id.
-            return self.collect_scan(_header_run_id(resp))
+            return self._collect(_header_run_id(resp), on_run)
 
         if ANSWER_FIELD in accepted and accepted[ANSWER_FIELD] != ANSWER_STATUS:
             said = f"HTTP {resp.status_code} with answer {accepted[ANSWER_FIELD]!r}"
@@ -569,7 +760,7 @@ class CyberEngineClient:
                     )
                 # An older engine that still answers synchronously.
                 return accepted
-            return self.collect_scan(run_id)
+            return self._collect(run_id, on_run)
 
         # A 202 (or any other 2xx): the run is not over, whatever state it names.
         if run_id is None:
@@ -579,7 +770,7 @@ class CyberEngineClient:
                 kind=ENGINE_UNREADABLE,
                 status=resp.status_code,
             )
-        return self.collect_scan(run_id)
+        return self._collect(run_id, on_run)
 
     @staticmethod
     def _unread(http_status: int | None, run_id: str, said: str) -> "ScanUncollected":
@@ -677,6 +868,56 @@ class CyberEngineClient:
                 f"still be running, and can be collected later: {exc}",
                 run_id=run_id,
             ) from exc
+
+    def abort_scan(self, run_id: str, reason: str | None = None) -> dict:
+        """Stop exactly one run: ``POST /api/scans/{run_id}/abort``.
+
+        One scan's Stop stops that scan's run and nothing else: never
+        ``/api/scans/abort-all``. It carries no Idempotency-Key -- a stop is
+        processed every time it is sent (athena-engine #77 never reads one on a stop
+        route) -- and the engine's answer is read like the stop lane's other reads,
+        at most ``MAX_STOP_LANE_BODY``.
+
+        Returns ``{"run_id", "state", "stopped", "detail"}``: ``stopped`` is True when
+        the stop is in effect for the run (recorded; or in effect on the engine, which
+        records it later), False when the run had already ended or the engine has no
+        such run -- nothing was left to stop. Raises EngineError when the engine
+        could not be reached or did not say which: the stop is still owed."""
+        path = f"/api/scans/{quote(run_id, safe='')}/abort"
+        resp = self._send_post(path, {"reason": reason} if reason else {})
+        if resp.status_code == 404:
+            # Only the engine's own answer says there is no such run. A 404 anything
+            # else wrote -- a gateway's page -- says nothing about the run: still owed.
+            try:
+                said = _json_of(resp, max_body=MAX_STOP_LANE_BODY)
+            except ValueError:
+                said = None
+            if isinstance(said, dict) and said.get("detail") == "No such scan run":
+                return {"run_id": run_id, "state": None, "stopped": False,
+                        "detail": f"The engine has no run {run_id}: nothing runs under that id."}
+        if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
+        body = self._read_json(resp, path, max_body=MAX_STOP_LANE_BODY)
+        state = body.get("state") if isinstance(body.get("state"), str) else None
+        if body.get("detail") == "not running":
+            return {"run_id": run_id, "state": state, "stopped": False,
+                    "detail": f"Run {run_id} had already ended (state {state!r}): nothing was "
+                              f"left to stop."}
+        if body.get("recorded") is False:
+            return {"run_id": run_id, "state": state, "stopped": True,
+                    "detail": f"The stop is in effect on the engine for run {run_id}, which has "
+                              f"not recorded it yet."}
+        # #71 and later say `recorded: true`; engine main says only the reason.
+        if body.get("recorded") is True or ("recorded" not in body and isinstance(body.get("reason"), str)):
+            return {"run_id": run_id, "state": state, "stopped": True,
+                    "detail": f"The engine stopped run {run_id} (state {state!r})."}
+        raise EngineError(
+            f"The engine answered the stop of run {run_id} (HTTP {resp.status_code}) in a shape "
+            f"this backend does not read, so it is not known to have landed.",
+            kind=ENGINE_UNREADABLE,
+            status=resp.status_code,
+            run_id=run_id,
+        )
 
     def run_llm_scan(self, payload: dict) -> dict:
         """
