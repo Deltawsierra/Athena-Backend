@@ -126,13 +126,22 @@ def test_a_row_with_no_name_is_counted_without_being_invented():
 
 def test_a_stored_manifest_with_a_non_dict_row_does_not_crash_the_decision():
     """check_coverage was type-guarded; its rows were not, so a fixture load or a
-    shell session could take the decision, the receipt and the API down."""
+    shell session could take the decision, the receipt and the API down.
+
+    Read without a crash -- and counted, by this file's own rule for a row that
+    cannot be read. This test used to pin such a record as "not reported", which
+    caps nothing: a stored record whose every row had become a string lifted the
+    cap a readable one held, and the decision read READY (the Phase 4 chaos suite,
+    coverage-record-corrupted)."""
     dep = _dep()
     dep.check_coverage = {"checks": ["tls", "xss"]}
     dep.save()
     section = cov._checks_section(dep)
-    assert section["reported"] is False
-    assert cov.checks_gap(dep) is False
+    assert section["reported"] is True
+    assert (section["total"], section["performed"], section["complete"]) == (2, 0, False)
+    assert "2 row(s) could not be read" in section["summary"]
+    assert cov.checks_gap(dep) is True
+    assert cov.coverage_decision_cap(dep) == Deployment.Decision.AUDIT_INCOMPLETE
 
 
 # --------------------------------------------------------------------------

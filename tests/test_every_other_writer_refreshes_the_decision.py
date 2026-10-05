@@ -96,7 +96,8 @@ def _change_form(web, url, **changes):
     form = response.context["adminform"].form
     data = {}
     for bound in form:
-        value = changes.get(bound.name, bound.value())
+        changed = bound.name in changes
+        value = changes[bound.name] if changed else bound.value()
         widget = bound.field.widget
         if isinstance(widget, forms.MultiWidget):
             for i, part in enumerate(widget.decompress(value)):
@@ -105,7 +106,10 @@ def _change_form(web, url, **changes):
             if value:
                 data[bound.html_name] = "on"
         else:
-            prepared = bound.field.prepare_value(value)
+            # `BoundField.value()` is already prepared for its widget; only a change,
+            # a Python value, is prepared here. A JSON field's prepare_value() is
+            # json.dumps, so a value prepared twice is posted as a JSON string.
+            prepared = bound.field.prepare_value(value) if changed else value
             data[bound.html_name] = "" if prepared is None else prepared
     for inline in response.context["inline_admin_formsets"]:
         formset = inline.formset

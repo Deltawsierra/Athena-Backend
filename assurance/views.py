@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import re
 import uuid as uuidlib
-from contextlib import nullcontext
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -28,6 +27,7 @@ from rest_framework.response import Response
 from django.db import transaction
 
 from config.parsers import SafeJSONParser
+from safety.stops import STOP_ROUTES, view_name
 
 from .access import assess_effective_access
 from .bom import build_ai_bom
@@ -54,7 +54,13 @@ from .capability import assess_capabilities
 from .compliance import build_compliance_map
 from .data_lifecycle import assess_data_lifecycle
 from .coverage import coverage_manifest
-from .decision import TransactionLostInHook, current_decision, decision_support, recompute_decision
+from .decision import (
+    TransactionLostInHook,
+    current_decision,
+    decision_support,
+    hold_unrecomputed,
+    recompute_decision,
+)
 from .dispatch import OwedRecorder, log_later, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
@@ -249,6 +255,119 @@ def _refresh_stored_decision(deployment) -> None:
     """
     recompute_decision(deployment)
     schedule_decision_refresh(deployment.pk)
+
+
+class _TakeDownLost(Exception):
+    """The database ended a take-down's transaction while the decision it moved was
+    written -- SQLite rolls a whole transaction back on some I/O, full-disk and busy
+    errors, and the savepoint the write was in went with it -- so nothing of the
+    take-down committed. ``why`` names what the decision's write met first."""
+
+    def __init__(self, why: str) -> None:
+        super().__init__(why)
+        self.why = why
+
+
+def _take_down(claim, to_status, *, actor, note):
+    """Revoke or contradict ``claim`` -- a stop (safety.stops) -- and write the
+    decision the move takes down. Returns ``(event, what the answer says of the
+    decision)``.
+
+    The move commits whatever the decision's recompute meets. The recompute ran in
+    the move's own transaction, so one that raised -- a table the decision reads that
+    could not be read, a registry that failed -- rolled the revoke back behind a 500:
+    a stop dropped by a read the stop never needed. It now runs in a savepoint of that
+    transaction (:func:`_decision_a_take_down_moved`): one that fails is rolled back
+    alone, the decision is held where no recompute reached it -- never READY, never
+    lifted (:func:`assurance.decision.hold_unrecomputed`) -- and the answer says the
+    move landed and the decision could not be recomputed.
+
+    Where the database ended the whole transaction instead (:class:`_TakeDownLost`),
+    the move is made again in a transaction of its own with less decision work, down
+    to none: an answer never reports a take-down that was rolled back, and the take-down
+    is never refused for its decision."""
+    why = None
+    for attempt in ("recompute", "hold"):
+        try:
+            with refresh_deferred(claim.deployment_id), transaction.atomic():
+                event = apply_claim_transition(claim, to_status, actor=actor, note=note)
+                return event, _decision_a_take_down_moved(claim.deployment, attempt, why)
+        except _TakeDownLost as lost:
+            why = lost.why
+    with refresh_deferred(claim.deployment_id), transaction.atomic():
+        event = apply_claim_transition(claim, to_status, actor=actor, note=note)
+    return event, {
+        "decision_recomputed": False,
+        "decision": None,
+        "decision_unrecomputed": (
+            f"The decision could not be recomputed ({why}), and each write of it ended the "
+            "transaction; the take-down is recorded without it, and the stored decision "
+            "stands as it was until the deployment's next refresh."
+        ),
+    }
+
+
+def _decision_a_take_down_moved(deployment, attempt: str, why: str | None) -> dict:
+    """Write the decision a take-down moved, in savepoints of the take-down's own
+    transaction: recomputed (``attempt`` "recompute"); else held where no recompute
+    reached it (:func:`assurance.decision.hold_unrecomputed`, the one writer); else
+    left as it stands, and said so. What the answer says of it -- the error's type
+    only: its message can carry another tenant's detail, and goes to the log.
+
+    Raises :class:`_TakeDownLost` when a write that failed took the transaction with
+    it: carried on, the take-down would be reported and never committed."""
+    if attempt == "recompute":
+        try:
+            with transaction.atomic():
+                recompute_decision(deployment)
+            return {"decision_recomputed": True, "decision": deployment.decision}
+        except Exception as exc:  # noqa: BLE001 - whatever the recompute raised, the take-down stands
+            why = type(exc).__name__
+            # Logged from another thread: a stop never waits on a log sink.
+            log_later(
+                logging.ERROR,
+                "deployment %s: a claim take-down landed, and the decision it moved could not be "
+                "recomputed (%s)",
+                deployment.pk,
+                why,
+                exc=True,
+                logger_name=__name__,
+            )
+            if transaction.get_rollback():
+                raise _TakeDownLost(why) from exc
+    why = why or "unknown"
+    try:
+        with transaction.atomic():
+            held = hold_unrecomputed(deployment, reason=why)
+        return {
+            "decision_recomputed": False,
+            "decision": held,
+            "decision_unrecomputed": (
+                f"The decision could not be recomputed ({why}); it is held at {held} -- never "
+                "ready, never better than it stood -- until the first read that can recomputes it."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - a hold the database refused leaves the decision as it stood
+        unheld = type(exc).__name__
+        log_later(
+            logging.ERROR,
+            "deployment %s: the decision a claim take-down moved could not be held either (%s); "
+            "it stands as it was until the deployment's next refresh",
+            deployment.pk,
+            unheld,
+            exc=True,
+            logger_name=__name__,
+        )
+        if transaction.get_rollback():
+            raise _TakeDownLost(why) from exc
+    return {
+        "decision_recomputed": False,
+        "decision": None,
+        "decision_unrecomputed": (
+            f"The decision could not be recomputed ({why}), nor held ({unheld}); the stored "
+            "decision stands as it was until the deployment's next refresh."
+        ),
+    }
 
 
 def _fire_conditions(deployment_ids) -> None:
@@ -486,20 +605,27 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     CANDIDATE_PAGE_SIZE = 50
 
     def get_queryset(self):
-        qs = Deployment.objects.all().annotate(
-            finding_count=Count("findings"),
-            # Lets the serializer reconcile the decision it publishes without a
-            # query per row for a deployment whose stamp is current.
-            has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))),
-        )
-        if self.action != "recompute":
-            # The head of each row's transition log, read with the row: what the
-            # serializer holds a row behind its log to (`current_decision`),
-            # without a query per row. Not on the route that pauses: it publishes
-            # nothing off the row it loads -- `recompute_decision` reads the
-            # decision in force under the row lock -- and nothing added for a
-            # read may add a way for a pause to fail.
-            qs = qs.annotate(**logged_head())
+        if view_name(self.request) in STOP_ROUTES:
+            # A route a stop is made on (safety.stops: the pause, the dispatch kill
+            # switch) loads its deployment with nothing the stop does not need. The
+            # annotations below are for what a read publishes, and each is a read of
+            # another table: the finding count and the chain lookup were in the
+            # pause's own query, so a findings or chain-outcome table that could not
+            # be read -- a corrupt page, a statement timeout on a count over a
+            # million findings -- dropped the pause behind a 500, and the kill switch
+            # with it. Nothing added for a read may add a way for a stop to fail.
+            qs = Deployment.objects.all()
+        else:
+            qs = Deployment.objects.all().annotate(
+                finding_count=Count("findings"),
+                # Lets the serializer reconcile the decision it publishes without a
+                # query per row for a deployment whose stamp is current.
+                has_chain_outcomes=Exists(WorkflowChainOutcome.objects.filter(deployment=OuterRef("pk"))),
+                # The head of each row's transition log, read with the row: what the
+                # serializer holds a row behind its log to (`current_decision`),
+                # without a query per row.
+                **logged_head(),
+            )
         user = self.request.user
         if _is_privileged(user):
             return qs
@@ -2217,10 +2343,16 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
     def get_object(self):
         """Look a claim up by uuid within the caller's scope, across ALL versions —
         a detail read or a lifecycle event of a superseded version is still
-        reachable, unlike the list which defaults to current versions only."""
-        qs = self._scoped_claims().select_related(
-            "deployment", "asset", "human_owner", "superseded_by"
-        )
+        reachable, unlike the list which defaults to current versions only.
+
+        A route a stop is made on (safety.stops: the transition, which revokes and
+        contradicts) loads the claim alone. The joins are for what a read serializes,
+        and each is a read of another table: the asset join was in the take-down's own
+        query, so an asset table that could not be read dropped a revoke behind a 500.
+        """
+        qs = self._scoped_claims()
+        if view_name(self.request) not in STOP_ROUTES:
+            qs = qs.select_related("deployment", "asset", "human_owner", "superseded_by")
         obj = get_object_or_404(qs, uuid=self.kwargs["uuid"])
         self.check_object_permissions(self.request, obj)
         return obj
@@ -2329,6 +2461,8 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
         to_status = request.data.get("to_status")
         if to_status not in AssuranceClaim.ClaimStatus.values:
             return Response({"detail": f"Unknown claim status: {to_status!r}."}, status=400)
+        note = request.data.get("note", "")
+        decided = {}
         try:
             # A claim an operator contradicts caps the decision. Without the
             # refresh, decision-support computed the capped decision live under the
@@ -2344,19 +2478,22 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             # of any other write, and the decision the revoke moves is recomputed in
             # its own transaction here, so it is current when the revoke commits.
             # A contradiction takes a READY down as a revoke does, and waits on no hook
-            # either.
-            revoke = to_status in (AssuranceClaim.ClaimStatus.REVOKED, AssuranceClaim.ClaimStatus.CONTRADICTED)
+            # either. And neither waits on the recompute succeeding (`_take_down`).
             #
             # The claim is decided from its row as committed when the move is
             # written (apply_claim_transition re-reads it under the write lock), not
             # from the read above: a stop always lands -- on the current version when
             # it was addressed to a superseded one -- and a person's move read before
             # a stop or a supersession committed is a 409, never written over it.
-            with refresh_deferred(claim.deployment_id) if revoke else nullcontext(), transaction.atomic():
-                event = apply_claim_transition(
-                    claim, to_status, actor=request.user, note=request.data.get("note", "")
-                )
-                _refresh_stored_decision(claim.deployment)
+            if to_status in (AssuranceClaim.ClaimStatus.REVOKED, AssuranceClaim.ClaimStatus.CONTRADICTED):
+                event, decided = _take_down(claim, to_status, actor=request.user, note=note)
+            else:
+                # Every other move keeps the one transaction: a move that can lift the
+                # decision does not commit without the decision recomputed, and one
+                # that fails leaves nothing half-done for the person to retry.
+                with transaction.atomic():
+                    event = apply_claim_transition(claim, to_status, actor=request.user, note=note)
+                    _refresh_stored_decision(claim.deployment)
         except ClaimChanged as exc:
             return Response({"detail": str(exc)}, status=409)
         except IllegalClaimTransition as exc:
@@ -2367,6 +2504,7 @@ class ClaimViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
                 "status": moved.status,
                 "status_label": moved.get_status_display(),
                 "event": ClaimEventSerializer(event).data,
+                **decided,
             }
         )
 

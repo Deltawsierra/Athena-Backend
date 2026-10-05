@@ -232,6 +232,49 @@ assurance policy pins the table's order of the classes, so a change to that orde
 moves the policy pin. The order is the one this service kept before, so the pin
 did not move.
 
+## When a dependency fails
+
+`tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each
+dependency of the deployment decision fail, one at a time. It asks decision-support,
+the recompute and the receipt what they serve, and times every stop against a 1 s
+bound. Its `MATRIX` is the full table. What each fault reads as:
+
+- A table the decision is computed from cannot be read (findings, claims, retest
+  obligations, latent conditions, the asset inventory, the workflow chains), or the
+  chain composition raises. Decision-support and the recompute answer 500, and the
+  stored decision stays the one its inputs implied. Nothing serves READY.
+- A claim revoked or contradicted while the decision cannot be recomputed still
+  lands. The decision it moved is held at `needs_more_evidence`, or where it stood if
+  that is worse. The answer carries `"decision_recomputed": false` and names the
+  error's type in `decision_unrecomputed`. The held decision carries no policy stamp,
+  so the first publishing read that can recompute it does. Until then those reads
+  fail rather than publish it.
+- The pause, the dispatch kill switch and a claim take-down load their row with
+  nothing a stop does not need. A failed read of the findings, chain outcomes, assets
+  or transition log no longer drops them.
+- The clock stepping back: the decision is judged no earlier than the deployment
+  record's last write, so an acceptance the record has seen lapse does not stand
+  again. A step back that nothing wrote across is not seen.
+- A stored check-coverage record whose rows cannot be read counts them as checks
+  with an unknown outcome (`audit_incomplete`). It never reads as "not reported".
+- An engine answer whose findings list holds nothing readable is no report. It is
+  not ingested as a clean completed scan.
+- The outcome keyring unreadable: no chain outcome can be shown signed, and the
+  decision reads `needs_more_evidence` until the keyring is back.
+- The rules are module constants, so no policy file is read. The pin is read before
+  any rule is applied, so a decision is stamped with the rules it was read under. One
+  computed while a rule moved names the old rules, and the first publishing read
+  recomputes it under the rules in force.
+
+What does not hold, and is named in `MATRIX` with its severity: a database that
+refuses every write records no stop (each answers 500 and claims nothing). A pause
+cannot land while the transition log cannot be read or the decision cannot be
+written; the failsafe relay still does. A take-down while the decision cannot be
+written, or its transition log read, lands, but leaves the stored decision as it was
+until the next refresh. An engine answer that holds readable findings beside rows
+this side cannot read ingests the readable ones and drops the rest uncounted, so
+one `info` finding beside unreadable rows reads `ready`.
+
 ## Verifying a receipt
 
 `GET /api/assurance/deployments/<uuid>/signed-assurance-receipt/` returns a
