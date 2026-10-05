@@ -959,13 +959,35 @@ def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
                 _adopt(claim, row)
                 return written
     # Moved under every attempt: never weighed under the lock (a stop would wait on
-    # it). Marked unsettled on the row as it is, under the lock, and nothing else.
+    # it). Marked unsettled on the row as it is, under the lock, and nothing else --
+    # unless what overtook the last weighing was an audit that weighed the very
+    # evidence it read (:func:`_settled_since`): that claim is settled, not unsettled.
     with transaction.atomic():
         row = _locked_row(claim)
-        if _is_audited(row):
+        if _is_audited(row) and not _settled_since(row, read, evidence):
             _record_unsettled(row, now)
     _adopt(claim, row)
     return None
+
+
+def _settled_since(row: AssuranceClaim, read: AssuranceClaim, evidence: tuple) -> bool:
+    """Whether the locked row ``row`` carries an audit written since ``read`` -- the
+    last read an overtaken audit weighed -- of exactly the evidence that read saw
+    (``evidence``), current for the status the row reads.
+
+    The evidence token never goes back (an item recorded, invalidated or attributed
+    only moves it on), and every audit writes only when the token under the lock is
+    the one it weighed. So when the token now is the one ``read`` saw, an audit
+    written since weighed that same evidence: the claim is settled, and marking it
+    unsettled would hold a weighed VERIFIED at UNKNOWN (#124 review round 1, F2).
+    Reads the row and the one aggregate every write already takes under the lock;
+    the evidence is never weighed here."""
+    audit = row.evidence_audit or {}
+    if not audit or audit.get("unsettled") or audit == (read.evidence_audit or {}):
+        return False
+    if not audit_is_current(row):
+        return False
+    return evidence_token(row.deployment_id, row.fingerprint) == evidence
 
 
 #: Why a stored audit is unsettled (:func:`_record_unsettled`).
@@ -1118,15 +1140,25 @@ def refusal_for_transition(claim: AssuranceClaim, to_status: str, *, now=None, a
 
 
 def _refusal(result: dict) -> str:
-    why = (
-        result.get("unsettled")
-        or "; ".join(result.get("contradictions") or [])
-        or f"the evidence reads {result.get('verdict')}"
-    )
+    """Why a person may not choose a reading over the audit's hold. A hold a weighed
+    contradiction put on the claim names the items that contradict it, still, when a
+    later audit could not be weighed: those are what a person would invalidate. A
+    hold that rests only on an unsettled audit says so, and what settles it."""
+    contradictions = "; ".join(result.get("contradictions") or [])
+    unsettled = result.get("unsettled")
+    verdict = result.get("verdict") or ("unsettled" if unsettled else "no verdict")
+    if contradictions or not unsettled:
+        why = contradictions or f"the evidence reads {verdict}"
+        later = f" Since then: {unsettled.rstrip('.')}." if unsettled else ""
+        return _clip(
+            f"The evidence recorded against this claim holds it at {result.get('status')} "
+            f"({verdict}): {why.rstrip('.')}.{later} Resolve the evidence first -- invalidate an "
+            "item with a reason, or record independent evidence -- rather than choosing a reading."
+        )
     return _clip(
-        f"The evidence recorded against this claim holds it at {result.get('status')} "
-        f"({result.get('verdict')}): {why.rstrip('.')}. Resolve the evidence first -- invalidate an "
-        "item with a reason, or record independent evidence -- rather than choosing a reading."
+        f"The evidence recorded against this claim holds it at {result.get('status')} ({verdict}): "
+        f"{unsettled.rstrip('.')}. Its next audit -- new or invalidated evidence, or a re-derive -- "
+        "settles it; choosing a reading does not."
     )
 
 
