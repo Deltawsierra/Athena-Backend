@@ -117,6 +117,7 @@ from .workflow_chains import (
 )
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
+from .retest_closure import ClosureRefused
 from .vendor import assess_vendors
 from .serializers import (
     ApprovedWorkflowSerializer,
@@ -2677,9 +2678,15 @@ class FindingViewSet(
         # receipt could read READY with a critical finding open while
         # decision-support, computing live, said otherwise. The finding and the
         # decision it moves commit together.
-        with transaction.atomic():
-            finding = serializer.save()
-            _refresh_stored_decision(finding.deployment)
+        # A close of a retest-required finding with no complete closure evidence is
+        # refused by the save itself (assurance.retest_closure); the row is left as
+        # it was and the caller is told which fixture class or pattern is missing.
+        try:
+            with transaction.atomic():
+                finding = serializer.save()
+                _refresh_stored_decision(finding.deployment)
+        except ClosureRefused as exc:
+            raise ValidationError({"status": exc.reasons}) from exc
 
     @action(detail=True, methods=["get"], url_path="remediation")
     def remediation(self, request, uuid=None):
@@ -2805,6 +2812,9 @@ class FindingViewSet(
             )
         except IllegalTransition as exc:
             return Response({"detail": str(exc)}, status=400)
+        except ClosureRefused as exc:
+            # A RESOLVED a retest-required finding's closure evidence does not carry.
+            return Response({"detail": str(exc), "reasons": exc.reasons}, status=400)
         return Response(
             {
                 "remediation_state": finding.remediation_state,

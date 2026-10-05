@@ -232,6 +232,63 @@ assurance policy pins the table's order of the classes, so a change to that orde
 moves the policy pin. The order is the one this service kept before, so the pin
 did not move.
 
+## Retest-gated closure
+
+A finding with `retest_required` set owes a retest before it can be called fixed.
+Ingest sets the flag on every medium-or-worse finding. Such a finding moves to
+`status=closed`, or to `remediation_state=resolved`, only on a retest record
+(`RetestClosureEvidence`, migration `assurance.0049`) that shows the check run
+against four classes of fixture:
+
+| Class | What it is | The check must |
+| --- | --- | --- |
+| `vulnerable` | the original defect | fail |
+| `repaired` | the fix | pass |
+| `benign` | a case that never had the defect | pass |
+| `incomplete_repair` | a fixture that looks repaired but leaves the effect reachable | still fail, on each of six patterns |
+
+The six incomplete-repair patterns are each their own fixture:
+
+- `restored_reachability`: the path reopens some other way.
+- `changed_defaults`: the fix works but flips a default users depend on.
+- `lost_compensating_control`: the patch removes a workaround without replacing it.
+- `displaced_effects`: the behaviour moves to an adjacent code path.
+- `restored_persistence`: state that should have been purged survives.
+- `operational_breakage`: the fix is correct but breaks something unrelated.
+
+An incomplete repair that passed means the check was fooled. A cosmetic
+error-message change, a disabled logger or a partial endpoint check would have
+read as a repair, so the check's pass on the real fix proves nothing either.
+
+The gate is `assurance.retest_closure.enforce`, called from `Finding.save`. Every
+writer goes through it: the findings PATCH, the Django admin, the
+`remediation/transition` action and `remediation.apply_transition`. It reads the
+finding's latest record and refuses the move when:
+
+- there is no record;
+- the record's origin is not `independent` (the only origin that carries weight,
+  as for claim evidence);
+- the record names no artifact digest;
+- the record is older than the finding's `last_seen`, so a scan saw the defect
+  after the retest ran;
+- any class or pattern is missing, not run, unreadable, or has the wrong outcome.
+
+The refusal names every class and pattern that failed. The finding stays where it
+was. The PATCH and the transition answer 400 with the reasons, and the admin
+shows them on the form. The admin cannot untick `retest_required`, because the
+flag belongs to ingest.
+
+These are not closures and are not gated: `accepted`, `false_positive`,
+`invalidated`, a finding with no retest owed, and a save that does not move the
+finding into `closed` or `resolved`. bom drift's own close of a drift finding is
+also not gated, because drift findings never carry `retest_required`. Nothing
+here touches a stop, a claim revoke or a pause.
+
+A record is written with `retest_closure.record_closure_evidence`. Like
+`record_claim_evidence`, it has no API route. Neither the deployment decision
+nor the Assurance Receipt changed. A refused close leaves the finding unresolved,
+and the decision reads it the same way it did before.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each

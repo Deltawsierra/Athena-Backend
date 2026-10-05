@@ -452,11 +452,12 @@ def test_migration_0048_recomputes_every_believed_claims_confidence_and_leaves_h
             dep, fingerprint="g", status=Status.SUPERSEDED, confidence=strong, valid_to=timezone.now(),
         ),
     }
+    # Forward to 0048 itself, as the 0047 test does to 0047: a later migration
+    # moving the leaf does not change what this one is tested against.
     head = MigrationExecutor(connection).loader.graph.leaf_nodes("assurance")[0]
-    assert head[1] == "0048_claim_confidence_follows_its_status"
     try:
         _migrate(_BEFORE_0048)
-        _migrate(head)
+        _migrate(("assurance", "0048_claim_confidence_follows_its_status"))
     finally:
         _migrate(head)
 
