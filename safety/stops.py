@@ -510,6 +510,9 @@ NOT_STOPS = {
         "POST": "moves a finding's remediation state: tracking work, not stopping it"
     },
     "finding-remediation-assign": {"POST": "assigns a finding's owner: tracking work, not a stop"},
+    "finding-closure-evidence": {
+        "POST": "the engine service records a retest run's evidence: it closes nothing and stops nothing"
+    },
     "finding-assignable": _get(),
     "provider-list": {"GET": _READ, "POST": "creates a provider record: configuration that starts and stops nothing"},
     "provider-detail": {

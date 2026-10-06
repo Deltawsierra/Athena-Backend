@@ -365,6 +365,43 @@ def _remediation_transition():
     )
 
 
+def _closure_evidence():
+    """The engine service records a retest run's evidence: it closes nothing, and the
+    service's credential, not an operator's session, is the only caller it takes."""
+    from django.test import override_settings
+
+    dep = _scanned()
+    finding = _finding(dep)
+    recompute_decision(dep)
+    account = User.objects.create_user(username="closure-engine", role=User.Roles.VIEWER)
+    credential = "closure-evidence-engine-service-test-only-0000"
+    document = {
+        "finding_type": finding.finding_type,
+        "finding_ref": str(finding.uuid),
+        "engine": "replay-under-test",
+        "origin": "independent",
+        "remediation": {"kind": "k", "control_changed": "c"},
+        "replay": {"reached": True, "original_effect": "gone", "variants": {"v": "gone"}, "utility": "retained"},
+        "fixtures": {},
+    }
+
+    def write(_operator):
+        from assurance.closure_evidence import canonical_digest
+
+        client = APIClient()
+        client.credentials(HTTP_X_CLOSURE_EVIDENCE_TOKEN=credential)
+        with override_settings(
+            CLOSURE_EVIDENCE_SERVICE_TOKEN=credential, CLOSURE_EVIDENCE_SERVICE_USER=account.username
+        ):
+            return client.post(
+                f"/api/assurance/findings/{finding.uuid}/closure-evidence/",
+                {"document": document, "content_digest": canonical_digest(document)},
+                format="json",
+            )
+
+    return dep, write
+
+
 def _remediation_assign():
     dep = _scanned()
     finding = _finding(dep)
@@ -433,6 +470,11 @@ CANNOT_MOVE = {
         "the remediation workflow is the human process of fixing a finding, never the "
         "security status the decision reads",
         _remediation_transition,
+    ),
+    ("FindingViewSet", "closure_evidence", "post"): (
+        "records a retest run's evidence for a later close to be judged on; it moves no "
+        "finding's status, and a close is still the operator's PATCH, which is in MOVES",
+        _closure_evidence,
     ),
     ("FindingViewSet", "remediation_assign", "post"): (
         "who does the remediation work, not whether the risk is live",

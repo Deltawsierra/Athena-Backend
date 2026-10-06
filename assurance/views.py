@@ -23,6 +23,7 @@ from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 
 from django.db import transaction
 
@@ -117,7 +118,8 @@ from .workflow_chains import (
 )
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
-from .retest_closure import ClosureRefused
+from . import closure_evidence as evidence_route
+from .retest_closure import ClosureRefused, classify, closure_standing, record_closure_evidence
 from .vendor import assess_vendors
 from .serializers import (
     ApprovedWorkflowSerializer,
@@ -2687,6 +2689,80 @@ class FindingViewSet(
                 _refresh_stored_decision(finding.deployment)
         except ClosureRefused as exc:
             raise ValidationError({"status": exc.reasons}) from exc
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="closure-evidence",
+        # The engine service's credential first; an operator's session after it, so
+        # an operator is told 403 -- refused -- rather than 401.
+        authentication_classes=[
+            evidence_route.EngineServiceAuthentication,
+            *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+        ],
+        permission_classes=[evidence_route.IsEngineService],
+        parser_classes=[SafeJSONParser],
+    )
+    def closure_evidence(self, request, uuid=None):
+        """Record one retest run's evidence document against this finding (Phase 6
+        item 3, A1): the engine service's route, and the only caller of
+        :func:`~assurance.retest_closure.record_closure_evidence`. See
+        :mod:`assurance.closure_evidence` for who may call it and exactly what it
+        takes.
+
+        Closes nothing. The record is evidence a later close is judged on, by the
+        gate, as every close is; the answer says what the replay came to
+        (``result``: ``verified_closed`` only when everything the gate reads in the
+        document carries a closure) and the finding's closure standing now. A
+        document that cannot be read whole is refused, and nothing is stored."""
+        # The DECLARED length, before the body is read (as the signed-outcome route
+        # does): the route's own 413 for every size, never Django's generic 400.
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > evidence_route.MAX_BODY_BYTES:
+            return Response(
+                {"error": f"the body is larger than this route reads ({evidence_route.MAX_BODY_BYTES} bytes)"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": "closure evidence is posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        # Not ``get_object``: the service account sees no deployment's findings, and
+        # needs none -- it names one finding by its uuid, and records against it.
+        valid = _valid_uuid(uuid)
+        finding = Finding.objects.filter(uuid=valid).first() if valid else None
+        if finding is None:
+            return Response({"error": "no such finding"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            document, digest = evidence_route.read_body(request.data, finding=finding)
+        except evidence_route.DocumentRefused as exc:
+            raise ValidationError(exc.errors) from None
+        result, reasons = classify(document)
+        with transaction.atomic():
+            record = record_closure_evidence(
+                finding,
+                fixtures=document["fixtures"],
+                origin=document["origin"],
+                content_digest=digest,
+                recorded_by=request.user,
+                document=document,
+            )
+        return Response(
+            {
+                "uuid": str(record.uuid),
+                "finding": str(finding.uuid),
+                "content_digest": digest,
+                "recorded_at": record.created_at.isoformat(),
+                "result": result,
+                "reasons": reasons,
+                "closure": closure_standing(Finding.objects.get(pk=finding.pk)),
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["get"], url_path="remediation")
     def remediation(self, request, uuid=None):
