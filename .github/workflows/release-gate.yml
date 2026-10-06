@@ -1,0 +1,182 @@
+name: release-gate
+
+on:
+  pull_request:
+    branches: [master]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "The candidate commit (full 40-hex sha)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Name the candidate commit
+        id: candidate
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          QUEUE_HEAD: ${{ github.event.merge_group.head_sha }}
+          DISPATCHED: ${{ inputs.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) SHA="$PR_HEAD" ;;
+            merge_group) SHA="$QUEUE_HEAD" ;;
+            workflow_dispatch) SHA="$DISPATCHED" ;;
+            *) echo "::error::release-gate does not run on $EVENT"; exit 1 ;;
+          esac
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the candidate is not a full 40-hex commit"; exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the verifier (every file hash-pinned)
+        timeout-minutes: 10
+        env:
+          TOKEN: ${{ secrets.MINOTAUR_READ_TOKEN }}
+          BACKEND_ASSET: ${{ vars.MINOTAUR_BACKEND_WHEEL_ASSET }}
+          BACKEND_NAME: ${{ vars.MINOTAUR_BACKEND_WHEEL_NAME }}
+          BACKEND_SHA256: ${{ vars.MINOTAUR_BACKEND_WHEEL_SHA256 }}
+          ENGINE_ASSET: ${{ vars.MINOTAUR_ENGINE_WHEEL_ASSET }}
+          ENGINE_NAME: ${{ vars.MINOTAUR_ENGINE_WHEEL_NAME }}
+          ENGINE_SHA256: ${{ vars.MINOTAUR_ENGINE_WHEEL_SHA256 }}
+        run: |
+          mkdir -p wheels
+          : > verifier.lock
+          for wheel in "$BACKEND_ASSET $BACKEND_NAME $BACKEND_SHA256" \
+                       "$ENGINE_ASSET $ENGINE_NAME $ENGINE_SHA256"; do
+            set -- $wheel
+            case "$1" in
+              https://api.github.com/repos/Deltawsierra/Minotaur-Backend/releases/assets/*) ;;
+              https://api.github.com/repos/Deltawsierra/Minotaur-Engine/releases/assets/*) ;;
+              *) echo "::error::a wheel asset is not a Minotaur release asset URL"; exit 1 ;;
+            esac
+            if ! printf '%s' "${1##*/}" | grep -Eq '^[0-9]+$'; then
+              echo "::error::a wheel asset URL does not end in an asset id"; exit 1
+            fi
+            if ! printf '%s' "$2" | grep -Eq '^[A-Za-z0-9_.+-]+\.whl$'; then
+              echo "::error::a wheel name is not a wheel file name"; exit 1
+            fi
+            if ! printf '%s' "$3" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::a wheel sha256 is not 64 hex"; exit 1
+            fi
+            # The API serves a private repository's asset: octet-stream, then a redirect
+            # to storage (-L), and curl drops the token on that cross-host hop.
+            curl -fsSL --proto '=https' --max-time 120 \
+              -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/octet-stream" \
+              -o "wheels/$2" "$1"
+            printf './wheels/%s --hash=sha256:%s\n' "$2" "$3" >> verifier.lock
+          done
+          cat >> verifier.lock <<'LOCK'
+          blinker==1.9.0 \
+              --hash=sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc
+          certifi==2026.7.22 \
+              --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+          cffi==2.1.1 \
+              --hash=sha256:34e261f78cb6ceaaa36f42f2613f4380d94d9c759a9c73c769ee6e0247364632
+          charset-normalizer==3.5.2 \
+              --hash=sha256:1c50fe28bbc2ced33386f298650d91218076c05420e6cbd790b913adc41659e7 \
+              --hash=sha256:211d5a3eb6af8f513b8d4ca19a8c1b7accab1b5f0d3175f9826b03c1a920dc1f \
+              --hash=sha256:b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685
+          click==8.5.0 \
+              --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+          cryptography==50.0.2 \
+              --hash=sha256:1981f1db4630889b9ef7803fadef12b056f428cb6b85c27ba57b774793b6093c \
+              --hash=sha256:4061c0079120205fb760c58acab6443e217307dcf05e3702cf970e0689972856 \
+              --hash=sha256:58a0c478eeca76fe5e07993c5a0703def34a6dc6a0cda4f5564639b33112ffe7 \
+              --hash=sha256:630ebfea3bf689d075f82316324ff7433dc447fe6bc1bfc76524b74b4a9567d2 \
+              --hash=sha256:9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079 \
+              --hash=sha256:e105ab60406787da31fccc883fc0f733af1efd78f0136a4599692c4083a73d0c \
+              --hash=sha256:ee247f5c245c9a2fe7c8e2214e295918838e44e00a45a6718451e4004219e767 \
+              --hash=sha256:f21e8a22c8605750c7af886bab299a363721264061b4ac0a30efb73cfd58efc5 \
+              --hash=sha256:f2f9bd7f90c64fe89253f0a2c05e3c4856072660429ce8831b4235bf29403a67
+          flask==3.1.3 \
+              --hash=sha256:f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c
+          idna==3.20 \
+              --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+          itsdangerous==2.2.0 \
+              --hash=sha256:c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef
+          jinja2==3.1.6 \
+              --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+          markupsafe==3.0.4 \
+              --hash=sha256:6da83a088f8ef93b2d483a8232a4dbf4d69d3d8496b568a03c56becac43e1808
+          pycparser==3.0 \
+              --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+          requests==2.34.2 \
+              --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+          urllib3==2.8.0 \
+              --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+          werkzeug==3.1.9 \
+              --hash=sha256:6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab
+          LOCK
+          python -m pip install --require-hashes --only-binary=:all: --no-deps -r verifier.lock
+
+      - name: Wait for a fresh decision for the candidate, from the configured store only
+        # The loop below ends by itself, with its own error, before this step's timeout
+        # (and the job's) could cancel it silently: WAIT <= 2400s, each request <= 30s,
+        # and no sleep runs past the deadline.
+        timeout-minutes: 45
+        env:
+          STORE: ${{ vars.MINOTAUR_STORE_URL }}
+          ENGINE: ${{ vars.MINOTAUR_ENGINE_NAME }}
+          STORE_KEY: ${{ secrets.MINOTAUR_STORE_READ_KEY }}
+          WAIT: ${{ vars.MINOTAUR_DECISION_WAIT_SECONDS || '2400' }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          case "$STORE" in
+            https://*) ;;
+            *) echo "::error::MINOTAUR_STORE_URL must be an https:// origin"; exit 1 ;;
+          esac
+          case "$ENGINE" in
+            achilles-engine|athena-engine|athena-backend) ;;
+            *) echo "::error::MINOTAUR_ENGINE_NAME is not an engine Minotaur measures"; exit 1 ;;
+          esac
+          case "$WAIT" in
+            ''|*[!0-9]*) echo "::error::MINOTAUR_DECISION_WAIT_SECONDS is not a number"; exit 1 ;;
+          esac
+          if [ "$WAIT" -gt 2400 ]; then WAIT=2400; fi  # stays inside timeout-minutes
+          deadline=$(( $(date +%s) + WAIT ))
+          delay=15
+          while :; do
+            # No -L: a redirect is never followed, so the key goes to this origin only.
+            code=$(curl -sS --proto '=https' --max-redirs 0 --max-time 30 \
+              -H "X-Minotaur-Key: ${STORE_KEY}" -o decision.json -w '%{http_code}' \
+              "${STORE%/}/releases/latest?engine=${ENGINE}&build=${SHA}") || code=000
+            case "$code" in
+              200) break ;;
+              404) echo "no decision for ${SHA} yet" ;;
+              409) echo "the latest decision for ${SHA} is behind the store: waiting for a new one" ;;
+              000|5??) echo "the store did not answer (${code}); retrying" ;;
+              *) echo "::error::the store refused the request (${code})"; cat decision.json; exit 1 ;;
+            esac
+            left=$(( deadline - $(date +%s) ))
+            if [ "$left" -le 0 ]; then
+              echo "::error::no fresh decision for ${SHA} within ${WAIT}s: the release process must POST /releases for this exact sha (and again after a 409)"
+              exit 1
+            fi
+            sleep "$(( delay < left ? delay : left ))"
+            delay=$(( delay * 2 > 240 ? 240 : delay * 2 ))
+          done
+
+      - name: Verify it (offline)
+        env:
+          ENGINE: ${{ vars.MINOTAUR_ENGINE_NAME }}
+          KEYS: ${{ vars.MINOTAUR_RELEASE_PUBLIC_KEYS }}
+          STORE_ID: ${{ vars.MINOTAUR_STORE_ID }}
+          MAX_AGE: ${{ vars.MINOTAUR_DECISION_MAX_AGE || '6h' }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          python -m minotaur_backend.release_gate verify decision.json \
+            --engine "$ENGINE" --build "$SHA" --keys "$KEYS" \
+            --max-age "$MAX_AGE" --store-id "$STORE_ID"
