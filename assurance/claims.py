@@ -1407,7 +1407,9 @@ def _write_plan(plan: _Plan) -> dict:
             derived=derived,
             now=now,
             held=step["held"],
-            audited=step["audited"] if action != "keep" else None,
+            # Stamped with the evidence token the plan read before its items, and
+            # checked under the lock just now (#124 review round 4, F1).
+            audited=ea.weighed_under(step["audited"], step["evidence"]) if action != "keep" else None,
         )
         if action == "create":
             _make_claim(dep, **common)
@@ -1420,7 +1422,7 @@ def _write_plan(plan: _Plan) -> dict:
                 row.input_fingerprint = step["input_fp"]
             if _refresh_machine_fields(
                 row, derived, plan.receipt_digest, now, human_status=step["human_status"], held=step["held"],
-                audit_context=step["audit_context"], audited=step["audited"],
+                audit_context=step["audit_context"], audited=common["audited"],
                 weighing_unchanged=step["weighing_unchanged"],
             ):
                 counts["updated"] += 1
@@ -1626,7 +1628,12 @@ def _move(claim: AssuranceClaim, to_status, *, actor, note: str) -> ClaimEvent:
     # or over adverse evidence it had to refuse -- is refused here, not made and then
     # undone: a person resolves the evidence, not the reading.
     now = timezone.now()
-    audited = ea.audit_of(claim, base_status=to_status.value, now=now, reading_by_person=True)
+    # The evidence token BEFORE the weighing, kept with the audit the move writes
+    # (ea.weighed_under; #124 review round 4, F1).
+    evidence = ea.evidence_token(claim.deployment_id, claim.fingerprint)
+    audited = ea.weighed_under(
+        ea.audit_of(claim, base_status=to_status.value, now=now, reading_by_person=True), evidence
+    )
     refusal = ea.refusal_for_transition(claim, to_status, now=now, audited=audited)
     if refusal:
         raise IllegalClaimTransition(refusal)

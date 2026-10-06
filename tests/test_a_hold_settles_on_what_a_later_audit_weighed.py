@@ -23,6 +23,10 @@ later lifts it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from datetime import timedelta as _timedelta
+from datetime import timezone as _tz
+
 import pytest
 from django.db import transaction
 from django.utils import timezone
@@ -30,7 +34,7 @@ from django.utils import timezone
 from assurance import claims as claims_module
 from assurance import evidence_audit as ea
 from assurance import invalidation
-from assurance.models import AssuranceClaim, ClaimEvent, ClaimVerdict
+from assurance.models import AssuranceClaim, ClaimEvent, ClaimEvidence, ClaimVerdict
 from tests.test_every_writer_decides_from_the_row_it_writes import _deployment, _person
 from tests.test_spine_evidence_audit import _access_claim, _current, _good
 
@@ -156,3 +160,128 @@ def test_a_stop_lands_on_an_unsettled_hold_and_stays():
         row = AssuranceClaim.objects.filter(deployment=dep, fingerprint=claim.fingerprint).order_by("-pk").first()
         cur = _current(dep)
         assert (cur or row).status == stop, f"a {stop} over an unsettled hold did not stand"
+
+
+# ---------------------------------------------------------------------------
+# Round 4: every writer of a weighed audit says what it weighed
+# ---------------------------------------------------------------------------
+
+
+def _overtaken_with(monkeypatch, dep, claim, meanwhile):
+    """``audit_claim`` of ``claim``, overtaken on each of its weighings; on the last,
+    ``meanwhile`` runs first (other writers committing in that window)."""
+    real = ea.audit_of
+    state = {"reads": 0, "inner": False}
+
+    def audit_of(claim_, **kwargs):
+        out = real(claim_, **kwargs)
+        if state["inner"] or "base_status" in kwargs:
+            return out
+        state["reads"] += 1
+        if state["reads"] < ea.AUDIT_ATTEMPTS:
+            AssuranceClaim.objects.filter(pk=claim_.pk).update(updated_at=timezone.now())
+        elif state["reads"] == ea.AUDIT_ATTEMPTS:
+            state["inner"] = True
+            try:
+                meanwhile()
+            finally:
+                state["inner"] = False
+        return out
+
+    monkeypatch.setattr(ea, "audit_of", audit_of)
+    ea.audit_claim(AssuranceClaim.objects.get(pk=claim.pk))
+    monkeypatch.undo()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_person_s_move_that_weighed_the_evidence_in_force_settles_the_claim(monkeypatch):
+    """A later ingest's audit settles, then a person moves VERIFIED to SUPPORTED, and
+    that move's audit weighs the evidence in force. Unstamped, the fallback held the
+    weighed SUPPORTED at UNKNOWN (#124 review round 4, F1)."""
+    dep = _deployment("r4-move")
+    claim = _access_claim(dep)
+    ea.record_claim_evidence(claim, **_good(claim))
+    assert _current(dep).status == Status.VERIFIED
+    seen = {}
+
+    def meanwhile():
+        ea.record_claim_evidence(_current(dep), **_good(claim))
+        claims_module.apply_claim_transition(_current(dep), Status.SUPPORTED, actor=_person("r4-move"), note="down")
+        seen["audit"] = dict(_current(dep).evidence_audit)
+
+    _overtaken_with(monkeypatch, dep, claim, meanwhile)
+
+    after = _current(dep)
+    assert seen["audit"]["weighed_evidence"] == ea.evidence_digest(ea.evidence_token(dep.pk, claim.fingerprint))
+    assert after.status == Status.SUPPORTED, f"held at {after.status} though the move weighed the evidence in force"
+    assert not after.evidence_audit.get("unsettled")
+    truth = ea.audit_of(after)
+    assert (truth["verdict"], truth["status"]) == (V.PASS.value, Status.SUPPORTED)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_re_derive_that_weighed_the_evidence_in_force_settles_the_claim(monkeypatch):
+    dep = _deployment("r4-derive")
+    claim = _access_claim(dep)
+    ea.record_claim_evidence(claim, **_good(claim))
+    seen = {}
+
+    def meanwhile():
+        ea.record_claim_evidence(_current(dep), **_good(claim))
+        AssuranceClaim.objects.filter(pk=_current(dep).pk).update(statement="changed, so the re-derive refreshes it")
+        claims_module.derive_claims(dep)
+        seen["audit"] = dict(_current(dep).evidence_audit)
+
+    _overtaken_with(monkeypatch, dep, claim, meanwhile)
+
+    after = _current(dep)
+    assert seen["audit"]["weighed_evidence"] == ea.evidence_digest(ea.evidence_token(dep.pk, claim.fingerprint))
+    assert after.status == Status.VERIFIED, f"held at {after.status} though the re-derive weighed the evidence in force"
+    assert not after.evidence_audit.get("unsettled")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_later_audit_of_evidence_no_longer_in_force_does_not_settle_it(monkeypatch):
+    """The other side: a later audit weighed the evidence as it was, and more came
+    after it. That audit settles nothing, and the claim is held unsettled."""
+    dep = _deployment("r4-behind")
+    claim = _access_claim(dep)
+    ea.record_claim_evidence(claim, **_good(claim))
+
+    def meanwhile():
+        ea.record_claim_evidence(_current(dep), **_good(claim))  # its own audit settles
+        # Then an item no audit has weighed, recorded behind the audits' backs.
+        ClaimEvidence.objects.create(
+            **{
+                **{k: v for k, v in ClaimEvidence.objects.filter(claim_fingerprint=claim.fingerprint)
+                   .values().first().items() if k not in ("id", "uuid", "created_at", "superseded_by_id")},
+            }
+        )
+
+    _overtaken_with(monkeypatch, dep, claim, meanwhile)
+
+    after = _current(dep)
+    assert after.evidence_audit.get("unsettled"), "an audit of evidence no longer in force settled the claim"
+    assert after.status == Status.UNKNOWN
+
+
+def timezone_offset(*, hours: int):
+    return _tz(_timedelta(hours=hours))
+
+
+def test_one_instant_digests_alike_in_any_zone():
+    instant = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    elsewhere = instant.astimezone(timezone_offset(hours=2))
+    assert instant == elsewhere
+    assert ea.evidence_digest((1, 2, 0, 0, instant, 0)) == ea.evidence_digest((1, 2, 0, 0, elsewhere, 0))
+    assert ea.evidence_digest((1, 2, 0, 0, instant, 0)) != ea.evidence_digest((1, 3, 0, 0, instant, 0))
+
+
+@pytest.mark.django_db
+def test_what_an_audit_weighed_is_bookkeeping_and_never_served():
+    dep = _deployment("r4-served")
+    claim = _access_claim(dep)
+    ea.record_claim_evidence(claim, **_good(claim))
+    current = _current(dep)
+    assert "weighed_evidence" in current.evidence_audit
+    assert "weighed_evidence" not in ea.served_audit(current)

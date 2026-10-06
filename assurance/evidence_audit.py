@@ -106,7 +106,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from django.db import transaction
 from django.db.models import Count, Max, Q
@@ -884,12 +884,29 @@ def evidence_token(deployment_id, fingerprint: str | None = None) -> tuple:
 
 def evidence_digest(token: tuple) -> str:
     """An :func:`evidence_token`, as it is kept in a stored audit (JSON): equal
-    exactly when the tokens are."""
-    canonical = json.dumps(
-        [value.isoformat() if hasattr(value, "isoformat") else value for value in token],
-        separators=(",", ":"),
-    )
-    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    exactly when the tokens are. An instant is written in UTC, so one instant read
+    in two zones digests alike (#124 review round 4, F2)."""
+
+    def canonical(value):
+        if isinstance(value, datetime):
+            return (value.astimezone(UTC) if value.tzinfo else value).isoformat()
+        return value
+
+    text = json.dumps([canonical(value) for value in token], separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def weighed_under(result: dict | None, token: tuple) -> dict | None:
+    """``result``, an audit about to be written, with the evidence it weighed kept
+    with it (``weighed_evidence``, :func:`_settled_since`). ``token`` is the
+    :func:`evidence_token` read BEFORE the items were weighed: an item recorded
+    after that read leaves the stamp behind the evidence in force, and the claim
+    is then held, never settled, on it. Every writer of a weighed audit stamps it:
+    the audit (:func:`_audit_in_place`), the re-derive and a person's move
+    (:mod:`assurance.claims`; #124 review round 4, F1)."""
+    if result is None:
+        return None
+    return {**result, "weighed_evidence": evidence_digest(token)}
 
 
 def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
@@ -968,12 +985,10 @@ def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
         if not _is_audited(read):
             _adopt(claim, read)
             return None
-        result = audit_of(read, now=now)
-        if result is not None:
-            # The evidence this weighing weighed, kept with it: written only under
-            # the very token, so a later fallback can tell an audit that weighed the
-            # evidence in force from one that did not (#124 review round 3, F1).
-            result = {**result, "weighed_evidence": evidence_digest(evidence)}
+        # The evidence this weighing weighed, kept with it: written only under the
+        # very token, so a later fallback can tell an audit that weighed the
+        # evidence in force from one that did not (#124 review round 3, F1).
+        result = weighed_under(audit_of(read, now=now), evidence)
         with transaction.atomic():
             row = _locked_row(read)
             if claim_token(row) == claim_token(read) and evidence_token(row.deployment_id, row.fingerprint) == evidence:
@@ -1231,6 +1246,9 @@ def served_audit(claim: AssuranceClaim) -> dict:
     audit = dict(claim.evidence_audit or {})
     if not audit:
         return audit
+    # Which evidence it weighed is this module's own bookkeeping (_settled_since),
+    # not part of the verdict a reader is served (#124 review round 4, F3).
+    audit.pop("weighed_evidence", None)
     why = _why_not_current(claim)
     audit["audit_current"] = not why
     if why:
