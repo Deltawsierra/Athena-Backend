@@ -299,6 +299,17 @@ MATRIX = {
         "a scan ingested twice records each finding once",
         ("test_a_scan_ingested_twice_records_each_finding_once",),
     ),
+    "closure-evidence-forward": Boundary(
+        "assurance.closure_forward: a recorded closure document sent on to Minotaur-Backend's POST "
+        "/remediation-outcomes (a dataset row), queued as a ClosureEvidenceForward in the record's "
+        "transaction and sent after it commits; retried by manage.py retry_closure_forwards",
+        "none: new",
+        "one ClosureEvidenceForward per record (OneToOne), claimed by a conditional update before "
+        "it is sent; once sent, never sent again",
+        "sent twice -- the commit's send, a retry, another runner -- the document is one row; a "
+        "send whose answer was lost is UNKNOWN and sent again only with --unknown",
+        ("test_a_closure_forward_fired_twice_is_one_dataset_row",),
+    ),
 }
 
 #: Every effect call site the code holds, as :func:`effect_sites` names it, and the
@@ -307,6 +318,8 @@ SITES = {
     "ai_engine/services/cyberengine_client.py::CyberEngineClient._send_post::requests.post": "engine-transport",
     "ai_engine/services/cyberengine_client.py::CyberEngineClient.defend_log_file::requests.post": "engine-transport",
     "assurance/connectors/base.py::RequestsTransport.post::requests.post": "engine-transport",
+    "assurance/closure_forward.py::_send::transport.post": "closure-evidence-forward",
+    "assurance/closure_forward.py::queue::ClosureEvidenceForward.objects.create": "closure-evidence-forward",
     "ai_engine/services/preflight.py::_attest_routes::attestation_check": "engine-governance",
     "ai_engine/services/preflight.py::check::assurance_check": "engine-governance",
     "pentest/management/commands/approve_deployment.py::Command.handle::assurance_approve": "engine-governance",
@@ -357,7 +370,9 @@ _OTHER_TRANSPORTS = frozenset({"urlopen", "HTTPConnection", "HTTPSConnection", "
 _CONNECTOR_CALLS = frozenset({"push_finding", "comment_on", "push_receipt"})
 #: Durable rows another process acts on: the dispatch runner and sweeper, the
 #: re-derive that resolves a retest, the engine's poll, the scan's ingest.
-_ACTED_ON = frozenset({"DispatchAttempt", "DecisionDispatchDue", "RetestRequirement", "FailsafeCommand", "PentestScan"})
+_ACTED_ON = frozenset(
+    {"DispatchAttempt", "DecisionDispatchDue", "RetestRequirement", "FailsafeCommand", "PentestScan", "ClosureEvidenceForward"}
+)
 _ROW_WRITES = frozenset({"create", "get_or_create", "update_or_create", "bulk_create"})
 
 
@@ -1194,6 +1209,40 @@ def test_a_webhook_redelivery_carries_the_same_operation_id(credential_key):
     assert len(receiver.received) == 2
     keys = {headers["Idempotency-Key"] for headers in receiver.received}
     assert keys == {dispatch.operation_id(finding, "webhook")}
+
+
+def test_a_closure_forward_fired_twice_is_one_dataset_row(settings, monkeypatch):
+    """The send after the record commits, a retry, the retry command with --unknown:
+    one call to Minotaur, one dataset row."""
+    from assurance import closure_forward
+    from assurance.models import ClosureEvidenceForward
+    from assurance.retest_closure import record_closure_evidence
+
+    settings.MINOTAUR_OUTCOMES_URL = "https://minotaur.invalid"
+    settings.MINOTAUR_RUNNER_KEY = "minotaur-runner-key-for-tests"
+    sent = []
+
+    class Minotaur:
+        def post(self, url, *, headers, json):
+            sent.append(json)
+            return _Answer(201, {"id": len(sent)})
+
+    monkeypatch.setattr(closure_forward, "_transport", Minotaur)
+    finding = _finding(_deployment())
+    document = {"replay": {"reached": False}, "fixtures": {}}
+    record = record_closure_evidence(
+        finding, fixtures={}, origin=ClaimEvidence.Origin.INDEPENDENT, content_digest="sha256:ab", document=document
+    )
+    forward = ClosureEvidenceForward.objects.create(record=record)
+
+    assert closure_forward.deliver(forward.pk) == ClosureEvidenceForward.Status.SENT
+    assert closure_forward.deliver(forward.pk) is None
+    assert closure_forward.retry_due(unknown=True) == {}
+    call_command("retry_closure_forwards", "--unknown")
+
+    assert sent == [document]
+    forward.refresh_from_db()
+    assert (forward.status, forward.attempts) == (ClosureEvidenceForward.Status.SENT, 1)
 
 
 def test_the_webhook_receipt_push_has_no_caller():

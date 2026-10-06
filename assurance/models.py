@@ -2438,6 +2438,37 @@ class RetestClosureEvidence(models.Model):
         return f"{self.origin} retest closure evidence for finding {self.finding_id}"
 
 
+class ClosureEvidenceForward(models.Model):
+    """One closure record's document on its way to Minotaur-Backend's
+    remediation-outcomes dataset (``assurance.closure_forward``): queued in the
+    record's own transaction, sent after it commits, and kept so a send that did not
+    land is retried and one that did is never sent again. One per record."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Queued, not yet sent"
+        SENDING = "sending", "Being sent"
+        SENT = "sent", "Recorded by Minotaur"
+        FAILED = "failed", "Certainly not recorded; retried"
+        UNKNOWN = "unknown", "May have been recorded; retried only when asked"
+        REFUSED = "refused", "Minotaur cannot read it; never retried"
+
+    id = models.BigAutoField(primary_key=True)
+    record = models.OneToOneField(RetestClosureEvidence, on_delete=models.CASCADE, related_name="forward")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    # The row Minotaur recorded, by its id, once sent.
+    dataset_row_id = models.BigIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "updated_at"])]
+
+    def __str__(self) -> str:
+        return f"closure evidence forward {self.pk} ({self.status})"
+
+
 # ---------------------------------------------------------------------------
 # DeclaredComponent — the customer's declared architecture (SPINE Stage 3)
 # ---------------------------------------------------------------------------

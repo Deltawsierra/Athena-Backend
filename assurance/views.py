@@ -119,6 +119,7 @@ from .workflow_chains import (
 from .ripple import assess_ripple
 from .remediation import IllegalTransition, apply_transition, assign
 from . import closure_evidence as evidence_route
+from . import closure_forward
 from .retest_closure import ClosureRefused, classify, closure_standing, record_closure_evidence
 from .vendor import assess_vendors
 from .serializers import (
@@ -2751,6 +2752,9 @@ class FindingViewSet(
                 recorded_by=request.user,
                 document=document,
             )
+            # Sent on to Minotaur's dataset only after this commits, off the request
+            # (assurance.closure_forward): no answer from Minotaur delays or undoes it.
+            queued = closure_forward.queue(record)
         return Response(
             {
                 "uuid": str(record.uuid),
@@ -2759,6 +2763,7 @@ class FindingViewSet(
                 "recorded_at": record.created_at.isoformat(),
                 "result": result,
                 "reasons": reasons,
+                "dataset_forward": "queued" if queued else "off",
                 "closure": closure_standing(Finding.objects.get(pk=finding.pk)),
             },
             status=status.HTTP_201_CREATED,
