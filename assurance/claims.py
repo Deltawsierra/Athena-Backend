@@ -820,6 +820,10 @@ def _refresh_machine_fields(
     ``audited``: that audit, already taken (:func:`_refresh_audit`) while the
     re-derive was planned outside the write lock; taken here when not given."""
     old_status = claim.status
+    # Whether the evidence audit was holding this claim as the refresh began: a
+    # refresh that lets that hold go writes the audit's move, not the deriver's.
+    was_held_by_audit = ea._held_by_audit(claim)
+    reading_before = ea.reading_status(claim)
     new_status = ea.reading_status(claim) if human_status else derived["status"]
     note = "Re-derived"
     if audited is None and audit_context is not None:
@@ -827,9 +831,11 @@ def _refresh_machine_fields(
     if audited is not None and audited["held"]:
         new_status = audited["status"]
         note = ea.audit_note(audited)
+    condition_held = False
     if held and _held_status(new_status) != new_status:
         new_status = _held_status(new_status)
         note = f"Re-derived; {_HELD}."
+        condition_held = True
 
     claim.statement = derived["statement"]
     claim.evidence_class = derived["evidence_class"]
@@ -873,7 +879,24 @@ def _refresh_machine_fields(
         ea.store_weighing(claim, audited)
 
     if status_changed:
-        by_audit = audited is not None and audited["held"] and new_status == audited["status"]
+        # The audit's move: its hold, or its hold let go -- a release lands the claim
+        # on the reading it kept under the hold, whoever set that reading. Recorded
+        # as the audit's (cause evidence_audit), so :func:`_persons_move` never reads
+        # a release as the move that set the reading: written as the deriver's, it
+        # hid a person's SUPPORTED, and the next re-derive lifted the claim to the
+        # deriver's VERIFIED (#124 review round 1, F1).
+        held_by_audit = audited is not None and audited["held"] and new_status == audited["status"]
+        # A release lands on the reading kept under the hold. When the claim moves
+        # anywhere else -- a STALE reading the deriver replaces with its own -- it is
+        # the deriver's move, recorded as the deriver's (#124 review round 2, F1-a).
+        released_by_audit = (
+            was_held_by_audit
+            and audited is not None
+            and not audited["held"]
+            and not condition_held
+            and new_status == reading_before
+        )
+        by_audit = held_by_audit or released_by_audit
         ClaimEvent.objects.create(
             claim=claim, from_status=old_status, to_status=new_status, actor=None, note=note,
             cause=ClaimEvent.CAUSE_EVIDENCE_AUDIT if by_audit else "",
@@ -1384,7 +1407,9 @@ def _write_plan(plan: _Plan) -> dict:
             derived=derived,
             now=now,
             held=step["held"],
-            audited=step["audited"] if action != "keep" else None,
+            # Stamped with the evidence token the plan read before its items, and
+            # checked under the lock just now (#124 review round 4, F1).
+            audited=ea.weighed_under(step["audited"], step["evidence"]) if action != "keep" else None,
         )
         if action == "create":
             _make_claim(dep, **common)
@@ -1397,7 +1422,7 @@ def _write_plan(plan: _Plan) -> dict:
                 row.input_fingerprint = step["input_fp"]
             if _refresh_machine_fields(
                 row, derived, plan.receipt_digest, now, human_status=step["human_status"], held=step["held"],
-                audit_context=step["audit_context"], audited=step["audited"],
+                audit_context=step["audit_context"], audited=common["audited"],
                 weighing_unchanged=step["weighing_unchanged"],
             ):
                 counts["updated"] += 1
@@ -1603,7 +1628,12 @@ def _move(claim: AssuranceClaim, to_status, *, actor, note: str) -> ClaimEvent:
     # or over adverse evidence it had to refuse -- is refused here, not made and then
     # undone: a person resolves the evidence, not the reading.
     now = timezone.now()
-    audited = ea.audit_of(claim, base_status=to_status.value, now=now, reading_by_person=True)
+    # The evidence token BEFORE the weighing, kept with the audit the move writes
+    # (ea.weighed_under; #124 review round 4, F1).
+    evidence = ea.evidence_token(claim.deployment_id, claim.fingerprint)
+    audited = ea.weighed_under(
+        ea.audit_of(claim, base_status=to_status.value, now=now, reading_by_person=True), evidence
+    )
     refusal = ea.refusal_for_transition(claim, to_status, now=now, audited=audited)
     if refusal:
         raise IllegalClaimTransition(refusal)
