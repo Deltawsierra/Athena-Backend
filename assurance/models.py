@@ -2424,6 +2424,11 @@ class RetestClosureEvidence(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     created_at = models.DateTimeField(default=timezone.now)
+    # The replay this run came from, as the engine service sent it
+    # (assurance.closure_evidence): Minotaur-Backend's remediation replay row, whose
+    # ``fixtures`` are this record's. Null for a record made without one, which the
+    # gate judges as it always did; a record that carries one is held to it too.
+    document = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ["created_at", "pk"]

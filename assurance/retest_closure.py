@@ -40,6 +40,18 @@ is not a closure and never comes here; nor does a finding without
 ``retest_required``. A later close of an INVALIDATED finding is one, and does: so
 an INVALIDATED finding is served what its closure would stand on, while an accepted
 or false-positive one is served ``not_a_closure`` (:func:`closure_standing`).
+
+A record may also carry the replay it came from (``document``: Minotaur-Backend's
+remediation replay row, recorded by the engine service through
+``POST /api/assurance/findings/<uuid>/closure-evidence/``, :mod:`assurance.closure_evidence`).
+Such a record is held to its replay as well (:func:`replay_reasons`): a replay that
+did not reach the target, could not tell whether the effect is gone on the original
+scenario or on every variant it replayed, or whether legitimate use survives, that
+replayed no variant at all, or that found the effect still produced or the use
+broken, carries no closure -- it is kept, and its result (:func:`classify`) is
+``inconclusive``, ``cosmetic``, ``partial`` or ``utility_breaking``. Every condition
+above still applies to it unchanged. A record without a replay (``document`` null)
+is judged exactly as before.
 """
 
 from __future__ import annotations
@@ -68,6 +80,25 @@ INCOMPLETE_REPAIR_PATTERNS = (
 
 # What each single-fixture class must have read for a closure to stand.
 _EXPECTED = {VULNERABLE: FAILED, REPAIRED: PASSED, BENIGN: PASSED}
+
+# The replay's vocabulary, verbatim from Minotaur-Backend's remediation-outcomes
+# dataset (minotaur_backend/remediation_outcomes.py): one document is read there and
+# here. What a replay can say about the effect on one path, and about legitimate use.
+GONE = "gone"
+PRESENT = "present"
+UNKNOWN = "unknown"
+EFFECT_READINGS = frozenset({GONE, PRESENT, UNKNOWN})
+RETAINED = "retained"
+BROKEN = "broken"
+UTILITY_READINGS = frozenset({RETAINED, BROKEN, UNKNOWN})
+
+#: What a replay comes to (:func:`classify`), the dataset's outcomes. Only
+#: ``verified_closed`` can stand behind a closure, and only through the gate.
+RESULT_VERIFIED_CLOSED = "verified_closed"
+RESULT_COSMETIC = "cosmetic"
+RESULT_PARTIAL = "partial"
+RESULT_UTILITY_BREAKING = "utility_breaking"
+RESULT_INCONCLUSIVE = "inconclusive"
 
 
 class ClosureRefused(ValueError):
@@ -126,6 +157,86 @@ def fixture_reasons(fixtures) -> list[str]:
 def _clip_repr(value, limit: int = 80) -> str:
     text = repr(value)
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _replay_verdict(document) -> tuple[str | None, list[str]]:
+    """``(result, reasons)`` for the replay ``document`` carries, in the dataset's own
+    order (Minotaur-Backend ``remediation_outcomes.classify``); ``(None, [])`` when the
+    replay shows the effect gone on the original scenario and every variant, at least
+    one variant replayed, and legitimate use retained. Never raises: whatever JSON a
+    record holds, an unreadable replay is a reason."""
+    replay = document.get("replay") if isinstance(document, dict) else None
+    if not isinstance(replay, dict):
+        return RESULT_INCONCLUSIVE, ["replay: unreadable"]
+    reached = replay.get("reached")
+    original = replay.get("original_effect")
+    variants = replay.get("variants")
+    utility = replay.get("utility")
+    if (
+        not isinstance(reached, bool)
+        or not _one_of(original, EFFECT_READINGS)
+        or not _one_of(utility, UTILITY_READINGS)
+        or not isinstance(variants, dict)
+        or not all(_one_of(v, EFFECT_READINGS) for v in variants.values())
+    ):
+        return RESULT_INCONCLUSIVE, ["replay: unreadable"]
+    if not reached:
+        return RESULT_INCONCLUSIVE, ["replay: did not reach the target, so nothing was observed"]
+    if original == UNKNOWN:
+        return RESULT_INCONCLUSIVE, ["replay: could not tell whether the original scenario's effect is gone"]
+    if original == PRESENT:
+        return RESULT_COSMETIC, ["replay: the original scenario still produces the unauthorized effect"]
+    present = sorted(str(name) for name, reading in variants.items() if reading == PRESENT)
+    if present:
+        return RESULT_PARTIAL, [f"replay: an adjacent path still produces the effect: {', '.join(present)}"]
+    unknown = sorted(str(name) for name, reading in variants.items() if reading == UNKNOWN)
+    if unknown:
+        return RESULT_INCONCLUSIVE, [
+            f"replay: could not tell whether these paths still produce the effect: {', '.join(unknown)}"
+        ]
+    if utility == BROKEN:
+        return RESULT_UTILITY_BREAKING, ["replay: the effect is gone, and so is the legitimate use"]
+    if utility == UNKNOWN:
+        return RESULT_INCONCLUSIVE, ["replay: could not tell whether the legitimate use survives"]
+    if not variants:
+        return RESULT_INCONCLUSIVE, [
+            "replay: no adjacent path was replayed; a closure needs the effect shown gone on at "
+            "least one variant beside the original scenario"
+        ]
+    return None, []
+
+
+def _one_of(value, vocabulary) -> bool:
+    return isinstance(value, str) and value in vocabulary
+
+
+def replay_reasons(document) -> list[str]:
+    """Every reason the replay ``document`` carries does not carry a closure; empty
+    when it does. What the gate adds for a record that carries a replay."""
+    return _replay_verdict(document)[1]
+
+
+def classify(document) -> tuple[str, list[str]]:
+    """``(result, reasons)`` of a whole replay document, as Minotaur-Backend's dataset
+    computes a row's outcome: the replay first (:func:`_replay_verdict`), then the
+    fixture document (a check not proven is ``inconclusive``), then the origin (only
+    an independent observer's replay verifies). ``verified_closed`` with no reasons,
+    or the result and every reason it is not. Says what a replay came to; never
+    decides a closure -- the gate does (:func:`enforce`)."""
+    result, reasons = _replay_verdict(document)
+    if result is not None:
+        return result, reasons
+    fixtures = fixture_reasons(document.get("fixtures"))
+    if fixtures:
+        return RESULT_INCONCLUSIVE, ["the check was not proven to tell the cases apart", *fixtures]
+    from .models import ClaimEvidence
+
+    origin = document.get("origin")
+    if origin != ClaimEvidence.Origin.INDEPENDENT:
+        return RESULT_INCONCLUSIVE, [
+            f"origin: {_clip_repr(origin)}, only an independent observer's replay verifies a closure"
+        ]
+    return RESULT_VERIFIED_CLOSED, []
 
 
 def latest_record(finding):
@@ -281,7 +392,12 @@ def _record_reasons(finding, record, *, last_seen=None) -> list[str]:
     last_seen = last_seen or finding.last_seen
     if last_seen is not None and record.created_at < last_seen:
         reasons.append("recorded before the finding was last observed: the defect was seen after the retest ran")
-    return reasons + fixture_reasons(record.fixtures)
+    reasons += fixture_reasons(record.fixtures)
+    # A record that carries the replay it came from is held to it too; one without
+    # (``document`` null) is judged as it always was.
+    if record.document is not None:
+        reasons += replay_reasons(record.document)
+    return reasons
 
 
 def enforce(finding, update_fields=None) -> None:
@@ -322,21 +438,28 @@ def enforce(finding, update_fields=None) -> None:
 
 
 def record_closure_evidence(
-    finding, *, fixtures, origin, content_digest="", summary="", recorded_by=None, now=None
+    finding, *, fixtures, origin, content_digest="", summary="", recorded_by=None, now=None, document=None
 ):
     """Record one retest run against ``finding``'s four fixture classes.
 
     ANYTHING WELL-FORMED IS RECORDED, as for claim evidence: a record whose
     incomplete repair passed is an honest record of a check that was fooled, and
     the gate reads it as such. Refused here only what cannot be a record: an
-    unknown origin, or fixtures that are not a mapping. Like
-    :func:`assurance.evidence_audit.record_claim_evidence`, this has no API route."""
+    unknown origin, fixtures that are not a mapping, or a ``document`` -- the replay
+    the run came from -- that is not a mapping or names other fixtures than the
+    record's. Its one API route is the engine service's
+    (:mod:`assurance.closure_evidence`), which always passes the document."""
     from .models import ClaimEvidence, RetestClosureEvidence
 
     if origin not in ClaimEvidence.Origin.values:
         raise ValueError(f"origin {origin!r} is not one of {sorted(ClaimEvidence.Origin.values)}")
     if not isinstance(fixtures, dict):
         raise ValueError("fixtures must be a mapping of fixture class to run")
+    if document is not None:
+        if not isinstance(document, dict):
+            raise ValueError("document must be a mapping: the replay the run came from")
+        if "fixtures" in document and document["fixtures"] != fixtures:
+            raise ValueError("document names other fixtures than the record's")
     return RetestClosureEvidence.objects.create(
         finding=finding,
         fixtures=fixtures,
@@ -345,4 +468,5 @@ def record_closure_evidence(
         summary=summary or "",
         recorded_by=recorded_by,
         created_at=now or timezone.now(),
+        document=document,
     )
