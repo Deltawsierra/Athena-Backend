@@ -16,6 +16,7 @@ from .change import CHANGE_LABELS, age_days, change_status, is_stale
 from .claim_confidence import confidence_basis as claim_confidence_basis
 from .composition import EVIDENCE_LABELS, evidence_kind
 from .receipt import finding_receipt
+from .retest_closure import closure_standing
 from .models import (
     ApprovedWorkflow,
     Asset,
@@ -134,9 +135,17 @@ class FindingSerializer(serializers.ModelSerializer):
     # about a state that exists *because* its wrong reading is easy. The caveat
     # beside it is served from the same table for the same reason.
     status_label = serializers.CharField(source="get_status_display", read_only=True)
+    # What a closure of this finding stands on: the closure gate's own verdict
+    # (assurance.retest_closure), per finding. "verified_closed" is the only
+    # standing that says a closure is effect-backed; a closed finding that asked
+    # for no retest reads "closed_without_retest", never verified.
+    closure = serializers.SerializerMethodField()
 
     def get_status_must_not_imply(self, obj) -> str | None:
         return Finding.MUST_NOT_IMPLY.get(obj.status)
+
+    def get_closure(self, obj) -> dict:
+        return closure_standing(obj)
 
     class Meta:
         model = Finding
@@ -164,6 +173,7 @@ class FindingSerializer(serializers.ModelSerializer):
             "control_mapping",
             "location",
             "retest_required",
+            "closure",
             "evidence_class",
             "evidence",
             "asset_uuid",
@@ -183,6 +193,19 @@ class FindingSerializer(serializers.ModelSerializer):
             for f in fields
             if f not in ("status", "risk_accepted_until", "owner", "business_impact")
         ]
+
+    def update(self, instance, validated_data):
+        """Write only the fields this request set. A whole-row save wrote every column
+        back from the copy loaded at the start of the request, so an owner's edit
+        undid a re-observation ingest recorded meanwhile (``last_seen``,
+        ``retest_required``), and a finding seen again since its retest read
+        verified closed once more (#125 review round 2, M1)."""
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save(update_fields=[*validated_data, "updated_at"])
+        # The response says what is stored now, not what this copy loaded.
+        instance.refresh_from_db()
+        return instance
 
     def validate(self, attrs):
         """An accepted risk names when its acceptance ends (owner decision Q6).

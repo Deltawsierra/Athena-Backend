@@ -365,7 +365,10 @@ def test_no_code_path_writes_a_findings_disposition_past_save():
         for p in (REPO / "assurance").rglob("*.py")
         if "migrations" not in p.parts
     }
-    bypass = re.compile(r"(\.update|bulk_update)\((?:[^()]|\([^()]*\))*\b(status|remediation_state)\b", re.S)
+    # The retest flag too: a queryset update lowering it would let a close past the
+    # gate, and the flagger scan below only matches it as a dict key or an
+    # assignment (#125 review round 2, L5).
+    bypass = re.compile(r"(\.update|bulk_update)\((?:[^()]|\([^()]*\))*\b(status|remediation_state|retest_required)\b", re.S)
     for path, text in sources.items():
         for match in bypass.finditer(text):
             assert "Finding" not in match.group(0) and "findings" not in text[max(0, match.start() - 200):match.start()], (
