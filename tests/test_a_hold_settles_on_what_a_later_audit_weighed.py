@@ -285,3 +285,75 @@ def test_what_an_audit_weighed_is_bookkeeping_and_never_served():
     current = _current(dep)
     assert "weighed_evidence" in current.evidence_audit
     assert "weighed_evidence" not in ea.served_audit(current)
+
+
+# ---------------------------------------------------------------------------
+# Round 5: the stamp is never newer than what was weighed
+# ---------------------------------------------------------------------------
+
+
+def _behind_the_audits(claim):
+    """Record an item no audit weighs: a raw copy of the claim's first item."""
+    first = ClaimEvidence.objects.filter(claim_fingerprint=claim.fingerprint).values().first()
+    ClaimEvidence.objects.create(
+        **{k: v for k, v in first.items() if k not in ("id", "uuid", "created_at", "superseded_by_id")}
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_person_s_move_stamps_the_evidence_read_before_it_weighed(monkeypatch):
+    """The token is read BEFORE the move's audit reads the items. Read after, an item
+    recorded between the two would be in the stamp and not in the weighing: a stamp
+    newer than what was weighed, which a fallback would settle on (round 5, L1)."""
+    dep = _deployment("r5-move-order")
+    claim = _access_claim(dep)
+    ea.record_claim_evidence(claim, **_good(claim))
+    real = ea.audit_of
+
+    def audit_of(claim_, **kwargs):
+        out = real(claim_, **kwargs)
+        if kwargs.get("reading_by_person"):
+            _behind_the_audits(claim)  # after the items were weighed
+        return out
+
+    monkeypatch.setattr(ea, "audit_of", audit_of)
+    claims_module.apply_claim_transition(_current(dep), Status.SUPPORTED, actor=_person("r5-move"), note="down")
+    monkeypatch.undo()
+
+    stamp = _current(dep).evidence_audit["weighed_evidence"]
+    assert stamp != ea.evidence_digest(ea.evidence_token(dep.pk, claim.fingerprint)), (
+        "the move's stamp names an item its audit never weighed"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_re_derive_planned_again_stamps_the_evidence_read_before_its_items(monkeypatch):
+    """A re-derive whose evidence moved under the lock plans again: the token, then the
+    items. Read the other way round, an item recorded between them would be in the
+    token the lock checks and not in the audit written, stamped as weighed
+    (round 5, L2). The audit written weighs every item the stamp names."""
+    dep = _deployment("r5-replan-order")
+    claim = _access_claim(dep)
+    ea.record_claim_evidence(claim, **_good(claim))
+    AssuranceClaim.objects.filter(pk=_current(dep).pk).update(statement="changed, so the re-derive refreshes it")
+    real = claims_module._evidence_by_identity
+    calls = {"n": 0}
+
+    def evidence_by_identity(deployment, fingerprint=None):
+        out = real(deployment, fingerprint)
+        calls["n"] += 1
+        if calls["n"] <= 2:  # after the plan's read, and after the first re-plan's
+            _behind_the_audits(claim)
+        return out
+
+    monkeypatch.setattr(claims_module, "_evidence_by_identity", evidence_by_identity)
+    claims_module.derive_claims(dep)
+    monkeypatch.undo()
+
+    current = _current(dep)
+    audit = current.evidence_audit
+    weighed = sum(audit["counts"][key] for key in ("admitted", "refused"))
+    in_force = ClaimEvidence.objects.filter(claim_fingerprint=claim.fingerprint).count()
+    assert calls["n"] >= 3, "the re-derive did not plan again"
+    if audit.get("weighed_evidence") == ea.evidence_digest(ea.evidence_token(dep.pk, claim.fingerprint)):
+        assert weighed == in_force, "the stamp names evidence the written audit never weighed"
