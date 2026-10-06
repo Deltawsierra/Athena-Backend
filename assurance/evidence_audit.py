@@ -102,6 +102,8 @@ evidence record can establish it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import timedelta
@@ -880,6 +882,16 @@ def evidence_token(deployment_id, fingerprint: str | None = None) -> tuple:
     return (agg["n"], agg["last"], agg["invalidated"], agg["attributed"], agg["last_invalidated"], agg["superseded"])
 
 
+def evidence_digest(token: tuple) -> str:
+    """An :func:`evidence_token`, as it is kept in a stored audit (JSON): equal
+    exactly when the tokens are."""
+    canonical = json.dumps(
+        [value.isoformat() if hasattr(value, "isoformat") else value for value in token],
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def audit_claim(claim: AssuranceClaim, *, now=None) -> dict | None:
     """Audit a CURRENT claim version in place and write the answer onto it -- or,
     where the version was superseded before its audit ran, the claim identity's
@@ -957,6 +969,11 @@ def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
             _adopt(claim, read)
             return None
         result = audit_of(read, now=now)
+        if result is not None:
+            # The evidence this weighing weighed, kept with it: written only under
+            # the very token, so a later fallback can tell an audit that weighed the
+            # evidence in force from one that did not (#124 review round 3, F1).
+            result = {**result, "weighed_evidence": evidence_digest(evidence)}
         with transaction.atomic():
             row = _locked_row(read)
             if claim_token(row) == claim_token(read) and evidence_token(row.deployment_id, row.fingerprint) == evidence:
@@ -976,23 +993,34 @@ def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
 
 
 def _settled_since(row: AssuranceClaim, read: AssuranceClaim, evidence: tuple) -> bool:
-    """Whether the locked row ``row`` carries an audit written since ``read`` -- the
-    last read an overtaken audit weighed -- of exactly the evidence that read saw
-    (``evidence``), current for the status the row reads.
+    """Whether the locked row ``row`` carries an audit WEIGHED since ``read`` -- the
+    last read an overtaken audit weighed -- of the evidence in force now, current for
+    the status the row reads.
 
     The evidence token never goes back (an item recorded, invalidated or attributed
     only moves it on), and every audit writes only when the token under the lock is
-    the one it weighed. So when the token now is the one ``read`` saw, an audit
-    written since weighed that same evidence: the claim is settled, and marking it
-    unsettled would hold a weighed VERIFIED at UNKNOWN (#124 review round 1, F2).
+    the one it weighed. So an audit written since ``read`` weighed the evidence in
+    force when the token now is the one ``read`` saw (``evidence``) -- or the one
+    that audit records it weighed (``weighed_evidence``): a later ingest whose own
+    audit settled first (#124 review round 3, F1). Then the claim is settled, and
+    marking it unsettled would hold a weighed VERIFIED at UNKNOWN (round 1, F2).
+
+    Weighed, not merely rewritten: a stale-mark (:func:`hold_reading_at_stale`) or a
+    stop over a hold (:func:`taken_down`) rewrites the stored audit and keeps its
+    ``audited_at``, and settles nothing (round 3, F2).
+
     Reads the row and the one aggregate every write already takes under the lock;
     the evidence is never weighed here."""
     audit = row.evidence_audit or {}
-    if not audit or audit.get("unsettled") or audit == (read.evidence_audit or {}):
+    before = read.evidence_audit or {}
+    if not audit or audit.get("unsettled") or audit == before:
+        return False
+    if audit.get("audited_at") == before.get("audited_at"):
         return False
     if not audit_is_current(row):
         return False
-    return evidence_token(row.deployment_id, row.fingerprint) == evidence
+    now = evidence_token(row.deployment_id, row.fingerprint)
+    return now == evidence or audit.get("weighed_evidence") == evidence_digest(now)
 
 
 #: Why a stored audit is unsettled (:func:`_record_unsettled`).
@@ -1158,10 +1186,19 @@ def _refusal(result: dict) -> str:
     # next audit settles it (#124 review round 2, F3-a).
     if contradictions or result.get("verdict") or not unsettled:
         why = contradictions or f"the evidence reads {verdict}"
-        later = f" Since then: {unsettled.rstrip('.')}." if unsettled else ""
+        # Said in its own words here: UNSETTLED describes the hold an unsettled
+        # audit puts on a claim (at unknown), and this hold is the weighed one
+        # (#124 review round 3, F3).
+        weighed = f"as last weighed, {verdict}" if unsettled else verdict
+        later = (
+            f" A later audit could not be weighed (the claim or its evidence moved before each of "
+            f"{AUDIT_ATTEMPTS} weighings could be written), so this hold stands until one is."
+            if unsettled
+            else ""
+        )
         return _clip(
             f"The evidence recorded against this claim holds it at {result.get('status')} "
-            f"({verdict}): {why.rstrip('.')}.{later} Resolve the evidence first -- invalidate an "
+            f"({weighed}): {why.rstrip('.')}.{later} Resolve the evidence first -- invalidate an "
             "item with a reason, or record independent evidence -- rather than choosing a reading."
         )
     return _clip(
