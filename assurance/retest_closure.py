@@ -84,8 +84,11 @@ def _run_reason(name, entry, expected):
     if not entry["ran"]:
         return f"{name}: not run"
     outcome = entry.get("outcome")
-    if outcome not in OUTCOMES:
-        return f"{name}: unreadable outcome {outcome!r}"
+    # A string first: an object or a list is unhashable, and the membership test
+    # raised on it -- a 500 for every read of a finding carrying such a record
+    # (#125 review round 1, F2).
+    if not isinstance(outcome, str) or outcome not in OUTCOMES:
+        return f"{name}: unreadable outcome {_clip_repr(outcome)}"
     if outcome == expected:
         return None
     if expected == FAILED and outcome == PASSED and name.startswith(INCOMPLETE_REPAIR):
@@ -117,20 +120,34 @@ def fixture_reasons(fixtures) -> list[str]:
     return reasons
 
 
+def _clip_repr(value, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def latest_record(finding):
     """The latest :class:`RetestClosureEvidence` of ``finding`` -- the one the gate
-    reads -- or None. Read from the prefetched records when a list view prefetched
-    them (``closure_evidence``), so serving the closure standing of a page of
-    findings is one query, not one per finding."""
+    reads -- or None. Always read from the database, now: the gate decides on it at
+    the save (:func:`enforce`), and a record committed after the finding was loaded
+    -- a fooled retest landing mid-request -- must be the one it reads (#125 review
+    round 1, F1)."""
     from .models import RetestClosureEvidence
 
     if finding.pk is None:
         return None
-    cached = getattr(finding, "_prefetched_objects_cache", {}).get("closure_evidence")
-    if cached is not None:
-        records = list(cached)
-        return max(records, key=lambda r: (r.created_at, r.pk)) if records else None
     return RetestClosureEvidence.objects.filter(finding_id=finding.pk).order_by("-created_at", "-pk").first()
+
+
+def _served_latest(finding):
+    """:func:`latest_record`, for SERVING only (:func:`closure_standing`): read from
+    the prefetched records when the view prefetched them (``closure_evidence``), so
+    a page of findings is one query, not one per finding. Same order as the query:
+    the latest ``created_at``, the highest pk among equals. Never the gate's read."""
+    cached = getattr(finding, "_prefetched_objects_cache", {}).get("closure_evidence")
+    if cached is None or finding.pk is None:
+        return latest_record(finding)
+    records = list(cached)
+    return max(records, key=lambda r: (r.created_at, r.pk)) if records else None
 
 
 #: What a reader is told a finding's closure stands on (:func:`closure_standing`).
@@ -139,6 +156,11 @@ CLOSABLE = "closable"
 NOT_CLOSABLE = "not_closable"
 CLOSED_UNVERIFIED = "closed_without_retest"
 NOT_GATED = "not_retest_gated"
+NOT_A_CLOSURE = "not_a_closure"
+
+#: Dispositions that are not closures (:attr:`Finding.Status`): a human decision to
+#: carry the risk, or that there was none. No closure is claimed, so none is served.
+_DISPOSITIONS = frozenset({"accepted", "false_positive"})
 
 
 def closure_standing(finding) -> dict:
@@ -147,30 +169,34 @@ def closure_standing(finding) -> dict:
 
     ``standing``:
 
-    - ``verified_closed``   -- closed or resolved, retest-gated, and its latest
-      closure evidence carries the closure now (every fixture class and pattern
-      ran with the outcome a closure needs, an independent observer's, after the
-      finding was last seen). The only standing that says a closure is effect-backed.
-    - ``closable``          -- open, retest-gated, and its latest evidence would
-      carry a closure if one were made now.
+    - ``verified_closed``   -- CLOSED, retest-gated, and its latest closure
+      evidence carries the closure now (every fixture class and pattern ran with
+      the outcome a closure needs, an independent observer's, after the finding
+      was last seen). The only standing that says a closure is effect-backed.
+      Status CLOSED only: a remediation RESOLVED says someone called the work
+      done, not that the finding is closed (#125 review round 1, F3).
+    - ``closable``          -- not closed, retest-gated, and its latest evidence
+      would carry a closure if one were made now.
     - ``not_closable``      -- retest-gated, and the evidence would not carry a
       closure: ``reasons`` names every reason, as the gate would refuse. A closed
       finding reads this when its evidence no longer carries it (seen again since).
-    - ``closed_without_retest`` -- closed or resolved without asking for a retest:
-      a disposition, never an effect-backed closure, and said so.
-    - ``not_retest_gated``  -- open, and no retest was asked for.
+    - ``closed_without_retest`` -- closed without asking for a retest: a
+      disposition, never an effect-backed closure, and said so.
+    - ``not_retest_gated``  -- not closed, and no retest was asked for.
+    - ``not_a_closure``     -- accepted as residual risk, or a false positive: a
+      human decision, not a closure, so no closure standing is claimed for it.
 
     ``evidence`` is the latest record's provenance and, per fixture class and
     pattern, whether it ran and how it came out -- or None when there is none.
     Pure reads; never writes."""
     from .models import Finding
 
-    record = latest_record(finding)
-    closed = finding.status == Finding.Status.CLOSED or (
-        finding.remediation_state == Finding.RemediationState.RESOLVED
-    )
-    reasons = refusal_reasons(finding) if finding.retest_required else []
-    if not finding.retest_required:
+    record = _served_latest(finding)
+    closed = finding.status == Finding.Status.CLOSED
+    reasons = _record_reasons(finding, record) if finding.retest_required else []
+    if finding.status in _DISPOSITIONS:
+        standing, reasons = NOT_A_CLOSURE, []
+    elif not finding.retest_required:
         standing = CLOSED_UNVERIFIED if closed else NOT_GATED
     elif reasons:
         standing = NOT_CLOSABLE
@@ -188,9 +214,15 @@ def closure_standing(finding) -> dict:
 
 
 def _run_of(entry) -> dict:
+    """One run as it is served: ``outcome`` is one of :data:`OUTCOMES`, ``None``
+    when it did not run, or ``"unreadable"`` -- never the record's raw value, which
+    is whatever JSON the recorder wrote (#125 review round 1, F4)."""
     if not isinstance(entry, dict) or not isinstance(entry.get("ran"), bool):
         return {"ran": None, "outcome": "unreadable"}
-    return {"ran": entry["ran"], "outcome": entry.get("outcome") if entry["ran"] else None}
+    if not entry["ran"]:
+        return {"ran": False, "outcome": None}
+    outcome = entry.get("outcome")
+    return {"ran": True, "outcome": outcome if isinstance(outcome, str) and outcome in OUTCOMES else "unreadable"}
 
 
 def _served_record(record) -> dict:
@@ -215,9 +247,14 @@ def refusal_reasons(finding, *, last_seen=None) -> list[str]:
     """Why ``finding`` may not be closed on its latest closure evidence; empty when
     it may. ``last_seen`` is the latest observation of the defect (defaults to the
     finding's own)."""
+    return _record_reasons(finding, latest_record(finding), last_seen=last_seen)
+
+
+def _record_reasons(finding, record, *, last_seen=None) -> list[str]:
+    """:func:`refusal_reasons` of ``record``, the latest closure evidence as the
+    caller read it."""
     from .models import ClaimEvidence
 
-    record = latest_record(finding)
     if record is None:
         return [
             "no closure evidence recorded: a retest-gated closure needs the vulnerable, repaired, "
