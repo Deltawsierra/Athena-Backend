@@ -177,8 +177,9 @@ def emit_now(level, msg, *args, logger_name=None) -> None:
 
 def drain(limit: float = 5.0) -> int:
     """Wait, for at most ``limit`` seconds, until everything queued is written:
-    through the pump while it runs, here if it does not. Returns how many records
-    are left. For the process's exit, and for a test that reads what was logged."""
+    through the pump while it runs, here if it does not, and for a record another
+    thread has popped and is still writing. Returns how many records are left (a
+    write still in flight counts as one). For the process's exit, and for a test that reads what was logged."""
     deadline = time.monotonic() + limit
     pid = os.getpid()
     while time.monotonic() < deadline:
@@ -188,9 +189,12 @@ def drain(limit: float = 5.0) -> int:
             pump = _PUMP[0] if _PUMP else None
             record = None
             if pump is None or pump[0] != pid or not pump[1].is_alive():
-                if not _BUF:
-                    return 0
-                record = _BUF.popleft()
+                # Nothing queued here but ``_BUSY`` set (the check above): a pump
+                # that is not this process's own -- one a test left running -- has
+                # popped a record and is still writing it. Wait for it, within
+                # ``limit``, rather than report it written.
+                if _BUF:
+                    record = _BUF.popleft()
         if record is None:
             time.sleep(0.01)
         else:
