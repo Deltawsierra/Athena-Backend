@@ -1,0 +1,4 @@
+# The release-gate job (.github/workflows/release-gate.yml) is what a release is held to,
+# and a pull request runs the workflow file as it has it: so any change under .github/
+# needs the code owner's review. Pair with "Require review from Code Owners" in branch protection.
+/.github/ @Deltawsierra
