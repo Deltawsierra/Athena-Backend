@@ -823,6 +823,7 @@ def _refresh_machine_fields(
     # Whether the evidence audit was holding this claim as the refresh began: a
     # refresh that lets that hold go writes the audit's move, not the deriver's.
     was_held_by_audit = ea._held_by_audit(claim)
+    reading_before = ea.reading_status(claim)
     new_status = ea.reading_status(claim) if human_status else derived["status"]
     note = "Re-derived"
     if audited is None and audit_context is not None:
@@ -885,7 +886,16 @@ def _refresh_machine_fields(
         # hid a person's SUPPORTED, and the next re-derive lifted the claim to the
         # deriver's VERIFIED (#124 review round 1, F1).
         held_by_audit = audited is not None and audited["held"] and new_status == audited["status"]
-        released_by_audit = was_held_by_audit and audited is not None and not audited["held"] and not condition_held
+        # A release lands on the reading kept under the hold. When the claim moves
+        # anywhere else -- a STALE reading the deriver replaces with its own -- it is
+        # the deriver's move, recorded as the deriver's (#124 review round 2, F1-a).
+        released_by_audit = (
+            was_held_by_audit
+            and audited is not None
+            and not audited["held"]
+            and not condition_held
+            and new_status == reading_before
+        )
         by_audit = held_by_audit or released_by_audit
         ClaimEvent.objects.create(
             claim=claim, from_status=old_status, to_status=new_status, actor=None, note=note,

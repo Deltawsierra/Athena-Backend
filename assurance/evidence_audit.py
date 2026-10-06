@@ -946,11 +946,16 @@ def _audit_in_place(claim: AssuranceClaim, now) -> dict | None:
     from .claims import _adopt, _locked_row
 
     for _attempt in range(AUDIT_ATTEMPTS):
+        # The evidence token BEFORE the row: an audit written between the two reads
+        # weighed evidence no newer than this token, so `_settled_since` can trust
+        # that an audit written since `read` weighed exactly this evidence (#124
+        # review round 2, F2-a). The identity (deployment, fingerprint) is the
+        # claim's own and does not change between the reads.
+        evidence = evidence_token(claim.deployment_id, claim.fingerprint)
         read = AssuranceClaim.objects.select_related("deployment").get(pk=claim.pk)
         if not _is_audited(read):
             _adopt(claim, read)
             return None
-        evidence = evidence_token(read.deployment_id, read.fingerprint)
         result = audit_of(read, now=now)
         with transaction.atomic():
             row = _locked_row(read)
@@ -1147,7 +1152,11 @@ def _refusal(result: dict) -> str:
     contradictions = "; ".join(result.get("contradictions") or [])
     unsettled = result.get("unsettled")
     verdict = result.get("verdict") or ("unsettled" if unsettled else "no verdict")
-    if contradictions or not unsettled:
+    # A hold the evidence was weighed into (a verdict) keeps its own words: what holds
+    # it, and that resolving the evidence is the way through. Only a hold that rests
+    # on an unsettled audit alone -- no verdict, no contradiction -- says that its
+    # next audit settles it (#124 review round 2, F3-a).
+    if contradictions or result.get("verdict") or not unsettled:
         why = contradictions or f"the evidence reads {verdict}"
         later = f" Since then: {unsettled.rstrip('.')}." if unsettled else ""
         return _clip(
