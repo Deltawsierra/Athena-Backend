@@ -190,3 +190,110 @@ def test_a_closure_served_verified_names_the_origin_it_stands_on_and_an_ungated_
     _record(vendor, origin=ClaimEvidence.Origin.VENDOR)
     served = _served(Finding.objects.get(pk=vendor.pk))
     assert served["reasons"] == [] and served["evidence"]["origin"] == ClaimEvidence.Origin.VENDOR
+
+
+# ---------------------------------------------------------------------------
+# Round 2
+# ---------------------------------------------------------------------------
+
+
+def _close(finding):
+    finding = Finding.objects.get(pk=finding.pk)
+    finding.status = Finding.Status.CLOSED
+    finding.save()
+    return Finding.objects.get(pk=finding.pk)
+
+
+def test_an_owner_s_edit_never_undoes_a_re_observation_ingest_recorded_meanwhile(monkeypatch):
+    """A PATCH saved the whole row from the copy it loaded, so an owner's edit wrote
+    back the last_seen ingest had just moved on, and a finding seen again since its
+    retest read verified closed once more (#125 review round 2, M1)."""
+    finding = _finding()
+    now = timezone.now()
+    _record(finding, now=now)
+    closed = _close(finding)
+    assert _served(closed)["standing"] == VERIFIED_CLOSED
+    seen_again = now + timedelta(hours=1)
+    validate = serializers_module.FindingSerializer.validate
+
+    def ingest_lands(self, attrs):
+        Finding.objects.filter(pk=closed.pk).update(last_seen=seen_again)
+        return validate(self, attrs)
+
+    monkeypatch.setattr(serializers_module.FindingSerializer, "validate", ingest_lands)
+    request = APIRequestFactory().patch("/x/", {"business_impact": "the ledger"}, format="json")
+    force_authenticate(request, user=closed.deployment.owner)
+
+    response = FindingViewSet.as_view({"patch": "partial_update"})(request, uuid=str(closed.uuid))
+
+    assert response.status_code == 200, response.data
+    stored = Finding.objects.get(pk=closed.pk)
+    assert stored.business_impact == "the ledger"
+    assert stored.last_seen == seen_again, "the owner's edit wrote back the last_seen it had loaded"
+    assert response.data["closure"]["standing"] == NOT_CLOSABLE
+    assert _served(stored)["standing"] == NOT_CLOSABLE
+
+
+@pytest.mark.parametrize("stale_side", ["stored", "instance"])
+def test_the_gate_judges_a_close_on_the_later_of_the_two_last_seen(stale_side):
+    """The gate reads last_seen from both the stored row and the instance being
+    saved, and judges by the later (round 2, L1): a close from a copy that has not
+    seen a re-observation, or that carries one the row has not, is refused."""
+    finding = _finding()
+    now = timezone.now()
+    _record(finding, now=now)
+    loaded = Finding.objects.get(pk=finding.pk)
+    if stale_side == "stored":
+        Finding.objects.filter(pk=finding.pk).update(last_seen=now + timedelta(hours=1))
+    else:
+        loaded.last_seen = now + timedelta(hours=1)
+    loaded.status = Finding.Status.CLOSED
+
+    with pytest.raises(ClosureRefused, match="last observed"):
+        loaded.save()
+
+
+def test_a_closed_finding_seen_again_at_a_lower_severity_still_stands_on_its_retest():
+    """Ingest lowers retest_required for a low re-observation, and the closed finding
+    was served closed without a retest, hiding that it was seen again after the
+    retest it was closed on (round 2, L2). It stands on that evidence still."""
+    finding = _finding()
+    now = timezone.now()
+    _record(finding, now=now)
+    closed = _close(finding)
+    Finding.objects.filter(pk=closed.pk).update(severity="low", retest_required=False, last_seen=now + timedelta(hours=1))
+
+    served = _served(Finding.objects.get(pk=closed.pk))
+
+    assert served["standing"] == NOT_CLOSABLE
+    assert any("last observed" in reason for reason in served["reasons"])
+    assert served["retest_required"] is False
+
+    never_retested = _close(_finding(retest_required=False))
+    assert _served(never_retested)["standing"] == "closed_without_retest"
+
+
+def test_an_accepted_finding_on_a_refused_retest_is_still_not_a_closure_with_no_reasons():
+    finding = _finding(status=Finding.Status.ACCEPTED)
+    _record(finding, _fooled())
+
+    served = _served(Finding.objects.get(pk=finding.pk))
+
+    assert served["standing"] == NOT_A_CLOSURE
+    assert served["reasons"] == [], "the gate's reasons are for a closure, and none is claimed"
+
+
+@pytest.mark.parametrize(
+    "status", [Finding.Status.INVALIDATED, Finding.Status.CONTAINED, Finding.Status.RETESTING]
+)
+def test_a_finding_that_may_still_be_closed_is_served_what_its_closure_would_stand_on(status):
+    """INVALIDATED is not a closure, but a later close of one goes through the gate
+    (round 2, L3); so it, and every other status that may still be closed, is
+    served closable or not as the gate would decide."""
+    passing = _finding(status=status)
+    _record(passing)
+    fooled = _finding(status=status)
+    _record(fooled, _fooled())
+
+    assert _served(Finding.objects.get(pk=passing.pk))["standing"] == CLOSABLE
+    assert _served(Finding.objects.get(pk=fooled.pk))["standing"] == NOT_CLOSABLE

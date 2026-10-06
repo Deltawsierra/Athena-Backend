@@ -35,8 +35,11 @@ independent observer (the only origin that carries weight, as for claim evidence
 a record naming no artifact digest; a record older than the finding's last
 observation (the scan saw the defect after the retest ran); and any fixture class
 or pattern missing, not run, unreadable, or with the wrong outcome. A refused move
-leaves the finding where it was. ACCEPTED, FALSE_POSITIVE and INVALIDATED are not
-closures and never come here; nor does a finding without ``retest_required``.
+leaves the finding where it was. A move to ACCEPTED, FALSE_POSITIVE or INVALIDATED
+is not a closure and never comes here; nor does a finding without
+``retest_required``. A later close of an INVALIDATED finding is one, and does: so
+an INVALIDATED finding is served what its closure would stand on, while an accepted
+or false-positive one is served ``not_a_closure`` (:func:`closure_standing`).
 """
 
 from __future__ import annotations
@@ -158,9 +161,13 @@ CLOSED_UNVERIFIED = "closed_without_retest"
 NOT_GATED = "not_retest_gated"
 NOT_A_CLOSURE = "not_a_closure"
 
-#: Dispositions that are not closures (:attr:`Finding.Status`): a human decision to
-#: carry the risk, or that there was none. No closure is claimed, so none is served.
-_DISPOSITIONS = frozenset({"accepted", "false_positive"})
+def _dispositions() -> frozenset:
+    """Dispositions that are not closures (:attr:`Finding.Status`): a human decision
+    to carry the risk, or that there was none. No closure is claimed, so none is
+    served."""
+    from .models import Finding
+
+    return frozenset({Finding.Status.ACCEPTED, Finding.Status.FALSE_POSITIVE})
 
 
 def closure_standing(finding) -> dict:
@@ -193,10 +200,16 @@ def closure_standing(finding) -> dict:
 
     record = _served_latest(finding)
     closed = finding.status == Finding.Status.CLOSED
-    reasons = _record_reasons(finding, record) if finding.retest_required else []
-    if finding.status in _DISPOSITIONS:
+    # A closed finding with closure evidence was closed on it -- the gate counts a
+    # retest asked of either copy -- and stands on it still, whatever the flag reads
+    # now: a re-observation at a lower severity lowers the flag (ingest), and was
+    # served "closed without a retest", hiding that the defect was seen again
+    # after its retest (#125 review round 2, L2).
+    gated = bool(finding.retest_required) or (closed and record is not None)
+    reasons = _record_reasons(finding, record) if gated else []
+    if finding.status in _dispositions():
         standing, reasons = NOT_A_CLOSURE, []
-    elif not finding.retest_required:
+    elif not gated:
         standing = CLOSED_UNVERIFIED if closed else NOT_GATED
     elif reasons:
         standing = NOT_CLOSABLE

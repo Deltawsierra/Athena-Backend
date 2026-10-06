@@ -194,6 +194,19 @@ class FindingSerializer(serializers.ModelSerializer):
             if f not in ("status", "risk_accepted_until", "owner", "business_impact")
         ]
 
+    def update(self, instance, validated_data):
+        """Write only the fields this request set. A whole-row save wrote every column
+        back from the copy loaded at the start of the request, so an owner's edit
+        undid a re-observation ingest recorded meanwhile (``last_seen``,
+        ``retest_required``), and a finding seen again since its retest read
+        verified closed once more (#125 review round 2, M1)."""
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save(update_fields=[*validated_data, "updated_at"])
+        # The response says what is stored now, not what this copy loaded.
+        instance.refresh_from_db()
+        return instance
+
     def validate(self, attrs):
         """An accepted risk names when its acceptance ends (owner decision Q6).
 
