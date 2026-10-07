@@ -206,6 +206,31 @@ def test_a_replayed_outcome_is_refused(service):
     assert WorkflowChainOutcome.objects.filter(observer_engine="achilles-effect").count() == 1
 
 
+def test_a_replay_that_races_past_the_check_is_still_a_named_refusal(service, monkeypatch):
+    """Two posts of one dispatch racing: the second passes the dedupe query before the
+    first commits. The unique column stops it, and the answer is a named 400 -- not a
+    500 -- with nothing recorded twice."""
+    dep, _, permit, _ = _world()
+    envelope, evidence = signed_chains.observed_effect(dep, WF, permit.outcome_id, _now(2))
+    assert _send(service, dep, envelope, evidence).status_code == 201
+    replay, replay_evidence = signed_chains.observed_effect(
+        dep, WF, permit.outcome_id, _now(1), dispatch_id=evidence["dispatch_id"]
+    )
+    real = WorkflowChainOutcome.objects.filter
+
+    def racing(*args, **kwargs):
+        if "effect_dispatch_id__in" in kwargs:  # the first post has not committed yet
+            return WorkflowChainOutcome.objects.none()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(WorkflowChainOutcome.objects, "filter", racing)
+    resp = _send(service, dep, replay, replay_evidence)
+    monkeypatch.undo()
+    assert resp.status_code == 400, resp.content
+    assert "another post recorded it first" in resp.json()["refused"][0]["reason"]
+    assert WorkflowChainOutcome.objects.filter(effect_dispatch_id=evidence["dispatch_id"]).count() == 1
+
+
 def test_an_outcome_signed_for_another_deployment_is_refused(service):
     dep, _, permit, _ = _world()
     other, _, _, _ = _world()
@@ -277,8 +302,9 @@ def _chain_citing(client, dep, permit, row, **kw):
         ({"tool": ("skill", "crm-mcp")}, "effect_other_tool"),
         ({"workflow": "other-workflow"}, "effect_outcome_other_workflow"),
         ({"gate": "another"}, "effect_other_dispatch"),
+        ({"action": "customer:delete"}, "effect_other_action"),
     ],
-    ids=["another-tool", "another-kind", "another-workflow", "another-gate-decision"],
+    ids=["another-tool", "another-kind", "another-workflow", "another-gate-decision", "another-action"],
 )
 def test_an_observation_that_does_not_match_the_invokes_hop_does_not_prove_it(service, observed, code):
     dep, client, permit, _ = _world()
@@ -286,7 +312,8 @@ def test_an_observation_that_does_not_match_the_invokes_hop_does_not_prove_it(se
     if observed.get("gate"):
         gate = signed_chains.record_signed(dep, WF, oc.HELD, _now(3)).outcome_id
     row = signed_chains.record_observed_effect(
-        dep, observed.get("workflow", WF), gate, _now(), tool=observed.get("tool", ("mcp_server", "crm-mcp"))
+        dep, observed.get("workflow", WF), gate, _now(), tool=observed.get("tool", ("mcp_server", "crm-mcp")),
+        action=observed.get("action", "customer:update"),
     )
     chain = _chain_citing(client, dep, permit, row)
     produces = _hops(chain)["produces"]

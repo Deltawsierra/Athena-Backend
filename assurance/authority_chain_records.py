@@ -213,6 +213,7 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None) -> rul
                         gate_outcome_id=document["gate_outcome_id"],
                         dispatch_id=document["dispatch_id"],
                         permit_digest=document["permit_digest"],
+                        action=document["action"],
                     )
             outcomes[row.outcome_id] = rule.CitedOutcome(
                 outcome_id=row.outcome_id,

@@ -87,11 +87,11 @@ What each check reads, per hop:
 * ``produces`` (action -> effect): the chain cites an ``observed_effect`` outcome
   for the same workflow, whose evidence document (``mythos.observed-effect/v1``,
   re-read against its signed digest) names the tool the chain's ``invokes`` hop
-  names and the gate decision the chain cites -- the observation was made on that
-  dispatch -- and that no other chain in force cites: ``held`` proves it,
-  ``violated`` breaks it. An observation of another tool, of another dispatch, or
-  claimed by two chains is unproven: it does not contradict the hop, and it does not
-  support it.
+  names, the action its ``performs`` hop names, and the gate decision the chain
+  cites -- the observation was made on that dispatch -- and that no other chain in
+  force cites: ``held`` proves it, ``violated`` breaks it. An observation of another
+  tool, another action or another dispatch, or claimed by two chains, is unproven:
+  it does not contradict the hop, and it does not support it.
 * ``authenticated_as``, ``delegates_to``: unproven -- no record.
 
 Everything is read as the record stands NOW, not as it stood when the effect was
@@ -236,6 +236,8 @@ REASONS: Mapping[str, str] = {
     ),
     "effect_tool_unnamed": "the chain names no tool in an invokes hop for the observed effect to match",
     "effect_other_tool": "the observed effect is of another tool than the one the chain's invokes hop names",
+    "effect_action_unnamed": "the chain names no action in a performs hop for the observed effect to match",
+    "effect_other_action": "the observed effect is of another action than the one the chain's performs hop names",
     "effect_other_dispatch": (
         "the effect was observed on the dispatch of another gate decision than the one the chain cites"
     ),
@@ -504,6 +506,8 @@ class ObservedEffect:
     gate_outcome_id: str
     dispatch_id: str = ""
     permit_digest: str = ""
+    #: The permitted action the dispatch carried out, as its permit named it.
+    action: str = ""
 
 
 @dataclass(frozen=True)
@@ -1020,6 +1024,24 @@ def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
                 "effect_other_tool",
                 f"outcome {cited} observed {effect.tool_kind} {effect.tool_identifier!r}; the chain's invokes hop "
                 f"names {invokes.target.kind} {invokes.target.ref!r}",
+            )
+        )
+    performs = _last_hop_before(chain, i, PERFORMS)
+    if performs is None:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_action_unnamed",
+                f"the chain names no action in a performs hop; outcome {cited} observed {effect.action!r}",
+            )
+        )
+    elif performs.target.ref != effect.action:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_other_action",
+                f"outcome {cited} observed the action {effect.action!r}; the chain's performs hop names "
+                f"{performs.target.ref!r}",
             )
         )
     if effect.gate_outcome_id != chain.gate_outcome_id:

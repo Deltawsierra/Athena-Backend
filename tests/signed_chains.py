@@ -98,6 +98,7 @@ def observed_effect(
     status=oc.HELD,
     dispatch_id=None,
     key=None,
+    action="customer:update",
 ) -> tuple[dict, dict]:
     """``(envelope, evidence)``: what Achilles posts when its dispatch saw a permitted
     action's effect -- the ``mythos.observed-effect/v1`` document, and the outcome its
@@ -108,7 +109,7 @@ def observed_effect(
         "deployment": str(deployment.uuid),
         "workflow": workflow,
         "tool": {"kind": tool[0], "identifier": tool[1]},
-        "action": "customer:update",
+        "action": action,
         "action_digest": "ab" * 32,
         "permit_digest": "sha256:" + "ef" * 32,
         "dispatch_id": dispatch_id or uuid.uuid4().hex,

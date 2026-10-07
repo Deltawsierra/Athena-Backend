@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from mythos_core import outcome as oc
 
 from . import composition
@@ -491,7 +491,21 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
             )
             for (_, outcome, key_id, envelope), route in zip(accepted, routes, strict=True)
         ]
-        WorkflowChainOutcome.objects.bulk_create(rows)
+        try:
+            # A savepoint of its own: the unique columns (outcome id, observed
+            # dispatch) are the backstop for two posts racing past the checks above,
+            # and a race lost there is a named refusal like any replay -- never a 500.
+            with transaction.atomic():
+                WorkflowChainOutcome.objects.bulk_create(rows)
+        except IntegrityError:
+            return [], [
+                Refusal(
+                    index,
+                    "the record already holds this outcome, or an observation of this "
+                    "dispatch: another post recorded it first",
+                )
+                for index, _, _, _ in accepted
+            ]
     return rows, []
 
 
