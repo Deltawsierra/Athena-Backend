@@ -97,7 +97,8 @@ def test_receipt_carries_the_full_versioned_tuple():
     # 4.0 added `chains` -- new HASHED content again, so MAJOR again.
     # 4.1 put the issue time in the signed form, outside the digest: MINOR, like 3.1.
     # 5.0 added the authority chains, new hashed content: MAJOR, like 4.0.
-    assert r["receipt_version"] == receipt.RECEIPT_VERSION == "mythos.assurance.receipt/5.0"
+    # 6.0 added the consequential effects, new hashed content: MAJOR, like 5.0.
+    assert r["receipt_version"] == receipt.RECEIPT_VERSION == "mythos.assurance.receipt/6.0"
     assert receipt.RECEIPT_SCHEMA["$id"] == receipt.RECEIPT_VERSION
 
     # The pinned assurance-policy version the decision was made under — the rule

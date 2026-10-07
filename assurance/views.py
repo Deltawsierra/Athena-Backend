@@ -2024,8 +2024,12 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
 
         GET returns every recorded chain, newest first, each with every hop's verdict
         (``proven`` and by what, ``unproven`` and why, ``broken`` and why) and whether
-        it is the chain in force for its effect; and the approval digests in force,
-        which is what a chain's policy node names as its ``version``.
+        it is the chain in force for its effect; the approval digests in force,
+        which is what a chain's policy node names as its ``version``; and every
+        effect the approvals cover (:mod:`assurance.consequential`) with its class,
+        its status -- covered by a chain in force, MISSING one, of an UNKNOWN class,
+        or needing none -- its digest (what the receipt names it by), and what to
+        record or declare.
 
         Beside ``chain-outcomes``, and not folded into it: an outcome is one status
         per workflow, and a chain is the path one effect took. The workflow slug is
@@ -2076,6 +2080,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             )
         ):
             approvals[workflow.slug] = authority_chain_records.approval_digest(workflow, workflow.live_tool_bindings)
+        effects = authority_chain_records.approved_effects(deployment, [r for r in read if r.standing])
         return Response(
             {
                 "chains": [authority_chain_records.chain_payload(r) for r in page],
@@ -2084,6 +2089,8 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "page_size": self.AUTHORITY_CHAIN_PAGE_SIZE,
                 **authority_chain_records.summary(read),
                 "approvals_in_force": approvals,
+                "effects": [authority_chain_records.effect_brief(e, str(deployment.uuid)) for e in effects],
+                "effect_census": authority_chain_records.effects_summary(effects),
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )

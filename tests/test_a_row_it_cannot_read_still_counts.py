@@ -222,8 +222,10 @@ def test_the_same_gap_signs_identically():
 
 
 def test_the_receipt_version_moved_when_the_coverage_block_gained_required_fields():
-    # 5.0: every authority chain in force, hop by hop -- new hashed content, MAJOR.
-    assert RECEIPT_VERSION == "mythos.assurance.receipt/5.0"
+    # 6.0: every effect the approvals cover, and which have no chain -- new hashed
+    # content, MAJOR, like 5.0's authority chains before it.
+    assert RECEIPT_VERSION == "mythos.assurance.receipt/6.0"
+    assert "mythos.assurance.receipt/5.0" in SUPERSEDED_VERSIONS
     # 4.1: the signed form's issue time, outside the digest -- MINOR, by 3.1's rule.
     assert "mythos.assurance.receipt/4.1" in SUPERSEDED_VERSIONS
     assert "mythos.assurance.receipt/4.0" in SUPERSEDED_VERSIONS

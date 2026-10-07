@@ -405,7 +405,10 @@ DECISION_INPUTS = {
     # unobservable, or its evaluation failed -- holds the decision back.
     "assurance.LatentCondition": ("deployment",),
     # An approval or claim bound to a tool contract that has since moved holds the
-    # decision back (assurance.tool_contract); binding again releases it.
+    # decision back (assurance.tool_contract); binding again releases it. So does an
+    # approved tool whose effect is consequential and no chain names, or whose effect
+    # class is unknown (assurance.consequential) -- read off the binding and the
+    # tool's registration (`assurance.Asset`, above).
     "assurance.ToolContractBinding": ("deployment",),
     # A recorded authority chain in force with a hop nothing proves, or one the
     # record contradicts, holds the decision back (assurance.authority_chain).

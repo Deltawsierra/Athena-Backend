@@ -46,6 +46,7 @@ from mythos_core import evidence as _core_evidence
 from . import authority_chain as _authority_chain
 from . import change as _change
 from . import composition as _composition
+from . import consequential as _consequential
 from . import coverage as _coverage
 from . import decision as _decision
 from . import graph_refs as _graph_refs
@@ -239,6 +240,21 @@ def _policy_document() -> dict:
             "graph_kinds": sorted(_authority_chain.GRAPH_KINDS),
             "tool_kinds": sorted(_authority_chain.TOOL_NODE_KINDS),
             "no_record_relations": sorted(_authority_chain.NO_RECORD_RELATIONS),
+        },
+        # Which effects need an authority chain (assurance.consequential): the
+        # declared effect classes that make a tool's effect consequential and the ones
+        # that need no chain, the annotations that raise a tool to consequential, the
+        # classes and their order, and the statuses that read unproven. A change to
+        # any of them changes which stored approvals cap the decision
+        # (`claim_caps` above: authority_chain_missing / effect_class_unknown).
+        "consequential": {
+            "consequential_effect_classes": sorted(_consequential.CONSEQUENTIAL_EFFECT_CLASSES),
+            "read_only_effect_classes": sorted(_consequential.READ_ONLY_EFFECT_CLASSES),
+            "destructive_annotations": sorted(_consequential.DESTRUCTIVE_ANNOTATIONS),
+            "classes": sorted(_consequential.CLASSES),
+            "class_rank": _table(_consequential._CLASS_RANK),
+            "statuses": sorted(_consequential.STATUSES),
+            "unproven_statuses": sorted(_consequential.UNPROVEN_STATUSES),
         },
         # What a served route is (assurance.served_route). The route axis compares the
         # route each chain outcome was bound to with the route this definition reads

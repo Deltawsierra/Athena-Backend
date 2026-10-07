@@ -120,6 +120,9 @@ VECTORS = (
     # 5.0: the authority chains, read by the verifier as well as digested.
     ("signed 4.1 receipt, which carries no authority chains", "verified", False),
     ("unsigned copy, a chain reading proven over an unproven hop", "malformed", False),
+    # 6.0: the consequential effects, read against the chains the receipt holds.
+    ("signed 5.0 receipt, which carries no consequential effects", "verified", False),
+    ("unsigned copy, a consequential effect covered by no chain", "malformed", False),
     ("signed 4.0 receipt, which carries no issue time", "verified", False),
     ("signed 4.0 receipt under --max-age", "no_signed_time", True),
     # Every version ever emitted reads back: generated from git, at the commits that
@@ -141,6 +144,7 @@ ISSUED_TEXT = "2026-01-02T03:04:05Z"
 CHECKED = ISSUED + timedelta(seconds=60)
 FOUR_OH = "mythos.assurance.receipt/4.0"
 FOUR_ONE = "mythos.assurance.receipt/4.1"
+FIVE_OH = "mythos.assurance.receipt/5.0"
 
 
 # ----------------------------------------------------------------- building blocks
@@ -274,6 +278,21 @@ def _deployment(owner) -> Deployment:
         hops=[h.as_dict() for h in hops],
         digest=chain_digest(chain_document(str(dep.uuid), "support-update", hops, "", "")),
     )
+    # The workflow's approval binds two tools, so the receipt carries their effects: a
+    # write no chain names (the chain above never invokes it) is missing one, and a
+    # read needs none.
+    from assurance.models import ApprovedWorkflow
+    from assurance.tool_contract import bind_workflow
+
+    workflow = ApprovedWorkflow.objects.create(deployment=dep, slug="support-update", name="Support update")
+    for name, effect_class in (("crm-mcp", "write"), ("lookup-mcp", "read")):
+        bind_workflow(
+            workflow,
+            Asset.objects.create(
+                deployment=dep, kind=Asset.Kind.MCP_SERVER, name=name, identifier=name,
+                classification=Asset.Classification.APPROVED, metadata={"effect_class": effect_class},
+            ),
+        )
     return stamped_under_the_rules_in_force(dep)
 
 
@@ -379,6 +398,11 @@ def _backend_on_receipt(document: dict, form: str, signed_claim: bool = False) -
         return "malformed"
     # From 5.0: the authority chains, each as bad as its worst hop.
     if "authority_chains" in document and receipt.authority_chains_problem(document["authority_chains"]):
+        return "malformed"
+    # From 6.0: the consequential effects, read against the chains it holds.
+    if "consequential_effects" in document and receipt.consequential_effects_problem(
+        document["consequential_effects"], document.get("authority_chains")
+    ):
         return "malformed"
     outside = ("algorithm", "digest", *receipt.NOT_SIGNED_OVER, *receipt.SIGNED_FORM_ONLY)
     hashed = {k: v for k, v in document.items() if k not in outside}
@@ -490,7 +514,7 @@ def vectors(monkeypatch):
     # What #118's route signed for this state: the signed form with its issue time and
     # no authority chains, under the 4.1 version string, digested by the unchanged
     # rule, signed by the key.
-    four_one = {k: v for k, v in sent.items() if k != "authority_chains"}
+    four_one = {k: v for k, v in sent.items() if k not in ("authority_chains", "consequential_effects")}
     four_one["receipt_version"] = FOUR_ONE
     four_one["digest"] = receipt._digest(
         {k: v for k, v in four_one.items() if k not in ("algorithm", "digest", *receipt.SIGNED_FORM_ONLY)}
@@ -510,9 +534,36 @@ def vectors(monkeypatch):
 
     inconsistent = _edited(unsigned, proven_over_unproven)
 
+    # What #133's route signed for this state: the signed form with no consequential
+    # effects, under the 5.0 version string, digested by the unchanged rule.
+    five = {k: v for k, v in sent.items() if k != "consequential_effects"}
+    five["receipt_version"] = FIVE_OH
+    five["digest"] = receipt._digest(
+        {k: v for k, v in five.items() if k not in ("algorithm", "digest", *receipt.SIGNED_FORM_ONLY)}
+    )
+
+    def as_five(answer):
+        answer["envelope"] = _sign(_engine_bytes(five), signer)
+        answer["receipt"] = five
+
+    signed_five = _edited(signed, as_five)
+
+    # A 6.0 receipt that reads an effect covered while it names no chain: digested
+    # again so only that disagrees, which no route emits.
+    def covered_by_nothing(r):
+        missing = next(e for e in r["consequential_effects"]["effects"] if e["status"] == "missing")
+        missing["status"] = "covered"
+        r["digest"] = receipt._digest({k: v for k, v in r.items() if k not in verifier.OUTSIDE_DIGEST})
+
+    uncovered = _edited(unsigned, covered_by_nothing)
+
     # What a0b504a's route signed for this state: the signed form with no issue time,
     # under the 4.0 version string, digested by the unchanged rule, signed by the key.
-    four = {k: v for k, v in sent.items() if k not in (*receipt.SIGNED_FORM_ONLY, "authority_chains")}
+    four = {
+        k: v
+        for k, v in sent.items()
+        if k not in (*receipt.SIGNED_FORM_ONLY, "authority_chains", "consequential_effects")
+    }
     four["receipt_version"] = FOUR_OH
     four["digest"] = receipt._digest({k: v for k, v in four.items() if k not in ("algorithm", "digest")})
 
@@ -576,6 +627,13 @@ def vectors(monkeypatch):
             shows="lacks     authority_chains: which authority chain produced each consequential effect",
         ),
         "unsigned copy, a chain reading proven over an unproven hop": Vector(inconsistent, _backend(inconsistent)),
+        "signed 5.0 receipt, which carries no consequential effects": Vector(
+            signed_five,
+            _backend(signed_five),
+            ring,
+            shows="lacks     consequential_effects: which consequential effects no authority chain names",
+        ),
+        "unsigned copy, a consequential effect covered by no chain": Vector(uncovered, _backend(uncovered)),
         "signed 4.0 receipt, which carries no issue time": Vector(
             four_oh, _backend(four_oh), ring, shows="issued at not signed (4.0)"
         ),
@@ -750,6 +808,15 @@ def test_the_spec_is_the_version_the_code_emits_and_names_every_version_it_reads
     assert set(verifier.NODE_KINDS) == {k for froms, tos in rule.GRAMMAR.values() for k in (*froms, *tos)}
     assert set(verifier.CHAIN_BASES) == set(AuthorityChain.Basis.values)
     assert verifier._AUTHORITY_MEMBERS == set(receipt.RECEIPT_SCHEMA["properties"]["authority_chains"]["required"])
+    # And the effect vocabulary a 6.0 receipt is read against is the rule's own.
+    from assurance import consequential
+
+    assert set(verifier.EFFECT_STATUSES) == set(consequential.STATUSES)
+    assert set(verifier.EFFECT_CLASSES) == set(consequential.CLASSES)
+    assert set(verifier.EFFECT_TOOL_KINDS) == set(rule.TOOL_NODE_KINDS)
+    assert verifier._EFFECT_MEMBERS == set(
+        receipt.RECEIPT_SCHEMA["properties"]["consequential_effects"]["required"]
+    )
     # Every version the backend describes, the verifier reads -- with the members the
     # backend's own published schema for that version gives it -- and the spec names.
     versions = (receipt.RECEIPT_VERSION, *receipt.SUPERSEDED_VERSIONS)
@@ -802,12 +869,20 @@ def test_the_spec_names_every_member_and_every_value_the_code_can_put_in_a_recei
     missing = [path for path in _schema_paths(receipt.RECEIPT_SCHEMA) if f"`{path}`" not in text]
     assert not missing, f"members the specification does not describe: {missing}"
     from assurance import authority_chain as rule
+    from assurance import consequential
 
     values = [
         *rule.HOP_VERDICTS,
         *rule.RELATIONS,
         *(kind for froms, tos in rule.GRAMMAR.values() for kind in (*froms, *tos)),
         *rule.REASONS,
+        *consequential.CLASSES,
+        *consequential.STATUSES,
+        *consequential.REASONS,
+        *consequential.CONSEQUENTIAL_EFFECT_CLASSES,
+        *consequential.READ_ONLY_EFFECT_CLASSES,
+        *consequential.DESTRUCTIVE_ANNOTATIONS,
+        consequential.EFFECT_SCHEMA,
         *Deployment.Decision.values,
         *Deployment.Environment.values,
         *receipt.RECEIPT_SCHEMA["properties"]["coverage"]["properties"]["verdict"]["enum"],

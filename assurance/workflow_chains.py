@@ -192,11 +192,18 @@ def read_expected_workflows(deployment) -> list[str] | None:
     return slugs or None
 
 
-def composition_for(deployment, keyring=observed_outcomes.READ_KEYRING) -> Composition:
-    """The composition of a deployment's recorded chains. Two queries, no writes."""
+#: Says the caller has not read the approved set: ``None`` is a reading of its own
+#: (the set is not recorded), so it cannot stand for "read it here".
+NOT_READ = object()
+
+
+def composition_for(deployment, keyring=observed_outcomes.READ_KEYRING, *, expected=NOT_READ) -> Composition:
+    """The composition of a deployment's recorded chains. Two queries, no writes;
+    one, when the caller passes the approved set it read (``expected``, as
+    :func:`read_expected_workflows` returns it), so the decision reads it once."""
     return compose(
         read_chain_outcomes(deployment, keyring),
-        expected_workflows=read_expected_workflows(deployment),
+        expected_workflows=read_expected_workflows(deployment) if expected is NOT_READ else expected,
     )
 
 

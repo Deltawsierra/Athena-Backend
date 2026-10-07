@@ -651,9 +651,13 @@ class Chaos:
             deployment=dep, allowed_regions=["eu-west-1"], training_allowed=False,
             third_party_sharing_allowed=False,
         )
+        # The tool declares that it only reads. An approved workflow that binds no
+        # tools reaches every registered tool (assurance.consequential), and an
+        # undeclared one reads unknown -- so a deployment whose inputs imply READY
+        # (the keyring cell below, once the fault clears) has to say what its tool does.
         Asset.objects.create(
             deployment=dep, kind=Asset.Kind.TOOL, name="tool-0", identifier="tool-0",
-            classification=Asset.Classification.KNOWN,
+            classification=Asset.Classification.KNOWN, metadata={"effect_class": "read"},
         )
         derive_claims(Deployment.objects.get(pk=dep.pk))
         AssuranceClaim.objects.filter(deployment=dep, valid_to__isnull=True).update(status=Status.SUPPORTED)

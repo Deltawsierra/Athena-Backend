@@ -312,6 +312,18 @@ def plan_revalidation(deployment) -> dict:
             for workflow in composition.off_route
         ]
 
+        # THE AUTHORITY CHAINS NOBODY RECORDED. No claim reads them either, and the
+        # decision does (assurance.consequential): every consequential effect of an
+        # approved workflow that no chain in force names reads unproven, and so does a
+        # tool whose effect class nobody declared. Each is work, named: the chain to
+        # record, or the class to declare.
+        from .authority_chain_records import authority_chain_signal, effect_brief
+
+        authority = authority_chain_signal(deployment)
+        deployment_uuid = str(deployment.uuid)
+        to_record = [effect_brief(e, deployment_uuid) for e in authority["missing"]]
+        to_declare = [effect_brief(e, deployment_uuid) for e in authority["unknown"]]
+
         if required:
             note = (
                 f"{len(required)} claim(s) need revalidation because of a change, an expiry, a "
@@ -362,6 +374,26 @@ def plan_revalidation(deployment) -> dict:
                 note = f"{note} Separately, {chains}"
             else:
                 note = f"No claim needs revalidation, but {chains} Nothing else needs re-running."
+        if to_record or to_declare:
+            # Never "nothing to re-run" beside an effect whose authority nobody
+            # recorded: the decision reads it unproven whatever every claim reads.
+            gaps = []
+            if to_record:
+                named = "; ".join(f"{e['workflow'] or 'no approved workflow'} through {e['tool_kind']} {e['tool_identifier']!r}" for e in to_record)
+                gaps.append(
+                    f"{len(to_record)} consequential effect(s) have no authority chain in force ({named}): "
+                    "record the chain each was produced through."
+                )
+            if to_declare:
+                named = "; ".join(f"{e['workflow'] or 'no approved workflow'} through {e['tool_kind']} {e['tool_identifier']!r}" for e in to_declare)
+                gaps.append(
+                    f"{len(to_declare)} approved tool(s) have an unknown effect class ({named}): declare it."
+                )
+            gaps = " ".join(gaps)
+            if required or outstanding_unknowns or unowned or workflows:
+                note = f"{note} Separately, {gaps}"
+            else:
+                note = f"No claim needs revalidation, but {gaps} Re-running an assessment does not answer either."
 
         return {
             "deployment_uuid": str(deployment.uuid),
@@ -371,12 +403,18 @@ def plan_revalidation(deployment) -> dict:
                 "still_current": len(still_current),
                 "outstanding_unknowns": len(outstanding_unknowns),
                 "workflows_to_exercise": len(workflows),
+                "authority_chains_to_record": len(to_record),
+                "effect_classes_to_declare": len(to_declare),
             },
             "recompute_action": "POST deployments/{uuid}/recompute-claims to re-derive after the named retests run.",
             "required": required,
             "outstanding_unknowns": outstanding_unknowns,
             "still_current": still_current,
             "workflows_to_exercise": workflows,
+            # The consequential effects no authority chain in force names, each with
+            # the chain to record, and the approved tools whose effect class is unknown.
+            "authority_chains_to_record": to_record,
+            "effect_classes_to_declare": to_declare,
             # Open retests no current claim carries: each holds the decision back.
             "open_retests_without_a_current_claim": unowned,
             "note": note,
