@@ -20,7 +20,9 @@ So this module:
   :class:`~assurance.models.ToolContract`): a new row whenever the digest differs
   from the last one recorded for that registration;
 - **binds approvals and claims to it** (:func:`bind_claim`, :func:`bind_workflow`):
-  the binding records the digest the approval or claim was made under;
+  the binding records the digest the approval or claim was made under. An
+  approval made over HTTP binds through :func:`approve_workflow_tools`, which the
+  approved-workflows route calls with the tools each workflow names;
 - **finds what a contract change supersedes** (:func:`superseded_bindings`): live
   bindings whose digest is not the tool's current one -- decided live, off the
   asset rows, so nothing that writes a claim row can lift it;
@@ -219,6 +221,119 @@ def bind_workflow(workflow: ApprovedWorkflow, tool: Asset, *, actor=None, now=No
     """Record that the approval of ``workflow`` covers ``tool`` under the tool's
     contract in force now. Re-approving under a changed contract is binding again."""
     return _bind(workflow.deployment, tool, actor=actor, now=now, workflow=workflow)
+
+
+#: The most tools one approved workflow may name. The approved set is read on
+#: every assurance answer for the deployment, and each tool is a binding that read
+#: carries, so the size is a cost every later request pays.
+MAX_TOOLS_PER_WORKFLOW = 100
+
+
+class ToolApprovalRefused(ValueError):
+    """An approval naming a tool it cannot be bound to. ``errors`` maps each
+    refused entry's position to why. Nothing the refused call began is kept: it
+    raises inside its own transaction."""
+
+    def __init__(self, errors: dict[int, str]):
+        self.errors = errors
+        super().__init__("; ".join(f"tools[{i}]: {why}" for i, why in sorted(errors.items())))
+
+
+def approve_workflow_tools(workflow: ApprovedWorkflow, entries, *, actor=None, now=None) -> list[ToolContractBinding]:
+    """Make ``entries`` exactly the tools ``workflow``'s approval covers, each bound
+    to the contract in force now.
+
+    ``entries``: ``[{"kind", "identifier", "contract_digest"?}]``, shape-checked by
+    the caller. This IS the approval of each tool, so:
+
+    - a tool not registered on the deployment is refused: there is no contract to
+      approve;
+    - an entry that names the ``contract_digest`` it approves is refused when that
+      is not the contract in force. Approving a contract the tool no longer has is
+      approving what the tool is not -- and it is what a client that read a
+      superseded binding back and sent it again would otherwise do: re-approve,
+      silently, a change nobody looked at. Without a digest the entry approves the
+      contract in force, as :func:`bind_workflow` does;
+    - a tool listed twice is refused;
+    - a tool bound before and not listed now is released: the approval no longer
+      covers it, so there is nothing for its contract to hold.
+
+    A tool listed again under an unchanged contract keeps its binding (no new
+    row). Refusals raise :class:`ToolApprovalRefused` inside this call's
+    transaction, so a refused approval binds and releases nothing.
+    """
+    now = now or timezone.now()
+    deployment = workflow.deployment
+    with transaction.atomic():
+        tools = current_tools(deployment, assets=Asset.objects.filter(deployment=deployment))
+        errors: dict[int, str] = {}
+        resolved: list[tuple[int, Asset, str | None]] = []
+        seen: set[tuple[str, str]] = set()
+        for i, entry in enumerate(entries):
+            key = _key(entry["kind"], entry["identifier"])
+            if key in seen:
+                errors[i] = f"{entry['kind']} '{entry['identifier']}' is listed twice."
+                continue
+            seen.add(key)
+            asset = tools.get(key)
+            if asset is None:
+                errors[i] = (
+                    f"no {entry['kind']} '{entry['identifier']}' is registered on this deployment, "
+                    "so there is no contract to approve."
+                )
+                continue
+            resolved.append((i, asset, entry.get("contract_digest") or None))
+        if errors:
+            raise ToolApprovalRefused(errors)
+
+        live = ToolContractBinding.objects.select_for_update().filter(workflow=workflow, released_at__isnull=True)
+        for binding in live:
+            if _key(binding.tool_kind, binding.tool_identifier) not in seen:
+                binding.released_at = now
+                binding.save(update_fields=["released_at"])
+
+        bound = []
+        for i, asset, approved in resolved:
+            binding = _bind(deployment, asset, actor=actor, now=now, workflow=workflow)
+            # Checked against what was bound, under the lock the bind took, so a
+            # contract that moved between the read above and the bind is refused
+            # rather than approved unseen.
+            if approved is not None and approved != binding.contract_digest:
+                errors[i] = (
+                    f"approves contract {approved}, but the contract in force for {asset.kind} "
+                    f"'{asset.identifier}' is {binding.contract_digest}."
+                )
+            bound.append(binding)
+        if errors:
+            raise ToolApprovalRefused(errors)
+        return bound
+
+
+def approved_tools(workflow, digests) -> list[dict]:
+    """The tools ``workflow``'s approval covers, as a reader sees them: the contract
+    each was approved under, the one in force now (``None`` for a tool no longer
+    registered), and whether the approval is SUPERSEDED. ``digests`` is
+    :func:`current_digests` for the workflow's deployment, read once by the caller.
+    Reads ``workflow.live_tool_bindings`` when the caller prefetched it."""
+    live = getattr(workflow, "live_tool_bindings", None)
+    if live is None:
+        live = list(
+            workflow.tool_contract_bindings.filter(released_at__isnull=True).order_by("tool_kind", "tool_identifier")
+        )
+    out = []
+    for binding in live:
+        now_digest = digests.get(_key(binding.tool_kind, binding.tool_identifier))
+        out.append(
+            {
+                "kind": binding.tool_kind,
+                "identifier": binding.tool_identifier,
+                "contract_digest": binding.contract_digest,
+                "bound_at": binding.bound_at,
+                "current_digest": now_digest,
+                "superseded": now_digest != binding.contract_digest,
+            }
+        )
+    return out
 
 
 def superseded_bindings(deployment, *, digests=None) -> list[ToolContractBinding]:

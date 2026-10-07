@@ -506,6 +506,21 @@ class DeclaredComponentSerializer(serializers.ModelSerializer):
         return value
 
 
+class ToolApprovalSerializer(serializers.Serializer):
+    """One tool an approved workflow covers, as the approval names it: the
+    registration's ``(kind, identifier)`` and, optionally, the contract digest the
+    approver looked at (:func:`assurance.tool_contract.approve_workflow_tools`
+    refuses one that is not the contract in force)."""
+
+    kind = serializers.ChoiceField(
+        choices=[Asset.Kind.TOOL, Asset.Kind.MCP_SERVER, Asset.Kind.SKILL]
+    )
+    identifier = serializers.CharField(max_length=1024)
+    contract_digest = serializers.RegexField(
+        r"^[0-9a-f]{64}$", required=False, allow_null=True
+    )
+
+
 class ApprovedWorkflowSerializer(serializers.ModelSerializer):
     """One approved business workflow — the unit the compositional assurance graph
     is scoped to (:mod:`assurance.composition`).
@@ -534,6 +549,13 @@ class ApprovedWorkflowSerializer(serializers.ModelSerializer):
     #: whoever the body says.
     approved_by = serializers.SerializerMethodField()
     approved_at = serializers.DateTimeField(source="created_at", read_only=True)
+    #: The tools the approval covers (SPINE: bind approval to the tool's effective
+    #: contract). Written as ``[{kind, identifier, contract_digest?}]``; OMITTED on a
+    #: write, the workflow's tool approvals are left exactly as they stand -- a
+    #: roster edit is not a re-approval of every tool. Read back by
+    #: :meth:`to_representation` with the contract each was approved under and the
+    #: one in force.
+    tools = ToolApprovalSerializer(many=True, required=False, write_only=True)
 
     class Meta:
         model = ApprovedWorkflow
@@ -544,8 +566,29 @@ class ApprovedWorkflowSerializer(serializers.ModelSerializer):
             "description",
             "approved_by",
             "approved_at",
+            "tools",
         ]
         read_only_fields = ["uuid"]
+
+    def validate_tools(self, value):
+        from .tool_contract import MAX_TOOLS_PER_WORKFLOW
+
+        if len(value) > MAX_TOOLS_PER_WORKFLOW:
+            raise serializers.ValidationError(
+                f"{len(value)} tools is more than the {MAX_TOOLS_PER_WORKFLOW} one "
+                "approved workflow may name."
+            )
+        return value
+
+    def to_representation(self, instance):
+        from .tool_contract import approved_tools, current_digests
+
+        data = super().to_representation(instance)
+        digests = self.context.get("tool_digests")
+        if digests is None:
+            digests = current_digests(instance.deployment)
+        data["tools"] = approved_tools(instance, digests)
+        return data
 
     def get_approved_by(self, obj) -> str | None:
         """The approver's username, or ``None`` when the account is gone.
