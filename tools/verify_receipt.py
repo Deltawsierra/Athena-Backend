@@ -144,7 +144,7 @@ EMITTED: dict[tuple[str, str | None], str] = {
     ("mythos.assurance.receipt/3.1", None): "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
     ("mythos.assurance.receipt/4.0", None): "#105 (7985460), 26 Sep 2026, until #118",
     ("mythos.assurance.receipt/4.1", None): "#118 (d81e9cb), 29 Sep 2026, until #133",
-    ("mythos.assurance.receipt/5.0", None): "#133 (PENDING), 7 Oct 2026, and since",
+    ("mythos.assurance.receipt/5.0", None): "#133 (1f357fa), 7 Oct 2026, and since",
 }
 
 #: What each shape added over the one before it: its members, and what a receipt
