@@ -36,6 +36,7 @@ from assurance.retest_closure import (
     refusal_reasons,
 )
 from assurance.views import FindingViewSet
+from tests.repair_contracts import agree, replay
 
 pytestmark = pytest.mark.django_db
 
@@ -62,13 +63,18 @@ def _finding(retest_required=True, **kwargs):
         title="SQLi", severity="critical", retest_required=retest_required,
     )
     defaults.update(kwargs)
-    return Finding.objects.create(**defaults)
+    finding = Finding.objects.create(**defaults)
+    # Its repair agreed before it is worked on (assurance.repair_contract), so every
+    # closure below stands or falls on its retest record, held to that contract.
+    agree(finding)
+    return finding
 
 
 def _record(finding, fixtures=None, *, origin=ClaimEvidence.Origin.INDEPENDENT, now=None):
+    fixtures = copy.deepcopy(COMPLETE if fixtures is None else fixtures)
     return record_closure_evidence(
-        finding, fixtures=copy.deepcopy(COMPLETE if fixtures is None else fixtures),
-        origin=origin, content_digest="sha256:ab12", now=now,
+        finding, fixtures=fixtures, origin=origin, content_digest="sha256:ab12", now=now,
+        document=replay(finding, fixtures, origin=origin),
     )
 
 

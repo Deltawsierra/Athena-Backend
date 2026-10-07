@@ -402,6 +402,17 @@ def _closure_evidence():
     return dep, write
 
 
+def _repair_contract():
+    dep = _scanned()
+    finding = _finding(dep)
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        f"/api/assurance/findings/{finding.uuid}/repair-contracts/",
+        {"prohibited_effect": "reads another tenant's rows", "preserved_behaviours": ["own rows load"]},
+        format="json",
+    )
+
+
 def _remediation_assign():
     dep = _scanned()
     finding = _finding(dep)
@@ -475,6 +486,11 @@ CANNOT_MOVE = {
         "records a retest run's evidence for a later close to be judged on; it moves no "
         "finding's status, and a close is still the operator's PATCH, which is in MOVES",
         _closure_evidence,
+    ),
+    ("FindingViewSet", "repair_contracts", "post"): (
+        "agrees what a repair must eliminate and preserve before it is worked on; the "
+        "decision reads neither the contract nor the remediation workflow it gates",
+        _repair_contract,
     ),
     ("FindingViewSet", "remediation_assign", "post"): (
         "who does the remediation work, not whether the risk is live",

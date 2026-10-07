@@ -27,6 +27,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from assurance.models import ClaimEvidence, Deployment, Finding, RetestClosureEvidence
+from tests.repair_contracts import agree, held_to
 from assurance.retest_closure import (
     CLOSABLE,
     INCOMPLETE_REPAIR,
@@ -79,7 +80,11 @@ def _finding(retest_required=True, **kwargs):
         title="SQLi", severity="critical", retest_required=retest_required,
     )
     defaults.update(kwargs)
-    return Finding.objects.create(**defaults)
+    finding = Finding.objects.create(**defaults)
+    # Its repair agreed before it is worked on (assurance.repair_contract); the
+    # replay below is held to it.
+    agree(finding)
+    return finding
 
 
 def _document(finding, **overrides):
@@ -97,6 +102,8 @@ def _document(finding, **overrides):
         },
         "fixtures": copy.deepcopy(COMPLETE),
     }
+    if isinstance(finding, Finding):  # held to its repair contract (a stub has none)
+        document["contract"] = held_to(finding)
     document.update(copy.deepcopy(overrides))
     return document
 
@@ -320,12 +327,15 @@ def test_the_gate_reads_a_record_s_replay_and_judges_one_without_a_replay_as_bef
     )
     assert any("replay: unreadable" in r for r in refusal_reasons(unreadable))
 
+    # A record without a replay is still judged on everything it was judged on before
+    # -- and, since the repair contract, cannot close: it names no contract.
     legacy = _finding()
     record_closure_evidence(
         legacy, fixtures=copy.deepcopy(COMPLETE), origin=ClaimEvidence.Origin.INDEPENDENT,
         content_digest="sha256:ab12",
     )
-    assert refusal_reasons(legacy) == []
+    (reason,) = refusal_reasons(legacy)
+    assert reason.startswith("contract: the closure evidence carries no replay document")
 
 
 # ---------------------------------------------------------------------------

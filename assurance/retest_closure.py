@@ -50,13 +50,33 @@ scenario or on every variant it replayed, or whether legitimate use survives, th
 replayed no variant at all, or that found the effect still produced or the use
 broken, carries no closure -- it is kept, and its result (:func:`classify`) is
 ``inconclusive``, ``cosmetic``, ``partial`` or ``utility_breaking``. Every condition
-above still applies to it unchanged. A record without a replay (``document`` null)
-is judged exactly as before.
+above still applies to it unchanged.
+
+THE REPAIR CONTRACT (Roadmap Phase 6: a repair contract before any candidate patch;
+:mod:`assurance.repair_contract`). A repair is agreed before it is worked on -- the
+prohibited effect it must eliminate and the legitimate behaviours it must preserve
+-- and a closure is held to that agreement. On top of every condition above, a
+retest-gated closure is refused (:func:`refusal_reasons`) unless the latest record's
+replay document carries a ``contract`` block,
+``{"digest": "sha256:<hex>", "preserved": {"<behaviour>": "retained"|"broken"|"unknown"}}``,
+that
+
+- names the digest of the finding's CURRENT contract (a contract superseded after
+  the replay leaves that replay unable to close: it was held to the old terms), and
+- reads ``retained`` for every preserved behaviour of that contract, and names no
+  behaviour the contract does not.
+
+So a record without a replay (``document`` null), or a replay without the block, is
+still recorded and still judged on everything above -- and cannot close; nor can any
+record of a finding with no agreed contract. This gate only ever got stricter: no
+closure it refused before is allowed now.
 """
 
 from __future__ import annotations
 
 from django.utils import timezone
+
+from .repair_contract import block_of
 
 PASSED = "passed"
 FAILED = "failed"
@@ -210,6 +230,32 @@ def _one_of(value, vocabulary) -> bool:
     return isinstance(value, str) and value in vocabulary
 
 
+def _preserved_verdict(document) -> tuple[str | None, list[str]]:
+    """What the replay says of the behaviours its repair contract preserves, as the
+    dataset reads it (Minotaur-Backend ``remediation_outcomes.classify``): one read
+    ``broken`` is ``utility_breaking``, one read ``unknown`` (or unreadable) is
+    ``inconclusive``; ``(None, [])`` otherwise, and for a document with no block.
+    Whether the block names the finding's CURRENT contract is the gate's to judge
+    (:func:`~assurance.repair_contract.contract_reasons`), on the finding."""
+    block = document.get("contract") if isinstance(document, dict) else None
+    if block is None:
+        return None, []
+    preserved = block.get("preserved") if isinstance(block, dict) else None
+    if not isinstance(preserved, dict):
+        return RESULT_INCONCLUSIVE, ["contract: unreadable"]
+    broken = sorted(str(n) for n, r in preserved.items() if r == BROKEN)
+    if broken:
+        return RESULT_UTILITY_BREAKING, [
+            f"contract: the effect is gone, and so is a behaviour the repair had to preserve: {', '.join(broken)}"
+        ]
+    unsure = sorted(str(n) for n, r in preserved.items() if not _one_of(r, UTILITY_READINGS) or r == UNKNOWN)
+    if unsure:
+        return RESULT_INCONCLUSIVE, [
+            f"contract: could not tell whether these preserved behaviours survive: {', '.join(unsure)}"
+        ]
+    return None, []
+
+
 def replay_reasons(document) -> list[str]:
     """Every reason the replay ``document`` carries does not carry a closure; empty
     when it does. What the gate adds for a record that carries a replay."""
@@ -219,11 +265,15 @@ def replay_reasons(document) -> list[str]:
 def classify(document) -> tuple[str, list[str]]:
     """``(result, reasons)`` of a whole replay document, as Minotaur-Backend's dataset
     computes a row's outcome: the replay first (:func:`_replay_verdict`), then the
+    contract's preserved behaviours (:func:`_preserved_verdict`), then the
     fixture document (a check not proven is ``inconclusive``), then the origin (only
     an independent observer's replay verifies). ``verified_closed`` with no reasons,
     or the result and every reason it is not. Says what a replay came to; never
     decides a closure -- the gate does (:func:`enforce`)."""
     result, reasons = _replay_verdict(document)
+    if result is not None:
+        return result, reasons
+    result, reasons = _preserved_verdict(document)
     if result is not None:
         return result, reasons
     fixtures = fixture_reasons(document.get("fixtures"))
@@ -305,7 +355,9 @@ def closure_standing(finding) -> dict:
       human decision, not a closure, so no closure standing is claimed for it.
 
     ``evidence`` is the latest record's provenance and, per fixture class and
-    pattern, whether it ran and how it came out -- or None when there is none.
+    pattern, whether it ran and how it came out, and the replay's ``contract``
+    block as read (or None) -- or None when there is no record. ``contract`` is the
+    finding's current repair contract's version and digest, or None.
     Pure reads; never writes."""
     from .models import Finding
 
@@ -317,7 +369,10 @@ def closure_standing(finding) -> dict:
     # served "closed without a retest", hiding that the defect was seen again
     # after its retest (#125 review round 2, L2).
     gated = bool(finding.retest_required) or (closed and record is not None)
-    reasons = _record_reasons(finding, record) if gated else []
+    from .repair_contract import served_contracts
+
+    contracts = served_contracts(finding)
+    reasons = _record_reasons(finding, record, contracts=contracts) if gated else []
     if finding.status in _dispositions():
         standing, reasons = NOT_A_CLOSURE, []
     elif not gated:
@@ -329,11 +384,15 @@ def closure_standing(finding) -> dict:
     # Built with keywords: the retest flag is READ here and served, never written.
     # test_no_code_path_writes_a_findings_disposition_past_save pins that only
     # ingest writes it, by matching the flag as a quoted dict key or an assignment.
+    current = contracts[-1] if contracts else None
     return dict(
         standing=standing,
         retest_required=bool(finding.retest_required),
         reasons=reasons,
         evidence=None if record is None else _served_record(record),
+        contract=None if current is None else {
+            "version": current.version, "content_digest": current.content_digest,
+        },
     )
 
 
@@ -364,6 +423,7 @@ def _served_record(record) -> dict:
                 for pattern in INCOMPLETE_REPAIR_PATTERNS
             },
         },
+        "contract": block_of(record.document),
     }
 
 
@@ -374,10 +434,12 @@ def refusal_reasons(finding, *, last_seen=None) -> list[str]:
     return _record_reasons(finding, latest_record(finding), last_seen=last_seen)
 
 
-def _record_reasons(finding, record, *, last_seen=None) -> list[str]:
+def _record_reasons(finding, record, *, last_seen=None, contracts=None) -> list[str]:
     """:func:`refusal_reasons` of ``record``, the latest closure evidence as the
-    caller read it."""
+    caller read it, against ``contracts`` -- the finding's repair contract versions,
+    oldest first; read from the database when not given (the gate's read)."""
     from .models import ClaimEvidence
+    from .repair_contract import contract_reasons, contracts_of
 
     if record is None:
         return [
@@ -397,6 +459,9 @@ def _record_reasons(finding, record, *, last_seen=None) -> list[str]:
     # (``document`` null) is judged as it always was.
     if record.document is not None:
         reasons += replay_reasons(record.document)
+    # And every closure is held to the finding's current repair contract: a record
+    # without a replay, or a replay without the block, cannot close.
+    reasons += contract_reasons(record.document, contracts_of(finding) if contracts is None else contracts)
     return reasons
 
 

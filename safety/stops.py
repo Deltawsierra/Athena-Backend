@@ -514,6 +514,10 @@ NOT_STOPS = {
         "POST": "the engine service records a retest run's evidence: it closes nothing and stops nothing"
     },
     "finding-assignable": _get(),
+    "finding-repair-contracts": {
+        "GET": _READ,
+        "POST": "records a new version of a finding's repair contract: tracking work, not stopping it",
+    },
     "provider-list": {"GET": _READ, "POST": "creates a provider record: configuration that starts and stops nothing"},
     "provider-detail": {
         "GET": _READ,
@@ -611,6 +615,7 @@ _ADMIN_MODELS = {
     "assurance.provider": "providers: configuration that starts and stops nothing",
     "assurance.providerassertion": "provider assertions: evidence that starts and stops nothing",
     "assurance.remediationevent": "remediation history: records that start and stop nothing",
+    "assurance.repaircontract": "agreed repair contracts, read-only here: records that start and stop nothing",
     "assurance.unknown": "unknown assets: records that start and stop nothing",
     "audit.auditlog": "the audit log: records that start and stop nothing",
     "auth.group": "permission groups: configuration that starts and stops nothing",
