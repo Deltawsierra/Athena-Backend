@@ -441,6 +441,24 @@ def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
     Asset.objects.create(deployment=dep, kind=Asset.Kind.MODEL, name="gpt", identifier="gpt")
     ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="refund")
     record_signed(dep, "refund-over-limit", oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=5))
+    # A recorded chain that starts at a person, so the sign-in and delegation records
+    # its first hops are proven by (assurance.identity_evidence) are read too.
+    from assurance.models import AuthorityChain
+
+    person, user = {"kind": "person", "ref": "employee"}, {"kind": "user", "ref": "support-user"}
+    agent, action = {"kind": "agent", "ref": "support-agent"}, {"kind": "action", "ref": "refund:issue"}
+    AuthorityChain.objects.create(
+        deployment=dep,
+        workflow="refund-over-limit",
+        effect="refund",
+        hops=[
+            {"from": person, "relation": "authenticated_as", "to": user},
+            {"from": user, "relation": "delegates_to", "to": agent},
+            {"from": agent, "relation": "performs", "to": action},
+            {"from": action, "relation": "produces", "to": {"kind": "effect", "ref": "refund"}},
+        ],
+        digest="sha256:" + "0" * 64,
+    )
     derive_claims(dep)
     with CaptureQueriesContext(connection) as queries:
         compute_decision(Deployment.objects.get(pk=dep.pk))

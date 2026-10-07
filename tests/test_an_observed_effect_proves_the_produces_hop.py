@@ -12,7 +12,8 @@ document its digest names (:mod:`assurance.observed_effects`).
 * A signature by any key not mapped to ``observed_effect`` is refused.
 * A replayed outcome is refused: its id, and a second observation of its dispatch.
 * An observation of another workflow, tool or dispatch does not prove the hop.
-* ``authenticated_as`` and ``delegates_to`` stay unproven: nothing records them yet.
+* ``authenticated_as`` and ``delegates_to`` stay unproven without a signed sign-in and
+  delegation record (part 4 adds them).
 
 On master every test here fails: there is no observed-effects route (404), no
 signer maps to ``observed_effect``, and an observed effect posted as a signed
@@ -106,7 +107,9 @@ def test_a_real_key_observed_effect_proves_produces_and_lifts_the_effect(service
 
 
 def test_sign_in_and_delegation_stay_unproven_until_they_have_a_record(service):
-    """Part 4's: a chain that starts at a person still cannot be fully proven."""
+    """With no signed sign-in or delegation record (part 4,
+    tests/test_sign_in_and_delegation_prove_the_person_hops.py), a chain that starts at
+    a person is not fully proven by an observed effect alone."""
     from tests.test_spine_authority_chain import _hops as hops_for, _version
 
     dep, client, permit, _ = _world()
@@ -122,6 +125,8 @@ def test_sign_in_and_delegation_stay_unproven_until_they_have_a_record(service):
         "authenticated_as": "unproven",
         "delegates_to": "unproven",
     }
+    assert [r["code"] for r in hops["authenticated_as"]["reasons"]] == ["no_authentication_record"]
+    assert [r["code"] for r in hops["delegates_to"]["reasons"]] == ["no_delegation_record"]
     assert chain["verdict"] == "unproven"
 
 

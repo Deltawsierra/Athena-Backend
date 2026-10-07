@@ -34,7 +34,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import observability, observed_effects, observed_outcomes
+from . import identity_evidence, observability, observed_effects, observed_outcomes
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -2077,6 +2077,110 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             },
             status=status.HTTP_201_CREATED,
         )
+
+    def _identity_evidence(self, request, uuid, kind):
+        """Record one signed sign-in or delegation record of ``kind``
+        (:mod:`assurance.identity_evidence`): the envelope and the document its digest
+        names, through :func:`assurance.identity_evidence.ingest`. The row and the
+        decision it moves commit together; a refused record records nothing and moves
+        nothing."""
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > identity_evidence.MAX_BODY_BYTES:
+            return Response(
+                {"error": f"the request is larger than one {kind} record can be"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": f"an {kind} record is posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        # Not ``get_object``: the service account sees no deployment, and needs none.
+        valid = _valid_uuid(uuid)
+        deployment = Deployment.objects.filter(uuid=valid).first() if valid else None
+        if deployment is None:
+            return Response({"error": "no such deployment"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            envelope, evidence = identity_evidence.read_body(kind, request.data)
+        except identity_evidence.BodyRefused as exc:
+            raise ValidationError(exc.errors) from None
+        try:
+            with transaction.atomic():
+                row, refusal = identity_evidence.ingest(deployment, kind, envelope, evidence)
+                if refusal is None:
+                    _refresh_stored_decision(deployment)
+        except observed_outcomes.KeyringUnavailable as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if refusal is not None:
+            return Response(
+                {"recorded": 0, "refused": [{"index": 0, "reason": refusal.reason}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {
+                "recorded": 1,
+                "kind": row.kind,
+                "outcome_id": row.outcome_id,
+                "principal": row.principal,
+                "witness": row.witness,
+                "evidence_digest": row.evidence_digest,
+                "evidence_kind": row.kind,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="authentications",
+        # The sign-in collector's credential first; an operator's session after it, so
+        # an operator is told 403 -- refused -- rather than 401.
+        authentication_classes=[
+            identity_evidence.AuthenticationServiceAuthentication,
+            *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+        ],
+        permission_classes=[identity_evidence.IsAuthenticationService],
+        parser_classes=[SafeJSONParser],
+    )
+    def authentications(self, request, uuid=None):
+        """Record one signed sign-in: the outcome the sign-in collector signed, and the
+        ``mythos.authentication/v1`` document its digest names -- a person signed in as
+        a principal, at an instant, through an identity provider. It proves an
+        authority chain's ``authenticated_as`` hop, read at read time.
+
+        ``{"envelope": <DSSE envelope>, "evidence": <document>}``. Refused, with nothing
+        recorded: a key not mapped to ``authentication``, an outcome id already
+        recorded, an assertion already recorded, a document that is not the one the
+        signature names, another deployment, and everything a signed outcome is
+        refused for."""
+        return self._identity_evidence(request, uuid, identity_evidence.AUTHENTICATION)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="delegations",
+        authentication_classes=[
+            identity_evidence.DelegationServiceAuthentication,
+            *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+        ],
+        permission_classes=[identity_evidence.IsDelegationService],
+        parser_classes=[SafeJSONParser],
+    )
+    def delegations(self, request, uuid=None):
+        """Record one signed delegation record: the outcome the grant collector signed,
+        and the ``mythos.delegation/v1`` document its digest names -- a principal
+        delegated an agent a scope for a window, and whether the grant is revoked. It
+        proves an authority chain's ``delegates_to`` hop, read at read time.
+
+        Refused as an authentication record is (a key not mapped to ``delegation``, a
+        reused outcome id, a grant state already recorded, a tampered document, another
+        deployment). A REVOCATION is never refused for its age or order, or because the
+        grant was never recorded here: the revoke happens at the identity provider, and
+        its evidence is never dropped for when it arrives."""
+        return self._identity_evidence(request, uuid, identity_evidence.DELEGATION)
 
     #: How many authority chains one POST may append, and how many the read returns.
     #: Chains append forever; the bound is on the request and the page, and the

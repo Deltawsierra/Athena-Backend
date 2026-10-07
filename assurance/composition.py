@@ -212,16 +212,41 @@ EVIDENCE_KINDS: frozenset[str] = frozenset(
     }
 )
 
+#: IDENTITY EVIDENCE, which is not evidence about a workflow's chain at all
+#: (:mod:`assurance.identity_evidence`). An outcome signed with the sign-in
+#: collector's key says a person authenticated as a principal, at an instant, through
+#: an identity provider: it proves an authority chain's ``authenticated_as`` hop. One
+#: signed with the grant collector's key says a principal delegated a scope to an
+#: agent for a window, and whether that grant has been revoked: it proves the
+#: ``delegates_to`` hop. Each is recorded only with its evidence document, on its own
+#: route, and never as a chain outcome -- so neither is in :data:`EVIDENCE_KINDS`, and
+#: neither is ever counted in a composition's evidence census.
+EVIDENCE_AUTHENTICATION = "authentication"
+EVIDENCE_DELEGATION = "delegation"
+#: The identity evidence kinds. Disjoint from :data:`EVIDENCE_KINDS`, asserted by test.
+IDENTITY_EVIDENCE_KINDS: frozenset[str] = frozenset({EVIDENCE_AUTHENTICATION, EVIDENCE_DELEGATION})
+
 #: Which signer's outcomes are which kind of evidence, by the engine name a
 #: verified signature binds. Exact names: a signer not listed here is
 #: `unclassified`, never whichever entry it happens to resemble. The keyring binds
 #: each key to ONE engine name (:mod:`assurance.observed_outcomes` refuses a key
 #: filed under two), so the observed-effect key is ``observed_effect`` and nothing
 #: else, and Achilles' outcome key stays an authorization check.
+#:
+#: The two identity signers (part 4 of the 7 Oct decision) are named for what signs:
+#: the Mythos-run collectors that read the customer's identity provider -- its
+#: sign-in log, and its delegation grants and their revocations. Each key is one
+#: engine, so one kind: a sign-in collector's key never proves a delegation, nor the
+#: other way round. Per the owner's 5 Oct scope call their evidence is
+#: Mythos-witnessed (:data:`assurance.identity_evidence.SIGNER_WITNESS`); a
+#: customer-run or third-party collector is planned and is added here, under its own
+#: name, when one signs.
 SIGNER_EVIDENCE: Mapping[str, str] = {
     "achilles": EVIDENCE_AUTHORIZATION_CHECK,
     "athena": EVIDENCE_SCAN,
     "achilles-effect": EVIDENCE_OBSERVED_EFFECT,
+    "mythos-signin-collector": EVIDENCE_AUTHENTICATION,
+    "mythos-grant-collector": EVIDENCE_DELEGATION,
 }
 
 #: The kind an UNSIGNED basis names. A basis missing here raises rather than
@@ -280,8 +305,18 @@ def evidence_kind(basis: str, signer: str = "") -> str:
     for a demonstrated basis, for that reason.
     """
     if basis == BASIS_DEMONSTRATED:
-        return SIGNER_EVIDENCE.get(signer, EVIDENCE_UNCLASSIFIED)
+        kind = signer_evidence(signer)
+        # An identity signer's outcome is no evidence about a workflow's chain: on a
+        # chain outcome it is a signature nobody classified for that, and is read as
+        # one. (Its own route records it, as what it is.)
+        return EVIDENCE_UNCLASSIFIED if kind in IDENTITY_EVIDENCE_KINDS else kind
     return _UNSIGNED_EVIDENCE[basis]
+
+
+def signer_evidence(signer: str) -> str:
+    """What ``signer``'s verified outcomes are evidence of, as :data:`SIGNER_EVIDENCE`
+    maps it -- an identity kind included -- or ``unclassified``."""
+    return SIGNER_EVIDENCE.get(signer, EVIDENCE_UNCLASSIFIED)
 
 
 #: WHAT THE OUTCOME WAS TAKEN AGAINST, a fourth axis. An exercise is an exercise

@@ -184,6 +184,47 @@ def _observe_the_effect_a_chain_cites():
     return dep, write
 
 
+def _prove_the_person_hop_a_chain_still_lacks(kind):
+    """The sign-in (or grant) collector posts the one record a person-started chain
+    still lacks: every other hop is proven, the observed effect included, so its
+    ``authenticated_as`` (or ``delegates_to``) hop goes from unproven to proven and the
+    chain lifts the decision it held."""
+    import os
+    from unittest import mock
+
+    from assurance import identity_evidence
+    from tests import signed_chains
+    from tests.test_spine_authority_chain import WF, _chain_body, _post, _world
+
+    dep, operator, permit, _ = _world()
+    now = datetime.now(dt_timezone.utc)
+    effect = signed_chains.record_observed_effect(dep, WF, permit.outcome_id, now - timedelta(minutes=1))
+    signed_in = signed_chains.authentication(dep, now - timedelta(minutes=30))
+    granted = signed_chains.delegation(dep, now - timedelta(hours=1), now + timedelta(days=1))
+    records = {identity_evidence.AUTHENTICATION: signed_in, identity_evidence.DELEGATION: granted}
+    other = (set(records) - {kind}).pop()
+    signed_chains.record_identity(dep, other, *records[other])
+    body = _chain_body(operator, dep, permit, person=True)
+    body["effect_outcome_id"] = effect.outcome_id
+    assert _post(operator, dep, body).status_code == 201
+    recompute_decision(Deployment.objects.get(pk=dep.pk))
+    service = identity_evidence.AUTHENTICATION_SERVICE if kind == "authentication" else identity_evidence.DELEGATION_SERVICE
+    account = User.objects.create_user(username=f"{kind}-collector", role=User.Roles.VIEWER)
+    token = f"{kind}-collector-test-only-0000000000000000"  # pragma: allowlist secret
+    envelope, evidence = records[kind]
+
+    def write(caller):
+        client = APIClient()
+        client.raise_request_exception = getattr(caller, "raise_request_exception", True)
+        client.credentials(**{service.meta: token})
+        with mock.patch.dict(os.environ, {service.token_env: token, service.user_env: account.username}):
+            return client.post(
+                _base(dep) + f"{kind}s/", {"envelope": envelope, "evidence": evidence}, format="json"
+            )
+
+    return dep, write
+
+
 def _record_a_chain_nothing_proves():
     """A chain whose effect nothing observed: an unproven hop, which holds READY."""
     dep = _scanned()
@@ -341,6 +382,10 @@ MOVES = {
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
     ("DeploymentViewSet", "observed_chain_outcomes", "post"): _sign_a_violation,
     ("DeploymentViewSet", "observed_effects", "post"): _observe_the_effect_a_chain_cites,
+    ("DeploymentViewSet", "authentications", "post"): lambda: _prove_the_person_hop_a_chain_still_lacks(
+        "authentication"
+    ),
+    ("DeploymentViewSet", "delegations", "post"): lambda: _prove_the_person_hop_a_chain_still_lacks("delegation"),
     ("DeploymentViewSet", "authority_chains", "post"): _record_a_chain_nothing_proves,
     ("DeploymentViewSet", "declared_architecture", "put"): _declare_a_component_nobody_observed,
     ("DeploymentViewSet", "record_bom_drift", "post"): _record_drift,

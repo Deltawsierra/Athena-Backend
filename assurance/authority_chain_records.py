@@ -41,7 +41,7 @@ from mythos_core import outcome as _oc
 from . import authority_chain as rule
 from . import composition as _composition
 from . import consequential
-from . import observed_effects, observed_outcomes
+from . import identity_evidence, observed_effects, observed_outcomes
 from .models import AuthorityChain, ToolContractBinding, WorkflowChainOutcome
 from .receipt import _digest
 
@@ -108,13 +108,17 @@ def _permissions(metadata) -> tuple[str, ...] | None:
     return tuple(p for p in raw if isinstance(p, str))
 
 
-def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None) -> rule.Inputs:
+def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None, principals=()) -> rule.Inputs:
     """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``.
 
     ``cited_ids``: the outcome ids the chains cite (their gate decisions and
     observed effects). ``keyring``: the one the decision is read under, so a
     citation verifies against the same keys as the composition beside it.
-    ``effect_citations``: how many chains in force cite each observed effect."""
+    ``effect_citations``: how many chains in force cite each observed effect.
+    ``principals``: the principals the chains' sign-in and delegation hops name; the
+    signed records that name one are read, in force under the same keyring
+    (:func:`assurance.identity_evidence.records_for`) -- one query, none when no chain
+    names a principal."""
     from .access import assess_effective_access
     from .coverage import coverage_manifest
     from .governance import is_shadow
@@ -214,6 +218,7 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None) -> rul
                         dispatch_id=document["dispatch_id"],
                         permit_digest=document["permit_digest"],
                         action=document["action"],
+                        observed_at=observed_outcomes._instant(document["observed_at"]),
                     )
             outcomes[row.outcome_id] = rule.CitedOutcome(
                 outcome_id=row.outcome_id,
@@ -222,9 +227,29 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None) -> rul
                 evidence=evidence,
                 effect=effect,
             )
+    authentications, delegations = identity_evidence.records_for(deployment, principals, keyring)
     return rule.Inputs(
-        graph=graph, approvals=approvals, outcomes=outcomes, effect_citations=dict(effect_citations or {})
+        graph=graph,
+        approvals=approvals,
+        outcomes=outcomes,
+        effect_citations=dict(effect_citations or {}),
+        authentications=authentications,
+        delegations=delegations,
     )
+
+
+def named_principals(chains) -> set[str]:
+    """The principals ``chains`` name where a sign-in or delegation record would prove
+    a hop: the account an ``authenticated_as`` hop signs in as, and the one a
+    ``delegates_to`` hop delegates from."""
+    found: set[str] = set()
+    for chain in chains:
+        for hop in chain.hops:
+            if hop.relation == rule.AUTHENTICATED_AS:
+                found.add(hop.target.ref)
+            elif hop.relation == rule.DELEGATES_TO:
+                found.add(hop.source.ref)
+    return found
 
 
 # --------------------------------------------------------------------- reading
@@ -307,6 +332,7 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
         {i for row in rows for i in (row.gate_outcome_id, row.effect_outcome_id)},
         keyring,
         effect_citations=citations,
+        principals=named_principals(chains.values()),
     )
     deployment_uuid = str(deployment.uuid)
     stands = set(standing)

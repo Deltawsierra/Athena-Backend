@@ -410,9 +410,16 @@ DECISION_INPUTS = {
     # class is unknown (assurance.consequential) -- read off the binding and the
     # tool's registration (`assurance.Asset`, above).
     "assurance.ToolContractBinding": ("deployment",),
+    # The contract a binding names, read with it whenever a recorded authority chain
+    # is verified (what the approved tools were approved to permit). Append-only, so
+    # a new row moves no decision by itself; watched because the rule reads it.
+    "assurance.ToolContract": ("deployment",),
     # A recorded authority chain in force with a hop nothing proves, or one the
     # record contradicts, holds the decision back (assurance.authority_chain).
     "assurance.AuthorityChain": ("deployment",),
+    # A signed sign-in or delegation record proves a chain's authenticated_as or
+    # delegates_to hop (assurance.identity_evidence); a revocation unproves one.
+    "assurance.IdentityEvidence": ("deployment",),
 }
 
 def _deployments_serving_through(instance) -> set:

@@ -36,6 +36,10 @@ ENGINE_KEYS = {
     # Achilles' observed-effect key: a key of its own, under its own observer name,
     # which the keyring files under ``achilles-effect`` and nothing else.
     "achilles-effect": Ed25519PrivateKey.generate(),
+    # The identity collectors' keys (part 4 of the 7 Oct decision): one for sign-ins,
+    # one for delegation grants and their revocations, each a key of its own.
+    "mythos-signin-collector": Ed25519PrivateKey.generate(),
+    "mythos-grant-collector": Ed25519PrivateKey.generate(),
 }
 
 
@@ -143,3 +147,117 @@ def record_observed_effect(deployment, workflow, gate_outcome_id, observed_at, *
     rows, refusals = observed_outcomes.ingest(deployment, [envelope], evidence=[evidence])
     assert not refusals, refusals
     return rows[0]
+
+
+def _stamp(instant) -> str:
+    return instant.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _sign_record(deployment, kind, evidence, observed_at, *, engine, key=None, status=oc.HELD, workflow=None):
+    outcome = oc.build_outcome(
+        deployment=str(deployment.uuid),
+        workflow=workflow or kind,
+        status=status,
+        engine=engine,
+        engine_version="0.1.0",
+        run_id=f"run-{uuid.uuid4().hex[:8]}",
+        evidence_digest=oc.evidence_digest_of(evidence),
+        observed_at=observed_at,
+        reason="" if status == oc.HELD else "the collector did not establish it",
+    )
+    return oc.sign_outcome(outcome, key or ENGINE_KEYS[engine])
+
+
+def authentication(
+    deployment,
+    authenticated_at,
+    *,
+    person="employee",
+    principal="support-user",
+    expires_at=None,
+    observed_at=None,
+    assertion=None,
+    witness="mythos",
+    engine="mythos-signin-collector",
+    key=None,
+    status=oc.HELD,
+    workflow=None,
+) -> tuple[dict, dict]:
+    """``(envelope, evidence)``: what the sign-in collector posts when the identity
+    provider's log shows ``person`` signed in as ``principal`` -- the
+    ``mythos.authentication/v1`` document, and the outcome its key signed over it."""
+    from datetime import timedelta
+
+    observed_at = observed_at or authenticated_at
+    evidence = {
+        "schema": "mythos.authentication/v1",
+        "deployment": str(deployment.uuid),
+        "person": person,
+        "principal": principal,
+        "identity_provider": {"issuer": "https://idp.example.test", "protocol": "oidc"},
+        "assertion_digest": assertion or "sha256:" + uuid.uuid4().hex * 2,
+        "authenticated_at": _stamp(authenticated_at),
+        "expires_at": _stamp(expires_at or authenticated_at + timedelta(hours=8)),
+        "witness": witness,
+        "observed_at": _stamp(observed_at),
+    }
+    envelope = _sign_record(
+        deployment, "authentication", evidence, observed_at, engine=engine, key=key, status=status, workflow=workflow
+    )
+    return envelope, evidence
+
+
+def delegation(
+    deployment,
+    not_before,
+    not_after,
+    *,
+    principal=("user", "support-user"),
+    agent="support-agent",
+    actions=("customer:update",),
+    grant_id="grant-1",
+    revoked_at=None,
+    observed_at=None,
+    witness="mythos",
+    engine="mythos-grant-collector",
+    key=None,
+    status=oc.HELD,
+) -> tuple[dict, dict]:
+    """``(envelope, evidence)``: what the grant collector posts for a grant of
+    ``actions`` from ``principal`` to ``agent`` over ``[not_before, not_after)`` -- or,
+    with ``revoked_at``, for its revocation."""
+    from assurance.identity_evidence import grant_digest
+
+    grant = {
+        "grant_id": grant_id,
+        "principal": {"kind": principal[0], "ref": principal[1]},
+        "agent": agent,
+        "scope": {"actions": sorted(set(actions))},
+        "not_before": _stamp(not_before),
+        "not_after": _stamp(not_after),
+    }
+    observed_at = observed_at or revoked_at or not_before
+    evidence = {
+        "schema": "mythos.delegation/v1",
+        "deployment": str(deployment.uuid),
+        "grant": grant,
+        "grant_digest": grant_digest(str(deployment.uuid), grant),
+        "revocation": (
+            {"state": "revoked", "revoked_at": _stamp(revoked_at)}
+            if revoked_at is not None
+            else {"state": "active", "revoked_at": None}
+        ),
+        "witness": witness,
+        "observed_at": _stamp(observed_at),
+    }
+    return _sign_record(deployment, "delegation", evidence, observed_at, engine=engine, key=key, status=status), evidence
+
+
+def record_identity(deployment, kind, envelope, evidence):
+    """A sign-in or delegation record, recorded the one way one is: verified and taken
+    in whole (:func:`assurance.identity_evidence.ingest`)."""
+    from assurance import identity_evidence
+
+    row, refusal = identity_evidence.ingest(deployment, kind, envelope, evidence)
+    assert refusal is None, refusal
+    return row
