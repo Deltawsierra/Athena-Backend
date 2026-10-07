@@ -17,10 +17,13 @@ saw. A plain POST can no longer claim ``demonstrated``
 "OBSERVED" IN THIS MODULE'S NAME AND ROUTE MEANS "REPORTED BY AN ENGINE AT AN
 INSTANT", NOT "AN EFFECT WAS SEEN". What a signed outcome is evidence of depends
 on who signed it (:func:`assurance.composition.evidence_kind`). Achilles signs
-``held`` whenever the gate's dispatch-time permit check passes: the gate
-authorized the workflow's action, which shows the authority chain resolves and
-does not show the effect happened. Nothing that signs outcomes today watches an
-effect, and every surface that publishes a signed outcome says which kind it is.
+``held`` with its OUTCOME key whenever the gate's dispatch-time permit check
+passes: the gate authorized the workflow's action, which shows the authority chain
+resolves and does not show the effect happened. With its OBSERVED-EFFECT key
+(``achilles-effect``) it signs that the dispatch that carried the action out saw
+the provider complete it -- an ``observed_effect``, recorded only with its evidence
+document, on its own route (:mod:`assurance.observed_effects`). Every surface that
+publishes a signed outcome says which kind it is.
 
 WHAT A SIGNATURE DOES NOT PROVE, and so what is checked here as well. A valid
 signature says an engine this deployment trusts produced these bytes. It does not
@@ -325,17 +328,28 @@ def _examine(envelope: Any, deployment, keyring, now: datetime) -> tuple[dict | 
     return outcome, verdict.key_id, ""
 
 
-def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = None):
+def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = None, evidence: list | None = None):
     """Verify and record ``envelopes`` for ``deployment``, all or none.
+
+    ``evidence``: for the observed-effects route only, the
+    ``mythos.observed-effect/v1`` document posted beside each envelope, by position
+    (:mod:`assurance.observed_effects`). Then every envelope must be an observed
+    effect its document matches, and each is recorded with its document. Without
+    it -- the signed-outcome route -- an observed effect is refused: it is recorded
+    with the document its digest names, or not at all.
 
     Returns ``(recorded_rows, refusals)``; when ``refusals`` is non-empty nothing
     was recorded. Raises :class:`KeyringUnavailable` when nothing can be verified.
     """
+    from . import observed_effects
+
     keyring = keyring if keyring is not None else load_keyring()
     now = now or datetime.now(dt_timezone.utc)
     refusals: list[Refusal] = []
     accepted: list[tuple[int, dict, str, Any]] = []
     seen_ids: set[str] = set()
+    seen_dispatches: set[str] = set()
+    documents: dict[str, dict] = {}
     for index, envelope in enumerate(envelopes):
         outcome, key_id, why = _examine(envelope, deployment, keyring, now)
         if outcome is None:
@@ -344,6 +358,28 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
         if outcome["outcome_id"] in seen_ids:
             refusals.append(Refusal(index, "the same outcome appears twice in this batch"))
             continue
+        kind = composition.evidence_kind(composition.BASIS_DEMONSTRATED, outcome["observer"]["engine"])
+        if evidence is None:
+            if kind == composition.EVIDENCE_OBSERVED_EFFECT:
+                refusals.append(
+                    Refusal(
+                        index,
+                        "an observed effect is recorded with the evidence document its digest names, "
+                        "on the observed-effects route; posted here it would prove nothing",
+                    )
+                )
+                continue
+        else:
+            document = evidence[index] if index < len(evidence) else None
+            why = observed_effects.examine(outcome, document)
+            if why:
+                refusals.append(Refusal(index, why))
+                continue
+            if document["dispatch_id"] in seen_dispatches:
+                refusals.append(Refusal(index, "the same dispatch is observed twice in this batch"))
+                continue
+            seen_dispatches.add(document["dispatch_id"])
+            documents[outcome["outcome_id"]] = document
         seen_ids.add(outcome["outcome_id"])
         accepted.append((index, outcome, key_id, envelope))
     # No early return on a first-pass refusal: the envelopes that passed still go
@@ -372,11 +408,24 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 outcome_id__in=[o["outcome_id"] for _, o, _, _ in accepted]
             ).values_list("outcome_id", flat=True)
         )
+        # One observation per dispatch: a dispatch already observed, under any
+        # outcome id, is a replay. The unique column backs this if two posts race.
+        observed_dispatches = set(
+            WorkflowChainOutcome.objects.filter(
+                effect_dispatch_id__in=[d["dispatch_id"] for d in documents.values()]
+            ).values_list("effect_dispatch_id", flat=True)
+        ) if documents else set()
         # ``index`` is the envelope's place in the batch the caller sent, never its
         # place in ``accepted`` -- a refusal must name the envelope it refuses.
         for index, outcome, _, _ in accepted:
             if outcome["outcome_id"] in existing:
                 refusals.append(Refusal(index, f"outcome {outcome['outcome_id']} was already recorded"))
+                continue
+            document = documents.get(outcome["outcome_id"])
+            if document is not None and document["dispatch_id"] in observed_dispatches:
+                refusals.append(
+                    Refusal(index, f"dispatch {document['dispatch_id']} was already observed and recorded")
+                )
                 continue
             newest = (
                 WorkflowChainOutcome.objects.filter(
@@ -437,6 +486,8 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 evidence_digest=outcome["evidence_digest"],
                 envelope=envelope,
                 route_fingerprint=route,
+                effect_evidence=documents.get(outcome["outcome_id"]),
+                effect_dispatch_id=(documents.get(outcome["outcome_id"]) or {}).get("dispatch_id"),
             )
             for (_, outcome, key_id, envelope), route in zip(accepted, routes, strict=True)
         ]

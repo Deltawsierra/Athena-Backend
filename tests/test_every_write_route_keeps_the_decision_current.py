@@ -148,6 +148,42 @@ def _sign_a_violation():
     return dep, lambda c: c.post(_base(dep) + "chain-outcomes/observed/", envelope, format="json")
 
 
+def _observe_the_effect_a_chain_cites():
+    """Achilles' observed-effect service posts the effect a recorded chain already
+    cites: its produces hop goes from unproven to proven, and the chain lifts the
+    decision it held."""
+    import base64
+    import json
+    import os
+    from unittest import mock
+
+    from tests import signed_chains
+    from tests.test_spine_authority_chain import WF, _chain_body, _post, _world
+
+    dep, operator, permit, _ = _world()
+    envelope, evidence = signed_chains.observed_effect(
+        dep, WF, permit.outcome_id, datetime.now(dt_timezone.utc) - timedelta(minutes=1)
+    )
+    body = _chain_body(operator, dep, permit)
+    body["effect_outcome_id"] = json.loads(base64.b64decode(envelope["payload"]))["outcome_id"]
+    assert _post(operator, dep, body).status_code == 201
+    recompute_decision(Deployment.objects.get(pk=dep.pk))
+    account = User.objects.create_user(username="effect-service", role=User.Roles.VIEWER)
+    token = "observed-effect-service-test-only-000000000"  # pragma: allowlist secret
+
+    def write(caller):
+        service = APIClient()
+        service.raise_request_exception = getattr(caller, "raise_request_exception", True)
+        service.credentials(HTTP_X_OBSERVED_EFFECT_TOKEN=token)
+        env = {"ASSURANCE_OBSERVED_EFFECT_TOKEN": token, "ASSURANCE_OBSERVED_EFFECT_USER": account.username}
+        with mock.patch.dict(os.environ, env):
+            return service.post(
+                _base(dep) + "observed-effects/", {"envelope": envelope, "evidence": evidence}, format="json"
+            )
+
+    return dep, write
+
+
 def _record_a_chain_nothing_proves():
     """A chain whose effect nothing observed: an unproven hop, which holds READY."""
     dep = _scanned()
@@ -304,6 +340,7 @@ MOVES = {
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
     ("DeploymentViewSet", "observed_chain_outcomes", "post"): _sign_a_violation,
+    ("DeploymentViewSet", "observed_effects", "post"): _observe_the_effect_a_chain_cites,
     ("DeploymentViewSet", "authority_chains", "post"): _record_a_chain_nothing_proves,
     ("DeploymentViewSet", "declared_architecture", "put"): _declare_a_component_nobody_observed,
     ("DeploymentViewSet", "record_bom_drift", "post"): _record_drift,

@@ -41,7 +41,7 @@ from mythos_core import outcome as _oc
 from . import authority_chain as rule
 from . import composition as _composition
 from . import consequential
-from . import observed_outcomes
+from . import observed_effects, observed_outcomes
 from .models import AuthorityChain, ToolContractBinding, WorkflowChainOutcome
 from .receipt import _digest
 
@@ -108,12 +108,13 @@ def _permissions(metadata) -> tuple[str, ...] | None:
     return tuple(p for p in raw if isinstance(p, str))
 
 
-def load_inputs(deployment, cited_ids, keyring) -> rule.Inputs:
+def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None) -> rule.Inputs:
     """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``.
 
     ``cited_ids``: the outcome ids the chains cite (their gate decisions and
     observed effects). ``keyring``: the one the decision is read under, so a
-    citation verifies against the same keys as the composition beside it."""
+    citation verifies against the same keys as the composition beside it.
+    ``effect_citations``: how many chains in force cite each observed effect."""
     from .access import assess_effective_access
     from .coverage import coverage_manifest
     from .governance import is_shadow
@@ -199,13 +200,30 @@ def load_inputs(deployment, cited_ids, keyring) -> rule.Inputs:
         deployment_uuid = str(deployment.uuid)
         for row in WorkflowChainOutcome.objects.filter(deployment=deployment, outcome_id__in=ids):
             basis = observed_outcomes.basis_in_force(row, keyring, deployment_uuid=deployment_uuid)
+            evidence = _composition.evidence_kind(basis, row.observer_engine)
+            effect = None
+            if evidence == _composition.EVIDENCE_OBSERVED_EFFECT:
+                # What it observed, only as the signed digest names it: a document
+                # that does not match reads as no document.
+                document = observed_effects.evidence_in_force(row, deployment_uuid)
+                if document is not None:
+                    effect = rule.ObservedEffect(
+                        tool_kind=document["tool"]["kind"],
+                        tool_identifier=document["tool"]["identifier"],
+                        gate_outcome_id=document["gate_outcome_id"],
+                        dispatch_id=document["dispatch_id"],
+                        permit_digest=document["permit_digest"],
+                    )
             outcomes[row.outcome_id] = rule.CitedOutcome(
                 outcome_id=row.outcome_id,
                 workflow=row.workflow,
                 status=row.status,
-                evidence=_composition.evidence_kind(basis, row.observer_engine),
+                evidence=evidence,
+                effect=effect,
             )
-    return rule.Inputs(graph=graph, approvals=approvals, outcomes=outcomes)
+    return rule.Inputs(
+        graph=graph, approvals=approvals, outcomes=outcomes, effect_citations=dict(effect_citations or {})
+    )
 
 
 # --------------------------------------------------------------------- reading
@@ -277,10 +295,17 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
         for row in rows
     }
     standing, _ = rule.in_force([(pk, chain) for pk, chain in chains.items()])
+    # One observation proves one chain: how many chains in force cite each one.
+    citations: dict[str, int] = {}
+    for pk in standing:
+        cited = chains[pk].effect_outcome_id
+        if cited:
+            citations[cited] = citations.get(cited, 0) + 1
     inputs = load_inputs(
         deployment,
         {i for row in rows for i in (row.gate_outcome_id, row.effect_outcome_id)},
         keyring,
+        effect_citations=citations,
     )
     deployment_uuid = str(deployment.uuid)
     stands = set(standing)

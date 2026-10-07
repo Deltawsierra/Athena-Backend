@@ -34,7 +34,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import observability, observed_outcomes
+from . import observability, observed_effects, observed_outcomes
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -1997,6 +1997,83 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                     rows, many=True, context={"deployment_uuid": str(deployment.uuid)}
                 ).data,
                 "composition": _composition_payload(deployment),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="observed-effects",
+        # The observed-effect service's credential first; an operator's session after
+        # it, so an operator is told 403 -- refused -- rather than 401.
+        authentication_classes=[
+            observed_effects.ObservedEffectServiceAuthentication,
+            *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+        ],
+        permission_classes=[observed_effects.IsObservedEffectService],
+        parser_classes=[SafeJSONParser],
+    )
+    def observed_effects(self, request, uuid=None):
+        """Record one observed effect: the outcome Achilles signed with its
+        observed-effect key, and the ``mythos.observed-effect/v1`` document its digest
+        names (:mod:`assurance.observed_effects`). The only writer of an
+        ``observed_effect``, and the only route that takes one.
+
+        ``{"envelope": <DSSE envelope>, "evidence": <document>}``. Refused, with
+        nothing recorded: a signature by any key not mapped to ``observed_effect``, an
+        outcome id or a dispatch already recorded, evidence that is not the document
+        the signature names, and everything a signed outcome is refused for. What it
+        proves is read at read time: a chain's ``produces`` hop, when the document
+        names that chain's tool and gate decision."""
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"body": "Content-Length is not a number"}) from None
+        if declared > observed_effects.MAX_BODY_BYTES:
+            return Response(
+                {"error": "the request is larger than one observed effect can be"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
+            return Response(
+                {"error": "an observed effect is posted as application/json"},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        # Not ``get_object``: the service account sees no deployment, and needs none.
+        valid = _valid_uuid(uuid)
+        deployment = Deployment.objects.filter(uuid=valid).first() if valid else None
+        if deployment is None:
+            return Response({"error": "no such deployment"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            envelope, evidence = observed_effects.read_body(request.data)
+        except observed_effects.BodyRefused as exc:
+            raise ValidationError(exc.errors) from None
+        try:
+            # The row and the decision it moves commit together, as on the
+            # signed-outcome route.
+            with transaction.atomic():
+                rows, refusals = observed_outcomes.ingest(deployment, [envelope], evidence=[evidence])
+                if not refusals:
+                    _refresh_stored_decision(deployment)
+        except observed_outcomes.KeyringUnavailable as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if refusals:
+            return Response(
+                {"recorded": 0, "refused": [{"index": r.index, "reason": r.reason} for r in refusals]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from .composition import EVIDENCE_OBSERVED_EFFECT
+
+        row = rows[0]
+        return Response(
+            {
+                "recorded": 1,
+                "outcome_id": row.outcome_id,
+                "workflow": row.workflow,
+                "dispatch_id": row.effect_dispatch_id,
+                "evidence_digest": row.evidence_digest,
+                "evidence_kind": EVIDENCE_OBSERVED_EFFECT,
             },
             status=status.HTTP_201_CREATED,
         )

@@ -23,10 +23,8 @@ import json
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from mythos_core import outcome as oc
 
 from assurance import composition as comp
 from assurance.decision import decision_support
@@ -95,25 +93,22 @@ def test_recording_the_chain_names_the_effect_and_its_unproven_hops_hold_it_inst
 # --------------------------------------------- a fully proven chain lifts the effect
 
 
-@pytest.fixture
-def collector(engine_keyring, monkeypatch):
-    """An independent collector whose signed outcomes read as ``observed_effect``.
-    NOTHING in production is one (``assurance.composition.SIGNER_EVIDENCE`` maps no
-    signer to it, and a test pins that); here a key is trusted as one, so the
-    ``produces`` hop -- the one hop no production data can prove today -- can be."""
-    monkeypatch.setitem(signed_chains.ENGINE_KEYS, "collector", Ed25519PrivateKey.generate())
-    signed_chains.write_keyring(engine_keyring)
-    monkeypatch.setitem(comp.SIGNER_EVIDENCE, "collector", comp.EVIDENCE_OBSERVED_EFFECT)
-    return "collector"
+def _observed(dep, permit):
+    """The effect Achilles' dispatch observed, signed with its observed-effect key --
+    the production signer (``achilles-effect``), bound to the gate decision ``permit``
+    and the CRM tool. #134 could prove ``produces`` here only by trusting a made-up
+    collector key; nothing is patched now."""
+    return signed_chains.record_observed_effect(
+        dep, WF, permit.outcome_id, datetime.now(dt_timezone.utc) - timedelta(minutes=1)
+    )
 
 
-def test_a_chain_whose_every_hop_is_proven_lifts_the_missing_chain(collector):
+def test_a_chain_whose_every_hop_is_proven_lifts_the_missing_chain():
+    assert comp.SIGNER_EVIDENCE["achilles-effect"] == comp.EVIDENCE_OBSERVED_EFFECT
     dep, client, permit, _ = _world()
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
-    observed = signed_chains.record_signed(
-        dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=1), engine=collector
-    )
+    observed = _observed(dep, permit)
     # Starting at the agent: sign-in and delegation (authenticated_as, delegates_to)
     # have no record anywhere in this platform, so a chain naming them cannot be proven.
     body = _chain_body(client, dep, permit)
@@ -168,7 +163,7 @@ def test_an_unbound_write_tool_an_approved_workflow_reaches_reads_unproven(binds
     assert missing["to_do"].startswith("bind mcp_server 'crm-mcp' to the approval of")
 
 
-def test_binding_the_reached_write_tool_and_a_fully_proven_chain_lifts_it(collector):
+def test_binding_the_reached_write_tool_and_a_fully_proven_chain_lifts_it():
     dep, client, permit, _ = _world(bind=False)
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
@@ -178,9 +173,7 @@ def test_binding_the_reached_write_tool_and_a_fully_proven_chain_lifts_it(collec
     assert (missing["workflow"], missing["reasons"]) == (WF, ["declared_write", "no_chain_in_force"])
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
-    observed = signed_chains.record_signed(
-        dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=1), engine=collector
-    )
+    observed = _observed(dep, permit)
     body = _chain_body(client, dep, permit)
     body["effect_outcome_id"] = observed.outcome_id
     chain = _post(client, dep, body).json()["chains"][0]

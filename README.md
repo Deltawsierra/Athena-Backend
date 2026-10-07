@@ -170,8 +170,13 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   refused, the workflow's action at dispatch. A held shows the authority chain
   resolves. It does not show the effect happened.
 - `scan`: signed by Athena. Its checks ran against the target.
-- `observed_effect`: reserved for an independent collector. Nothing produces it
-  yet.
+- `observed_effect`: signed by Achilles' observed-effect key (observer
+  `achilles-effect`, a key that signs nothing else): the dispatch that carried a
+  permitted action out saw its provider complete it. Recorded only with its
+  `mythos.observed-effect/v1` evidence document, through
+  `POST /api/assurance/deployments/<uuid>/observed-effects/` and the observed-effect
+  service's credential (`assurance/observed_effects.py`); it proves an authority
+  chain's `produces` hop when the document names that chain's tool and gate decision.
 - `unclassified`: signed by a trusted key for an engine not listed above.
 - `attested`: typed in by an operator, or signed by a key the keyring no longer
   trusts.

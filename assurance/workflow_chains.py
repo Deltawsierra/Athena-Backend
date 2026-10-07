@@ -381,8 +381,8 @@ def composition_payload(
         # What KIND of evidence the standing outcomes are, every kind including the
         # zeros, and which workflows rest on an authorization check. `demonstrated`
         # in the basis census says a trusted engine signed; this says what that
-        # engine could see -- and `observed_effect` is always here, at 0 until
-        # something that watches effects signs one.
+        # engine could see -- and `observed_effect` is always here, at 0 until an
+        # observed effect is recorded (assurance.observed_effects).
         "evidence_census": dict(composition.evidence_census),
         "authorization_checked": list(composition.authorization_checked),
         # Which standing outcomes were taken against the route serving now, every
