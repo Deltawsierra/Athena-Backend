@@ -65,16 +65,26 @@ What each check reads, per hop:
   that kind (a dangling or ambiguous reference is unproven), be governed (a
   shadow node is unproven -- :func:`assurance.governance.is_shadow`), and be
   assessed (a component the coverage manifest lists unassessed is unproven).
-* ``under_policy`` (agent -> policy): the policy node is the chain's own
-  workflow's approval, and the version it names is the approval digest IN FORCE.
-  No approval, no version, or a version that is not in force: unproven.
-* ``invokes`` (policy or agent -> tool): the approval names this tool (another
-  tool set and not this one: broken; no tools at all: unproven) under the
-  contract in force (superseded: unproven); the nearest agent before it reaches
-  it over a declared edge (only an inferred edge, or a dangling reference from
-  that agent: unproven; neither, over a graph with no gap from that agent:
-  broken); and the chain was recorded against the served route serving now
-  (moved or unrecorded: unproven).
+* ``under_policy`` (agent -> policy), AS OF DISPATCH: the policy node is the chain's
+  own workflow's approval; the version it names is the approval digest the gate
+  signed at dispatch (the cited observed effect's ``mythos.observed-effect/v2``
+  ``dispatch`` block); the gate ran under the authority epoch and operator policy the
+  permit was issued under, in the running state; and that version was the approval
+  in force at the dispatch instant by the recorded history
+  (:mod:`assurance.approval_history`). A version already superseded at the dispatch,
+  a stopped or moved epoch, or a moved operator policy: unproven
+  (``dispatched_under_superseded_policy``). No dispatch state on record -- no
+  observed effect, a v1 one, no approval digest presented, no version recorded by
+  then: unproven (``dispatch_state_unrecorded``), never read live instead.
+* ``invokes`` (policy or agent -> tool): AS OF DISPATCH, the approval in force at the
+  dispatch instant names this tool (another tool set and not this one: broken; no
+  tools at all: unproven) under the contract in force at that instant, which is the
+  one the gate signed (either superseded by then: unproven,
+  ``dispatched_under_superseded_contract``), and the served route at that instant is
+  on record -- bound when the effect was recorded -- and is the one the gate signed,
+  if it signed one; and, as the graph stands, the nearest agent before it reaches it
+  over a declared edge (only an inferred edge, or a dangling reference from that
+  agent: unproven; neither, over a graph with no gap from that agent: broken).
 * ``through_identity`` (tool -> service account): the nearest agent declares
   that it acts as this account (it declares another one: broken; none, or one
   that does not resolve cleanly: unproven).
@@ -86,7 +96,7 @@ What each check reads, per hop:
   through -- an Achilles-signed outcome for the same workflow that verifies now:
   a permit proves it, a refusal breaks it, anything else is unproven.
 * ``produces`` (action -> effect): the chain cites an ``observed_effect`` outcome
-  for the same workflow, whose evidence document (``mythos.observed-effect/v1``,
+  for the same workflow, whose evidence document (``mythos.observed-effect`` v1 or v2,
   re-read against its signed digest) names the tool the chain's ``invokes`` hop
   names, the action its ``performs`` hop names, and the gate decision the chain
   cites -- the observation was made on that dispatch -- and that no other chain in
@@ -115,12 +125,25 @@ hop; it does not weaken the proof, because no basis rule here reads a Mythos-wit
 signature as weaker -- the observed effect that proves ``produces`` is Mythos-witnessed
 too -- and that is stated rather than implied.
 
-Everything is read as the record stands NOW, not as it stood when the effect was
-produced: the graph, the approval and the contracts are live, as
-:func:`assurance.tool_contract.superseded_bindings` reads them. That is the
-direction a decision about deploying now has to err in -- authority that no longer
-resolves as recorded is not authority that covers the next effect -- and it is
-stated, because a chain can move from proven to unproven without anyone touching it.
+THE APPROVAL, THE CONTRACTS AND THE ROUTE ARE READ AS OF DISPATCH (part 5 of the 7
+Oct decision). Achilles signs, into the observed effect, the state its dispatch ran
+under: its own epoch and operator policy and the instant, from its service, and the
+approval digest, contract digests, route and sign-in and grant digests the dispatch
+was presented under. ``under_policy`` and ``invokes`` are proven against that and
+the history this backend keeps -- the approvals' versions
+(:class:`assurance.models.ApprovalVersion`), the tools' contracts
+(:class:`assurance.models.ToolContract`) and the route bound per effect at its
+dispatch instant -- so a re-approval, a contract change or a route move AFTER the
+effect does not unprove it, and an effect dispatched under an approval already
+superseded reads unproven even once that approval is restored. The dispatch instant
+bounds the effect's (:data:`DISPATCH_EFFECT_WINDOW_SECONDS`), and when the gate saw
+a sign-in assertion or a grant, only those records prove the person hops.
+
+Everything else is read as the record stands NOW: the graph (reach, identity,
+permissions), shadow and coverage, the approval's permissions ``performs`` reads, and
+whether each signature verifies under the keyring in force. No history of the graph
+is kept, so a chain can still move from proven to unproven without anyone touching
+it, which errs in the direction a decision about deploying now has to.
 """
 
 from __future__ import annotations
@@ -210,6 +233,19 @@ AUTHENTICATION_WINDOW_SECONDS = 24 * 60 * 60
 #: whole on every decision of its deployment.
 MAX_HOPS = 16
 
+#: How long after its dispatch an effect may be observed and still be that
+#: dispatch's (part 5 of the 7 Oct decision): the dispatch instant bounds the effect
+#: instant from below, and this from above. Achilles carries the action out in the
+#: dispatch itself, through a provider it gives at most 30 s
+#: (``achilles.observed_effect.MAX_PROVIDER_TIMEOUT_S``); twice that is the slack.
+DISPATCH_EFFECT_WINDOW_SECONDS = 60
+
+#: The gate's authority epoch is ``<state>#<generation>``
+#: (``achilles.failsafe.authority_epoch``); a dispatch is authority only under this
+#: state. Spelled here so the rule stays free of Achilles, and pinned by test.
+RUNNING_EPOCH_STATE = "running"
+EPOCH_SEPARATOR = "#"
+
 #: The document a chain's digest is taken over, and an engine's signature covers.
 CHAIN_SCHEMA = "mythos.authority-chain/v1"
 
@@ -217,8 +253,6 @@ CHAIN_SCHEMA = "mythos.authority-chain/v1"
 #: receipt carries (names stay out of it); the words are for a reader.
 REASONS: Mapping[str, str] = {
     # proven by
-    "approval_in_force": "the policy node names the approval in force, at its current version",
-    "approved_contract_in_force": "the approval names this tool, under the contract in force",
     "declared_edge": "the inventory declares that the acting agent invokes this tool",
     "effective_reach": "effective access reaches this tool from the acting agent over declared edges",
     "declared_identity": "the acting agent declares that it acts as this account",
@@ -237,6 +271,15 @@ REASONS: Mapping[str, str] = {
         "a signed delegation record says this principal delegated this agent a scope covering the action, "
         "for a window holding the effect, not revoked as of the effect"
     ),
+    "approval_in_force_at_dispatch": (
+        "the approval version the gate signed at dispatch is the chain's, and was the version in force at "
+        "the dispatch instant"
+    ),
+    "contract_in_force_at_dispatch": (
+        "the approval in force at dispatch names this tool under the contract that was in force at the "
+        "dispatch instant, the one the gate signed"
+    ),
+    "route_at_dispatch": "the served route at the dispatch instant is on record, and is the one the gate signed",
     # unproven
     "no_record": "this platform holds no record of this kind of hop",
     "not_in_grammar": "the hop does not follow the relation grammar in force",
@@ -249,14 +292,11 @@ REASONS: Mapping[str, str] = {
     "policy_version_unnamed": "the chain does not name which version of the approval it ran under",
     "policy_version_not_in_force": "the approval version the chain names is not the one in force",
     "approval_names_no_tools": "the approval names no tools, so nothing says this tool is within it",
-    "superseded_contract": "the tool was approved under a contract that has since changed",
     "approval_permissions_undeclared": "the approved tool contracts do not declare what they permit",
     "no_actor": "no agent in the chain before this hop acts",
     "actor_unresolved": "the acting agent does not resolve to one governed component",
     "inferred_edge": "only an inferred edge -- the shape of the pipeline, not a declaration -- joins them",
     "dangling_edge": "the acting agent declares references discovery could not place",
-    "route_moved": "the chain was recorded against a served route that no longer serves",
-    "route_unrecorded": "nothing records which served route the chain was taken against",
     "identity_unresolved": "the acting agent's declared identity does not resolve cleanly",
     "no_declared_identity": "the acting agent declares no identity",
     "permissions_undeclared": "the components the identity acts through do not all declare their permissions",
@@ -300,6 +340,31 @@ REASONS: Mapping[str, str] = {
     "delegation_out_of_window": "the effect happened before the delegation's window opened",
     "delegation_expired": "the effect happened after the delegation's window closed",
     "delegation_revoked": "the delegation was revoked before (or at) the instant of the effect",
+    "dispatch_state_unrecorded": (
+        "nothing records the state the effect's dispatch ran under -- no observed effect signed with it, or "
+        "no approval, contract or route on record at the dispatch instant -- so the hop is not read live instead"
+    ),
+    "dispatched_under_superseded_policy": (
+        "the dispatch ran under an approval, or a gate epoch or operator policy, already superseded at the "
+        "dispatch instant"
+    ),
+    "dispatched_under_superseded_contract": (
+        "the dispatch ran under a tool contract already superseded at the dispatch instant"
+    ),
+    "dispatched_on_another_route": (
+        "the gate signed a served route at dispatch that is not the route serving at the dispatch instant"
+    ),
+    "effect_outside_dispatch_window": (
+        "the effect was observed before its dispatch left, or longer after it than the dispatch window"
+    ),
+    "authentication_not_dispatched": (
+        "the gate saw another sign-in at dispatch: no record in force with the assertion it carried names "
+        "this person and principal"
+    ),
+    "delegation_not_dispatched": (
+        "the gate saw another grant at dispatch: no record in force of the grant it carried names this "
+        "principal and agent"
+    ),
     "unchecked": "no check speaks for this hop",
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
@@ -308,6 +373,21 @@ REASONS: Mapping[str, str] = {
     "permission_not_declared": "every component the identity acts through declares its permissions, and none this one",
     "gate_refused": "the Action Gate refused this workflow's action",
     "effect_violated": "the observed-effect outcome cited says the effect was produced outside its authority",
+}
+
+
+#: Codes this rule emitted before part 5 of the 7 Oct decision and no longer does:
+#: ``under_policy`` and ``invokes`` are read as of dispatch now, against the approval,
+#: contracts and route in force at the dispatch instant, so nothing reads them against
+#: the record in force when the receipt is computed. Published still, for receipts that
+#: carry them (the v6.0 spec lists them as retired); never in :data:`REASONS`, which is
+#: exactly what the rule emits.
+RETIRED_REASONS: Mapping[str, str] = {
+    "approval_in_force": "the policy node names the approval in force, at its current version",
+    "approved_contract_in_force": "the approval names this tool, under the contract in force",
+    "superseded_contract": "the tool was approved under a contract that has since changed",
+    "route_moved": "the chain was recorded against a served route that no longer serves",
+    "route_unrecorded": "nothing records which served route the chain was taken against",
 }
 
 
@@ -554,10 +634,61 @@ class Approval:
 
 
 @dataclass(frozen=True)
+class DispatchState:
+    """The state an effect's dispatch ran under, as the gate signed it into the observed
+    effect (``mythos.observed-effect/v2``'s ``dispatch`` block), read against its signed
+    digest -- and the served route at that instant, as this backend bound it when it
+    recorded the effect.
+
+    From Achilles' service: ``dispatched_at``, the authority ``epoch`` at the spend and
+    the ``permit_epoch`` the permit was issued under, the operator ``policy_digest`` at
+    the spend and the ``permit_policy_digest`` the permit was decided under. As the
+    dispatch was presented (Achilles signs it and cannot judge it): ``approval_digest``,
+    ``contracts`` (``(kind, identifier) -> digest``), ``route_fingerprint``,
+    ``assertion_digest`` and ``grant_digest`` -- ``None`` (empty) for none. And
+    ``route_at_dispatch``: this backend's own record of the route serving at
+    ``dispatched_at`` (blank: the record cannot say)."""
+
+    dispatched_at: datetime
+    epoch: str = ""
+    permit_epoch: str = ""
+    policy_id: str = ""
+    policy_digest: str = ""
+    permit_policy_digest: str = ""
+    approval_digest: str | None = None
+    contracts: Mapping[tuple[str, str], str] = field(default_factory=dict)
+    route_fingerprint: str | None = None
+    assertion_digest: str | None = None
+    grant_digest: str | None = None
+    route_at_dispatch: str = ""
+
+
+@dataclass(frozen=True)
+class ApprovalVersion:
+    """One recorded version of a workflow's approval (:mod:`assurance.approval_history`):
+    its digest (blank once withdrawn), the tools it bound as ``(kind, identifier,
+    contract digest)``, and when the platform noted it in force."""
+
+    in_force_from: datetime
+    digest: str
+    tools: tuple[tuple[str, str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class ContractVersion:
+    """One recorded contract of a tool (:class:`assurance.models.ToolContract`): its
+    digest, and when it was recorded -- in force from then until the next one."""
+
+    recorded_at: datetime
+    digest: str
+
+
+@dataclass(frozen=True)
 class ObservedEffect:
     """What an observed-effect outcome's evidence document says it observed, as far
     as the rule reads it: the tool, and the dispatch it was observed on -- that
-    dispatch's gate decision, its id and the permit's digest."""
+    dispatch's gate decision, its id and the permit's digest -- and, for a v2
+    document, the state that dispatch ran under (``dispatch``; ``None`` for v1)."""
 
     tool_kind: str
     tool_identifier: str
@@ -570,6 +701,7 @@ class ObservedEffect:
     #: outcome repeats. The one instant of a chain a signature vouches for, and so
     #: the one sign-in and delegation are placed against.
     observed_at: datetime | None = None
+    dispatch: DispatchState | None = None
 
 
 @dataclass(frozen=True)
@@ -604,6 +736,8 @@ class Authentication:
     issuer: str = ""
     protocol: str = ""
     witness: str = ""
+    #: ``sha256:`` of the id_token or assertion: one sign-in, one record.
+    assertion_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -638,6 +772,12 @@ class Inputs:
     #: chains name.
     authentications: tuple[Authentication, ...] = ()
     delegations: tuple[Delegation, ...] = ()
+    #: Every recorded version of the chains' workflows' approvals, oldest first, by
+    #: slug; and every recorded contract of the tools they bound, oldest first, by
+    #: ``(kind, identifier)``. What ``under_policy`` and ``invokes`` are read against,
+    #: as of each chain's dispatch instant.
+    approval_history: Mapping[str, tuple[ApprovalVersion, ...]] = field(default_factory=dict)
+    contract_history: Mapping[tuple[str, str], tuple[ContractVersion, ...]] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ the verdict
@@ -771,11 +911,96 @@ def _no_record(chain, i, source, target, inputs, index) -> list[Reading]:
     ]
 
 
+def _unrecorded(detail: str) -> Reading:
+    return Reading(UNPROVEN, "dispatch_state_unrecorded", detail)
+
+
+def _dispatch_state(chain: Chain, inputs: Inputs) -> tuple[DispatchState | None, Reading | None]:
+    """The state the chain's effect was dispatched under, or why nothing records it:
+    the cited observed effect's v2 ``dispatch`` block, read from the document its
+    signed digest names. Never the record as it stands now in its place: a hop read
+    as of dispatch with no dispatch state on record is unproven, not read live."""
+    cited = chain.effect_outcome_id
+    if not cited:
+        return None, _unrecorded(
+            "the chain cites no observed effect, so nothing records the state its dispatch ran under"
+        )
+    outcome = inputs.outcomes.get(cited)
+    if (
+        outcome is None
+        or outcome.workflow != chain.workflow
+        or outcome.evidence != _composition.EVIDENCE_OBSERVED_EFFECT
+        or outcome.effect is None
+    ):
+        return None, _unrecorded(
+            f"the observed effect the chain cites ({cited}) is not one in force for {chain.workflow!r} "
+            "with a document matching its signed digest, so nothing records the state its dispatch ran under"
+        )
+    if outcome.effect.dispatch is None:
+        return None, _unrecorded(
+            f"observed effect {cited} is a mythos.observed-effect/v1 document: it records no state its "
+            "dispatch ran under"
+        )
+    return outcome.effect.dispatch, None
+
+
+def _version_at(versions, instant: datetime, when) -> tuple[object | None, list]:
+    """The version of ``versions`` (oldest first) in force at ``instant`` -- the last
+    one ``when`` puts at or before it -- and every one before that."""
+    current, before = None, []
+    for version in versions:
+        if when(version) > instant:
+            break
+        if current is not None:
+            before.append(current)
+        current = version
+    return current, before
+
+
+def _gate_epoch(dispatch: DispatchState) -> list[Reading]:
+    """What the gate's own epoch and policy at the spend say: nothing when the dispatch
+    ran under the authority the permit was issued under, a reading otherwise."""
+    if not dispatch.epoch:
+        return [_unrecorded("the gate bound no authority epoch into the dispatch")]
+    readings = []
+    state = dispatch.epoch.partition(EPOCH_SEPARATOR)[0]
+    if state != RUNNING_EPOCH_STATE:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_policy",
+                f"the gate's authority epoch at the dispatch was {dispatch.epoch!r}, not {RUNNING_EPOCH_STATE}",
+            )
+        )
+    if dispatch.permit_epoch != dispatch.epoch:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_policy",
+                f"the permit was issued under authority epoch {dispatch.permit_epoch!r}; at the dispatch the epoch "
+                f"in force was {dispatch.epoch!r}",
+            )
+        )
+    if dispatch.permit_policy_digest != dispatch.policy_digest:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_policy",
+                f"the permit was decided under operator policy {dispatch.permit_policy_digest or 'none'}; at the "
+                f"dispatch the policy in force was {dispatch.policy_digest or 'none'}",
+            )
+        )
+    return readings
+
+
 def _under_policy(chain, i, source, target, inputs, index) -> list[Reading]:
+    """Read AS OF DISPATCH (part 5 of the 7 Oct decision): the version the chain names
+    is the one the gate signed at dispatch, the gate ran under the epoch and operator
+    policy the permit was issued under, and that version was the approval in force at
+    the dispatch instant by the recorded history -- not the approval in force now. A
+    re-approval after the effect does not unprove it; an approval already superseded
+    at the dispatch does, and so does a dispatch whose state nothing records."""
     policy = chain.hops[i].target
-    approval = inputs.approvals.get(policy.ref)
-    if approval is None:
-        return [Reading(UNPROVEN, "no_approval", f"no approved workflow {policy.ref!r} is on record")]
     if policy.ref != chain.workflow:
         return [
             Reading(
@@ -789,65 +1014,167 @@ def _under_policy(chain, i, source, target, inputs, index) -> list[Reading]:
             Reading(
                 UNPROVEN,
                 "policy_version_unnamed",
-                f"the chain does not name the version of {policy.ref!r} it ran under; in force is {approval.digest}",
+                f"the chain does not name the version of {policy.ref!r} it ran under",
             )
         ]
-    if policy.version != approval.digest:
-        return [
+    dispatch, missing = _dispatch_state(chain, inputs)
+    if missing is not None:
+        return [missing]
+    readings = _gate_epoch(dispatch)
+    presented = dispatch.approval_digest
+    at = _when(dispatch.dispatched_at)
+    if presented is None:
+        return [*readings, _unrecorded(f"the dispatch at {at} presented no approval digest of {policy.ref!r}")]
+    if policy.version != presented:
+        readings.append(
             Reading(
                 UNPROVEN,
                 "policy_version_not_in_force",
-                f"the chain ran under version {policy.version} of {policy.ref!r}; in force is {approval.digest}",
+                f"the chain ran under version {policy.version} of {policy.ref!r}; the gate signed version "
+                f"{presented} at the dispatch at {at}",
+            )
+        )
+    versions = inputs.approval_history.get(chain.workflow, ())
+    current, before = _version_at(versions, dispatch.dispatched_at, lambda v: v.in_force_from)
+    if current is None:
+        readings.append(
+            _unrecorded(f"no version of the approval of {policy.ref!r} is recorded at or before the dispatch at {at}")
+        )
+    elif current.digest != presented:
+        if not current.digest:
+            why = f"the approval of {policy.ref!r} had been withdrawn (from {_when(current.in_force_from)})"
+        elif any(v.digest == presented for v in before):
+            why = (
+                f"version {presented} of {policy.ref!r} had been superseded by {current.digest} "
+                f"(from {_when(current.in_force_from)})"
+            )
+        else:
+            why = (
+                f"version {presented} of {policy.ref!r} was not in force; {current.digest} was "
+                f"(from {_when(current.in_force_from)})"
+            )
+        readings.append(Reading(UNPROVEN, "dispatched_under_superseded_policy", f"{why} at the dispatch at {at}"))
+    elif not readings:
+        readings.append(
+            Reading(
+                PROVEN,
+                "approval_in_force_at_dispatch",
+                f"approval {policy.ref!r} at {presented}, the version in force (from "
+                f"{_when(current.in_force_from)}) at the dispatch at {at}, under gate epoch {dispatch.epoch!r}",
+            )
+        )
+    return readings
+
+
+def _approved_at_dispatch(chain: Chain, node: Node, target, dispatch: DispatchState, inputs: Inputs) -> list[Reading]:
+    """The approval and contract half of ``invokes``, as of dispatch: the approval in
+    force at the dispatch instant names this tool, under the contract in force at that
+    instant, which is the one the gate signed."""
+    at = _when(dispatch.dispatched_at)
+    approval, _ = _version_at(
+        inputs.approval_history.get(chain.workflow, ()), dispatch.dispatched_at, lambda v: v.in_force_from
+    )
+    if approval is None:
+        return [_unrecorded(f"no version of the approval of {chain.workflow!r} is recorded at or before the dispatch at {at}")]
+    if not approval.digest:
+        return [
+            Reading(
+                UNPROVEN, "no_approval", f"the approval of {chain.workflow!r} had been withdrawn by the dispatch at {at}"
             )
         ]
-    return [Reading(PROVEN, "approval_in_force", f"approval {policy.ref!r} at {approval.digest}, the version in force")]
-
-
-def _approved_tool(approval: Approval, tool: Component | None, node: Node) -> ApprovedTool | None:
+    if not approval.tools:
+        return [
+            Reading(
+                UNPROVEN,
+                "approval_names_no_tools",
+                f"the approval of {chain.workflow!r} in force at the dispatch at {at} names no tools",
+            )
+        ]
     keys = {(node.kind, node.ref)}
-    if tool is not None:
-        keys.add((tool.kind, tool.identifier))
-    return next((t for t in approval.tools if (t.kind, t.identifier) in keys), None)
+    if target is not None:
+        keys.add((target.kind, target.identifier))
+    approved = next((t for t in approval.tools if (t[0], t[1]) in keys), None)
+    if approved is None:
+        named = ", ".join(sorted(f"{k} {ident!r}" for k, ident, _ in approval.tools))
+        return [
+            Reading(
+                BROKEN,
+                "outside_approval",
+                f"the approval of {chain.workflow!r} in force at the dispatch at {at} names {named}, and not "
+                f"{node.kind} {node.ref!r}",
+            )
+        ]
+    kind, identifier, approved_digest = approved
+    contract, _ = _version_at(
+        inputs.contract_history.get((kind, identifier), ()), dispatch.dispatched_at, lambda v: v.recorded_at
+    )
+    presented = dispatch.contracts.get((kind, identifier))
+    readings: list[Reading] = []
+    if contract is None:
+        readings.append(_unrecorded(f"no contract of {kind} {identifier!r} is recorded at or before the dispatch at {at}"))
+    elif contract.digest != approved_digest:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_contract",
+                f"{kind} {identifier!r} was approved under contract {approved_digest}; the contract in force at the "
+                f"dispatch at {at} was {contract.digest} (from {_when(contract.recorded_at)})",
+            )
+        )
+    if presented is None:
+        readings.append(_unrecorded(f"the dispatch at {at} presented no contract digest of {kind} {identifier!r}"))
+    elif contract is not None and presented != contract.digest:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_contract",
+                f"the dispatch at {at} presented contract {presented} of {kind} {identifier!r}; the contract in "
+                f"force then was {contract.digest}",
+            )
+        )
+    if readings:
+        return readings
+    return [
+        Reading(
+            PROVEN,
+            "contract_in_force_at_dispatch",
+            f"approved under contract {approved_digest}, the contract in force at the dispatch at {at}, as presented",
+        )
+    ]
+
+
+def _route_at_dispatch(dispatch: DispatchState) -> Reading:
+    at = _when(dispatch.dispatched_at)
+    if not dispatch.route_at_dispatch:
+        return _unrecorded(f"the served route at the dispatch at {at} is not on record")
+    if dispatch.route_fingerprint is not None and dispatch.route_fingerprint != dispatch.route_at_dispatch:
+        return Reading(
+            UNPROVEN,
+            "dispatched_on_another_route",
+            f"the gate signed served route {dispatch.route_fingerprint} at the dispatch at {at}; the route serving "
+            f"then was {dispatch.route_at_dispatch}",
+        )
+    return Reading(
+        PROVEN,
+        "route_at_dispatch",
+        f"the dispatch at {at} ran on served route {dispatch.route_at_dispatch}, as recorded when its effect was",
+    )
 
 
 def _invokes(chain, i, source, target, inputs, index) -> list[Reading]:
+    """The approval, contract and route are read AS OF DISPATCH (part 5 of the 7 Oct
+    decision): a contract changed or a route moved after the effect does not unprove
+    it, and a dispatch whose state nothing records is unproven rather than read live.
+    The graph -- whether the acting agent reaches the tool -- is read as it stands: no
+    history of it is kept."""
     readings: list[Reading] = []
     node = chain.hops[i].target
-    approval = inputs.approvals.get(chain.workflow)
-    if approval is None:
-        readings.append(Reading(UNPROVEN, "no_approval", f"no approval of {chain.workflow!r} is on record"))
-    elif not approval.tools:
-        readings.append(
-            Reading(UNPROVEN, "approval_names_no_tools", f"the approval of {chain.workflow!r} names no tools")
-        )
+    dispatch, missing = _dispatch_state(chain, inputs)
+    if missing is not None:
+        readings.append(missing)
     else:
-        approved = _approved_tool(approval, target, node)
-        if approved is None:
-            named = ", ".join(sorted(f"{t.kind} {t.identifier!r}" for t in approval.tools))
-            readings.append(
-                Reading(
-                    BROKEN,
-                    "outside_approval",
-                    f"the approval of {chain.workflow!r} names {named}, and not {node.kind} {node.ref!r}",
-                )
-            )
-        elif approved.superseded:
-            readings.append(
-                Reading(
-                    UNPROVEN,
-                    "superseded_contract",
-                    f"{node.kind} {node.ref!r} was approved under contract {approved.approved_digest}; "
-                    f"in force is {approved.current_digest or 'none (no longer registered)'}",
-                )
-            )
-        else:
-            readings.append(
-                Reading(
-                    PROVEN,
-                    "approved_contract_in_force",
-                    f"approved under contract {approved.approved_digest}, the contract in force",
-                )
-            )
+        readings.extend(_approved_at_dispatch(chain, node, target, dispatch, inputs))
+        readings.append(_route_at_dispatch(dispatch))
 
     actor_node = _last_before(chain, i, {AGENT})
     if actor_node is None:
@@ -860,15 +1187,6 @@ def _invokes(chain, i, source, target, inputs, index) -> list[Reading]:
             )
         elif target is not None:
             readings.append(_reach(index, actor, target))
-    route = chain.route
-    if route == _composition.ROUTE_MOVED:
-        readings.append(
-            Reading(UNPROVEN, "route_moved", "the chain was recorded against a served route that no longer serves")
-        )
-    elif route != _composition.ROUTE_CURRENT:
-        readings.append(
-            Reading(UNPROVEN, "route_unrecorded", "nothing records which served route the chain was taken against")
-        )
     return readings
 
 
@@ -1166,6 +1484,22 @@ def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
                 "one chain",
             )
         )
+    dispatch = effect.dispatch
+    if dispatch is not None:
+        # The dispatch instant bounds the effect's: not before the dispatch left, and
+        # within the dispatch window after it.
+        observed = effect.observed_at
+        window = timedelta(seconds=DISPATCH_EFFECT_WINDOW_SECONDS)
+        if observed is None or observed < dispatch.dispatched_at or observed - dispatch.dispatched_at > window:
+            readings.append(
+                Reading(
+                    UNPROVEN,
+                    "effect_outside_dispatch_window",
+                    f"outcome {cited} observed the effect at {_when(observed)}; its dispatch left at "
+                    f"{_when(dispatch.dispatched_at)}, and an effect is that dispatch's only within "
+                    f"{DISPATCH_EFFECT_WINDOW_SECONDS} s after it",
+                )
+            )
     if readings:
         return readings
     if outcome.status == _composition.HELD:
@@ -1230,6 +1564,19 @@ def _authenticated_as(chain, i, source, target, inputs, index) -> list[Reading]:
                 f"no signed authentication record in force says {person!r} signed in as {principal!r}",
             )
         ]
+    # The sign-in the gate saw at dispatch, if it saw one: only that record proves it.
+    dispatch, _ = _dispatch_state(chain, inputs)
+    if dispatch is not None and dispatch.assertion_digest is not None:
+        named = [a for a in named if a.assertion_digest == dispatch.assertion_digest]
+        if not named:
+            return [
+                Reading(
+                    UNPROVEN,
+                    "authentication_not_dispatched",
+                    f"the dispatch carried sign-in assertion {dispatch.assertion_digest}; no record in force of it "
+                    f"says {person!r} signed in as {principal!r}",
+                )
+            ]
     instant = _effect_instant(chain, inputs)
     if instant is None:
         return [_instant_unknown(chain)]
@@ -1299,6 +1646,19 @@ def _delegates_to(chain, i, source, target, inputs, index) -> list[Reading]:
                 f"no signed delegation record in force says {who} delegated to agent {hop.target.ref!r}",
             )
         ]
+    # The grant the gate saw at dispatch, if it saw one: only that grant proves it.
+    dispatch, _ = _dispatch_state(chain, inputs)
+    if dispatch is not None and dispatch.grant_digest is not None:
+        named = [d for d in named if d.grant_digest == dispatch.grant_digest]
+        if not named:
+            return [
+                Reading(
+                    UNPROVEN,
+                    "delegation_not_dispatched",
+                    f"the dispatch carried grant {dispatch.grant_digest}; no record in force of it says {who} "
+                    f"delegated to agent {hop.target.ref!r}",
+                )
+            ]
     instant = _effect_instant(chain, inputs)
     if instant is None:
         return [_instant_unknown(chain)]

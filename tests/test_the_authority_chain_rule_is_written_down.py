@@ -59,16 +59,55 @@ GATE = ac.CitedOutcome("gate1", WF, comp.HELD, comp.EVIDENCE_AUTHORIZATION_CHECK
 #: dispatch of gate decision ``gate1``.
 #: When the effect was observed: the instant sign-in and delegation are placed against.
 EFFECT_AT = datetime(2026, 10, 7, 12, 0, tzinfo=dt_timezone.utc)
+#: When its dispatch left (part 5): a second before the effect was observed.
+DISPATCHED_AT = EFFECT_AT - timedelta(seconds=1)
+ROUTE = "5e" * 32
+EPOCH = "running#c0ffee.0"
+#: The state the dispatch ran under, as the gate signed it into the observed effect:
+#: its own epoch and operator policy, and the approval and contract it was presented
+#: under -- the ones in force at the dispatch instant by the history below -- and the
+#: route this backend recorded as serving then.
+DISPATCH = ac.DispatchState(
+    dispatched_at=DISPATCHED_AT,
+    epoch=EPOCH,
+    permit_epoch=EPOCH,
+    policy_id="support-policy",
+    policy_digest="sha256:" + "b0" * 32,
+    permit_policy_digest="sha256:" + "b0" * 32,
+    approval_digest=APPROVAL_DIGEST,
+    contracts={("mcp_server", "crm-mcp"): CONTRACT},
+    route_at_dispatch=ROUTE,
+)
 OBSERVED = ac.ObservedEffect(
-    "mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64, "customer:update", observed_at=EFFECT_AT
+    "mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64, "customer:update", observed_at=EFFECT_AT,
+    dispatch=DISPATCH,
 )
 EFFECT = ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, OBSERVED)
+#: The approval's history: in force since the day before the dispatch, binding the
+#: CRM server under CONTRACT; and that contract, recorded two days before.
+V1 = ac.ApprovalVersion(EFFECT_AT - timedelta(days=1), APPROVAL_DIGEST, (("mcp_server", "crm-mcp", CONTRACT),))
+APPROVAL_HISTORY = {WF: (V1,)}
+CONTRACT_HISTORY = {("mcp_server", "crm-mcp"): (ac.ContractVersion(EFFECT_AT - timedelta(days=2), CONTRACT),)}
 
 
 def inputs(**over):
-    base = {"graph": graph(), "approvals": {WF: approval()}, "outcomes": {"gate1": GATE, "eff1": EFFECT}}
+    base = {
+        "graph": graph(),
+        "approvals": {WF: approval()},
+        "outcomes": {"gate1": GATE, "eff1": EFFECT},
+        "approval_history": APPROVAL_HISTORY,
+        "contract_history": CONTRACT_HISTORY,
+    }
     base.update(over)
     return ac.Inputs(**base)
+
+
+def with_dispatch(**over):
+    """The reference outcomes, with the observed effect's dispatch state changed."""
+    from dataclasses import replace
+
+    effect = replace(OBSERVED, dispatch=replace(DISPATCH, **over))
+    return {"gate1": GATE, "eff1": ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, effect)}
 
 
 #: The roadmap's first two hops, recorded: employee:alice signed in as support-user
@@ -148,8 +187,8 @@ def test_a_chain_every_hop_of_which_the_record_supports_is_proven_and_says_by_wh
     result = ac.verify(chain(), inputs())
     assert result.verdict == ac.PROVEN
     assert verdicts(result) == [ac.PROVEN] * 5
-    assert codes(at(result, "under_policy")) == {"approval_in_force"}
-    assert codes(at(result, "invokes")) == {"approved_contract_in_force", "declared_edge"}
+    assert codes(at(result, "under_policy")) == {"approval_in_force_at_dispatch"}
+    assert codes(at(result, "invokes")) == {"contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"}
     assert codes(at(result, "through_identity")) == {"declared_identity"}
     assert codes(at(result, "performs")) == {"declared_permission", "within_approval", "gate_permit"}
     assert codes(at(result, "produces")) == {"observed_effect"}
@@ -182,8 +221,13 @@ def test_a_hop_type_with_no_data_is_unproven_never_proven(monkeypatch):
 def test_nothing_observes_an_effect_today_so_the_best_chain_stops_short_of_proven():
     result = ac.verify(chain(effect_outcome_id=""), inputs())
     assert result.verdict == ac.UNPROVEN
-    assert [h.hop.relation for h in result.unproven] == ["produces"]
+    # Since part 5 the policy and the invocation are read as of dispatch, and with no
+    # observed effect nothing records the state the dispatch ran under: they read
+    # unproven too, never live in its place.
+    assert [h.hop.relation for h in result.unproven] == ["under_policy", "invokes", "produces"]
     assert codes(at(result, "produces")) == {"effect_not_observed"}
+    assert codes(at(result, "under_policy")) == {"dispatch_state_unrecorded"}
+    assert "dispatch_state_unrecorded" in codes(at(result, "invokes"))
 
 
 @pytest.mark.parametrize(
@@ -258,6 +302,26 @@ def test_an_observation_of_another_action_does_not_prove_this_chain(raw, action,
                     gate_outcome_id="gate1", effect_outcome_id="eff1", route=comp.ROUTE_CURRENT)
     readings = ac._produces(stub, len(stub.hops) - 1, None, None, inputs(), ac._Index(graph()))
     assert {r.code for r in readings} == {"effect_action_unnamed"}
+
+
+@pytest.mark.parametrize(
+    ("dispatched_at", "proven"),
+    [
+        (EFFECT_AT, True),
+        (EFFECT_AT - timedelta(seconds=ac.DISPATCH_EFFECT_WINDOW_SECONDS), True),
+        (EFFECT_AT + timedelta(microseconds=1), False),
+        (EFFECT_AT - timedelta(seconds=ac.DISPATCH_EFFECT_WINDOW_SECONDS, microseconds=1), False),
+    ],
+    ids=["same-instant", "window-edge", "observed-before-dispatch", "past-the-window"],
+)
+def test_the_dispatch_instant_bounds_the_effect_instant(dispatched_at, proven):
+    history = {WF: (ac.ApprovalVersion(dispatched_at - timedelta(days=1), APPROVAL_DIGEST, V1.tools),)}
+    result = ac.verify(chain(), inputs(outcomes=with_dispatch(dispatched_at=dispatched_at), approval_history=history))
+    h = at(result, "produces")
+    if proven:
+        assert h.verdict == ac.PROVEN, codes(h)
+    else:
+        assert h.verdict == ac.UNPROVEN and codes(h) == {"effect_outside_dispatch_window"}
 
 
 def test_one_observation_proves_one_chain():
@@ -337,6 +401,21 @@ def test_a_sign_in_proves_the_hop_only_for_this_person_and_principal_inside_the_
     assert at(result, "authenticated_as").verdict == ac.UNPROVEN
     assert codes(at(result, "authenticated_as")) == {code}
     assert at(result, "delegates_to").verdict == ac.PROVEN
+
+
+def test_when_the_gate_saw_a_sign_in_and_a_grant_only_those_records_prove_the_person_hops():
+    signed = _replace(SIGNED_IN, assertion_digest="sha256:" + "5a" * 32)
+    outcomes = with_dispatch(assertion_digest=signed.assertion_digest, grant_digest=GRANT.grant_digest)
+    result = ac.verify(chain(ROADMAP), identity_inputs(authentications=(signed,), outcomes=outcomes))
+    assert result.verdict == ac.PROVEN, [(h.hop.relation, codes(h)) for h in result.hops]
+    # Another sign-in, another grant: records of them exist, and they are not what the
+    # gate saw at dispatch.
+    other = with_dispatch(assertion_digest="sha256:" + "6c" * 32, grant_digest="sha256:" + "7d" * 32)
+    result = ac.verify(chain(ROADMAP), identity_inputs(authentications=(signed,), outcomes=other))
+    assert codes(at(result, "authenticated_as")) == {"authentication_not_dispatched"}
+    assert codes(at(result, "delegates_to")) == {"delegation_not_dispatched"}
+    # The gate saw none: the person hops are placed against the effect's instant alone.
+    assert ac.verify(chain(ROADMAP), identity_inputs()).verdict == ac.PROVEN
 
 
 def test_the_window_is_inclusive_at_both_ends():
@@ -486,10 +565,20 @@ def test_a_node_two_components_answer_to_is_ambiguous():
 
 
 def test_no_approval_on_record_leaves_every_policy_check_unproven():
-    result = ac.verify(chain(), inputs(approvals={}))
-    for relation in ("under_policy", "invokes", "performs"):
-        assert "no_approval" in codes(at(result, relation)), relation
+    # No version of the approval recorded by the dispatch: the policy and the
+    # invocation have no state to be read against. The approval's permissions, which
+    # `performs` reads as they stand, are missing live.
+    result = ac.verify(chain(), inputs(approvals={}, approval_history={}))
+    for relation in ("under_policy", "invokes"):
+        assert "dispatch_state_unrecorded" in codes(at(result, relation)), relation
         assert at(result, relation).verdict == ac.UNPROVEN
+    assert "no_approval" in codes(at(result, "performs"))
+    # Withdrawn before the dispatch: no approval was in force at it.
+    withdrawn = {WF: (V1, ac.ApprovalVersion(DISPATCHED_AT - timedelta(minutes=5), ""))}
+    result = ac.verify(chain(), inputs(approval_history=withdrawn))
+    assert codes(at(result, "under_policy")) == {"dispatched_under_superseded_policy"}
+    assert "withdrawn" in at(result, "under_policy").reasons[0].detail
+    assert codes(at(result, "invokes")) == {"no_approval"}
 
 
 def test_the_policy_version_must_be_the_one_in_force():
@@ -502,28 +591,125 @@ def test_the_policy_version_must_be_the_one_in_force():
     stale[1] = hop(node("policy", WF, "ee" * 32), "invokes", TOOL_N)
     h = at(ac.verify(chain(stale), inputs()), "under_policy")
     assert codes(h) == {"policy_version_not_in_force"} and h.verdict == ac.UNPROVEN
-    assert APPROVAL_DIGEST in h.reasons[0].detail
+    assert APPROVAL_DIGEST in h.reasons[0].detail and "signed" in h.reasons[0].detail
+
+
+# ----------------------------------------------- the approval, read as of dispatch
+
+
+V2 = "a2" * 32
+
+
+def test_a_re_approval_after_the_dispatch_leaves_it_proven_citing_the_version_it_ran_under():
+    # Live, approval v2 is in force now (approvals= is what stands); the history says
+    # v1 was in force at the dispatch, and v1 is what the gate signed.
+    later = {WF: (V1, ac.ApprovalVersion(EFFECT_AT + timedelta(hours=1), V2, V1.tools))}
+    result = ac.verify(chain(), inputs(approvals={WF: approval(digest=V2)}, approval_history=later))
+    h = at(result, "under_policy")
+    assert result.verdict == ac.PROVEN and codes(h) == {"approval_in_force_at_dispatch"}
+    assert APPROVAL_DIGEST in h.proven_by[0].detail and V2 not in h.proven_by[0].detail
+
+
+def test_an_effect_dispatched_after_its_approval_was_superseded_reads_unproven_even_once_it_is_restored():
+    superseded = (V1, ac.ApprovalVersion(DISPATCHED_AT - timedelta(minutes=5), V2, V1.tools))
+    result = ac.verify(chain(), inputs(approval_history={WF: superseded}))
+    h = at(result, "under_policy")
+    assert h.verdict == ac.UNPROVEN and codes(h) == {"dispatched_under_superseded_policy"}
+    assert f"superseded by {V2}" in h.reasons[0].detail
+    # v1 restored after the effect: live it is in force again, and it changes nothing.
+    restored = (*superseded, ac.ApprovalVersion(EFFECT_AT + timedelta(hours=1), APPROVAL_DIGEST, V1.tools))
+    h = at(ac.verify(chain(), inputs(approval_history={WF: restored})), "under_policy")
+    assert codes(h) == {"dispatched_under_superseded_policy"}
+    # A version noted only after the dispatch was not in force at it either.
+    noted_late = {WF: (ac.ApprovalVersion(EFFECT_AT + timedelta(minutes=1), APPROVAL_DIGEST, V1.tools),)}
+    h = at(ac.verify(chain(), inputs(approval_history=noted_late)), "under_policy")
+    assert codes(h) == {"dispatch_state_unrecorded"}
+    # A version never on record for the workflow is not the one in force.
+    other = {WF: (ac.ApprovalVersion(V1.in_force_from, V2, V1.tools),)}
+    h = at(ac.verify(chain(), inputs(approval_history=other)), "under_policy")
+    assert codes(h) == {"dispatched_under_superseded_policy"} and "was not in force" in h.reasons[0].detail
+
+
+@pytest.mark.parametrize(
+    ("over", "says"),
+    [
+        ({"epoch": "stood_down#c0ffee.1", "permit_epoch": "stood_down#c0ffee.1"}, "not running"),
+        ({"permit_epoch": "running#c0ffee.0", "epoch": "running#c0ffee.1"}, "issued under authority epoch"),
+        ({"policy_digest": "sha256:" + "b1" * 32}, "operator policy"),
+    ],
+    ids=["stopped", "epoch-moved", "policy-moved"],
+)
+def test_a_dispatch_under_a_superseded_gate_epoch_or_policy_reads_unproven(over, says):
+    h = at(ac.verify(chain(), inputs(outcomes=with_dispatch(**over))), "under_policy")
+    assert h.verdict == ac.UNPROVEN and codes(h) == {"dispatched_under_superseded_policy"}
+    assert any(says in r.detail for r in h.reasons)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "relations"),
+    [
+        # A v1 observed effect: it proves produces, and records no dispatch state.
+        (
+            {"gate1": GATE, "eff1": ac.CitedOutcome(
+                "eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT,
+                ac.ObservedEffect("mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64,
+                                  "customer:update", observed_at=EFFECT_AT),
+            )},
+            ("under_policy", "invokes"),
+        ),
+        (with_dispatch(epoch="", permit_epoch=""), ("under_policy",)),
+        (with_dispatch(approval_digest=None), ("under_policy",)),
+        (with_dispatch(contracts={}), ("invokes",)),
+        (with_dispatch(route_at_dispatch=""), ("invokes",)),
+    ],
+    ids=["v1-document", "no-epoch", "no-approval-presented", "no-contract-presented", "no-route-recorded"],
+)
+def test_a_dispatch_time_record_that_is_missing_reads_unproven_never_live(outcomes, relations):
+    result = ac.verify(chain(), inputs(outcomes=outcomes))
+    assert [h.hop.relation for h in result.unproven] == list(relations)
+    for relation in relations:
+        assert "dispatch_state_unrecorded" in codes(at(result, relation))
+
+
+def test_no_history_at_the_dispatch_instant_reads_unproven():
+    result = ac.verify(chain(), inputs(contract_history={}))
+    assert [h.hop.relation for h in result.unproven] == ["invokes"]
+    assert "no contract of mcp_server 'crm-mcp' is recorded" in at(result, "invokes").reasons[0].detail
+    late = {("mcp_server", "crm-mcp"): (ac.ContractVersion(EFFECT_AT + timedelta(seconds=1), CONTRACT),)}
+    assert "dispatch_state_unrecorded" in codes(at(ac.verify(chain(), inputs(contract_history=late)), "invokes"))
 
 
 def test_a_tool_outside_the_approval_is_broken_and_none_named_is_unproven():
-    other = approval(tools=(ac.ApprovedTool("tool", "refund", CONTRACT, CONTRACT, ("refund:issue",)),))
-    result = ac.verify(chain(), inputs(approvals={WF: other}))
+    other = {WF: (ac.ApprovalVersion(V1.in_force_from, APPROVAL_DIGEST, (("tool", "refund", CONTRACT),)),)}
+    result = ac.verify(chain(), inputs(approval_history=other))
     assert at(result, "invokes").verdict == ac.BROKEN
     assert "outside_approval" in codes(at(result, "invokes"))
     assert result.verdict == ac.BROKEN
 
-    none = ac.verify(chain(), inputs(approvals={WF: approval(tools=())}))
+    none = ac.verify(chain(), inputs(approval_history={WF: (ac.ApprovalVersion(V1.in_force_from, APPROVAL_DIGEST),)}))
     assert "approval_names_no_tools" in codes(at(none, "invokes"))
     assert at(none, "invokes").verdict == ac.UNPROVEN
 
 
-def test_a_tool_approved_under_a_superseded_contract_is_unproven():
-    moved = approval(tools=(ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, "99" * 32, ("customer:update",)),))
-    h = at(ac.verify(chain(), inputs(approvals={WF: moved})), "invokes")
-    assert h.verdict == ac.UNPROVEN and "superseded_contract" in codes(h)
-    gone = approval(tools=(ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, None, ("customer:update",)),))
-    h = at(ac.verify(chain(), inputs(approvals={WF: gone})), "invokes")
-    assert "superseded_contract" in codes(h) and "no longer registered" in h.reasons[0].detail
+def test_a_tool_approved_under_a_contract_superseded_by_the_dispatch_is_unproven():
+    moved = {("mcp_server", "crm-mcp"): (*CONTRACT_HISTORY[("mcp_server", "crm-mcp")],
+                                         ac.ContractVersion(DISPATCHED_AT - timedelta(minutes=1), "99" * 32))}
+    h = at(ac.verify(chain(), inputs(contract_history=moved)), "invokes")
+    assert h.verdict == ac.UNPROVEN and codes(h) >= {"dispatched_under_superseded_contract"}
+    assert any("approved under contract" in r.detail for r in h.reasons)
+    # Presented under another contract than the one in force then.
+    h = at(ac.verify(chain(), inputs(outcomes=with_dispatch(contracts={("mcp_server", "crm-mcp"): "99" * 32}))), "invokes")
+    assert codes(h) == {"dispatched_under_superseded_contract"} and "presented contract" in h.reasons[0].detail
+
+
+def test_a_contract_changed_after_the_effect_leaves_the_invocation_proven():
+    # Live, the binding is superseded (current digest moved); at the dispatch it was not.
+    moved_live = approval(tools=(ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, "99" * 32, ("customer:update",)),))
+    after = {("mcp_server", "crm-mcp"): (*CONTRACT_HISTORY[("mcp_server", "crm-mcp")],
+                                         ac.ContractVersion(EFFECT_AT + timedelta(minutes=1), "99" * 32))}
+    result = ac.verify(chain(), inputs(approvals={WF: moved_live}, contract_history=after))
+    assert result.verdict == ac.PROVEN
+    assert codes(at(result, "invokes")) == {"contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"}
 
 
 # --------------------------------------------------------------------- the reach
@@ -564,10 +750,19 @@ def test_effective_access_over_a_resolved_graph_that_cannot_reach_the_tool_break
     assert result.verdict == ac.BROKEN and [x.index for x in result.broken] == [1]
 
 
-@pytest.mark.parametrize(("route", "code"), [(comp.ROUTE_MOVED, "route_moved"), (comp.ROUTE_UNRECORDED, "route_unrecorded")])
-def test_a_chain_recorded_against_another_served_route_is_unproven(route, code):
+@pytest.mark.parametrize("route", [comp.ROUTE_MOVED, comp.ROUTE_UNRECORDED, comp.ROUTE_CURRENT])
+def test_the_route_is_read_at_the_dispatch_and_a_move_after_it_unproves_nothing(route):
+    # The chain's own route against the route serving now no longer decides: the route
+    # serving at the dispatch instant, recorded with the effect, does.
     h = at(ac.verify(chain(route=route), inputs()), "invokes")
-    assert h.verdict == ac.UNPROVEN and code in codes(h)
+    assert h.verdict == ac.PROVEN and "route_at_dispatch" in codes(h)
+
+
+def test_a_dispatch_the_gate_signed_on_another_route_reads_unproven():
+    h = at(ac.verify(chain(), inputs(outcomes=with_dispatch(route_fingerprint="99" * 32))), "invokes")
+    assert h.verdict == ac.UNPROVEN and codes(h) == {"dispatched_on_another_route"}
+    same = at(ac.verify(chain(), inputs(outcomes=with_dispatch(route_fingerprint=ROUTE))), "invokes")
+    assert same.verdict == ac.PROVEN
 
 
 def test_a_chain_with_no_agent_names_no_actor():
@@ -655,10 +850,11 @@ def test_the_action_gate_decision_the_chain_cites(gate_id, outcomes, expected, c
 
 
 def test_a_hop_is_proven_only_when_every_reading_is():
-    # The approval proves the invocation; a moved route alone keeps it unproven.
-    h = at(ac.verify(chain(route=comp.ROUTE_MOVED), inputs()), "invokes")
+    # The approval and contract prove the invocation; a route nothing recorded at the
+    # dispatch alone keeps it unproven.
+    h = at(ac.verify(chain(), inputs(outcomes=with_dispatch(route_at_dispatch=""))), "invokes")
     assert h.verdict == ac.UNPROVEN
-    assert h.proven_by == () and {r.code for r in h.reasons} == {"route_moved"}
+    assert h.proven_by == () and {r.code for r in h.reasons} == {"dispatch_state_unrecorded"}
 
 
 def test_a_broken_reading_outranks_any_number_of_unproven_ones():
@@ -697,6 +893,11 @@ def test_every_reading_code_the_rule_emits_is_published_and_every_published_one_
     source = Path(ac.__file__).read_text(encoding="utf-8")
     emitted = set(re.findall(r'Reading\(\s*(?:PROVEN|UNPROVEN|BROKEN),\s*"([a-z_]+)"', source))
     assert emitted == set(ac.REASONS), (sorted(emitted - set(ac.REASONS)), sorted(set(ac.REASONS) - emitted))
+    # The codes part 5 retired are published apart, and the rule emits none of them.
+    assert set(ac.RETIRED_REASONS) == {
+        "approval_in_force", "approved_contract_in_force", "superseded_contract", "route_moved", "route_unrecorded",
+    }
+    assert not set(ac.RETIRED_REASONS) & (emitted | set(ac.REASONS))
 
 
 # --------------------------------------------------------------- the write shape

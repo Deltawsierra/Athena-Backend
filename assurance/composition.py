@@ -185,7 +185,7 @@ EVIDENCE_SCAN = "scan"
 #: observer name ``achilles-effect``: the dispatch that carried a permitted action
 #: out through the operator's provider saw the provider complete it (a 2xx to
 #: exactly the permitted action), and signed the evidence document
-#: (``mythos.observed-effect/v1``, :mod:`assurance.observed_effects`) that names the
+#: (``mythos.observed-effect`` v1 or v2, :mod:`assurance.observed_effects`) that names the
 #: tool, the permit, the dispatch and the gate decision. It is recorded only with
 #: that document, on its own route. Witnessed by the dispatch path, not by a party
 #: independent of Achilles: what it shows is that the provider answered success to

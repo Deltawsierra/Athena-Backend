@@ -472,6 +472,9 @@ _GOVERNING = [
         "HOP_VERDICTS", "RELATIONS", "GRAPH_KINDS", "TOOL_NODE_KINDS", "NO_RECORD_RELATIONS",
         # Part 4: the chain's window a sign-in must fall in.
         "AUTHENTICATION_WINDOW_SECONDS",
+        # Part 5: the dispatch window an effect must fall in, and the gate epoch a
+        # dispatch is authority under.
+        "DISPATCH_EFFECT_WINDOW_SECONDS", "RUNNING_EPOCH_STATE", "EPOCH_SEPARATOR",
     )],
     *[("assurance.authority_chain", "_VERDICT_RANK", key) for key in ("proven", "unproven", "broken")],
     *[("assurance.authority_chain", "GRAMMAR", key) for key in (
@@ -518,6 +521,8 @@ _NOT_RULES = {
     ("assurance.authority_chain", "CHAIN_SCHEMA"): "the name of the document a chain's digest is taken over; "
     "no verdict is computed from it",
     ("assurance.authority_chain", "REASONS"): "the words shown beside a reading's code; nothing decides on them",
+    ("assurance.authority_chain", "RETIRED_REASONS"): "the words published beside codes no longer emitted; "
+    "nothing decides on them",
     ("assurance.consequential", "REASONS"): "the words shown beside an effect's code; nothing decides on them",
     ("assurance.consequential", "EFFECT_SCHEMA"): "the name of the document an effect's digest is taken over; "
     "no status is computed from it",

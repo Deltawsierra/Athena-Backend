@@ -1474,6 +1474,7 @@ def refresh_stored_decisions(deployment_ids) -> None:
         return
     from .carry import converge
     from .latent import fire_due_conditions
+    from .approval_history import note_approvals_quietly
     from .served_route import note_route_quietly
     from .signals import refresh_deferred
 
@@ -1498,6 +1499,9 @@ def refresh_stored_decisions(deployment_ids) -> None:
             fire_due_conditions(deployment, schedule_refresh=False)
             # And the route the write left serving is noted, so a run after it binds.
             note_route_quietly(deployment)
+            # And the approvals as they stand, so a dispatch after now is read against
+            # them: the backstop for a write no signal saw (assurance.approval_history).
+            note_approvals_quietly(deployment)
         # Brought current only under the claim made here, still standing: a row this
         # release's before the watches were read is left recognisable if another
         # writer's recompute made it not, whoever recomputed after.

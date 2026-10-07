@@ -246,6 +246,12 @@ def _policy_document() -> dict:
             "no_record_relations": sorted(_authority_chain.NO_RECORD_RELATIONS),
             # The chain's window a sign-in must fall in to prove authenticated_as.
             "authentication_window_seconds": _authority_chain.AUTHENTICATION_WINDOW_SECONDS,
+            # Part 5: read as of dispatch -- how long after its dispatch an effect may
+            # be observed, and the gate epoch state (and its spelling) a dispatch is
+            # authority under.
+            "dispatch_effect_window_seconds": _authority_chain.DISPATCH_EFFECT_WINDOW_SECONDS,
+            "running_epoch_state": _authority_chain.RUNNING_EPOCH_STATE,
+            "epoch_separator": _authority_chain.EPOCH_SEPARATOR,
         },
         # Which effects need an authority chain (assurance.consequential): the
         # declared effect classes that make a tool's effect consequential and the ones

@@ -108,7 +108,9 @@ def _permissions(metadata) -> tuple[str, ...] | None:
     return tuple(p for p in raw if isinstance(p, str))
 
 
-def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None, principals=()) -> rule.Inputs:
+def load_inputs(
+    deployment, cited_ids, keyring, *, effect_citations=None, principals=(), workflows=()
+) -> rule.Inputs:
     """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``.
 
     ``cited_ids``: the outcome ids the chains cite (their gate decisions and
@@ -118,7 +120,9 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None, princi
     ``principals``: the principals the chains' sign-in and delegation hops name; the
     signed records that name one are read, in force under the same keyring
     (:func:`assurance.identity_evidence.records_for`) -- one query, none when no chain
-    names a principal."""
+    names a principal. ``workflows``: the chains' workflows, whose approval history and
+    the contract history of the tools it bound are read
+    (:func:`histories`) -- two queries, none for no workflow."""
     from .access import assess_effective_access
     from .coverage import coverage_manifest
     from .governance import is_shadow
@@ -219,6 +223,7 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None, princi
                         permit_digest=document["permit_digest"],
                         action=document["action"],
                         observed_at=observed_outcomes._instant(document["observed_at"]),
+                        dispatch=dispatch_state(document, row),
                     )
             outcomes[row.outcome_id] = rule.CitedOutcome(
                 outcome_id=row.outcome_id,
@@ -228,6 +233,7 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None, princi
                 effect=effect,
             )
     authentications, delegations = identity_evidence.records_for(deployment, principals, keyring)
+    approval_history, contract_history = histories(deployment, workflows)
     return rule.Inputs(
         graph=graph,
         approvals=approvals,
@@ -235,7 +241,66 @@ def load_inputs(deployment, cited_ids, keyring, *, effect_citations=None, princi
         effect_citations=dict(effect_citations or {}),
         authentications=authentications,
         delegations=delegations,
+        approval_history=approval_history,
+        contract_history=contract_history,
     )
+
+
+def dispatch_state(document: dict, row) -> rule.DispatchState | None:
+    """The state an observed effect's dispatch ran under, from its v2 document (read
+    against its signed digest by the caller) and the route this backend bound for the
+    dispatch instant when it recorded the row; ``None`` for a v1 document."""
+    block = document.get("dispatch")
+    if not isinstance(block, dict):
+        return None
+    presented = block["presented"]
+    return rule.DispatchState(
+        dispatched_at=observed_outcomes._instant(block["dispatched_at"]),
+        epoch=block["epoch"],
+        permit_epoch=block["permit_epoch"],
+        policy_id=block["policy_id"],
+        policy_digest=block["policy_digest"],
+        permit_policy_digest=block["permit_policy_digest"],
+        approval_digest=presented["approval_digest"],
+        contracts={(c["kind"], c["identifier"]): c["digest"] for c in presented["contracts"]},
+        route_fingerprint=presented["route_fingerprint"],
+        assertion_digest=presented["assertion_digest"],
+        grant_digest=presented["grant_digest"],
+        route_at_dispatch=row.dispatch_route_fingerprint or "",
+    )
+
+
+def histories(deployment, workflows) -> tuple[dict, dict]:
+    """``(approval history, contract history)`` for ``workflows``: every recorded
+    version of each one's approval (:mod:`assurance.approval_history`), and every
+    recorded contract (:class:`assurance.models.ToolContract`) of every tool any of
+    those versions bound -- oldest first. Two queries; none for no workflow."""
+    from . import approval_history
+    from .models import ToolContract
+
+    found = approval_history.history(deployment, workflows)
+    approvals = {
+        slug: tuple(
+            rule.ApprovalVersion(
+                in_force_from=v.in_force_from,
+                digest=v.digest,
+                tools=tuple(tuple(str(x) for x in t) for t in (v.tools if isinstance(v.tools, list) else [])),
+            )
+            for v in versions
+        )
+        for slug, versions in found.items()
+    }
+    keys = {(t[0], t[1]) for versions in approvals.values() for v in versions for t in v.tools if len(t) == 3}
+    contracts: dict[tuple[str, str], list[rule.ContractVersion]] = {}
+    if keys:
+        rows = ToolContract.objects.filter(
+            deployment=deployment, tool_identifier__in=sorted({identifier for _, identifier in keys})
+        ).order_by("recorded_at", "id")
+        for row in rows:
+            key = (str(row.tool_kind), str(row.tool_identifier))
+            if key in keys:
+                contracts.setdefault(key, []).append(rule.ContractVersion(recorded_at=row.recorded_at, digest=row.digest))
+    return approvals, {key: tuple(versions) for key, versions in contracts.items()}
 
 
 def named_principals(chains) -> set[str]:
@@ -333,6 +398,7 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
         keyring,
         effect_citations=citations,
         principals=named_principals(chains.values()),
+        workflows={chain.workflow for chain in chains.values()},
     )
     deployment_uuid = str(deployment.uuid)
     stands = set(standing)

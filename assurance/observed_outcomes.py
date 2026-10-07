@@ -303,6 +303,15 @@ def _instant(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=dt_timezone.utc)
 
 
+def _dispatched_at(document) -> datetime | None:
+    """When an observed effect's dispatch left, as its v2 document says; None for a v1
+    document and for every other outcome."""
+    dispatch = document.get("dispatch") if isinstance(document, dict) else None
+    if not isinstance(dispatch, dict) or not isinstance(dispatch.get("dispatched_at"), str):
+        return None
+    return _instant(dispatch["dispatched_at"])
+
+
 def _examine(envelope: Any, deployment, keyring, now: datetime) -> tuple[dict | None, str | None, str]:
     """``(outcome, key_id, "")`` for an envelope that may be recorded, else
     ``(None, None, why)``."""
@@ -332,7 +341,7 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
     """Verify and record ``envelopes`` for ``deployment``, all or none.
 
     ``evidence``: for the observed-effects route only, the
-    ``mythos.observed-effect/v1`` document posted beside each envelope, by position
+    ``mythos.observed-effect`` document (v1 or v2) posted beside each envelope, by position
     (:mod:`assurance.observed_effects`). Then every envelope must be an observed
     effect its document matches, and each is recorded with its document. Without
     it -- the signed-outcome route -- an observed effect is refused: it is recorded
@@ -478,9 +487,19 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
         # The route each run exercised, as far as the record shows it: bound now,
         # while the row is written, and never after (see
         # assurance.served_route.route_for_outcome).
-        routes = routes_for_outcomes(
-            deployment, [_instant(outcome["observed_at"]) for _, outcome, _, _ in accepted], now=now
+        # And, for an observed effect whose document says when its dispatch left
+        # (mythos.observed-effect/v2), the route serving at THAT instant, by the same
+        # rule, in the same note: Achilles holds no route of this backend's, so this
+        # backend supplies the route the dispatch ran on, once, as it is recorded.
+        dispatched = [
+            _dispatched_at(documents.get(outcome["outcome_id"])) for _, outcome, _, _ in accepted
+        ]
+        bound = routes_for_outcomes(
+            deployment,
+            [_instant(outcome["observed_at"]) for _, outcome, _, _ in accepted] + dispatched,
+            now=now,
         )
+        routes, dispatch_routes = bound[: len(accepted)], bound[len(accepted) :]
         rows = [
             WorkflowChainOutcome(
                 deployment=deployment,
@@ -501,8 +520,11 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
                 route_fingerprint=route,
                 effect_evidence=documents.get(outcome["outcome_id"]),
                 effect_dispatch_id=(documents.get(outcome["outcome_id"]) or {}).get("dispatch_id"),
+                dispatch_route_fingerprint=dispatch_route,
             )
-            for (_, outcome, key_id, envelope), route in zip(accepted, routes, strict=True)
+            for (_, outcome, key_id, envelope), route, dispatch_route in zip(
+                accepted, routes, dispatch_routes, strict=True
+            )
         ]
         try:
             # A savepoint of its own: the unique columns (outcome id, observed

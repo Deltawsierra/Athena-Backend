@@ -3336,8 +3336,9 @@ class WorkflowChainOutcome(models.Model):
     evidence_digest = models.CharField(max_length=71, blank=True)
     envelope = models.JSONField(null=True, blank=True)
     # AN OBSERVED EFFECT'S EVIDENCE (assurance.observed_effects): the
-    # ``mythos.observed-effect/v1`` document whose digest the signed outcome names --
-    # the tool, the permit, the dispatch, the gate decision and what was observed.
+    # ``mythos.observed-effect`` document (v1, or v2 with the state its dispatch ran
+    # under) whose digest the signed outcome names -- the tool, the permit, the
+    # dispatch, the gate decision and what was observed.
     # Written only by the observed-effects route, with the envelope; null on every
     # other row. Kept whole, and re-read against the signed digest on every read,
     # because the produces hop is bound by what it says, not by a column.
@@ -3346,6 +3347,15 @@ class WorkflowChainOutcome(models.Model):
     # unique: a second signed observation of one dispatch is a replay, whatever its
     # outcome id. Null on every other row.
     effect_dispatch_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
+    # THE SERVED ROUTE AT THE DISPATCH INSTANT, for an observed effect whose document
+    # says when its dispatch left (``mythos.observed-effect/v2``'s ``dispatched_at``).
+    # Bound when the row is written, by the same rule as ``route_fingerprint``
+    # (assurance.served_route.routes_for_outcomes): the route noted as serving now, if
+    # it was already noted as serving at that instant, else blank -- the record cannot
+    # say. Achilles holds no route of this backend's, so this backend supplies it; the
+    # ``invokes`` hop reads it as of dispatch, and a route that moves afterwards does
+    # not move it. Blank on every other row.
+    dispatch_route_fingerprint = models.CharField(max_length=64, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     @property
@@ -3648,6 +3658,67 @@ class AuthorityChain(models.Model):
 
     def __str__(self) -> str:
         return f"authority chain {self.workflow} -> {self.effect} ({len(self.hops or [])} hops)"
+
+
+class ApprovalVersionRewriteRefused(ValueError):
+    """A recorded approval version was asked to change or go away. The history is
+    append-only: an approval that moved is a NEW row, and the one before it stays."""
+
+
+class ApprovalVersion(models.Model):
+    """One version of an approved workflow's approval, and from when it was in force.
+
+    :class:`ApprovedWorkflow` is the approval as it stands NOW: its description is
+    rewritten in place, its tool bindings are released and re-bound, and withdrawing it
+    deletes it with its bindings. So nothing said which approval was in force at an
+    instant in the past -- and an authority chain read its ``under_policy`` hop against
+    the approval in force when the receipt was computed, so a re-approval after an
+    effect unproved an effect that was properly authorised.
+
+    This row is that history (:mod:`assurance.approval_history`): the approval's digest
+    (:func:`assurance.authority_chain_records.approval_digest`, blank once withdrawn),
+    the tools it bound and the contract digest each was bound under, and the instant
+    the platform noted it. Noted in the same transaction as every write that can move
+    an approval, and again at every decision refresh, so ``in_force_from`` is when the
+    platform NOTICED: at or after the change. A version is in force from its
+    ``in_force_from`` until the next version of the same workflow's.
+
+    APPEND-ONLY: a version that moved is a new row; the model refuses an update or a
+    delete of a recorded one (:class:`ApprovalVersionRewriteRefused`). An approval that
+    returns to an earlier digest is appended again: the history says it moved and came
+    back. Keyed by the workflow's slug rather than a foreign key, so withdrawing the
+    approval never deletes the record of what it was.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="approval_versions")
+    workflow = models.SlugField(max_length=200)
+    # The approval digest (64 hex), or blank: the approval was withdrawn.
+    digest = models.CharField(max_length=64, blank=True)
+    # [[tool kind, tool identifier, contract digest], ...], sorted: what the digest
+    # covers of the tools, kept so the tools bound at an instant can be read back.
+    tools = models.JSONField(default=list)
+    in_force_from = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "workflow", "in_force_from", "id"]
+        indexes = [
+            models.Index(fields=["deployment", "workflow", "in_force_from"], name="assurance_approval_version"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ApprovalVersionRewriteRefused(
+                "A recorded approval version is history and is never rewritten; record the new version as a new row."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ApprovalVersionRewriteRefused("A recorded approval version is history and is never deleted.")
+
+    def __str__(self) -> str:
+        return f"approval {self.workflow} @ {(self.digest or 'withdrawn')[:12]} from {self.in_force_from.isoformat()}"
 
 
 class IdentityEvidenceRewriteRefused(ValueError):

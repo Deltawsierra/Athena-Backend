@@ -1,0 +1,953 @@
+{
+  "about": "Conformance vectors for the observed-effect evidence document, v2 (v1 and the dispatch block: the state the dispatch ran under, bound at dispatch), generated from achilles-engine (achilles/observed_effect.py) and carried byte-for-byte in athena-backend. Each key is Ed25519 with the private seed SHA-256 of its phrase: test keys, public by construction, never a real one. Keys, payloads and signatures are written as hex; an envelope's base64 fields are the base64 of those bytes.",
+  "effect_engine": "achilles-effect",
+  "effect_key_phrase": "mythos.observed-effect/v2 conformance vector: the observed-effect test key, never a real one",
+  "effect_public_key_hex": "257f6701e3b9339d4de1762162727744571819286b43f56d834684804298b1d8",
+  "envelope": {
+    "payloadType": "application/vnd.mythos.chain-outcome+json",
+    "payload_hex": "7b226465706c6f796d656e74223a2237663363326131302d303030302d343030302d383030302d303030303030303030306532222c2265766964656e63655f646967657374223a227368613235363a36636133313331613565306365326639316534336534653235643336643463346633333039626663356235646534346339636365346363323338366238313932222c226f627365727665645f6174223a22323032362d31302d30375431323a30303a30302e3132333435365a222c226f62736572766572223a7b22656e67696e65223a22616368696c6c65732d656666656374222c2272756e5f6964223a2272756e2d32222c2276657273696f6e223a22302e312e30227d2c226f7574636f6d655f6964223a223666356534643363326231613466396538643763366235613439333832373237222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2263726d2d757064617465227d",
+    "signatures": [
+      {
+        "keyid": "sha256:cf84c219a43396f039058f4e7ef6946c",
+        "sig_hex": "6d15a5f6ced1c0c3e6d8231cc4b2f3045e0cda2694b60ee69ea31159af8dd3dba7d61dd6513461d94337ef1cba82768b4c311e186b74a6834af89ce97b49a507"
+      }
+    ]
+  },
+  "evidence": {
+    "action": "crm.update",
+    "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+    "dispatch": {
+      "dispatched_at": "2026-10-07T12:00:00.023456Z",
+      "epoch": "running#9f2c41d07a3b5e68.0",
+      "permit_epoch": "running#9f2c41d07a3b5e68.0",
+      "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "policy_id": "p-1",
+      "presented": {
+        "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "contracts": [
+          {
+            "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "identifier": "crm-mcp",
+            "kind": "mcp_server"
+          }
+        ],
+        "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+        "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+      }
+    },
+    "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+    "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+    "observed": {
+      "provider": "crm-provider",
+      "receipt_id": "rcpt-0002",
+      "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+      "status_code": 200
+    },
+    "observed_at": "2026-10-07T12:00:00.123456Z",
+    "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+    "schema": "mythos.observed-effect/v2",
+    "tool": {
+      "identifier": "crm-mcp",
+      "kind": "mcp_server"
+    },
+    "workflow": "crm-update"
+  },
+  "evidence_digest": "sha256:6ca3131a5e0ce2f91e43e4e25d36d4c4f3309bfc5b5de44c9cce4cc2386b8192",
+  "gate_envelope": {
+    "payloadType": "application/vnd.mythos.chain-outcome+json",
+    "payload_hex": "7b226465706c6f796d656e74223a2237663363326131302d303030302d343030302d383030302d303030303030303030306532222c2265766964656e63655f646967657374223a227368613235363a65656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565222c226f627365727665645f6174223a22323032362d31302d30375431313a35393a35392e3935343332315a222c226f62736572766572223a7b22656e67696e65223a22616368696c6c6573222c2272756e5f6964223a2272756e2d32222c2276657273696f6e223a22302e312e30227d2c226f7574636f6d655f6964223a223163376435663362396132653464346338623666346537643563346233613231222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2263726d2d757064617465227d",
+    "signatures": [
+      {
+        "keyid": "sha256:dee36b613a082eddbaec3a842c44db86",
+        "sig_hex": "1e5a8f3cc680754a281acb4c1c81af0db60375a495e81b89ad81b938951674bb7e40a5f1b695702330f20be2b587361b1c2707454838c5d9d0c93e92971d3905"
+      }
+    ]
+  },
+  "gate_key_phrase": "mythos.observed-effect/v2 conformance vector: the gate's outcome test key, never a real one",
+  "gate_public_key_hex": "e4d45cd9fc0e730d4e07811a3bebaf05116b434d2c6fcba55ccca4bb1f8234c6",
+  "inputs": {
+    "authority": {
+      "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "contracts": [
+        {
+          "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        }
+      ],
+      "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+      "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+    },
+    "dispatched_at": "2026-10-07T12:00:00.023456Z",
+    "effect_outcome_id": "6f5e4d3c2b1a4f9e8d7c6b5a49382727",
+    "engine_version": "0.1.0",
+    "gate_result": {
+      "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "epoch": "running#9f2c41d07a3b5e68.0",
+      "ok": true,
+      "permit_epoch": "running#9f2c41d07a3b5e68.0",
+      "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "policy_id": "p-1",
+      "policy_in_force": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "permit": {
+      "action_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "budget_ceiling": null,
+      "budget_task": "",
+      "epoch": "running#9f2c41d07a3b5e68.0",
+      "expires_at": 1893456000.0,
+      "field_digests": {},
+      "lab": false,
+      "mac": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nonces": [
+        "n-1"
+      ],
+      "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "policy_id": "p-1",
+      "policy_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "revocable": [],
+      "subject": "acme"
+    },
+    "provider_response": "{\"receipt_id\":\"rcpt-0002\",\"status\":\"updated\"}"
+  },
+  "invalid": [
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a v1 document under the v2 schema"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v1",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a v2 document under the v1 schema"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v3",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "another schema"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          },
+          "verdict": "proven"
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "an extra field in dispatch"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "dispatch without its instant"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1"
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "dispatch without what it was presented"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "epoch": "running#9f2c41d07a3b5e68.0",
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "an epoch claimed among what was presented"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "sha256:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "an approval digest that is not 64 hex"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a route fingerprint that is not 64 hex"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "an assertion digest with no algorithm"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": 7,
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a grant digest that is not text"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "identifier": "refund",
+                "kind": "tool"
+              },
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "contracts out of order"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              },
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "one tool's contract twice"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "agent"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a contract of a kind no hop names"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "approved": true,
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a contract with an extra field"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a dispatch instant with another spelling"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a policy digest with no algorithm"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running\n#0.0",
+          "permit_epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "a control character in the epoch"
+    },
+    {
+      "evidence": {
+        "action": "crm.update",
+        "action_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "deployment": "7f3c2a10-0000-4000-8000-0000000000e2",
+        "dispatch": {
+          "dispatched_at": "2026-10-07T12:00:00.023456Z",
+          "epoch": "running#9f2c41d07a3b5e68.0",
+          "permit_epoch": null,
+          "permit_policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "policy_id": "p-1",
+          "presented": {
+            "approval_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "assertion_digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "contracts": [
+              {
+                "digest": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                "identifier": "crm-mcp",
+                "kind": "mcp_server"
+              }
+            ],
+            "grant_digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+            "route_fingerprint": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+          }
+        },
+        "dispatch_id": "d2e3f4a5b6c74d8e9fa0b1c2d3e4f5a6",
+        "gate_outcome_id": "1c7d5f3b9a2e4d4c8b6f4e7d5c4b3a21",
+        "observed": {
+          "provider": "crm-provider",
+          "receipt_id": "rcpt-0002",
+          "response_digest": "sha256:fc2919d77ee61de4840a1aa9baae55920e776977cd4466fb399fc05633698812",
+          "status_code": 200
+        },
+        "observed_at": "2026-10-07T12:00:00.123456Z",
+        "permit_digest": "sha256:bbbc312b7a009e1f7dacb412fbdb5ac6939cde44d75598c3c36dde757acbe0f7",
+        "schema": "mythos.observed-effect/v2",
+        "tool": {
+          "identifier": "crm-mcp",
+          "kind": "mcp_server"
+        },
+        "workflow": "crm-update"
+      },
+      "why": "an epoch that is not text"
+    }
+  ],
+  "schema": "mythos.observed-effect/v2"
+}

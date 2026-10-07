@@ -35,6 +35,7 @@ from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
 from . import identity_evidence, observability, observed_effects, observed_outcomes
+from .approval_history import note_approvals
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
 from .invalidation import check_invalidations as run_invalidation_check
@@ -1792,6 +1793,11 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                                     }
                                 }
                             ) from refused
+                # The roster's own writes are bulk, which no signal sees: the
+                # approvals' versions are noted here, in this transaction, so the
+                # history a chain is read against as of dispatch never lags this PUT
+                # (assurance.approval_history).
+                note_approvals(deployment, now=now)
                 _refresh_stored_decision(deployment)
         # `select_related` because `approved_by` is read per row: without it a
         # thousand-row set issues a thousand extra user queries. The live tool
@@ -2016,7 +2022,7 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
     )
     def observed_effects(self, request, uuid=None):
         """Record one observed effect: the outcome Achilles signed with its
-        observed-effect key, and the ``mythos.observed-effect/v1`` document its digest
+        observed-effect key, and the ``mythos.observed-effect`` document (v1 or v2) its digest
         names (:mod:`assurance.observed_effects`). The only writer of an
         ``observed_effect``, and the only route that takes one.
 
