@@ -311,9 +311,13 @@ def test_a_4_0_receipt_still_reads(monkeypatch):
     key = Ed25519PrivateKey.generate()
     signed = _signed_answer(monkeypatch, dep, reader, key)["receipt"]
 
-    # The current one without what every later version added: 4.1's issue time, and
-    # 5.0's authority chains.
-    four = {name: value for name, value in signed.items() if name not in ("issued_at", "authority_chains")}
+    # The current one without what every later version added: 4.1's issue time, 5.0's
+    # authority chains and 6.0's consequential effects.
+    four = {
+        name: value
+        for name, value in signed.items()
+        if name not in ("issued_at", "authority_chains", "consequential_effects")
+    }
     four["receipt_version"] = FOUR_OH
     four["digest"] = receipt._digest(_hashed(four))
     served = {"receipt": four, "envelope": _envelope(_engine_bytes(four), key)}

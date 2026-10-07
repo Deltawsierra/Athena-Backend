@@ -66,7 +66,13 @@ time at all. It binds, into one deterministic payload:
   it was produced through, hop by hop, and each hop's verdict (see
   :mod:`assurance.authority_chain`): proven, unproven (a shadow node, a dangling
   edge, an unverified approval) or broken. Named by digest, never by the nodes'
-  names.
+  names;
+- the **consequential effects** -- every effect an approved workflow has through a
+  tool its approval binds, and which of them need a chain and have none (see
+  :mod:`assurance.consequential`): consequential and covered by a chain in force,
+  consequential and MISSING one, of an UNKNOWN class, or read-only. A missing chain
+  reads unproven, so a receipt over a deployment that recorded no chain no longer
+  reads like one whose chains all hold. Named by digest too.
 
 Together those two are what make the receipt answer, on its own, *which
 configuration passed and what was not covered*. Neither is retrievable from the
@@ -223,7 +229,17 @@ SIGNED_FORM_ONLY = ("issued_at",)
 #         digest of the same state differ. HASHED_CONTENT_VERSION moves with it, and
 #         so does the policy pin -- which the two caps this version's chains bring
 #         to the decision move anyway.
-RECEIPT_VERSION = "mythos.assurance.receipt/5.0"
+#   6.0 — added ``consequential_effects``: every effect an approved workflow has
+#         through a tool its approval binds, its class, and whether a chain in force
+#         names it (assurance.consequential). MAJOR, for the reason 5.0 was: it is
+#         new HASHED content, so a 5.0 digest and a 6.0 digest of the same state
+#         differ. Not a 5.1: a MINOR step changes only what sits outside the digest
+#         (3.1, 4.1), and calling new hashed content minor would tell a consumer two
+#         digests of one state are comparable when they are not. The policy pin moves
+#         with it, and with the two caps (authority_chain_missing,
+#         effect_class_unknown) this version's effects bring to the decision.
+RECEIPT_VERSION = "mythos.assurance.receipt/6.0"
+_VERSION_5_0 = "mythos.assurance.receipt/5.0"
 _VERSION_4_1 = "mythos.assurance.receipt/4.1"
 _VERSION_4_0 = "mythos.assurance.receipt/4.0"
 _VERSION_3_1 = "mythos.assurance.receipt/3.1"
@@ -250,7 +266,8 @@ EMITTED_AS = {
     _VERSION_3_1: "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
     _VERSION_4_0: "#105 (7985460), 26 Sep 2026, until #118",
     _VERSION_4_1: "#118 (d81e9cb), 29 Sep 2026, until #133",
-    RECEIPT_VERSION: "#133 (1f357fa), 7 Oct 2026, and since",
+    _VERSION_5_0: "#133 (1f357fa), 7 Oct 2026, until #PRNUM",
+    RECEIPT_VERSION: "#PRNUM (COMMITSHA), 7 Oct 2026, and since",
 }
 
 #: The versions no route ever signed. Receipts were first signed under 3.1, by #96
@@ -268,11 +285,11 @@ NEVER_SIGNED = (_VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0)
 # callers are unaffected. Every version ever emitted is here: 1.0 was left out
 # until the receipts #27 emitted were read back from git (tests/fixtures/receipts).
 SUPERSEDED_VERSIONS = (
-    _VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0, _VERSION_4_1,
+    _VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0, _VERSION_4_1, _VERSION_5_0,
 )
 
-#: The version that introduced the HASHED content this module emits: 5.0, which added
-#: ``authority_chains`` (4.0 added ``chains``). A MINOR step changes only what sits outside the digest, so it leaves
+#: The version that introduced the HASHED content this module emits: 6.0, which added
+#: ``consequential_effects`` (5.0 added ``authority_chains``, 4.0 ``chains``). A MINOR step changes only what sits outside the digest, so it leaves
 #: this where it is; a MAJOR step moves it. :mod:`assurance.policy` pins THIS as its
 #: ``evaluator_standard``, not :data:`RECEIPT_VERSION`. The policy pin is what every
 #: claim and stored decision is bound to, and pinning the stamped version made 4.1 --
@@ -758,6 +775,45 @@ RECEIPT_SCHEMA = {
                 "recorded", "standing", "superseded", "verdict_census", "basis_census", "chains", "not_shown",
             ],
         },
+        "consequential_effects": {
+            "type": "object",
+            "description": (
+                "Every effect an approved workflow has through a tool its approval binds "
+                "(assurance.consequential), and whether it needs an authority chain: the tool's "
+                "declared effect class makes it consequential (write, destructive, or annotated "
+                "destructive), read-only (read), or unknown (undeclared, outside the vocabulary, "
+                "or the tool no longer registered). A consequential effect no chain in force "
+                "names is missing, and holds the decision at needs_more_evidence as an unproven "
+                "chain does; so does an unknown one. No workflow or tool is named: each effect is "
+                "identified by its digest, the SHA-256 of the effect document the deployment's "
+                "authority-chains route serves beside its names."
+            ),
+            "properties": {
+                "status_census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": (
+                        "Effects by status -- covered, missing, unknown, not_required -- every "
+                        "status including the zeros."
+                    ),
+                },
+                "effects": {
+                    "type": "array",
+                    "description": (
+                        "The effects, ordered by digest, at most 50: each its digest, tool_kind, "
+                        "class (consequential, read_only, unknown), status, readings (the codes "
+                        "that decided its class and status) and chains (the digests of the "
+                        "authority chains in force that name it)."
+                    ),
+                    "items": {"type": "object"},
+                },
+                "not_shown": {
+                    "type": "integer",
+                    "description": "Effects past the 50 listed: counted, never silently dropped.",
+                },
+            },
+            "required": ["status_census", "effects", "not_shown"],
+        },
         "algorithm": {"type": "string", "const": ALGORITHM},
         "digest": {
             "type": "string",
@@ -826,6 +882,7 @@ RECEIPT_SCHEMA = {
         "coverage",
         "chains",
         "authority_chains",
+        "consequential_effects",
         "algorithm",
         "digest",
         "computed_at",
@@ -857,9 +914,14 @@ RECEIPT_SCHEMA = {
 #: What each shape added over the one before it, newest first: (the shape before,
 #: what was added). ``means`` is what a receipt without those members cannot say.
 _ADDED_IN = (
+    # 6.0: every effect the approvals cover, and which of them have no chain.
+    (_VERSION_5_0, {
+        "in": RECEIPT_VERSION, "fields": ("consequential_effects",), "coverage": (),
+        "means": "which consequential effects no authority chain names, and which tools' effect class is unknown",
+    }),
     # 5.0: every authority chain in force, hop by hop, with each hop's verdict.
     (_VERSION_4_1, {
-        "in": RECEIPT_VERSION, "fields": ("authority_chains",), "coverage": (),
+        "in": _VERSION_5_0, "fields": ("authority_chains",), "coverage": (),
         "means": "which authority chain produced each consequential effect, and which of its hops are proven",
     }),
     # 4.1: the signed form's issue time, outside the digest.
@@ -990,6 +1052,7 @@ def _both_2_0_shapes() -> dict:
     return {**as_67, "properties": {**as_67["properties"], "coverage": coverage}}
 
 
+_SCHEMA_5_0 = _schema_before(_VERSION_5_0)
 _SCHEMA_4_1 = _schema_before(_VERSION_4_1)
 _SCHEMA_4_0 = _schema_before(_VERSION_4_0)
 _SCHEMA_3_1 = _schema_before(_VERSION_3_1)
@@ -1000,6 +1063,7 @@ _SCHEMA_1_0 = _schema_before(_VERSION_1_0)
 
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_5_0: _SCHEMA_5_0,
     _VERSION_4_1: _SCHEMA_4_1,
     _VERSION_4_0: _SCHEMA_4_0,
     _VERSION_3_1: _SCHEMA_3_1,
@@ -1207,7 +1271,7 @@ def _chains_reference(deployment) -> dict:
 RECEIPT_CHAIN_LIMIT = 50
 
 
-def _authority_chains_reference(deployment) -> dict:
+def _authority_chains_reference(deployment, read=None) -> dict:
     """Every authority chain in force, hop by hop, with each hop's verdict
     (:func:`assurance.authority_chain_records.receipt_reference`).
 
@@ -1221,7 +1285,71 @@ def _authority_chains_reference(deployment) -> dict:
     """
     from .authority_chain_records import receipt_reference
 
-    return receipt_reference(deployment, limit=RECEIPT_CHAIN_LIMIT)
+    return receipt_reference(deployment, limit=RECEIPT_CHAIN_LIMIT, read=read)
+
+
+#: How many effects the receipt lists. The rest are counted (``not_shown``).
+RECEIPT_EFFECT_LIMIT = 50
+
+
+def _consequential_effects_reference(deployment, read=None) -> dict:
+    """Every effect the approvals cover, its class, and whether a chain in force names
+    it (:func:`assurance.authority_chain_records.effects_reference`).
+
+    ``authority_chains`` lists the chains somebody recorded; this lists the effects
+    that NEED one, so a deployment that recorded none cannot read like one whose
+    chains all hold. Hashed, named by digest, imported lazily, for the reasons
+    :func:`_authority_chains_reference` gives."""
+    from .authority_chain_records import effects_reference
+
+    return effects_reference(deployment, limit=RECEIPT_EFFECT_LIMIT, read=read)
+
+
+def consequential_effects_problem(section, chains=None) -> str | None:
+    """Why ``section`` is not a ``consequential_effects`` block this module could have
+    emitted, or ``None``: the members the schema requires, every status in the census,
+    each effect in the vocabulary of :mod:`assurance.consequential` with a status its
+    class allows, and the counts counting what is listed. With ``chains`` (the
+    receipt's ``authority_chains``), a covered effect must name a chain and every
+    chain it names must be in force there whenever that block lists every chain."""
+    from . import consequential as rule
+    from .authority_chain import TOOL_NODE_KINDS
+
+    required = set(RECEIPT_SCHEMA["properties"]["consequential_effects"]["required"])
+    if not isinstance(section, dict) or set(section) != required:
+        return "consequential_effects does not have the members the schema requires"
+    census = section["status_census"]
+    if not isinstance(census, dict) or set(census) != set(rule.STATUSES):
+        return "the status census does not count every status"
+    effects = section["effects"]
+    if not isinstance(effects, list):
+        return "effects is not a list"
+    allowed = {
+        rule.CONSEQUENTIAL: {rule.COVERED, rule.MISSING},
+        rule.READ_ONLY: {rule.NOT_REQUIRED},
+        rule.UNKNOWN: {rule.UNKNOWN},
+    }
+    listed = None
+    if isinstance(chains, dict) and chains.get("not_shown") == 0 and isinstance(chains.get("chains"), list):
+        listed = {c.get("digest") for c in chains["chains"] if isinstance(c, dict)}
+    for effect in effects:
+        if not isinstance(effect, dict) or set(effect) != {
+            "digest", "tool_kind", "class", "status", "readings", "chains",
+        }:
+            return "an effect does not have the members digest, tool_kind, class, status, readings and chains"
+        if effect["tool_kind"] not in TOOL_NODE_KINDS:
+            return "an effect names a tool kind outside the vocabulary"
+        if effect["class"] not in allowed or effect["status"] not in allowed[effect["class"]]:
+            return "an effect names a class, or a status its class does not allow"
+        if not isinstance(effect["readings"], list) or not isinstance(effect["chains"], list):
+            return "an effect's readings or chains are not lists"
+        if (effect["status"] == rule.COVERED) != bool(effect["chains"]) and effect["class"] == rule.CONSEQUENTIAL:
+            return "a consequential effect is covered exactly when a chain in force names it"
+        if listed is not None and not set(effect["chains"]) <= listed:
+            return "an effect names a chain the authority chains do not hold in force"
+    if len(effects) + section["not_shown"] != sum(census.values()):
+        return "the counts do not count the effects listed"
+    return None
 
 
 def authority_chains_problem(section) -> str | None:
@@ -1286,7 +1414,7 @@ def build_assurance_receipt(deployment) -> dict:
 
     Deterministic: the digest is over stable content only (version, system,
     result, policy, evidence root, assessment digests, served route, coverage,
-    chains, authority chains). ``computed_at`` rides
+    chains, authority chains, consequential effects). ``computed_at`` rides
     alongside as metadata, outside the hash, so the same DB state always yields
     the same digest. Prefetch ``findings__evidence`` and
     ``assets__provider__assertions`` and select_related ``data_boundary`` on the
@@ -1306,6 +1434,11 @@ def build_assurance_receipt(deployment) -> dict:
     # stable parts of the deployment receipt — the timestamp inside it is dropped
     # so no clock leaks into our digest.
     evidence_root = deployment_receipt(deployment)
+    # The recorded authority chains, read and verified once for the two blocks that
+    # carry them: the chains in force, and the effects they name.
+    from .authority_chain_records import read_chains
+
+    chains_read = read_chains(deployment)
 
     stable = {
         "receipt_version": RECEIPT_VERSION,
@@ -1348,7 +1481,10 @@ def build_assurance_receipt(deployment) -> dict:
         # Which authority produced each consequential effect, hop by hop, and
         # which hops nothing proves. Hashed: a chain through a shadow node and one
         # through a governed tool are different states.
-        "authority_chains": _authority_chains_reference(deployment),
+        "authority_chains": _authority_chains_reference(deployment, read=chains_read),
+        # Which effects NEED a chain, and which have none. Hashed: a deployment that
+        # recorded no chain and one whose chains hold are different states.
+        "consequential_effects": _consequential_effects_reference(deployment, read=chains_read),
     }
 
     return {

@@ -137,6 +137,18 @@ def _digest(dep, identifier):
     return tc.contract_digest(Asset.objects.get(deployment=dep, identifier=identifier))
 
 
+def _holds(dep):
+    """Which of the tool caps hold the decision back. Since the owner's decision of
+    7 Oct the refund -- a write no authority chain names -- holds it at needs more
+    evidence on its own (assurance.consequential), the same place a superseded
+    approval holds it, so the decision alone no longer tells the two apart: each
+    test names which one holds."""
+    from assurance.decision import claim_decision_signal
+
+    signal = claim_decision_signal(_fresh(dep))
+    return {k for k in ("superseded_tool_contracts", "authority_chains_missing", "effect_classes_unknown") if signal[k]}
+
+
 # --------------------------------------------------------------------------
 # The approval binds, and the read says under which contract.
 # --------------------------------------------------------------------------
@@ -156,7 +168,10 @@ def test_an_approval_names_its_tools_and_each_is_bound_to_the_contract_in_force(
     assert tool["kind"] == "tool" and tool["identifier"] == "refund@payments"
     assert tool["contract_digest"] == tool["current_digest"] == refund
     assert tool["superseded"] is False
-    assert compute_decision(_fresh(dep)) == D.READY_RESTRICTED
+    # READY_RESTRICTED on master: the refund's write had no authority chain and that
+    # counted for nothing. It reads unproven now, and only that holds it.
+    assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert _holds(dep) == {"authority_chains_missing"}
 
 
 def test_a_contract_change_under_an_http_approval_holds_the_decision():
@@ -166,6 +181,7 @@ def test_a_contract_change_under_an_http_approval_holds_the_decision():
 
     _redeclare(dep, "refund@payments", effect_class="destructive")
     assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert "superseded_tool_contracts" in _holds(dep)
 
     tool = client.get(_url(dep)).data["approved"][0]["tools"][0]
     assert tool["contract_digest"] == before
@@ -194,9 +210,11 @@ def test_a_roster_edit_keeps_a_superseded_approval_holding():
     dep, client = _setup()
     workflow = ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="refund")
     tc.bind_workflow(workflow, Asset.objects.get(deployment=dep, identifier="refund@payments"))
-    assert compute_decision(_fresh(dep)) == D.READY_RESTRICTED
+    assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert _holds(dep) == {"authority_chains_missing"}
     _redeclare(dep, "refund@payments", effect_class="destructive")
     assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert _holds(dep) == {"authority_chains_missing", "superseded_tool_contracts"}
 
     # Re-declare the same workflow, renamed, without naming its tools: a roster
     # edit, not a re-approval. On master this read READY_RESTRICTED again.
@@ -204,6 +222,7 @@ def test_a_roster_edit_keeps_a_superseded_approval_holding():
     assert response.status_code == 200, response.data
 
     assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert "superseded_tool_contracts" in _holds(dep)
     assert ApprovedWorkflow.objects.get(deployment=dep, slug="refund-over-limit").pk == workflow.pk
     assert ToolContractBinding.objects.filter(workflow=workflow, released_at__isnull=True).count() == 1
     assert response.data["approved"][0]["tools"][0]["superseded"] is True
@@ -243,7 +262,10 @@ def test_re_approving_under_the_contract_in_force_lifts_the_hold():
     response = _put(client, dep, _entry("refund-over-limit", [_refund(now)]))
     assert response.status_code == 200, response.data
     assert response.data["approved"][0]["tools"][0]["superseded"] is False
-    assert compute_decision(_fresh(dep)) == D.READY_RESTRICTED
+    # The superseded hold is lifted; the destructive refund no chain names still
+    # reads unproven (READY_RESTRICTED on master).
+    assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert _holds(dep) == {"authority_chains_missing"}
     # The old approval is kept, released -- the record of what was approved before.
     assert ToolContractBinding.objects.filter(deployment=dep, released_at__isnull=False).count() == 1
 

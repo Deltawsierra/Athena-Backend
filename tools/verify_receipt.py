@@ -6,7 +6,7 @@
     python verify_receipt.py RECEIPT.json --keyring KEYRING.json --max-age SECONDS
     python verify_receipt.py RECEIPT.json          # an unsigned copy: checked, then refused
 
-Written from ``docs/receipt-spec/v5.0.md``, not from this repository's code, and it
+Written from ``docs/receipt-spec/v6.0.md``, not from this repository's code, and it
 imports nothing from it: the Python standard library, plus ``cryptography`` for
 Ed25519 -- the one crypto library athena-backend already depends on. Copy this file
 anywhere and run it.
@@ -40,6 +40,14 @@ chain of authority it was produced through, hop by hop, with each hop's verdict.
 verifier checks its shape and that each chain reads as its worst hop, and a VERIFIED
 names every chain that is not proven and the hops that hold it.
 
+From 6.0 a receipt also carries ``consequential_effects``: every effect an approved
+workflow has through a tool its approval binds, its class, and whether a chain in
+force names it. A consequential effect no chain names is ``missing``, and one whose
+class nobody declared is ``unknown``; both read unproven. The verifier checks the
+section's shape, that each status is one its class allows, that a covered effect
+names a chain the receipt holds in force, and a VERIFIED names every effect that is
+missing or unknown.
+
 ``--max-age SECONDS`` is your freshness policy. From 4.1 a signed receipt carries the
 time it was issued, under the signature; with ``--max-age`` a receipt issued longer
 ago than that is refused (``stale``), and so is one that carries no signed time at
@@ -72,7 +80,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-SPEC = "docs/receipt-spec/v5.0.md"
+SPEC = "docs/receipt-spec/v6.0.md"
 
 #: The DSSE payload type an assurance-receipt signature is bound to.
 RECEIPT_TYPE = "application/vnd.mythos.assurance-receipt+json"
@@ -99,8 +107,9 @@ HASHED: dict[str, frozenset[str]] = {
     "mythos.assurance.receipt/4.0": frozenset((*_V2, "chains")),
     "mythos.assurance.receipt/4.1": frozenset((*_V2, "chains")),
     "mythos.assurance.receipt/5.0": frozenset((*_V2, "chains", "authority_chains")),
+    "mythos.assurance.receipt/6.0": frozenset((*_V2, "chains", "authority_chains", "consequential_effects")),
 }
-CURRENT = "mythos.assurance.receipt/5.0"
+CURRENT = "mythos.assurance.receipt/6.0"
 
 #: The receipt's report on itself: present from 3.1, outside the digest and outside
 #: the signature. A receipt cannot make itself signed; only an envelope can.
@@ -108,14 +117,14 @@ SELF_REPORT = ("signed", "signature", "unsigned_reason")
 _SELF_REPORTING = frozenset(
     {
         "mythos.assurance.receipt/3.1", "mythos.assurance.receipt/4.0", "mythos.assurance.receipt/4.1",
-        "mythos.assurance.receipt/5.0",
+        "mythos.assurance.receipt/5.0", "mythos.assurance.receipt/6.0",
     }
 )
 
 #: The signed form's issue time: from 4.1, in the signed form only, inside the
 #: signature and outside the digest.
 SIGNED_ONLY = ("issued_at",)
-_ISSUED = frozenset({"mythos.assurance.receipt/4.1", "mythos.assurance.receipt/5.0"})
+_ISSUED = frozenset({"mythos.assurance.receipt/4.1", "mythos.assurance.receipt/5.0", "mythos.assurance.receipt/6.0"})
 
 #: Top-level members no digest covers. ``algorithm``, ``digest`` and ``issued_at``
 #: are covered by the signature; the other four by nothing.
@@ -144,7 +153,8 @@ EMITTED: dict[tuple[str, str | None], str] = {
     ("mythos.assurance.receipt/3.1", None): "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
     ("mythos.assurance.receipt/4.0", None): "#105 (7985460), 26 Sep 2026, until #118",
     ("mythos.assurance.receipt/4.1", None): "#118 (d81e9cb), 29 Sep 2026, until #133",
-    ("mythos.assurance.receipt/5.0", None): "#133 (1f357fa), 7 Oct 2026, and since",
+    ("mythos.assurance.receipt/5.0", None): "#133 (1f357fa), 7 Oct 2026, until #PRNUM",
+    ("mythos.assurance.receipt/6.0", None): "#PRNUM (COMMITSHA), 7 Oct 2026, and since",
 }
 
 #: What each shape added over the one before it: its members, and what a receipt
@@ -170,6 +180,10 @@ ADDED: dict[tuple[str, str | None], tuple[tuple[str, ...], str]] = {
     ("mythos.assurance.receipt/5.0", None): (
         ("authority_chains",),
         "which authority chain produced each consequential effect, and which of its hops are proven",
+    ),
+    ("mythos.assurance.receipt/6.0", None): (
+        ("consequential_effects",),
+        "which consequential effects no authority chain names, and which tools' effect class is unknown",
     ),
 }
 
@@ -517,6 +531,83 @@ def _authority_chains(section: object) -> str | None:
     return None
 
 
+#: The effect vocabulary a 6.0 receipt's ``consequential_effects`` is read against
+#: (specification, section 4.11): each class, and the statuses it allows.
+EFFECT_CLASSES: dict[str, frozenset[str]] = {
+    "consequential": frozenset({"covered", "missing"}),
+    "read_only": frozenset({"not_required"}),
+    "unknown": frozenset({"unknown"}),
+}
+EFFECT_STATUSES = ("covered", "missing", "unknown", "not_required")
+#: The node kinds a tool an approval binds can be.
+EFFECT_TOOL_KINDS = ("tool", "mcp_server", "skill")
+_EFFECT_MEMBERS = frozenset({"status_census", "effects", "not_shown"})
+_EFFECT_ITEM = frozenset({"digest", "tool_kind", "class", "status", "readings", "chains"})
+
+
+def _consequential_effects(section: object, chains: object) -> str | None:
+    """Why a 6.0 ``consequential_effects`` is not the shape section 4.11 gives, or None.
+
+    Read against the receipt's own ``authority_chains`` too: a consequential effect
+    is covered exactly when it names a chain, and when every chain in force is listed,
+    every chain an effect names must be one of them."""
+    if not isinstance(section, dict) or set(section) != _EFFECT_MEMBERS:
+        return "consequential_effects does not have the three members section 4.11 gives"
+    census, effects = section["status_census"], section["effects"]
+    if not isinstance(census, dict) or set(census) != set(EFFECT_STATUSES):
+        return "consequential_effects.status_census does not count every status, zeros included"
+    if not isinstance(effects, list):
+        return "consequential_effects.effects is not a list"
+    listed = None
+    if isinstance(chains, dict) and chains.get("not_shown") == 0:
+        listed = {chain["digest"] for chain in chains["chains"]}
+    for n, effect in enumerate(effects):
+        where = f"consequential_effects.effects[{n}]"
+        if not isinstance(effect, dict) or set(effect) != _EFFECT_ITEM:
+            return f"{where} does not have the six members section 4.11 gives"
+        if not (isinstance(effect["digest"], str) and _CHAIN_DIGEST.fullmatch(effect["digest"])):
+            return f"{where}.digest is not sha256: and 64 lowercase hex characters"
+        if effect["tool_kind"] not in EFFECT_TOOL_KINDS or effect["class"] not in EFFECT_CLASSES:
+            return f"{where} names a tool kind or class section 4.11 does not define"
+        if effect["status"] not in EFFECT_CLASSES[effect["class"]]:
+            return f"{where} is {effect['status']}, which a {effect['class']} effect cannot be"
+        named = effect["chains"]
+        if not (isinstance(named, list) and all(isinstance(d, str) for d in named)):
+            return f"{where}.chains is not a list of chain digests"
+        if not (isinstance(effect["readings"], list) and all(isinstance(c, str) for c in effect["readings"])):
+            return f"{where}.readings is not a list of codes"
+        if effect["class"] == "consequential" and (effect["status"] == "covered") != bool(named):
+            return f"{where} is {effect['status']} while naming {len(named)} chain(s)"
+        if listed is not None and not set(named) <= listed:
+            return f"{where} names a chain the receipt's authority_chains does not hold in force"
+    if len(effects) + section["not_shown"] != sum(census.values()):
+        return "consequential_effects does not count the effects it lists"
+    if any(sum(1 for e in effects if e["status"] == status) > census[status] for status in EFFECT_STATUSES):
+        return "consequential_effects lists more effects of a status than its census counts"
+    return None
+
+
+def _effect_lines(receipt: dict) -> list[str]:
+    """What a 6.0 receipt says about the effects that need a chain: the census, then
+    every effect that is missing one or of an unknown class."""
+    section = receipt.get("consequential_effects")
+    if not isinstance(section, dict):
+        return []
+    census = section["status_census"]
+    lines = [
+        f"effects   {sum(census.values())} approved: {census['covered']} covered, {census['missing']} missing a "
+        f"chain, {census['unknown']} of an unknown class, {census['not_required']} read-only"
+        + (f"; {section['not_shown']} not listed" if section["not_shown"] else "")
+    ]
+    for effect in section["effects"]:
+        if effect["status"] in ("missing", "unknown"):
+            lines.append(
+                f"effect    {effect['digest']} {effect['status']} ({effect['tool_kind']}, "
+                f"{', '.join(effect['readings']) or 'no reading'})"
+            )
+    return lines
+
+
 def _authority_lines(receipt: dict) -> list[str]:
     """What a 5.0 receipt says about the authority behind its effects: the census,
     then every chain that is not proven and the hops that hold it."""
@@ -610,6 +701,10 @@ def _check_structure(receipt: dict, form: str, signed_claim: bool) -> tuple[str,
             )
     if "authority_chains" in HASHED[version]:
         problem = _authority_chains(receipt["authority_chains"])
+        if problem is not None:
+            raise Refused("malformed", problem)
+    if "consequential_effects" in HASHED[version]:
+        problem = _consequential_effects(receipt["consequential_effects"], receipt["authority_chains"])
         if problem is not None:
             raise Refused("malformed", problem)
     if _has_non_integer_number(receipt):
@@ -955,6 +1050,7 @@ def _verified(
         f"issued at {issued_line}",
         *reading[1:],
         *_authority_lines(receipt),
+        *_effect_lines(receipt),
         f"evidence  {evidence_line}",
         "This establishes integrity and provenance only: not that the assessment is "
         "correct or the system safe, and not when the state held. " + when,

@@ -28,8 +28,10 @@ Two independent signals, combined worst-first:
   under the old schema or effect class authorizes nothing the tool may do now.
   So does a recorded **authority chain** (:mod:`assurance.authority_chain`) with a
   hop nothing proves -- and one with a hop the record contradicts caps at
-  NEEDS_REMEDIATION. Supported/verified claims, and a deployment with no claims
-  and no recorded chain, add no cap.
+  NEEDS_REMEDIATION. So does a CONSEQUENTIAL effect no chain in force names, and
+  an approved tool whose effect class nobody declared (:mod:`assurance.consequential`):
+  a missing chain reads unproven. Supported/verified claims, and a deployment with
+  no claims, no recorded chain and no consequential approved tool, add no cap.
 - **Workflow chains** (the compositional assurance graph) place the deployment by
   the worst status among its approved business workflows' authority-to-effect
   chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
@@ -207,6 +209,16 @@ CLAIM_CAPS: dict[str, str] = {
     # superseded approval, a hop this platform holds no record of. It cannot read
     # READY; it reads at best what needs-more-evidence means.
     "authority_chain_unproven": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A consequential effect (assurance.consequential: a tool an approved workflow
+    # binds whose contract in force declares a write or destructive effect) that no
+    # authority chain in force names. Owner decision, 7 Oct: a missing chain reads
+    # unproven, as an unproven one does -- otherwise recording a chain could only
+    # lower a decision, and the incentive would be not to record one.
+    "authority_chain_missing": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A tool an approved workflow binds whose effect class is unknown: undeclared,
+    # outside the vocabulary, or the tool no longer registered. Not read as
+    # read-only: nobody can say its effect needs no chain.
+    "effect_class_unknown": Deployment.Decision.NEEDS_MORE_EVIDENCE,
 }
 
 #: How a risk a person accepted caps the decision (owner decision Q6).
@@ -313,6 +325,14 @@ def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING) -> d
       under ``keyring`` (the one the decision is read under). A deployment with no
       recorded chain reads one query here and is capped by nothing: its decision is
       what it was before chains were recorded;
+    - an **effect that needs a chain and has none** caps at NEEDS_MORE_EVIDENCE
+      (``authority_chain_missing``): a tool an approved workflow binds whose
+      contract in force declares a consequential effect class
+      (:mod:`assurance.consequential`), and that no chain in force names. So does a
+      bound tool whose effect class is UNKNOWN (``effect_class_unknown``) --
+      undeclared, outside the vocabulary, or no longer registered -- whatever chain
+      names it. A missing chain reads exactly as an unproven one does, so recording
+      a chain never lowers a decision that not recording one would have left higher;
     - SUPPORTED / VERIFIED / PARTIALLY_VERIFIED claims (and DRAFT, which is not yet
       an assessment) impose no cap -- and a held one, or one bound to a superseded
       tool contract, is not counted as supporting.
@@ -383,6 +403,8 @@ def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING) -> d
             "bound_to_superseded_tool_contract": superseded,
             "authority_chain_broken": chains["broken"],
             "authority_chain_unproven": chains["unproven"],
+            "authority_chain_missing": chains["missing"],
+            "effect_class_unknown": chains["unknown"],
         }
     )
 
@@ -399,6 +421,10 @@ def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING) -> d
         "superseded_tool_contracts": superseded,
         "authority_chains_broken": chains["broken"],
         "authority_chains_unproven": chains["unproven"],
+        # The consequential effects no chain in force names, and the effects whose
+        # class nobody declared (assurance.consequential).
+        "authority_chains_missing": chains["missing"],
+        "effect_classes_unknown": chains["unknown"],
         "supporting": supporting,
     }
 
@@ -764,6 +790,12 @@ def _chain_brief(recorded) -> dict:
     return chain_brief(recorded)
 
 
+def _effect_brief(effect, deployment) -> dict:
+    from .authority_chain_records import effect_brief
+
+    return effect_brief(effect, str(deployment.uuid))
+
+
 def _hops_named(records, verdict: str) -> str:
     """Each chain and the hops of ``verdict`` in it, with the first reason each."""
     parts = []
@@ -791,6 +823,35 @@ def _unproven_chains_note(records) -> str:
         f"Held at 'needs more evidence' by {len(records)} authority chain(s) with a hop nothing "
         f"proves: {_hops_named(records, 'unproven')}. A chain with an unproven hop cannot read ready."
     )
+
+
+def _effects_named(effects) -> str:
+    return "; ".join(
+        f"workflow {e.workflow!r} through {e.kind} {e.identifier!r} ({', '.join(e.reasons)})" for e in effects
+    )
+
+
+def _authority_gaps_note(signal) -> str:
+    """Every authority gap that holds the decision at needs more evidence, each named:
+    the chains with an unproven hop, the consequential effects no chain names, and the
+    tools whose effect class nobody declared."""
+    parts = []
+    if signal["authority_chains_unproven"]:
+        parts.append(_unproven_chains_note(signal["authority_chains_unproven"]))
+    missing, unknown = signal["authority_chains_missing"], signal["effect_classes_unknown"]
+    if missing:
+        parts.append(
+            f"Held at 'needs more evidence' by {len(missing)} consequential effect(s) no authority chain in "
+            f"force names: {_effects_named(missing)}. Record the chain each was produced through; a missing "
+            "chain reads as an unproven one."
+        )
+    if unknown:
+        parts.append(
+            f"Held at 'needs more evidence' by {len(unknown)} approved tool(s) whose effect class is unknown: "
+            f"{_effects_named(unknown)}. Nothing says whether their effect needs an authority chain; declare "
+            "the effect class (read, write or destructive)."
+        )
+    return " ".join(parts)
 
 
 def _accepted_brief(finding: Finding) -> dict:
@@ -970,10 +1031,12 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
         ):
             note = _unread_conditions_note(signal["unread_conditions"])
-        elif signal["authority_chains_unproven"] and not (
-            signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
-        ):
-            note = _unproven_chains_note(signal["authority_chains_unproven"])
+        elif (
+            signal["authority_chains_unproven"]
+            or signal["authority_chains_missing"]
+            or signal["effect_classes_unknown"]
+        ) and not (signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]):
+            note = _authority_gaps_note(signal)
         elif not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
             legal = ", ".join(sorted({c.claim_type for c in signal["legally_stale"]}))
             note = (
@@ -1067,6 +1130,10 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             # those with a hop nothing proves -- each with the hops that hold it.
             "authority_chains_broken": [_chain_brief(r) for r in signal["authority_chains_broken"]],
             "authority_chains_unproven": [_chain_brief(r) for r in signal["authority_chains_unproven"]],
+            # The consequential effects no chain in force names -- each with the chain
+            # to record -- and the approved tools whose effect class is unknown.
+            "authority_chains_missing": [_effect_brief(e, deployment) for e in signal["authority_chains_missing"]],
+            "effect_classes_unknown": [_effect_brief(e, deployment) for e in signal["effect_classes_unknown"]],
             "supporting": [_claim_brief(c) for c in signal["supporting"]],
         },
         "note": note,

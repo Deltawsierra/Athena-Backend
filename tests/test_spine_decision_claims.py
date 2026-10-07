@@ -330,6 +330,8 @@ def test_revoked_claim_is_excluded_from_the_plan():
         "still_current": 0,
         "outstanding_unknowns": 0,
         "workflows_to_exercise": 0,
+        "authority_chains_to_record": 0,
+        "effect_classes_to_declare": 0,
     }
     assert plan["workflows_to_exercise"] == []
 

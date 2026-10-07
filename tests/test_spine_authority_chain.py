@@ -67,17 +67,22 @@ def _fresh(dep):
     return Deployment.objects.get(pk=dep.pk)
 
 
-def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles"):
+def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles", effect_class="write"):
     """The roadmap's example as a deployment: a support agent that invokes a CRM MCP
     server, acting as service account X, under an approved workflow that names the
-    server; a gate decision Achilles signed for the workflow."""
+    server; a gate decision Achilles signed for the workflow. The server declares
+    that it writes (it updates customer records), so the workflow's effect through it
+    is consequential and needs a chain (assurance.consequential)."""
     admin = _admin()
     client = _client(admin)
     dep = Deployment.objects.create(name=f"support{Deployment.objects.count()}", owner=admin)
     now = timezone.now()
+    crm = {"permissions": ["customer:update", "customer:read"]}
+    if effect_class is not None:
+        crm["effect_class"] = effect_class
     for kind, name, classification, metadata in (
         ("agent", "support-agent", A.APPROVED, {"tools": ["crm-mcp"], "identity": identity}),
-        ("mcp_server", "crm-mcp", tool, {"permissions": ["customer:update", "customer:read"]}),
+        ("mcp_server", "crm-mcp", tool, crm),
         ("service_account", "svc-x", A.APPROVED, {}),
         ("service_account", "svc-admin", A.APPROVED, {}),
     ):
@@ -163,8 +168,14 @@ def _by_relation(chain):
 )
 def test_a_held_workflow_whose_effect_ran_through_a_shadow_node_no_longer_reads_ready(engine, before, unproven):
     dep, client, permit, _ = _world(tool=A.UNMANAGED, engine=engine)
-    # Today's behaviour, unchanged while no chain is recorded.
-    assert _fresh(dep).decision == before
+    # The workflow chains alone still read what the deployment read on master...
+    assert decision_support(_fresh(dep))["composition"]["signal"] == before
+    # ...and since the owner's decision of 7 Oct the consequential effect no chain
+    # names reads unproven before any chain is recorded (assurance.consequential).
+    # On master this was `before`: recording the chain could only lower it.
+    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
+    (missing,) = decision_support(_fresh(dep))["claims"]["authority_chains_missing"]
+    assert (missing["workflow"], missing["tool_kind"], missing["tool_identifier"]) == (WF, "mcp_server", "crm-mcp")
 
     answer = _post(client, dep, _chain_body(client, dep, permit))
 
@@ -184,6 +195,7 @@ def test_a_held_workflow_whose_effect_ran_through_a_shadow_node_no_longer_reads_
     assert support["decision"] == D.NEEDS_MORE_EVIDENCE
     held = support["claims"]["authority_chains_unproven"]
     assert [c["digest"] for c in held] == [chain["digest"]]
+    assert support["claims"]["authority_chains_missing"] == [], "the chain recorded names the effect"
     assert "authority chain" in support["note"] and "crm-mcp" in support["note"]
 
 
@@ -300,12 +312,19 @@ def test_a_route_that_moved_after_the_chain_leaves_the_invocation_unproven():
     assert "route_moved" in {r["code"] for r in _by_relation(chain)["invokes"]["reasons"]}
 
 
-def test_a_workflow_whose_effect_has_no_chain_keeps_todays_decision():
+def test_a_workflow_whose_consequential_effect_has_no_chain_reads_unproven_not_todays_decision():
+    # On master this read READY_RESTRICTED with no cap: an effect nobody recorded a
+    # chain for was decided as if chains did not exist, so recording one could only
+    # lower the decision. The owner's decision of 7 Oct: a missing chain reads
+    # unproven, and the decision names the effect that lacks one.
     dep, client, _, _ = _world()
-    assert _fresh(dep).decision == D.READY_RESTRICTED
+    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
     support = decision_support(_fresh(dep))
     assert support["claims"]["authority_chains_broken"] == support["claims"]["authority_chains_unproven"] == []
-    assert support["claim_cap"] is None
+    assert support["claim_cap"] == D.NEEDS_MORE_EVIDENCE
+    assert [(m["workflow"], m["tool_identifier"], m["status"]) for m in support["claims"]["authority_chains_missing"]] == [
+        (WF, "crm-mcp", "missing")
+    ]
 
 
 # ---------------------------------------------------------- recording, superseding
@@ -351,12 +370,14 @@ def test_a_recorded_chain_is_never_rewritten_or_deleted():
 )
 def test_a_write_that_is_not_a_chain_is_refused_and_records_nothing(edit, field):
     dep, client, permit, _ = _world()
+    before = _fresh(dep).decision
     body = _chain_body(client, dep, permit)
     edit(body)
     answer = _post(client, dep, body)
     assert answer.status_code == 400 and field in answer.json(), answer.content
     assert not _chains_model().objects.filter(deployment=dep).exists()
-    assert _fresh(dep).decision == D.READY_RESTRICTED
+    # Unchanged by the refused write: the effect still has no chain, so it reads unproven.
+    assert _fresh(dep).decision == before == D.NEEDS_MORE_EVIDENCE
 
 
 def test_a_batch_is_recorded_whole_or_not_at_all_and_only_by_an_admin():
@@ -439,7 +460,7 @@ def test_the_chain_and_every_hops_verdict_appear_in_the_receipt_and_the_verifier
 
     dep, client, permit, _ = _world(tool=A.UNMANAGED)
     before = client.get(_base(dep) + "assurance-receipt/").json()
-    assert before["receipt_version"] == "mythos.assurance.receipt/5.0"
+    assert before["receipt_version"] == "mythos.assurance.receipt/6.0"
     assert before["authority_chains"]["standing"] == 0 and before["authority_chains"]["chains"] == []
 
     chain = _post(client, dep, _chain_body(client, dep, permit)).json()["chains"][0]

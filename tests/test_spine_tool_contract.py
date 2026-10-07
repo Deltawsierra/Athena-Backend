@@ -364,26 +364,39 @@ def test_a_claim_bound_under_the_old_contract_cannot_make_the_decision_ready():
 
 
 def test_an_approval_under_the_old_contract_does_not_read_as_a_permit(engine_keyring):
-    """An Achilles permit check on the approved workflow reads READY_RESTRICTED. The
-    same permit check, once the tool the approval covered has a different contract,
-    reads nothing better than NEEDS_MORE_EVIDENCE -- until the workflow is approved
-    again under the contract in force."""
+    """An Achilles permit check on the approved workflow reads READY_RESTRICTED on its
+    own. The same permit check, once the tool the approval covered has a different
+    contract, reads nothing better than NEEDS_MORE_EVIDENCE -- until the workflow is
+    approved again under the contract in force.
+
+    Since the owner's decision of 7 Oct the refund's write, which no authority chain
+    names, also reads unproven (assurance.consequential) and holds the decision at
+    the same place: READY_RESTRICTED on master. So which cap holds is read off the
+    signal, not off the decision alone."""
     dep = Deployment.objects.create(name="permit", owner=_admin())
     refund = _tool(dep, "refund", "refund@payments", input_schema=REFUND_SCHEMA, effect_class="write")
     workflow = ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="refund")
     record_signed(_fresh(dep), "refund-over-limit", comp.HELD, timezone.now() - timedelta(minutes=5))
     tc.bind_workflow(workflow, refund)
-    assert compute_decision(_fresh(dep)) == D.READY_RESTRICTED
+
+    def holds():
+        signal = claim_decision_signal(_fresh(dep))
+        return {k for k in ("superseded_tool_contracts", "authority_chains_missing") if signal[k]}
+
+    assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert holds() == {"authority_chains_missing"}
 
     _redeclare(dep, "refund@payments", effect_class="destructive")
     assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert holds() == {"authority_chains_missing", "superseded_tool_contracts"}
     counts = check_invalidations(_fresh(dep))
     assert counts["retests_opened"] == 0, "a workflow approval has no claim to retest"
     binding = ToolContractBinding.objects.get(workflow=workflow, released_at__isnull=True)
     assert binding.invalidated_at is not None and "refund@payments" in binding.invalidation_reason
 
     tc.bind_workflow(workflow, _asset(dep, "refund@payments"))
-    assert compute_decision(_fresh(dep)) == D.READY_RESTRICTED
+    assert compute_decision(_fresh(dep)) == D.NEEDS_MORE_EVIDENCE
+    assert holds() == {"authority_chains_missing"}
 
 
 def test_a_change_to_one_tool_holds_nothing_bound_only_to_another():

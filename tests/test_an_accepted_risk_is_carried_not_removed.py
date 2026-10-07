@@ -390,7 +390,7 @@ _GOVERNING = [
     *[("assurance.decision", "CLAIM_CAPS", key) for key in (
         "contradicted", "stale", "unknown", "open_retest", "legally_stale",
         "unread_latent_condition", "held_by_fired_latent_condition", "bound_to_superseded_tool_contract",
-        "authority_chain_broken", "authority_chain_unproven",
+        "authority_chain_broken", "authority_chain_unproven", "authority_chain_missing", "effect_class_unknown",
     )],
     ("assurance.decision", "ACCEPTED_RISK_CAPS", "standing"),
     ("assurance.decision", "ACCEPTED_RISK_CAPS", "lapsed_undated_or_outgrown"),
@@ -466,6 +466,16 @@ _GOVERNING = [
     *[("assurance.authority_chain", "GRAMMAR", key) for key in (
         "authenticated_as", "delegates_to", "under_policy", "invokes", "through_identity", "performs", "produces",
     )],
+    # Which effects need an authority chain (assurance.consequential): the declared
+    # effect classes that make one consequential and the ones that need none, the
+    # annotations that raise a tool to consequential, the classes and their order,
+    # and the statuses that read unproven. Each changes which stored approvals cap
+    # the decision.
+    *[("assurance.consequential", name, None) for name in (
+        "CONSEQUENTIAL_EFFECT_CLASSES", "READ_ONLY_EFFECT_CLASSES", "DESTRUCTIVE_ANNOTATIONS", "CLASSES",
+        "STATUSES", "UNPROVEN_STATUSES",
+    )],
+    *[("assurance.consequential", "_CLASS_RANK", key) for key in ("read_only", "unknown", "consequential")],
 ]
 
 #: The constants of the modules the decision is computed in that are NOT rules, and
@@ -495,6 +505,9 @@ _NOT_RULES = {
     ("assurance.authority_chain", "CHAIN_SCHEMA"): "the name of the document a chain's digest is taken over; "
     "no verdict is computed from it",
     ("assurance.authority_chain", "REASONS"): "the words shown beside a reading's code; nothing decides on them",
+    ("assurance.consequential", "REASONS"): "the words shown beside an effect's code; nothing decides on them",
+    ("assurance.consequential", "EFFECT_SCHEMA"): "the name of the document an effect's digest is taken over; "
+    "no status is computed from it",
 }
 #: A spelling of one value -- a status, a basis, a kind, a route reading, a decision
 #: state. Renaming one renames a value; the sets, tables and orders that hold it --
@@ -516,6 +529,7 @@ _SPELLINGS = {
         "THROUGH_IDENTITY", "PERFORMS", "PRODUCES", "PERSON", "USER", "AGENT", "SERVICE_ACCOUNT", "TOOL",
         "MCP_SERVER", "SKILL", "POLICY", "ACTION", "EFFECT",
     },
+    "assurance.consequential": {"CONSEQUENTIAL", "READ_ONLY", "UNKNOWN", "COVERED", "MISSING", "NOT_REQUIRED"},
 }
 
 
@@ -553,6 +567,7 @@ def test_every_constant_the_decision_reads_is_in_the_pin(monkeypatch):
     for module_name in (
         "assurance.decision", "assurance.composition", "assurance.workflow_chains", "assurance.coverage",
         "assurance.served_route", "assurance.authority_chain", "assurance.authority_chain_records",
+        "assurance.consequential",
     ):
         module = import_module(module_name)
         for name, value in list(vars(module).items()):

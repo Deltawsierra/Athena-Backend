@@ -17,13 +17,18 @@ decided here:
 * :func:`record_chain` appends one, typed in (``attested``) or signed by an engine
   (``demonstrated``: the envelope :mod:`assurance.observed_outcomes` verifies, with
   the chain's own digest as its evidence digest).
+* :func:`approved_effects` reads which effects need a chain
+  (:mod:`assurance.consequential`): every tool an approved workflow binds, classified
+  off its registration in force, and whether a chain in force names it.
 * :func:`authority_chain_signal` is what the decision reads
   (:func:`assurance.decision.claim_decision_signal`), and :func:`receipt_reference`
-  what the receipt carries.
+  and :func:`effects_reference` what the receipt carries.
 
-A deployment with no recorded chain reads ONE query here and nothing else: no
-graph, no access, no coverage. The decision of a deployment nobody recorded a
-chain for is exactly what it was before chains existed.
+A deployment with no recorded chain and no approved tool reads TWO queries here and
+nothing else: no graph, no access, no coverage. One with approved tools and no chain
+reads its registrations too, because a consequential effect with no chain in force
+is not a deployment nobody assessed -- it is one whose authority nobody recorded,
+and that reads unproven (the owner's decision of 7 Oct).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from mythos_core import outcome as _oc
 
 from . import authority_chain as rule
 from . import composition as _composition
+from . import consequential
 from . import observed_outcomes
 from .models import AuthorityChain, ToolContractBinding, WorkflowChainOutcome
 from .receipt import _digest
@@ -289,15 +295,60 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
     ]
 
 
+def approved_effects(deployment, standing) -> tuple[consequential.Effect, ...]:
+    """Every effect of every approved workflow through every tool its approval binds
+    (:func:`assurance.consequential.effects`), classified off the tool's registration
+    IN FORCE and checked against ``standing``, the chains in force
+    (:class:`Recorded`). One query when no approval binds a tool.
+
+    The registration in force, not the contract the approval bound: a tool
+    re-declared since is a superseded binding the decision already holds back
+    (``bound_to_superseded_tool_contract``), and what it does NOW is what the next
+    effect will do. A tool no longer registered reads unknown."""
+    from .graph_refs import in_graph
+    from .tool_contract import contract_descriptor, current_tools
+
+    bindings = list(
+        ToolContractBinding.objects.filter(deployment=deployment, released_at__isnull=True, workflow__isnull=False)
+        .select_related("workflow")
+        .order_by("pk")
+    )
+    if not bindings:
+        return ()
+    assets = in_graph(list(deployment.assets.all()))
+    registered = current_tools(deployment, assets=assets)
+    tools = [
+        consequential.ApprovedTool(
+            workflow=b.workflow.slug,
+            kind=str(b.tool_kind),
+            identifier=str(b.tool_identifier),
+            contract=(
+                contract_descriptor(registered[key])
+                if (key := (str(b.tool_kind), str(b.tool_identifier))) in registered
+                else None
+            ),
+        )
+        for b in bindings
+    ]
+    return consequential.effects(tools, [(r.row.digest, r.verdict.chain) for r in standing], components=assets)
+
+
 def authority_chain_signal(deployment, keyring=observed_outcomes.READ_KEYRING) -> dict:
-    """The chains in force, by verdict. What the decision caps on
-    (:data:`assurance.decision.CLAIM_CAPS`): a broken chain and an unproven one. A
-    superseded chain caps nothing; it is published, not decided with."""
+    """The chains in force, by verdict, and the effects that need one. What the
+    decision caps on (:data:`assurance.decision.CLAIM_CAPS`): a broken chain, an
+    unproven one, a consequential effect no chain in force names (``missing``) and an
+    effect whose class nobody declared (``unknown``). A superseded chain caps
+    nothing; it is published, not decided with. ``effects`` is every effect, the
+    ones that need no chain and the covered ones included."""
     standing = [r for r in read_chains(deployment, keyring) if r.standing]
+    found = approved_effects(deployment, standing)
     return {
         "broken": [r for r in standing if r.verdict.verdict == rule.BROKEN],
         "unproven": [r for r in standing if r.verdict.verdict == rule.UNPROVEN],
         "proven": [r for r in standing if r.verdict.verdict == rule.PROVEN],
+        "missing": [e for e in found if e.status == consequential.MISSING],
+        "unknown": [e for e in found if e.status == consequential.UNKNOWN],
+        "effects": list(found),
     }
 
 
@@ -453,6 +504,53 @@ def chain_brief(recorded: Recorded) -> dict:
     }
 
 
+def effect_digest(effect: consequential.Effect, deployment_uuid: str) -> str:
+    """``sha256:`` + hex over the effect's document: which deployment, workflow and
+    tool. What the receipt names an effect by."""
+    return chain_digest(effect.document(deployment_uuid))
+
+
+def _what_to_do(effect: consequential.Effect) -> str | None:
+    tool = f"{effect.kind} {effect.identifier!r}"
+    if effect.status == consequential.MISSING:
+        return (
+            f"record the authority chain workflow {effect.workflow!r} produced this effect through: a chain for "
+            f"{effect.workflow!r} whose invokes hop names {tool}"
+        )
+    if effect.status == consequential.UNKNOWN:
+        if "tool_not_registered" in effect.reasons:
+            return f"register {tool} again, or bind the approval of {effect.workflow!r} to the tools it uses now"
+        return (
+            f"declare the effect class of {tool} (read, write or destructive) and bind the approval of "
+            f"{effect.workflow!r} to its contract again"
+        )
+    return None
+
+
+def effect_brief(effect: consequential.Effect, deployment_uuid: str) -> dict:
+    """One effect, for a reader who has to act on it: which workflow and tool, its
+    declared effect class, its class and status with every code that says why, the
+    chains in force that name it, and what to do -- named, so the reader is told
+    exactly which chain to record or which class to declare."""
+    return {
+        "digest": effect_digest(effect, deployment_uuid),
+        "workflow": effect.workflow,
+        "tool_kind": effect.kind,
+        "tool_identifier": effect.identifier,
+        "effect_class": effect.effect_class,
+        "class": effect.klass,
+        "status": effect.status,
+        "reasons": list(effect.reasons),
+        "chains": list(effect.chains),
+        "to_do": _what_to_do(effect),
+    }
+
+
+def effects_summary(found) -> dict:
+    """How many effects there are by status, every status including the zeros."""
+    return {status: sum(1 for e in found if e.status == status) for status in sorted(consequential.STATUSES)}
+
+
 def summary(read: list[Recorded]) -> dict:
     standing = [r for r in read if r.standing]
     return {
@@ -467,7 +565,7 @@ def summary(read: list[Recorded]) -> dict:
     }
 
 
-def receipt_reference(deployment, *, limit: int) -> dict:
+def receipt_reference(deployment, *, limit: int, read: list[Recorded] | None = None) -> dict:
     """The chains in force as the receipt carries them: each chain by its digest,
     every hop by relation, node kinds, verdict and the codes of what proves it or
     holds it -- and no node's name. The names are the customer's vocabulary on an
@@ -476,7 +574,7 @@ def receipt_reference(deployment, *, limit: int) -> dict:
 
     Ordered by digest, so the same chains always serialise the same; at most
     ``limit`` of them, with how many were not shown."""
-    read = read_chains(deployment)
+    read = read_chains(deployment) if read is None else read
     standing = sorted((r for r in read if r.standing), key=lambda r: r.row.digest)
     shown = standing[:limit]
     return {
@@ -504,4 +602,39 @@ def receipt_reference(deployment, *, limit: int) -> dict:
             for r in shown
         ],
         "not_shown": len(standing) - len(shown),
+    }
+
+
+def effects_reference(deployment, *, limit: int, read: list[Recorded] | None = None) -> dict:
+    """The effects the approvals cover, as the receipt carries them
+    (:mod:`assurance.consequential`): each by its digest, with the tool's kind, its
+    class, its status, the codes that say why, and the digests of the chains in force
+    that name it -- and no workflow's or tool's name, for the reason
+    :func:`receipt_reference` gives. The deployment's authority-chains route serves
+    each effect with its names beside its digest.
+
+    Every effect that needs a chain or reads unknown, and the ones that need none:
+    ordered by digest, at most ``limit``, with how many were not shown."""
+    read = read_chains(deployment) if read is None else read
+    standing = [r for r in read if r.standing]
+    deployment_uuid = str(deployment.uuid)
+    found = sorted(
+        ((effect_digest(e, deployment_uuid), e) for e in approved_effects(deployment, standing)),
+        key=lambda pair: pair[0],
+    )
+    shown = found[:limit]
+    return {
+        "status_census": effects_summary([e for _, e in found]),
+        "effects": [
+            {
+                "digest": digest,
+                "tool_kind": e.kind,
+                "class": e.klass,
+                "status": e.status,
+                "readings": list(e.reasons),
+                "chains": sorted(e.chains),
+            }
+            for digest, e in shown
+        ],
+        "not_shown": len(found) - len(shown),
     }
