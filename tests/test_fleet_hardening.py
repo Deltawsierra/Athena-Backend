@@ -146,7 +146,7 @@ def test_an_internal_address_in_a_translated_form_is_still_refused(address):
     perimeter.
     """
     resolved = [(socket.AF_INET6, None, None, "", (address, 0))]
-    with mock.patch("pentest.views.socket.getaddrinfo", return_value=resolved):
+    with mock.patch("socket.getaddrinfo", return_value=resolved):
         reason = views.target_is_out_of_bounds("https://looks-fine.example/")
 
     assert reason, f"{address} was accepted as a scan target"
@@ -157,13 +157,13 @@ def test_an_internal_address_in_a_translated_form_is_still_refused(address):
 )
 def test_a_resolver_failure_refuses_the_target_instead_of_raising(error):
     """Only gaierror was caught, so the other three became a 500."""
-    with mock.patch("pentest.views.socket.getaddrinfo", side_effect=error):
+    with mock.patch("socket.getaddrinfo", side_effect=error):
         assert views.target_is_out_of_bounds("https://client.example/")
 
 
 def test_a_host_that_resolves_to_nothing_is_refused():
     """The loop had nothing to iterate, so it fell through and allowed it."""
-    with mock.patch("pentest.views.socket.getaddrinfo", return_value=[]):
+    with mock.patch("socket.getaddrinfo", return_value=[]):
         assert views.target_is_out_of_bounds("https://client.example/")
 
 

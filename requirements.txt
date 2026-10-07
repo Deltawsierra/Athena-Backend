@@ -156,8 +156,8 @@ zopfli==0.2.3.post1
 # Achilles held as an authorization check for exactly that reason.
 #
 # Mythos-Core#30 -- a URL whose host no parser can read is refused by the egress
-# guard with the parser's reason instead of raising. This service does not import
-# the egress guard.
+# guard with the parser's reason instead of raising. This service did not import
+# the egress guard until the #47 pin below; its target guard now asks it.
 #
 # Mythos-Core#31 -- mythos_core.evidence holds the evidence-class table: the rank
 # of each class, its ordinal strength, its qualitative reading and CLASS_BASIS.
@@ -178,4 +178,37 @@ zopfli==0.2.3.post1
 # keyring assurance/observed_outcomes.py loads refuses a mixed-order key as well.
 #
 # Mythos-Core#35 -- documentation only: the owner's written freeze exceptions.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@c3c6c191554f37ccba5224ee880516f3861b89bc
+#
+# What the pin since c3c6c19 (Mythos-Core#36) adds:
+#
+# Mythos-Core#47 -- the reason for this pin: resolver equivalence. The egress
+# policy decides on the host in the form the HTTP client dials
+# (egress.resolver_host, urllib3's own reader: lowercased, percent-escapes
+# decoded, IDNA 2008, no root dot), refuses a URL the client cannot read (a
+# port out of range, `:+80`, a non-ASCII digit, fullwidth letters, ideographic
+# dots, a malformed escape, `http:host` with no authority), and drops an IPv6
+# zone ID before its metadata check; the authority scope's normalise_host uses
+# the same reader. Its decide/connect map named two places in this service that
+# decided destinations their own way, and both now ask core:
+# pentest/views.py target_is_out_of_bounds decides through egress.check_target
+# (no name list of its own compared as written, no IDNA 2003 getaddrinfo of its
+# own), refuses a URL whose host as written is not the host the client dials,
+# and still holds every approved address to this service's internal-network
+# list; pentest/models.py Engagement.covers reduces both sides with
+# normalise_host, and covers a host only where it did before AND in the
+# dialled form. Both only tighten
+# (tests/test_the_target_guard_decides_on_the_host_the_client_dials.py runs
+# #47's corpus through the guard).
+#
+# Mythos-Core#41 -- a clock fault never blocks a stop: an engine applies a PAUSE
+# or STAND_DOWN outside its validity window and records where its clock stood;
+# RESUME, RELEASE and TERMINATE keep the window. This service drafts and relays
+# those commands (failsafe/) and runs no Governor; what it signs is unchanged,
+# and tests/test_failsafe_control_plane.py verifies them with this pin's
+# verify_command. #42 adds a test of the same rule.
+#
+# Mythos-Core#40 -- the chain verifiers never write to what they verify, and an
+# empty chain reads empty, not ok. #39 -- mythos_core.recovery, a restore
+# drill. This service calls neither. #37 and #38 are documentation and tests;
+# #43 (a secret-scan CI gate), #44 and #46 (FREEZE.md) carry no code.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@b3fef5f799a9a211aa5a1fc9088749e1795b9dcd
