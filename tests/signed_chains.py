@@ -91,6 +91,36 @@ def observed_internal(outcome: dict):
     return observed_outcomes._instant(outcome["observed_at"])
 
 
+#: The gate's state at a test dispatch's spend: Achilles' authority epoch
+#: (``<state>#<boot>.<stops>``) and operator policy, the permit's and in force alike.
+GATE_EPOCH = "running#5eed0fee5eed0fee.0"
+GATE_POLICY = "sha256:" + "b0" * 32
+GATE_STATE = {
+    "epoch": GATE_EPOCH,
+    "permit_epoch": GATE_EPOCH,
+    "policy_id": "support-policy",
+    "policy_digest": GATE_POLICY,
+    "permit_policy_digest": GATE_POLICY,
+}
+
+
+def live_presented(deployment, workflow, *, route=None, assertion=None, grant=None) -> dict:
+    """What a dispatch made NOW would be presented under: the approval of ``workflow``
+    as it stands, and the contract digest of every tool it binds (sorted) -- the
+    authority an Achilles caller reads from this backend and names in
+    ``effect.authority``."""
+    from assurance.approval_history import approvals_now
+
+    digest, tools = approvals_now(deployment).get(workflow, (None, []))
+    return {
+        "approval_digest": digest,
+        "contracts": [{"kind": k, "identifier": i, "digest": d} for k, i, d in sorted(tools)],
+        "route_fingerprint": route,
+        "assertion_digest": assertion,
+        "grant_digest": grant,
+    }
+
+
 def observed_effect(
     deployment,
     workflow,
@@ -103,13 +133,23 @@ def observed_effect(
     dispatch_id=None,
     key=None,
     action="customer:update",
+    schema="v2",
+    dispatched_at=None,
+    presented=None,
+    gate=None,
 ) -> tuple[dict, dict]:
     """``(envelope, evidence)``: what Achilles posts when its dispatch saw a permitted
-    action's effect -- the ``mythos.observed-effect/v1`` document, and the outcome its
-    observed-effect key signed over the document's digest."""
+    action's effect -- the ``mythos.observed-effect/v2`` document, and the outcome its
+    observed-effect key signed over the document's digest.
+
+    The ``dispatch`` block: the gate's state (:data:`GATE_STATE`, ``gate`` overriding
+    any of it), the instant the dispatch left (``dispatched_at``, the effect's own
+    instant by default), and what it was ``presented`` under (:func:`live_presented` by
+    default: the approval and contracts as they stand when this is called).
+    ``schema="v1"``: the v1 document, which records no dispatch state."""
     instant = observed_at.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     evidence = {
-        "schema": "mythos.observed-effect/v1",
+        "schema": f"mythos.observed-effect/{schema}",
         "deployment": str(deployment.uuid),
         "workflow": workflow,
         "tool": {"kind": tool[0], "identifier": tool[1]},
@@ -126,6 +166,14 @@ def observed_effect(
         },
         "observed_at": instant,
     }
+    if schema == "v2":
+        left = dispatched_at if dispatched_at is not None else observed_at
+        evidence["dispatch"] = {
+            **GATE_STATE,
+            **(gate or {}),
+            "dispatched_at": _stamp(left),
+            "presented": presented if presented is not None else live_presented(deployment, workflow),
+        }
     outcome = oc.build_outcome(
         deployment=str(deployment.uuid),
         workflow=workflow,

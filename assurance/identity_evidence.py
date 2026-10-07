@@ -509,6 +509,7 @@ def as_authentication(row, document: dict) -> rule.Authentication:
         issuer=provider["issuer"],
         protocol=provider["protocol"],
         witness=document["witness"],
+        assertion_digest=document["assertion_digest"],
     )
 
 

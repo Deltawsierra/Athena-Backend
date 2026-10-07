@@ -99,6 +99,14 @@ def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles"
         entry["tools"] = [{"kind": "mcp_server", "identifier": "crm-mcp"}]
     put = client.put(_base(dep) + "approved-workflows/", {"workflows": [entry]}, format="json")
     assert put.status_code == 200, put.content
+    # And the approval and the contracts it bound as the platform noted them an hour
+    # ago, like the route: so an effect dispatched a minute ago was dispatched under
+    # them, as of dispatch (part 5). A fixture placing the world in the past, written
+    # once here; the rows are append-only to every writer the platform has.
+    from assurance.models import ApprovalVersion, ToolContract
+
+    ApprovalVersion.objects.filter(deployment=dep).update(in_force_from=now - timedelta(hours=1))
+    ToolContract.objects.filter(deployment=dep).update(recorded_at=now - timedelta(hours=1))
     permit = record_signed(dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=2), engine=engine)
     refusal = None
     if gate != oc.HELD:
@@ -153,15 +161,45 @@ def _by_relation(chain):
     return {h["relation"]: h for h in chain["hops"]}
 
 
+def _dispatched(dep, permit, **kw):
+    """The effect of a dispatch made now, as Achilles observes and signs it
+    (``mythos.observed-effect/v2``): the state it ran under -- the approval and
+    contracts as they stand -- signed in, and recorded through the ingest, which binds
+    the route serving at the dispatch instant. Since part 5 of the 7 Oct decision a
+    chain's policy and invocation are read against that, as of dispatch."""
+    from tests.signed_chains import record_observed_effect
+
+    return record_observed_effect(dep, WF, permit.outcome_id, kw.pop("at", None) or timezone.now(), **kw)
+
+
+def _dispatched_body(client, dep, permit, **kw):
+    """A chain citing the observed effect of a dispatch made now."""
+    version = kw.pop("version", None)
+    effect_kw = {k: kw.pop(k) for k in ("at", "presented") if k in kw}
+    if "tool" in kw:
+        effect_kw["tool"] = ("mcp_server", kw["tool"])
+    effect = _dispatched(dep, permit, **effect_kw)
+    body = _chain_body(client, dep, permit, **kw)
+    if version is not None:
+        for hop in body["hops"]:
+            for end in ("from", "to"):
+                if hop[end]["kind"] == "policy":
+                    hop[end]["version"] = version
+    body["effect_outcome_id"] = effect.outcome_id
+    return body
+
+
 # ---------------------------------------------------------------- the master probe
 
 
 @pytest.mark.parametrize(
     ("engine", "before", "unproven"),
     [
-        ("achilles", D.READY_RESTRICTED, [1, 2, 4]),
+        # Hop 0, the policy, too since part 5: the chain cites no observed effect, so
+        # nothing records the state its dispatch ran under (dispatch_state_unrecorded).
+        ("achilles", D.READY_RESTRICTED, [0, 1, 2, 4]),
         # An Athena scan is no Action Gate decision: cited as one, the action is unproven too.
-        ("athena", D.READY, [1, 2, 3, 4]),
+        ("athena", D.READY, [0, 1, 2, 3, 4]),
     ],
 )
 def test_a_held_workflow_whose_effect_ran_through_a_shadow_node_no_longer_reads_ready(engine, before, unproven):
@@ -221,13 +259,15 @@ def test_the_roadmap_chain_is_reconstructed_hop_by_hop_and_every_unproven_hop_is
         # recorded here, so each hop names the record it lacks.
         "authenticated_as": ("unproven", {"no_authentication_record"}),
         "delegates_to": ("unproven", {"no_delegation_record"}),
-        "under_policy": ("proven", {"approval_in_force"}),
-        "invokes": ("proven", {"approved_contract_in_force", "declared_edge"}),
+        # Part 5: read as of dispatch, and with no observed effect cited nothing
+        # records the state the dispatch ran under -- never read live in its place.
+        "under_policy": ("unproven", {"dispatch_state_unrecorded"}),
+        "invokes": ("unproven", {"dispatch_state_unrecorded"}),
         "through_identity": ("proven", {"declared_identity"}),
         "performs": ("proven", {"declared_permission", "within_approval", "gate_permit"}),
         "produces": ("unproven", {"effect_not_observed"}),
     }
-    assert chain["unproven_hops"] == [0, 1, 6] and chain["broken_hops"] == []
+    assert chain["unproven_hops"] == [0, 1, 2, 3, 6] and chain["broken_hops"] == []
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
 
@@ -266,7 +306,8 @@ def test_a_tool_outside_the_approval_is_unauthorized_and_blocks_ready():
         deployment=dep, kind="mcp_server", name="billing-mcp", identifier="billing-mcp",
         classification=A.APPROVED, assessed_at=timezone.now(), metadata={"permissions": ["customer:update"]},
     )
-    chain = _post(client, dep, _chain_body(client, dep, permit, tool="billing-mcp")).json()["chains"][0]
+    body = _dispatched_body(client, dep, permit, tool="billing-mcp")
+    chain = _post(client, dep, body).json()["chains"][0]
     invokes = _by_relation(chain)["invokes"]
     assert invokes["verdict"] == "broken"
     assert {"outside_approval", "unreachable"} <= {r["code"] for r in invokes["reasons"]}
@@ -282,34 +323,92 @@ def test_a_component_the_coverage_manifest_has_not_assessed_leaves_its_hops_unpr
     # Read live: once something assesses it, that reason is gone without a rewrite.
     Asset.objects.filter(deployment=dep, name="svc-x").update(assessed_at=timezone.now())
     chain = _client(_admin()).get(_base(dep) + "authority-chains/").json()["chains"][0]
-    assert chain["unproven_hops"] == [4], "only the effect nothing observed"
+    # Only what no observed effect records: the dispatch's state (hops 0 and 1, part
+    # 5) and the effect itself.
+    assert chain["unproven_hops"] == [0, 1, 4], "only what no observed effect records"
 
 
-def test_an_approval_re_versioned_after_the_chain_leaves_the_policy_hop_unproven():
-    dep, client, permit, _ = _world()
-    old = _version(client, dep)
-    _post(client, dep, _chain_body(client, dep, permit))
-    client.put(
+def _reapprove(client, dep, description="update any customer record"):
+    put = client.put(
         _base(dep) + "approved-workflows/",
-        {"workflows": [{"slug": WF, "name": "Support update", "description": "update any customer record",
+        {"workflows": [{"slug": WF, "name": "Support update", "description": description,
                         "tools": [{"kind": "mcp_server", "identifier": "crm-mcp"}]}]},
         format="json",
     )
+    assert put.status_code == 200, put.content
+
+
+def test_an_approval_re_versioned_after_the_effect_leaves_the_policy_hop_proven_citing_the_version_it_ran_under():
+    # Part 5. On master this read `policy_version_not_in_force` the moment the
+    # approval moved: a re-approval after the effect unproved an effect that was
+    # properly authorised under v1.
+    dep, client, permit, _ = _world()
+    old = _version(client, dep)
+    chain = _post(client, dep, _dispatched_body(client, dep, permit)).json()["chains"][0]
+    assert _by_relation(chain)["under_policy"]["verdict"] == "proven"
+    _reapprove(client, dep)
     read = client.get(_base(dep) + "authority-chains/").json()
     assert read["approvals_in_force"][WF] != old
     policy = _by_relation(read["chains"][0])["under_policy"]
-    assert policy["verdict"] == "unproven"
-    assert [r["code"] for r in policy["reasons"]] == ["policy_version_not_in_force"]
+    assert policy["verdict"] == "proven", policy
+    assert [r["code"] for r in policy["proven_by"]] == ["approval_in_force_at_dispatch"]
+    assert old in policy["proven_by"][0]["detail"] and read["approvals_in_force"][WF] not in policy["proven_by"][0]["detail"]
 
 
-def test_a_route_that_moved_after_the_chain_leaves_the_invocation_unproven():
+def test_an_effect_dispatched_under_a_superseded_approval_reads_unproven_and_restoring_it_changes_nothing():
     dep, client, permit, _ = _world()
-    _post(client, dep, _chain_body(client, dep, permit))
+    v1 = _version(client, dep)
+    presented = _live(dep)
+    _reapprove(client, dep)
+    # The dispatch presents v1, which the platform had superseded before it left, and
+    # the chain names v1 as the version it ran under.
+    body = _dispatched_body(client, dep, permit, presented=presented, version=v1)
+    chain = _post(client, dep, body).json()["chains"][0]
+    policy = _by_relation(chain)["under_policy"]
+    assert policy["verdict"] == "unproven"
+    assert [r["code"] for r in policy["reasons"]] == ["dispatched_under_superseded_policy"]
+    assert v1 in policy["reasons"][0]["detail"]
+    # v1 restored: live it is in force again, and the effect stays unproven.
+    _reapprove(client, dep, "update a customer record")
+    read = client.get(_base(dep) + "authority-chains/").json()
+    assert read["approvals_in_force"][WF] == v1
+    policy = _by_relation(read["chains"][0])["under_policy"]
+    assert [r["code"] for r in policy["reasons"]] == ["dispatched_under_superseded_policy"]
+
+
+def _live(dep):
+    from tests.signed_chains import live_presented
+
+    return live_presented(dep, WF)
+
+
+def test_a_route_that_moved_after_the_effect_leaves_the_invocation_proven():
+    # On master a moved route unproved the invocation whenever it moved. Part 5 reads
+    # the route serving at the dispatch instant, bound when the effect was recorded.
+    dep, client, permit, _ = _world()
+    _post(client, dep, _dispatched_body(client, dep, permit))
     Asset.objects.create(deployment=dep, kind="model", name="gpt-x", identifier="gpt-x",
                          classification=A.APPROVED, assessed_at=timezone.now(), metadata={"model_revision": "2"})
     chain = client.get(_base(dep) + "authority-chains/").json()["chains"][0]
     assert chain["route"] == "moved"
-    assert "route_moved" in {r["code"] for r in _by_relation(chain)["invokes"]["reasons"]}
+    invokes = _by_relation(chain)["invokes"]
+    assert invokes["verdict"] == "proven", invokes
+    assert {r["code"] for r in invokes["proven_by"]} == {"contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"}
+
+
+def test_a_contract_changed_after_the_effect_leaves_the_invocation_proven():
+    dep, client, permit, _ = _world()
+    _post(client, dep, _dispatched_body(client, dep, permit))
+    crm = Asset.objects.get(deployment=dep, identifier="crm-mcp")
+    crm.metadata = {**crm.metadata, "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}}}
+    crm.save()
+    from assurance.tool_contract import record_tool_contracts
+
+    record_tool_contracts(dep)
+    chain = client.get(_base(dep) + "authority-chains/").json()["chains"][0]
+    invokes = _by_relation(chain)["invokes"]
+    assert invokes["verdict"] == "proven", invokes
+    assert "contract_in_force_at_dispatch" in {r["code"] for r in invokes["proven_by"]}
 
 
 def test_a_workflow_whose_consequential_effect_has_no_chain_reads_unproven_not_todays_decision():
@@ -463,7 +562,7 @@ def test_the_chain_and_every_hops_verdict_appear_in_the_receipt_and_the_verifier
     assert before["receipt_version"] == "mythos.assurance.receipt/6.0"
     assert before["authority_chains"]["standing"] == 0 and before["authority_chains"]["chains"] == []
 
-    chain = _post(client, dep, _chain_body(client, dep, permit)).json()["chains"][0]
+    chain = _post(client, dep, _dispatched_body(client, dep, permit)).json()["chains"][0]
     receipt = client.get(_base(dep) + "assurance-receipt/").json()
     section = receipt["authority_chains"]
     assert receipt["digest"] != before["digest"]
@@ -473,9 +572,11 @@ def test_the_chain_and_every_hops_verdict_appear_in_the_receipt_and_the_verifier
     assert listed["digest"] == chain["digest"] and listed["verdict"] == "unproven"
     assert [(h["relation"], h["verdict"]) for h in listed["hops"]] == [
         ("under_policy", "proven"), ("invokes", "unproven"), ("through_identity", "unproven"),
-        ("performs", "proven"), ("produces", "unproven"),
+        ("performs", "proven"), ("produces", "proven"),
     ]
     assert "shadow_node" in listed["hops"][1]["readings"]
+    # Read as of dispatch, and carried by code (part 5).
+    assert listed["hops"][0]["readings"] == ["approval_in_force_at_dispatch"]
     assert "crm-mcp" not in json.dumps(section), "the receipt names chains by digest, never by node"
 
     # The offline verifier reads the section: shape, and each chain as its worst hop.

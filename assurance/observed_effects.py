@@ -18,10 +18,10 @@ to ``observed_effect`` and to nothing else. The keyring already refuses one key 
 under two engines, so the outcome key and the effect key can never be one key here.
 
 THE DOCUMENT. The signed outcome names, as its evidence digest, a
-``mythos.observed-effect/v1`` document (:func:`validate_evidence`), defined here and
-in Achilles alike and held to the same conformance vectors
-(``tests/vectors/observed-effect-v1.json`` in both repositories) -- no code is
-shared, and nothing here imports Achilles:
+``mythos.observed-effect/v2`` document (:func:`validate_evidence`) -- or a ``v1`` one,
+which stays readable -- defined here and in Achilles alike and held to the same
+conformance vectors (``tests/vectors/observed-effect-v1.json`` and ``-v2.json`` in both
+repositories) -- no code is shared, and nothing here imports Achilles:
 
 - ``deployment``, ``workflow``: the outcome's own, repeated;
 - ``tool``: ``{"kind", "identifier"}``, the tool the action went through;
@@ -30,7 +30,15 @@ shared, and nothing here imports Achilles:
 - ``dispatch_id``: the dispatch it was observed on, one observation per dispatch;
 - ``gate_outcome_id``: the authorization check the same dispatch signed;
 - ``observed``: ``{"provider", "status_code" (a 2xx), "receipt_id", "response_digest"}``;
-- ``observed_at``: the outcome's own instant.
+- ``observed_at``: the outcome's own instant;
+- v2 only, ``dispatch``: the state the dispatch ran under, bound at dispatch
+  (:data:`DISPATCH_FIELDS`) -- from Achilles' service, the instant it left, its
+  authority epoch and operator policy at the spend and the permit's; and
+  ``presented``, this backend's approval digest, tool contract digests, served route
+  and sign-in and grant digests the dispatch was made under, which Achilles signs as
+  presented and this backend proves against its own history as of the dispatch
+  instant (:mod:`assurance.authority_chain`). A v1 document records none of it, and
+  the hops read as of dispatch read it as unrecorded.
 
 WHAT IS REFUSED, at the route (:func:`examine`, through
 :func:`assurance.observed_outcomes.ingest`): every check a signed outcome already
@@ -76,7 +84,13 @@ from . import composition
 
 logger = logging.getLogger(__name__)
 
-EVIDENCE_SCHEMA = "mythos.observed-effect/v1"
+#: The document a dispatch signs now: v1 and the ``dispatch`` block -- the state the
+#: dispatch ran under, bound at dispatch (part 5 of the 7 Oct decision). v1 stays
+#: readable: it proves ``produces`` as before, and records no dispatch state, so the
+#: hops read as of dispatch (``under_policy``, ``invokes``) read it as unrecorded.
+EVIDENCE_SCHEMA = "mythos.observed-effect/v2"
+EVIDENCE_SCHEMA_V1 = "mythos.observed-effect/v1"
+EVIDENCE_SCHEMAS: tuple[str, ...] = (EVIDENCE_SCHEMA_V1, EVIDENCE_SCHEMA)
 #: The tool kinds an ``invokes`` hop may name (``authority_chain.TOOL_NODE_KINDS``),
 #: spelled out so the schema is this module's to read, and pinned equal by test.
 TOOL_KINDS: frozenset[str] = frozenset({"tool", "mcp_server", "skill"})
@@ -99,6 +113,21 @@ EVIDENCE_FIELDS = frozenset(
 TOOL_FIELDS = frozenset({"kind", "identifier"})
 OBSERVED_FIELDS = frozenset({"provider", "status_code", "receipt_id", "response_digest"})
 BODY_FIELDS = frozenset({"envelope", "evidence"})
+#: v2's ``dispatch`` block. From Achilles' service, never its caller: when the effect
+#: left (``dispatched_at``), the gate's authority epoch at the spend and the one the
+#: permit was issued under, and the operator policy the spend found in force and the
+#: one the permit was decided under. ``presented``: this backend's authority the
+#: dispatch was presented under, which Achilles cannot judge and signs as presented,
+#: and which this backend proves against its own history as of ``dispatched_at``
+#: (:mod:`assurance.authority_chain`).
+DISPATCH_FIELDS = frozenset(
+    {"dispatched_at", "epoch", "permit_epoch", "policy_id", "policy_digest", "permit_policy_digest", "presented"}
+)
+PRESENTED_FIELDS = frozenset({"approval_digest", "contracts", "route_fingerprint", "assertion_digest", "grant_digest"})
+CONTRACT_FIELDS = frozenset({"kind", "identifier", "digest"})
+#: The most tool contracts one dispatch may present (``tool_contract.MAX_TOOLS_PER_WORKFLOW``).
+MAX_PRESENTED_CONTRACTS = 100
+_POLICY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 _SLUG = re.compile(r"^[-a-zA-Z0-9_]{1,200}$")
 _TOKEN = re.compile(r"^[-a-zA-Z0-9_.:+]{1,200}$")
@@ -119,7 +148,7 @@ MAX_BODY_BYTES = oc.MAX_PAYLOAD_B64 + 16 * 1024
 
 
 class EvidenceRefused(ValueError):
-    """A document that is not a ``mythos.observed-effect/v1`` evidence document."""
+    """A document that is not a ``mythos.observed-effect`` evidence document (v1 or v2)."""
 
 
 # ----------------------------------------------------------------- the document
@@ -149,20 +178,70 @@ def _match(value: Any, pattern: re.Pattern[str], name: str, what: str) -> str:
     return value
 
 
+def _optional(value: Any, pattern: re.Pattern[str], name: str, what: str) -> str | None:
+    if value is None:
+        return None
+    return _match(value, pattern, name, f"null or {what}")
+
+
+def _validate_presented(raw: Any) -> None:
+    name = "dispatch.presented"
+    if not isinstance(raw, dict) or set(raw) != PRESENTED_FIELDS:
+        raise EvidenceRefused(f"{name} has exactly the fields {sorted(PRESENTED_FIELDS)}")
+    _optional(raw["approval_digest"], _HEX64, f"{name}.approval_digest", "64 lowercase hex characters")
+    _optional(raw["route_fingerprint"], _HEX64, f"{name}.route_fingerprint", "64 lowercase hex characters")
+    _optional(raw["assertion_digest"], _DIGEST, f"{name}.assertion_digest", "a sha256 digest")
+    _optional(raw["grant_digest"], _DIGEST, f"{name}.grant_digest", "a sha256 digest")
+    contracts = raw["contracts"]
+    if not isinstance(contracts, list) or len(contracts) > MAX_PRESENTED_CONTRACTS:
+        raise EvidenceRefused(f"{name}.contracts is a list of at most {MAX_PRESENTED_CONTRACTS}")
+    keys: list[tuple[str, str]] = []
+    for i, entry in enumerate(contracts):
+        where = f"{name}.contracts[{i}]"
+        if not isinstance(entry, dict) or set(entry) != CONTRACT_FIELDS:
+            raise EvidenceRefused(f"{where} has exactly the fields {sorted(CONTRACT_FIELDS)}")
+        if entry["kind"] not in TOOL_KINDS:
+            raise EvidenceRefused(f"{where}.kind is one of {sorted(TOOL_KINDS)}")
+        _text(entry["identifier"], f"{where}.identifier")
+        _match(entry["digest"], _HEX64, f"{where}.digest", "64 lowercase hex characters")
+        keys.append((entry["kind"], entry["identifier"]))
+    if keys != sorted(set(keys)):
+        raise EvidenceRefused(f"{name}.contracts is sorted by kind and identifier, one entry per tool")
+
+
+def _validate_dispatch(block: Any) -> None:
+    if not isinstance(block, dict) or set(block) != DISPATCH_FIELDS:
+        raise EvidenceRefused(f"dispatch has exactly the fields {sorted(DISPATCH_FIELDS)}")
+    _match(block["dispatched_at"], _INSTANT, "dispatch.dispatched_at", "YYYY-MM-DDTHH:MM:SS.ffffffZ")
+    _text(block["epoch"], "dispatch.epoch", allow_empty=True)
+    _text(block["permit_epoch"], "dispatch.permit_epoch", allow_empty=True)
+    if block["policy_id"] != "":
+        _match(block["policy_id"], _POLICY_ID, "dispatch.policy_id", "empty or a policy id")
+    for name in ("policy_digest", "permit_policy_digest"):
+        if block[name] != "":
+            _match(block[name], _DIGEST, f"dispatch.{name}", "empty or a sha256 digest")
+    _validate_presented(block["presented"])
+
+
 def validate_evidence(document: Any) -> dict[str, Any]:
-    """``document`` if it is a ``mythos.observed-effect/v1`` evidence document, else
+    """``document`` if it is a ``mythos.observed-effect/v2`` evidence document -- or a
+    ``v1`` one, which is v2 without its ``dispatch`` block -- else
     :class:`EvidenceRefused` naming the first thing wrong. Exactly the fields, no
     more, at every level -- Achilles' own rules, checked against the same vectors."""
     if not isinstance(document, dict):
         raise EvidenceRefused("the evidence is an object")
-    if set(document) != EVIDENCE_FIELDS:
+    schema = document.get("schema")
+    if schema not in EVIDENCE_SCHEMAS:
+        raise EvidenceRefused(f"schema is one of {list(EVIDENCE_SCHEMAS)}")
+    fields = EVIDENCE_FIELDS | {"dispatch"} if schema == EVIDENCE_SCHEMA else EVIDENCE_FIELDS
+    if set(document) != fields:
         raise EvidenceRefused(
-            f"the evidence has exactly the fields {sorted(EVIDENCE_FIELDS)}; missing "
-            f"{sorted(EVIDENCE_FIELDS - set(document))}, unexpected "
-            f"{sorted(str(k) for k in set(document) - EVIDENCE_FIELDS)}"
+            f"a {schema} document has exactly the fields {sorted(fields)}; missing "
+            f"{sorted(fields - set(document))}, unexpected "
+            f"{sorted(str(k) for k in set(document) - fields)}"
         )
-    if document["schema"] != EVIDENCE_SCHEMA:
-        raise EvidenceRefused(f"schema is {EVIDENCE_SCHEMA!r}")
+    if schema == EVIDENCE_SCHEMA:
+        _validate_dispatch(document["dispatch"])
     _match(document["deployment"], _TOKEN, "deployment", "a deployment token")
     _match(document["workflow"], _SLUG, "workflow", "a workflow slug")
     tool = document["tool"]
@@ -209,7 +288,7 @@ def examine(outcome: dict, document: Any) -> str:
     try:
         validate_evidence(document)
     except EvidenceRefused as exc:
-        return f"the evidence is not a {EVIDENCE_SCHEMA} document: {exc}"
+        return f"the evidence is not an observed-effect document ({' or '.join(EVIDENCE_SCHEMAS)}): {exc}"
     if oc.evidence_digest_of(document) != outcome["evidence_digest"]:
         return (
             "the evidence is not the document the signature names: its digest is "

@@ -93,13 +93,14 @@ def test_recording_the_chain_names_the_effect_and_its_unproven_hops_hold_it_inst
 # --------------------------------------------- a fully proven chain lifts the effect
 
 
-def _observed(dep, permit):
+def _observed(dep, permit, at=None):
     """The effect Achilles' dispatch observed, signed with its observed-effect key --
     the production signer (``achilles-effect``), bound to the gate decision ``permit``
     and the CRM tool. #134 could prove ``produces`` here only by trusting a made-up
-    collector key; nothing is patched now."""
+    collector key; nothing is patched now. ``at``: when it was dispatched and observed
+    (a minute ago by default)."""
     return signed_chains.record_observed_effect(
-        dep, WF, permit.outcome_id, datetime.now(dt_timezone.utc) - timedelta(minutes=1)
+        dep, WF, permit.outcome_id, at or datetime.now(dt_timezone.utc) - timedelta(minutes=1)
     )
 
 
@@ -173,7 +174,9 @@ def test_binding_the_reached_write_tool_and_a_fully_proven_chain_lifts_it():
     assert (missing["workflow"], missing["reasons"]) == (WF, ["declared_write", "no_chain_in_force"])
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
-    observed = _observed(dep, permit)
+    # Dispatched after the binding (part 5 reads the approval as of dispatch: an
+    # effect dispatched before it was bound ran under an approval naming no tools).
+    observed = _observed(dep, permit, at=datetime.now(dt_timezone.utc))
     body = _chain_body(client, dep, permit)
     body["effect_outcome_id"] = observed.outcome_id
     chain = _post(client, dep, body).json()["chains"][0]

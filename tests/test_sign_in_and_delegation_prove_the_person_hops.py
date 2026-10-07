@@ -139,8 +139,10 @@ def test_a_chain_that_starts_at_a_person_reads_proven_end_to_end(collectors):
     assert {r: _codes(h) for r, h in hops.items()} == {
         "authenticated_as": ["authentication"],
         "delegates_to": ["delegation"],
-        "under_policy": ["approval_in_force"],
-        "invokes": ["approved_contract_in_force", "declared_edge"],
+        # Read as of dispatch (part 5): the approval, contract and route the observed
+        # effect's dispatch ran under.
+        "under_policy": ["approval_in_force_at_dispatch"],
+        "invokes": ["contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"],
         "through_identity": ["declared_identity"],
         "performs": ["declared_permission", "within_approval", "gate_permit"],
         "produces": ["observed_effect"],

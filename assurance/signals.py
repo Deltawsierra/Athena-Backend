@@ -420,6 +420,11 @@ DECISION_INPUTS = {
     # A signed sign-in or delegation record proves a chain's authenticated_as or
     # delegates_to hop (assurance.identity_evidence); a revocation unproves one.
     "assurance.IdentityEvidence": ("deployment",),
+    # The approval in force at a dispatch instant: a chain's under_policy and invokes
+    # hops are read against it, as of dispatch (assurance.approval_history). Appended
+    # beside the approval write that moves it, which refreshes anyway; watched because
+    # the rule reads it.
+    "assurance.ApprovalVersion": ("deployment",),
 }
 
 def _deployments_serving_through(instance) -> set:
@@ -714,6 +719,45 @@ def _deployment_saved(sender, instance, raw=False, using=None, update_fields=Non
         # the next one.
         return
     schedule_decision_refresh(instance.pk, using=using)
+
+
+@receiver(post_save, sender="assurance.ApprovedWorkflow", dispatch_uid="assurance_approval_noted_on_save")
+def _approval_saved(sender, instance, raw=False, **kwargs):
+    """An approval saved is an approval that may have moved: its version is noted in
+    the same transaction (:func:`assurance.approval_history.note_approvals`), so the
+    history a chain is read against as of dispatch never lags the write. A failure
+    fails the write: an approval and its history commit together. No stop writes one."""
+    if raw:
+        return
+    from .approval_history import note_approvals
+
+    note_approvals(instance.deployment)
+
+
+@receiver(post_delete, sender="assurance.ApprovedWorkflow", dispatch_uid="assurance_approval_noted_on_delete")
+def _approval_deleted(sender, instance, origin=None, **kwargs):
+    """A withdrawn approval is noted withdrawn, in the same transaction. Not when the
+    deployment itself is being deleted: its history goes with it."""
+    from .models import Deployment
+
+    if isinstance(origin, Deployment) or (isinstance(origin, QuerySet) and origin.model is Deployment):
+        return
+    from .approval_history import note_approvals
+
+    deployment = Deployment.objects.filter(pk=instance.deployment_id).first()
+    if deployment is not None:
+        note_approvals(deployment)
+
+
+@receiver(post_save, sender="assurance.ToolContractBinding", dispatch_uid="assurance_approval_noted_on_binding")
+def _approval_binding_saved(sender, instance, raw=False, **kwargs):
+    """A workflow's tool bound, re-bound or released moves its approval's digest: noted
+    in the same transaction. A claim's binding is no approval, and notes nothing."""
+    if raw or instance.workflow_id is None:
+        return
+    from .approval_history import note_approvals
+
+    note_approvals(instance.deployment)
 
 
 @receiver(post_save, sender="assurance.Deployment", dispatch_uid="assurance_route_noted_at_creation")
