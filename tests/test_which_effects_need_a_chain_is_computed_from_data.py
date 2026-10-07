@@ -191,7 +191,58 @@ def test_every_code_the_rule_emits_is_published_and_every_published_one_is_emitt
         contract(effect_class="read", annotations={"destructiveHint": True}),
     ]
     emitted = set()
+    registered = {("tool", "lookup@crm"): contract(effect_class="write")}
     for chains in ([], [("c1", chain())]):
         for found in rule.effects([tool(c) for c in contracts], chains, [REFUND]):
             emitted.update(found.reasons)
+        for approved in ([WF], [WF, "bare"]):
+            for found in rule.effects([tool(contract())], chains, [REFUND], approved=approved, registered=registered):
+                emitted.update(found.reasons)
     assert emitted == set(rule.REASONS)
+
+
+# ------------------------------------------- what an approved workflow can reach
+
+
+WRITE = contract(effect_class="write")
+READ = contract(effect_class="read")
+
+
+def test_an_approval_that_binds_no_tools_reaches_every_registered_tool_and_none_is_proven():
+    registered = {("tool", "refund@payments"): WRITE, ("tool", "lookup@crm"): READ, ("skill", "odd"): contract()}
+    found = _rule().effects([], [("c1", chain())], [REFUND], approved=[WF], registered=registered)
+    assert [(e.workflow, e.kind, e.identifier, e.status, e.reasons, e.chains) for e in found] == [
+        (WF, "skill", "odd", "unknown", ("effect_class_undeclared", "approval_binds_no_tools"), ()),
+        (WF, "tool", "lookup@crm", "not_required", ("declared_read", "approval_binds_no_tools"), ()),
+        # A chain names it, and still: nothing says the write is within an approval.
+        (WF, "tool", "refund@payments", "missing", ("declared_write", "approval_binds_no_tools"), ()),
+    ]
+    assert [e.unproven for e in found] == [True, False, True]
+
+
+def test_a_registered_tool_no_approval_binds_is_an_effect_of_no_named_workflow():
+    registered = {("tool", "refund@payments"): WRITE, ("tool", "lookup@crm"): READ, ("tool", "wire@bank"): WRITE}
+    bound = [tool(READ, identifier="lookup@crm")]
+    found = _rule().effects(bound, [], [REFUND], approved=[WF], registered=registered)
+    assert [(e.workflow, e.identifier, e.status, e.reasons) for e in found] == [
+        ("", "refund@payments", "missing", ("declared_write", "tool_not_bound_to_approval")),
+        ("", "wire@bank", "missing", ("declared_write", "tool_not_bound_to_approval")),
+        (WF, "lookup@crm", "not_required", ("declared_read",)),
+    ]
+
+
+def test_binding_the_tool_makes_it_the_workflows_effect_and_a_chain_covers_it():
+    registered = {("tool", "refund@payments"): WRITE}
+    (effect,) = _rule().effects([tool(WRITE)], [("c1", chain())], [REFUND], approved=[WF], registered=registered)
+    assert (effect.workflow, effect.status, effect.chains) == (WF, "covered", ("c1",))
+
+
+def test_an_unbound_read_only_tool_needs_nothing_and_says_it_is_unbound():
+    found = _rule().effects([], approved=[WF], registered={("tool", "lookup@crm"): READ})
+    assert [(e.status, e.unproven, e.reasons) for e in found] == [
+        ("not_required", False, ("declared_read", "approval_binds_no_tools"))
+    ]
+
+
+def test_with_nothing_approved_no_registered_tool_is_an_effect():
+    assert _rule().effects([], approved=[], registered={("tool", "refund@payments"): WRITE}) == ()

@@ -67,7 +67,7 @@ def _fresh(dep):
     return Deployment.objects.get(pk=dep.pk)
 
 
-def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles", effect_class="write"):
+def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles", effect_class="write", bind=True):
     """The roadmap's example as a deployment: a support agent that invokes a CRM MCP
     server, acting as service account X, under an approved workflow that names the
     server; a gate decision Achilles signed for the workflow. The server declares
@@ -94,12 +94,10 @@ def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles"
     # was observed against it.
     note_route(dep, now=now - timedelta(hours=1))
     ServedRouteNote.objects.filter(deployment=dep).update(since=now - timedelta(hours=1))
-    put = client.put(
-        _base(dep) + "approved-workflows/",
-        {"workflows": [{"slug": WF, "name": "Support update", "description": "update a customer record",
-                        "tools": [{"kind": "mcp_server", "identifier": "crm-mcp"}]}]},
-        format="json",
-    )
+    entry = {"slug": WF, "name": "Support update", "description": "update a customer record"}
+    if bind:
+        entry["tools"] = [{"kind": "mcp_server", "identifier": "crm-mcp"}]
+    put = client.put(_base(dep) + "approved-workflows/", {"workflows": [entry]}, format="json")
     assert put.status_code == 200, put.content
     permit = record_signed(dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=2), engine=engine)
     refusal = None

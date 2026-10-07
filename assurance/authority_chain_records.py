@@ -24,11 +24,11 @@ decided here:
   (:func:`assurance.decision.claim_decision_signal`), and :func:`receipt_reference`
   and :func:`effects_reference` what the receipt carries.
 
-A deployment with no recorded chain and no approved tool reads TWO queries here and
-nothing else: no graph, no access, no coverage. One with approved tools and no chain
-reads its registrations too, because a consequential effect with no chain in force
-is not a deployment nobody assessed -- it is one whose authority nobody recorded,
-and that reads unproven (the owner's decision of 7 Oct).
+A deployment with no recorded chain and no approved workflow reads TWO queries here
+and nothing else: no graph, no access, no coverage. One with approved workflows and
+no chain reads its bindings and registrations too, because a consequential effect
+with no chain in force is not a deployment nobody assessed -- it is one whose
+authority nobody recorded, and that reads unproven (the owner's decision of 7 Oct).
 """
 
 from __future__ import annotations
@@ -295,11 +295,23 @@ def read_chains(deployment, keyring=observed_outcomes.READ_KEYRING, *, with_reco
     ]
 
 
-def approved_effects(deployment, standing) -> tuple[consequential.Effect, ...]:
-    """Every effect of every approved workflow through every tool its approval binds
-    (:func:`assurance.consequential.effects`), classified off the tool's registration
-    IN FORCE and checked against ``standing``, the chains in force
-    (:class:`Recorded`). One query when no approval binds a tool.
+def read_approved(deployment) -> dict:
+    """Every approved workflow's slug, by its row id: the approved set, read once.
+    The decision reads it with its other inputs and hands it to the composition and
+    to :func:`approved_effects` alike, so the two never describe two moments."""
+    # In the order read_expected_workflows reads them, so the composition built from
+    # this set is the one it built before.
+    return dict(deployment.approved_workflows.values_list("id", "slug"))
+
+
+def approved_effects(deployment, standing, approved: dict | None = None) -> tuple[consequential.Effect, ...]:
+    """Every effect of every approved workflow (:func:`assurance.consequential.effects`):
+    through every tool its approval binds, and through every registered tool an
+    approval does not bind (an approved workflow can reach it, and nothing on record
+    says otherwise). Each is classified off the tool's registration IN FORCE and
+    checked against ``standing``, the chains in force (:class:`Recorded`).
+    ``approved``: :func:`read_approved`, when the caller already read it. One query
+    when nothing is approved, none when the caller read it.
 
     The registration in force, not the contract the approval bound: a tool
     re-declared since is a superseded binding the decision already holds back
@@ -308,18 +320,22 @@ def approved_effects(deployment, standing) -> tuple[consequential.Effect, ...]:
     from .graph_refs import in_graph
     from .tool_contract import contract_descriptor, current_tools
 
-    bindings = list(
-        ToolContractBinding.objects.filter(deployment=deployment, released_at__isnull=True, workflow__isnull=False)
-        .select_related("workflow")
-        .order_by("pk")
-    )
-    if not bindings:
+    approved = read_approved(deployment) if approved is None else approved
+    if not approved:
         return ()
+    # The workflow by its id, from the approved set read once: no join back to it.
+    bindings = [
+        b
+        for b in ToolContractBinding.objects.filter(
+            deployment=deployment, released_at__isnull=True, workflow__isnull=False
+        ).order_by("pk")
+        if b.workflow_id in approved
+    ]
     assets = in_graph(list(deployment.assets.all()))
     registered = current_tools(deployment, assets=assets)
     tools = [
         consequential.ApprovedTool(
-            workflow=b.workflow.slug,
+            workflow=approved[b.workflow_id],
             kind=str(b.tool_kind),
             identifier=str(b.tool_identifier),
             contract=(
@@ -330,18 +346,25 @@ def approved_effects(deployment, standing) -> tuple[consequential.Effect, ...]:
         )
         for b in bindings
     ]
-    return consequential.effects(tools, [(r.row.digest, r.verdict.chain) for r in standing], components=assets)
+    return consequential.effects(
+        tools,
+        [(r.row.digest, r.verdict.chain) for r in standing],
+        components=assets,
+        approved=sorted(approved.values()),
+        registered={key: contract_descriptor(asset) for key, asset in registered.items()},
+    )
 
 
-def authority_chain_signal(deployment, keyring=observed_outcomes.READ_KEYRING) -> dict:
+def authority_chain_signal(deployment, keyring=observed_outcomes.READ_KEYRING, *, approved=None) -> dict:
     """The chains in force, by verdict, and the effects that need one. What the
     decision caps on (:data:`assurance.decision.CLAIM_CAPS`): a broken chain, an
     unproven one, a consequential effect no chain in force names (``missing``) and an
     effect whose class nobody declared (``unknown``). A superseded chain caps
     nothing; it is published, not decided with. ``effects`` is every effect, the
-    ones that need no chain and the covered ones included."""
+    ones that need no chain and the covered ones included. ``approved``:
+    :func:`read_approved`, when the caller read it with its other inputs."""
     standing = [r for r in read_chains(deployment, keyring) if r.standing]
-    found = approved_effects(deployment, standing)
+    found = approved_effects(deployment, standing, approved)
     return {
         "broken": [r for r in standing if r.verdict.verdict == rule.BROKEN],
         "unproven": [r for r in standing if r.verdict.verdict == rule.UNPROVEN],
@@ -512,6 +535,13 @@ def effect_digest(effect: consequential.Effect, deployment_uuid: str) -> str:
 
 def _what_to_do(effect: consequential.Effect) -> str | None:
     tool = f"{effect.kind} {effect.identifier!r}"
+    unbound = {"approval_binds_no_tools", "tool_not_bound_to_approval"} & set(effect.reasons)
+    if unbound and effect.status in consequential.UNPROVEN_STATUSES:
+        whose = f"the approval of {effect.workflow!r}" if effect.workflow else "the approval of the workflow that uses it"
+        declare = (
+            " and declare its effect class (read, write or destructive)" if effect.status == consequential.UNKNOWN else ""
+        )
+        return f"bind {tool} to {whose}{declare}, then record the authority chain the effect was produced through"
     if effect.status == consequential.MISSING:
         return (
             f"record the authority chain workflow {effect.workflow!r} produced this effect through: a chain for "
@@ -534,7 +564,8 @@ def effect_brief(effect: consequential.Effect, deployment_uuid: str) -> dict:
     exactly which chain to record or which class to declare."""
     return {
         "digest": effect_digest(effect, deployment_uuid),
-        "workflow": effect.workflow,
+        # None for a registered tool no approval binds: no workflow is named for it.
+        "workflow": effect.workflow or None,
         "tool_kind": effect.kind,
         "tool_identifier": effect.identifier,
         "effect_class": effect.effect_class,

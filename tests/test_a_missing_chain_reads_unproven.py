@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from mythos_core import outcome as oc
 
 from assurance import composition as comp
@@ -131,6 +132,73 @@ def test_a_chain_whose_every_hop_is_proven_lifts_the_missing_chain(collector):
     # Lifted: the decision is the workflow chains' again, no longer held by authority.
     assert _fresh(dep).decision == support["decision"] == support["composition"]["signal"]
     assert _fresh(dep).decision in (D.READY, D.READY_RESTRICTED)
+
+
+# ------------------------------------- a tool the approval does not bind, reached
+
+
+def _approve(client, dep, *tools):
+    entry = {"slug": WF, "name": "Support update", "description": "update a customer record"}
+    if tools:
+        entry["tools"] = [{"kind": "mcp_server", "identifier": t} for t in tools]
+    put = client.put(_base(dep) + "approved-workflows/", {"workflows": [entry]}, format="json")
+    assert put.status_code == 200, put.content
+
+
+@pytest.mark.parametrize("binds", ["nothing", "only-the-read-tool"])
+def test_an_unbound_write_tool_an_approved_workflow_reaches_reads_unproven(binds):
+    # Not binding the write must never read better than binding it: on 28479ea an
+    # approval that left crm-mcp out read ready_restricted, the decision the bound
+    # one had before chains were required.
+    dep, client, _, _ = _world(bind=False)
+    if binds == "only-the-read-tool":
+        Asset.objects.create(
+            deployment=dep, kind="mcp_server", name="lookup-mcp", identifier="lookup-mcp",
+            classification=A.APPROVED, assessed_at=timezone.now(), metadata={"effect_class": "read"},
+        )
+        _approve(client, dep, "lookup-mcp")
+    assert decision_support(_fresh(dep))["composition"]["signal"] == D.READY_RESTRICTED
+    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
+    (missing,) = decision_support(_fresh(dep))["claims"]["authority_chains_missing"]
+    code = "approval_binds_no_tools" if binds == "nothing" else "tool_not_bound_to_approval"
+    assert (missing["tool_identifier"], missing["status"], missing["reasons"]) == (
+        "crm-mcp", "missing", ["declared_write", code],
+    )
+    assert missing["workflow"] == (WF if binds == "nothing" else None)
+    assert missing["to_do"].startswith("bind mcp_server 'crm-mcp' to the approval of")
+
+
+def test_binding_the_reached_write_tool_and_a_fully_proven_chain_lifts_it(collector):
+    dep, client, permit, _ = _world(bind=False)
+    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
+
+    # Bound, it is the workflow's effect -- still missing its chain.
+    _approve(client, dep, "crm-mcp")
+    (missing,) = decision_support(_fresh(dep))["claims"]["authority_chains_missing"]
+    assert (missing["workflow"], missing["reasons"]) == (WF, ["declared_write", "no_chain_in_force"])
+    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
+
+    observed = signed_chains.record_signed(
+        dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=1), engine=collector
+    )
+    body = _chain_body(client, dep, permit)
+    body["effect_outcome_id"] = observed.outcome_id
+    chain = _post(client, dep, body).json()["chains"][0]
+    assert chain["verdict"] == "proven", [h["reasons"] for h in chain["hops"] if h["verdict"] != "proven"]
+    support = decision_support(_fresh(dep))
+    assert support["claims"]["authority_chains_missing"] == [] and support["claim_cap"] is None
+    assert _fresh(dep).decision == support["composition"]["signal"]
+    assert _fresh(dep).decision in (D.READY, D.READY_RESTRICTED)
+
+
+def test_an_unbound_read_tool_needs_nothing():
+    dep, client, _, _ = _world(bind=False, effect_class="read")
+    effect = _effects(client, dep)["crm-mcp"]
+    assert (effect["status"], effect["reasons"], effect["to_do"]) == (
+        "not_required", ["declared_read", "approval_binds_no_tools"], None,
+    )
+    assert decision_support(_fresh(dep))["claim_cap"] is None
+    assert _fresh(dep).decision == D.READY_RESTRICTED
 
 
 # --------------------------------------------------------- undeclared and read-only

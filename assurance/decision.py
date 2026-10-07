@@ -275,7 +275,7 @@ def _decision_from_findings(deployment: Deployment) -> str | None:
 _LEGALLY_STALE = frozenset({LegalStatus.STALE})
 
 
-def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING) -> dict:
+def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING, approved=None) -> dict:
     """How the deployment's CURRENT assurance claims bear on its decision (Stage 1C).
 
     Reads the current version of each claim (``valid_to`` null), excluding human
@@ -382,7 +382,7 @@ def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING) -> d
     bound_to_superseded = {b.claim_fingerprint for b in superseded if b.claim_fingerprint}
     from .authority_chain_records import authority_chain_signal
 
-    chains = authority_chain_signal(deployment, keyring)
+    chains = authority_chain_signal(deployment, keyring, approved=approved)
     supporting = [
         c
         for c in current
@@ -643,14 +643,19 @@ def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING, now=No
     COMMITTED a second read of the same fact is a second moment even inside one
     transaction, so "read it once" is the load-bearing half.
     """
+    from .authority_chain_records import read_approved
+
+    # The approved set, read once: the composition counts what it expects from it,
+    # and the authority chains read which effects need a chain from it.
+    approved = read_approved(deployment)
     return DecisionParts(
         from_findings=_decision_from_findings(deployment),
         completed_scan=_completed_scan_signal(deployment),
         complete_audit=complete_audit_signal(deployment),
-        claim_signal=claim_decision_signal(deployment, keyring=keyring),
+        claim_signal=claim_decision_signal(deployment, keyring=keyring, approved=approved),
         scan_cap=incomplete_evidence_cap(deployment),
         coverage_cap=coverage_decision_cap(deployment),
-        composition=composition_for(deployment, keyring),
+        composition=composition_for(deployment, keyring, expected=list(approved.values()) or None),
         # Read here with everything else, inside the caller's transaction, for
         # the reason the docstring above gives: reading each fact exactly once
         # is what closes the tear. A census read later would describe a
@@ -827,7 +832,9 @@ def _unproven_chains_note(records) -> str:
 
 def _effects_named(effects) -> str:
     return "; ".join(
-        f"workflow {e.workflow!r} through {e.kind} {e.identifier!r} ({', '.join(e.reasons)})" for e in effects
+        f"{f'workflow {e.workflow!r}' if e.workflow else 'no approved workflow'} through {e.kind} "
+        f"{e.identifier!r} ({', '.join(e.reasons)})"
+        for e in effects
     )
 
 

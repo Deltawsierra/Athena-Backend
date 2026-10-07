@@ -379,13 +379,13 @@ def plan_revalidation(deployment) -> dict:
             # recorded: the decision reads it unproven whatever every claim reads.
             gaps = []
             if to_record:
-                named = "; ".join(f"{e['workflow']} through {e['tool_kind']} {e['tool_identifier']!r}" for e in to_record)
+                named = "; ".join(f"{e['workflow'] or 'no approved workflow'} through {e['tool_kind']} {e['tool_identifier']!r}" for e in to_record)
                 gaps.append(
                     f"{len(to_record)} consequential effect(s) have no authority chain in force ({named}): "
                     "record the chain each was produced through."
                 )
             if to_declare:
-                named = "; ".join(f"{e['workflow']} through {e['tool_kind']} {e['tool_identifier']!r}" for e in to_declare)
+                named = "; ".join(f"{e['workflow'] or 'no approved workflow'} through {e['tool_kind']} {e['tool_identifier']!r}" for e in to_declare)
                 gaps.append(
                     f"{len(to_declare)} approved tool(s) have an unknown effect class ({named}): declare it."
                 )

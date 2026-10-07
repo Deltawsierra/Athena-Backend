@@ -54,14 +54,43 @@ Each effect then has one STATUS:
                    again (:mod:`assurance.tool_contract`).
     not_required   read-only: no chain is needed.
 
-Deliberately PURE, as :mod:`assurance.authority_chain` is: no models, no ORM, no
-clock. :mod:`assurance.authority_chain_records` loads the bindings, the
-registrations and the chains in force, and calls :func:`effects`.
+WHAT AN APPROVED WORKFLOW CAN REACH, NOT ONLY WHAT IT BINDS
+-----------------------------------------------------------
 
-What it does not cover, stated: an effect produced through a tool NO approval binds
-is not one of these -- an unapproved tool's effect is held by the shadow and
-coverage readings, not here -- and an approved workflow that binds no tools has no
-effect this rule can name.
+Were the effects only the bound tools, NOT binding a write tool would escape the
+rule: an approval that names nothing, or names only the read tools, would read
+better than one that names the write it can reach -- the "recording lowers the
+decision" incentive moved up one level. So the effects are the bound tools AND the
+registered tools the approved workflows can reach.
+
+The graph holds no edge from a workflow to a tool: an approved workflow is a slug,
+a name and a description (``ApprovedWorkflow``), a chain outcome is one status per
+workflow (``WorkflowChainOutcome``), and the route map and effective access join
+components to components, never to a workflow. Nothing on record says a workflow
+does NOT reach a registered tool, so every one is read as reachable, and:
+
+    approval_binds_no_tools      an approved workflow whose approval binds no tools
+                                 has one effect through EVERY registered tool, each
+                                 classified as above;
+    tool_not_bound_to_approval   a registered tool no approval binds, when approvals
+                                 exist and none binds nothing, is one effect of no
+                                 named workflow (``workflow`` is ``""``).
+
+A consequential one is ``missing`` and an unknown one ``unknown`` -- whatever chain
+names it, since a chain for a tool the approval does not name cannot prove it is
+within the approval (:func:`assurance.authority_chain.verify` reads that hop
+unproven or broken). The fix is to bind the tool to the approval of the workflow that
+uses it and record the chain. A read-only one is ``not_required``, with the code
+saying it is unbound.
+
+Deliberately PURE, as :mod:`assurance.authority_chain` is: no models, no ORM, no
+clock. :mod:`assurance.authority_chain_records` loads the bindings, the approved
+workflows, the registrations and the chains in force, and calls :func:`effects`.
+
+What it does not cover, stated: a workflow that binds SOME tools is read as
+reaching those it binds; a tool it reaches that another approval binds is that
+approval's effect, not this one's, because nothing on record tells the two apart.
+A deployment with no approved workflow has no effect here.
 """
 
 from __future__ import annotations
@@ -121,6 +150,11 @@ REASONS: Mapping[str, str] = {
     "(read, write, destructive)",
     "tool_not_registered": "no registration of the tool is in the graph now, so nothing says what it does",
     # its status
+    # why it is an effect at all, when no approval binds it
+    "approval_binds_no_tools": "the workflow's approval binds no tools, so every registered tool is one it can "
+    "reach and nothing says is within it: bind the tools it uses",
+    "tool_not_bound_to_approval": "no approval binds this registered tool, which an approved workflow can reach: "
+    "bind it to the approval of the workflow that uses it",
     "chain_in_force": "an authority chain in force for this workflow names the tool; its verdict decides",
     "no_chain_in_force": "no authority chain in force for this workflow names the tool: record the chain the "
     "effect was produced through",
@@ -238,17 +272,44 @@ def covering(chains: Sequence[tuple[object, _chain.Chain]], workflow: str, kind:
     )
 
 
+def _unbound(tool: ApprovedTool, code: str) -> Effect:
+    """An effect through a tool the approval does not bind: never covered."""
+    klass, codes = classify(tool.contract)
+    status = {READ_ONLY: NOT_REQUIRED, UNKNOWN: UNKNOWN, CONSEQUENTIAL: MISSING}[klass]
+    declared = tool.contract.get("effect_class") if isinstance(tool.contract, Mapping) else None
+    return Effect(tool.workflow, tool.kind, tool.identifier, declared, klass, status, (*codes, code))
+
+
 def effects(
-    tools: Sequence[ApprovedTool], chains: Sequence[tuple[object, _chain.Chain]] = (), components=()
+    tools: Sequence[ApprovedTool],
+    chains: Sequence[tuple[object, _chain.Chain]] = (),
+    components=(),
+    *,
+    approved: Sequence[str] = (),
+    registered: Mapping[tuple[str, str], Mapping] | None = None,
 ) -> tuple[Effect, ...]:
-    """Every effect of every approved workflow through every tool it binds, each with
-    its class and status. ``chains``: the chains IN FORCE, ``(key, chain)``.
-    ``components``: what a chain's tool node is resolved against (anything with
-    ``kind``, ``identifier``, ``name``, ``metadata``). Ordered by workflow, kind and
-    identifier. Pure."""
+    """Every effect of every approved workflow, each with its class and status: one
+    through every tool its approval binds (``tools``), and -- when ``approved`` (every
+    approved workflow's slug) and ``registered`` (every registered tool,
+    ``(kind, identifier) -> contract``) are given -- one through every registered
+    tool an approval does not bind (see the module docstring). ``chains``: the chains
+    IN FORCE, ``(key, chain)``. ``components``: what a chain's tool node is resolved
+    against (anything with ``kind``, ``identifier``, ``name``, ``metadata``). Ordered
+    by workflow, kind and identifier. Pure."""
     index = _refs.reference_index(components)
     out = []
-    for tool in sorted(tools, key=lambda t: (t.workflow, t.kind, t.identifier)):
+    registered = registered or {}
+    binding = {t.workflow for t in tools}
+    bound = {(t.kind, t.identifier) for t in tools}
+    bare = sorted(set(approved) - binding)
+    for workflow in bare:
+        for (kind, identifier), contract in registered.items():
+            out.append(_unbound(ApprovedTool(workflow, kind, identifier, contract), "approval_binds_no_tools"))
+    if approved and not bare:
+        for (kind, identifier), contract in registered.items():
+            if (kind, identifier) not in bound:
+                out.append(_unbound(ApprovedTool("", kind, identifier, contract), "tool_not_bound_to_approval"))
+    for tool in tools:
         klass, codes = classify(tool.contract)
         named = covering(chains, tool.workflow, tool.kind, tool.identifier, index)
         if klass == READ_ONLY:
@@ -261,4 +322,4 @@ def effects(
             status, codes = MISSING, (*codes, "no_chain_in_force")
         declared = tool.contract.get("effect_class") if isinstance(tool.contract, Mapping) else None
         out.append(Effect(tool.workflow, tool.kind, tool.identifier, declared, klass, status, codes, named))
-    return tuple(out)
+    return tuple(sorted(out, key=lambda e: (e.workflow, e.kind, e.identifier)))

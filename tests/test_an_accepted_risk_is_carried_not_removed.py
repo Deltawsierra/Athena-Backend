@@ -500,6 +500,8 @@ _NOT_RULES = {
     ("assurance.composition", "_UNEXERCISED_NAMED"): "how many workflows one sentence names",
     ("assurance.workflow_chains", "PROVENANCE_LIMIT"): "how many sources the provenance census lists",
     ("assurance.workflow_chains", "UNATTRIBUTED"): "the census's name for an outcome with no source",
+    ("assurance.workflow_chains", "NOT_READ"): "a sentinel meaning 'the caller did not read the approved set', "
+    "not a rule",
     ("assurance.authority_chain", "MAX_HOPS"): "how many hops one write may carry; a chain is refused on "
     "write, never read differently",
     ("assurance.authority_chain", "CHAIN_SCHEMA"): "the name of the document a chain's digest is taken over; "
