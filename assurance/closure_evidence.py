@@ -39,10 +39,19 @@ the same document can be sent on there unchanged:
 - ``fixtures``     -- the gate's fixture document: ``vulnerable``, ``repaired``,
   ``benign`` and ``incomplete_repair`` (one run per named pattern), each run
   ``{"ran": bool, "outcome": "passed"|"failed"|"errored"}``, ``outcome`` null or
-  absent when it did not run.
+  absent when it did not run;
+- ``contract``     -- the repair contract the replay was held to
+  (:mod:`assurance.repair_contract`): ``{"digest": "sha256:<hex>", "preserved":
+  {"<behaviour>": "retained"|"broken"|"unknown"}}``, ``digest`` the finding's
+  contract's ``content_digest`` and ``preserved`` a reading for each behaviour that
+  contract preserves (at least one, at most :data:`MAX_PRESERVED`). A PRODUCER MUST
+  SEND IT: the field is optional only so a replay without it is still recorded, and
+  such a replay closes nothing -- the gate holds every closure to the finding's
+  current contract (``retest_closure``), and refuses one whose replay does not name
+  it, reads any of its behaviours other than ``retained``, or names one it does not.
 
 Every field is typed and every one is required, except a fixture class or pattern,
-which may be left out (the gate then names it "not recorded"). A field nobody
+which may be left out (the gate then names it "not recorded"), and ``contract``. A field nobody
 defined is refused by name, at every level -- an ``outcome`` or ``result`` above
 all: what a replay came to is computed (:func:`~assurance.retest_closure.classify`),
 never taken. Text is non-empty, at most :data:`MAX_TEXT` characters, with no
@@ -56,7 +65,8 @@ unless the body's matches, and the recomputed one is what is stored: the record
 names the exact document it was made from, and the dataset row made from the same
 document carries the same digest.
 
-WHAT IS STORED. Every document that can be read whole, whatever it came to: the
+WHAT IS STORED. Every document that can be read whole, whatever it came to -- one
+without a ``contract`` block, or naming a superseded contract, included: the
 record's ``fixtures`` and ``origin`` are the document's, its ``document`` the whole
 of it. A replay that did not show the effect gone is kept and closes nothing -- the
 gate holds a record to the replay it carries (``retest_closure.replay_reasons``).
@@ -101,11 +111,17 @@ MAX_BODY_BYTES = 64 * 1024
 #: The longest text field, and the most variants -- Minotaur-Backend's bounds.
 MAX_TEXT = 500
 MAX_VARIANTS = 32
+#: The most preserved behaviours a contract block names -- a contract's own bound
+#: (``repair_contract.MAX_PRESERVED``) and Minotaur-Backend's.
+MAX_PRESERVED = 32
 
 BODY_FIELDS = frozenset({"document", "content_digest"})
-DOCUMENT_FIELDS = frozenset(
+DOCUMENT_REQUIRED = frozenset(
     {"finding_type", "finding_ref", "engine", "origin", "remediation", "replay", "fixtures"}
 )
+#: ``contract`` may be left out -- the document is then recorded, and closes nothing.
+DOCUMENT_FIELDS = DOCUMENT_REQUIRED | {"contract"}
+CONTRACT_FIELDS = frozenset({"digest", "preserved"})
 REMEDIATION_FIELDS = frozenset({"kind", "control_changed"})
 REPLAY_FIELDS = frozenset({"reached", "original_effect", "variants", "utility"})
 RUN_FIELDS = frozenset({"ran", "outcome"})
@@ -304,6 +320,32 @@ def _replay(value, errors: dict) -> None:
         _word(reading, f"{path}.variants.{name}", EFFECT_READINGS, errors)
 
 
+def _contract(value, errors: dict) -> None:
+    path = "document.contract"
+    if not _fields(value, path, CONTRACT_FIELDS, CONTRACT_FIELDS, errors):
+        return
+    digest = value["digest"]
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+        errors[f"{path}.digest"] = "must be sha256: and 64 lowercase hex digits"
+    preserved = value["preserved"]
+    if not isinstance(preserved, dict):
+        errors[f"{path}.preserved"] = "must be an object reading each preserved behaviour"
+        return
+    if not preserved:
+        errors[f"{path}.preserved"] = "must read at least one preserved behaviour"
+        return
+    if len(preserved) > MAX_PRESERVED:
+        errors[f"{path}.preserved"] = f"must name at most {MAX_PRESERVED} behaviours"
+        return
+    for name, reading in preserved.items():
+        name_errors: dict = {}
+        _text(name, "name", name_errors)
+        if name_errors:
+            errors[f"{path}.preserved"] = f"each behaviour's name {name_errors['name']}"
+            return
+        _word(reading, f"{path}.preserved.{name}", UTILITY_READINGS, errors)
+
+
 def read_body(data, *, finding) -> tuple[dict, str]:
     """``(document, content_digest)`` from a request body for ``finding``, or
     :class:`DocumentRefused` naming every field that cannot be read. The document
@@ -317,7 +359,7 @@ def read_body(data, *, finding) -> tuple[dict, str]:
     document, claimed = data["document"], data["content_digest"]
     if not isinstance(claimed, str) or not _DIGEST.fullmatch(claimed):
         errors["content_digest"] = "must be sha256: and 64 lowercase hex digits"
-    if _fields(document, "document", DOCUMENT_FIELDS, DOCUMENT_FIELDS, errors):
+    if _fields(document, "document", DOCUMENT_FIELDS, DOCUMENT_REQUIRED, errors):
         for name in ("finding_type", "finding_ref", "engine"):
             _text(document[name], f"document.{name}", errors)
         _word(document["origin"], "document.origin", frozenset(ClaimEvidence.Origin.values), errors)
@@ -327,6 +369,8 @@ def read_body(data, *, finding) -> tuple[dict, str]:
                 _text(remediation[name], f"document.remediation.{name}", errors)
         _replay(document["replay"], errors)
         _fixtures(document["fixtures"], errors)
+        if "contract" in document:
+            _contract(document["contract"], errors)
         if "document.finding_ref" not in errors and document["finding_ref"] != str(finding.uuid):
             errors["document.finding_ref"] = "must be this finding's uuid"
         if "document.finding_type" not in errors and document["finding_type"] != finding.finding_type:

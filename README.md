@@ -284,10 +284,55 @@ finding into `closed` or `resolved`. bom drift's own close of a drift finding is
 also not gated, because drift findings never carry `retest_required`. Nothing
 here touches a stop, a claim revoke or a pause.
 
-A record is written with `retest_closure.record_closure_evidence`. Like
-`record_claim_evidence`, it has no API route. Neither the deployment decision
-nor the Assurance Receipt changed. A refused close leaves the finding unresolved,
-and the decision reads it the same way it did before.
+A record is written with `retest_closure.record_closure_evidence`, whose one API
+route is the engine service's `POST /api/assurance/findings/<uuid>/closure-evidence/`
+(`assurance/closure_evidence.py`). Neither the deployment decision nor the
+Assurance Receipt changed. A refused close leaves the finding unresolved, and the
+decision reads it the same way it did before.
+
+### The repair contract comes first
+
+Before a fix is worked on, an operator agrees the finding's repair contract
+(`RepairContract`, migration `assurance.0052`, `assurance/repair_contract.py`):
+
+- `prohibited_effect`: the unauthorized effect the repair must eliminate;
+- `preserved_behaviours`: the legitimate behaviours that must keep working, each
+  named once.
+
+`POST /api/assurance/findings/<uuid>/repair-contracts/` agrees the next version
+(admin only, attributed to the caller); `GET` on the same route lists every version
+to any operator who can see the finding. A contract is never edited or deleted: a
+change is a new version, and the latest is current. Its `content_digest` is
+`sha256:` over the canonical JSON of `{finding_ref, version, prohibited_effect,
+preserved_behaviours}`. The admin shows contracts read-only.
+
+**No fix before agreement.** A finding's `remediation_state` cannot move into
+`in_progress`, `in_review` or `resolved` without a current contract, and a finding
+cannot be created already in one of those states. The gate is
+`remediation.enforce_contract`, called from `Finding.save` and `Finding.clean`, so
+the `remediation/transition` action, `remediation.apply_transition`, the admin and
+any other save all go through it; the refusal names what is missing. A finding that
+was already in one of those states is not rewritten: it stays there, can still be
+moved to `wont_fix`, needs a contract for any further working move, and its closure
+is held to the contract like any other.
+
+**Closure is held to the contract.** On top of every rule above, a retest-gated
+close is refused unless the latest record's replay document carries a `contract`
+block:
+
+```json
+{"digest": "sha256:<hex>", "preserved": {"<behaviour name>": "retained"}}
+```
+
+that names the digest of the finding's current contract, reads `retained` for
+every behaviour that contract preserves, and names none it does not. A contract
+superseded after the replay leaves that replay unable to close. A behaviour read
+`broken` or `unknown`, one left out, or one the contract never named, is refused by
+name. **A producer must now send `contract`.** A document without it is still
+recorded, as before, and closes nothing. The block is strictly typed (an unknown
+field is refused by name) and sits inside the document's canonical digest, which
+Minotaur-Backend's `POST /remediation-outcomes` computes byte-identically for the
+same document: it accepts and stores the block too.
 
 ## When a dependency fails
 

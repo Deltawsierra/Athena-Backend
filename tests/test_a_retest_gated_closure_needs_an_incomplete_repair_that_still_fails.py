@@ -37,6 +37,7 @@ from assurance.retest_closure import (
 )
 from assurance.views import FindingViewSet
 from pentest.models import PentestScan
+from tests.repair_contracts import agree, replay
 
 pytestmark = pytest.mark.django_db
 
@@ -65,13 +66,18 @@ def _finding(retest_required=True, **kwargs):
         severity="critical", retest_required=retest_required,
     )
     defaults.update(kwargs)
-    return Finding.objects.create(**defaults)
+    finding = Finding.objects.create(**defaults)
+    # Its repair agreed before it is worked on (assurance.repair_contract), so every
+    # close below is judged on its retest record, held to that contract.
+    agree(finding)
+    return finding
 
 
 def _record(finding, fixtures=None, *, origin=ClaimEvidence.Origin.INDEPENDENT, digest="sha256:ab12", now=None):
+    fixtures = copy.deepcopy(COMPLETE if fixtures is None else fixtures)
     return record_closure_evidence(
-        finding, fixtures=copy.deepcopy(COMPLETE if fixtures is None else fixtures),
-        origin=origin, content_digest=digest, now=now,
+        finding, fixtures=fixtures, origin=origin, content_digest=digest, now=now,
+        document=replay(finding, fixtures, origin=origin),
     )
 
 
@@ -348,6 +354,7 @@ def test_an_ingested_finding_owes_the_retest_and_its_patch_close_is_refused():
     finding = Finding.objects.get(finding_type="sql_injection")
     assert finding.retest_required is True
     assert _api_patch(finding) is False
+    agree(finding)
     _record(finding)
     assert _api_patch(finding) is True
 
