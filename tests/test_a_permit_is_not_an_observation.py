@@ -63,12 +63,21 @@ def test_what_each_signer_is_evidence_of():
     assert comp.evidence_kind(comp.BASIS_DEMONSTRATED, "") == comp.EVIDENCE_UNCLASSIFIED
 
 
-def test_nothing_produces_an_observed_effect_yet():
-    """Reserved for an independent collector's key. The first signer to claim it
-    has to be added here on purpose, and this test is where that shows."""
+def test_only_the_observed_effect_key_produces_an_observed_effect():
+    """Exactly one signer claims it: Achilles' observed-effect key, under its own
+    observer name. Its outcome key stays an authorization check, and nothing that
+    resembles the name is read as it. Added here on purpose (part 3 of the 7 Oct
+    decision), and this test is where that shows."""
     assert comp.EVIDENCE_OBSERVED_EFFECT in comp.EVIDENCE_KINDS
-    assert comp.EVIDENCE_OBSERVED_EFFECT not in comp.SIGNER_EVIDENCE.values()
-    assert "Nothing records this kind yet" in comp.EVIDENCE_LABELS[comp.EVIDENCE_OBSERVED_EFFECT]
+    assert [s for s, k in comp.SIGNER_EVIDENCE.items() if k == comp.EVIDENCE_OBSERVED_EFFECT] == [
+        "achilles-effect"
+    ]
+    assert comp.evidence_kind(comp.BASIS_DEMONSTRATED, "achilles") == comp.EVIDENCE_AUTHORIZATION_CHECK
+    for near in ("achilles_effect", "Achilles-effect", "achilles-effect ", "achilles-effects"):
+        assert comp.evidence_kind(comp.BASIS_DEMONSTRATED, near) == comp.EVIDENCE_UNCLASSIFIED
+    # Unsigned, it is what its basis says, whatever engine it names.
+    assert comp.evidence_kind(comp.BASIS_ATTESTED, "achilles-effect") == comp.EVIDENCE_ATTESTED
+    assert "Nothing records this kind yet" not in comp.EVIDENCE_LABELS[comp.EVIDENCE_OBSERVED_EFFECT]
 
 
 def test_an_unsigned_basis_is_its_own_kind_whatever_engine_the_row_names():

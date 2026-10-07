@@ -640,7 +640,8 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
     follows from who signed it (:func:`assurance.composition.evidence_kind`). A row
     Achilles signed is an ``authorization_check`` -- the gate authorized the
     workflow's action at dispatch, which shows the authority chain resolves and not
-    that the effect happened -- and nothing yet records an ``observed_effect``.
+    that the effect happened. One Achilles signs with its observed-effect key is an
+    ``observed_effect`` (:mod:`assurance.observed_effects`).
     """
 
     status_label = serializers.CharField(source="get_status_display", read_only=True)

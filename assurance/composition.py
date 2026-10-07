@@ -180,10 +180,16 @@ EVIDENCE_AUTHORIZATION_CHECK = "authorization_check"
 #: checks found against the target. They probe the target; they do not watch this
 #: workflow's own effect either.
 EVIDENCE_SCAN = "scan"
-#: Reserved for an outcome signed by an independent collector's key -- one that
-#: watched the effect itself happen, separately from the engine that authorized
-#: it. NOTHING PRODUCES ONE YET: no signer maps to it, and a test pins that, so
-#: the first thing to claim it has to be added on purpose rather than by a typo.
+#: An outcome signed with Achilles' OBSERVED-EFFECT key
+#: (``achilles/observed_effect.py``), a key that signs nothing else, under the
+#: observer name ``achilles-effect``: the dispatch that carried a permitted action
+#: out through the operator's provider saw the provider complete it (a 2xx to
+#: exactly the permitted action), and signed the evidence document
+#: (``mythos.observed-effect/v1``, :mod:`assurance.observed_effects`) that names the
+#: tool, the permit, the dispatch and the gate decision. It is recorded only with
+#: that document, on its own route. Witnessed by the dispatch path, not by a party
+#: independent of Achilles: what it shows is that the provider answered success to
+#: the action the gate permitted, not what the provider then did with it.
 EVIDENCE_OBSERVED_EFFECT = "observed_effect"
 #: Signed by a key this deployment trusts, for an engine this module has not
 #: classified. Not `observed_effect`: a signer nobody has looked at is read as no
@@ -208,10 +214,14 @@ EVIDENCE_KINDS: frozenset[str] = frozenset(
 
 #: Which signer's outcomes are which kind of evidence, by the engine name a
 #: verified signature binds. Exact names: a signer not listed here is
-#: `unclassified`, never whichever entry it happens to resemble.
+#: `unclassified`, never whichever entry it happens to resemble. The keyring binds
+#: each key to ONE engine name (:mod:`assurance.observed_outcomes` refuses a key
+#: filed under two), so the observed-effect key is ``observed_effect`` and nothing
+#: else, and Achilles' outcome key stays an authorization check.
 SIGNER_EVIDENCE: Mapping[str, str] = {
     "achilles": EVIDENCE_AUTHORIZATION_CHECK,
     "athena": EVIDENCE_SCAN,
+    "achilles-effect": EVIDENCE_OBSERVED_EFFECT,
 }
 
 #: The kind an UNSIGNED basis names. A basis missing here raises rather than
@@ -234,8 +244,8 @@ EVIDENCE_LABELS: Mapping[str, str] = {
         "workflow's own effect"
     ),
     EVIDENCE_OBSERVED_EFFECT: (
-        "Observed effect — an independent collector saw the effect happen. Nothing "
-        "records this kind yet"
+        "Observed effect — the dispatch that carried the permitted action out saw "
+        "its provider complete it, signed with a key that signs nothing else"
     ),
     EVIDENCE_UNCLASSIFIED: (
         "Unclassified — signed by an engine this deployment trusts, whose evidence "

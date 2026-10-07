@@ -51,10 +51,11 @@ A hop no check speaks for is ``unproven`` -- **a hop type this platform holds no
 data for is unproven, never proven**, and two of the seven relations are exactly
 that today (:data:`NO_RECORD_RELATIONS`: nothing here records who signed in as whom
 or who delegated to which agent). So is ``produces`` unless the chain cites an
-outcome an independent collector signed as an ``observed_effect`` -- and nothing
-signs one yet (:data:`assurance.composition.EVIDENCE_OBSERVED_EFFECT`). Said here
-rather than discovered: TODAY NO CHAIN CAN BE FULLY PROVEN, and every recorded
-chain holds the decision at ``needs_more_evidence`` at best.
+``observed_effect`` outcome bound to it (:mod:`assurance.observed_effects`): Achilles
+signs one, with a key mapped to that kind and nothing else, when the dispatch that
+carried the permitted action out saw the provider complete it. Said here rather than
+discovered: until ``authenticated_as`` and ``delegates_to`` have a record, a chain
+that starts at a person cannot be fully proven; one that starts at the agent can.
 
 What each check reads, per hop:
 
@@ -84,7 +85,13 @@ What each check reads, per hop:
   through -- an Achilles-signed outcome for the same workflow that verifies now:
   a permit proves it, a refusal breaks it, anything else is unproven.
 * ``produces`` (action -> effect): the chain cites an ``observed_effect`` outcome
-  for the same workflow: ``held`` proves it, ``violated`` breaks it.
+  for the same workflow, whose evidence document (``mythos.observed-effect/v1``,
+  re-read against its signed digest) names the tool the chain's ``invokes`` hop
+  names, the action its ``performs`` hop names, and the gate decision the chain
+  cites -- the observation was made on that dispatch -- and that no other chain in
+  force cites: ``held`` proves it, ``violated`` breaks it. An observation of another
+  tool, another action or another dispatch, or claimed by two chains, is unproven:
+  it does not contradict the hop, and it does not support it.
 * ``authenticated_as``, ``delegates_to``: unproven -- no record.
 
 Everything is read as the record stands NOW, not as it stood when the effect was
@@ -186,7 +193,10 @@ REASONS: Mapping[str, str] = {
     "declared_permission": "a component the identity acts through declares this permission",
     "within_approval": "a tool the approval names was approved with this permission",
     "gate_permit": "the Action Gate authorized this workflow's action at dispatch (a signed permit check)",
-    "observed_effect": "an independent collector signed that it observed the effect",
+    "observed_effect": (
+        "the dispatch that carried the action out saw the provider complete it, and signed that with "
+        "a key mapped to observed effects and nothing else"
+    ),
     # unproven
     "no_record": "this platform holds no record of this kind of hop",
     "not_in_grammar": "the hop does not follow the relation grammar in force",
@@ -215,11 +225,23 @@ REASONS: Mapping[str, str] = {
     "gate_decision_other_workflow": "the Action Gate decision the chain cites is for another workflow",
     "not_a_gate_decision": "the outcome cited is not a signed Action Gate permit check that verifies now",
     "gate_incomplete": "the Action Gate decision cited is incomplete",
-    "effect_not_observed": "nothing observed the effect: no observed-effect outcome is cited, and nothing signs one yet",
+    "effect_not_observed": "nothing observed the effect: the chain cites no observed-effect outcome",
     "effect_outcome_not_recorded": "the observed-effect outcome the chain cites is not recorded here",
     "effect_outcome_other_workflow": "the observed-effect outcome cited is for another workflow",
     "not_an_observed_effect": "the outcome cited is not an observed effect signed by a key trusted now",
     "effect_not_established": "the observed-effect outcome cited does not establish the effect",
+    "effect_evidence_unread": (
+        "the observed-effect outcome cited carries no evidence document matching its signed digest, so "
+        "nothing says which tool, permit or dispatch it observed"
+    ),
+    "effect_tool_unnamed": "the chain names no tool in an invokes hop for the observed effect to match",
+    "effect_other_tool": "the observed effect is of another tool than the one the chain's invokes hop names",
+    "effect_action_unnamed": "the chain names no action in a performs hop for the observed effect to match",
+    "effect_other_action": "the observed effect is of another action than the one the chain's performs hop names",
+    "effect_other_dispatch": (
+        "the effect was observed on the dispatch of another gate decision than the one the chain cites"
+    ),
+    "effect_outcome_cited_twice": "another chain in force cites the same observed effect: one observation proves one chain",
     "unchecked": "no check speaks for this hop",
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
@@ -474,15 +496,34 @@ class Approval:
 
 
 @dataclass(frozen=True)
+class ObservedEffect:
+    """What an observed-effect outcome's evidence document says it observed, as far
+    as the rule reads it: the tool, and the dispatch it was observed on -- that
+    dispatch's gate decision, its id and the permit's digest."""
+
+    tool_kind: str
+    tool_identifier: str
+    gate_outcome_id: str
+    dispatch_id: str = ""
+    permit_digest: str = ""
+    #: The permitted action the dispatch carried out, as its permit named it.
+    action: str = ""
+
+
+@dataclass(frozen=True)
 class CitedOutcome:
     """A recorded chain outcome a chain cites, as the rule may rely on it:
     ``evidence`` is :func:`assurance.composition.evidence_kind` over the basis IN
-    FORCE, so an envelope that no longer verifies reads as what it then is."""
+    FORCE, so an envelope that no longer verifies reads as what it then is.
+    ``effect`` is an observed effect's evidence document, read against its signed
+    digest (:func:`assurance.observed_effects.evidence_in_force`); ``None`` for
+    every other outcome, and for one whose document does not match."""
 
     outcome_id: str
     workflow: str
     status: str
     evidence: str
+    effect: ObservedEffect | None = None
 
 
 @dataclass(frozen=True)
@@ -490,6 +531,9 @@ class Inputs:
     graph: Graph = field(default_factory=Graph)
     approvals: Mapping[str, Approval] = field(default_factory=dict)
     outcomes: Mapping[str, CitedOutcome] = field(default_factory=dict)
+    #: How many chains in force cite each observed-effect outcome, by its id: one
+    #: observation proves one chain.
+    effect_citations: Mapping[str, int] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ the verdict
@@ -900,6 +944,27 @@ def _gate(chain: Chain, inputs: Inputs) -> Reading:
     return Reading(UNPROVEN, "gate_incomplete", f"the Action Gate decision {cited} is {outcome.status}")
 
 
+def _last_hop_before(chain: Chain, index: int, relation: str) -> Hop | None:
+    """The last hop of ``relation`` before hop ``index``."""
+    for hop in reversed(chain.hops[:index]):
+        if hop.relation == relation:
+            return hop
+    return None
+
+
+def _same_tool(index: _Index, node: Node, effect: ObservedEffect) -> bool:
+    """Whether the invokes hop's tool ``node`` is the tool ``effect`` observed: the same
+    kind, and the same reference or two references that resolve to the same one
+    component."""
+    if node.kind != effect.tool_kind:
+        return False
+    if node.ref == effect.tool_identifier:
+        return True
+    named, _ = index.resolve(node)
+    observed, _ = index.resolve(Node(effect.tool_kind, effect.tool_identifier))
+    return named is not None and observed is not None and named.uuid == observed.uuid
+
+
 def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
     cited = chain.effect_outcome_id
     if not cited:
@@ -907,8 +972,7 @@ def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
             Reading(
                 UNPROVEN,
                 "effect_not_observed",
-                "nothing observed the effect: the chain cites no observed-effect outcome, and nothing in this "
-                "platform signs one yet",
+                "nothing observed the effect: the chain cites no observed-effect outcome",
             )
         ]
     outcome = inputs.outcomes.get(cited)
@@ -930,8 +994,85 @@ def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
                 f"outcome {cited} is {outcome.evidence} evidence; only an observed effect shows the effect happened",
             )
         ]
+    effect = outcome.effect
+    if effect is None:
+        return [
+            Reading(
+                UNPROVEN,
+                "effect_evidence_unread",
+                f"outcome {cited} carries no evidence document matching its signed digest: nothing says which "
+                "tool or dispatch it observed",
+            )
+        ]
+    # THE BINDING. A signature says the observer saw AN effect; these say it is THIS
+    # chain's: its tool, its dispatch, and no other chain's.
+    readings: list[Reading] = []
+    invokes = _last_hop_before(chain, i, INVOKES)
+    if invokes is None:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_tool_unnamed",
+                f"the chain names no tool in an invokes hop; outcome {cited} observed {effect.tool_kind} "
+                f"{effect.tool_identifier!r}",
+            )
+        )
+    elif not _same_tool(index, invokes.target, effect):
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_other_tool",
+                f"outcome {cited} observed {effect.tool_kind} {effect.tool_identifier!r}; the chain's invokes hop "
+                f"names {invokes.target.kind} {invokes.target.ref!r}",
+            )
+        )
+    performs = _last_hop_before(chain, i, PERFORMS)
+    if performs is None:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_action_unnamed",
+                f"the chain names no action in a performs hop; outcome {cited} observed {effect.action!r}",
+            )
+        )
+    elif performs.target.ref != effect.action:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_other_action",
+                f"outcome {cited} observed the action {effect.action!r}; the chain's performs hop names "
+                f"{performs.target.ref!r}",
+            )
+        )
+    if effect.gate_outcome_id != chain.gate_outcome_id:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_other_dispatch",
+                f"outcome {cited} was observed on the dispatch of gate decision {effect.gate_outcome_id}; this "
+                f"chain cites {chain.gate_outcome_id or 'none'}",
+            )
+        )
+    if inputs.effect_citations.get(cited, 0) > 1:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "effect_outcome_cited_twice",
+                f"{inputs.effect_citations[cited]} chains in force cite outcome {cited}; one observation proves "
+                "one chain",
+            )
+        )
+    if readings:
+        return readings
     if outcome.status == _composition.HELD:
-        return [Reading(PROVEN, "observed_effect", f"an independent collector observed the effect (outcome {cited})")]
+        return [
+            Reading(
+                PROVEN,
+                "observed_effect",
+                f"the dispatch {effect.dispatch_id or '(unnamed)'} that carried the action out observed the "
+                f"provider complete it (outcome {cited})",
+            )
+        ]
     if outcome.status == _composition.VIOLATED:
         return [
             Reading(

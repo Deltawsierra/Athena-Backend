@@ -471,6 +471,9 @@ NOT_STOPS = {
     "deployment-chain-outcomes": {"GET": _READ, "POST": _EVIDENCE},
     "deployment-observed-chain-outcomes": {"POST": _EVIDENCE},
     "deployment-authority-chains": {"GET": _READ, "POST": _EVIDENCE},
+    "deployment-observed-effects": {
+        "POST": "the observed-effect service records a signed observed effect: evidence, and it stops nothing"
+    },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

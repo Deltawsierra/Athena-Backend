@@ -3335,6 +3335,17 @@ class WorkflowChainOutcome(models.Model):
     observer_key_id = models.CharField(max_length=64, blank=True)
     evidence_digest = models.CharField(max_length=71, blank=True)
     envelope = models.JSONField(null=True, blank=True)
+    # AN OBSERVED EFFECT'S EVIDENCE (assurance.observed_effects): the
+    # ``mythos.observed-effect/v1`` document whose digest the signed outcome names --
+    # the tool, the permit, the dispatch, the gate decision and what was observed.
+    # Written only by the observed-effects route, with the envelope; null on every
+    # other row. Kept whole, and re-read against the signed digest on every read,
+    # because the produces hop is bound by what it says, not by a column.
+    effect_evidence = models.JSONField(null=True, blank=True)
+    # The dispatch the effect was observed on. One observation per dispatch, so
+    # unique: a second signed observation of one dispatch is a replay, whatever its
+    # outcome id. Null on every other row.
+    effect_dispatch_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     @property

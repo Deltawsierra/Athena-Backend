@@ -416,6 +416,9 @@ _GOVERNING = [
     ("assurance.composition", "VERDICTS", None),
     ("assurance.composition", "SIGNER_EVIDENCE", "achilles"),
     ("assurance.composition", "SIGNER_EVIDENCE", "athena"),
+    # Part 3 of the 7 Oct decision: the observed-effect key's engine, the one signer
+    # whose outcomes can prove a chain's produces hop.
+    ("assurance.composition", "SIGNER_EVIDENCE", "achilles-effect"),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_authorization_check"),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_unclassified_signer"),
     # Round 3: the orders and ranks every threshold, tie and cap is read against, and

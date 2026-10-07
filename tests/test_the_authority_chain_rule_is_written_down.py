@@ -54,7 +54,10 @@ def approval(**over):
 
 
 GATE = ac.CitedOutcome("gate1", WF, comp.HELD, comp.EVIDENCE_AUTHORIZATION_CHECK)
-EFFECT = ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT)
+#: What the observed effect's evidence document says: the CRM tool, observed on the
+#: dispatch of gate decision ``gate1``.
+OBSERVED = ac.ObservedEffect("mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64, "customer:update")
+EFFECT = ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, OBSERVED)
 
 
 def inputs(**over):
@@ -157,11 +160,14 @@ def test_nothing_observes_an_effect_today_so_the_best_chain_stops_short_of_prove
 @pytest.mark.parametrize(
     ("cited", "expected", "code"),
     [
-        (ac.CitedOutcome("eff1", WF, comp.VIOLATED, comp.EVIDENCE_OBSERVED_EFFECT), ac.BROKEN, "effect_violated"),
+        (ac.CitedOutcome("eff1", WF, comp.VIOLATED, comp.EVIDENCE_OBSERVED_EFFECT, OBSERVED), ac.BROKEN, "effect_violated"),
         (ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_AUTHORIZATION_CHECK), ac.UNPROVEN, "not_an_observed_effect"),
         (ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_ATTESTED), ac.UNPROVEN, "not_an_observed_effect"),
-        (ac.CitedOutcome("eff1", "other", comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT), ac.UNPROVEN, "effect_outcome_other_workflow"),
-        (ac.CitedOutcome("eff1", WF, comp.INCOMPLETE, comp.EVIDENCE_OBSERVED_EFFECT), ac.UNPROVEN, "effect_not_established"),
+        (ac.CitedOutcome("eff1", "other", comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, OBSERVED), ac.UNPROVEN, "effect_outcome_other_workflow"),
+        (ac.CitedOutcome("eff1", WF, comp.INCOMPLETE, comp.EVIDENCE_OBSERVED_EFFECT, OBSERVED), ac.UNPROVEN, "effect_not_established"),
+        # Signed by the observed-effect key, but with no document matching its digest:
+        # nothing says what it observed.
+        (ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT), ac.UNPROVEN, "effect_evidence_unread"),
         (None, ac.UNPROVEN, "effect_outcome_not_recorded"),
     ],
 )
@@ -169,6 +175,96 @@ def test_what_the_effect_outcome_cited_says_about_the_produces_hop(cited, expect
     outcomes = {"gate1": GATE} if cited is None else {"gate1": GATE, "eff1": cited}
     h = at(ac.verify(chain(), inputs(outcomes=outcomes)), "produces")
     assert (h.verdict, codes(h)) == (expected, {code})
+
+
+# ------------------------------------------- the observation is bound to this chain
+
+
+def _produces_with(effect, **kw):
+    cited = ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, effect)
+    over = {"outcomes": {"gate1": GATE, "eff1": cited}, **kw.pop("inputs", {})}
+    return at(ac.verify(chain(**kw), inputs(**over)), "produces")
+
+
+@pytest.mark.parametrize(
+    ("effect", "code"),
+    [
+        (ac.ObservedEffect("mcp_server", "billing-mcp", "gate1", action="customer:update"), "effect_other_tool"),
+        (ac.ObservedEffect("tool", "crm-mcp", "gate1", action="customer:update"), "effect_other_tool"),
+        (ac.ObservedEffect("mcp_server", "crm-mcp", "gate2", action="customer:update"), "effect_other_dispatch"),
+    ],
+    ids=["another-tool", "another-kind", "another-gate-decision"],
+)
+def test_an_observation_of_another_tool_or_dispatch_does_not_prove_this_chain(effect, code):
+    """A signature says the dispatch saw AN effect. Only the document says whose, and
+    an observation of another tool, or made on another gate decision's dispatch, is
+    no support for this chain's produces hop -- and no contradiction of it either."""
+    h = _produces_with(effect)
+    assert (h.verdict, codes(h)) == (ac.UNPROVEN, {code})
+
+
+def test_an_observation_cannot_be_replayed_onto_a_chain_that_cites_no_gate_decision():
+    h = _produces_with(OBSERVED, gate_outcome_id="")
+    assert h.verdict == ac.UNPROVEN and "effect_other_dispatch" in codes(h)
+
+
+@pytest.mark.parametrize(
+    ("raw", "action", "code"),
+    [
+        (None, "customer:delete", "effect_other_action"),
+        ([hop(POLICY, "invokes", TOOL_N), hop(TOOL_N, "through_identity", ACCOUNT_N)], "customer:update", None),
+    ],
+    ids=["another-action", "no-performs-hop"],
+)
+def test_an_observation_of_another_action_does_not_prove_this_chain(raw, action, code):
+    """The permit names the action the dispatch carried out; the chain's performs hop
+    names the action it claims. Another action is no support for this chain."""
+    if raw is None:
+        h = _produces_with(ac.ObservedEffect("mcp_server", "crm-mcp", "gate1", action=action))
+        assert (h.verdict, codes(h)) == (ac.UNPROVEN, {code})
+        return
+    # A chain with no performs hop before produces (a grammar-valid stub is not
+    # possible: produces starts at an action), read on the produces check directly.
+    stub = ac.Chain(WF, ac.parse_hops(SUPPORTED, WF)[0][:2] + ac.parse_hops(SUPPORTED, WF)[0][4:],
+                    gate_outcome_id="gate1", effect_outcome_id="eff1", route=comp.ROUTE_CURRENT)
+    readings = ac._produces(stub, len(stub.hops) - 1, None, None, inputs(), ac._Index(graph()))
+    assert {r.code for r in readings} == {"effect_action_unnamed"}
+
+
+def test_one_observation_proves_one_chain():
+    h = _produces_with(OBSERVED, inputs={"effect_citations": {"eff1": 2}})
+    assert (h.verdict, codes(h)) == (ac.UNPROVEN, {"effect_outcome_cited_twice"})
+    assert _produces_with(OBSERVED, inputs={"effect_citations": {"eff1": 1}}).verdict == ac.PROVEN
+
+
+def test_a_chain_with_no_invokes_hop_has_no_tool_for_the_observation_to_match():
+    raw = [hop(ACCOUNT_N, "performs", ACTION), hop(ACTION, "produces", EFFECT_N)]
+    h = _produces_with(OBSERVED, raw=raw)
+    assert (h.verdict, codes(h)) == (ac.UNPROVEN, {"effect_tool_unnamed"})
+
+
+def test_every_binding_that_fails_is_named():
+    h = _produces_with(
+        ac.ObservedEffect("mcp_server", "billing-mcp", "gate2", action="customer:update"), inputs={"effect_citations": {"eff1": 3}}
+    )
+    assert codes(h) == {"effect_other_tool", "effect_other_dispatch", "effect_outcome_cited_twice"}
+
+
+def test_the_tool_matches_by_reference_or_by_the_one_component_both_resolve_to():
+    """The invokes hop may name the tool by its name; the document names it by its
+    identifier. The same one component is the same tool."""
+    renamed = ac.Component(
+        uuid="t1", kind="mcp_server", name="crm-mcp", identifier="crm-mcp-prod",
+        classification="approved", permissions=TOOL.permissions,
+    )
+    g = graph(components=(AGENT, renamed, ACCOUNT, OTHER_ACCOUNT))
+    h = _produces_with(ac.ObservedEffect("mcp_server", "crm-mcp-prod", "gate1", action="customer:update"), inputs={"graph": g})
+    assert (h.verdict, codes(h)) == (ac.PROVEN, {"observed_effect"})
+    other = ac.Component(uuid="t9", kind="mcp_server", name="crm-mcp-prod", identifier="crm-mcp-prod",
+                         classification="approved")
+    g = graph(components=(AGENT, TOOL, other, ACCOUNT, OTHER_ACCOUNT))
+    h = _produces_with(ac.ObservedEffect("mcp_server", "crm-mcp-prod", "gate1", action="customer:update"), inputs={"graph": g})
+    assert codes(h) == {"effect_other_tool"}
 
 
 # --------------------------------------------------------------------- the nodes
