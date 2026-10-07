@@ -181,7 +181,7 @@ zopfli==0.2.3.post1
 #
 # What the pin since c3c6c19 (Mythos-Core#36) adds:
 #
-# Mythos-Core#47 -- the reason for this pin: resolver equivalence. The egress
+# Mythos-Core#47 -- the reason for the b3fef5f pin: resolver equivalence. The egress
 # policy decides on the host in the form the HTTP client dials
 # (egress.resolver_host, urllib3's own reader: lowercased, percent-escapes
 # decoded, IDNA 2008, no root dot), refuses a URL the client cannot read (a
@@ -211,4 +211,22 @@ zopfli==0.2.3.post1
 # empty chain reads empty, not ok. #39 -- mythos_core.recovery, a restore
 # drill. This service calls neither. #37 and #38 are documentation and tests;
 # #43 (a secret-scan CI gate), #44 and #46 (FREEZE.md) carry no code.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@b3fef5f799a9a211aa5a1fc9088749e1795b9dcd
+#
+# What the pin since b3fef5f (Mythos-Core#47) adds:
+#
+# Mythos-Core#48 -- property tests of the trusted core, and the violations they
+# found: a nonce is checked and spent as one step (one signed command on several
+# threads is accepted once); a nonce store that cannot be read or written
+# refuses a RESUME, RELEASE or TERMINATE and never blocks a PAUSE or
+# STAND_DOWN; malformed input is a CommandRejected from verify_command,
+# Command.from_dict and Governor.apply, never an exception; Governor keeps an
+# empty durable nonce store; the keyring tool exports each key as lowercase
+# hex; and safe_http reports a response with invalid framing, or a compressed
+# body cut short, as truncated. This service runs no Governor and calls no
+# verify_command: it reaches Command.from_dict only to compute a command's
+# signing bytes from fields it builds itself (failsafe/signing.py), which are
+# well-formed, so nothing it sends or verifies changes. It exports no keyring
+# with the tool and makes no safe_http request.
+# tests/test_failsafe_control_plane.py verifies what it signs with this pin's
+# verify_command.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@6cd53439c3a6690fa4ac804fab5314bb54a006dd
