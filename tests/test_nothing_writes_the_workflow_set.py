@@ -453,6 +453,10 @@ def test_the_payload_shapes_are_pinned():
         "description",
         "approved_by",
         "approved_at",
+        # The tools the approval covers, each with the contract it was approved
+        # under (SPINE; tests/test_an_approval_binds_the_tools_it_names.py pins
+        # each entry's shape).
+        "tools",
     }
 
     assert set(outcome.data) == {

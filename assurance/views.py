@@ -16,7 +16,7 @@ import uuid as uuidlib
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Count, Exists, OuterRef
+from django.db.models import Count, Exists, OuterRef, Prefetch
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
@@ -65,6 +65,8 @@ from .decision import (
 from .dispatch import OwedRecorder, log_later, schedule_blocking_decision_dispatch
 from .revalidation import plan_revalidation
 from .revision import logged_head
+from .tool_contract import ToolApprovalRefused, approve_workflow_tools
+from .tool_contract import current_digests as current_tool_digests
 from .incident import assemble_incident_pack
 from .metadata_logging import assess_metadata_logging
 from .operational import assess_operational
@@ -92,6 +94,7 @@ from .models import (
     Provider,
     ProviderAssertion,
     RetestRequirement,
+    ToolContractBinding,
     Unknown,
     WorkflowChainOutcome,
 )
@@ -1721,23 +1724,97 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                         )
                     }
                 )
+            # A WORKFLOW THAT STAYS IS UPDATED IN PLACE, NOT DELETED AND MADE AGAIN.
+            # Its tool approvals (`ToolContractBinding`, SPINE) cascade with the
+            # row, so re-creating every row on every PUT shed every binding -- a
+            # superseded one included -- and any roster edit, even a rename, lifted
+            # the hold a changed tool contract put on the decision. A row that stays keeps its bindings; only an entry
+            # that names `tools` re-approves them, and only those it names.
+            # Withdrawn workflows still leave, taking their bindings with them:
+            # an approval that is gone has nothing left to hold.
+            now = timezone.now()
             with transaction.atomic():
-                deployment.approved_workflows.all().delete()
+                kept = {
+                    w.slug: w
+                    for w in deployment.approved_workflows.select_for_update()
+                }
+                deployment.approved_workflows.exclude(slug__in=slugs).delete()
+                tools_for = {row["slug"]: row.pop("tools", None) for row in rows}
+                stays = [row for row in rows if row["slug"] in kept]
+                for row in stays:
+                    workflow = kept[row["slug"]]
+                    workflow.name = row["name"]
+                    workflow.description = row.get("description", "")
+                    # Declared again by this admin, now -- as a re-created row
+                    # recorded it before. Its tool approvals keep their own
+                    # `bound_at` and `bound_by`.
+                    workflow.approved_by = request.user
+                    workflow.created_at = now
+                ApprovedWorkflow.objects.bulk_update(
+                    [kept[row["slug"]] for row in stays],
+                    ["name", "description", "approved_by", "created_at"],
+                )
                 ApprovedWorkflow.objects.bulk_create(
                     ApprovedWorkflow(
                         deployment=deployment, approved_by=request.user, **row
                     )
                     for row in rows
+                    if row["slug"] not in kept
                 )
+                if any(tools is not None for tools in tools_for.values()):
+                    by_slug = {
+                        w.slug: w
+                        for w in deployment.approved_workflows.filter(
+                            slug__in=[s for s, t in tools_for.items() if t is not None]
+                        )
+                    }
+                    for position, slug in enumerate(slugs):
+                        if tools_for[slug] is None:
+                            continue
+                        try:
+                            approve_workflow_tools(
+                                by_slug[slug], tools_for[slug], actor=request.user, now=now
+                            )
+                        except ToolApprovalRefused as refused:
+                            # Raised inside the transaction: nothing this PUT
+                            # wrote -- roster or bindings -- is kept.
+                            raise ValidationError(
+                                {
+                                    "workflows": {
+                                        position: {
+                                            "tools": {
+                                                i: [why]
+                                                for i, why in sorted(refused.errors.items())
+                                            }
+                                        }
+                                    }
+                                }
+                            ) from refused
                 _refresh_stored_decision(deployment)
         # `select_related` because `approved_by` is read per row: without it a
-        # thousand-row set issues a thousand extra user queries.
-        recorded = deployment.approved_workflows.select_related("approved_by")
+        # thousand-row set issues a thousand extra user queries. The live tool
+        # bindings are prefetched, and the contracts in force read once, for the
+        # same reason.
+        recorded = deployment.approved_workflows.select_related(
+            "approved_by"
+        ).prefetch_related(
+            Prefetch(
+                "tool_contract_bindings",
+                queryset=ToolContractBinding.objects.filter(
+                    released_at__isnull=True
+                ).order_by("tool_kind", "tool_identifier"),
+                to_attr="live_tool_bindings",
+            )
+        )
         total = recorded.count()
         page = list(recorded[: self.APPROVED_WORKFLOW_LIMIT])
         return Response(
             {
-                "approved": ApprovedWorkflowSerializer(page, many=True).data,
+                "approved": ApprovedWorkflowSerializer(
+                    page,
+                    many=True,
+                    context={"tool_digests": current_tool_digests(deployment)},
+                ).data,
                 # Bounded, and saying so, exactly as the outcome route is. This
                 # returned every row while its sibling's comment called an
                 # unbounded list "the defect the project's own pagination default
