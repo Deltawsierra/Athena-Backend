@@ -39,8 +39,10 @@ RUNNER_KEY = "minotaur-runner-key-for-tests"
 
 #: What Minotaur-Backend's remediation_outcomes.normalize takes, exactly: anything
 #: else it refuses by name. The fake refuses the same, so a forward that adds or
-#: drops a field fails here.
+#: drops a field fails here. ``contract`` -- the repair contract the replay was held
+#: to -- is optional there, and so here.
 ROW_FIELDS = {"finding_type", "finding_ref", "engine", "origin", "remediation", "replay", "fixtures"}
+OPTIONAL_ROW_FIELDS = {"contract"}
 
 
 class _Answer:
@@ -78,7 +80,7 @@ class FakeMinotaur:
             return _Answer(401, {"error": "a valid X-Minotaur-Key is required"})
         if self.mode == "error":
             return _Answer(500, {"error": "internal"})
-        if self.mode == "refuse" or not isinstance(json, dict) or set(json) != ROW_FIELDS:
+        if self.mode == "refuse" or not isinstance(json, dict) or (set(json) - OPTIONAL_ROW_FIELDS) != ROW_FIELDS:
             return _Answer(400, {"error": "the row cannot be read"})
         self.rows.append(json)
         if self.mode == "lost":

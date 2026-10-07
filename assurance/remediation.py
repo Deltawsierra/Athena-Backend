@@ -17,6 +17,24 @@ Every move is attributed: :func:`apply_transition` and :func:`assign` each write
 a :class:`~assurance.models.RemediationEvent`, reusing the actor + note +
 ordered-timestamp trail the failsafe control plane already established rather
 than inventing a parallel one. Illegal transitions are rejected, not coerced.
+
+**No fix before agreement** (Roadmap Phase 6: a repair contract before any
+candidate patch). A finding's remediation cannot move into a working state --
+:data:`WORKING_STATES`: ``in_progress``, ``in_review``, ``resolved`` -- unless the
+finding has a current agreed :class:`~assurance.models.RepairContract` naming the
+prohibited effect the repair must eliminate and the behaviours it must preserve
+(:mod:`assurance.repair_contract`). :func:`enforce_contract` is that gate, and it
+runs in :meth:`Finding.save` and :meth:`Finding.clean`, beside the retest-closure
+gate, so every path is covered: this module's :func:`apply_transition` (the API's
+``remediation/transition`` route), the admin's change and add forms, and any other
+save. A finding cannot be created already in a working state, since no contract can
+be agreed for a finding that does not exist yet. The refusal
+(:class:`ContractRequired`) names what is missing.
+
+A finding already in a working state when the gate landed is not rewritten: it
+stays where it is and may still be moved to ``wont_fix``; any further move into a
+working state needs a contract, and its closure, like every retest-gated closure,
+is held to the current contract (:mod:`assurance.retest_closure`).
 """
 
 from __future__ import annotations
@@ -44,9 +62,61 @@ LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 
+#: The states in which a fix is being worked on, reviewed or called done. None is
+#: entered without a current repair contract (:func:`enforce_contract`).
+WORKING_STATES: frozenset[str] = frozenset({State.IN_PROGRESS, State.IN_REVIEW, State.RESOLVED})
+
+
 class IllegalTransition(ValueError):
     """A remediation move the state machine forbids. A caller turns this into a
     clean 400 rather than letting an illegal jump be silently coerced."""
+
+
+class ContractRequired(IllegalTransition):
+    """A move into a working state on a finding with no agreed repair contract.
+    ``reasons`` names what is missing."""
+
+    def __init__(self, reasons):
+        self.reasons = list(reasons)
+        super().__init__("Remediation move refused: " + "; ".join(self.reasons))
+
+
+def enforce_contract(finding, update_fields=None) -> None:
+    """Refuse a save that moves ``finding``'s remediation into one of
+    :data:`WORKING_STATES` -- from any other state, from a different working state,
+    or by creating the finding in one -- when the finding has no current repair
+    contract. Called from :meth:`Finding.save` and :meth:`Finding.clean`. A save that
+    is not such a move passes; so does every move out to ``triaged``, ``new`` or
+    ``wont_fix``, which no contract is needed to stop working on."""
+    from .repair_contract import current_contract
+
+    target = finding.remediation_state
+    if target not in WORKING_STATES:
+        return
+    if update_fields is not None and "remediation_state" not in set(update_fields):
+        return
+    stored = None
+    if finding.pk is not None:
+        stored = Finding.objects.filter(pk=finding.pk).values_list("remediation_state", flat=True).first()
+    if stored == target:
+        return
+    if current_contract(finding) is not None:
+        return
+    if finding.pk is None or stored is None:
+        raise ContractRequired(
+            [
+                f"repair contract: a finding cannot be created already {target}; create it, agree "
+                "its repair contract (the prohibited effect the repair must eliminate and the "
+                "behaviours it must preserve), then move it"
+            ]
+        )
+    raise ContractRequired(
+        [
+            f"repair contract: none agreed for this finding, so its remediation cannot move to "
+            f"{target}; agree one first (POST repair-contracts/): the prohibited effect the repair "
+            "must eliminate, and the legitimate behaviours it must preserve"
+        ]
+    )
 
 
 def can_transition(from_state: str, to_state: str) -> bool:
@@ -73,9 +143,10 @@ def apply_transition(
         )
     finding.remediation_state = to_state
     try:
-        # RESOLVED on a retest-required finding passes the retest-closure gate in
-        # the save (assurance.retest_closure); a refusal leaves the caller's copy
-        # where the row is.
+        # A move into a working state passes the repair-contract gate in the save
+        # (enforce_contract), and RESOLVED on a retest-required finding the
+        # retest-closure gate too (assurance.retest_closure); a refusal leaves the
+        # caller's copy where the row is.
         finding.save(update_fields=["remediation_state", "updated_at"])
     except Exception:
         finding.remediation_state = from_state

@@ -18,6 +18,7 @@ from .models import (
     Provider,
     ProviderAssertion,
     RemediationEvent,
+    RepairContract,
     Unknown,
 )
 
@@ -205,6 +206,27 @@ class RemediationEventAdmin(admin.ModelAdmin):
     list_filter = ("to_state", "from_state")
     search_fields = ("finding__title", "note")
     readonly_fields = ("finding", "from_state", "to_state", "actor", "note", "created_at")
+
+
+@admin.register(RepairContract)
+class RepairContractAdmin(admin.ModelAdmin):
+    # Append-only (assurance.repair_contract): agreed through the API, never added,
+    # edited or deleted here. A change is a new version.
+    list_display = ("finding", "version", "agreed_by", "agreed_at", "content_digest")
+    search_fields = ("finding__title", "prohibited_effect")
+    readonly_fields = (
+        "uuid", "finding", "version", "prohibited_effect", "preserved_behaviours",
+        "agreed_by", "agreed_at", "content_digest",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Asset)

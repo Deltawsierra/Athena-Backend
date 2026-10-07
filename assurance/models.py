@@ -857,20 +857,26 @@ class Finding(models.Model):
         # refused close is shown on the form rather than raised from the save.
         from django.core.exceptions import ValidationError
 
+        from .remediation import ContractRequired, enforce_contract
         from .retest_closure import ClosureRefused, enforce
 
         super().clean()
         try:
+            enforce_contract(self)
             enforce(self)
-        except ClosureRefused as exc:
+        except (ContractRequired, ClosureRefused) as exc:
             raise ValidationError(exc.reasons) from exc
 
     def save(self, *args, **kwargs):
+        # No fix before agreement: a move of the remediation into a working state
+        # needs a current repair contract (assurance.remediation.enforce_contract).
         # FREEZE.md: closure is effect-backed only. Every write of a retest-required
         # finding to CLOSED, or its remediation to RESOLVED, passes the one gate in
         # assurance.retest_closure; a refusal leaves the row as it was.
+        from .remediation import enforce_contract
         from .retest_closure import enforce
 
+        enforce_contract(self, kwargs.get("update_fields"))
         enforce(self, kwargs.get("update_fields"))
         super().save(*args, **kwargs)
 
@@ -2467,6 +2473,86 @@ class ClosureEvidenceForward(models.Model):
 
     def __str__(self) -> str:
         return f"closure evidence forward {self.pk} ({self.status})"
+
+
+# ---------------------------------------------------------------------------
+# RepairContract — what a repair must eliminate and must preserve, agreed first
+# ---------------------------------------------------------------------------
+
+
+class RepairContractQuerySet(models.QuerySet):
+    """An agreed contract is never edited and never deleted on its own: a queryset
+    ``update``, ``bulk_update`` or ``delete`` is refused (:mod:`assurance.repair_contract`).
+    A contract goes only with its finding (the foreign key's cascade)."""
+
+    def update(self, **kwargs):
+        from .repair_contract import ContractIsAppendOnly
+
+        raise ContractIsAppendOnly("a repair contract is never edited: agree a new version")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        from .repair_contract import ContractIsAppendOnly
+
+        raise ContractIsAppendOnly("a repair contract is never edited: agree a new version")
+
+    def delete(self):
+        from .repair_contract import ContractIsAppendOnly
+
+        raise ContractIsAppendOnly("a repair contract is never deleted: agree a new version")
+
+    delete.queryset_only = True
+
+
+class RepairContract(models.Model):
+    """One agreed version of a finding's repair contract (``assurance.repair_contract``):
+    the prohibited effect the repair must eliminate and the legitimate behaviours it
+    must preserve, agreed before any fix is worked on.
+
+    Append-only and versioned per finding (1, 2, ...): never edited, never deleted on
+    its own; a change is a new version and the latest is current. ``content_digest``
+    is ``sha256:`` over the canonical JSON of ``{finding_ref, version,
+    prohibited_effect, preserved_behaviours}``, computed on the save that creates the
+    row and never taken from a caller."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    finding = models.ForeignKey(Finding, on_delete=models.CASCADE, related_name="repair_contracts")
+    version = models.PositiveIntegerField()
+    prohibited_effect = models.TextField()
+    preserved_behaviours = models.JSONField(default=list)
+    agreed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    agreed_at = models.DateTimeField(default=timezone.now)
+    content_digest = models.CharField(max_length=71, editable=False)
+
+    objects = RepairContractQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["finding_id", "version"]
+        constraints = [
+            models.UniqueConstraint(fields=["finding", "version"], name="uq_repair_contract_finding_version"),
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="repair_contract_version_from_one"),
+        ]
+
+    def __str__(self) -> str:
+        return f"repair contract v{self.version} for finding {self.finding_id}"
+
+    def save(self, *args, **kwargs):
+        from .repair_contract import ContractIsAppendOnly, content_digest, validate
+
+        if not self._state.adding:
+            raise ContractIsAppendOnly("a repair contract is never edited: agree a new version")
+        validate(self.prohibited_effect, self.preserved_behaviours)
+        self.content_digest = content_digest(
+            str(self.finding.uuid), self.version, self.prohibited_effect, self.preserved_behaviours
+        )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        from .repair_contract import ContractIsAppendOnly
+
+        raise ContractIsAppendOnly("a repair contract is never deleted: agree a new version")
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,8 @@ from assurance.roi import (
 )
 from assurance.views import DeploymentViewSet
 from assurance.revision import accept_transition
+from assurance.remediation import WORKING_STATES
+from tests.repair_contracts import agree
 
 pytestmark = pytest.mark.django_db
 
@@ -49,12 +51,25 @@ def _asset(dep, *, kind=Asset.Kind.MODEL, classification=Asset.Classification.KN
     )
 
 
+def _move_to(finding, remediation_state):
+    """Put ``finding``'s remediation where the test needs it. A working state is
+    entered only with a repair contract agreed (assurance.remediation.enforce_contract),
+    and a finding is never created in one."""
+    if remediation_state == Finding.RemediationState.NEW:
+        return
+    if remediation_state in WORKING_STATES:
+        agree(finding)
+    finding.remediation_state = remediation_state
+    finding.save(update_fields=["remediation_state", "updated_at"])
+
+
 def _finding(dep, finding_type="t", severity="high", *, status=Finding.Status.OPEN,
              remediation_state=Finding.RemediationState.NEW, evidence_class=None, n="1"):
     f = Finding.objects.create(
         deployment=dep, fingerprint=f"fp-{finding_type}-{n}", finding_type=finding_type,
-        title=finding_type, severity=severity, status=status, remediation_state=remediation_state,
+        title=finding_type, severity=severity, status=status,
     )
+    _move_to(f, remediation_state)
     if evidence_class is not None:
         Evidence.objects.create(finding=f, classification=evidence_class, source="test")
     return f

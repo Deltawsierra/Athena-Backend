@@ -28,6 +28,7 @@ from assurance.remediation import (
     can_transition,
 )
 from assurance.views import FindingViewSet
+from tests.repair_contracts import agree
 
 pytestmark = pytest.mark.django_db
 
@@ -130,7 +131,8 @@ def test_workflow_transition_does_not_change_status_or_decision():
     assert before == Deployment.Decision.NOT_RECOMMENDED
     assert f.status == Finding.Status.OPEN
 
-    # Walk the workflow all the way to RESOLVED.
+    # Walk the workflow all the way to RESOLVED, its repair contract agreed first.
+    agree(f, by=admin)
     apply_transition(f, State.TRIAGED, actor=admin)
     apply_transition(f, State.IN_PROGRESS, actor=admin)
     apply_transition(f, State.IN_REVIEW, actor=admin)

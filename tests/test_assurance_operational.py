@@ -34,6 +34,8 @@ from assurance.operational import (
 )
 from assurance.views import DeploymentViewSet
 from assurance.revision import accept_transition
+from assurance.remediation import WORKING_STATES
+from tests.repair_contracts import agree
 
 pytestmark = pytest.mark.django_db
 
@@ -45,6 +47,18 @@ NOW = timezone.now()
 
 def _user(name="analyst", role=None):
     return User.objects.create_user(username=name, password="x", role=role or User.Roles.ANALYST)
+
+
+def _move_to(finding, remediation_state):
+    """Put ``finding``'s remediation where the test needs it. A working state is
+    entered only with a repair contract agreed (assurance.remediation.enforce_contract),
+    and a finding is never created in one."""
+    if remediation_state == Finding.RemediationState.NEW:
+        return
+    if remediation_state in WORKING_STATES:
+        agree(finding)
+    finding.remediation_state = remediation_state
+    finding.save(update_fields=["remediation_state", "updated_at"])
 
 
 def _finding(
@@ -66,8 +80,8 @@ def _finding(
         title=finding_type,
         severity=severity,
         status=status,
-        remediation_state=remediation_state,
     )
+    _move_to(f, remediation_state)
     # first_seen/last_seen default to now(); override to control change/staleness.
     updates = []
     if first_seen is not None:

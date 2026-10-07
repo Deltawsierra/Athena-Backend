@@ -117,7 +117,8 @@ from .workflow_chains import (
     read_chain_provenance,
 )
 from .ripple import assess_ripple
-from .remediation import IllegalTransition, apply_transition, assign
+from .remediation import ContractRequired, IllegalTransition, apply_transition, assign
+from . import repair_contract
 from . import closure_evidence as evidence_route
 from . import closure_forward
 from .retest_closure import ClosureRefused, classify, closure_standing, record_closure_evidence
@@ -2891,6 +2892,9 @@ class FindingViewSet(
             event = apply_transition(
                 finding, to_state, actor=request.user, note=request.data.get("note", "")
             )
+        except ContractRequired as exc:
+            # A move into a working state with no agreed repair contract.
+            return Response({"detail": str(exc), "reasons": exc.reasons}, status=400)
         except IllegalTransition as exc:
             return Response({"detail": str(exc)}, status=400)
         except ClosureRefused as exc:
@@ -2901,6 +2905,59 @@ class FindingViewSet(
                 "remediation_state": finding.remediation_state,
                 "remediation_state_label": finding.get_remediation_state_display(),
                 "event": RemediationEventSerializer(event).data,
+            }
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="repair-contracts")
+    def repair_contracts(self, request, uuid=None):
+        """The finding's repair contract (Roadmap Phase 6, :mod:`assurance.repair_contract`):
+        what the repair must eliminate and what it must preserve, agreed before any
+        fix is worked on.
+
+        ``GET`` lists every agreed version, oldest first, the latest marked
+        ``current`` -- open to any operator who can see the finding, like the
+        remediation read. ``POST`` agrees the next version -- admin-only, as every
+        remediation write is, and attributed to the caller. Body:
+        ``{"prohibited_effect": <text>, "preserved_behaviours": [<name>, ...]}``,
+        both required; anything else is refused by name. A contract is never edited
+        or deleted: a change is a new version, which supersedes the last -- and a
+        replay held to the old one can no longer close the finding."""
+        finding = self.get_object()
+        if request.method == "POST":
+            _require_admin(request)
+            data = request.data
+            if not isinstance(data, dict):
+                raise ValidationError({"body": "must be an object"})
+            errors = {
+                key: "unknown field"
+                for key in sorted(str(k) for k in data)
+                if key not in ("prohibited_effect", "preserved_behaviours")
+            }
+            for key in ("prohibited_effect", "preserved_behaviours"):
+                if key not in data:
+                    errors[key] = "required"
+            if errors:
+                raise ValidationError(errors)
+            try:
+                contract = repair_contract.agree(
+                    finding,
+                    prohibited_effect=data["prohibited_effect"],
+                    preserved_behaviours=data["preserved_behaviours"],
+                    agreed_by=request.user,
+                )
+            except repair_contract.ContractRefused as exc:
+                raise ValidationError(exc.errors) from None
+            return Response(
+                repair_contract.served(contract, current_version=contract.version),
+                status=status.HTTP_201_CREATED,
+            )
+        contracts = list(finding.repair_contracts.select_related("agreed_by", "finding").order_by("version"))
+        current = contracts[-1].version if contracts else None
+        return Response(
+            {
+                "finding": str(finding.uuid),
+                "current": current,
+                "contracts": [repair_contract.served(c, current_version=current) for c in contracts],
             }
         )
 
@@ -3013,8 +3070,9 @@ class FindingViewSet(
         qs = (
             self._scoped_findings()
             .select_related("deployment", "asset", "owner", "assignee")
-            # The closure standing reads each finding's latest closure evidence.
-            .prefetch_related("evidence", "closure_evidence")
+            # The closure standing reads each finding's latest closure evidence, and
+            # holds it to the finding's current repair contract.
+            .prefetch_related("evidence", "closure_evidence", "repair_contracts")
         )
         severity = self.request.query_params.get("severity")
         if severity:
