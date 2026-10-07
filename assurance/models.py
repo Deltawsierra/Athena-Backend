@@ -3275,3 +3275,175 @@ class WorkflowChainOutcome(models.Model):
 
     def __str__(self) -> str:
         return f"{self.workflow}: {self.status}"
+
+
+# ---------------------------------------------------------------------------
+# ToolContract / ToolContractBinding -- authority bound to what a tool may do
+# ---------------------------------------------------------------------------
+
+
+class ToolContractRewriteRefused(ValueError):
+    """A recorded tool contract was asked to change or go away. The history is
+    append-only: a contract that moved is a NEW row, never an edit of the old one."""
+
+
+class ToolContract(models.Model):
+    """One tool registration's effective contract, as it stood when it was recorded.
+
+    A tool, MCP server or skill (:data:`assurance.tool_contract.TOOL_KINDS`) is
+    registered as an :class:`Asset` row keyed by ``(deployment, kind, identifier)``.
+    That key is stable across a change to what the tool may DO: the same
+    ``refund@payments`` row can be re-declared with a wider input schema, a
+    destructive effect class, or a new permission. The deployment-wide fingerprint
+    does not see a schema or an effect class at all, so before this an approval or
+    a claim made against the old contract went on reading as current.
+
+    This row is the contract's identity, recorded per registration: the canonical
+    descriptor (:func:`assurance.tool_contract.contract_descriptor`) and the
+    SHA-256 over its canonical JSON. APPEND-ONLY: a contract that moved is a new
+    row, the old one stays as the record of what was in force before, and the
+    model refuses an update or a delete of a recorded row
+    (:class:`ToolContractRewriteRefused`). A contract that moves back to an earlier
+    digest is appended again -- the history says it went away and came back.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="tool_contracts"
+    )
+    # The registration row this contract was read off. SET_NULL so a removed
+    # registration never deletes the record of what its contract was; the key
+    # below names it either way.
+    asset = models.ForeignKey(
+        Asset, on_delete=models.SET_NULL, null=True, blank=True, related_name="tool_contracts"
+    )
+    tool_kind = models.CharField(max_length=32, choices=Asset.Kind.choices)
+    tool_identifier = models.CharField(max_length=1024)
+    digest = models.CharField(max_length=64)
+    # The canonical descriptor the digest is taken over, kept whole so the digest
+    # can be re-derived from the row and a reader can see what changed.
+    contract = models.JSONField(default=dict)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "tool_kind", "tool_identifier", "id"]
+        indexes = [
+            models.Index(
+                fields=["deployment", "tool_kind", "tool_identifier"], name="assurance_toolcontract_key"
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ToolContractRewriteRefused(
+                "A recorded tool contract is history and is never rewritten; record the new contract as a new row."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ToolContractRewriteRefused("A recorded tool contract is history and is never deleted.")
+
+    def __str__(self) -> str:
+        return f"{self.tool_kind}:{self.tool_identifier} @ {self.digest[:12]}"
+
+
+class ToolContractBinding(models.Model):
+    """An approval or a claim that depends on a tool, bound to the contract it was
+    made under.
+
+    The subject is EITHER a claim identity (``claim_fingerprint``, the stable
+    identity every version of a claim shares, so a re-derive that supersedes the
+    version does not shed the binding) OR an :class:`ApprovedWorkflow` -- never
+    both, never neither (the check constraint). ``contract_digest`` is the tool
+    contract in force when it was bound.
+
+    A binding whose digest is no longer the tool's current contract digest -- the
+    contract moved, or the tool is no longer registered -- is SUPERSEDED, decided
+    live by :func:`assurance.tool_contract.superseded_bindings` rather than stored,
+    so nothing that writes a claim row can lift it. A superseded binding holds the
+    decision back (:func:`assurance.decision.claim_decision_signal`) and, for a
+    claim, opens a retest (:func:`assurance.tool_contract.invalidate_superseded`).
+    It stops holding only when the subject is bound again to the contract in force
+    (a new row; this one is ``released_at``) or the contract returns to the one it
+    was bound to. ``invalidated_at``/``invalidation_reason`` record the first time
+    the invalidation engine found it superseded.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="tool_contract_bindings"
+    )
+    # A claim identity (AssuranceClaim.fingerprint), blank for a workflow binding.
+    claim_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # The claim version it was bound on, for provenance. SET_NULL: trimming a
+    # version never deletes the binding, which is about the identity.
+    claim = models.ForeignKey(
+        AssuranceClaim,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tool_contract_bindings",
+    )
+    # An approved workflow, null for a claim binding. CASCADE: an approval that
+    # is withdrawn takes its bindings with it -- there is nothing left to hold.
+    workflow = models.ForeignKey(
+        ApprovedWorkflow,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="tool_contract_bindings",
+    )
+    tool_kind = models.CharField(max_length=32, choices=Asset.Kind.choices)
+    tool_identifier = models.CharField(max_length=1024)
+    contract_digest = models.CharField(max_length=64)
+    # The recorded contract row the digest names. Contracts are never deleted on
+    # their own; SET_NULL only so a deployment's cascade removes both in any order.
+    # The digest above is the binding's own record either way.
+    contract = models.ForeignKey(
+        ToolContract, on_delete=models.SET_NULL, null=True, blank=True, related_name="bindings"
+    )
+    bound_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tool_contract_bindings",
+    )
+    bound_at = models.DateTimeField(default=timezone.now)
+    # Set when the same subject is bound to the same tool again: the newer row is
+    # the live one. Null = live.
+    released_at = models.DateTimeField(null=True, blank=True)
+    invalidated_at = models.DateTimeField(null=True, blank=True)
+    invalidation_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["deployment", "tool_kind", "tool_identifier", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    (~Q(claim_fingerprint="") & Q(workflow__isnull=True))
+                    | (Q(claim_fingerprint="") & Q(workflow__isnull=False))
+                ),
+                name="ck_tool_binding_one_subject",
+            ),
+            # One live binding per subject and tool.
+            models.UniqueConstraint(
+                fields=["deployment", "claim_fingerprint", "tool_kind", "tool_identifier"],
+                condition=Q(released_at__isnull=True, workflow__isnull=True),
+                name="uq_live_claim_tool_binding",
+            ),
+            models.UniqueConstraint(
+                fields=["workflow", "tool_kind", "tool_identifier"],
+                condition=Q(released_at__isnull=True, workflow__isnull=False),
+                name="uq_live_workflow_tool_binding",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deployment", "released_at"], name="assurance_toolbinding_live"),
+        ]
+
+    def __str__(self) -> str:
+        subject = f"claim {self.claim_fingerprint[:12]}" if self.claim_fingerprint else f"workflow {self.workflow_id}"
+        return f"{subject} bound to {self.tool_kind}:{self.tool_identifier} @ {self.contract_digest[:12]}"
