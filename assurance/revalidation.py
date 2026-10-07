@@ -62,7 +62,7 @@ _ACHILLES_CAPABILITIES: dict[str, tuple[str, ...]] = {
 
 def _reason_for(
     claim: AssuranceClaim, requirement: RetestRequirement | None, holding=None, *, unread=None,
-    legally_stale: bool = False,
+    legally_stale: bool = False, superseded_tools=(),
 ) -> str:
     """Why this claim needs revalidating: the open retest obligation's own reason
     when a change opened one, else the declared condition that fired on it and holds
@@ -96,6 +96,10 @@ def _reason_for(
             "watches is not being checked, so the claim is not read as holding until the condition "
             "is read again or a person withdraws it."
         )
+    if superseded_tools:
+        from .tool_contract import reason_for
+
+        return reason_for(superseded_tools)
     if legally_stale:
         return (
             "A person judged this claim legally stale: an obligation beneath it moved, and the move "
@@ -107,7 +111,7 @@ def _reason_for(
 
 def _claim_work(
     claim: AssuranceClaim, requirement: RetestRequirement | None, holding=None, *, unread=None,
-    legally_stale: bool = False,
+    legally_stale: bool = False, superseded_tools=(),
 ) -> dict:
     """The minimal revalidation work for one drifted/stale/contradicted/held claim,
     or one a watch nobody can read or a legal ruling holds back."""
@@ -117,7 +121,10 @@ def _claim_work(
         "claim_type": claim.claim_type,
         "statement": claim.statement,
         "status": claim.status,
-        "reason": _reason_for(claim, requirement, holding, unread=unread, legally_stale=legally_stale),
+        "reason": _reason_for(
+            claim, requirement, holding, unread=unread, legally_stale=legally_stale,
+            superseded_tools=superseded_tools,
+        ),
         "retest_requirement_uuid": str(requirement.uuid) if requirement is not None else None,
         # The minimal Athena work: re-derive exactly this claim's assessment.
         "athena_reassessments": [reassessment] if reassessment else [],
@@ -232,22 +239,35 @@ def plan_revalidation(deployment) -> dict:
             into = holding if condition.state in LATENT_HOLDING_STATES else unread
             into.setdefault(condition.claim.fingerprint, condition)
         carried = carried_legal_statuses(deployment.pk, current)
+        # A claim bound to a tool contract that has since moved: the decision holds it
+        # back whatever its row reads (assurance.tool_contract), so the plan does too.
+        from .tool_contract import superseded_bindings
+
+        superseded_tools: dict[str, list] = {}
+        for binding in superseded_bindings(deployment):
+            if binding.claim_fingerprint:
+                superseded_tools.setdefault(binding.claim_fingerprint, []).append(binding)
 
         for claim in current:
             requirement = open_reqs.get(claim.fingerprint)
             held = holding.get(claim.fingerprint)
             unreadable = unread.get(claim.fingerprint)
             legally_stale = carried.get(claim.pk, claim.legal_status) in _LEGALLY_STALE
+            tools = superseded_tools.get(claim.fingerprint, ())
             drifted = (
                 requirement is not None
                 or held is not None
                 or claim.status in (Status.CONTRADICTED, Status.STALE)
                 or unreadable is not None
                 or legally_stale
+                or bool(tools)
             )
             if drifted:
                 required.append(
-                    _claim_work(claim, requirement, held, unread=unreadable, legally_stale=legally_stale)
+                    _claim_work(
+                        claim, requirement, held, unread=unreadable, legally_stale=legally_stale,
+                        superseded_tools=tools,
+                    )
                 )
             elif claim.status in _NOT_ESTABLISHED:
                 outstanding_unknowns.append(

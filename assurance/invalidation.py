@@ -44,6 +44,15 @@ The mechanism, and why it is honest:
 
 A human REVOKED claim is a withdrawal and is never invalidated, never marked, and
 never given a retest obligation.
+
+**Per-tool precision on top, never instead.** Neither fingerprint above sees what a
+tool registration may do -- its schemas, its declared effect class -- and a stable
+tool name or registry entry does not prove stable authority. So after the
+deployment-wide pass, which runs exactly as it always has, :mod:`assurance.tool_contract`
+invalidates exactly the claims bound to a tool contract that has since moved
+(:func:`assurance.tool_contract.invalidate_superseded`), and a retest opened for a
+claim still bound to a superseded contract is not resolved by a re-derive alone:
+the claim has to be bound again to the contract in force.
 """
 
 from __future__ import annotations
@@ -63,6 +72,7 @@ from .fingerprint import (
 )
 from .fingerprint import policy_version as _current_policy_version
 from .models import AssuranceClaim, ClaimEvent, Deployment, RetestRequirement
+from .tool_contract import invalidate_superseded, record_tool_contracts, superseded_claim_identities
 
 ClaimType = AssuranceClaim.ClaimType
 
@@ -235,6 +245,10 @@ def resolve_satisfied_requirements(
         input_fps = claim_input_fingerprints(deployment)
     if held is None:
         held = held_by_fired_conditions(deployment)
+    # A claim still bound to a tool contract that has since moved is not answered by
+    # any re-derive: what it was established against is not what the tool may do
+    # now, and only binding it again to the contract in force says otherwise.
+    bound_to_superseded = superseded_claim_identities(deployment)
 
     resolved = 0
     open_reqs = RetestRequirement.objects.filter(
@@ -245,6 +259,8 @@ def resolve_satisfied_requirements(
             # A re-derive refreshed this claim back to a pass and resolved this
             # retest while the declared precondition that opened it still held --
             # READY again, with nothing changed back and nobody having accepted it.
+            continue
+        if req.claim.fingerprint in bound_to_superseded:
             continue
         current = (
             AssuranceClaim.objects.filter(
@@ -302,8 +318,16 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
     resolves any open obligation a prior re-derivation has already satisfied.
     Idempotent and transactional.
 
+    Then, unchanged in everything above, the per-tool pass
+    (:func:`assurance.tool_contract.invalidate_superseded`): the tool contracts in
+    force are recorded, and every current, non-REVOKED claim bound to a tool
+    contract that has since moved gets a retest naming the tool and both digests
+    (unless one is already open) and is moved to STALE. Claims bound only to other
+    tools, or to none, are not touched by it.
+
     Returns ``{invalidated, retests_opened, retests_resolved}``:
-      - ``invalidated`` — current, non-REVOKED claims whose bound state OR policy has drifted;
+      - ``invalidated`` — current, non-REVOKED claims whose bound state OR policy has
+        drifted, or that are bound to a superseded tool contract (each counted once);
       - ``retests_opened`` — NEW obligations opened (0 on an idempotent re-run);
       - ``retests_resolved`` — obligations a rebinding re-derivation has satisfied.
 
@@ -322,7 +346,7 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
         input_fps = claim_input_fingerprints(dep)
         policy_version = _current_policy_version(dep)
 
-        invalidated = 0
+        invalidated = set()
         opened = 0
         currents = list(
             AssuranceClaim.objects.filter(deployment=dep).current()
@@ -340,7 +364,7 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
             policy_drift = claim.policy_version != policy_version
             if not (state_drift or policy_drift):
                 continue
-            invalidated += 1
+            invalidated.add(claim.pk)
             if not _has_open_requirement(dep, claim):
                 inputs = _inputs_phrase(claim)
                 if state_drift and policy_drift:
@@ -362,7 +386,13 @@ def check_invalidations(deployment, *, actor=None, now=None) -> dict:
             # "invalid but passing" state.
             _mark_stale(claim, now)
 
+        # Per-tool precision, ADDED after the pass above and never in place of it.
+        record_tool_contracts(dep, now=now)
+        by_tool = invalidate_superseded(dep, currents, system_fp=system_fp, actor=actor, now=now)
+        invalidated.update(by_tool["claim_pks"])
+        opened += by_tool["retests_opened"]
+
         resolved = resolve_satisfied_requirements(
             dep, system_fp=system_fp, policy_version=policy_version, now=now, input_fps=input_fps
         )
-        return {"invalidated": invalidated, "retests_opened": opened, "retests_resolved": resolved}
+        return {"invalidated": len(invalidated), "retests_opened": opened, "retests_resolved": resolved}

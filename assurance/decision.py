@@ -23,8 +23,10 @@ Two independent signals, combined worst-first:
   (an assurance statement the current state falsifies) caps at NEEDS_REMEDIATION; a
   STALE or UNKNOWN claim, any open retest obligation, a declared precondition of a
   claim that cannot be read now, or one that fired and still holds its claim, caps
-  at NEEDS_MORE_EVIDENCE. Supported/verified claims and a deployment with no claims
-  add no cap.
+  at NEEDS_MORE_EVIDENCE. So does a claim or an approved workflow bound to a tool
+  contract that has since moved (:mod:`assurance.tool_contract`): an approval made
+  under the old schema or effect class authorizes nothing the tool may do now.
+  Supported/verified claims and a deployment with no claims add no cap.
 - **Workflow chains** (the compositional assurance graph) place the deployment by
   the worst status among its approved business workflows' authority-to-effect
   chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
@@ -187,6 +189,11 @@ CLAIM_CAPS: dict[str, str] = {
     # A declared precondition that fired and still holds its claim, whatever the
     # claim row reads (assurance.latent).
     "held_by_fired_latent_condition": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A current claim, or an approved workflow, bound to a tool contract that has
+    # since moved -- a changed schema or declared effect class under the same tool
+    # name, or a tool no longer registered (assurance.tool_contract). Read off the
+    # binding and the registration, so nothing that writes a claim row lifts it.
+    "bound_to_superseded_tool_contract": Deployment.Decision.NEEDS_MORE_EVIDENCE,
 }
 
 #: How a risk a person accepted caps the decision (owner decision Q6).
@@ -278,8 +285,16 @@ def claim_decision_signal(deployment: Deployment) -> dict:
       and resolved its retest, and the upgrade from that release left the claim
       reading a pass under a condition still FIRED. The hold is read here, off the
       condition, so no such write can lift it;
+    - a current claim, or an approved workflow, **bound to a superseded tool
+      contract** (:func:`assurance.tool_contract.superseded_bindings`) caps at
+      NEEDS_MORE_EVIDENCE whatever the claim row reads: it was made under a schema
+      or a declared effect class the tool no longer has, and an approval of the old
+      contract is no approval of the new one. Read here, off the binding and the
+      registration rows, so it holds before any invalidation check runs and after
+      a re-derive reads the claim back to a pass;
     - SUPPORTED / VERIFIED / PARTIALLY_VERIFIED claims (and DRAFT, which is not yet
-      an assessment) impose no cap -- and a held one is not counted as supporting.
+      an assessment) impose no cap -- and a held one, or one bound to a superseded
+      tool contract, is not counted as supporting.
 
     The caps are :data:`CLAIM_CAPS`, and the cap is the worst of those that apply.
     ``cap`` is ``None`` when no current claim holds the decision back — including a
@@ -316,11 +331,20 @@ def claim_decision_signal(deployment: Deployment) -> dict:
     # re-derive of a release that did not carry it dropped still caps.
     carried = carried_legal_statuses(deployment.pk, current)
     legally_stale = [c for c in current if carried.get(c.pk, c.legal_status) in _LEGALLY_STALE]
+    # Bindings to a tool contract that has since moved: on a current, unrevoked
+    # claim, or on an approved workflow (a withdrawn approval takes its bindings).
+    from .tool_contract import superseded_bindings
+
+    superseded = [
+        b for b in superseded_bindings(deployment) if b.workflow_id is not None or b.claim_fingerprint in identities
+    ]
+    bound_to_superseded = {b.claim_fingerprint for b in superseded if b.claim_fingerprint}
     supporting = [
         c
         for c in current
         if c.status in (Status.SUPPORTED, Status.VERIFIED, Status.PARTIALLY_VERIFIED)
         and c.fingerprint not in holding
+        and c.fingerprint not in bound_to_superseded
     ]
 
     cap = _claim_cap(
@@ -332,6 +356,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
             "legally_stale": legally_stale,
             "unread_latent_condition": unread_conditions,
             "held_by_fired_latent_condition": held,
+            "bound_to_superseded_tool_contract": superseded,
         }
     )
 
@@ -345,6 +370,7 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         "legally_stale": legally_stale,
         "unread_conditions": unread_conditions,
         "held": held,
+        "superseded_tool_contracts": superseded,
         "supporting": supporting,
     }
 
@@ -698,6 +724,12 @@ def _held_by_fired_note(claims) -> str:
     )
 
 
+def _tool_brief(binding) -> dict:
+    from .tool_contract import brief
+
+    return brief(binding)
+
+
 def _accepted_brief(finding: Finding) -> dict:
     """An accepted finding for the decision-support view: what it is, how severe,
     and when its acceptance ends (``None`` for one that never named an end)."""
@@ -859,6 +891,16 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             note = f"Held at 'needs remediation' by a contradicted assurance claim ({held}); a current claim's boundary does not hold."
         elif signal["held"] and not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
             note = _held_by_fired_note(signal["held"])
+        elif signal["superseded_tool_contracts"] and not (
+            signal["stale"] or signal["unknown"] or signal["retest_pending"]
+        ):
+            tools = ", ".join(sorted({b.tool_identifier for b in signal["superseded_tool_contracts"]}))
+            note = (
+                f"Held at 'needs more evidence' by {len(signal['superseded_tool_contracts'])} approval(s) "
+                f"or claim(s) bound to a tool contract that has since changed ({tools}). An approval "
+                "made under a tool's earlier schema or effect class does not authorize what the tool "
+                "may do now; bind it again to the contract in force."
+            )
         elif signal["unread_conditions"] and not (
             signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
         ):
@@ -950,6 +992,8 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             ],
             # The current claims a fired condition holds, whatever their rows read.
             "held": [_claim_brief(c) for c in signal["held"]],
+            # The approvals and claims bound to a tool contract that has since moved.
+            "superseded_tool_contracts": [_tool_brief(b) for b in signal["superseded_tool_contracts"]],
             "supporting": [_claim_brief(c) for c in signal["supporting"]],
         },
         "note": note,

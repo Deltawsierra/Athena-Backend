@@ -389,7 +389,7 @@ def _changed(value):
 _GOVERNING = [
     *[("assurance.decision", "CLAIM_CAPS", key) for key in (
         "contradicted", "stale", "unknown", "open_retest", "legally_stale",
-        "unread_latent_condition", "held_by_fired_latent_condition",
+        "unread_latent_condition", "held_by_fired_latent_condition", "bound_to_superseded_tool_contract",
     )],
     ("assurance.decision", "ACCEPTED_RISK_CAPS", "standing"),
     ("assurance.decision", "ACCEPTED_RISK_CAPS", "lapsed_undated_or_outgrown"),

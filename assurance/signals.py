@@ -404,6 +404,9 @@ DECISION_INPUTS = {
     # A declared precondition a current claim rests on that nobody can read now --
     # unobservable, or its evaluation failed -- holds the decision back.
     "assurance.LatentCondition": ("deployment",),
+    # An approval or claim bound to a tool contract that has since moved holds the
+    # decision back (assurance.tool_contract); binding again releases it.
+    "assurance.ToolContractBinding": ("deployment",),
 }
 
 def _deployments_serving_through(instance) -> set:
