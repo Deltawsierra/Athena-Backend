@@ -36,6 +36,7 @@ is never overwritten by a re-derive. Nothing here reaches the network.
 
 from __future__ import annotations
 
+import json
 from urllib.parse import urlparse
 
 from django.db import transaction
@@ -467,6 +468,42 @@ def _tool_identifier(entry: dict, kind: str, name: str) -> str:
     return name
 
 
+#: What a declared tool entry may say about what the tool may DO, by the metadata
+#: key it is written under and the spellings a declaration may use (the MCP tool
+#: listing writes ``inputSchema``/``outputSchema``). Carried onto the tool's row so
+#: its contract (:mod:`assurance.tool_contract`) can be read off it.
+_CONTRACT_KINDS = frozenset({Asset.Kind.TOOL, Asset.Kind.MCP_SERVER, Asset.Kind.SKILL})
+_CONTRACT_DECLARATIONS = {
+    "input_schema": ("input_schema", "inputSchema"),
+    "output_schema": ("output_schema", "outputSchema"),
+    "effect_class": ("effect_class", "effectClass"),
+    "annotations": ("annotations",),
+}
+
+
+def _declared_contract_value(entry: dict, spellings) -> object:
+    """The value an entry declares under the first spelling it uses, else None.
+    An effect class is a label: compared without case or surrounding space."""
+    for spelling in spellings:
+        if entry.get(spelling) is not None:
+            value = entry[spelling]
+            return value.strip().lower() if isinstance(value, str) else value
+    return None
+
+
+def _merged_contract(values: list) -> object:
+    """One declared value per contract field, from every entry naming the tool.
+    Entries that agree are one value; entries that disagree are BOTH kept, in a
+    stable order, under ``conflicting_declarations`` -- never whichever line came
+    last, which would make what the tool may do depend on declaration order."""
+    distinct: dict[str, object] = {}
+    for value in values:
+        distinct.setdefault(json.dumps(value, sort_keys=True, default=str), value)
+    if len(distinct) == 1:
+        return next(iter(distinct.values()))
+    return {"conflicting_declarations": [distinct[k] for k in sorted(distinct)]}
+
+
 def _agent_and_tools(
     deployment: Deployment, cfg: dict, now, *, target: str = ""
 ) -> tuple[Asset | None, list[Asset]]:
@@ -511,8 +548,13 @@ def _agent_and_tools(
                     "provenance": str(entry.get("provenance") or "").strip(),
                     "server": str(entry.get("server") or "").strip(),
                     "subkind": str(entry.get("kind") or "").strip(),
+                    "contract": {},
                 },
             )
+            for field, spellings in _CONTRACT_DECLARATIONS.items():
+                value = _declared_contract_value(entry, spellings)
+                if value is not None:
+                    tool["contract"].setdefault(field, []).append(value)
             # Approved only if every entry for it says so: one line calling it
             # approved does not vouch for a line that did not.
             tool["approved"] = tool["approved"] and bool(entry.get("approved"))
@@ -540,6 +582,9 @@ def _agent_and_tools(
                 "provenance": tool["provenance"],
                 "server": tool["server"],
                 "subkind": tool["subkind"],
+                # Only what was declared: an undeclared schema is absent here and
+                # read as undeclared by the contract, never invented.
+                **{field: _merged_contract(values) for field, values in tool["contract"].items()},
             },
         )
         if asset:
@@ -798,6 +843,13 @@ def derive_assets(deployment: Deployment, scan) -> list[Asset]:
         for a in inventory_assets:
             if a not in touched:
                 touched.append(a)
+        if any(a.kind in _CONTRACT_KINDS for a in inventory_assets):
+            # The contracts of the tools this declaration wrote, recorded as they
+            # stand now: a re-declaration that changed one appends its new contract
+            # to the history (assurance.tool_contract).
+            from .tool_contract import record_tool_contracts
+
+            record_tool_contracts(deployment, now=now, assets=Asset.objects.filter(deployment=deployment))
 
     # 4. Endpoint assets from findings that carry a location, and attach every
     #    finding to the asset it concerns. Reconciled in bulk so ingest stays
