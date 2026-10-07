@@ -266,8 +266,8 @@ EMITTED_AS = {
     _VERSION_3_1: "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
     _VERSION_4_0: "#105 (7985460), 26 Sep 2026, until #118",
     _VERSION_4_1: "#118 (d81e9cb), 29 Sep 2026, until #133",
-    _VERSION_5_0: "#133 (1f357fa), 7 Oct 2026, until #PRNUM",
-    RECEIPT_VERSION: "#PRNUM (COMMITSHA), 7 Oct 2026, and since",
+    _VERSION_5_0: "#133 (1f357fa), 7 Oct 2026, until #134",
+    RECEIPT_VERSION: "#134 (c61a065), 7 Oct 2026, and since",
 }
 
 #: The versions no route ever signed. Receipts were first signed under 3.1, by #96
