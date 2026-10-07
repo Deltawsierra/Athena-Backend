@@ -113,10 +113,13 @@ VECTORS = (
     ("checked against the wrong key", "wrong_key", True),
     ("signed by a key the keyring revoked", "revoked_key", True),
     ("the signed payload re-serialised after signing", "bad_signature", True),
-    # 4.1: the time a receipt was issued, under the signature.
-    ("signed 4.1 receipt, within --max-age, its issue time shown", "verified", False),
-    ("signed 4.1 receipt, its issue time edited after signing", "bad_signature", True),
-    ("signed 4.1 receipt, issued longer ago than --max-age", "stale", True),
+    # 4.1 on: the time a receipt was issued, under the signature.
+    ("signed receipt, within --max-age, its issue time shown", "verified", False),
+    ("signed receipt, its issue time edited after signing", "bad_signature", True),
+    ("signed receipt, issued longer ago than --max-age", "stale", True),
+    # 5.0: the authority chains, read by the verifier as well as digested.
+    ("signed 4.1 receipt, which carries no authority chains", "verified", False),
+    ("unsigned copy, a chain reading proven over an unproven hop", "malformed", False),
     ("signed 4.0 receipt, which carries no issue time", "verified", False),
     ("signed 4.0 receipt under --max-age", "no_signed_time", True),
     # Every version ever emitted reads back: generated from git, at the commits that
@@ -137,6 +140,7 @@ ISSUED_TEXT = "2026-01-02T03:04:05Z"
 #: The verifier's clock, held while they are checked: a minute after they were issued.
 CHECKED = ISSUED + timedelta(seconds=60)
 FOUR_OH = "mythos.assurance.receipt/4.0"
+FOUR_ONE = "mythos.assurance.receipt/4.1"
 
 
 # ----------------------------------------------------------------- building blocks
@@ -245,6 +249,31 @@ def _deployment(owner) -> Deployment:
         provider=provider,
         classification=Asset.Classification.APPROVED,
     )
+    # One authority chain, so the receipt carries a chain and its hops' verdicts:
+    # a person's sign-in this platform holds no record of, so it is unproven.
+    from assurance import authority_chain as rule
+    from assurance.authority_chain_records import chain_digest, chain_document
+    from assurance.models import AuthorityChain
+
+    hops, errors = rule.parse_hops(
+        [
+            {"from": {"kind": "person", "ref": "employee"}, "relation": "authenticated_as",
+             "to": {"kind": "user", "ref": "support-user"}},
+            {"from": {"kind": "user", "ref": "support-user"}, "relation": "delegates_to",
+             "to": {"kind": "agent", "ref": "support-agent"}},
+            {"from": {"kind": "agent", "ref": "support-agent"}, "relation": "performs",
+             "to": {"kind": "action", "ref": "customer:update"}},
+            {"from": {"kind": "action", "ref": "customer:update"}, "relation": "produces",
+             "to": {"kind": "effect", "ref": "customer-record-change"}},
+        ],
+        "support-update",
+    )
+    assert not errors, errors
+    AuthorityChain.objects.create(
+        deployment=dep, workflow="support-update", effect="customer-record-change",
+        hops=[h.as_dict() for h in hops],
+        digest=chain_digest(chain_document(str(dep.uuid), "support-update", hops, "", "")),
+    )
     return stamped_under_the_rules_in_force(dep)
 
 
@@ -348,6 +377,9 @@ def _backend_on_receipt(document: dict, form: str, signed_claim: bool = False) -
     # shapes 2.0 was emitted in.
     if shapes_read(schema, document) is None:
         return "malformed"
+    # From 5.0: the authority chains, each as bad as its worst hop.
+    if "authority_chains" in document and receipt.authority_chains_problem(document["authority_chains"]):
+        return "malformed"
     outside = ("algorithm", "digest", *receipt.NOT_SIGNED_OVER, *receipt.SIGNED_FORM_ONLY)
     hashed = {k: v for k, v in document.items() if k not in outside}
     if receipt._digest(hashed) != document["digest"]:
@@ -438,7 +470,7 @@ def vectors(monkeypatch):
     reordered = json.dumps(_members_reversed(json.loads(unsigned)), indent=2, ensure_ascii=False).encode()
     assert reordered != unsigned and json.loads(reordered) == json.loads(unsigned)
     decision_altered = _edited(unsigned, lambda r: r["result"].update(decision="ready"))
-    unknown_version = _edited(unsigned, lambda r: r.update(receipt_version="mythos.assurance.receipt/5.0"))
+    unknown_version = _edited(unsigned, lambda r: r.update(receipt_version="mythos.assurance.receipt/9.0"))
     member_removed = _edited(unsigned, lambda r: r.pop("coverage"))
     copy_altered = _edited(signed, lambda r: r["receipt"]["result"].update(decision="ready"))
     pack_type = json.dumps(_sign(_engine_bytes(sent), signer, "application/vnd.mythos.evidence-pack+json")).encode()
@@ -455,9 +487,32 @@ def vectors(monkeypatch):
         answer["receipt"] = moved
 
     time_edited = _edited(signed, move_the_time)
+    # What #118's route signed for this state: the signed form with its issue time and
+    # no authority chains, under the 4.1 version string, digested by the unchanged
+    # rule, signed by the key.
+    four_one = {k: v for k, v in sent.items() if k != "authority_chains"}
+    four_one["receipt_version"] = FOUR_ONE
+    four_one["digest"] = receipt._digest(
+        {k: v for k, v in four_one.items() if k not in ("algorithm", "digest", *receipt.SIGNED_FORM_ONLY)}
+    )
+
+    def as_four_one(answer):
+        answer["envelope"] = _sign(_engine_bytes(four_one), signer)
+        answer["receipt"] = four_one
+
+    signed_four_one = _edited(signed, as_four_one)
+
+    # A 5.0 receipt whose chain says proven while a hop of it says unproven: digested
+    # again so only the verdicts disagree, which no route emits.
+    def proven_over_unproven(r):
+        r["authority_chains"]["chains"][0]["verdict"] = "proven"
+        r["digest"] = receipt._digest({k: v for k, v in r.items() if k not in verifier.OUTSIDE_DIGEST})
+
+    inconsistent = _edited(unsigned, proven_over_unproven)
+
     # What a0b504a's route signed for this state: the signed form with no issue time,
     # under the 4.0 version string, digested by the unchanged rule, signed by the key.
-    four = {k: v for k, v in sent.items() if k not in receipt.SIGNED_FORM_ONLY}
+    four = {k: v for k, v in sent.items() if k not in (*receipt.SIGNED_FORM_ONLY, "authority_chains")}
     four["receipt_version"] = FOUR_OH
     four["digest"] = receipt._digest({k: v for k, v in four.items() if k not in ("algorithm", "digest")})
 
@@ -479,7 +534,9 @@ def vectors(monkeypatch):
 
     evidence = _evidence_file(dep, reader)
     built = {
-        "signed receipt": Vector(signed, _backend(signed), ring),
+        "signed receipt": Vector(
+            signed, _backend(signed), ring, shows="authority 1 chain(s) in force: 0 proven, 1 unproven, 0 broken"
+        ),
         "signed receipt, its key since retired": Vector(
             signed, _backend(signed), _keyring((signer, "retired"), (stranger, "active"))
         ),
@@ -505,13 +562,20 @@ def vectors(monkeypatch):
             signed, _backend(signed), _keyring((signer, "revoked"), (stranger, "active"))
         ),
         "the signed payload re-serialised after signing": Vector(reserialised, _backend(reserialised), ring),
-        "signed 4.1 receipt, within --max-age, its issue time shown": Vector(
+        "signed receipt, within --max-age, its issue time shown": Vector(
             signed, _backend(signed), ring, max_age=3600, shows=f"issued at {ISSUED_TEXT} by the issuer's clock"
         ),
-        "signed 4.1 receipt, its issue time edited after signing": Vector(time_edited, _backend(time_edited), ring),
-        "signed 4.1 receipt, issued longer ago than --max-age": Vector(
+        "signed receipt, its issue time edited after signing": Vector(time_edited, _backend(time_edited), ring),
+        "signed receipt, issued longer ago than --max-age": Vector(
             signed, _backend(signed), ring, max_age=3600, now=ISSUED + timedelta(hours=2)
         ),
+        "signed 4.1 receipt, which carries no authority chains": Vector(
+            signed_four_one,
+            _backend(signed_four_one),
+            ring,
+            shows="lacks     authority_chains: which authority chain produced each consequential effect",
+        ),
+        "unsigned copy, a chain reading proven over an unproven hop": Vector(inconsistent, _backend(inconsistent)),
         "signed 4.0 receipt, which carries no issue time": Vector(
             four_oh, _backend(four_oh), ring, shows="issued at not signed (4.0)"
         ),
@@ -677,6 +741,15 @@ def test_the_spec_is_the_version_the_code_emits_and_names_every_version_it_reads
     assert verifier.MAX_DEPTH == MAX_JSON_DEPTH
     assert set(verifier.NOT_SIGNED) == set(receipt.NOT_SIGNED_OVER)
     assert set(verifier.SIGNED_ONLY) == set(receipt.SIGNED_FORM_ONLY)
+    # The authority-chain vocabulary a 5.0 receipt is read against is the rule's own.
+    from assurance import authority_chain as rule
+    from assurance.models import AuthorityChain
+
+    assert set(verifier.HOP_VERDICTS) == set(rule.HOP_VERDICTS)
+    assert verifier.RELATIONS == rule.RELATIONS
+    assert set(verifier.NODE_KINDS) == {k for froms, tos in rule.GRAMMAR.values() for k in (*froms, *tos)}
+    assert set(verifier.CHAIN_BASES) == set(AuthorityChain.Basis.values)
+    assert verifier._AUTHORITY_MEMBERS == set(receipt.RECEIPT_SCHEMA["properties"]["authority_chains"]["required"])
     # Every version the backend describes, the verifier reads -- with the members the
     # backend's own published schema for that version gives it -- and the spec names.
     versions = (receipt.RECEIPT_VERSION, *receipt.SUPERSEDED_VERSIONS)
@@ -728,7 +801,13 @@ def test_the_spec_names_every_member_and_every_value_the_code_can_put_in_a_recei
     text = _spec()
     missing = [path for path in _schema_paths(receipt.RECEIPT_SCHEMA) if f"`{path}`" not in text]
     assert not missing, f"members the specification does not describe: {missing}"
+    from assurance import authority_chain as rule
+
     values = [
+        *rule.HOP_VERDICTS,
+        *rule.RELATIONS,
+        *(kind for froms, tos in rule.GRAMMAR.values() for kind in (*froms, *tos)),
+        *rule.REASONS,
         *Deployment.Decision.values,
         *Deployment.Environment.values,
         *receipt.RECEIPT_SCHEMA["properties"]["coverage"]["properties"]["verdict"]["enum"],

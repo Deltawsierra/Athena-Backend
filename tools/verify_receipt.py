@@ -6,7 +6,7 @@
     python verify_receipt.py RECEIPT.json --keyring KEYRING.json --max-age SECONDS
     python verify_receipt.py RECEIPT.json          # an unsigned copy: checked, then refused
 
-Written from ``docs/receipt-spec/v4.1.md``, not from this repository's code, and it
+Written from ``docs/receipt-spec/v5.0.md``, not from this repository's code, and it
 imports nothing from it: the Python standard library, plus ``cryptography`` for
 Ed25519 -- the one crypto library athena-backend already depends on. Copy this file
 anywhere and run it.
@@ -34,6 +34,11 @@ agree with each other.
 form the specification gives (section 5.3). With it the root is recomputed from the
 evidence; without it the root is bound by the digest and the signature but not
 re-derived, and the output says so.
+
+From 5.0 a receipt carries ``authority_chains``: for each consequential effect, the
+chain of authority it was produced through, hop by hop, with each hop's verdict. The
+verifier checks its shape and that each chain reads as its worst hop, and a VERIFIED
+names every chain that is not proven and the hops that hold it.
 
 ``--max-age SECONDS`` is your freshness policy. From 4.1 a signed receipt carries the
 time it was issued, under the signature; with ``--max-age`` a receipt issued longer
@@ -67,7 +72,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-SPEC = "docs/receipt-spec/v4.1.md"
+SPEC = "docs/receipt-spec/v5.0.md"
 
 #: The DSSE payload type an assurance-receipt signature is bound to.
 RECEIPT_TYPE = "application/vnd.mythos.assurance-receipt+json"
@@ -93,20 +98,24 @@ HASHED: dict[str, frozenset[str]] = {
     "mythos.assurance.receipt/3.1": frozenset(_V2),
     "mythos.assurance.receipt/4.0": frozenset((*_V2, "chains")),
     "mythos.assurance.receipt/4.1": frozenset((*_V2, "chains")),
+    "mythos.assurance.receipt/5.0": frozenset((*_V2, "chains", "authority_chains")),
 }
-CURRENT = "mythos.assurance.receipt/4.1"
+CURRENT = "mythos.assurance.receipt/5.0"
 
 #: The receipt's report on itself: present from 3.1, outside the digest and outside
 #: the signature. A receipt cannot make itself signed; only an envelope can.
 SELF_REPORT = ("signed", "signature", "unsigned_reason")
 _SELF_REPORTING = frozenset(
-    {"mythos.assurance.receipt/3.1", "mythos.assurance.receipt/4.0", "mythos.assurance.receipt/4.1"}
+    {
+        "mythos.assurance.receipt/3.1", "mythos.assurance.receipt/4.0", "mythos.assurance.receipt/4.1",
+        "mythos.assurance.receipt/5.0",
+    }
 )
 
 #: The signed form's issue time: from 4.1, in the signed form only, inside the
 #: signature and outside the digest.
 SIGNED_ONLY = ("issued_at",)
-_ISSUED = frozenset({"mythos.assurance.receipt/4.1"})
+_ISSUED = frozenset({"mythos.assurance.receipt/4.1", "mythos.assurance.receipt/5.0"})
 
 #: Top-level members no digest covers. ``algorithm``, ``digest`` and ``issued_at``
 #: are covered by the signature; the other four by nothing.
@@ -134,7 +143,8 @@ EMITTED: dict[tuple[str, str | None], str] = {
     ("mythos.assurance.receipt/3.0", None): "#70 (99bc3d9), 22 Sep 2026, until #87",
     ("mythos.assurance.receipt/3.1", None): "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
     ("mythos.assurance.receipt/4.0", None): "#105 (7985460), 26 Sep 2026, until #118",
-    ("mythos.assurance.receipt/4.1", None): "#118 (d81e9cb), 29 Sep 2026, and since",
+    ("mythos.assurance.receipt/4.1", None): "#118 (d81e9cb), 29 Sep 2026, until #133",
+    ("mythos.assurance.receipt/5.0", None): "#133 (PENDING), 7 Oct 2026, and since",
 }
 
 #: What each shape added over the one before it: its members, and what a receipt
@@ -157,6 +167,10 @@ ADDED: dict[tuple[str, str | None], tuple[tuple[str, ...], str]] = {
     ("mythos.assurance.receipt/3.1", None): (("signed", "signature", "unsigned_reason"), "its own word that it is unsigned"),
     ("mythos.assurance.receipt/4.0", None): (("chains",), "how the approved workflow chains composed into the decision"),
     ("mythos.assurance.receipt/4.1", None): (("issued_at",), "a signed issue time: when the receipt was handed to be signed"),
+    ("mythos.assurance.receipt/5.0", None): (
+        ("authority_chains",),
+        "which authority chain produced each consequential effect, and which of its hops are proven",
+    ),
 }
 
 #: The versions no route ever signed: receipts were first signed under 3.1, by #96
@@ -441,6 +455,92 @@ def _issued(value: object) -> datetime | None:
         return None
 
 
+#: The authority-chain vocabulary a 5.0 receipt's ``authority_chains`` is read
+#: against (specification, section 4.10).
+HOP_VERDICTS = ("proven", "unproven", "broken")
+RELATIONS = (
+    "authenticated_as", "delegates_to", "under_policy", "invokes", "through_identity", "performs", "produces",
+)
+NODE_KINDS = (
+    "person", "user", "agent", "service_account", "tool", "mcp_server", "skill", "policy", "action", "effect",
+)
+CHAIN_BASES = ("demonstrated", "attested")
+_AUTHORITY_MEMBERS = frozenset(
+    {"recorded", "standing", "superseded", "verdict_census", "basis_census", "chains", "not_shown"}
+)
+_CHAIN_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _authority_chains(section: object) -> str | None:
+    """Why a 5.0 ``authority_chains`` is not the shape section 4.10 gives, or None.
+
+    Its verdicts are checked against each other too: a chain is as bad as its worst
+    hop, so a chain reading ``proven`` over an unproven hop is not a receipt the
+    backend could have emitted, and is not read as one."""
+    if not isinstance(section, dict) or set(section) != _AUTHORITY_MEMBERS:
+        return "authority_chains does not have the seven members section 4.10 gives"
+    census, bases, chains = section["verdict_census"], section["basis_census"], section["chains"]
+    if not isinstance(census, dict) or set(census) != set(HOP_VERDICTS):
+        return "authority_chains.verdict_census does not count every verdict, zeros included"
+    if not isinstance(bases, dict) or set(bases) != set(CHAIN_BASES):
+        return "authority_chains.basis_census does not count every basis, zeros included"
+    if not isinstance(chains, list):
+        return "authority_chains.chains is not a list"
+    rank = {verdict: i for i, verdict in enumerate(HOP_VERDICTS)}
+    for n, chain in enumerate(chains):
+        where = f"authority_chains.chains[{n}]"
+        if not isinstance(chain, dict) or set(chain) != {"digest", "basis", "verdict", "hops"}:
+            return f"{where} does not have the members digest, basis, verdict and hops"
+        if not (isinstance(chain["digest"], str) and _CHAIN_DIGEST.fullmatch(chain["digest"])):
+            return f"{where}.digest is not sha256: and 64 lowercase hex characters"
+        if chain["basis"] not in CHAIN_BASES or chain["verdict"] not in HOP_VERDICTS:
+            return f"{where} names a basis or verdict section 4.10 does not define"
+        hops = chain["hops"]
+        if not isinstance(hops, list) or not hops:
+            return f"{where}.hops is not a non-empty list"
+        for m, hop in enumerate(hops):
+            if not isinstance(hop, dict) or set(hop) != {"relation", "from_kind", "to_kind", "verdict", "readings"}:
+                return f"{where}.hops[{m}] does not have the five members section 4.10 gives"
+            if (
+                hop["relation"] not in RELATIONS
+                or hop["from_kind"] not in NODE_KINDS
+                or hop["to_kind"] not in NODE_KINDS
+                or hop["verdict"] not in HOP_VERDICTS
+                or not isinstance(hop["readings"], list)
+                or not all(isinstance(code, str) for code in hop["readings"])
+            ):
+                return f"{where}.hops[{m}] names a relation, kind or verdict section 4.10 does not define"
+        if chain["verdict"] != max((hop["verdict"] for hop in hops), key=rank.__getitem__):
+            return f"{where} reads {chain['verdict']}, which is not the worst of its hops"
+    if sum(census.values()) != section["standing"] or len(chains) + section["not_shown"] != section["standing"]:
+        return "authority_chains does not count the chains it lists"
+    return None
+
+
+def _authority_lines(receipt: dict) -> list[str]:
+    """What a 5.0 receipt says about the authority behind its effects: the census,
+    then every chain that is not proven and the hops that hold it."""
+    section = receipt.get("authority_chains")
+    if not isinstance(section, dict):
+        return []
+    census = section["verdict_census"]
+    lines = [
+        f"authority {section['standing']} chain(s) in force: {census['proven']} proven, "
+        f"{census['unproven']} unproven, {census['broken']} broken"
+        + (f"; {section['not_shown']} not listed" if section["not_shown"] else "")
+    ]
+    for chain in section["chains"]:
+        if chain["verdict"] == "proven":
+            continue
+        held = "; ".join(
+            f"hop {i} {hop['relation']} {hop['verdict']} ({', '.join(hop['readings']) or 'no reading'})"
+            for i, hop in enumerate(chain["hops"])
+            if hop["verdict"] != "proven"
+        )
+        lines.append(f"chain     {chain['digest']} {chain['verdict']} ({chain['basis']}): {held}")
+    return lines
+
+
 def _check_structure(receipt: dict, form: str, signed_claim: bool) -> tuple[str, str | None]:
     """Steps 5 and 6: the version, then the members that version defines. Returns the
     version and, for a version emitted in two shapes (2.0), which one this is."""
@@ -508,6 +608,10 @@ def _check_structure(receipt: dict, form: str, signed_claim: bool) -> tuple[str,
                 f"coverage has the members {_show(sorted(members))}. 2.0 was emitted with the five "
                 "#56 gave it or the nine #67 gave it, and this is neither: it is not read as either",
             )
+    if "authority_chains" in HASHED[version]:
+        problem = _authority_chains(receipt["authority_chains"])
+        if problem is not None:
+            raise Refused("malformed", problem)
     if _has_non_integer_number(receipt):
         raise Refused("malformed", "a receipt's numbers are integers; this one carries a fraction or an exponent")
     return version, shape
@@ -850,6 +954,7 @@ def _verified(
         f"signer    {key_id} ({status})",
         f"issued at {issued_line}",
         *reading[1:],
+        *_authority_lines(receipt),
         f"evidence  {evidence_line}",
         "This establishes integrity and provenance only: not that the assessment is "
         "correct or the system safe, and not when the state held. " + when,

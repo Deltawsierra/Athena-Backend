@@ -148,6 +148,24 @@ def _sign_a_violation():
     return dep, lambda c: c.post(_base(dep) + "chain-outcomes/observed/", envelope, format="json")
 
 
+def _record_a_chain_nothing_proves():
+    """A chain whose effect nothing observed: an unproven hop, which holds READY."""
+    dep = _scanned()
+    return dep, lambda c: c.post(
+        _base(dep) + "authority-chains/",
+        {
+            "workflow": "refund-over-limit",
+            "hops": [
+                {"from": {"kind": "agent", "ref": "refund-agent"}, "relation": "performs",
+                 "to": {"kind": "action", "ref": "refund:issue"}},
+                {"from": {"kind": "action", "ref": "refund:issue"}, "relation": "produces",
+                 "to": {"kind": "effect", "ref": "refund-paid"}},
+            ],
+        },
+        format="json",
+    )
+
+
 def _declare_a_component_nobody_observed():
     dep = _scanned()
     return dep, lambda c: c.put(
@@ -286,6 +304,7 @@ MOVES = {
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
     ("DeploymentViewSet", "observed_chain_outcomes", "post"): _sign_a_violation,
+    ("DeploymentViewSet", "authority_chains", "post"): _record_a_chain_nothing_proves,
     ("DeploymentViewSet", "declared_architecture", "put"): _declare_a_component_nobody_observed,
     ("DeploymentViewSet", "record_bom_drift", "post"): _record_drift,
     ("DeploymentViewSet", "recompute_claims", "post"): _re_derive_the_claims,

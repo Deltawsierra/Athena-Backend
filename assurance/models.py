@@ -3533,3 +3533,107 @@ class ToolContractBinding(models.Model):
     def __str__(self) -> str:
         subject = f"claim {self.claim_fingerprint[:12]}" if self.claim_fingerprint else f"workflow {self.workflow_id}"
         return f"{subject} bound to {self.tool_kind}:{self.tool_identifier} @ {self.contract_digest[:12]}"
+
+
+# ---------------------------------------------------------------------------
+# AuthorityChain -- this exact authority chain produced this effect
+# ---------------------------------------------------------------------------
+
+
+class AuthorityChainRewriteRefused(ValueError):
+    """A recorded authority chain was asked to change or go away. The record is
+    append-only: a corrected chain is a NEW row, and the one it corrects stays."""
+
+
+class AuthorityChain(models.Model):
+    """The hop-by-hop authority one consequential effect was produced through,
+    bound to the effect and to the workflow it serves (:mod:`assurance.authority_chain`).
+
+    A :class:`WorkflowChainOutcome` says a workflow's chain held; this row says
+    WHICH chain: ``hops`` is the ordered ``[{from, relation, to}]`` the effect ran
+    through -- person, user, agent, policy, tool, identity, action, effect -- and
+    every hop is verified against the graph, the approvals, the tool contracts, the
+    coverage manifest and the signed outcomes each time the decision is read
+    (:mod:`assurance.authority_chain_records`). Nothing about a hop's verdict is
+    stored: it is decided live, so nothing that writes another row can lift it.
+
+    NAMED BY SLUG, NOT FOREIGN KEY, for the reason :class:`WorkflowChainOutcome`
+    is: a chain serving a workflow nobody approved has to be representable, and it
+    is, as a chain whose policy hops are unproven.
+
+    APPEND-ONLY. A newer chain for the same ``(workflow, effect)`` supersedes the
+    older one for the decision (:func:`assurance.authority_chain.in_force`), and the
+    older one stays, published as superseded. The model refuses an update or a
+    delete of a recorded row (:class:`AuthorityChainRewriteRefused`).
+
+    ``basis`` is ``demonstrated`` only when an engine signed the chain: a
+    :mod:`mythos_core.outcome` envelope whose evidence digest is ``digest``, the
+    digest of this chain's document. Read at read time against the keyring in
+    force, as a chain outcome's is; a typed-in chain is ``attested``.
+    """
+
+    class Basis(models.TextChoices):
+        DEMONSTRATED = composition.BASIS_DEMONSTRATED, "Demonstrated — an engine signed this chain"
+        ATTESTED = composition.BASIS_ATTESTED, "Attested — a person recorded it"
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        Deployment, on_delete=models.CASCADE, related_name="authority_chains"
+    )
+    # The workflow the effect serves, by slug (see the class docstring).
+    workflow = models.SlugField(max_length=200)
+    # The effect: the last hop's target. Kept as its own column so the chains in
+    # force -- the newest per (workflow, effect) -- are one indexed read.
+    effect = models.CharField(max_length=200)
+    hops = models.JSONField(default=list)
+    # "sha256:" + 64 hex over the canonical chain document
+    # (assurance.authority_chain_records.chain_document): what a signature covers
+    # and what the receipt names a chain by.
+    digest = models.CharField(max_length=71)
+    # The Action Gate decision the action went through: the outcome_id of a
+    # recorded WorkflowChainOutcome. Blank when the chain cites none.
+    gate_outcome_id = models.CharField(max_length=32, blank=True, default="")
+    # An outcome that observed the effect itself. Blank when none is cited.
+    effect_outcome_id = models.CharField(max_length=32, blank=True, default="")
+    # When the effect was produced. Null = not said.
+    observed_at = models.DateTimeField(null=True, blank=True)
+    # The served route the chain was recorded against (served_route.route_for_outcome),
+    # bound when the row is written and never after. Blank reads as unrecorded.
+    route_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    basis = models.CharField(max_length=32, choices=Basis.choices, default=composition.BASIS_ATTESTED)
+    # The signed envelope a demonstrated chain rests on, kept whole so it can be
+    # re-verified against the bytes that were signed.
+    outcome_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
+    observer_engine = models.CharField(max_length=64, blank=True)
+    observer_key_id = models.CharField(max_length=64, blank=True)
+    envelope = models.JSONField(null=True, blank=True)
+    source = models.CharField(max_length=255, blank=True)
+    note = models.TextField(blank=True)
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="authority_chains",
+    )
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        indexes = [
+            models.Index(fields=["deployment", "workflow", "effect"], name="assurance_authchain_effect"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise AuthorityChainRewriteRefused(
+                "A recorded authority chain is never rewritten; record the corrected chain as a new row."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AuthorityChainRewriteRefused("A recorded authority chain is never deleted.")
+
+    def __str__(self) -> str:
+        return f"authority chain {self.workflow} -> {self.effect} ({len(self.hops or [])} hops)"

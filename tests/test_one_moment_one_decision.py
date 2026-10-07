@@ -143,9 +143,9 @@ def test_decision_support_reads_the_claim_signal_exactly_once(monkeypatch):
     calls: list[int] = []
     real = decision_module.claim_decision_signal
 
-    def counting(deployment):
+    def counting(deployment, **kwargs):
         calls.append(1)
-        return real(deployment)
+        return real(deployment, **kwargs)
 
     monkeypatch.setattr(decision_module, "claim_decision_signal", counting)
     decision_support(dep)
@@ -273,9 +273,9 @@ def test_a_writer_landing_between_two_reads_cannot_splice_the_answer(monkeypatch
     real = decision_module.claim_decision_signal
     reads: list[int] = []
 
-    def flipping(deployment):
+    def flipping(deployment, **kwargs):
         reads.append(1)
-        result = real(deployment)
+        result = real(deployment, **kwargs)
         if len(reads) == 1:
             # The writer, in the gap.
             AssuranceClaim.objects.filter(pk=claim.pk).update(

@@ -122,6 +122,7 @@ from .workflow_chains import (
 from .ripple import assess_ripple
 from .remediation import ContractRequired, IllegalTransition, apply_transition, assign
 from . import repair_contract
+from . import authority_chain_records
 from . import closure_evidence as evidence_route
 from . import closure_forward
 from .retest_closure import ClosureRefused, classify, closure_standing, record_closure_evidence
@@ -130,6 +131,7 @@ from .serializers import (
     ApprovedWorkflowSerializer,
     AssetSerializer,
     AssuranceClaimSerializer,
+    AuthorityChainSerializer,
     ClaimEventSerializer,
     ClaimEvidenceSerializer,
     DataBoundarySerializer,
@@ -1997,6 +1999,93 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
                 "composition": _composition_payload(deployment),
             },
             status=status.HTTP_201_CREATED,
+        )
+
+    #: How many authority chains one POST may append, and how many the read returns.
+    #: Chains append forever; the bound is on the request and the page, and the
+    #: counts beside the page stay whole.
+    AUTHORITY_CHAIN_BATCH_LIMIT = 20
+    AUTHORITY_CHAIN_PAGE_SIZE = 100
+
+    @action(detail=True, methods=["get", "post"], url_path="authority-chains")
+    def authority_chains(self, request, uuid=None):
+        """This exact authority chain produced this effect (:mod:`assurance.authority_chain`).
+
+        POST APPENDS one chain, or ``{"chains": [...]}`` (admin-only -- it writes the
+        shared record, and the decision moves with it, in the same transaction). A
+        chain is the ordered hops one consequential effect was produced through --
+        ``{"workflow", "hops": [{"from": {kind, ref[, version]}, "relation", "to"}],
+        "gate_outcome_id"?, "effect_outcome_id"?, "observed_at"?, "source"?, "note"?,
+        "envelope"?}`` -- and it is refused only for not being a chain (the shape
+        :class:`~assurance.serializers.AuthorityChainSerializer` checks), or for an
+        ``envelope`` that does not sign exactly this chain. A hop that is unproven or
+        broken is recorded: that is what the record is for. The batch is recorded
+        whole or not at all.
+
+        GET returns every recorded chain, newest first, each with every hop's verdict
+        (``proven`` and by what, ``unproven`` and why, ``broken`` and why) and whether
+        it is the chain in force for its effect; and the approval digests in force,
+        which is what a chain's policy node names as its ``version``.
+
+        Beside ``chain-outcomes``, and not folded into it: an outcome is one status
+        per workflow, and a chain is the path one effect took. The workflow slug is
+        not checked against the approved set, for the reason the outcome route gives:
+        a chain serving a workflow nobody approved is what the record must be able to
+        hold -- its policy hops read unproven.
+        """
+        deployment = self.get_object()
+        created = False
+        if request.method == "POST":
+            _require_admin(request)
+            payload, single = _rows_from_body(request.data, key="chains", single_allowed=True)
+            if isinstance(payload, list) and len(payload) > self.AUTHORITY_CHAIN_BATCH_LIMIT:
+                raise ValidationError(
+                    {
+                        "chains": (
+                            f"{len(payload)} chains is more than the {self.AUTHORITY_CHAIN_BATCH_LIMIT} one "
+                            "request accepts. Post again with the rest; chains append, so nothing is lost."
+                        )
+                    }
+                )
+            serializer = AuthorityChainSerializer(data=payload, many=True)
+            if not serializer.is_valid():
+                raise ValidationError(serializer.errors[0] if single else serializer.errors)
+            now = timezone.now()
+            try:
+                with transaction.atomic():
+                    for position, data in enumerate(serializer.validated_data):
+                        try:
+                            authority_chain_records.record_chain(deployment, data, actor=request.user, now=now)
+                        except authority_chain_records.ChainRefused as refused:
+                            raise ValidationError(
+                                {"envelope": [str(refused)]} if single else {"chains": {position: {"envelope": [str(refused)]}}}
+                            ) from refused
+                    _refresh_stored_decision(deployment)
+            except observed_outcomes.KeyringUnavailable as exc:
+                return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            created = True
+        read = authority_chain_records.read_chains(deployment, with_recorder=True)
+        newest_first = list(reversed(read))
+        page = newest_first[: self.AUTHORITY_CHAIN_PAGE_SIZE]
+        approvals = {}
+        for workflow in deployment.approved_workflows.prefetch_related(
+            Prefetch(
+                "tool_contract_bindings",
+                queryset=ToolContractBinding.objects.filter(released_at__isnull=True),
+                to_attr="live_tool_bindings",
+            )
+        ):
+            approvals[workflow.slug] = authority_chain_records.approval_digest(workflow, workflow.live_tool_bindings)
+        return Response(
+            {
+                "chains": [authority_chain_records.chain_payload(r) for r in page],
+                "returned": len(page),
+                "truncated": len(page) < len(read),
+                "page_size": self.AUTHORITY_CHAIN_PAGE_SIZE,
+                **authority_chain_records.summary(read),
+                "approvals_in_force": approvals,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
     @action(detail=True, methods=["get"], url_path="ai-bom")

@@ -43,6 +43,7 @@ from __future__ import annotations
 # longer read, and changing the rule left the pin where it was.
 from mythos_core import evidence as _core_evidence
 
+from . import authority_chain as _authority_chain
 from . import change as _change
 from . import composition as _composition
 from . import coverage as _coverage
@@ -220,6 +221,24 @@ def _policy_document() -> dict:
                 "held_unexercised": _value(composition.FLOORS[composition.NOT_DEMONSTRATED]),
                 "held_off_route": _value(composition.FLOORS[composition.NOT_DEMONSTRATED]),
             },
+        },
+        # How an authority chain's hops are verified (assurance.authority_chain): the
+        # verdicts and the order the worst is taken in, the relation grammar a hop is
+        # read against, which node kinds are graph components and which are tools, and
+        # the relations no record speaks for. A change to any of them changes the
+        # verdict of the same stored chain, and so the cap it puts on the decision
+        # (`claim_caps` above: authority_chain_broken / authority_chain_unproven).
+        "authority_chain": {
+            "verdicts": _values(_authority_chain.HOP_VERDICTS),
+            "verdict_rank": _table(_authority_chain._VERDICT_RANK),
+            "relations": list(_authority_chain.RELATIONS),
+            "grammar": {
+                str(relation): spec if isinstance(spec, int) else [list(kinds) for kinds in spec]
+                for relation, spec in _authority_chain.GRAMMAR.items()
+            },
+            "graph_kinds": sorted(_authority_chain.GRAPH_KINDS),
+            "tool_kinds": sorted(_authority_chain.TOOL_NODE_KINDS),
+            "no_record_relations": sorted(_authority_chain.NO_RECORD_RELATIONS),
         },
         # What a served route is (assurance.served_route). The route axis compares the
         # route each chain outcome was bound to with the route this definition reads
