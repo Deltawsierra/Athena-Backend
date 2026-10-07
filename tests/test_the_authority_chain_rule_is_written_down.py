@@ -10,6 +10,7 @@ supported, and each test takes one support away and names what the rule must say
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 
 import pytest
@@ -56,7 +57,11 @@ def approval(**over):
 GATE = ac.CitedOutcome("gate1", WF, comp.HELD, comp.EVIDENCE_AUTHORIZATION_CHECK)
 #: What the observed effect's evidence document says: the CRM tool, observed on the
 #: dispatch of gate decision ``gate1``.
-OBSERVED = ac.ObservedEffect("mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64, "customer:update")
+#: When the effect was observed: the instant sign-in and delegation are placed against.
+EFFECT_AT = datetime(2026, 10, 7, 12, 0, tzinfo=dt_timezone.utc)
+OBSERVED = ac.ObservedEffect(
+    "mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64, "customer:update", observed_at=EFFECT_AT
+)
 EFFECT = ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, OBSERVED)
 
 
@@ -64,6 +69,23 @@ def inputs(**over):
     base = {"graph": graph(), "approvals": {WF: approval()}, "outcomes": {"gate1": GATE, "eff1": EFFECT}}
     base.update(over)
     return ac.Inputs(**base)
+
+
+#: The roadmap's first two hops, recorded: employee:alice signed in as support-user
+#: half an hour before the effect, in an eight-hour session; support-user delegated
+#: support-agent customer:update for the day around it.
+SIGNED_IN = ac.Authentication(
+    "auth1", "employee:alice", "support-user", EFFECT_AT - timedelta(minutes=30), EFFECT_AT + timedelta(hours=8),
+    issuer="https://idp.example.test", protocol="oidc", witness="mythos",
+)
+GRANT = ac.Delegation(
+    "dlg1", "sha256:" + "9" * 64, "user", "support-user", "support-agent", frozenset({"customer:update"}),
+    EFFECT_AT - timedelta(hours=1), EFFECT_AT + timedelta(days=1), witness="mythos",
+)
+
+
+def identity_inputs(authentications=(SIGNED_IN,), delegations=(GRANT,), **over):
+    return inputs(authentications=tuple(authentications), delegations=tuple(delegations), **over)
 
 
 def node(kind, ref, version=None):
@@ -133,21 +155,28 @@ def test_a_chain_every_hop_of_which_the_record_supports_is_proven_and_says_by_wh
     assert codes(at(result, "produces")) == {"observed_effect"}
 
 
-def test_the_roadmap_example_reconstructs_and_names_the_hops_nothing_here_records():
+def test_the_roadmap_example_reconstructs_and_names_the_records_its_first_hops_lack():
     result = ac.verify(chain(ROADMAP), inputs())
     assert result.verdict == ac.UNPROVEN
     assert verdicts(result) == [ac.UNPROVEN, ac.UNPROVEN, *[ac.PROVEN] * 5]
     assert [h.index for h in result.unproven] == [0, 1]
-    assert codes(result.hops[0]) == codes(result.hops[1]) == {"no_record"}
+    assert codes(result.hops[0]) == {"no_authentication_record"}
+    assert codes(result.hops[1]) == {"no_delegation_record"}
     assert result.broken == ()
 
 
-def test_a_hop_type_with_no_data_is_unproven_never_proven():
-    # Even with every check around it passing, the relations nothing records stay
-    # unproven -- the rule does not let surrounding support stand in for them.
-    for relation in ac.NO_RECORD_RELATIONS:
-        result = ac.verify(chain(ROADMAP), inputs())
+def test_a_hop_type_with_no_data_is_unproven_never_proven(monkeypatch):
+    # A relation that has no record is unproven whatever its check -- or the records
+    # around it -- would say: the rule does not let surrounding support stand in.
+    # Since part 4 none does; put one back and it reads no_record again.
+    assert ac.NO_RECORD_RELATIONS == frozenset()
+    proven = ac.verify(chain(ROADMAP), identity_inputs())
+    assert proven.verdict == ac.PROVEN
+    for relation in (ac.AUTHENTICATED_AS, ac.DELEGATES_TO):
+        monkeypatch.setattr(ac, "NO_RECORD_RELATIONS", frozenset({relation}))
+        result = ac.verify(chain(ROADMAP), identity_inputs())
         assert at(result, relation).verdict == ac.UNPROVEN
+        assert codes(at(result, relation)) == {"no_record"}
 
 
 def test_nothing_observes_an_effect_today_so_the_best_chain_stops_short_of_proven():
@@ -268,6 +297,151 @@ def test_the_tool_matches_by_reference_or_by_the_one_component_both_resolve_to()
 
 
 # --------------------------------------------------------------------- the nodes
+
+
+# ---------------------------------------------- sign-in and delegation (part 4)
+
+
+def _replace(record, **kw):
+    from dataclasses import replace
+
+    return replace(record, **kw)
+
+
+def test_a_chain_that_starts_at_a_person_is_proven_by_its_signed_records():
+    result = ac.verify(chain(ROADMAP), identity_inputs())
+    assert result.verdict == ac.PROVEN, [(h.hop.relation, codes(h)) for h in result.hops]
+    assert codes(at(result, "authenticated_as")) == {"authentication"}
+    assert codes(at(result, "delegates_to")) == {"delegation"}
+    # Who witnessed it is named in what proves the hop; it does not weaken it.
+    assert "witnessed by mythos" in at(result, "authenticated_as").proven_by[0].detail
+    assert "witnessed by mythos" in at(result, "delegates_to").proven_by[0].detail
+
+
+@pytest.mark.parametrize(
+    ("record", "code"),
+    [
+        ({"person": "employee:bob"}, "no_authentication_record"),
+        ({"principal": "admin-user"}, "no_authentication_record"),
+        ({"authenticated_at": EFFECT_AT + timedelta(seconds=1)}, "authentication_out_of_window"),
+        (
+            {"authenticated_at": EFFECT_AT - timedelta(seconds=ac.AUTHENTICATION_WINDOW_SECONDS + 1)},
+            "authentication_out_of_window",
+        ),
+        ({"expires_at": EFFECT_AT}, "authentication_expired"),
+    ],
+    ids=["another-person", "another-principal", "after-the-effect", "before-the-window", "session-expired"],
+)
+def test_a_sign_in_proves_the_hop_only_for_this_person_and_principal_inside_the_window(record, code):
+    result = ac.verify(chain(ROADMAP), identity_inputs(authentications=[_replace(SIGNED_IN, **record)]))
+    assert at(result, "authenticated_as").verdict == ac.UNPROVEN
+    assert codes(at(result, "authenticated_as")) == {code}
+    assert at(result, "delegates_to").verdict == ac.PROVEN
+
+
+def test_the_window_is_inclusive_at_both_ends():
+    for instant in (EFFECT_AT, EFFECT_AT - timedelta(seconds=ac.AUTHENTICATION_WINDOW_SECONDS)):
+        record = _replace(SIGNED_IN, authenticated_at=instant, expires_at=EFFECT_AT + timedelta(hours=1))
+        result = ac.verify(chain(ROADMAP), identity_inputs(authentications=[record]))
+        assert at(result, "authenticated_as").verdict == ac.PROVEN
+
+
+def test_one_sign_in_inside_the_window_proves_the_hop_whatever_else_is_on_record():
+    stale = _replace(SIGNED_IN, outcome_id="auth0", authenticated_at=EFFECT_AT - timedelta(days=3),
+                     expires_at=EFFECT_AT - timedelta(days=2))
+    result = ac.verify(chain(ROADMAP), identity_inputs(authentications=[stale, SIGNED_IN]))
+    assert codes(at(result, "authenticated_as")) == {"authentication"}
+
+
+@pytest.mark.parametrize(
+    ("record", "code"),
+    [
+        ({"principal_ref": "admin-user"}, "no_delegation_record"),
+        ({"principal_kind": "person"}, "no_delegation_record"),
+        ({"agent": "billing-agent"}, "no_delegation_record"),
+        ({"actions": frozenset({"customer:read"})}, "delegation_out_of_scope"),
+        ({"not_before": EFFECT_AT + timedelta(seconds=1)}, "delegation_out_of_window"),
+        ({"not_after": EFFECT_AT}, "delegation_expired"),
+        ({"revoked_at": EFFECT_AT - timedelta(seconds=1)}, "delegation_revoked"),
+        ({"revoked_at": EFFECT_AT}, "delegation_revoked"),
+    ],
+    ids=["another-principal", "another-principal-kind", "another-agent", "out-of-scope", "not-yet-open",
+         "expired", "revoked-before", "revoked-at-the-instant"],
+)
+def test_a_delegation_proves_the_hop_only_for_this_principal_agent_scope_window_and_revocation(record, code):
+    result = ac.verify(chain(ROADMAP), identity_inputs(delegations=[_replace(GRANT, **record)]))
+    assert at(result, "delegates_to").verdict == ac.UNPROVEN
+    assert codes(at(result, "delegates_to")) == {code}
+    assert at(result, "authenticated_as").verdict == ac.PROVEN
+
+
+def test_revocation_is_read_at_the_effect_a_later_one_does_not_unprove_it():
+    """The effect-time rule: authority is what was in force when the effect was
+    produced. A grant revoked after the effect leaves it proven, and says so; one
+    revoked before it does not."""
+    revoked_later = _replace(GRANT, outcome_id="dlg2", revoked_at=EFFECT_AT + timedelta(seconds=1))
+    result = ac.verify(chain(ROADMAP), identity_inputs(delegations=[GRANT, revoked_later]))
+    hop = at(result, "delegates_to")
+    assert hop.verdict == ac.PROVEN and "after the effect, which stands" in hop.proven_by[0].detail
+    revoked_before = _replace(GRANT, outcome_id="dlg3", revoked_at=EFFECT_AT - timedelta(seconds=1))
+    result = ac.verify(chain(ROADMAP), identity_inputs(delegations=[GRANT, revoked_later, revoked_before]))
+    assert codes(at(result, "delegates_to")) == {"delegation_revoked"}
+
+
+def test_the_earliest_revocation_of_a_grant_decides_and_an_active_record_never_unrevokes_it():
+    revoked = _replace(GRANT, outcome_id="dlg2", revoked_at=EFFECT_AT - timedelta(minutes=5))
+    result = ac.verify(chain(ROADMAP), identity_inputs(delegations=[revoked, GRANT]))
+    assert codes(at(result, "delegates_to")) == {"delegation_revoked"}
+
+
+def test_another_grant_in_force_proves_the_hop_when_one_is_revoked():
+    revoked = _replace(GRANT, revoked_at=EFFECT_AT - timedelta(minutes=5))
+    other = _replace(GRANT, outcome_id="dlg9", grant_digest="sha256:" + "8" * 64)
+    result = ac.verify(chain(ROADMAP), identity_inputs(delegations=[revoked, other]))
+    assert codes(at(result, "delegates_to")) == {"delegation"}
+
+
+def test_every_reason_no_grant_proves_it_for_is_named_once():
+    bad = _replace(GRANT, actions=frozenset({"customer:read"}), revoked_at=EFFECT_AT - timedelta(minutes=1))
+    worse = _replace(bad, grant_digest="sha256:" + "7" * 64, not_after=EFFECT_AT)
+    result = ac.verify(chain(ROADMAP), identity_inputs(delegations=[bad, worse]))
+    # Grant by grant, in digest order (worse's first), each code once.
+    assert [r.code for r in at(result, "delegates_to").reasons] == [
+        "delegation_out_of_scope", "delegation_expired", "delegation_revoked",
+    ]
+
+
+def test_the_agent_matches_by_reference_or_by_the_one_component_both_resolve_to():
+    by_uuid_name = _replace(GRANT, agent="support-agent")
+    assert codes(at(ac.verify(chain(ROADMAP), identity_inputs(delegations=[by_uuid_name])), "delegates_to")) == {
+        "delegation"
+    }
+    renamed = ac.Component(uuid="a1", kind="agent", name="Support Agent", identifier="agent-001",
+                           classification="approved")
+    g = graph(components=(renamed, TOOL, ACCOUNT, OTHER_ACCOUNT))
+    raw = [hop(PERSON, "authenticated_as", USER), hop(USER, "delegates_to", node("agent", "Support Agent")),
+           *[hop(node("agent", "Support Agent"), "under_policy", POLICY)], *SUPPORTED[1:]]
+    result = ac.verify(chain(raw), identity_inputs(delegations=[_replace(GRANT, agent="agent-001")], graph=g))
+    assert codes(at(result, "delegates_to")) == {"delegation"}
+
+
+def test_sign_in_and_delegation_need_the_effects_signed_instant():
+    for result in (
+        ac.verify(chain(ROADMAP, effect_outcome_id=""), identity_inputs()),
+        ac.verify(chain(ROADMAP), identity_inputs(outcomes={"gate1": GATE, "eff1": _replace(EFFECT, effect=None)})),
+    ):
+        assert codes(at(result, "authenticated_as")) == codes(at(result, "delegates_to")) == {"effect_instant_unknown"}
+
+
+def test_a_delegation_with_no_action_after_it_has_no_scope_to_cover():
+    # Unreachable through a write (an action is only ever a performs hop's target);
+    # a stored row is read leniently, so the rule still names it.
+    hops = (
+        ac.Hop(ac.Node("user", "support-user"), "delegates_to", ac.Node("agent", "support-agent")),
+        ac.Hop(ac.Node("agent", "support-agent"), "under_policy", ac.Node("policy", WF, APPROVAL_DIGEST)),
+    )
+    result = ac.verify(ac.Chain(WF, hops, "gate1", "eff1", comp.ROUTE_CURRENT), identity_inputs())
+    assert codes(at(result, "delegates_to")) == {"delegation_action_unnamed"}
 
 
 def test_a_shadow_node_leaves_every_hop_that_touches_it_unproven():

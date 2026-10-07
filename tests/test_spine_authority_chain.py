@@ -217,8 +217,10 @@ def test_the_roadmap_chain_is_reconstructed_hop_by_hop_and_every_unproven_hop_is
     ]
     verdicts = {h["relation"]: (h["verdict"], {r["code"] for r in h["proven_by"] or h["reasons"]}) for h in chain["hops"]}
     assert verdicts == {
-        "authenticated_as": ("unproven", {"no_record"}),
-        "delegates_to": ("unproven", {"no_record"}),
+        # Part 4: a sign-in and a delegation have a signed record now, and none is
+        # recorded here, so each hop names the record it lacks.
+        "authenticated_as": ("unproven", {"no_authentication_record"}),
+        "delegates_to": ("unproven", {"no_delegation_record"}),
         "under_policy": ("proven", {"approval_in_force"}),
         "invokes": ("proven", {"approved_contract_in_force", "declared_edge"}),
         "through_identity": ("proven", {"declared_identity"}),

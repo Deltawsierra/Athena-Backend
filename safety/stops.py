@@ -474,6 +474,18 @@ NOT_STOPS = {
     "deployment-observed-effects": {
         "POST": "the observed-effect service records a signed observed effect: evidence, and it stops nothing"
     },
+    "deployment-authentications": {
+        "POST": "the sign-in collector records a signed sign-in as evidence for an authority chain; it starts "
+        "and stops nothing"
+    },
+    # A revocation recorded here is evidence that a delegation was revoked at the
+    # identity provider, where the revoke happens; this route records it, never
+    # refuses one for its age or order (assurance.identity_evidence), and holds no
+    # stop back.
+    "deployment-delegations": {
+        "POST": "the grant collector records a signed delegation grant or revocation as evidence for an "
+        "authority chain; it starts and stops nothing"
+    },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

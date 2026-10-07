@@ -3648,3 +3648,74 @@ class AuthorityChain(models.Model):
 
     def __str__(self) -> str:
         return f"authority chain {self.workflow} -> {self.effect} ({len(self.hops or [])} hops)"
+
+
+class IdentityEvidenceRewriteRefused(ValueError):
+    """A recorded sign-in or delegation record was asked to change or go away. The
+    record is append-only: a revocation is a NEW record of the same grant."""
+
+
+class IdentityEvidence(models.Model):
+    """One signed sign-in or delegation record (:mod:`assurance.identity_evidence`):
+    what proves an authority chain's ``authenticated_as`` or ``delegates_to`` hop.
+
+    Not a :class:`WorkflowChainOutcome`: a sign-in or a delegation is not an outcome of
+    any workflow's chain, and recorded as one it would be counted in the composition
+    as one. Written only by the authentications and delegations routes, with the
+    envelope the record rests on and the evidence document its signed digest names,
+    both kept whole; re-verified on every read against the keyring in force, so a
+    column edited after the fact proves nothing.
+
+    APPEND-ONLY, as an authority chain is: a grant's revocation is a new record of the
+    same grant (the same ``grant_digest``), and the record it revokes stays.
+    """
+
+    class Kind(models.TextChoices):
+        AUTHENTICATION = composition.EVIDENCE_AUTHENTICATION, "Authentication — a person signed in as a principal"
+        DELEGATION = composition.EVIDENCE_DELEGATION, "Delegation — a principal delegated a scope to an agent"
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="identity_evidence")
+    kind = models.CharField(max_length=32, choices=Kind.choices)
+    # The signed outcome: unique, so a replay of one outcome is refused here as it is
+    # everywhere else.
+    outcome_id = models.CharField(max_length=32, unique=True)
+    observer_engine = models.CharField(max_length=64)
+    observer_key_id = models.CharField(max_length=64)
+    evidence_digest = models.CharField(max_length=71)
+    envelope = models.JSONField()
+    # The mythos.authentication/v1 or mythos.delegation/v1 document whose digest the
+    # signed outcome names.
+    document = models.JSONField()
+    # What makes a record a replay whatever its outcome id
+    # (assurance.identity_evidence.replay_key): one record per sign-in assertion; one
+    # per grant, state and revocation instant. Unique: the backstop for two posts
+    # racing past the check.
+    replay_key = models.CharField(max_length=160, unique=True)
+    # The principal the record names -- the account signed in as, or the one that
+    # delegated -- so the records a chain's hops can use are one indexed read.
+    principal = models.CharField(max_length=200)
+    # Who witnessed it (mythos, customer, third_party): the signer's, checked at ingest
+    # and on every read.
+    witness = models.CharField(max_length=32)
+    observed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        indexes = [
+            models.Index(fields=["deployment", "principal"], name="assurance_identity_principal"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise IdentityEvidenceRewriteRefused(
+                "A recorded sign-in or delegation record is never rewritten; a revocation is a new record."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise IdentityEvidenceRewriteRefused("A recorded sign-in or delegation record is never deleted.")
+
+    def __str__(self) -> str:
+        return f"{self.kind} record {self.outcome_id} ({self.principal})"

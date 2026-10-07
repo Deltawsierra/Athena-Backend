@@ -419,6 +419,12 @@ _GOVERNING = [
     # Part 3 of the 7 Oct decision: the observed-effect key's engine, the one signer
     # whose outcomes can prove a chain's produces hop.
     ("assurance.composition", "SIGNER_EVIDENCE", "achilles-effect"),
+    # Part 4: the sign-in and grant collectors' engines, the signers whose records
+    # can prove a chain's authenticated_as and delegates_to hops, and the identity
+    # kinds a chain outcome never takes (it reads them as unclassified).
+    ("assurance.composition", "SIGNER_EVIDENCE", "mythos-signin-collector"),
+    ("assurance.composition", "SIGNER_EVIDENCE", "mythos-grant-collector"),
+    ("assurance.composition", "IDENTITY_EVIDENCE_KINDS", None),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_authorization_check"),
     ("assurance.workflow_chains", "CHAIN_CAPS", "held_on_unclassified_signer"),
     # Round 3: the orders and ranks every threshold, tie and cap is read against, and
@@ -464,6 +470,8 @@ _GOVERNING = [
     # stored chain, and so the cap the decision takes from it.
     *[("assurance.authority_chain", name, None) for name in (
         "HOP_VERDICTS", "RELATIONS", "GRAPH_KINDS", "TOOL_NODE_KINDS", "NO_RECORD_RELATIONS",
+        # Part 4: the chain's window a sign-in must fall in.
+        "AUTHENTICATION_WINDOW_SECONDS",
     )],
     *[("assurance.authority_chain", "_VERDICT_RANK", key) for key in ("proven", "unproven", "broken")],
     *[("assurance.authority_chain", "GRAMMAR", key) for key in (
@@ -521,7 +529,8 @@ _SPELLINGS = {
     "assurance.composition": {
         "HELD", "VIOLATED", "NOT_DEMONSTRATED", "INCOMPLETE", "BASIS_DEMONSTRATED", "BASIS_ATTESTED",
         "BASIS_UNKNOWN", "EVIDENCE_AUTHORIZATION_CHECK", "EVIDENCE_SCAN", "EVIDENCE_OBSERVED_EFFECT",
-        "EVIDENCE_UNCLASSIFIED", "EVIDENCE_ATTESTED", "EVIDENCE_UNKNOWN", "ROUTE_CURRENT", "ROUTE_MOVED",
+        "EVIDENCE_UNCLASSIFIED", "EVIDENCE_ATTESTED", "EVIDENCE_UNKNOWN", "EVIDENCE_AUTHENTICATION",
+        "EVIDENCE_DELEGATION", "ROUTE_CURRENT", "ROUTE_MOVED",
         "ROUTE_UNRECORDED", "READY", "READY_RESTRICTED", "NEEDS_MORE_EVIDENCE", "AUDIT_INCOMPLETE",
         "NEEDS_REMEDIATION", "NOT_RECOMMENDED",
     },

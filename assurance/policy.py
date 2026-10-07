@@ -195,6 +195,10 @@ def _policy_document() -> dict:
             "chain_bases": _values(composition.CHAIN_BASES),
             "chain_routes": _values(composition.CHAIN_ROUTES),
             "evidence_kinds": _values(composition.EVIDENCE_KINDS),
+            # The kinds a signer's records can be that are no chain outcome: sign-in
+            # and delegation (assurance.identity_evidence). On a chain outcome they
+            # read as unclassified (assurance.composition.evidence_kind).
+            "identity_evidence_kinds": _values(composition.IDENTITY_EVIDENCE_KINDS),
             "demonstrated_statuses": _values(composition.DEMONSTRATED),
             "unexercised_bases": _values(composition.UNEXERCISED_BASES),
             "off_route": _values(composition.OFF_ROUTE),
@@ -240,6 +244,8 @@ def _policy_document() -> dict:
             "graph_kinds": sorted(_authority_chain.GRAPH_KINDS),
             "tool_kinds": sorted(_authority_chain.TOOL_NODE_KINDS),
             "no_record_relations": sorted(_authority_chain.NO_RECORD_RELATIONS),
+            # The chain's window a sign-in must fall in to prove authenticated_as.
+            "authentication_window_seconds": _authority_chain.AUTHENTICATION_WINDOW_SECONDS,
         },
         # Which effects need an authority chain (assurance.consequential): the
         # declared effect classes that make a tool's effect consequential and the ones

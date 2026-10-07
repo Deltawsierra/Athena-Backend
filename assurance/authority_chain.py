@@ -48,14 +48,15 @@ Every hop gets ONE of three verdicts:
 
 A hop's verdict is the worst of its readings; a chain's is the worst of its hops.
 A hop no check speaks for is ``unproven`` -- **a hop type this platform holds no
-data for is unproven, never proven**, and two of the seven relations are exactly
-that today (:data:`NO_RECORD_RELATIONS`: nothing here records who signed in as whom
-or who delegated to which agent). So is ``produces`` unless the chain cites an
-``observed_effect`` outcome bound to it (:mod:`assurance.observed_effects`): Achilles
-signs one, with a key mapped to that kind and nothing else, when the dispatch that
-carried the permitted action out saw the provider complete it. Said here rather than
-discovered: until ``authenticated_as`` and ``delegates_to`` have a record, a chain
-that starts at a person cannot be fully proven; one that starts at the agent can.
+data for is unproven, never proven** (:data:`NO_RECORD_RELATIONS`, empty since part 4
+of the 7 Oct decision gave sign-in and delegation a record). So is ``produces``
+unless the chain cites an ``observed_effect`` outcome bound to it
+(:mod:`assurance.observed_effects`): Achilles signs one, with a key mapped to that kind
+and nothing else, when the dispatch that carried the permitted action out saw the
+provider complete it. And so are ``authenticated_as`` and ``delegates_to`` unless a
+signed ``authentication`` or ``delegation`` record (:mod:`assurance.identity_evidence`)
+names exactly that hop, at the effect's instant. With all three, a chain that starts
+at a person can be fully proven from production data.
 
 What each check reads, per hop:
 
@@ -92,7 +93,27 @@ What each check reads, per hop:
   force cites: ``held`` proves it, ``violated`` breaks it. An observation of another
   tool, another action or another dispatch, or claimed by two chains, is unproven:
   it does not contradict the hop, and it does not support it.
-* ``authenticated_as``, ``delegates_to``: unproven -- no record.
+* ``authenticated_as`` (person -> user): a signed ``authentication`` record names
+  this person and this principal, and its instant falls inside the chain's window --
+  at most :data:`AUTHENTICATION_WINDOW_SECONDS` before the effect's instant (the
+  cited observed effect's, read against its signed digest), and not after it -- and
+  the session it opened had not expired by the effect. No record naming both:
+  unproven; one outside the window or expired: unproven, named.
+* ``delegates_to`` (person, user or agent -> agent): a signed ``delegation`` record
+  names this principal and this agent, every action the chain performs after it is
+  within the delegated scope, the effect's instant is within the grant's window, and
+  the grant was not revoked as of the effect. Revocation is read at the EFFECT's
+  instant: a grant revoked after the effect does not unprove it, one revoked before
+  (or at) it does. A revoked, expired, not-yet-valid or out-of-scope grant is
+  unproven, each named.
+
+Both identity hops need the effect's instant, and the only instant a chain carries
+that a signature vouches for is its observed effect's: with none, they are unproven
+(``effect_instant_unknown``). Who witnessed the record (``witness``: today the
+Mythos-run collectors, per the owner's 5 Oct scope call) is named in what proves the
+hop; it does not weaken the proof, because no basis rule here reads a Mythos-witnessed
+signature as weaker -- the observed effect that proves ``produces`` is Mythos-witnessed
+too -- and that is stated rather than implied.
 
 Everything is read as the record stands NOW, not as it stood when the effect was
 produced: the graph, the approval and the contracts are live, as
@@ -106,6 +127,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from . import composition as _composition
 from . import graph_refs as _refs
@@ -172,7 +194,17 @@ GRAMMAR: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 
 #: The relations this platform holds no record of at all. Unproven, never proven.
-NO_RECORD_RELATIONS: frozenset[str] = frozenset({AUTHENTICATED_AS, DELEGATES_TO})
+#: Empty since part 4 of the 7 Oct decision: sign-in and delegation have signed
+#: records (:mod:`assurance.identity_evidence`), read by their own checks below. A
+#: relation that loses its record goes back here, and reads unproven whatever its
+#: check would say.
+NO_RECORD_RELATIONS: frozenset[str] = frozenset()
+
+#: The chain's window, for an ``authenticated_as`` hop: a sign-in proves it only if
+#: it happened at most this long before the effect's instant, and not after it. A
+#: day: a session older than that is not the one this effect was produced in, however
+#: long the identity provider let it live.
+AUTHENTICATION_WINDOW_SECONDS = 24 * 60 * 60
 
 #: The most hops one chain may carry. A write bound, not a rule: a chain is read
 #: whole on every decision of its deployment.
@@ -196,6 +228,14 @@ REASONS: Mapping[str, str] = {
     "observed_effect": (
         "the dispatch that carried the action out saw the provider complete it, and signed that with "
         "a key mapped to observed effects and nothing else"
+    ),
+    "authentication": (
+        "a signed authentication record says this person signed in as this principal inside the chain's "
+        "window, in a session still open at the effect"
+    ),
+    "delegation": (
+        "a signed delegation record says this principal delegated this agent a scope covering the action, "
+        "for a window holding the effect, not revoked as of the effect"
     ),
     # unproven
     "no_record": "this platform holds no record of this kind of hop",
@@ -242,6 +282,24 @@ REASONS: Mapping[str, str] = {
         "the effect was observed on the dispatch of another gate decision than the one the chain cites"
     ),
     "effect_outcome_cited_twice": "another chain in force cites the same observed effect: one observation proves one chain",
+    "effect_instant_unknown": (
+        "the chain cites no observed effect whose signed document says when the effect happened, so no "
+        "sign-in or delegation can be placed against it"
+    ),
+    "no_authentication_record": (
+        "no signed authentication record in force names this person signing in as this principal"
+    ),
+    "authentication_out_of_window": (
+        "the sign-in recorded for this person and principal falls outside the chain's window: after the "
+        "effect, or more than a day before it"
+    ),
+    "authentication_expired": "the session the recorded sign-in opened had expired by the time of the effect",
+    "no_delegation_record": "no signed delegation record in force names this principal delegating to this agent",
+    "delegation_action_unnamed": "the chain names no action in a performs hop for the delegated scope to cover",
+    "delegation_out_of_scope": "the action the chain performs is outside the scope the principal delegated",
+    "delegation_out_of_window": "the effect happened before the delegation's window opened",
+    "delegation_expired": "the effect happened after the delegation's window closed",
+    "delegation_revoked": "the delegation was revoked before (or at) the instant of the effect",
     "unchecked": "no check speaks for this hop",
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
@@ -508,6 +566,10 @@ class ObservedEffect:
     permit_digest: str = ""
     #: The permitted action the dispatch carried out, as its permit named it.
     action: str = ""
+    #: When the effect was observed: the document's own instant, which the signed
+    #: outcome repeats. The one instant of a chain a signature vouches for, and so
+    #: the one sign-in and delegation are placed against.
+    observed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -527,6 +589,44 @@ class CitedOutcome:
 
 
 @dataclass(frozen=True)
+class Authentication:
+    """A signed ``authentication`` record in force, as the rule reads it
+    (:mod:`assurance.identity_evidence`, ``mythos.authentication/v1``): ``person``
+    signed in as ``principal`` at ``authenticated_at``, through ``issuer`` over
+    ``protocol``, in a session that expires at ``expires_at``; ``witness`` says who
+    witnessed it."""
+
+    outcome_id: str
+    person: str
+    principal: str
+    authenticated_at: datetime
+    expires_at: datetime
+    issuer: str = ""
+    protocol: str = ""
+    witness: str = ""
+
+
+@dataclass(frozen=True)
+class Delegation:
+    """A signed ``delegation`` record in force (``mythos.delegation/v1``): the grant
+    ``grant_digest`` names -- ``principal_kind``/``principal_ref`` delegated ``agent``
+    the ``actions`` in scope, for ``[not_before, not_after)`` -- and, when the record
+    says so, the instant it was revoked. A grant may have several records (granted,
+    then revoked); the digest binds them to one grant."""
+
+    outcome_id: str
+    grant_digest: str
+    principal_kind: str
+    principal_ref: str
+    agent: str
+    actions: frozenset[str]
+    not_before: datetime
+    not_after: datetime
+    revoked_at: datetime | None = None
+    witness: str = ""
+
+
+@dataclass(frozen=True)
 class Inputs:
     graph: Graph = field(default_factory=Graph)
     approvals: Mapping[str, Approval] = field(default_factory=dict)
@@ -534,6 +634,10 @@ class Inputs:
     #: How many chains in force cite each observed-effect outcome, by its id: one
     #: observation proves one chain.
     effect_citations: Mapping[str, int] = field(default_factory=dict)
+    #: The signed sign-in and delegation records in force that name a principal the
+    #: chains name.
+    authentications: tuple[Authentication, ...] = ()
+    delegations: tuple[Delegation, ...] = ()
 
 
 # ------------------------------------------------------------------ the verdict
@@ -1084,9 +1188,194 @@ def _produces(chain, i, source, target, inputs, index) -> list[Reading]:
     return [Reading(UNPROVEN, "effect_not_established", f"the observed-effect outcome {cited} is {outcome.status}")]
 
 
+def _effect_instant(chain: Chain, inputs: Inputs) -> datetime | None:
+    """When the chain's effect happened, as far as a signature says: the instant of
+    the observed effect it cites, read from the document its signed digest names. None
+    when it cites none, or one that is not this workflow's, not an observed effect, or
+    carries no document in force."""
+    cited = chain.effect_outcome_id
+    outcome = inputs.outcomes.get(cited) if cited else None
+    if (
+        outcome is None
+        or outcome.workflow != chain.workflow
+        or outcome.evidence != _composition.EVIDENCE_OBSERVED_EFFECT
+        or outcome.effect is None
+    ):
+        return None
+    return outcome.effect.observed_at
+
+
+def _instant_unknown(chain: Chain) -> Reading:
+    return Reading(
+        UNPROVEN,
+        "effect_instant_unknown",
+        f"the chain cites no observed effect whose signed document says when the effect happened "
+        f"({chain.effect_outcome_id or 'none cited'}), so nothing can be placed against it",
+    )
+
+
+def _when(instant: datetime | None) -> str:
+    return instant.isoformat() if instant is not None else "never"
+
+
+def _authenticated_as(chain, i, source, target, inputs, index) -> list[Reading]:
+    hop = chain.hops[i]
+    person, principal = hop.source.ref, hop.target.ref
+    named = [a for a in inputs.authentications if a.person == person and a.principal == principal]
+    if not named:
+        return [
+            Reading(
+                UNPROVEN,
+                "no_authentication_record",
+                f"no signed authentication record in force says {person!r} signed in as {principal!r}",
+            )
+        ]
+    instant = _effect_instant(chain, inputs)
+    if instant is None:
+        return [_instant_unknown(chain)]
+    opens = instant - timedelta(seconds=AUTHENTICATION_WINDOW_SECONDS)
+    in_window = [a for a in named if opens <= a.authenticated_at <= instant]
+    live = [a for a in in_window if instant < a.expires_at]
+    if live:
+        a = max(live, key=lambda a: (a.authenticated_at, a.outcome_id))
+        return [
+            Reading(
+                PROVEN,
+                "authentication",
+                f"{person!r} signed in as {principal!r} through {a.issuer or 'an identity provider'} "
+                f"({a.protocol or 'protocol unnamed'}) at {_when(a.authenticated_at)}, inside the chain's window "
+                f"[{_when(opens)}, {_when(instant)}], in a session open until {_when(a.expires_at)} "
+                f"(record {a.outcome_id}, witnessed by {a.witness or 'unnamed'})",
+            )
+        ]
+    if in_window:
+        a = max(in_window, key=lambda a: (a.expires_at, a.outcome_id))
+        return [
+            Reading(
+                UNPROVEN,
+                "authentication_expired",
+                f"the session {person!r} opened as {principal!r} at {_when(a.authenticated_at)} expired at "
+                f"{_when(a.expires_at)}, before the effect at {_when(instant)}",
+            )
+        ]
+    return [
+        Reading(
+            UNPROVEN,
+            "authentication_out_of_window",
+            f"{len(named)} sign-in(s) of {person!r} as {principal!r} on record, none inside the chain's window "
+            f"[{_when(opens)}, {_when(instant)}]: at {', '.join(sorted(_when(a.authenticated_at) for a in named))}",
+        )
+    ]
+
+
+def _names(index: _Index, node: Node, kind: str, ref: str) -> bool:
+    """Whether ``node`` is the ``kind`` ``ref`` a record names: the same kind, and the
+    same reference -- or, for a graph kind, two references that resolve to the same
+    one component."""
+    if node.kind != kind:
+        return False
+    if node.ref == ref:
+        return True
+    if kind not in GRAPH_KINDS:
+        return False
+    named, _ = index.resolve(node)
+    recorded, _ = index.resolve(Node(kind, ref))
+    return named is not None and recorded is not None and named.uuid == recorded.uuid
+
+
+def _delegates_to(chain, i, source, target, inputs, index) -> list[Reading]:
+    hop = chain.hops[i]
+    named = [
+        d
+        for d in inputs.delegations
+        if _names(index, hop.source, d.principal_kind, d.principal_ref) and _names(index, hop.target, AGENT, d.agent)
+    ]
+    who = f"{hop.source.kind} {hop.source.ref!r}"
+    if not named:
+        return [
+            Reading(
+                UNPROVEN,
+                "no_delegation_record",
+                f"no signed delegation record in force says {who} delegated to agent {hop.target.ref!r}",
+            )
+        ]
+    instant = _effect_instant(chain, inputs)
+    if instant is None:
+        return [_instant_unknown(chain)]
+    actions = [h.target.ref for h in chain.hops[i + 1 :] if h.relation == PERFORMS]
+    if not actions:
+        return [
+            Reading(
+                UNPROVEN,
+                "delegation_action_unnamed",
+                f"the chain names no action after {who}'s delegation for its scope to cover",
+            )
+        ]
+    grants: dict[str, list[Delegation]] = {}
+    for d in named:
+        grants.setdefault(d.grant_digest, []).append(d)
+    failures: list[Reading] = []
+    for digest in sorted(grants):
+        records = grants[digest]
+        grant = records[0]  # the digest binds every record of it to the same grant
+        # REVOCATION IS AUTHORITY, read at the effect's instant: the earliest revocation
+        # on record. Revoked after the effect, the effect was produced under a grant in
+        # force and stays proven; revoked before (or at) it, it was not.
+        revoked = min((r.revoked_at for r in records if r.revoked_at is not None), default=None)
+        why: list[Reading] = []
+        outside = [a for a in actions if a not in grant.actions]
+        if outside:
+            why.append(
+                Reading(
+                    UNPROVEN,
+                    "delegation_out_of_scope",
+                    f"grant {digest} delegated {sorted(grant.actions)}; the chain performs {outside}",
+                )
+            )
+        if instant < grant.not_before:
+            why.append(
+                Reading(
+                    UNPROVEN,
+                    "delegation_out_of_window",
+                    f"grant {digest} opens at {_when(grant.not_before)}, after the effect at {_when(instant)}",
+                )
+            )
+        elif instant >= grant.not_after:
+            why.append(
+                Reading(
+                    UNPROVEN,
+                    "delegation_expired",
+                    f"grant {digest} closed at {_when(grant.not_after)}, before the effect at {_when(instant)}",
+                )
+            )
+        if revoked is not None and revoked <= instant:
+            why.append(
+                Reading(
+                    UNPROVEN,
+                    "delegation_revoked",
+                    f"grant {digest} was revoked at {_when(revoked)}, before the effect at {_when(instant)}",
+                )
+            )
+        if not why:
+            after = f"; revoked at {_when(revoked)}, after the effect, which stands" if revoked is not None else ""
+            return [
+                Reading(
+                    PROVEN,
+                    "delegation",
+                    f"{who} delegated agent {hop.target.ref!r} {sorted(grant.actions)} for "
+                    f"[{_when(grant.not_before)}, {_when(grant.not_after)}), holding the effect at {_when(instant)} "
+                    f"(grant {digest}, witnessed by {grant.witness or 'unnamed'}){after}",
+                )
+            ]
+        failures.extend(why)
+    # No grant proves it: every reason any grant fails for, each code once.
+    seen: set[str] = set()
+    return [r for r in failures if not (r.code in seen or seen.add(r.code))]
+
+
 _relation_checks = {
-    AUTHENTICATED_AS: _no_record,
-    DELEGATES_TO: _no_record,
+    AUTHENTICATED_AS: _authenticated_as,
+    DELEGATES_TO: _delegates_to,
     UNDER_POLICY: _under_policy,
     INVOKES: _invokes,
     THROUGH_IDENTITY: _through_identity,

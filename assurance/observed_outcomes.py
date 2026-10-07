@@ -359,6 +359,19 @@ def ingest(deployment, envelopes: list, *, keyring=None, now: datetime | None = 
             refusals.append(Refusal(index, "the same outcome appears twice in this batch"))
             continue
         kind = composition.evidence_kind(composition.BASIS_DEMONSTRATED, outcome["observer"]["engine"])
+        identity = composition.signer_evidence(outcome["observer"]["engine"])
+        if identity in composition.IDENTITY_EVIDENCE_KINDS:
+            # A sign-in or delegation record is no chain outcome: recorded as one it
+            # would be counted in the composition, and bound to nothing it proves.
+            refusals.append(
+                Refusal(
+                    index,
+                    f"an outcome signed by an {identity} key is an {identity} record, recorded with its "
+                    f"evidence document on the {identity} route (assurance.identity_evidence); posted here "
+                    "it would prove nothing",
+                )
+            )
+            continue
         if evidence is None:
             if kind == composition.EVIDENCE_OBSERVED_EFFECT:
                 refusals.append(

@@ -182,6 +182,29 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   trusts.
 - `unknown`: typed in without saying what it rests on.
 
+Two more signers sign records that are not chain outcomes, each on its own route
+with its own service credential (`assurance/identity_evidence.py`), and each proving
+one hop of an authority chain that starts at a person:
+
+- `authentication`: signed by the sign-in collector (observer
+  `mythos-signin-collector`) with a `mythos.authentication/v1` document -- a person
+  signed in as a principal, at an instant, through an identity provider. Posted to
+  `POST /api/assurance/deployments/<uuid>/authentications/` with
+  `X-Authentication-Evidence-Token` (`ASSURANCE_AUTHENTICATION_EVIDENCE_TOKEN` /
+  `_USER`). It proves `authenticated_as` when the sign-in falls inside the chain's
+  window: at most a day before the effect, not after it, in a session still open.
+- `delegation`: signed by the grant collector (observer `mythos-grant-collector`)
+  with a `mythos.delegation/v1` document -- a principal delegated an agent a scope
+  for a window, and whether the grant is revoked. Posted to
+  `POST /api/assurance/deployments/<uuid>/delegations/` with
+  `X-Delegation-Evidence-Token` (`ASSURANCE_DELEGATION_EVIDENCE_TOKEN` / `_USER`). It
+  proves `delegates_to` when the scope covers the chain's action and the window holds
+  the effect, and the grant was not revoked before the effect. A revocation is never
+  refused for its age or order.
+
+Both collectors are Mythos-run today (`witness: mythos`, the owner's 5 Oct scope
+call); a customer-run or third-party collector is planned.
+
 A held Achilles signed still counts as demonstrated: the composition's own rule
 reads `ready`. What the chains contribute to the deployment decision is less.
 Where an approved workflow holds on an authorization check alone, or on a `held`

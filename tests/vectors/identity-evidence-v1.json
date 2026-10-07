@@ -1,0 +1,384 @@
+{
+  "schema": "mythos.identity-evidence-vectors/v1",
+  "description": "Conformance vectors for mythos.authentication/v1 and mythos.delegation/v1: each signer's key is Ed25519 seeded with SHA-256 of its phrase; envelopes are DSSE with payload and signatures in hex. 'valid' are recorded at 'now'; 'invalid' are refused, each with the words of its refusal; 'hop_cases' place the valid records against an effect instant.",
+  "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+  "now": "2026-10-07T12:00:00.000000Z",
+  "keys": {
+    "mythos-signin-collector": {
+      "phrase": "mythos identity vectors v1: sign-in collector key",
+      "public_key_hex": "f3809752afcdc018be17e600b3b2f0c828cd8de2aebd391024b0b17fc8e66b18"
+    },
+    "mythos-grant-collector": {
+      "phrase": "mythos identity vectors v1: grant collector key",
+      "public_key_hex": "a5a37c2398c4f9f36dded5c184d7c91e9d17d1b9e6ab6aa19bfd99b57066a195"
+    }
+  },
+  "valid": [
+    {
+      "name": "authentication",
+      "kind": "authentication",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a64663737393364663662643934653062393738373263333536623861333831633438343739336362306134653231363765313762366566313732653363663937222c226f627365727665645f6174223a22323032362d31302d30375430393a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d7369676e696e2d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a226635356666313666363666343433363038363662393564623666386665633031222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2261757468656e7469636174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:52af3d72dabc03417716acbc88fe0e62",
+            "sig_hex": "7223911adf406bfabe772b93d8df3850aacd56161f23164fb8a971ded9ad288a264a57b46ab805ebae7897ddbfb1cfbc5c96dad39dccc299e8521e30ba657807"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.authentication/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "person": "employee:alice",
+        "principal": "support-user",
+        "identity_provider": {
+          "issuer": "https://idp.example.test",
+          "protocol": "oidc"
+        },
+        "assertion_digest": "sha256:b0f493845a54720c2d325c91db81ce78ae30738a13d1a310587f0d626c03bb30",
+        "authenticated_at": "2026-10-07T09:00:00.000000Z",
+        "expires_at": "2026-10-07T17:00:00.000000Z",
+        "witness": "mythos",
+        "observed_at": "2026-10-07T09:00:05.000000Z"
+      }
+    },
+    {
+      "name": "delegation-grant",
+      "kind": "delegation",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a31363763316165306337346430353761316465623361353533366635333631323263653038643461316330366662313361613335653566393933626664303337222c226f627365727665645f6174223a22323032362d31302d30375430303a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d6772616e742d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a223764633936663737366338343433653538613237383534383961336639633433222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2264656c65676174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:abfb68038146eba6b54220987e00db66",
+            "sig_hex": "6655d703686ef6741fc46deebd56e76ee2b9db432fd30e2ab7958233706fef1a33fe855fbd96870a1a23b6cb108941a62ad0ff4e47f2beda25d45be602524604"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.delegation/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "grant": {
+          "grant_id": "grant-vector-1",
+          "principal": {
+            "kind": "user",
+            "ref": "support-user"
+          },
+          "agent": "support-agent",
+          "scope": {
+            "actions": [
+              "customer:read",
+              "customer:update"
+            ]
+          },
+          "not_before": "2026-10-07T00:00:00.000000Z",
+          "not_after": "2026-10-08T00:00:00.000000Z"
+        },
+        "grant_digest": "sha256:e5daaed2a1c321022ba94641cfcb52ba078202f9a11b5d80e466572ae77e9c39",
+        "revocation": {
+          "state": "active",
+          "revoked_at": null
+        },
+        "witness": "mythos",
+        "observed_at": "2026-10-07T00:00:05.000000Z"
+      }
+    },
+    {
+      "name": "delegation-revocation",
+      "kind": "delegation",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a38386239613630336662353832343939626439653138663136626534343763303230303535333966383864386634386236316163306632633230316637626333222c226f627365727665645f6174223a22323032362d31302d30375431313a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d6772616e742d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a223438313464393230393361633461306638613231363361623837646565353039222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2264656c65676174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:abfb68038146eba6b54220987e00db66",
+            "sig_hex": "3720ab2029cce42fb2f4b5695b8dad08d85718b074c1e22de2e5255633768991c319139268d7d5f017d0349fde01632f04747eac257c8ac4f760b81458581e0e"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.delegation/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "grant": {
+          "grant_id": "grant-vector-1",
+          "principal": {
+            "kind": "user",
+            "ref": "support-user"
+          },
+          "agent": "support-agent",
+          "scope": {
+            "actions": [
+              "customer:read",
+              "customer:update"
+            ]
+          },
+          "not_before": "2026-10-07T00:00:00.000000Z",
+          "not_after": "2026-10-08T00:00:00.000000Z"
+        },
+        "grant_digest": "sha256:e5daaed2a1c321022ba94641cfcb52ba078202f9a11b5d80e466572ae77e9c39",
+        "revocation": {
+          "state": "revoked",
+          "revoked_at": "2026-10-07T11:00:00.000000Z"
+        },
+        "witness": "mythos",
+        "observed_at": "2026-10-07T11:00:05.000000Z"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong-key-kind",
+      "kind": "authentication",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a36656662623534383230613632633963623832373863346165343965336438336233303665333666373363616662326463663639373739303637666262626133222c226f627365727665645f6174223a22323032362d31302d30375430393a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d6772616e742d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a226430663633316361316464623438646238626366636239653035376364633938222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2261757468656e7469636174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:abfb68038146eba6b54220987e00db66",
+            "sig_hex": "a4d465f6d70d5d18f3645c990e15851354ae305517141ab7da2bb3e5c74c8c2881b8322827021dab8cb44cfe7e5372e5a9affd5921ff28106dd9ae6df05ac906"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.authentication/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "person": "employee:alice",
+        "principal": "support-user",
+        "identity_provider": {
+          "issuer": "https://idp.example.test",
+          "protocol": "oidc"
+        },
+        "assertion_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "authenticated_at": "2026-10-07T09:00:00.000000Z",
+        "expires_at": "2026-10-07T17:00:00.000000Z",
+        "witness": "mythos",
+        "observed_at": "2026-10-07T09:00:05.000000Z"
+      },
+      "refused": "mapped to delegation, not authentication"
+    },
+    {
+      "name": "wrong-key-kind-delegation",
+      "kind": "delegation",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a31363763316165306337346430353761316465623361353533366635333631323263653038643461316330366662313361613335653566393933626664303337222c226f627365727665645f6174223a22323032362d31302d30375430303a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d7369676e696e2d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a223963306162653531633665363435356438316465326430343464346662313934222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2264656c65676174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:52af3d72dabc03417716acbc88fe0e62",
+            "sig_hex": "e6dbc2281c175c5c6da729b3500bbb4c7d667a28cc269fb2953aada981fbe7dd67855c6df35cd0273a4e4dc080b51ffee842981a96660e5715dbfeb78d0e2503"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.delegation/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "grant": {
+          "grant_id": "grant-vector-1",
+          "principal": {
+            "kind": "user",
+            "ref": "support-user"
+          },
+          "agent": "support-agent",
+          "scope": {
+            "actions": [
+              "customer:read",
+              "customer:update"
+            ]
+          },
+          "not_before": "2026-10-07T00:00:00.000000Z",
+          "not_after": "2026-10-08T00:00:00.000000Z"
+        },
+        "grant_digest": "sha256:e5daaed2a1c321022ba94641cfcb52ba078202f9a11b5d80e466572ae77e9c39",
+        "revocation": {
+          "state": "active",
+          "revoked_at": null
+        },
+        "witness": "mythos",
+        "observed_at": "2026-10-07T00:00:05.000000Z"
+      },
+      "refused": "mapped to authentication, not delegation"
+    },
+    {
+      "name": "tampered",
+      "kind": "authentication",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a64663737393364663662643934653062393738373263333536623861333831633438343739336362306134653231363765313762366566313732653363663937222c226f627365727665645f6174223a22323032362d31302d30375430393a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d7369676e696e2d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a226635356666313666363666343433363038363662393564623666386665633031222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2261757468656e7469636174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:52af3d72dabc03417716acbc88fe0e62",
+            "sig_hex": "7223911adf406bfabe772b93d8df3850aacd56161f23164fb8a971ded9ad288a264a57b46ab805ebae7897ddbfb1cfbc5c96dad39dccc299e8521e30ba657807"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.authentication/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "person": "employee:mallory",
+        "principal": "support-user",
+        "identity_provider": {
+          "issuer": "https://idp.example.test",
+          "protocol": "oidc"
+        },
+        "assertion_digest": "sha256:b0f493845a54720c2d325c91db81ce78ae30738a13d1a310587f0d626c03bb30",
+        "authenticated_at": "2026-10-07T09:00:00.000000Z",
+        "expires_at": "2026-10-07T17:00:00.000000Z",
+        "witness": "mythos",
+        "observed_at": "2026-10-07T09:00:05.000000Z"
+      },
+      "refused": "not the document the signature names"
+    },
+    {
+      "name": "tampered-grant",
+      "kind": "delegation",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a31363763316165306337346430353761316465623361353533366635333631323263653038643461316330366662313361613335653566393933626664303337222c226f627365727665645f6174223a22323032362d31302d30375430303a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d6772616e742d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a223764633936663737366338343433653538613237383534383961336639633433222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2264656c65676174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:abfb68038146eba6b54220987e00db66",
+            "sig_hex": "6655d703686ef6741fc46deebd56e76ee2b9db432fd30e2ab7958233706fef1a33fe855fbd96870a1a23b6cb108941a62ad0ff4e47f2beda25d45be602524604"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.delegation/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "grant": {
+          "grant_id": "grant-vector-1",
+          "principal": {
+            "kind": "user",
+            "ref": "support-user"
+          },
+          "agent": "support-agent",
+          "scope": {
+            "actions": [
+              "customer:delete",
+              "customer:update"
+            ]
+          },
+          "not_before": "2026-10-07T00:00:00.000000Z",
+          "not_after": "2026-10-08T00:00:00.000000Z"
+        },
+        "grant_digest": "sha256:e5daaed2a1c321022ba94641cfcb52ba078202f9a11b5d80e466572ae77e9c39",
+        "revocation": {
+          "state": "active",
+          "revoked_at": null
+        },
+        "witness": "mythos",
+        "observed_at": "2026-10-07T00:00:05.000000Z"
+      },
+      "refused": "grant_digest is not the grant's"
+    },
+    {
+      "name": "other-deployment",
+      "kind": "authentication",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2230643965386637612d366235632d346433652d396632612d316230633964386537663661222c2265766964656e63655f646967657374223a227368613235363a62643139663138623165633834653264373736313834393138666631383138343337333064396565346365306131646232613463383332313466373263393130222c226f627365727665645f6174223a22323032362d31302d30375430393a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d7369676e696e2d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a223763316339376466313763303436393238383232623061663039613635323531222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2261757468656e7469636174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:52af3d72dabc03417716acbc88fe0e62",
+            "sig_hex": "db4b8a7955fe7960a62fdf1101a4182973aa1638b4d7e40443c14a095c9d92ee0b9108cca4394992ac72c52a93ee15a715c033ea259eb9c928d72a58ec01360e"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.authentication/v1",
+        "deployment": "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a",
+        "person": "employee:alice",
+        "principal": "support-user",
+        "identity_provider": {
+          "issuer": "https://idp.example.test",
+          "protocol": "oidc"
+        },
+        "assertion_digest": "sha256:b0f493845a54720c2d325c91db81ce78ae30738a13d1a310587f0d626c03bb30",
+        "authenticated_at": "2026-10-07T09:00:00.000000Z",
+        "expires_at": "2026-10-07T17:00:00.000000Z",
+        "witness": "mythos",
+        "observed_at": "2026-10-07T09:00:05.000000Z"
+      },
+      "refused": "not this one"
+    },
+    {
+      "name": "witness-claimed-by-the-wrong-signer",
+      "kind": "authentication",
+      "envelope": {
+        "payloadType": "application/vnd.mythos.chain-outcome+json",
+        "payload_hex": "7b226465706c6f796d656e74223a2236663163326433652d346135622d346336642d386539662d306131623263336434653566222c2265766964656e63655f646967657374223a227368613235363a65623134656232633133353463313532343136393265656237613735366237383161666464653538333934376637326135623163353933653634376364396530222c226f627365727665645f6174223a22323032362d31302d30375430393a30303a30352e3030303030305a222c226f62736572766572223a7b22656e67696e65223a226d7974686f732d7369676e696e2d636f6c6c6563746f72222c2272756e5f6964223a22766563746f722d72756e2d31222c2276657273696f6e223a22312e302e30227d2c226f7574636f6d655f6964223a223030313261336661303030633464633238656536353863336335386531326365222c22726561736f6e223a22222c22736368656d61223a226d7974686f732e636861696e2d6f7574636f6d652f7631222c22737461747573223a2268656c64222c22776f726b666c6f77223a2261757468656e7469636174696f6e227d",
+        "signatures": [
+          {
+            "keyid": "sha256:52af3d72dabc03417716acbc88fe0e62",
+            "sig_hex": "e262f09460d4ba4fd4d50111b7af9c78889df3c144b4a40de42a77e97c487173c8c2faae0c5d5f3177884d805421ddd17ebb1f732fdbc21c3c3705a232013e03"
+          }
+        ]
+      },
+      "evidence": {
+        "schema": "mythos.authentication/v1",
+        "deployment": "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        "person": "employee:alice",
+        "principal": "support-user",
+        "identity_provider": {
+          "issuer": "https://idp.example.test",
+          "protocol": "oidc"
+        },
+        "assertion_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "authenticated_at": "2026-10-07T09:00:00.000000Z",
+        "expires_at": "2026-10-07T17:00:00.000000Z",
+        "witness": "customer",
+        "observed_at": "2026-10-07T09:00:05.000000Z"
+      },
+      "refused": "witnessed by 'customer'"
+    }
+  ],
+  "hop_cases": [
+    {
+      "name": "inside-the-window",
+      "effect_at": "2026-10-07T10:00:00.000000Z",
+      "records": [
+        "authentication"
+      ],
+      "relation": "authenticated_as",
+      "expect": "authentication"
+    },
+    {
+      "name": "out-of-window",
+      "effect_at": "2026-10-08T09:30:00.000000Z",
+      "records": [
+        "authentication"
+      ],
+      "relation": "authenticated_as",
+      "expect": "authentication_out_of_window"
+    },
+    {
+      "name": "revoked-after-the-effect",
+      "effect_at": "2026-10-07T10:00:00.000000Z",
+      "records": [
+        "delegation-grant",
+        "delegation-revocation"
+      ],
+      "relation": "delegates_to",
+      "expect": "delegation"
+    },
+    {
+      "name": "revoked",
+      "effect_at": "2026-10-07T11:30:00.000000Z",
+      "records": [
+        "delegation-grant",
+        "delegation-revocation"
+      ],
+      "relation": "delegates_to",
+      "expect": "delegation_revoked"
+    },
+    {
+      "name": "expired",
+      "effect_at": "2026-10-08T00:00:00.000000Z",
+      "records": [
+        "delegation-grant"
+      ],
+      "relation": "delegates_to",
+      "expect": "delegation_expired"
+    }
+  ]
+}
