@@ -407,6 +407,9 @@ DECISION_INPUTS = {
     # An approval or claim bound to a tool contract that has since moved holds the
     # decision back (assurance.tool_contract); binding again releases it.
     "assurance.ToolContractBinding": ("deployment",),
+    # A recorded authority chain in force with a hop nothing proves, or one the
+    # record contradicts, holds the decision back (assurance.authority_chain).
+    "assurance.AuthorityChain": ("deployment",),
 }
 
 def _deployments_serving_through(instance) -> set:

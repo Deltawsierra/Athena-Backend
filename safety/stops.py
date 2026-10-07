@@ -470,6 +470,7 @@ NOT_STOPS = {
     "deployment-approved-workflows": {"GET": _READ, "PUT": _CONFIG},
     "deployment-chain-outcomes": {"GET": _READ, "POST": _EVIDENCE},
     "deployment-observed-chain-outcomes": {"POST": _EVIDENCE},
+    "deployment-authority-chains": {"GET": _READ, "POST": _EVIDENCE},
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

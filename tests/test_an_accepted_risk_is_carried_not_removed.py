@@ -390,6 +390,7 @@ _GOVERNING = [
     *[("assurance.decision", "CLAIM_CAPS", key) for key in (
         "contradicted", "stale", "unknown", "open_retest", "legally_stale",
         "unread_latent_condition", "held_by_fired_latent_condition", "bound_to_superseded_tool_contract",
+        "authority_chain_broken", "authority_chain_unproven",
     )],
     ("assurance.decision", "ACCEPTED_RISK_CAPS", "standing"),
     ("assurance.decision", "ACCEPTED_RISK_CAPS", "lapsed_undated_or_outgrown"),
@@ -454,6 +455,17 @@ _GOVERNING = [
     # coverage cap is read over, which stored rows are read against like the check
     # states.
     ("assurance.graph_refs", "RETIRED", None),
+    # The authority-chain rule (assurance.authority_chain): the verdicts and their
+    # order, the relation grammar, which node kinds are graph components and tools,
+    # and the relations no record speaks for. Each changes the verdict of the same
+    # stored chain, and so the cap the decision takes from it.
+    *[("assurance.authority_chain", name, None) for name in (
+        "HOP_VERDICTS", "RELATIONS", "GRAPH_KINDS", "TOOL_NODE_KINDS", "NO_RECORD_RELATIONS",
+    )],
+    *[("assurance.authority_chain", "_VERDICT_RANK", key) for key in ("proven", "unproven", "broken")],
+    *[("assurance.authority_chain", "GRAMMAR", key) for key in (
+        "authenticated_as", "delegates_to", "under_policy", "invokes", "through_identity", "performs", "produces",
+    )],
 ]
 
 #: The constants of the modules the decision is computed in that are NOT rules, and
@@ -478,6 +490,11 @@ _NOT_RULES = {
     ("assurance.composition", "_UNEXERCISED_NAMED"): "how many workflows one sentence names",
     ("assurance.workflow_chains", "PROVENANCE_LIMIT"): "how many sources the provenance census lists",
     ("assurance.workflow_chains", "UNATTRIBUTED"): "the census's name for an outcome with no source",
+    ("assurance.authority_chain", "MAX_HOPS"): "how many hops one write may carry; a chain is refused on "
+    "write, never read differently",
+    ("assurance.authority_chain", "CHAIN_SCHEMA"): "the name of the document a chain's digest is taken over; "
+    "no verdict is computed from it",
+    ("assurance.authority_chain", "REASONS"): "the words shown beside a reading's code; nothing decides on them",
 }
 #: A spelling of one value -- a status, a basis, a kind, a route reading, a decision
 #: state. Renaming one renames a value; the sets, tables and orders that hold it --
@@ -494,6 +511,11 @@ _SPELLINGS = {
         "EVIDENCE_UNCLASSIFIED", "READY", "READY_RESTRICTED", "ROUTE_CURRENT", "ROUTE_MOVED", "ROUTE_UNRECORDED",
     },
     "assurance.coverage": {"COMPLETE", "INCOMPLETE", "UNDECLARED"},
+    "assurance.authority_chain": {
+        "PROVEN", "UNPROVEN", "BROKEN", "AUTHENTICATED_AS", "DELEGATES_TO", "UNDER_POLICY", "INVOKES",
+        "THROUGH_IDENTITY", "PERFORMS", "PRODUCES", "PERSON", "USER", "AGENT", "SERVICE_ACCOUNT", "TOOL",
+        "MCP_SERVER", "SKILL", "POLICY", "ACTION", "EFFECT",
+    },
 }
 
 
@@ -530,7 +552,7 @@ def test_every_constant_the_decision_reads_is_in_the_pin(monkeypatch):
     unaccounted, unmoved = [], []
     for module_name in (
         "assurance.decision", "assurance.composition", "assurance.workflow_chains", "assurance.coverage",
-        "assurance.served_route",
+        "assurance.served_route", "assurance.authority_chain", "assurance.authority_chain_records",
     ):
         module = import_module(module_name)
         for name, value in list(vars(module).items()):

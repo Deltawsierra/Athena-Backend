@@ -61,7 +61,12 @@ time at all. It binds, into one deterministic payload:
   approved and assessed, and what KIND of evidence the standing outcomes rest on.
   A READY built on three typed-in ``held`` rows, on three gate authorization
   checks, and on three watched effects are three different claims, and without
-  this block the receipt signed all three identically.
+  this block the receipt signed all three identically;
+- the **authority chains** -- for each consequential effect, the chain of authority
+  it was produced through, hop by hop, and each hop's verdict (see
+  :mod:`assurance.authority_chain`): proven, unproven (a shadow node, a dangling
+  edge, an unverified approval) or broken. Named by digest, never by the nodes'
+  names.
 
 Together those two are what make the receipt answer, on its own, *which
 configuration passed and what was not covered*. Neither is retrievable from the
@@ -212,7 +217,14 @@ SIGNED_FORM_ONLY = ("issued_at",)
 #         embedded the stamped version, so ``policy_version`` moved too -- and
 #         "IDENTICAL" above was true of neither. :data:`HASHED_CONTENT_VERSION` is
 #         why it is one now.
-RECEIPT_VERSION = "mythos.assurance.receipt/4.1"
+#   5.0 — added ``authority_chains``: every authority chain in force, hop by hop,
+#         with each hop's verdict (assurance.authority_chain). MAJOR, for the reason
+#         2.0 and 4.0 were: it is new HASHED content, so a 4.1 digest and a 5.0
+#         digest of the same state differ. HASHED_CONTENT_VERSION moves with it, and
+#         so does the policy pin -- which the two caps this version's chains bring
+#         to the decision move anyway.
+RECEIPT_VERSION = "mythos.assurance.receipt/5.0"
+_VERSION_4_1 = "mythos.assurance.receipt/4.1"
 _VERSION_4_0 = "mythos.assurance.receipt/4.0"
 _VERSION_3_1 = "mythos.assurance.receipt/3.1"
 _VERSION_3_0 = "mythos.assurance.receipt/3.0"
@@ -237,7 +249,8 @@ EMITTED_AS = {
     _VERSION_3_0: "#70 (99bc3d9), 22 Sep 2026, until #87",
     _VERSION_3_1: "#87 (58083c1), 23 Sep 2026, until #105; signed from #96 (51484fb)",
     _VERSION_4_0: "#105 (7985460), 26 Sep 2026, until #118",
-    RECEIPT_VERSION: "#118 (d81e9cb), 29 Sep 2026, and since",
+    _VERSION_4_1: "#118 (d81e9cb), 29 Sep 2026, until #133",
+    RECEIPT_VERSION: "#133 (1f357fa), 7 Oct 2026, and since",
 }
 
 #: The versions no route ever signed. Receipts were first signed under 3.1, by #96
@@ -255,17 +268,17 @@ NEVER_SIGNED = (_VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0)
 # callers are unaffected. Every version ever emitted is here: 1.0 was left out
 # until the receipts #27 emitted were read back from git (tests/fixtures/receipts).
 SUPERSEDED_VERSIONS = (
-    _VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0,
+    _VERSION_1_0, _VERSION_1_1, _VERSION_2_0, _VERSION_3_0, _VERSION_3_1, _VERSION_4_0, _VERSION_4_1,
 )
 
-#: The version that introduced the HASHED content this module emits: 4.0, which added
-#: ``chains``. A MINOR step changes only what sits outside the digest, so it leaves
+#: The version that introduced the HASHED content this module emits: 5.0, which added
+#: ``authority_chains`` (4.0 added ``chains``). A MINOR step changes only what sits outside the digest, so it leaves
 #: this where it is; a MAJOR step moves it. :mod:`assurance.policy` pins THIS as its
 #: ``evaluator_standard``, not :data:`RECEIPT_VERSION`. The policy pin is what every
 #: claim and stored decision is bound to, and pinning the stamped version made 4.1 --
 #: a signed time, no rule touched -- move it: every claim superseded as "Assurance
 #: policy changed" and every stored decision recomputed, for a change to no policy.
-HASHED_CONTENT_VERSION = _VERSION_4_0
+HASHED_CONTENT_VERSION = RECEIPT_VERSION
 
 
 def _digest(payload: dict) -> str:
@@ -694,6 +707,57 @@ RECEIPT_SCHEMA = {
                 "route_census",
             ],
         },
+        "authority_chains": {
+            "type": "object",
+            "description": (
+                "Every authority chain in force (assurance.authority_chain): for a "
+                "consequential effect, the ordered hops it was produced through -- person, "
+                "user, agent, policy, tool, identity, action, effect -- and each hop's "
+                "verdict: proven, unproven or broken, with the codes of what proves it or "
+                "holds it. A chain with a broken hop holds the decision at "
+                "needs_remediation and one with an unproven hop at needs_more_evidence. "
+                "No node is named: each chain is identified by its digest, the SHA-256 of "
+                "the chain document the deployment's authority-chains route serves."
+            ),
+            "properties": {
+                "recorded": {"type": "integer", "description": "Chains ever recorded, superseded ones included."},
+                "standing": {
+                    "type": "integer",
+                    "description": "Chains in force: the newest per workflow and effect.",
+                },
+                "superseded": {"type": "integer", "description": "Chains a newer one for the same effect replaced."},
+                "verdict_census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": "Chains in force by verdict, every verdict including the zeros.",
+                },
+                "basis_census": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": (
+                        "Chains in force by what they rest on: an engine's signature over the "
+                        "chain that verifies now (demonstrated), or a person's record (attested)."
+                    ),
+                },
+                "chains": {
+                    "type": "array",
+                    "description": (
+                        "The chains in force, ordered by digest, at most 50: each its digest, "
+                        "basis, verdict and hops -- relation, from_kind, to_kind, verdict and "
+                        "readings (the codes of what proves a proven hop, or of every reason an "
+                        "unproven or broken one is not proven)."
+                    ),
+                    "items": {"type": "object"},
+                },
+                "not_shown": {
+                    "type": "integer",
+                    "description": "Chains in force past the 50 listed: counted, never silently dropped.",
+                },
+            },
+            "required": [
+                "recorded", "standing", "superseded", "verdict_census", "basis_census", "chains", "not_shown",
+            ],
+        },
         "algorithm": {"type": "string", "const": ALGORITHM},
         "digest": {
             "type": "string",
@@ -761,6 +825,7 @@ RECEIPT_SCHEMA = {
         "served_route",
         "coverage",
         "chains",
+        "authority_chains",
         "algorithm",
         "digest",
         "computed_at",
@@ -792,9 +857,14 @@ RECEIPT_SCHEMA = {
 #: What each shape added over the one before it, newest first: (the shape before,
 #: what was added). ``means`` is what a receipt without those members cannot say.
 _ADDED_IN = (
+    # 5.0: every authority chain in force, hop by hop, with each hop's verdict.
+    (_VERSION_4_1, {
+        "in": RECEIPT_VERSION, "fields": ("authority_chains",), "coverage": (),
+        "means": "which authority chain produced each consequential effect, and which of its hops are proven",
+    }),
     # 4.1: the signed form's issue time, outside the digest.
     (_VERSION_4_0, {
-        "in": RECEIPT_VERSION, "fields": SIGNED_FORM_ONLY, "coverage": (),
+        "in": _VERSION_4_1, "fields": SIGNED_FORM_ONLY, "coverage": (),
         "means": "a signed issue time: when the receipt was handed to be signed",
     }),
     # 4.0: the chain composition.
@@ -920,6 +990,7 @@ def _both_2_0_shapes() -> dict:
     return {**as_67, "properties": {**as_67["properties"], "coverage": coverage}}
 
 
+_SCHEMA_4_1 = _schema_before(_VERSION_4_1)
 _SCHEMA_4_0 = _schema_before(_VERSION_4_0)
 _SCHEMA_3_1 = _schema_before(_VERSION_3_1)
 _SCHEMA_3_0 = _schema_before(_VERSION_3_0)
@@ -929,6 +1000,7 @@ _SCHEMA_1_0 = _schema_before(_VERSION_1_0)
 
 _SCHEMAS = {
     RECEIPT_VERSION: RECEIPT_SCHEMA,
+    _VERSION_4_1: _SCHEMA_4_1,
     _VERSION_4_0: _SCHEMA_4_0,
     _VERSION_3_1: _SCHEMA_3_1,
     _VERSION_3_0: _SCHEMA_3_0,
@@ -1131,6 +1203,73 @@ def _chains_reference(deployment) -> dict:
     }
 
 
+#: How many authority chains the receipt lists. The rest are counted (``not_shown``).
+RECEIPT_CHAIN_LIMIT = 50
+
+
+def _authority_chains_reference(deployment) -> dict:
+    """Every authority chain in force, hop by hop, with each hop's verdict
+    (:func:`assurance.authority_chain_records.receipt_reference`).
+
+    The ``chains`` block says what KIND of evidence a workflow's ``held`` rests on;
+    this says WHICH authority produced each consequential effect, and which of its
+    hops nothing proves -- the shadow node, the dangling edge, the unverified
+    approval -- so a READY a receipt attests can be told from one an unproven hop
+    could not have reached. Hashed, because it is part of the state attested. Names
+    stay out, as for every other block: a chain is named by its digest. Imported
+    lazily -- the records module reaches this one through the decision.
+    """
+    from .authority_chain_records import receipt_reference
+
+    return receipt_reference(deployment, limit=RECEIPT_CHAIN_LIMIT)
+
+
+def authority_chains_problem(section) -> str | None:
+    """Why ``section`` is not an ``authority_chains`` block this module could have
+    emitted, or ``None``: the members the schema requires, every verdict and basis in
+    the censuses, each chain and hop in the vocabulary of
+    :mod:`assurance.authority_chain` -- and each chain exactly as bad as its worst
+    hop, which is how :func:`assurance.authority_chain.verify` reads one. The
+    backend's own reading of the block, as ``tools/verify_receipt.py`` reads it from
+    the specification."""
+    from . import authority_chain as rule
+
+    required = set(RECEIPT_SCHEMA["properties"]["authority_chains"]["required"])
+    if not isinstance(section, dict) or set(section) != required:
+        return "authority_chains does not have the members the schema requires"
+    bases = {"demonstrated", "attested"}
+    if set(section.get("verdict_census") or {}) != set(rule.HOP_VERDICTS):
+        return "the verdict census does not count every verdict"
+    if set(section.get("basis_census") or {}) != bases:
+        return "the basis census does not count every basis"
+    chains = section["chains"]
+    if not isinstance(chains, list):
+        return "chains is not a list"
+    kinds = {k for froms, tos in rule.GRAMMAR.values() for k in (*froms, *tos)}
+    for chain in chains:
+        if not isinstance(chain, dict) or set(chain) != {"digest", "basis", "verdict", "hops"}:
+            return "a chain does not have the members digest, basis, verdict and hops"
+        hops = chain["hops"]
+        if chain["basis"] not in bases or chain["verdict"] not in rule.HOP_VERDICTS or not isinstance(hops, list):
+            return "a chain names a basis or verdict outside the vocabulary"
+        for hop in hops:
+            if (
+                not isinstance(hop, dict)
+                or set(hop) != {"relation", "from_kind", "to_kind", "verdict", "readings"}
+                or hop["relation"] not in rule.RELATIONS
+                or hop["from_kind"] not in kinds
+                or hop["to_kind"] not in kinds
+                or hop["verdict"] not in rule.HOP_VERDICTS
+            ):
+                return "a hop is not in the vocabulary"
+        if not hops or chain["verdict"] != rule.worst(hop["verdict"] for hop in hops):
+            return "a chain does not read as its worst hop"
+    standing = section["standing"]
+    if len(chains) + section["not_shown"] != standing or sum(section["verdict_census"].values()) != standing:
+        return "the counts do not count the chains listed"
+    return None
+
+
 def build_assurance_receipt(deployment) -> dict:
     """The full, versioned assurance receipt for a deployment — the roadmap tuple
     (*system, version, policy, evidence, time, environment, result*) as one
@@ -1147,7 +1286,7 @@ def build_assurance_receipt(deployment) -> dict:
 
     Deterministic: the digest is over stable content only (version, system,
     result, policy, evidence root, assessment digests, served route, coverage,
-    chains). ``computed_at`` rides
+    chains, authority chains). ``computed_at`` rides
     alongside as metadata, outside the hash, so the same DB state always yields
     the same digest. Prefetch ``findings__evidence`` and
     ``assets__provider__assertions`` and select_related ``data_boundary`` on the
@@ -1206,6 +1345,10 @@ def build_assurance_receipt(deployment) -> dict:
         # check, a scan, or a watched effect. Hashed, because a READY resting on
         # assertion and one resting on observation are different states.
         "chains": _chains_reference(deployment),
+        # Which authority produced each consequential effect, hop by hop, and
+        # which hops nothing proves. Hashed: a chain through a shadow node and one
+        # through a governed tool are different states.
+        "authority_chains": _authority_chains_reference(deployment),
     }
 
     return {

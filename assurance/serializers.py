@@ -20,6 +20,7 @@ from .retest_closure import closure_standing
 from .models import (
     ApprovedWorkflow,
     Asset,
+    AuthorityChain,
     AssuranceClaim,
     ClaimEvent,
     ClaimEvidence,
@@ -780,6 +781,64 @@ class WorkflowChainOutcomeSerializer(serializers.ModelSerializer):
                 "recorded after it is observed, not before"
             )
         return value
+
+
+class AuthorityChainSerializer(serializers.Serializer):
+    """One authority chain, as written: the workflow it serves and the hops its
+    effect was produced through (:mod:`assurance.authority_chain`).
+
+    The hops are checked as a CHAIN here (:func:`assurance.authority_chain.parse_hops`):
+    contiguous, in the relation grammar, ending in the effect, visiting no node
+    twice, its policy node the workflow's own. Whether each hop is PROVEN is not
+    decided here and never refused for: an unproven or broken hop is exactly what
+    recording a chain exists to surface, so it is recorded and the decision reads it.
+
+    ``basis`` may only be ``attested``. A chain is ``demonstrated`` only when an
+    engine signed it -- ``envelope``, a signed outcome whose evidence digest is the
+    chain's own digest -- and that is decided from the signature, never typed in.
+    """
+
+    workflow = serializers.SlugField(max_length=200)
+    hops = serializers.JSONField()
+    gate_outcome_id = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    effect_outcome_id = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    observed_at = serializers.DateTimeField(required=False, allow_null=True)
+    source = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    note = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+    basis = serializers.CharField(required=False)
+    envelope = serializers.JSONField(required=False, allow_null=True)
+
+    def validate_basis(self, value):
+        if value != AuthorityChain.Basis.ATTESTED:
+            raise serializers.ValidationError(
+                "a recorded chain is attested; it is demonstrated only when an engine signed it -- "
+                "send the engine's envelope, whose evidence digest is the chain's digest"
+            )
+        return value
+
+    def validate_envelope(self, value):
+        if value is not None and not isinstance(value, dict):
+            raise serializers.ValidationError("a signed chain carries one DSSE envelope object")
+        return value
+
+    def validate_observed_at(self, value):
+        from .observed_outcomes import MAX_CLOCK_SKEW
+
+        if value is not None and value > timezone.now() + MAX_CLOCK_SKEW:
+            raise serializers.ValidationError(
+                f"observed_at {value.isoformat()} is in the future; an effect is recorded after it is produced"
+            )
+        return value
+
+    def validate(self, attrs):
+        from .authority_chain import parse_hops
+
+        hops, errors = parse_hops(attrs.get("hops"), attrs["workflow"])
+        if errors:
+            raise serializers.ValidationError({"hops": errors})
+        attrs["hops"] = hops
+        attrs.pop("basis", None)
+        return attrs
 
 
 class ClaimEventSerializer(serializers.ModelSerializer):

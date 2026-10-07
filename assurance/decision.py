@@ -26,7 +26,10 @@ Two independent signals, combined worst-first:
   at NEEDS_MORE_EVIDENCE. So does a claim or an approved workflow bound to a tool
   contract that has since moved (:mod:`assurance.tool_contract`): an approval made
   under the old schema or effect class authorizes nothing the tool may do now.
-  Supported/verified claims and a deployment with no claims add no cap.
+  So does a recorded **authority chain** (:mod:`assurance.authority_chain`) with a
+  hop nothing proves -- and one with a hop the record contradicts caps at
+  NEEDS_REMEDIATION. Supported/verified claims, and a deployment with no claims
+  and no recorded chain, add no cap.
 - **Workflow chains** (the compositional assurance graph) place the deployment by
   the worst status among its approved business workflows' authority-to-effect
   chains: a VIOLATED chain → NOT_RECOMMENDED, an INCOMPLETE one → AUDIT_INCOMPLETE,
@@ -194,6 +197,16 @@ CLAIM_CAPS: dict[str, str] = {
     # name, or a tool no longer registered (assurance.tool_contract). Read off the
     # binding and the registration, so nothing that writes a claim row lifts it.
     "bound_to_superseded_tool_contract": Deployment.Decision.NEEDS_MORE_EVIDENCE,
+    # A recorded authority chain in force (assurance.authority_chain) one of whose
+    # hops the record CONTRADICTS: effective access says the identity cannot reach
+    # the tool, the approval names other tools, the action is outside what the
+    # approval permits, the Action Gate refused it. As a contradicted claim caps:
+    # the record falsifies how an effect was produced.
+    "authority_chain_broken": Deployment.Decision.NEEDS_REMEDIATION,
+    # One with a hop nothing proves: a shadow or dangling node, an unverified or
+    # superseded approval, a hop this platform holds no record of. It cannot read
+    # READY; it reads at best what needs-more-evidence means.
+    "authority_chain_unproven": Deployment.Decision.NEEDS_MORE_EVIDENCE,
 }
 
 #: How a risk a person accepted caps the decision (owner decision Q6).
@@ -250,7 +263,7 @@ def _decision_from_findings(deployment: Deployment) -> str | None:
 _LEGALLY_STALE = frozenset({LegalStatus.STALE})
 
 
-def claim_decision_signal(deployment: Deployment) -> dict:
+def claim_decision_signal(deployment: Deployment, *, keyring=_READ_KEYRING) -> dict:
     """How the deployment's CURRENT assurance claims bear on its decision (Stage 1C).
 
     Reads the current version of each claim (``valid_to`` null), excluding human
@@ -292,6 +305,14 @@ def claim_decision_signal(deployment: Deployment) -> dict:
       contract is no approval of the new one. Read here, off the binding and the
       registration rows, so it holds before any invalidation check runs and after
       a re-derive reads the claim back to a pass;
+    - a recorded **authority chain** in force (:mod:`assurance.authority_chain`,
+      read by :func:`assurance.authority_chain_records.authority_chain_signal`)
+      caps at NEEDS_REMEDIATION when a hop is BROKEN -- the record contradicts it --
+      and at NEEDS_MORE_EVIDENCE when a hop is UNPROVEN. Verified live against the
+      graph, the approvals, the coverage manifest and the signed outcomes it cites,
+      under ``keyring`` (the one the decision is read under). A deployment with no
+      recorded chain reads one query here and is capped by nothing: its decision is
+      what it was before chains were recorded;
     - SUPPORTED / VERIFIED / PARTIALLY_VERIFIED claims (and DRAFT, which is not yet
       an assessment) impose no cap -- and a held one, or one bound to a superseded
       tool contract, is not counted as supporting.
@@ -339,6 +360,9 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         b for b in superseded_bindings(deployment) if b.workflow_id is not None or b.claim_fingerprint in identities
     ]
     bound_to_superseded = {b.claim_fingerprint for b in superseded if b.claim_fingerprint}
+    from .authority_chain_records import authority_chain_signal
+
+    chains = authority_chain_signal(deployment, keyring)
     supporting = [
         c
         for c in current
@@ -357,6 +381,8 @@ def claim_decision_signal(deployment: Deployment) -> dict:
             "unread_latent_condition": unread_conditions,
             "held_by_fired_latent_condition": held,
             "bound_to_superseded_tool_contract": superseded,
+            "authority_chain_broken": chains["broken"],
+            "authority_chain_unproven": chains["unproven"],
         }
     )
 
@@ -371,6 +397,8 @@ def claim_decision_signal(deployment: Deployment) -> dict:
         "unread_conditions": unread_conditions,
         "held": held,
         "superseded_tool_contracts": superseded,
+        "authority_chains_broken": chains["broken"],
+        "authority_chains_unproven": chains["unproven"],
         "supporting": supporting,
     }
 
@@ -593,7 +621,7 @@ def read_decision_parts(deployment: Deployment, *, keyring=_READ_KEYRING, now=No
         from_findings=_decision_from_findings(deployment),
         completed_scan=_completed_scan_signal(deployment),
         complete_audit=complete_audit_signal(deployment),
-        claim_signal=claim_decision_signal(deployment),
+        claim_signal=claim_decision_signal(deployment, keyring=keyring),
         scan_cap=incomplete_evidence_cap(deployment),
         coverage_cap=coverage_decision_cap(deployment),
         composition=composition_for(deployment, keyring),
@@ -728,6 +756,41 @@ def _tool_brief(binding) -> dict:
     from .tool_contract import brief
 
     return brief(binding)
+
+
+def _chain_brief(recorded) -> dict:
+    from .authority_chain_records import chain_brief
+
+    return chain_brief(recorded)
+
+
+def _hops_named(records, verdict: str) -> str:
+    """Each chain and the hops of ``verdict`` in it, with the first reason each."""
+    parts = []
+    for r in records:
+        hops = [h for h in r.verdict.hops if h.verdict == verdict]
+        named = "; ".join(
+            f"hop {h.index} {h.hop.source.ref!r} {h.hop.relation} {h.hop.target.ref!r}"
+            + (f" ({h.reasons[0].detail})" if h.reasons else "")
+            for h in hops
+        )
+        parts.append(f"{r.row.workflow} -> {r.row.effect}: {named}")
+    return " | ".join(parts)
+
+
+def _broken_chains_note(records) -> str:
+    return (
+        f"Held at 'needs remediation' by {len(records)} authority chain(s) the record contradicts: "
+        f"{_hops_named(records, 'broken')}. The effect was produced through authority this "
+        "deployment's own graph, approvals or Action Gate say it did not have."
+    )
+
+
+def _unproven_chains_note(records) -> str:
+    return (
+        f"Held at 'needs more evidence' by {len(records)} authority chain(s) with a hop nothing "
+        f"proves: {_hops_named(records, 'unproven')}. A chain with an unproven hop cannot read ready."
+    )
 
 
 def _accepted_brief(finding: Finding) -> dict:
@@ -889,6 +952,8 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
         held = ", ".join(sorted({c.claim_type for c in signal["contradicted"] + signal["stale"] + signal["unknown"]}))
         if signal["contradicted"]:
             note = f"Held at 'needs remediation' by a contradicted assurance claim ({held}); a current claim's boundary does not hold."
+        elif signal["authority_chains_broken"]:
+            note = _broken_chains_note(signal["authority_chains_broken"])
         elif signal["held"] and not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
             note = _held_by_fired_note(signal["held"])
         elif signal["superseded_tool_contracts"] and not (
@@ -905,6 +970,10 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
         ):
             note = _unread_conditions_note(signal["unread_conditions"])
+        elif signal["authority_chains_unproven"] and not (
+            signal["stale"] or signal["unknown"] or signal["retest_pending"] or signal["legally_stale"]
+        ):
+            note = _unproven_chains_note(signal["authority_chains_unproven"])
         elif not (signal["stale"] or signal["unknown"] or signal["retest_pending"]):
             legal = ", ".join(sorted({c.claim_type for c in signal["legally_stale"]}))
             note = (
@@ -994,6 +1063,10 @@ def decision_support(deployment: Deployment, *, paused: bool | None = None) -> d
             "held": [_claim_brief(c) for c in signal["held"]],
             # The approvals and claims bound to a tool contract that has since moved.
             "superseded_tool_contracts": [_tool_brief(b) for b in signal["superseded_tool_contracts"]],
+            # The authority chains in force whose hops the record contradicts, and
+            # those with a hop nothing proves -- each with the hops that hold it.
+            "authority_chains_broken": [_chain_brief(r) for r in signal["authority_chains_broken"]],
+            "authority_chains_unproven": [_chain_brief(r) for r in signal["authority_chains_unproven"]],
             "supporting": [_claim_brief(c) for c in signal["supporting"]],
         },
         "note": note,
