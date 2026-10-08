@@ -389,8 +389,11 @@ or from the environment when the settings name none.
   (`assurance.W304`), each process logs it once at start, and the retry command
   prints which credential it sends under.
 - **Refused:** the same secret set as both is one credential for two roles. It is
-  never sent, and forwarding is off until they differ (`assurance.E305`). The start
-  itself is never refused.
+  never sent, and forwarding is off until they differ: logged as an error at start,
+  and a warning in `manage.py check` (`assurance.W305`). Never a check error, which
+  would refuse every command that runs the checks, the scheduled Stop delivery
+  (`deliver_owed_stops`) among them. No credential setting ever fails a record, a
+  command or the start.
 
 ## When a dependency fails
 

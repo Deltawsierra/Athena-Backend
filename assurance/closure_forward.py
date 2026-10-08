@@ -32,8 +32,13 @@ It never stands in the store's way:
   decisions, imports runs and aborts, so role separation is NOT in force: ``manage.py
   check`` warns (``assurance.W304``), every process says so once at start, and
   :func:`credential` reports it. The same secret set as both is one credential for two
-  roles: it is never sent (``assurance.E305``), and forwarding is off until they
-  differ.
+  roles: it is never sent, and forwarding is off until they differ -- logged as an
+  error at start, and a WARNING in ``manage.py check`` (``assurance.W305``), never an
+  error: an error there would refuse every command that runs the checks, the scheduled
+  Stop delivery (``manage.py deliver_owed_stops``) among them.
+- **Never in front of the store or a stop.** No credential setting -- missing, shared,
+  or one no comparison can read -- raises out of :func:`queue`, the check, or the start
+  line: forwarding is off, and the record and every command go ahead.
 - **Never blocks or fails the store.** The forward is queued as a
   :class:`~assurance.models.ClosureEvidenceForward` row in the store's own
   transaction, and sent only after it commits, on a background thread: the engine
@@ -135,6 +140,13 @@ def _text(value) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _same_secret(a: str, b: str) -> bool:
+    """Whether two secrets are one, compared in constant time on their bytes: text
+    holding anything but ASCII cannot be compared as text (``compare_digest`` raises
+    on it), and a lone surrogate an environment carries still encodes."""
+    return hmac.compare_digest(a.encode("utf-8", "surrogatepass"), b.encode("utf-8", "surrogatepass"))
+
+
 def _outcomes_key() -> str | None:
     """Blue's key: the ``MINOTAUR_OUTCOMES_KEY`` setting, or the environment variable of
     that name when the settings name none. Read by its literal name."""
@@ -155,7 +167,7 @@ def credential() -> Credential:
     never a secret set as both, which is one credential for two roles."""
     outcomes = _outcomes_key()
     legacy = _legacy_runner_key()
-    if outcomes is not None and legacy is not None and hmac.compare_digest(outcomes, legacy):
+    if outcomes is not None and legacy is not None and _same_secret(outcomes, legacy):
         return Credential(
             key=None,
             setting=None,
@@ -184,13 +196,15 @@ def configured() -> tuple[str, str] | None:
 
 
 def credential_problems() -> list[tuple[str, str, str]]:
-    """``(level, id, message)`` for what :func:`credential` finds wrong: a secret set as
-    both credentials (an error: nothing is sent), the legacy runner key forwarding alone
-    (a warning: separation is not in force), or the legacy key set beside Blue's and
-    unused (a warning). Empty when there is nothing to say."""
+    """``(log level, id, message)`` for what :func:`credential` finds wrong: a secret set
+    as both credentials (logged as an error at start: nothing is sent), the legacy runner
+    key forwarding alone (separation is not in force), or the legacy key set beside
+    Blue's and unused. Each is only ever a WARNING in ``manage.py check``
+    (:func:`assurance.checks.closure_forward_credentials`). Empty when there is nothing
+    to say."""
     found = credential()
     if found.problem:
-        return [("error", "assurance.E305", found.problem)]
+        return [("error", "assurance.W305", found.problem)]
     if found.setting == LEGACY_RUNNER_KEY:
         return [
             (
@@ -250,7 +264,12 @@ def queue(record) -> bool:
     """Queue ``record``'s document for the dataset, inside the caller's transaction,
     and send it once that commits. False -- nothing queued -- when forwarding is off
     or the record carries no document."""
-    if configured() is None or not isinstance(record.document, dict):
+    try:
+        target = configured()
+    except Exception:  # noqa: BLE001 - a setting that cannot be read never fails the store
+        logger.exception("the closure forward's settings could not be read: forwarding is off")
+        target = None
+    if target is None or not isinstance(record.document, dict):
         return False
     forward = ClosureEvidenceForward.objects.create(record=record)
     transaction.on_commit(lambda: _spawn(lambda: deliver(forward.pk)))

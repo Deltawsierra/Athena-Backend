@@ -13,7 +13,12 @@ this producer sends it (``MINOTAUR_OUTCOMES_KEY``).
   and the runner key is never sent beside it.
 - The legacy runner key still forwards when it is the only one set, with a loud
   warning, and the credential is reported as not separated.
-- One secret set as both is one credential for two roles: never sent, an error.
+- One secret set as both is one credential for two roles: never sent, logged as an
+  error at start, and only ever a WARNING in ``manage.py check`` (``assurance.W305``):
+  a check error would refuse every command that runs the checks, the scheduled scan
+  Stop delivery (``deliver_owed_stops``) among them.
+- No credential setting -- shared, holding non-ASCII text, or unreadable -- fails a
+  record, a command or the start.
 
 Every call is answered in process by :class:`RoleSplitMinotaur`, which holds each key
 to its route as Minotaur-Backend does. Nothing reaches the network, and nothing here
@@ -22,9 +27,11 @@ is a stop or stands in front of one.
 
 from __future__ import annotations
 
+import io
 import logging
 
 import pytest
+from django.apps import apps
 from django.core import checks as django_checks
 from django.core.management import call_command
 
@@ -162,7 +169,8 @@ def test_the_legacy_runner_key_still_forwards_and_says_separation_is_not_in_forc
 
 def test_one_secret_as_both_credentials_is_never_sent(minotaur, settings, caplog, django_capture_on_commit_callbacks):
     """The same secret set as Blue's key and the runner key is one credential for two
-    roles: an error, nothing queued, nothing sent -- and the store still records."""
+    roles: nothing queued, nothing sent, an error line at start and a WARNING in the
+    checks -- and the store still records."""
     settings.MINOTAUR_OUTCOMES_KEY = RUNNER_KEY
     settings.MINOTAUR_RUNNER_KEY = RUNNER_KEY
 
@@ -173,7 +181,7 @@ def test_one_secret_as_both_credentials_is_never_sent(minotaur, settings, caplog
     assert minotaur.calls == [] and ClosureEvidenceForward.objects.count() == 0
     assert closure_forward.configured() is None
     [(level, ident, message)] = _problems()
-    assert level == django_checks.ERROR and ident == "assurance.E305"
+    assert level == django_checks.WARNING and ident == "assurance.W305"
     assert "one credential for two roles" in message and RUNNER_KEY not in message
     with caplog.at_level(logging.ERROR, logger="assurance.closure_forward"):
         closure_forward.say_credential()
@@ -216,3 +224,121 @@ def test_the_check_is_registered():
     from assurance.checks import closure_forward_credentials
 
     assert closure_forward_credentials in django_checks.registry.registry.get_checks()
+
+
+# --- nothing here refuses a command, a Stop's delivery, a record or the start ---------
+
+SHARED = "one-secret-0001"  # pragma: allowlist secret
+
+
+@pytest.fixture
+def owed_stops(monkeypatch):
+    """``deliver_owed_stops``'s handle, observed: the calls its ``_owed`` received."""
+    from pentest.management.commands import deliver_owed_stops
+    from pentest.models import PentestScan
+
+    calls = []
+
+    def owed():
+        calls.append("owed")
+        return PentestScan.objects.none()
+
+    monkeypatch.setattr(deliver_owed_stops, "_owed", owed)
+    return calls
+
+
+def test_one_secret_as_both_never_refuses_the_stop_delivery_or_any_command(minotaur, settings, owed_stops):
+    """SAFETY: the shared secret is a WARNING in the checks, so the scheduled scan-Stop
+    delivery runs its handle with the checks on, and so do migrate and check."""
+    settings.MINOTAUR_OUTCOMES_KEY = SHARED
+    settings.MINOTAUR_RUNNER_KEY = SHARED
+
+    call_command("deliver_owed_stops", skip_checks=False, stdout=io.StringIO(), stderr=io.StringIO())
+    assert owed_stops, "deliver_owed_stops never reached its handle"
+    call_command("migrate", plan=True, skip_checks=False, stdout=io.StringIO(), stderr=io.StringIO())
+    call_command("check", stdout=io.StringIO(), stderr=io.StringIO())
+    [(level, ident, _message)] = _problems()
+    assert (level, ident) == (django_checks.WARNING, "assurance.W305")
+
+
+@pytest.mark.parametrize(
+    "outcomes, legacy",
+    [
+        ("outcomes-\u2019-0001", "runner-0002"),
+        ("outcomes-0001", "runner-\u2019-0002"),
+        ("outcomes-\u00e9-0001", "outcomes-\u00e9-0001"),
+        ("outcomes-\udcff-0001", "runner-0002"),
+    ],
+    ids=["non-ascii-blue", "non-ascii-runner", "non-ascii-shared", "lone-surrogate"],
+)
+def test_a_secret_holding_non_ascii_text_fails_nothing(
+    minotaur, settings, owed_stops, caplog, django_capture_on_commit_callbacks, outcomes, legacy
+):
+    """A key holding text ``compare_digest`` cannot compare as text: the check, the
+    Stop delivery, the start line and a record all go ahead, and the two keys are still
+    told apart -- or told to be one -- on their bytes."""
+    settings.MINOTAUR_OUTCOMES_KEY = outcomes
+    settings.MINOTAUR_RUNNER_KEY = legacy
+
+    found = closure_forward.credential()
+    assert (found.problem != "") == (outcomes == legacy)
+    call_command("check", stdout=io.StringIO(), stderr=io.StringIO())
+    call_command("deliver_owed_stops", skip_checks=False, stdout=io.StringIO(), stderr=io.StringIO())
+    assert owed_stops
+    with caplog.at_level(logging.WARNING, logger="assurance.closure_forward"):
+        closure_forward.say_credential()
+    assert not [r for r in caplog.records if "could not be read" in r.getMessage()]
+    finding = _finding()
+    answer = _record_and_commit(finding, _document(finding), django_capture_on_commit_callbacks)
+    assert answer.status_code == 201, answer.content
+    assert answer.json()["dataset_forward"] == ("off" if outcomes == legacy else "queued")
+
+
+def test_a_setting_that_cannot_be_read_never_fails_the_record(
+    minotaur, settings, monkeypatch, caplog, django_capture_on_commit_callbacks
+):
+    """Whatever reading the credential raises, the record is kept (201) and forwarding
+    is off: nothing about the forward can roll back the store's transaction."""
+    settings.MINOTAUR_OUTCOMES_KEY = OUTCOMES_KEY
+
+    def unreadable():
+        raise RuntimeError("the settings could not be read")
+
+    monkeypatch.setattr(closure_forward, "credential", unreadable)
+    finding = _finding()
+    with caplog.at_level(logging.ERROR, logger="assurance.closure_forward"):
+        answer = _record_and_commit(finding, _document(finding), django_capture_on_commit_callbacks)
+    assert answer.status_code == 201, answer.content
+    assert answer.json()["dataset_forward"] == "off"
+    assert ClosureEvidenceForward.objects.count() == 0
+    assert any("forwarding is off" in r.getMessage() for r in caplog.records)
+    [(level, ident, message)] = _problems()
+    assert (level, ident) == (django_checks.WARNING, "assurance.W305") and "could not be read" in message
+
+
+def test_each_process_says_its_credential_at_start(minotaur, settings, monkeypatch, caplog):
+    """`AssuranceConfig.ready` says the credential: with the legacy runner key alone,
+    the start logs that role separation is not in force -- never the key."""
+    from assurance import observability
+
+    settings.MINOTAUR_RUNNER_KEY = RUNNER_KEY
+    monkeypatch.setattr(observability, "configure", lambda *a, **k: False)
+    with caplog.at_level(logging.WARNING, logger="assurance.closure_forward"):
+        apps.get_app_config("assurance").ready()
+    said = [r.getMessage() for r in caplog.records if "ROLE SEPARATION" in r.getMessage()]
+    assert said and "not in force" in said[0]
+    assert all(RUNNER_KEY not in line for line in said)
+
+
+@pytest.mark.parametrize("setting, key", [("MINOTAUR_OUTCOMES_KEY", OUTCOMES_KEY), ("MINOTAUR_RUNNER_KEY", RUNNER_KEY)])
+def test_the_retry_command_never_prints_the_key(minotaur, settings, django_capture_on_commit_callbacks, setting, key):
+    setattr(settings, setting, key)
+    finding = _finding()
+    _record_and_commit(finding, _document(finding), django_capture_on_commit_callbacks)
+    minotaur.spawned.clear()
+    ClosureEvidenceForward.objects.update(status=ClosureEvidenceForward.Status.FAILED)
+    out, err = io.StringIO(), io.StringIO()
+    call_command("retry_closure_forwards", stdout=out, stderr=err)
+    printed = out.getvalue() + err.getvalue()
+    assert "closure forward credential:" in printed and key not in printed
+    assert _sent_keys(minotaur) == [key]
