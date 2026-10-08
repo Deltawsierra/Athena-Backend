@@ -68,15 +68,6 @@ OTHER_TOKEN_ENVS: tuple[str, ...] = (
     "ASSURANCE_AUTHENTICATION_EVIDENCE_TOKEN",
     "ASSURANCE_DELEGATION_EVIDENCE_TOKEN",
 )
-#: And every one it reads from its settings: the closure-evidence service's, and the
-#: failsafe's -- the stop service token (``safety.service_token``) and the poll token
-#: (``failsafe.views``). A read credential that could also stop the platform, or poll
-#: its commands, is not one that only reads.
-OTHER_TOKEN_SETTINGS: tuple[str, ...] = (
-    "CLOSURE_EVIDENCE_SERVICE_TOKEN",
-    "FAILSAFE_SERVICE_TOKEN",
-    "FAILSAFE_POLL_TOKEN",
-)
 NO_APPROVAL_IN_FORCE = "no_approval_in_force"
 HISTORY_NOT_LEVEL = "approval_history_not_level"
 
@@ -88,10 +79,17 @@ def _hmac(value) -> bytes:
 
 
 def _others() -> list[str]:
+    """Every other service credential this backend holds: :data:`OTHER_TOKEN_ENVS`, and
+    the ones it reads from its settings -- the closure-evidence service's, and the
+    failsafe's stop service token (``safety.service_token``) and poll token
+    (``failsafe.views``). A read credential that could also stop the platform, or poll
+    its commands, is not one that only reads. Each setting is read by its literal name."""
     values = [os.environ.get(name) or "" for name in OTHER_TOKEN_ENVS]
     from django.conf import settings
 
-    values.extend(str(getattr(settings, name, "") or "") for name in OTHER_TOKEN_SETTINGS)
+    values.append(str(getattr(settings, "CLOSURE_EVIDENCE_SERVICE_TOKEN", "") or ""))
+    values.append(str(getattr(settings, "FAILSAFE_SERVICE_TOKEN", "") or ""))
+    values.append(str(getattr(settings, "FAILSAFE_POLL_TOKEN", "") or ""))
     return [v for v in values if v]
 
 
