@@ -616,7 +616,7 @@ def test_removing_an_operator_is_never_held_back_by_economics_rows(deployment, p
 # ===================================================== phase E1: observations
 
 #: The committed snapshot's hash (tests/test_economics_money.py pins it too).
-SYNTHETIC_HASH = "sha256:20fea6b1b1ed1939a5fd71b2f084d32e141afa585d64203fa5c96dd8f1594a19"
+SYNTHETIC_HASH = "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f"
 US_CPI = IndexSelector("SYN-CPI-US", "US", "consumer prices, all items (SYNTHETIC)", "2020-03=100", "USD")
 
 
@@ -626,11 +626,11 @@ def test_the_synthetic_snapshot_is_registered_open_and_unverified():
     assert (source.license_class, source.trust_tier) == ("open", "unverified")
     assert source.snapshot_hash == SYNTHETIC_HASH
     assert source.dataset.startswith("SYNTHETIC TEST DATA")
-    assert source.fx_observations.count() == 17 and source.cost_index_observations.count() == 7
+    assert source.fx_observations.count() == 18 and source.cost_index_observations.count() == 7
     assert set(source.fx_observations.values_list("source_snapshot_hash", flat=True)) == {SYNTHETIC_HASH}
     # Registering the same bytes again writes nothing.
     assert snapshots.register_snapshot().pk == source.pk
-    assert FinancialSource.objects.count() == 1 and FXObservation.objects.count() == 17
+    assert FinancialSource.objects.count() == 1 and FXObservation.objects.count() == 18
 
 
 def test_stored_observations_read_back_exactly_and_normalize_the_same():
@@ -647,7 +647,7 @@ def test_stored_observations_read_back_exactly_and_normalize_the_same():
         p.value for p in snap.index_points
     )
     policy = NormalizationPolicy("USD", "EUR", FXPolicy(("SYNTHETIC-REF",)), US_CPI)
-    args = {"event_date": date(2020, 3, 2), "valuation_date": date(2026, 10, 8), "policy": policy}
+    args = {"event_date": date(2020, 3, 2), "valuation_date": date(2026, 9, 30), "policy": policy}
     from_file = normalize(Money.parse("1000.00", "EUR"), fx_book=snap.fx_book(), index_book=snap.index_book(), **args)
     from_rows = normalize(
         Money.parse("1000.00", "EUR"),
@@ -704,6 +704,9 @@ def test_an_fx_observation_the_engine_refuses_is_refused(over, code):
         ({"value": Decimal("124.5000001")}, "value_precision"),
         ({"period": "2026-9"}, "period_malformed"),
         ({"vintage_date": date(2026, 8, 31)}, "date_inversion"),
+        # Review round 1, L2: inside its own month, before the month ended.
+        ({"vintage_date": date(2026, 9, 15)}, "date_inversion"),
+        ({"vintage_date": date(2026, 9, 29)}, "date_inversion"),
         ({"series_id": ""}, "required_field_blank"),
     ],
 )
@@ -719,7 +722,7 @@ def test_a_series_stays_one_geography_and_category_in_a_source():
     source = _source()
     _index(source)
     with pytest.raises(EconomicsRefused) as refused:
-        _index(source, period="2026-10", geography="EA")
+        _index(source, period="2026-10", vintage_date=date(2026, 11, 13), geography="EA")
     assert refused.value.code == "index_series_mismatch"
     with pytest.raises(IntegrityError), transaction.atomic():
         _index(source, value=Decimal("124.600"))  # same series, period and vintage
@@ -748,10 +751,10 @@ def test_the_database_refuses_a_bad_rate_written_past_save():
 def test_a_tenants_snapshot_goes_with_its_deployment(deployment):
     snapshots.register_snapshot(deployment=deployment)
     platform = snapshots.register_snapshot()
-    assert FinancialSource.objects.count() == 2 and FXObservation.objects.count() == 34
+    assert FinancialSource.objects.count() == 2 and FXObservation.objects.count() == 36
     deployment.delete()
     assert list(FinancialSource.objects.all()) == [platform]
-    assert FXObservation.objects.count() == 17 and CostIndexObservation.objects.count() == 7
+    assert FXObservation.objects.count() == 18 and CostIndexObservation.objects.count() == 7
     assert set(FXObservation.objects.values_list("source_id", flat=True)) == {platform.pk}
 
 
@@ -769,7 +772,7 @@ def test_removing_an_operator_who_registered_a_snapshot_is_never_held_back(peopl
     assert response.status_code == 204, response.content
     stored = FinancialSource.objects.get(pk=source.pk)
     assert (stored.recorded_by_id, stored.recorded_by_username) == (None, "leaver")
-    assert stored.fx_observations.count() == 17
+    assert stored.fx_observations.count() == 18
 
 
 # ===================================================================== review round 1 (E1)

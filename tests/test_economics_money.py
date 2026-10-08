@@ -44,14 +44,14 @@ SPEC = REPO / "docs" / "economics" / "spec-v1.md"
 #: The committed snapshot's hash: SHA-256 of its bytes. Registered as the
 #: FinancialSource's snapshot_hash, and named in the spec. An edit to the file moves
 #: it: change it here and in the spec, in the same reviewed change.
-SNAPSHOT_HASH = "sha256:20fea6b1b1ed1939a5fd71b2f084d32e141afa585d64203fa5c96dd8f1594a19"
+SNAPSHOT_HASH = "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f"
 
 REF, MKT = "SYNTHETIC-REF", "SYNTHETIC-MKT"
 CPI = "consumer prices, all items (SYNTHETIC)"
 BASE = "2020-03=100"
 US_CPI = IndexSelector("SYN-CPI-US", "US", CPI, BASE, "USD")
 EA_HICP = IndexSelector("SYN-HICP-EA", "EA", CPI, BASE, "EUR")
-EVENT, VALUATION = date(2020, 3, 2), date(2026, 10, 8)
+EVENT, VALUATION = date(2020, 3, 2), date(2026, 9, 30)
 HASH = "sha256:" + "ab" * 32
 OBSERVED = datetime(2020, 3, 2, 15, tzinfo=UTC)
 
@@ -412,7 +412,7 @@ def test_interpolation_only_where_the_policy_says_so_and_then_an_estimate(fx_boo
     # Too wide a gap is still unavailable, and nothing is extrapolated past the last rate.
     narrow = FXPolicy((REF,), missing_rate="interpolate", max_interpolation_gap_days=1)
     assert isinstance(fx.convert(eur("1"), "USD", date(2020, 3, 4), fx_book, narrow), Unavailable)
-    assert isinstance(fx.convert(eur("1"), "USD", date(2026, 10, 9), fx_book, rules), Unavailable)
+    assert isinstance(fx.convert(eur("1"), "USD", date(2026, 10, 1), fx_book, rules), Unavailable)
 
 
 def test_providers_are_tried_in_the_policys_order(fx_book):
@@ -420,7 +420,7 @@ def test_providers_are_tried_in_the_policys_order(fx_book):
     unavailable. SYNTHETIC-REF has no rate on 2020-03-04; SYNTHETIC-MKT has a mid."""
     step = fx.convert(eur("100"), "USD", date(2020, 3, 4), fx_book, FXPolicy((REF, MKT)))
     assert (step.provider, step.rate_type, step.quoted_rate, step.estimate) == (MKT, "mid", Decimal("1.1260"), False)
-    # Both have 2026-10-08: the first named wins.
+    # Both have 2026-09-30: the first named wins.
     assert fx.convert(eur("1"), "USD", VALUATION, fx_book, FXPolicy((REF, MKT))).provider == REF
     assert fx.convert(eur("1"), "USD", VALUATION, fx_book, FXPolicy((MKT, REF))).provider == MKT
     bid = fx.convert(eur("1"), "USD", VALUATION, fx_book, FXPolicy((MKT,), rate_types=("bid",)))
@@ -461,7 +461,7 @@ def test_no_triangulation(fx_book):
 
 
 def test_a_historical_cost_is_converted_at_the_event_date_and_indexed_to_the_valuation_date(fx_book, index_book):
-    """EUR 1,000 on 2020-03-02, base USD, reported in EUR on 2026-10-08:
+    """EUR 1,000 on 2020-03-02, base USD, reported in EUR on 2026-09-30:
     1,000 x 1.1000 = USD 1,100 at the event date; x 125/100 = USD 1,375 at the
     valuation date's prices; / 1.0500 = EUR 1,309.52 at the valuation date's rate."""
     result = normalize(
@@ -477,7 +477,7 @@ def test_a_historical_cost_is_converted_at_the_event_date_and_indexed_to_the_val
     assert [s.step for s in result.chain] == list(normalization.ORDER) == ["event_fx", "cost_index", "valuation_fx"]
     assert (event_fx.requested_date, event_fx.output) == (EVENT, usd("1100"))
     assert (indexed.ratio, indexed.output) == (Decimal("1.25"), usd("1375"))
-    assert (indexed.from_point.period, indexed.to_point.period) == ("2020-03", "2026-10")
+    assert (indexed.from_point.period, indexed.to_point.period) == ("2020-03", "2026-09")
     assert valuation_fx.requested_date == VALUATION and valuation_fx.direction == "inverted"
     assert result.value.amount == compute(lambda: Decimal(1375) / Decimal("1.05"))
     assert result.display() == "1309.52 EUR"
@@ -508,19 +508,20 @@ def test_swapping_the_steps_gives_a_different_wrong_answer(fx_book, index_book):
 
 
 def test_the_index_reads_the_latest_vintage_published_by_the_as_of_date(index_book):
-    assert index_book.value(US_CPI, "2026-09", date(2026, 10, 5)).value == Decimal("124.500")
-    assert index_book.value(US_CPI, "2026-09", date(2026, 10, 6)).value == Decimal("124.600")
-    assert index_book.value(US_CPI, "2026-09", date(2026, 9, 30)) is None
-    step = cost_index.index(usd("100"), EVENT, date(2026, 9, 30), index_book, US_CPI, as_of=date(2026, 10, 5))
-    assert step.to_point.vintage_date == date(2026, 10, 1)
+    assert index_book.value(US_CPI, "2026-09", date(2026, 9, 30)).value == Decimal("125.000")
+    assert index_book.value(US_CPI, "2026-09", date(2026, 10, 7)).value == Decimal("125.500")
+    assert index_book.value(US_CPI, "2026-09", date(2026, 9, 29)) is None
+    step = cost_index.index(usd("100"), EVENT, VALUATION, index_book, US_CPI, as_of=date(2026, 10, 7))
+    assert step.to_point.vintage_date == date(2026, 10, 7) and step.ratio == Decimal("1.255")
 
 
 def test_a_missing_index_is_unavailable_unless_a_lag_is_allowed(index_book):
     november = date(2026, 11, 15)
-    step = cost_index.index(usd("100"), EVENT, november, index_book, US_CPI)
-    assert isinstance(step, Unavailable) and step.reason == "index_missing"
-    lagged = cost_index.index(usd("100"), EVENT, november, index_book, US_CPI, max_lag_months=1)
-    assert (lagged.rule, lagged.lag_months, lagged.to_point.period) == ("latest_published_period", 1, "2026-10")
+    for lag in (0, 1):  # neither November's nor October's value is in the book
+        step = cost_index.index(usd("100"), EVENT, november, index_book, US_CPI, max_lag_months=lag)
+        assert isinstance(step, Unavailable) and step.reason == "index_missing"
+    lagged = cost_index.index(usd("100"), EVENT, november, index_book, US_CPI, max_lag_months=2)
+    assert (lagged.rule, lagged.lag_months, lagged.to_point.period) == ("latest_published_period", 2, "2026-09")
     assert lagged.stale and lagged.downgrades == (cost_index.STALE_INDEX,)
     # The event month's value is that month's or nothing.
     before = cost_index.index(usd("100"), date(2019, 12, 2), VALUATION, index_book, US_CPI, max_lag_months=6)
@@ -552,7 +553,7 @@ AMOUNTS = [
     "native_code, rules",
     [
         ("EUR", policy()),
-        ("EUR", policy(reporting="JPY")),
+        ("EUR", policy(reporting="JPY", missing_rate="interpolate")),
         ("EUR", policy(reporting="KWD")),
         ("JPY", policy()),
         ("KWD", policy(reporting="USD")),
@@ -657,7 +658,7 @@ def test_date_inversion_is_refused(fx_book, index_book):
     # inversion, never reported as an unavailable rate.
     with refused("date_inversion"):
         normalize(
-            eur("1"), event_date=date(2026, 10, 9), valuation_date=VALUATION, policy=policy(), fx_book=fx_book,
+            eur("1"), event_date=date(2026, 10, 1), valuation_date=VALUATION, policy=policy(), fx_book=fx_book,
             index_book=index_book,
         )
     with refused("date_inversion"):
@@ -665,6 +666,19 @@ def test_date_inversion_is_refused(fx_book, index_book):
     # A value published before its period began.
     with refused("date_inversion"):
         point(period="2020-03", vintage=date(2020, 2, 28))
+
+
+def test_r1_l2_a_months_index_is_never_published_before_the_month_ends():
+    """Review round 1, L2: a vintage inside its own month let a valuation read that
+    month's prices before the month was over. The earliest a monthly value is
+    published is the month's last day."""
+    for vintage in (date(2020, 3, 1), date(2020, 3, 15), date(2020, 3, 30)):
+        with refused("date_inversion"):
+            point(period="2020-03", vintage=vintage)
+    assert point(period="2020-03", vintage=date(2020, 3, 31)).vintage_date == date(2020, 3, 31)
+    assert point(period="2020-02", vintage=date(2020, 2, 29)).period == "2020-02"  # a leap year's February
+    assert point(period="2020-12", vintage=date(2020, 12, 31)).period == "2020-12"
+    assert cost_index.period_end("2026-09") == date(2026, 9, 30)
 
 
 def test_dates_are_dates_and_instants_are_aware():
@@ -737,7 +751,7 @@ def test_the_chain_records_every_rate_and_index_with_its_provenance(fx_book, ind
     assert record["display"] == "1309.52 EUR"
     assert record["arithmetic"] == "Decimal, 60 significant digits, ROUND_HALF_EVEN"
     event_fx, indexed, valuation_fx = record["chain"]
-    for step, day, direction in ((event_fx, "2020-03-02", "direct"), (valuation_fx, "2026-10-08", "inverted")):
+    for step, day, direction in ((event_fx, "2020-03-02", "direct"), (valuation_fx, "2026-09-30", "inverted")):
         assert (step["rule"], step["rate_date"], step["direction"], step["rate_type"]) == (
             "exact", day, direction, "reference"
         )
@@ -746,8 +760,8 @@ def test_the_chain_records_every_rate_and_index_with_its_provenance(fx_book, ind
         assert observation["source_snapshot_hash"] == SNAPSHOT_HASH
         assert observation["source_key"] == "synthetic-fx-and-cost-index"
     assert valuation_fx["quoted_rate"] == "1.05" and valuation_fx["factor"].startswith("0.952380952380")
-    assert (indexed["ratio"], indexed["from_period"], indexed["period_used"]) == ("1.25", "2020-03", "2026-10")
-    assert [o["vintage_date"] for o in indexed["observations"]] == ["2020-04-10", "2026-10-08"]
+    assert (indexed["ratio"], indexed["from_period"], indexed["period_used"]) == ("1.25", "2020-03", "2026-09")
+    assert [o["vintage_date"] for o in indexed["observations"]] == ["2020-04-10", "2026-09-30"]
     assert {o["source_snapshot_hash"] for o in indexed["observations"]} == {SNAPSHOT_HASH}
     assert event_fx["output"] == indexed["input"] and indexed["output"] == valuation_fx["input"]
     assert valuation_fx["output"] == record["value"]

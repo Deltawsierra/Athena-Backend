@@ -482,7 +482,7 @@ publish keeps its meaning.
 | `index_series_mismatch` | a series with two geographies, categories or bases, or a selector naming the wrong ones |
 | `period_malformed` | a period that is not `YYYY-MM` |
 | `date_malformed` | a date that is a datetime or text, an instant without a time zone |
-| `date_inversion` | an event after its valuation date; indexing from a later date to an earlier; an index value published before its period began |
+| `date_inversion` | an event after its valuation date; indexing from a later date to an earlier; an index value published before its period ended (a month's value is known on its last day at the earliest) |
 | `observation_duplicate` | a second rate for one provider, rate type, pair and date, or a second value for one series, period and vintage |
 | `snapshot_hash_malformed` | a snapshot hash not `sha256:` and 64 lowercase hex |
 | `snapshot_hash_mismatch` | an FX observation whose snapshot hash is not its source version's |
@@ -565,7 +565,12 @@ the input times that recorded ratio, so each step of the chain reproduces from
 what it lists (an FX step likewise: input times factor).
 An amount in another currency than the series' is refused (`currency_mismatch`).
 Each month's value is the latest vintage published on or before the as-of date
-(the valuation date), and the step records which. The event month's value is that
+(the valuation date), and the step records which; nothing published after it is
+read. A month's value is published no earlier than the month's last day: a vintage
+dated inside its own month is refused (`date_inversion`), so no valuation reads
+prices from its own future. The valuation month's value is therefore available
+only from its last day; before that, a policy that allows a lag reads the latest
+published month, flagged stale. The event month's value is that
 month's or `unavailable`. The valuation month's may be the latest published month
 within `index_max_lag_months` of it (default 0): the rule is then
 `latest_published_period` rather than `exact_period`, the lag is recorded, and the
@@ -587,9 +592,10 @@ the `FXPolicy`, the base currency's `IndexSelector` (another currency's is
 `currency_mismatch`) and the index lag.
 
 Worked, on the synthetic snapshot: EUR 1,000.00 on 2020-03-02, base USD, reported
-in EUR on 2026-10-08. 1,000 x 1.1000 = USD 1,100 at the event date's rate;
-x 125.000 / 100.000 = USD 1,375 at the valuation date's prices; / 1.0500 (an
-EUR/USD rate, inverted) = EUR 1,309.52.
+in EUR on 2026-09-30. 1,000 x 1.1000 = USD 1,100 at the event date's rate;
+x 125.000 / 100.000 (September 2026's value, published on 2026-09-30, the last
+day of the month and the valuation date) = USD 1,375 at the valuation date's
+prices; / 1.0500 (an EUR/USD rate, inverted) = EUR 1,309.52.
 
 Swapping the steps gives a different, wrong answer. Indexing first applies the
 base currency's inflation to an amount in another currency and then prices a
@@ -631,7 +637,7 @@ and the same rate read back from its column are written alike. Abridged:
 ```json
 {"status": "normalized",
  "native": {"amount": "1000", "currency": "EUR"},
- "event_date": "2020-03-02", "valuation_date": "2026-10-08",
+ "event_date": "2020-03-02", "valuation_date": "2026-09-30",
  "base_currency": "USD", "reporting_currency": "EUR",
  "order": ["event_fx", "cost_index", "valuation_fx"],
  "value": {"amount": "1309.52380952380952380952380952380952380952380952380952380952", "currency": "EUR"},
@@ -648,16 +654,16 @@ and the same rate read back from its column are written alike. Abridged:
    "observations": [{"provider": "SYNTHETIC-REF", "base": "EUR", "quote": "USD", "rate": "1.1",
                      "rate_type": "reference", "effective_date": "2020-03-02",
                      "observed_at": "2020-03-02T15:00:00+00:00",
-                     "source_snapshot_hash": "sha256:20fe...4a19",
+                     "source_snapshot_hash": "sha256:e719...8b90f",
                      "source_key": "synthetic-fx-and-cost-index", "source_version": 1}],
    "input": {"amount": "1000", "currency": "EUR"}, "output": {"amount": "1100", "currency": "USD"}},
   {"step": "cost_index", "series_id": "SYN-CPI-US", "geography": "US", "category": "...", "currency": "USD",
-   "from_date": "2020-03-02", "to_date": "2026-10-08", "from_period": "2020-03", "to_period": "2026-10",
-   "period_used": "2026-10", "as_of": "2026-10-08", "rule": "exact_period", "lag_months": 0,
+   "from_date": "2020-03-02", "to_date": "2026-09-30", "from_period": "2020-03", "to_period": "2026-09",
+   "period_used": "2026-09", "as_of": "2026-09-30", "rule": "exact_period", "lag_months": 0,
    "ratio": "1.25", "stale": false, "estimate": false, "downgrades": [],
    "observations": [{"series_id": "SYN-CPI-US", "period": "2020-03", "value": "100", "vintage_date": "2020-04-10",
-                     "source_snapshot_hash": "sha256:20fe...4a19", "...": "..."},
-                    {"series_id": "SYN-CPI-US", "period": "2026-10", "value": "125", "vintage_date": "2026-10-08",
+                     "source_snapshot_hash": "sha256:e719...8b90f", "...": "..."},
+                    {"series_id": "SYN-CPI-US", "period": "2026-09", "value": "125", "vintage_date": "2026-09-30",
                      "...": "..."}],
    "input": {"amount": "1100", "currency": "USD"}, "output": {"amount": "1375", "currency": "USD"}},
   {"step": "valuation_fx", "from": "USD", "to": "EUR", "rule": "exact", "direction": "inverted",
@@ -705,17 +711,20 @@ real price index. Every number in it was made up for tests, and none is a source
 for a customer figure. It says so in its `label`, in its source's `dataset`, in
 its providers' names (`SYNTHETIC-REF`, a reference publisher; `SYNTHETIC-MKT`, a
 market with bid, mid and ask) and in its series' category. Its hash is
-`sha256:20fea6b1b1ed1939a5fd71b2f084d32e141afa585d64203fa5c96dd8f1594a19`, pinned
+`sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f`, pinned
 by `tests/test_economics_money.py` and `tests/test_economics_records.py`, and it is
 registered as a `FinancialSource` (`source_key` `synthetic-fx-and-cost-index`,
 platform-wide) with licence class `open` and trust tier `unverified`: the data is
 Mythos's own to redistribute, and made-up numbers are never trusted above
 unverified (the snapshot parser refuses a synthetic snapshot that claims more).
 
-It holds 17 FX observations (EUR/USD, USD/JPY and USD/KWD on dates around
-2020-03-02, Easter 2020 and 2026-10-08, a missing Wednesday on 2020-03-04, and the
+It holds 18 FX observations (EUR/USD, USD/JPY and USD/KWD on dates around
+2020-03-02, Easter 2020 and 2026-09-30, a missing EUR/USD Wednesday on
+2020-03-04, a missing USD/JPY day on 2026-09-30 between its neighbours, and the
 market's rates), a calendar with SYNTHETIC-REF's two Easter holidays, and 7 index
-values (`SYN-CPI-US` with a revised vintage for 2026-09, and `SYN-HICP-EA`).
+values on the base `2020-03=100` (`SYN-CPI-US`, with a revised vintage for
+2026-09 published after the valuation date, and `SYN-HICP-EA`). Every index
+vintage is dated no earlier than the last day of its month.
 
 The document (schema `mythos.economics.observation-snapshot/v1`, `engine/snapshot.py`)
 has exactly `schema`, `label`, `synthetic`, `source`, `calendars`, `fx` and

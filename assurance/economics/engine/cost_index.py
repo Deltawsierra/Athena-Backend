@@ -23,7 +23,8 @@ input times the recorded ratio is the recorded output
   any other currency is never indexed by it (``currency_mismatch``).
 - **Vintages.** Each period's value is the latest vintage published on or before
   the as-of date (the valuation date unless the policy says otherwise), and the
-  step records which.
+  step records which. A month's value is published no earlier than the month's
+  last day (``date_inversion``), so no valuation reads a value from its future.
 - **A missing value is unavailable.** The event period's value is that month's or
   nothing. The valuation period's may be the latest published month within
   ``max_lag_months`` of it, when the policy allows a lag: the step records the
@@ -38,7 +39,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 
@@ -80,6 +81,13 @@ def period_start(period: str) -> date:
     return date(int(year), int(month), 1)
 
 
+def period_end(period: str) -> date:
+    """The last day of ``period``."""
+    start = period_start(period)
+    following = date(start.year + 1, 1, 1) if start.month == 12 else date(start.year, start.month + 1, 1)
+    return following - timedelta(days=1)
+
+
 def shift_period(period: str, months: int) -> str:
     """The period ``months`` before ``period`` (``months`` >= 0)."""
     start = period_start(period)
@@ -111,10 +119,13 @@ class IndexPoint:
         if self.value <= 0:
             raise MoneyRefused("index_value_not_positive", f"{self.series_id} {self.period} {self.value}")
         check_date(self.vintage_date, "vintage_date")
-        if self.vintage_date < period_start(self.period):
+        # A month's value is known only once the month is over: a vintage dated
+        # before the period's last day would let a valuation read prices from its
+        # own future.
+        if self.vintage_date < period_end(self.period):
             raise MoneyRefused(
                 "date_inversion",
-                f"{self.series_id} {self.period} published on {self.vintage_date}, before the period began",
+                f"{self.series_id} {self.period} published on {self.vintage_date}, before the period ended",
             )
         check_snapshot_hash(self.source_snapshot_hash)
 

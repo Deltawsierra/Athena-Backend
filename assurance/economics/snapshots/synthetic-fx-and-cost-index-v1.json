@@ -93,8 +93,8 @@
       "rate": "1.0480",
       "rate_type": "reference",
       "provider": "SYNTHETIC-REF",
-      "observed_at": "2026-10-07T15:00:00+00:00",
-      "effective_date": "2026-10-07"
+      "observed_at": "2026-09-29T15:00:00+00:00",
+      "effective_date": "2026-09-29"
     },
     {
       "base": "EUR",
@@ -102,8 +102,8 @@
       "rate": "1.0500",
       "rate_type": "reference",
       "provider": "SYNTHETIC-REF",
-      "observed_at": "2026-10-08T15:00:00+00:00",
-      "effective_date": "2026-10-08"
+      "observed_at": "2026-09-30T15:00:00+00:00",
+      "effective_date": "2026-09-30"
     },
     {
       "base": "USD",
@@ -117,11 +117,20 @@
     {
       "base": "USD",
       "quote": "JPY",
-      "rate": "148.00",
+      "rate": "147.00",
       "rate_type": "reference",
       "provider": "SYNTHETIC-REF",
-      "observed_at": "2026-10-08T15:00:00+00:00",
-      "effective_date": "2026-10-08"
+      "observed_at": "2026-09-29T15:00:00+00:00",
+      "effective_date": "2026-09-29"
+    },
+    {
+      "base": "USD",
+      "quote": "JPY",
+      "rate": "149.00",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2026-10-01T15:00:00+00:00",
+      "effective_date": "2026-10-01"
     },
     {
       "base": "USD",
@@ -138,8 +147,8 @@
       "rate": "0.3075",
       "rate_type": "reference",
       "provider": "SYNTHETIC-REF",
-      "observed_at": "2026-10-08T15:00:00+00:00",
-      "effective_date": "2026-10-08"
+      "observed_at": "2026-09-30T15:00:00+00:00",
+      "effective_date": "2026-09-30"
     },
     {
       "base": "EUR",
@@ -156,8 +165,8 @@
       "rate": "1.0495",
       "rate_type": "bid",
       "provider": "SYNTHETIC-MKT",
-      "observed_at": "2026-10-08T21:00:00+00:00",
-      "effective_date": "2026-10-08"
+      "observed_at": "2026-09-30T21:00:00+00:00",
+      "effective_date": "2026-09-30"
     },
     {
       "base": "EUR",
@@ -165,8 +174,8 @@
       "rate": "1.0500",
       "rate_type": "mid",
       "provider": "SYNTHETIC-MKT",
-      "observed_at": "2026-10-08T21:00:00+00:00",
-      "effective_date": "2026-10-08"
+      "observed_at": "2026-09-30T21:00:00+00:00",
+      "effective_date": "2026-09-30"
     },
     {
       "base": "EUR",
@@ -174,8 +183,8 @@
       "rate": "1.0505",
       "rate_type": "ask",
       "provider": "SYNTHETIC-MKT",
-      "observed_at": "2026-10-08T21:00:00+00:00",
-      "effective_date": "2026-10-08"
+      "observed_at": "2026-09-30T21:00:00+00:00",
+      "effective_date": "2026-09-30"
     }
   ],
   "cost_index": [
@@ -202,9 +211,9 @@
       "geography": "US",
       "category": "consumer prices, all items (SYNTHETIC)",
       "base": "2020-03=100",
-      "period": "2026-09",
-      "value": "124.500",
-      "vintage_date": "2026-10-01"
+      "period": "2026-08",
+      "value": "124.000",
+      "vintage_date": "2026-09-11"
     },
     {
       "series_id": "SYN-CPI-US",
@@ -212,17 +221,17 @@
       "category": "consumer prices, all items (SYNTHETIC)",
       "base": "2020-03=100",
       "period": "2026-09",
-      "value": "124.600",
-      "vintage_date": "2026-10-06"
-    },
-    {
-      "series_id": "SYN-CPI-US",
-      "geography": "US",
-      "category": "consumer prices, all items (SYNTHETIC)",
-      "base": "2020-03=100",
-      "period": "2026-10",
       "value": "125.000",
-      "vintage_date": "2026-10-08"
+      "vintage_date": "2026-09-30"
+    },
+    {
+      "series_id": "SYN-CPI-US",
+      "geography": "US",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2026-09",
+      "value": "125.500",
+      "vintage_date": "2026-10-07"
     },
     {
       "series_id": "SYN-HICP-EA",
@@ -238,9 +247,9 @@
       "geography": "EA",
       "category": "consumer prices, all items (SYNTHETIC)",
       "base": "2020-03=100",
-      "period": "2026-10",
+      "period": "2026-09",
       "value": "118.000",
-      "vintage_date": "2026-10-08"
+      "vintage_date": "2026-09-30"
     }
   ]
 }

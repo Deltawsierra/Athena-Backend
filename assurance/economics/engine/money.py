@@ -91,7 +91,7 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "date_malformed": "a date is a calendar date, and an instant a timezone-aware date and time",
         "date_inversion": (
             "a later date given as an earlier one: an event after its valuation date, or an index value "
-            "published before its period began"
+            "published before its period ended"
         ),
         "observation_duplicate": (
             "two observations of the same provider, pair, rate type and date, or of the same series, period and "
