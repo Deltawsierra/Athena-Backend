@@ -440,6 +440,46 @@ def test_interpolation_only_where_the_policy_says_so_and_then_an_estimate(fx_boo
     assert isinstance(fx.convert(eur("1"), "USD", date(2026, 10, 1), fx_book, rules), Unavailable)
 
 
+def test_r1_l8_the_valuation_step_can_be_an_interpolated_estimate(fx_book, index_book):
+    """Review round 1, L8: only the event-date step was ever interpolated in a test.
+    USD/JPY has no rate on 2026-09-30, between 147.00 the day before and 149.00 the
+    day after: reported in JPY, the valuation step is an estimate, and the whole
+    normalization says so and carries the downgrade."""
+    args = {"event_date": EVENT, "valuation_date": VALUATION, "fx_book": fx_book, "index_book": index_book}
+    strict = normalize(eur("1000"), policy=policy(reporting="JPY"), **args)
+    assert (strict.status, strict.value) == ("unavailable", None)
+    assert strict.unavailable.step == "valuation_fx" and [s.step for s in strict.chain] == ["event_fx", "cost_index"]
+    estimated = normalize(eur("1000"), policy=policy(reporting="JPY", missing_rate="interpolate"), **args)
+    event_fx, indexed, valuation_fx = estimated.chain
+    assert not event_fx.estimate and not indexed.estimate
+    assert (valuation_fx.rule, valuation_fx.quoted_rate, valuation_fx.interpolation_weight) == (
+        "linear_interpolation", Decimal("148.00"), Decimal("0.5")
+    )
+    assert estimated.status == "normalized" and estimated.estimate and not estimated.stale
+    assert estimated.confidence_downgrades == ("estimated_rate",)
+    assert estimated.graded(ConfidenceGrade.A) is ConfidenceGrade.B
+    assert estimated.display() == "203500 JPY"  # 1,375 x 148.00
+    record = estimated.as_dict()
+    assert record["estimate"] is True and record["chain"][2]["estimate"] is True
+    assert record["confidence_downgrades"] == ["estimated_rate"]
+
+
+def test_r1_l8_the_weekend_and_holiday_walk_stops_at_its_bound():
+    """Review round 1, L8: the last official rate walks back over at most
+    MAX_NON_PUBLICATION_RUN (31) days a provider does not publish; one day past it
+    is ``rate_missing``, never a rate from further back."""
+    assert fx.MAX_NON_PUBLICATION_RUN == 31
+    start = date(2020, 1, 2)
+    closed = [start + timedelta(days=n) for n in range(1, 60)]
+    book = FXBook([rate(effective_date=start)], {REF: closed})
+    rules = FXPolicy((REF,))
+    at_bound = fx.convert(eur("1"), "USD", start + timedelta(days=31), book, rules)
+    assert (at_bound.rule, at_bound.rate_date, at_bound.age_days) == ("last_official_rate", start, 31)
+    assert at_bound.stale and at_bound.downgrades == ("stale_rate",)
+    past = fx.convert(eur("1"), "USD", start + timedelta(days=32), book, rules)
+    assert isinstance(past, Unavailable) and past.reason == "rate_missing"
+
+
 def test_providers_are_tried_in_the_policys_order(fx_book):
     """The hierarchy of section 19: the policy's providers, strongest first, then
     unavailable. SYNTHETIC-REF has no rate on 2020-03-04; SYNTHETIC-MKT has a mid."""
@@ -887,8 +927,18 @@ def test_r1_l4_a_key_twice_in_one_object_is_refused():
 
 
 def test_the_snapshot_hash_moves_with_any_edit():
-    edited = _edited(lambda d: d["fx"][0].update(rate="1.1001"))
+    """Review round 1, L7: this test re-serialised the document to edit it, and
+    re-serialising alone moves the hash, so it passed whatever the hash covered. It
+    edits the bytes now, one digit, with a no-op control beside it."""
+    data = SNAPSHOT_PATH.read_bytes()
+    edited = data.replace(b'"1.1000"', b'"1.1001"', 1)
+    assert edited != data and len(edited) == len(data)
     assert snapshot.parse_snapshot(edited).snapshot_hash != SNAPSHOT_HASH
+    unchanged = data.replace(b'"1.1000"', b'"1.1000"', 1)
+    assert unchanged == data
+    assert snapshot.parse_snapshot(unchanged).snapshot_hash == SNAPSHOT_HASH
+    # Why the old way proved nothing: re-serialising with no edit moves the hash too.
+    assert snapshot.snapshot_hash(_edited(lambda document: None)) != SNAPSHOT_HASH
 
 
 def test_a_rate_is_never_read_as_a_float_from_a_snapshot(snap):
