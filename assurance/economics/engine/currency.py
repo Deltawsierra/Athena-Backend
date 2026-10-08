@@ -10,8 +10,10 @@ its own: every name below is core's object.
 
 What it adds is a pin. Core pins the bytes of its own file; this service pins the
 digest of the ENTRIES it was reviewed against (:data:`PINNED_ENTRIES_SHA256`, the
-value #141's working copy had). A mythos-core bump that adds, drops or changes an
-entry therefore fails here, loudly, until the pin moves in the same reviewed
+value #141's working copy had), and that core's ``REPORTABLE_MINOR_UNITS`` -- the
+codes an amount may be reported in, which this service refuses others against --
+is exactly the set those entries give. A mythos-core bump that adds, drops or
+changes an entry therefore fails here, loudly, until the pin moves in the same reviewed
 change -- never a silent change to how an amount is shown or which codes may be
 reported in. ``tests/test_economics_engine.py`` pins the same value, and core's
 file digest, beside the entries #141 pinned (JPY 0, USD 2, KWD 3, the retired
@@ -69,11 +71,30 @@ class UnknownCurrency(LookupError):
     and ``US$`` are unknown, not USD."""
 
 
-def pin_refusal(currencies: Mapping[str, Currency], pinned: str = PINNED_ENTRIES_SHA256) -> str | None:
-    """``None`` when ``currencies`` hold exactly the entries this service pinned;
-    otherwise why not. Never raises."""
+def reportable_from(currencies: Mapping[str, Currency]) -> dict[str, int]:
+    """The minor unit of every code an amount may be reported in, derived from the
+    entries themselves: active, with a minor unit."""
+    return {
+        code: entry.minor_units
+        for code, entry in currencies.items()
+        if entry.status == ACTIVE and entry.minor_units is not None
+    }
+
+
+def pin_refusal(
+    currencies: Mapping[str, Currency],
+    reportable: Mapping[str, int] | None = None,
+    pinned: str = PINNED_ENTRIES_SHA256,
+) -> str | None:
+    """``None`` when ``currencies`` hold exactly the entries this service pinned and
+    ``reportable`` (core's ``REPORTABLE_MINOR_UNITS`` unless given) is exactly the
+    set those entries give; otherwise why not. Never raises."""
+    if reportable is None:
+        reportable = _core.REPORTABLE_MINOR_UNITS
     try:
         digest = _core.entries_digest(currencies)
+        derived = reportable_from(currencies)
+        given = dict(reportable)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         # A table core cannot even digest is a refusal too, recorded, never raised here.
         return f"mythos-core's currency table could not be read: {type(exc).__name__}: {exc}"
@@ -82,20 +103,29 @@ def pin_refusal(currencies: Mapping[str, Currency], pinned: str = PINNED_ENTRIES
             f"mythos-core's currency entries digest to {digest}, not the {pinned} athena-backend pinned: "
             "a core bump that changes the table moves PINNED_ENTRIES_SHA256 in the same reviewed change"
         )
+    if given != derived:
+        differ = sorted(set(given.items()) ^ set(derived.items()))
+        return (
+            "mythos-core's REPORTABLE_MINOR_UNITS is not the set its own entries give (active, with a minor "
+            f"unit); they differ on {differ[:10]}"
+        )
     return None
 
 
-def check_pinned(currencies: Mapping[str, Currency], pinned: str = PINNED_ENTRIES_SHA256) -> None:
-    """Raise :class:`CurrencyTableInvalid` unless ``currencies`` hold exactly the
-    entries this service pinned."""
-    refusal = pin_refusal(currencies, pinned)
+def check_pinned(
+    currencies: Mapping[str, Currency],
+    reportable: Mapping[str, int] | None = None,
+    pinned: str = PINNED_ENTRIES_SHA256,
+) -> None:
+    """Raise :class:`CurrencyTableInvalid` unless :func:`pin_refusal` finds none."""
+    refusal = pin_refusal(currencies, reportable, pinned)
     if refusal is not None:
         raise CurrencyTableInvalid(refusal)
 
 
 #: Why core's table is not the one pinned, recorded once at import; ``None`` when it
 #: is. Importing never raises on it: :func:`require_pinned` does, on use.
-PIN_REFUSAL: str | None = pin_refusal(_core.CURRENCIES)
+PIN_REFUSAL: str | None = pin_refusal(_core.CURRENCIES, _core.REPORTABLE_MINOR_UNITS)
 
 
 def require_pinned() -> None:

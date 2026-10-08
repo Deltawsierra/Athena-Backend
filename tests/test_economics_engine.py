@@ -304,6 +304,45 @@ def test_a_core_bump_that_changes_the_table_refuses_economics_use_not_import():
     assert result.stdout.split() == ["imported", "True", "refused", "5"], (result.stdout, result.stderr)
 
 
+def test_the_pin_also_holds_cores_reportable_set_to_its_entries():
+    """Review round 1, L3: the codes core says an amount may be reported in are
+    exactly the codes its entries make reportable (active, with a minor unit). A
+    core whose two disagree is refused on use, like a changed entry."""
+    script = textwrap.dedent(
+        """
+        import types
+        import mythos_core.currency as core
+
+        core.REPORTABLE_MINOR_UNITS = types.MappingProxyType({**core.REPORTABLE_MINOR_UNITS, "HRK": 2})
+        from assurance.economics.engine import currency
+        try:
+            currency.reporting_refusal("HRK")
+        except core.CurrencyTableInvalid as refused:
+            print("refused", "REPORTABLE_MINOR_UNITS" in str(refused))
+        else:
+            print("reportable")
+        """
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"}
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.stdout.split() == ["refused", "True"], (result.stdout, result.stderr)
+
+    import mythos_core.currency as core
+
+    assert currency.reportable_from(core.CURRENCIES) == dict(core.REPORTABLE_MINOR_UNITS)
+    currency.check_pinned(core.CURRENCIES, core.REPORTABLE_MINOR_UNITS)
+    for reportable in (
+        {**core.REPORTABLE_MINOR_UNITS, "USD": 3},
+        {**core.REPORTABLE_MINOR_UNITS, "HRK": 2},
+        {code: units for code, units in core.REPORTABLE_MINOR_UNITS.items() if code != "JPY"},
+    ):
+        assert currency.pin_refusal(core.CURRENCIES, reportable) is not None
+        with pytest.raises(currency.CurrencyTableInvalid):
+            currency.check_pinned(core.CURRENCIES, reportable)
+
+
 def test_the_pin_holds_on_the_table_in_force():
     assert currency.PIN_REFUSAL is None
     currency.require_pinned()
