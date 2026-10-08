@@ -297,6 +297,57 @@ def test_a_credentialed_proxy_in_the_environment_is_neither_used_nor_quoted(name
     assert quoted == [], f"{name} quoted the proxy's credentials in {quoted}"
 
 
+def test_withholding_that_fails_says_less_and_never_stops_a_stop(monkeypatch, no_environment_proxy):
+    """The SAFETY RULE, for what this adds to the outbound path: a withholding that
+    raises says less, never more, and never stops a stop. With both halves broken --
+    an error's text and an answer's body -- a failed call says the classes of its
+    exceptions and nothing else, and a scan's Stop still reaches the engine, at
+    once."""
+    from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
+    from safety import outbound
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("withholding broke")
+
+    monkeypatch.setattr(outbound, "withhold", broken)
+    monkeypatch.setattr(outbound, "withheld_body", broken)
+    credential = _canary("stopkey")
+
+    down = _closed_base()
+    try:
+        CyberEngineClient(down, credential)._post("/api/classify-cve?token=QTOKEN", {"text": "x"})
+    except EngineError as exc:
+        # What the exception and every one it was raised from or during say (a
+        # traceback's source lines would quote this test's own call).
+        said, seen, current = [], set(), exc
+        pending = [exc]
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            said.append(f"{type(current).__name__}: {current} {current.args!r}")
+            pending.extend([current.__cause__, current.__context__])
+            pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+        said = "\n".join(said)
+    else:
+        raise AssertionError("an engine that is down answered")
+    assert "QTOKEN" not in said and "classify-cve" not in said, said
+
+    engine = Recorder()
+    began = time.monotonic()
+    try:
+        with pytest.raises(EngineError):
+            # The answer's body is dropped (it could not be withheld from), so the
+            # answer is unreadable -- after the Stop was sent and answered.
+            CyberEngineClient(engine.base, credential).abort_scan("run-1", "operator stop")
+        elapsed = time.monotonic() - began
+    finally:
+        engine.close()
+    assert [path for method, path, _h in engine.seen if method == "POST"] == ["/api/scans/run-1/abort"]
+    assert elapsed < 2.0, elapsed
+
+
 # ---------------------------------------------------------------------------
 # Every call site is one of these
 # ---------------------------------------------------------------------------

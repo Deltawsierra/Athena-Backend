@@ -149,9 +149,17 @@ def quiet(exc: BaseException, secrets=()) -> BaseException:
             if isinstance(url, str):
                 current.url = withhold(url, values)
     except Exception:  # noqa: BLE001 - withholding fails towards saying less
-        # Nothing more can be taken out of one whose args cannot be set either.
-        with contextlib.suppress(Exception):
-            exc.args = (type(exc).__name__,)
+        try:
+            linked = list(_chain(exc))
+        except Exception:  # noqa: BLE001 - a chain that cannot be walked: the exception alone
+            linked = [exc]
+        for current in linked:
+            # Each says its class alone; one whose args cannot be set says what it says.
+            with contextlib.suppress(Exception):
+                current.args = (type(current).__name__,)
+            with contextlib.suppress(Exception):
+                if isinstance(getattr(current, "url", None), str):
+                    current.url = WITHHELD
     return exc
 
 
@@ -178,25 +186,32 @@ def _secrets(kwargs: dict) -> list[str]:
     return sorted(found, key=len, reverse=True)
 
 
+def withheld_body(content: bytes, secrets) -> bytes:
+    """``content`` with each of ``secrets`` withheld."""
+    for secret in secrets:
+        content = content.replace(secret.encode("utf-8", "surrogatepass"), WITHHELD.encode())
+    return content
+
+
 def _withhold_body(response: requests.Response, secrets) -> None:
     """Every credential the request carried, withheld from the answer's body before
     anyone reads it. Whoever answered -- the far end, or a proxy's or gateway's error
     page -- may quote the request back, headers and all, and the call sites put an
     answer's text in a record, an error and a log line (an engine's refusal is
     ``Engine error <status>: <its body>``). A streamed answer is read by its caller
-    as it arrives and is left as it is. Never raises: an answer that cannot be read
-    here is left for its caller to find unreadable."""
+    as it arrives and is left as it is. Never raises, and fails towards saying less:
+    an answer whose body cannot be withheld from is handed on with no body, which
+    its caller reads as the unreadable answer it then is (the request was sent and
+    answered, a Stop's included: this runs after, and decides nothing about it)."""
     try:
         if not secrets or response.raw is None or getattr(response, "_content_consumed", False) is False:
             return
         content = response.content
-        if not content:
-            return
-        for secret in secrets:
-            content = content.replace(secret.encode("utf-8", "surrogatepass"), WITHHELD.encode())
-        response._content = content
-    except Exception:  # noqa: BLE001 - withholding fails towards leaving the answer to its caller
-        return
+        if content:
+            response._content = withheld_body(content, secrets)
+    except Exception:  # noqa: BLE001 - withholding fails towards saying less
+        with contextlib.suppress(Exception):
+            response._content = b""
 
 
 def _send(method: str, url: str, **kwargs) -> requests.Response:
