@@ -31,8 +31,14 @@ class AssuranceConfig(AppConfig):
         # default is used in its place, and no request logs it again.
         from django.core import checks
 
-        from . import dispatch
-        from .checks import dispatch_settings
+        from . import closure_forward, dispatch
+        from .checks import closure_forward_credentials, dispatch_settings
 
         checks.register(dispatch_settings)
         dispatch.read_settings()
+
+        # The closure forward's Minotaur credential: Blue's outcome-recorder key, or
+        # the legacy shared runner key -- said loudly once here, and by `manage.py
+        # check`, when role separation is not in force. Never refuses a start.
+        checks.register(closure_forward_credentials)
+        closure_forward.say_credential()
