@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand, CommandError
 
-from assurance.closure_forward import configured, retry_due
+from assurance.closure_forward import OUTCOMES_KEY, configured, credential, retry_due
 from assurance.models import ClosureEvidenceForward
 
 
@@ -29,9 +29,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        found = credential()
         if configured() is None:
-            self.stdout.write("forwarding to Minotaur is off (MINOTAUR_OUTCOMES_URL, MINOTAUR_RUNNER_KEY): nothing sent")
+            why = found.problem or f"MINOTAUR_OUTCOMES_URL, {OUTCOMES_KEY}"
+            self.stdout.write(f"forwarding to Minotaur is off ({why}): nothing sent")
             return
+        self.stdout.write(found.report())
         settled = retry_due(unknown=options["unknown"])
         for status, count in sorted(settled.items()):
             self.stdout.write(f"{status}: {count}")
