@@ -351,9 +351,12 @@ class Money:
 
     def display_amount(self) -> Decimal:
         """The amount rounded to the currency's minor unit with DISPLAY_ROUNDING, to
-        show. Never a ``Money``: a shown figure is not computed with again."""
+        show. Never a ``Money``: a shown figure is not computed with again. A zero is
+        shown as plain zero, never ``-0.00``: a small negative amount that rounds to
+        nothing shows as nothing, not as a loss."""
         exponent = Decimal(1).scaleb(-_currency.minor_units(self.currency))
-        return compute(lambda: self.amount.quantize(exponent, rounding=DISPLAY_ROUNDING))
+        shown = compute(lambda: self.amount.quantize(exponent, rounding=DISPLAY_ROUNDING))
+        return shown.copy_abs() if shown.is_zero() else shown
 
     def display(self) -> str:
         """``"1309.52 EUR"``, ``"13271 JPY"``, ``"379.627 KWD"``."""

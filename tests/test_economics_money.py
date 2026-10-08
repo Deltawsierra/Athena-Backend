@@ -227,6 +227,30 @@ def test_display_rounds_half_even_to_the_minor_unit(amount, code, shown):
     assert value.amount == Decimal(amount)
 
 
+@pytest.mark.parametrize(
+    "amount, code, shown",
+    [
+        ("-0.001", "USD", "0.00"),
+        ("-0.005", "USD", "0.00"),
+        ("-0", "USD", "0.00"),
+        ("-0.00", "EUR", "0.00"),
+        ("-0.4", "JPY", "0"),
+        ("-0.0004", "KWD", "0.000"),
+        ("-0.006", "USD", "-0.01"),
+        ("-1.5", "JPY", "-2"),
+    ],
+)
+def test_r1_l6_zero_is_shown_as_plain_zero(amount, code, shown):
+    """Review round 1, L6: a negative amount that rounds to nothing showed as
+    -0.00. Zero is shown as plain zero; a negative amount that does not round to
+    zero keeps its sign."""
+    value = Money.parse(amount, code)
+    assert value.display() == f"{shown} {code}"
+    if value.display_amount().is_zero():
+        assert not value.display_amount().is_signed()
+    assert value.amount == Decimal(amount)  # the amount itself keeps its sign
+
+
 def test_two_currencies_never_add_without_conversion():
     for operation in (
         lambda: usd("1") + eur("1"),

@@ -447,7 +447,8 @@ rounding: a tie goes to the even digit). 0.125 USD shows as 0.12 and 0.135 as
 mode does not bias a column of rounded figures up or down. Display returns a value
 to show, never a `Money`: a shown figure is not computed with again. Three
 half-cents summed at full precision show as 0.02 USD; rounded first, each would
-show as 0.00.
+show as 0.00. A zero is shown as plain zero: -0.001 USD shows as 0.00, never
+-0.00, while an amount that does not round to zero keeps its sign.
 
 ### 11.4 Currencies
 
