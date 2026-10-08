@@ -608,6 +608,22 @@ def test_a_unit_or_currency_mismatch_is_refused(index_book):
         point(period="2020-13")
 
 
+def test_r1_l1_each_step_reproduces_from_what_the_chain_records(fx_book):
+    """Review round 1, L1: the index output was amount x end / start, while the
+    chain recorded the ratio end / start, rounded; input x ratio did not reproduce
+    the output in its last digit. 1,000.01 x 7/3 is the case."""
+    book = IndexBook([point(value="3"), point(period="2026-09", value="7", vintage=date(2026, 10, 14))])
+    step = cost_index.index(usd("1000.01"), EVENT, date(2026, 9, 30), book, US_CPI, as_of=date(2026, 10, 14))
+    recorded = step.as_dict()
+    reproduced = compute(lambda: Decimal(recorded["input"]["amount"]) * Decimal(recorded["ratio"]))
+    assert reproduced == Decimal(recorded["output"]["amount"]) == step.output.amount
+    # Every FX step reproduces the same way: input x factor.
+    fx_step = fx.convert(usd("1000.01"), "EUR", VALUATION, fx_book, FXPolicy((REF,))).as_dict()
+    assert compute(lambda: Decimal(fx_step["input"]["amount"]) * Decimal(fx_step["factor"])) == Decimal(
+        fx_step["output"]["amount"]
+    )
+
+
 def test_r1_m3_a_rebased_series_never_divides_one_base_by_another():
     """Review round 1, M3. SYN-CPI-US is 100 for 2020-03 on the base 2020-03=100;
     its publisher rebases it to 2026=100 and the 2026-09 value arrives as 98.4 on

@@ -559,7 +559,10 @@ inflation or deflation. An `IndexSelector` names the series, its geography,
 category and base, and the currency its prices are in.
 
 `cost_index.index(amount, from_date, to_date, book, selector)` multiplies an amount
-by the series' value for `to_date`'s month over its value for `from_date`'s month.
+by the series' value for `to_date`'s month over its value for `from_date`'s month:
+the ratio is computed once, at 60 significant digits, recorded, and the output is
+the input times that recorded ratio, so each step of the chain reproduces from
+what it lists (an FX step likewise: input times factor).
 An amount in another currency than the series' is refused (`currency_mismatch`).
 Each month's value is the latest vintage published on or before the as-of date
 (the valuation date), and the step records which. The event month's value is that

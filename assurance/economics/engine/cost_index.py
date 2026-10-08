@@ -8,7 +8,9 @@ base it is expressed on (``2020-03=100``), period (``YYYY-MM``), value, the date
 that vintage was published, and the snapshot it was read from. It is the pure mirror of
 :class:`assurance.economics.models.CostIndexObservation`.
 
-:func:`index` multiplies an amount by ``value(to period) / value(from period)``
+:func:`index` multiplies an amount by ``value(to period) / value(from period)``,
+the ratio it records (rounded at 60 significant digits), so that the recorded
+input times the recorded ratio is the recorded output
 (``docs/economics/spec-v1.md``, section 12):
 
 - **One series, one base, one currency.** A series is one geography, one
@@ -298,11 +300,13 @@ def index(
             f"{selector.series_id} has no value for {to_period}, or within {max_lag_months} month(s) before it, "
             f"by {as_of}",
         )
+    # The output is the input times the RECORDED ratio, so the chain reproduces it:
+    # input x ratio is the output, digit for digit.
     ratio = compute(lambda: end.value / start.value)
     return IndexStep(
         step=step,
         input=amount,
-        output=Money(compute(lambda: amount.amount * end.value / start.value), amount.currency),
+        output=amount.times(ratio),
         selector=selector,
         from_date=from_date,
         to_date=to_date,
