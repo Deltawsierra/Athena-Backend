@@ -1372,9 +1372,14 @@ and the mean and variance.
 | `lognormal` | `severity` | mu, sigma > 0 | `median_sigma`; `p10_p90`: mu = (ln P10 + ln P90)/2, sigma = (ln P90 - ln P10)/(2 z90); `median_p90`: sigma = (ln P90 - ln median)/z90; z90 = 1.2815515655446004 | exp(mu + sigma^2/2), (e^(sigma^2) - 1) e^(2mu + sigma^2) |
 | `gamma` | `severity` | shape k > 0, scale theta > 0 | `mean_sd`: k = (m/s)^2, theta = s^2/m | k theta, k theta^2 |
 | `generalized_pareto` | `severity` | shape xi in (-1, 2], scale sigma > 0, threshold u >= 0 | `mean_excess`: sigma = (1 - xi) e, for xi < 1 | u + sigma/(1-xi) for xi < 1, else `None`; sigma^2/((1-xi)^2 (1-2xi)) for xi < 1/2, else `None` |
-| `spliced` | `severity` | a `lognormal` or `gamma` body truncated to (0, u], a `generalized_pareto` tail above u, the tail probability pi in (0, 1); u at or above the body's median | `continuous_at_threshold`: pi = the body's own probability above u | from the body's partial moments and the tail's; `None` where the tail's is |
+| `spliced` | `severity` | a `lognormal` or `gamma` body truncated to (0, u], a `generalized_pareto` tail above u, the tail probability pi in (0, 1); u at or above the body's median | `tail_probability_of_body`: pi = the body's own probability above u, so below u the splice is the body unchanged | from the body's partial moments and the tail's; `None` where the tail's is |
 | `pert` | `expert` | min < max, mode in [min, max], weight w > 0 (4 unless stated); a beta with alpha = 1 + w (mode - min)/(max - min), beta = 1 + w (max - mode)/(max - min) | | (min + w mode + max)/(w + 2), the scaled beta's |
 | `triangular` | `expert` | min < max, mode in [min, max] | | (min + mode + max)/3, (a^2 + b^2 + c^2 - ab - ac - bc)/18 |
+
+Every splice's CDF is continuous at u, whatever its tail probability: the body
+part reaches 1 - pi there and the tail starts from it. Its density in general is
+not continuous; `tail_probability_of_body` keeps the body's own shape below u,
+unscaled, and lets the tail replace only the body's mass above it.
 
 **Expert ranges keep their assumptions explicit.** A `pert` or `triangular` takes
 the parameter's `source_type` and a `sparse` mark, and is refused
@@ -1386,9 +1391,17 @@ should lower the confidence grade (step 7b).
 
 **Infinite moments are `None`, never a float Infinity.** A generalized Pareto's
 mean is infinite for xi >= 1 and its variance for xi >= 1/2; a splice whose tail
-has either inherits it. A moment that is finite in theory but too large for a
-binary64 float (a lognormal with a very large sigma) is refused when the
-distribution is built (`out_of_range`), so no output ever holds Infinity.
+has either inherits it. Whatever is finite in theory but too large for a binary64
+float is refused when the distribution is built (`out_of_range`): a mean, a
+variance or a second moment (a lognormal with a very large sigma, a PERT or
+triangle whose variance squares a width of 1e200), a width (max - min past the
+largest float), a generalized Pareto's scale over its shape, and its largest
+draw (its endpoint for xi < 0, otherwise its quantile at numpy's largest standard
+exponential, about 44.4: `LARGEST_EXPONENTIAL` is 45); so is a lognormal whose
+median e^mu underflows to zero. No accepted distribution has an Infinity or a NaN
+in a moment, a quantile below 1 or a draw. A lognormal's variance is computed in
+logarithms, so e^(sigma^2) - 1 overflowing alone does not refuse a variance that
+holds.
 
 Every distribution gives `sample(rng, n)`, `cdf(x)`, `ppf(p)` (also `quantile`),
 `mean` and `variance`. A quantile is the smallest x with `cdf(x) >= p`, for
@@ -1414,7 +1427,7 @@ draws are int64, a cost's float64.
 |---|---|
 | `not_a_number` | a parameter that is not an int, a float or a Decimal: a bool, text, None |
 | `not_finite` | NaN or Infinity |
-| `out_of_range` | a mean, variance or count too large to hold as a float or to sample |
+| `out_of_range` | a mean, variance, second moment, width, scale over shape, largest draw or count too large to hold as a float or to sample; a lognormal median too small to hold |
 | `scale_not_positive` | a scale (sigma, a gamma or Pareto scale) or a rate at or below zero |
 | `value_not_positive` | a value a form is built from at or below zero: a lognormal's median or quantile, a mean, a standard deviation, a variance, a mean excess |
 | `shape_out_of_range` | a gamma or beta shape or a negative-binomial size at or below zero, a PERT weight at or below zero, a generalized Pareto shape outside (-1, 2] |
@@ -1446,7 +1459,8 @@ draws are int64, a cost's float64.
 | `outcome_malformed` | a function that does not return one number per draw |
 | `outcome_not_finite` | an outcome that is NaN or Infinity |
 | `outcome_negative` | an outcome below zero: every outcome is a loss, and no benefit model is enabled |
-| `out_of_range` | a mean or variance of the outcomes too large to hold as a float |
+| `out_of_range` | a year's loss (a compound sum), or a mean or variance of the outcomes, too large to hold as a float |
+| `values_over_budget` | a run that would hold more than 30,000,000 values at once (section 23.9), refused before anything is sampled, and in a compound run once the years' counts are drawn and before any event is |
 | `percentile_out_of_range` | a severe-but-plausible percentile that is not an int or Decimal from 90 to below 100 |
 | `model_version_blank` | a run that does not name its model version |
 | `scenario_id_malformed` | a scenario id that is blank or not text |
@@ -1515,6 +1529,14 @@ written into the result.
 - **A mean that does not exist is not estimated.** When any parameter's mean is
   infinite, the mean, the expected annual loss, their standard error and band are
   `null`, and `mean_undefined` names the parameters; the percentiles are given.
+- **Nor is an uncertainty that does not exist.** When any parameter's variance is
+  infinite (a generalized Pareto with xi >= 1/2, the usual cyber tail, or a splice
+  with such a tail), the mean is given, but `standard_error_of_mean` and the
+  mean's band are `null`, and `standard_error_undefined` names the parameters: a
+  band from the sample's standard error would not cover at its stated level. The
+  review measured it at 10,000 draws over 300 seeds: a "95%" band covered the
+  true mean in 58% of runs at xi = 0.8 and 17% at 0.95, against 94% at 0.3. The
+  percentile bands are distribution-free and stay.
 
 ### 23.6 Precision
 
@@ -1531,8 +1553,8 @@ currency's minor unit only to be shown (`Money.display`, ROUND_HALF_EVEN; sectio
 The record carries the owner's specification's result fields (section 15:
 `scenario_id`, `model_version`, `seed`, `simulations`, `p10`, `p50`, `p90`,
 `mean`, `expected_annual_loss`, `severe_plausible`, `reporting_currency`), and
-beside them the basis, the severe percentile, the standard error, the bands, the
-events, every parameter's and the frequency's record (id, version, parameters,
+beside them the basis, the severe percentile, the standard error, the bands,
+`mean_undefined` and `standard_error_undefined`, the events, every parameter's and the frequency's record (id, version, parameters,
 form, values given), the expert parameters, the sampler's version and methods,
 and `outcomes_sha256`: the SHA-256 of every outcome as little-endian binary64,
 so the digest covers every draw. `scenario_id` is a placeholder until step 7b.
@@ -1549,20 +1571,21 @@ simulated years of three parameters at seed 2026:
 ```json
 {"schema": "mythos.economics.simulation/v1", "scenario_id": null, "model_version": "example-1",
  "seed": "2026", "simulations": 100000, "reporting_currency": "USD", "basis": "annual_loss",
- "p10": "31200.21030638023", "p50": "568764.7227033532", "p90": "3648776.83702994",
+ "p10": "31200.21030638023", "p50": "568764.722703353", "p90": "3648776.8370299395",
  "mean": "1644950.0589876557", "expected_annual_loss": "1644950.0589876557",
- "severe_plausible": "6053720.566941129", "severe_percentile": "95",
+ "severe_plausible": "6053720.56694113", "severe_percentile": "95",
  "standard_error_of_mean": "16636.019599060797", "confidence_level": "0.95",
  "bands": {"p50": ["561945.9126726118", "576212.1189518626"], "...": "..."},
- "mean_undefined": null, "events": {"total": 299232, "summary": {"...": "..."}},
+ "mean_undefined": null, "standard_error_undefined": null,
+ "events": {"total": 299232, "summary": {"...": "..."}},
  "parameters": {"records": {"id": "lognormal", "version": 1, "kind": "severity",
    "params": {"mu": "7.600902459542082", "sigma": "1.7967166947477073"},
    "form": "median_p90", "given": {"median": "2000", "p90": "20000"},
-   "mean": "10046.683913013187", "variance": "2446075982.1362333"}, "...": "..."},
+   "mean": "10046.683913013187", "variance": "2446075982.1362343"}, "...": "..."},
  "frequency": {"id": "poisson", "version": 1, "params": {"rate": "3"}, "...": "..."},
  "expert_parameters": [], "sampler": {"version": 1, "bit_generator": "PCG64", "...": "..."},
- "outcomes_sha256": "sha256:959e1af3...0162f",
- "digest": "sha256:24c9bdb9...afb7a",
+ "outcomes_sha256": "sha256:c40769c3...80b09",
+ "digest": "sha256:bcf87767...db060",
  "display": {"p50": "568764.72 USD", "...": "..."}, "provenance": {"numpy": "2.3.3"}}
 ```
 
@@ -1575,7 +1598,10 @@ SIMD dispatch: numpy picks an AVX-512, AVX2 or baseline implementation of its ow
 of them. A lognormal's and a generalized Pareto's draws go through `exp_portable`
 and `expm1_portable`, built from IEEE-754 basic operations alone (Cody and Waite's
 reduction, Taylor's series, an exact power-of-two scale), within one and two units
-in the last place; every other draw is numpy's own C sampler. During development
+in the last place, and Infinity, zero (or -1) and NaN beyond the range of a float,
+as any exp gives them; every other draw is numpy's own C sampler. A compound
+year's loss is `np.add.reduceat` over its events, the same additions in the same
+order on every CPU. During development
 the digests were also the same with glibc's FMA variants turned off
 (`GLIBC_TUNABLES`), which change libm's `exp`. What remains platform-dependent is
 the C library's `log`, `log1p` and `pow` that numpy's samplers call in rare
@@ -1589,11 +1615,40 @@ summary, not only the digest.
 
 100,000 draws by default, from 1,000 to 1,000,000; at most 10,000,000 events
 across a compound run's years; at most 10,000,000 draws from one `sample` call.
-Measured on the build machine (4 cores, numpy 2.3.3), each run sampled twice as
-section 23.4 says: 100,000 draws of one lognormal in 0.023 s; 100,000 simulated
-years of a three-parameter formula with a Poisson(3) frequency (about 300,000
-events) in 0.12 s; 1,000,000 such years in 1.7 s. The test of a default run
-allows 60 s, so it catches a per-draw Python loop and never CI load.
+
+**Memory is bounded by the limits.** Step 7b runs this inside a Django process,
+so a run that fits the limits cannot exhaust memory. A run holds at most
+30,000,000 values at once (`MAX_VALUES`, 240 MB as binary64), counted by
+`values_held` before anything is sampled (in a compound run, once the years'
+event counts are drawn and before any event is): (parameters + 3) vectors of the
+sampled length (the draws, or the events of a compound run) and, in a compound
+run, 8 per simulated year. The 3 are the first sample's outcomes, kept while the
+run samples again (section 23.4), the evaluated function's result, and one for its
+temporaries or a splice's buffer; the 8 are both samples' counts and annual
+losses and the compound sum's indices. More is refused (`values_over_budget`).
+So 27 parameters fit a million draws, and 28 do not; three parameters fit a
+million years of 3.5 events each, and eight parameters at 9.9 events a year (about
+855 MiB before this rule) do not.
+
+The engine keeps its own transients inside that count. Every sampler writes in
+place; the portable exp, the triangular inversion and the sums work in blocks of
+16,384 values; a year's sum uses one index per year, never one per event; and a
+splice draws its body in chunks of at most 1,000,000 values and at most a quarter
+of its sample (`SPLICE_CHUNK`), so one sample of n holds about 2.5 n values at
+its peak, never several times n (before, one round drew about 4 n at once, past
+`MAX_SAMPLE`). The traced peak of a run is at most 8 bytes for each value counted,
+plus about 1 MB of block buffers (`FIXED_BUFFER_BYTES`), plus whatever the
+evaluated function allocates beyond one vector. Measured with `tracemalloc` on
+the build machine: 236 MB for 27 parameters of a million draws (the budget is
+240 MB); 168 MB for three parameters over a million years of 3.5 events; 180 MB
+for one splice over a million years of 5.4 events; between 0.7 and 1.0 of the
+count for smaller runs.
+
+**Timing,** measured on the build machine (4 cores, numpy 2.3.3), each run
+sampled twice as section 23.4 says: 100,000 draws of one lognormal in 0.025 s;
+100,000 simulated years of a three-parameter formula with a Poisson(3) frequency
+(about 300,000 events) in 0.13 s; 1,000,000 such years in 1.5 s. The test of a
+default run allows 60 s, so it catches a per-draw Python loop and never CI load.
 
 ### 23.10 Safety
 
@@ -1644,3 +1699,10 @@ registration.
    function it evaluates might cap the loss.
 9. numpy is pinned in CI's set as well as the service's, at the same version
    (`numpy==2.3.3`).
+10. A run whose inputs include an infinite variance (but a finite mean) reports
+    the mean without a standard error or a mean band.
+11. A run holds at most 30,000,000 values at once (240 MB as binary64); a
+    process that can spare more may raise `MAX_VALUES`, one constant.
+12. Every splice's CDF is continuous at u; the form that keeps the body unchanged
+    below u is `tail_probability_of_body` (named `continuous_at_threshold` before
+    any record carried it).

@@ -70,8 +70,9 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "not_a_number": "a parameter is a number (an int, a float or a Decimal), never a bool, text or None",
         "not_finite": "NaN and Infinity are not values any parameter may hold",
         "out_of_range": (
-            "the parameters give a mean, a variance or a count too large to hold as a binary64 float or to "
-            "sample: refused rather than carried as Infinity"
+            "the parameters give a mean, a variance, a width, a largest draw or a count too large to hold as a "
+            "binary64 float or to sample, or a lognormal median too small to hold: refused rather than carried as "
+            "Infinity or zero"
         ),
         "scale_not_positive": "a scale (a lognormal's sigma, a gamma or Pareto scale) or a rate is greater than zero",
         "value_not_positive": (
@@ -137,10 +138,19 @@ GPD_SHAPE_MAX = 2.0
 PERT_WEIGHT = 4.0
 #: A splice's threshold is at or above this quantile of its body (the median).
 SPLICE_MIN_BODY_SHARE = 0.5
-#: How many rounds the splice's truncated body may take to fill a sample. Each
-#: round draws at least twice what is still needed from a body that keeps at least
-#: half of what it draws, so running out is a defect, never chance.
+#: The most body values a splice draws in one round of its rejection (8 MB), and
+#: never more than a quarter of the sample: a splice's sample holds about 2.5
+#: times its own size at its peak, never several times it.
+SPLICE_CHUNK = 1_000_000
+#: How many rounds the splice's truncated body may take beyond those its chunks
+#: need. A round draws 1.25 times what is still needed (up to a chunk) from a body
+#: that keeps at least half of what it draws, so running out is a defect, never
+#: chance.
 SPLICE_MAX_ROUNDS = 200
+#: No standard exponential numpy's ziggurat draws exceeds 7.697 + 53 ln 2, about
+#: 44.43 (its tail is r - log1p(-U), U < 1 - 2^-53); a generalized Pareto's
+#: largest draw is its quantile there.
+LARGEST_EXPONENTIAL = 45.0
 
 _STANDARD_NORMAL = NormalDist()
 #: The standard normal's 90th percentile, 1.2815515655446004 (statistics.NormalDist).
@@ -161,7 +171,7 @@ MEAN_SD = "mean_sd"
 MEAN_VARIANCE = "mean_variance"
 PRIOR_AND_TRIALS = "prior_and_trials"
 MEAN_EXCESS = "mean_excess"
-CONTINUOUS_AT_THRESHOLD = "continuous_at_threshold"
+TAIL_PROBABILITY_OF_BODY = "tail_probability_of_body"
 FORMS = (
     NATIVE,
     MEDIAN_SIGMA,
@@ -171,7 +181,7 @@ FORMS = (
     MEAN_VARIANCE,
     PRIOR_AND_TRIALS,
     MEAN_EXCESS,
-    CONTINUOUS_AT_THRESHOLD,
+    TAIL_PROBABILITY_OF_BODY,
 )
 
 
@@ -289,6 +299,16 @@ def _log1pmx(u: float) -> float:
     return total
 
 
+def _log1pmx_ratio(u: float, log_ratio: Callable[[], float]) -> float:
+    """log(1 + u) - u where 1 + u is a ratio of two positive numbers: below
+    u = -3/4 the ratio's own logarithm (``log_ratio()``, a difference of two
+    logarithms) replaces log1p(u), because u computed as a quotient has lost the
+    digits of 1 + u there, and rounds to -1 when the ratio is tiny."""
+    if u < -0.75:
+        return log_ratio() - u
+    return _log1pmx(u)
+
+
 #: From here on Stirling's series, four terms, gives lgamma's correction to the
 #: last bit, and the prefactors below use it.
 _STIRLING_FROM = 100.0
@@ -304,10 +324,13 @@ def _gamma_prefix(a: float, x: float) -> float:
     """x^a e^-x / Gamma(a). For a large shape the three terms of its logarithm are
     each about a ln a and cancel, so it is computed as
     a log1pmx((x - a) / a) + ln(a / 2 pi) / 2 - delta(a), delta Stirling's
-    correction to lgamma (four terms, exact to the last bit from a = 100)."""
+    correction to lgamma (four terms, exact to the last bit from a = 100). Far
+    below the shape (x < a / 4), a log1pmx is a (ln x - ln a) + a - x
+    (:func:`_log1pmx_ratio`)."""
     if a < _STIRLING_FROM:
         return math.exp(-x + a * math.log(x) - math.lgamma(a))
-    return math.exp(a * _log1pmx((x - a) / a) + 0.5 * math.log(a / (2.0 * math.pi)) - _stirling(a))
+    deviation = _log1pmx_ratio((x - a) / a, lambda: math.log(x) - math.log(a))
+    return math.exp(a * deviation + 0.5 * math.log(a / (2.0 * math.pi)) - _stirling(a))
 
 
 def _gamma_series(a: float, x: float) -> float:
@@ -426,8 +449,8 @@ def _beta_prefix(a: float, b: float, x: float) -> float:
         return math.exp(ratio - math.lgamma(small) + powers)
     x0 = a / (a + b)
     return math.exp(
-        a * _log1pmx((x - x0) / x0)
-        + b * _log1pmx((x0 - x) / (1.0 - x0))
+        a * _log1pmx_ratio((x - x0) / x0, lambda: math.log(x) - math.log(x0))
+        + b * _log1pmx_ratio((x0 - x) / (1.0 - x0), lambda: math.log1p(-x) - math.log1p(-x0))
         + 0.5 * math.log(a * b / (2.0 * math.pi * (a + b)))
         + _stirling(a + b)
         - _stirling(a)
@@ -468,6 +491,9 @@ _TAYLOR = tuple(1.0 / math.factorial(k) for k in range(15, -1, -1))
 #: 1/22!, ..., 1/2!, 1/1!: (e^y - 1) / y to degree 21, for |y| < 1 (truncation
 #: below 1e-21).
 _TAYLOR_EXPM1 = tuple(1.0 / math.factorial(k) for k in range(22, 0, -1))
+#: exp_portable clips its argument to +/- this: past +/-1100 every answer is
+#: already Infinity or zero, and the exponent k stays far inside an int32.
+_EXP_CLIP = 1100.0
 
 
 def _horner(r: np.ndarray, coefficients) -> np.ndarray:
@@ -477,28 +503,64 @@ def _horner(r: np.ndarray, coefficients) -> np.ndarray:
     return total
 
 
-def exp_portable(x: np.ndarray) -> np.ndarray:
+#: The portable exp and expm1, and the triangular inversion, work this many values
+#: at a time, so their temporaries are a block, never several times a sample.
+_BLOCK = 16_384
+
+
+def _exp_block(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, -_EXP_CLIP, _EXP_CLIP)
+    k = np.rint(x * _INV_LN2)
+    r = (x - k * _LN2_HI) - k * _LN2_LO
+    exponent = np.where(np.isnan(k), 0.0, k).astype(np.int32)
+    with np.errstate(over="ignore", under="ignore"):  # Infinity and zero are the answers there
+        return np.ldexp(_horner(r, _TAYLOR), exponent)
+
+
+def _expm1_block(y: np.ndarray) -> np.ndarray:
+    inside = np.clip(y, -1.0, 1.0)
+    near = inside * _horner(inside, _TAYLOR_EXPM1)
+    return np.where(np.abs(y) < 1.0, near, _exp_block(y) - 1.0)
+
+
+def _blockwise(block: Callable[[np.ndarray], np.ndarray], x, out: np.ndarray | None) -> np.ndarray:
+    """``block`` applied elementwise to ``x`` a block at a time, into ``out`` (which
+    may be ``x`` itself, a contiguous float64 array of its shape) or a new array."""
+    x = np.asarray(x, dtype=np.float64)
+    source = np.ascontiguousarray(x).reshape(-1)
+    if out is None:
+        out = np.empty(x.shape, dtype=np.float64)
+    elif out.shape != x.shape or out.dtype != np.float64 or not out.flags.c_contiguous:
+        raise ValueError("out is a contiguous float64 array of the input's shape")
+    target = out.reshape(-1)
+    for start in range(0, source.size, _BLOCK):
+        target[start : start + _BLOCK] = block(source[start : start + _BLOCK])
+    return out
+
+
+def exp_portable(x, out: np.ndarray | None = None) -> np.ndarray:
     """e^x, elementwise, from IEEE-754 basic operations only (multiply, add,
     subtract, round to integer, scale by a power of two), each its own numpy
     operation: the same bits on every CPU and C library, which neither numpy's
     SIMD ``exp`` nor libm's guarantees (both choose an implementation by CPU
     feature). x = k ln2 + r with |r| <= ln2 / 2 (Cody and Waite), e^r by Taylor's
     series to degree 15 (truncation below 1e-19), scaled by 2^k exactly. Within
-    about one unit in the last place of the true value."""
-    x = np.asarray(x, dtype=np.float64)
-    k = np.rint(x * _INV_LN2)
-    r = (x - k * _LN2_HI) - k * _LN2_LO
-    return np.ldexp(_horner(r, _TAYLOR), k.astype(np.int32))
+    about one unit in the last place of the true value.
+
+    Beyond the range of a float the answer is Infinity (above about 709.78) or
+    zero (below about -745.13), as for any exp: x is first clipped to
+    [-:data:`_EXP_CLIP`, :data:`_EXP_CLIP`], which changes no finite answer and
+    keeps every exponent an int32 holds. NaN stays NaN. Computed a block at a
+    time, into ``out`` if given (which may be ``x``)."""
+    return _blockwise(_exp_block, x, out)
 
 
-def expm1_portable(y: np.ndarray) -> np.ndarray:
+def expm1_portable(y, out: np.ndarray | None = None) -> np.ndarray:
     """e^y - 1, elementwise, by the same rule as :func:`exp_portable`: for
     |y| < 1, y times Taylor's series of (e^y - 1) / y, so a small value keeps its
     digits; beyond, :func:`exp_portable` minus one. Within about two units in the
-    last place."""
-    y = np.asarray(y, dtype=np.float64)
-    near = y * _horner(y, _TAYLOR_EXPM1)
-    return np.where(np.abs(y) < 1.0, near, exp_portable(y) - 1.0)
+    last place; Infinity above the range of a float, -1 below it, NaN for NaN."""
+    return _blockwise(_expm1_block, y, out)
 
 
 def _invert(cdf: Callable[[float], float], p: float, lo: float, hi: float) -> float:
@@ -672,7 +734,7 @@ class Poisson(Distribution):
         return self.rate
 
     def _draw(self, rng, n):
-        return rng.poisson(self.rate, n).astype(np.int64)
+        return rng.poisson(self.rate, n).astype(np.int64, copy=False)
 
     def _cdf(self, x):
         if x < 0.0:
@@ -737,7 +799,7 @@ class NegativeBinomial(Distribution):
         return self.size * (1.0 - self.probability) / (self.probability * self.probability)
 
     def _draw(self, rng, n):
-        return rng.negative_binomial(self.size, self.probability, n).astype(np.int64)
+        return rng.negative_binomial(self.size, self.probability, n).astype(np.int64, copy=False)
 
     def _cdf(self, x):
         if x < 0.0:
@@ -787,7 +849,7 @@ class ZeroInflatedPoisson(Distribution):
     def _draw(self, rng, n):
         # The structural zeros first, then the Poisson counts, each n draws.
         structural = rng.random(n) < self.zero_inflation
-        counts = rng.poisson(self.rate, n).astype(np.int64)
+        counts = rng.poisson(self.rate, n).astype(np.int64, copy=False)
         counts[structural] = 0
         return counts
 
@@ -890,10 +952,14 @@ class Lognormal(Distribution):
     def __post_init__(self):
         mu = _number(self.mu, "mu")
         sigma = _positive(self.sigma, "sigma", "scale_not_positive")
+        if math.exp(mu) == 0.0:
+            raise DistributionRefused("out_of_range", f"the median exp({float_text(mu)}) underflows a float to zero")
         _set(self, "mu", mu)
         _set(self, "sigma", sigma)
         _finite_moment(lambda: math.exp(mu + sigma * sigma / 2.0), "mean")
-        _finite_moment(lambda: math.expm1(sigma * sigma) * math.exp(2.0 * mu + sigma * sigma), "variance")
+        _finite_moment(lambda: self.variance, "variance")
+        # E[X^2], which a splice's body reads (partial_moment(2, u)).
+        _finite_moment(lambda: math.exp(2.0 * mu + 2.0 * sigma * sigma), "second moment")
         self._check_form()
 
     @classmethod
@@ -929,7 +995,11 @@ class Lognormal(Distribution):
 
     @property
     def variance(self):
-        return math.expm1(self.sigma * self.sigma) * math.exp(2.0 * self.mu + self.sigma * self.sigma)
+        # (e^(s^2) - 1) e^(2 mu + s^2), in logarithms: e^(s^2) - 1 alone overflows for
+        # s^2 > 709 even where the product does not.
+        s2 = self.sigma * self.sigma
+        log_expm1 = s2 + math.log1p(-math.exp(-s2)) if s2 > 1.0 else math.log(math.expm1(s2))
+        return math.exp(log_expm1 + 2.0 * self.mu + s2)
 
     def partial_moment(self, r: int, upper: float) -> float:
         """E[X^r ; X <= upper], for a splice's body."""
@@ -938,8 +1008,12 @@ class Lognormal(Distribution):
 
     def _draw(self, rng, n):
         # One standard normal per draw (numpy's C ziggurat), then exp(mu + sigma z)
-        # by exp_portable, so a draw does not depend on which exp the CPU selects.
-        return exp_portable(self.mu + self.sigma * rng.standard_normal(n))
+        # by exp_portable, so a draw does not depend on which exp the CPU selects;
+        # in place, so a sample is one vector.
+        z = rng.standard_normal(n)
+        z *= self.sigma
+        z += self.mu
+        return exp_portable(z, out=z)
 
     def _cdf(self, x):
         if x <= 0.0:
@@ -970,6 +1044,8 @@ class Gamma(Distribution):
         _set(self, "scale", scale)
         _finite_moment(lambda: shape * scale, "mean")
         _finite_moment(lambda: shape * scale * scale, "variance")
+        # E[X^2], which a splice's body reads (partial_moment(2, u)).
+        _finite_moment(lambda: shape * (shape + 1.0) * scale * scale, "second moment")
         self._check_form()
 
     @classmethod
@@ -998,7 +1074,9 @@ class Gamma(Distribution):
         )
 
     def _draw(self, rng, n):
-        return self.scale * rng.standard_gamma(self.shape, n)
+        drawn = rng.standard_gamma(self.shape, n)
+        drawn *= self.scale
+        return drawn
 
     def _cdf(self, x):
         if x <= 0.0:
@@ -1046,7 +1124,21 @@ class GeneralizedPareto(Distribution):
             _finite_moment(lambda: threshold + scale / (1.0 - shape), "mean")
         if shape < 0.5:
             _finite_moment(lambda: scale * scale / ((1.0 - shape) ** 2 * (1.0 - 2.0 * shape)), "variance")
+        if shape != 0.0:
+            _finite_moment(lambda: scale / abs(shape), "scale over shape")
+        _finite_moment(self._largest_draw, "largest draw")
         self._check_form()
+
+    def _largest_draw(self) -> float:
+        """The largest value a draw can take: the upper endpoint for xi < 0, and
+        otherwise the quantile at numpy's largest standard exponential
+        (:data:`LARGEST_EXPONENTIAL`). Refused at construction unless finite, so no
+        draw is ever Infinity."""
+        if self.shape < 0.0:
+            return self.threshold + self.scale / -self.shape
+        if self.shape == 0.0:
+            return self.threshold + self.scale * LARGEST_EXPONENTIAL
+        return self.threshold + self.scale * (math.expm1(self.shape * LARGEST_EXPONENTIAL) / self.shape)
 
     @classmethod
     def from_mean_excess(cls, threshold, mean_excess, shape) -> GeneralizedPareto:
@@ -1078,13 +1170,18 @@ class GeneralizedPareto(Distribution):
 
     def _draw(self, rng, n):
         # One standard exponential E per draw (numpy's C ziggurat); then
-        # x = u + (sigma / xi) expm1(xi E), whose survival is exactly e^-E, by
+        # x = u + sigma (expm1(xi E) / xi), whose survival is exactly e^-E, by
         # expm1_portable (and u + sigma E at xi = 0), so a draw does not depend on
-        # which exp the CPU selects.
+        # which exp the CPU selects. The quotient is taken first, so a tiny shape
+        # gives about sigma E rather than an overflowing sigma / xi.
         e = rng.standard_exponential(n)
-        if self.shape == 0.0:
-            return self.threshold + self.scale * e
-        return self.threshold + (self.scale / self.shape) * expm1_portable(self.shape * e)
+        if self.shape != 0.0:
+            e *= self.shape
+            expm1_portable(e, out=e)
+            e /= self.shape
+        e *= self.scale
+        e += self.threshold
+        return e
 
     def _cdf(self, x):
         z = (x - self.threshold) / self.scale
@@ -1099,7 +1196,7 @@ class GeneralizedPareto(Distribution):
     def _ppf(self, p):
         if self.shape == 0.0:
             return self.threshold - self.scale * math.log1p(-p)
-        return self.threshold + self.scale * math.expm1(-self.shape * math.log1p(-p)) / self.shape
+        return self.threshold + self.scale * (math.expm1(-self.shape * math.log1p(-p)) / self.shape)
 
 
 @dataclass(frozen=True)
@@ -1109,10 +1206,13 @@ class Spliced(Distribution):
     ``1 - tail_probability``, and ``tail`` (whose own threshold is u) with weight
     ``tail_probability``.
 
-    ``tail_probability`` is given (``native``), or :meth:`continuous` sets it to
-    the body's own probability above u, so the CDF is continuous at the
-    threshold. The threshold is at or above the body's median (the tail models
-    the tail), and the tail probability is in (0, 1)."""
+    ``tail_probability`` is given (``native``), or :meth:`from_body` sets it to
+    the body's own probability above u (form ``tail_probability_of_body``): the
+    splice then equals the body below u, unscaled, and the tail replaces only the
+    body's mass above it. Every splice's CDF is continuous at u, whatever its tail
+    probability; its density in general is not. The threshold is at or above the
+    body's median (the tail models the tail), and the tail probability is in
+    (0, 1)."""
 
     body: Distribution
     tail: GeneralizedPareto
@@ -1120,7 +1220,7 @@ class Spliced(Distribution):
 
     ID: ClassVar[str] = "spliced"
     KIND: ClassVar[str] = SEVERITY
-    FORMS: ClassVar[tuple[str, ...]] = (NATIVE, CONTINUOUS_AT_THRESHOLD)
+    FORMS: ClassVar[tuple[str, ...]] = (NATIVE, TAIL_PROBABILITY_OF_BODY)
 
     def __post_init__(self):
         if not isinstance(self.body, (Lognormal, Gamma)):
@@ -1142,11 +1242,12 @@ class Spliced(Distribution):
         self._check_form()
 
     @classmethod
-    def continuous(cls, body: Distribution, tail: GeneralizedPareto) -> Spliced:
-        """The splice whose tail probability is the body's own above the threshold."""
+    def from_body(cls, body: Distribution, tail: GeneralizedPareto) -> Spliced:
+        """The splice whose tail probability is the body's own above the threshold:
+        below it, the splice is the body unchanged."""
         if not isinstance(body, (Lognormal, Gamma)) or not isinstance(tail, GeneralizedPareto):
             raise DistributionRefused("component_unsupported", "a lognormal or gamma body and a generalized Pareto tail")
-        return cls(body, tail, 1.0 - body.cdf(tail.threshold), form=CONTINUOUS_AT_THRESHOLD)
+        return cls(body, tail, 1.0 - body.cdf(tail.threshold), form=TAIL_PROBABILITY_OF_BODY)
 
     @property
     def threshold(self) -> float:
@@ -1193,24 +1294,37 @@ class Spliced(Distribution):
         # n uniforms choose body or tail; then the body's draws, by rejection of
         # the body above the threshold; then the tail's draws. All from rng.
         in_tail = rng.random(n) >= 1.0 - self.tail_probability
+        tail_count = int(np.count_nonzero(in_tail))
         drawn = np.empty(n, dtype=np.float64)
-        drawn[~in_tail] = self._truncated_body(rng, int(n - np.count_nonzero(in_tail)))
-        drawn[in_tail] = self.tail._draw(rng, int(np.count_nonzero(in_tail)))
+        body = self._truncated_body(rng, n - tail_count)
+        drawn[~in_tail] = body
+        del body
+        drawn[in_tail] = self.tail._draw(rng, tail_count)
         return drawn
 
     def _truncated_body(self, rng, needed: int) -> np.ndarray:
-        kept = []
+        """``needed`` draws of the body at or below the threshold, by rejection,
+        into one array. Each round draws about 1.25 times what is still needed over
+        the body's share, but never more than a quarter of the sample (and at least
+        64) nor more than :data:`SPLICE_CHUNK`, so a sample of n holds about 2.5 n
+        values at its peak (itself, the body's part, two masks and a round), never
+        several times its size."""
+        filled = np.empty(needed, dtype=np.float64)
+        done = 0
         share = self._body_share
-        for _ in range(SPLICE_MAX_ROUNDS):
-            if needed == 0:
+        largest = min(SPLICE_CHUNK, max(needed // 4, 64))
+        rounds = SPLICE_MAX_ROUNDS + int(4 * needed / (share * largest))
+        for _ in range(rounds):
+            if done == needed:
                 break
-            batch = self.body._draw(rng, int(needed / share * 2.0) + 64)
-            accepted = batch[batch <= self.threshold][:needed]
-            kept.append(accepted)
-            needed -= accepted.size
-        if needed:
+            batch = self.body._draw(rng, min(largest, int((needed - done) / share * 1.25) + 64))
+            accepted = batch[batch <= self.threshold]
+            take = min(accepted.size, needed - done)
+            filled[done : done + take] = accepted[:take]
+            done += take
+        if done != needed:
             raise DistributionRefused("out_of_range", "the truncated body did not fill its sample")
-        return np.concatenate(kept) if kept else np.empty(0, dtype=np.float64)
+        return filled
 
     def _cdf(self, x):
         if x <= 0.0:
@@ -1255,9 +1369,16 @@ def _check_bounds(instance) -> None:
         raise DistributionRefused(
             "mode_out_of_range", f"mode {float_text(mode)} is outside [{float_text(low)}, {float_text(high)}]"
         )
+    _finite_moment(lambda: high - low, "width")
     _set(instance, "minimum", low)
     _set(instance, "mode", mode)
     _set(instance, "maximum", high)
+
+
+def _check_expert_moments(instance) -> None:
+    """The mean and variance hold as floats (the variance squares the width)."""
+    _finite_moment(lambda: instance.mean, "mean")
+    _finite_moment(lambda: instance.variance, "variance")
 
 
 def _expert_record(instance, record: dict) -> dict:
@@ -1291,6 +1412,7 @@ class Pert(Distribution):
         _check_expert(self)
         _check_bounds(self)
         _set(self, "shape", _positive(self.shape, "shape", "shape_out_of_range"))
+        _check_expert_moments(self)
         self._check_form()
 
     @property
@@ -1318,7 +1440,10 @@ class Pert(Distribution):
         return width * width * a * b / ((a + b) ** 2 * (a + b + 1.0))
 
     def _draw(self, rng, n):
-        return self.minimum + (self.maximum - self.minimum) * rng.beta(self._alpha, self._beta, n)
+        drawn = rng.beta(self._alpha, self._beta, n)
+        drawn *= self.maximum - self.minimum
+        drawn += self.minimum
+        return drawn
 
     def _cdf(self, x):
         if x <= self.minimum:
@@ -1350,6 +1475,7 @@ class Triangular(Distribution):
     def __post_init__(self):
         _check_expert(self)
         _check_bounds(self)
+        _check_expert_moments(self)
         self._check_form()
 
     def params(self):
@@ -1364,15 +1490,21 @@ class Triangular(Distribution):
 
     @property
     def variance(self):
-        a, c, b = self.minimum, self.mode, self.maximum
-        return (a * a + b * b + c * c - a * b - a * c - b * c) / 18.0
+        # (a^2 + b^2 + c^2 - ab - ac - bc) / 18, shifted to the minimum: the same
+        # value, without squaring large bounds whose width is small.
+        width, mode = self.maximum - self.minimum, self.mode - self.minimum
+        return (width * width - width * mode + mode * mode) / 18.0
 
     def _draw(self, rng, n):
         a, c, b = self.minimum, self.mode, self.maximum
         q = rng.random(n)
-        left = a + np.sqrt(q * (b - a) * (c - a))
-        right = b - np.sqrt((1.0 - q) * (b - a) * (b - c))
-        return np.where(q < (c - a) / (b - a), left, right)
+        cut = (c - a) / (b - a)
+        for start in range(0, n, _BLOCK):  # in place, a block at a time
+            block = q[start : start + _BLOCK]
+            left = a + np.sqrt(block * (b - a) * (c - a))
+            right = b - np.sqrt((1.0 - block) * (b - a) * (b - c))
+            q[start : start + _BLOCK] = np.where(block < cut, left, right)
+        return q
 
     def _cdf(self, x):
         a, c, b = self.minimum, self.mode, self.maximum

@@ -54,6 +54,6 @@ ruff==0.16.8
 # distribution and simulation tests run here. The two pins must name the SAME
 # version: a different numpy may draw a different stream from the same seed,
 # and a run's digest would then differ between CI and the service. Nothing
-# Django loads imports either module (tests/test_economics_distributions.py
+# Django loads imports either module (tests/test_economics_simulation.py
 # pins that), so a numpy fault cannot reach a stop route.
 numpy==2.3.3

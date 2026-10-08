@@ -20,9 +20,12 @@ The rules:
   the seed and its own name only: adding, removing or reordering another
   parameter never changes them. Nothing reads the global RNG, and nothing depends
   on Python's string hashing (``PYTHONHASHSEED``).
-- **Bounded.** :data:`DEFAULT_DRAWS` (100,000) draws by default, between
-  :data:`MIN_DRAWS` and :data:`MAX_DRAWS`; a compound run's events across all
-  years at most :data:`MAX_EVENTS`. More is refused before it is sampled.
+- **Bounded, in time and memory.** :data:`DEFAULT_DRAWS` (100,000) draws by
+  default, between :data:`MIN_DRAWS` and :data:`MAX_DRAWS`; a compound run's
+  events across all years at most :data:`MAX_EVENTS`; and at most
+  :data:`MAX_VALUES` values held at once (:func:`values_held`). More is refused
+  before it is sampled (a compound run's events, once the years' counts are
+  drawn and before any event is).
 - **Floats inside, Decimal outside.** Draws and arithmetic are binary64. The
   mean is ``math.fsum`` (a correctly rounded sum) divided by the count; the
   sample variance is ``fsum`` of the squared deviations over ``n - 1``. A
@@ -41,7 +44,10 @@ The rules:
 - **A mean that does not exist is not estimated.** When any input's mean is
   infinite (a generalized Pareto with shape >= 1), the mean, the expected annual
   loss and their standard error are ``None``, with the inputs named; the
-  percentiles are still given.
+  percentiles are still given. When any input's variance is infinite (shape >=
+  1/2), the mean is given but its standard error and band are ``None``, with the
+  inputs named: a band from the sample's standard error would not cover at its
+  stated level.
 
 Pure: no Django, no database, no I/O. Not wired to the formulas, the records or
 any route yet (step 7b).
@@ -84,6 +90,25 @@ MAX_DRAWS = 1_000_000
 #: The most events a compound run may sample across all its years (80 MB a vector).
 MAX_EVENTS = 10_000_000
 MAX_SEED = 2**64 - 1
+#: The most values a run may hold at once (240 MB as binary64), counted before
+#: anything is sampled (in a compound run, once the years' event counts are
+#: drawn and before any event is) by :func:`values_held`. More is refused
+#: (``values_over_budget``), so memory is bounded by the limits, not by luck.
+MAX_VALUES = 30_000_000
+#: Vectors of the sampled length a run holds beside its parameters' at its peak:
+#: the first sample's outcomes, kept while the run is sampled again; the
+#: evaluated function's result; and one more, for the function's temporaries or a
+#: splice's buffer.
+RUN_VECTORS = 3
+#: Vectors one per simulated year a compound run holds beside them: the event
+#: counts and the annual losses of both samples, and the compound sum's indices.
+YEAR_VECTORS = 8
+#: Sums and squared deviations are taken this many values at a time.
+_CHUNK = 16_384
+#: A run's peak beyond 8 bytes for each value :func:`values_held` counts: the
+#: block and chunk buffers of the portable exp, the triangular inversion and the
+#: sums, about a megabyte whatever the run's size.
+FIXED_BUFFER_BYTES = 1_000_000
 
 #: The percentiles every result reports.
 P10, P50, P90 = Decimal(10), Decimal(50), Decimal(90)
@@ -132,7 +157,12 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "outcome_malformed": "the evaluated function returns one number per draw",
         "outcome_not_finite": "every outcome is a finite number: NaN and Infinity are never summarised",
         "outcome_negative": "every outcome is a loss, at least zero: no benefit model is enabled",
-        "out_of_range": "a summary statistic too large to hold as a binary64 float",
+        "out_of_range": "an outcome, a year's loss or a summary statistic too large to hold as a binary64 float",
+        "values_over_budget": (
+            "a run holds at most MAX_VALUES values at once, counted as (parameters + RUN_VECTORS) times the "
+            "sampled length, plus YEAR_VECTORS per simulated year in a compound run: refused before anything is "
+            "sampled, and in a compound run before any event is"
+        ),
         "percentile_out_of_range": "severe-but-plausible is an int or Decimal percentile from 90 to below 100",
         "model_version_blank": "a run names the model version it ran, as text that is not blank",
         "scenario_id_malformed": "a scenario id is text that is not blank, or none",
@@ -231,27 +261,57 @@ def sample_parameters(parameters: Mapping[str, Distribution], random: RunRandom,
 def compound_annual(counts: np.ndarray, event_losses: np.ndarray) -> np.ndarray:
     """Each simulated year's loss: year i holds ``counts[i]`` events, taken in order
     from ``event_losses``, and its loss is their sum (zero for a year with none).
-    The sums are accumulated in event order, so they are the same every time."""
+    Each year's events are one contiguous run, summed by ``np.add.reduceat`` (the
+    same operations every time, on every CPU), with indices one per year, never one
+    per event. A sum too large for a float is Infinity here, refused by the
+    summary."""
     counts = np.asarray(counts)
     event_losses = np.asarray(event_losses, dtype=np.float64)
     if counts.ndim != 1 or counts.dtype.kind not in "iu" or (counts < 0).any():
         raise InvariantBroken("event counts are a vector of whole numbers at least zero")
     if event_losses.shape != (int(counts.sum()),):
         raise InvariantBroken("one event loss per event")
-    years = np.repeat(np.arange(counts.size), counts)
-    return np.bincount(years, weights=event_losses, minlength=counts.size).astype(np.float64)
+    annual = np.zeros(counts.size, dtype=np.float64)
+    if event_losses.size:
+        occupied = counts > 0
+        starts = np.cumsum(counts) - counts
+        with np.errstate(over="ignore"):
+            annual[occupied] = np.add.reduceat(event_losses, starts[occupied])
+    return annual
+
+
+def values_held(parameter_count: int, length: int, years: int | None = None) -> int:
+    """The values a run holds at its peak, by its own count: (parameters +
+    :data:`RUN_VECTORS`) vectors of the sampled length (the draws, or the events
+    of a compound run), and :data:`YEAR_VECTORS` per simulated year in a compound
+    run. The evaluated function's own temporaries beyond one vector are its own."""
+    return (parameter_count + RUN_VECTORS) * length + (0 if years is None else YEAR_VECTORS * years)
+
+
+def _check_budget(parameter_count: int, length: int, years: int | None = None) -> None:
+    held = values_held(parameter_count, length, years)
+    if held > MAX_VALUES:
+        what = f"{length} draws" if years is None else f"{length} events in {years} years"
+        raise SimulationRefused(
+            "values_over_budget", f"{parameter_count} parameters and {what} hold {held} values; at most {MAX_VALUES}"
+        )
 
 
 def _evaluated(evaluate, samples: Mapping[str, np.ndarray], n: int) -> np.ndarray:
-    outcome = np.asarray(evaluate(samples))
-    if outcome.shape != (n,) or outcome.dtype.kind not in "iuf":
-        raise SimulationRefused("outcome_malformed", f"shape {outcome.shape}, dtype {outcome.dtype}; {n} numbers wanted")
-    outcome = outcome.astype(np.float64)
+    result = np.asarray(evaluate(samples))
+    if result.shape != (n,) or result.dtype.kind not in "iuf":
+        raise SimulationRefused("outcome_malformed", f"shape {result.shape}, dtype {result.dtype}; {n} numbers wanted")
+    if result.dtype == np.float64 and result.flags.owndata and result.flags.writeable:
+        outcome = result  # the function's own new vector: no second copy
+    else:
+        outcome = result.astype(np.float64)  # a draw vector (read-only), a view, or not float64
+    del result
     if not np.isfinite(outcome).all():
         raise SimulationRefused("outcome_not_finite", f"{int(np.count_nonzero(~np.isfinite(outcome)))} of {n}")
     if (outcome < 0.0).any():
         raise SimulationRefused("outcome_negative", f"{int(np.count_nonzero(outcome < 0.0))} of {n}")
-    return outcome + 0.0  # no negative zero
+    outcome += 0.0  # no negative zero
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -269,6 +329,7 @@ def _sample(parameters, evaluate, frequency, seed: int, draws: int) -> _Sampled:
     events = int(counts.sum())
     if events > MAX_EVENTS:
         raise SimulationRefused("events_over_limit", f"{events} events in {draws} years; at most {MAX_EVENTS}")
+    _check_budget(len(parameters), events, draws)
     if events:
         event_losses = _evaluated(evaluate, sample_parameters(parameters, random, events), events)
     else:
@@ -317,9 +378,32 @@ class Summary:
     bands: Mapping[str, tuple[float, float] | None]
 
 
-def summarize(values: np.ndarray, *, severe_percentile: Decimal, mean_defined: bool = True) -> Summary:
+def _fsum(values: np.ndarray, square_about: float | None = None) -> float:
+    """``math.fsum`` of ``values`` (or of their squared deviations from
+    ``square_about``), a chunk at a time: correctly rounded, and never a list of
+    every value."""
+
+    def chunks():
+        for start in range(0, values.size, _CHUNK):
+            part = values[start : start + _CHUNK]
+            if square_about is not None:
+                part = part - square_about
+                with np.errstate(over="ignore"):  # an overflow is refused by the caller
+                    part = part * part
+            yield from part.tolist()
+
+    return math.fsum(chunks())
+
+
+def summarize(
+    values: np.ndarray, *, severe_percentile: Decimal, mean_defined: bool = True, error_defined: bool = True
+) -> Summary:
     """The percentiles, mean, standard error and bands of ``values``, with the
-    invariants checked."""
+    invariants checked. Without ``mean_defined`` there is no mean; without
+    ``error_defined`` (an input's variance is infinite) there is no standard error
+    and no band for the mean: the sample's would understate the uncertainty."""
+    if not np.isfinite(values).all():
+        raise SimulationRefused("out_of_range", "a year's loss is too large to hold as a float")
     ordered = np.sort(values, kind="stable")
     n = ordered.size
     points = {"p10": P10, "p50": P50, "p90": P90, "severe_plausible": severe_percentile}
@@ -331,15 +415,18 @@ def summarize(values: np.ndarray, *, severe_percentile: Decimal, mean_defined: b
     bands["mean"] = None
     if mean_defined:
         try:
-            mean = math.fsum(values.tolist()) / n
+            mean = _fsum(values) / n
         except OverflowError:
             raise SimulationRefused("out_of_range", "the outcomes' sum overflows a float") from None
-        deviations = values - mean
-        with np.errstate(over="ignore"):  # an overflow is refused just below
-            squares = deviations * deviations
-        variance = math.fsum(squares.tolist()) / (n - 1)
-        if not (math.isfinite(mean) and math.isfinite(variance)):
-            raise SimulationRefused("out_of_range", "the outcomes' mean or variance overflows a float")
+        if not math.isfinite(mean):
+            raise SimulationRefused("out_of_range", "the outcomes' mean overflows a float")
+    if mean is not None and error_defined:
+        try:
+            variance = _fsum(values, square_about=mean) / (n - 1)
+        except OverflowError:
+            raise SimulationRefused("out_of_range", "the outcomes' variance overflows a float") from None
+        if not math.isfinite(variance):
+            raise SimulationRefused("out_of_range", "the outcomes' variance overflows a float")
         standard_error = math.sqrt(variance / n)
         bands["mean"] = (mean - _Z * standard_error, mean + _Z * standard_error)
     summary = Summary(
@@ -370,7 +457,7 @@ def check_invariants(summary: Summary) -> None:
     if summary.mean is not None and summary.mean < 0.0:
         raise InvariantBroken(f"a loss mean is negative: {summary.mean}")
     figures = {"p10": summary.p10, "p50": summary.p50, "p90": summary.p90, "severe_plausible": summary.severe}
-    if summary.mean is not None:
+    if summary.mean is not None and summary.bands["mean"] is not None:
         figures["mean"] = summary.mean
     for key, figure in figures.items():
         low, high = summary.bands[key]
@@ -413,8 +500,9 @@ def canonical_json(record: Mapping) -> bytes:
 
 
 def outcomes_digest(outcomes: np.ndarray) -> str:
-    """``sha256:`` and the SHA-256 of the outcomes as little-endian binary64."""
-    return "sha256:" + hashlib.sha256(np.ascontiguousarray(outcomes, dtype="<f8").tobytes()).hexdigest()
+    """``sha256:`` and the SHA-256 of the outcomes as little-endian binary64 (read
+    in place, not copied)."""
+    return "sha256:" + hashlib.sha256(np.ascontiguousarray(outcomes, dtype="<f8").data).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -538,20 +626,26 @@ def run(
         raise SimulationRefused("scenario_id_malformed", repr(scenario_id))
     check_reporting_currency(reporting_currency)
     severe = check_severe_percentile(severe_percentile)
+    if frequency is None:
+        _check_budget(len(parameters), draws)  # a compound run checks once its events are counted
 
     sampled = _sample(parameters, evaluate, frequency, seed, draws)
     # Reproducibility, enforced: the same seed and inputs, sampled again from
     # fresh sub-streams, give the same outcomes, bit for bit.
     replayed = _sample(parameters, evaluate, frequency, seed, draws)
-    if outcomes_digest(sampled.outcomes) != outcomes_digest(replayed.outcomes):
+    reproduced = outcomes_digest(sampled.outcomes) == outcomes_digest(replayed.outcomes)
+    del replayed
+    if not reproduced:
         raise InvariantBroken("the same seed and inputs gave different outcomes: the run is not reproducible")
 
     infinite_mean = sorted(name for name, d in parameters.items() if d.mean is None)
-    mean_defined = not infinite_mean
-    summary = summarize(sampled.outcomes, severe_percentile=severe, mean_defined=mean_defined)
+    infinite_variance = sorted(name for name, d in parameters.items() if d.variance is None)
+    mean_defined, error_defined = not infinite_mean, not infinite_variance
+    defined = {"mean_defined": mean_defined, "error_defined": error_defined}
+    summary = summarize(sampled.outcomes, severe_percentile=severe, **defined)
     event_summary = None
     if frequency is not None and sampled.event_losses.size >= MIN_DRAWS:
-        event_summary = summarize(sampled.event_losses, severe_percentile=severe, mean_defined=mean_defined)
+        event_summary = summarize(sampled.event_losses, severe_percentile=severe, **defined)
 
     basis = PER_DRAW if frequency is None else ANNUAL_LOSS
     block = _summary_block(summary, reporting_currency)
@@ -577,6 +671,17 @@ def run(
             None
             if mean_defined
             else {"reason": "an input's mean is infinite: the sample mean estimates nothing", "parameters": infinite_mean}
+        ),
+        "standard_error_undefined": (
+            None
+            if error_defined
+            else {
+                "reason": (
+                    "an input's variance is infinite: the sample's standard error understates the mean's "
+                    "uncertainty, and a band from it would not cover at its stated level"
+                ),
+                "parameters": infinite_variance,
+            }
         ),
         "events": None
         if frequency is None

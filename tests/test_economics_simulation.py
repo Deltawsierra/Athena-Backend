@@ -23,7 +23,13 @@ Pinned here:
 - the safety rule: neither ``django.setup()`` nor the URLconf imports the
   probabilistic engine or numpy, and with all three unimportable the scan's Stop
   still resolves, answers and is saved;
-- the spec names every code and states the design.
+- the spec names every code and states the design;
+- (review round 1) an input whose variance is infinite gives a mean but no
+  standard error and no mean band (a band that would not cover); a run is refused
+  before it samples when it would hold more than MAX_VALUES values, and its
+  measured peak stays under the budget's 8 bytes a value; a year's loss too large
+  for a float is refused, never an invariant failure; the bands' order-statistic
+  ranks are pinned by hand.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import tracemalloc
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -175,7 +182,7 @@ _DIGEST_SCRIPT = textwrap.dedent(
             frequency=d.NegativeBinomial.from_mean_variance(3, 7),
             seed=2026, model_version="test-model-1", reporting_currency="USD", draws=20_000,
         ),
-        s.run({"tail": d.Spliced.continuous(d.Lognormal.from_median_sigma(1000, 1), d.GeneralizedPareto(0.3, 2000, 5000))},
+        s.run({"tail": d.Spliced.from_body(d.Lognormal.from_median_sigma(1000, 1), d.GeneralizedPareto(0.3, 2000, 5000))},
               seed=7, model_version="m", reporting_currency="EUR", draws=20_000),
         s.run({"gpd": d.GeneralizedPareto(-0.3, 1000, 10)}, frequency=d.ZeroInflatedPoisson(0.2, 2),
               seed=8, model_version="m", reporting_currency="JPY", draws=20_000),
@@ -248,7 +255,7 @@ def test_a_golden_digest():
 
 
 GOLDEN_P50 = "744.0092126459089"
-GOLDEN_DIGEST = "sha256:87aa5080e525ee1386a2ce84e53d391ed8f5f6038d476bacc125cf91afb376b4"
+GOLDEN_DIGEST = "sha256:cfdeb6a74f3874ea064c0fcc32870b07a71da1d850c531db577ab605f0a52e39"
 
 
 # ------------------------------------------------------------------ summary
@@ -275,7 +282,7 @@ SWEEP = [
     d.Gamma(0.5, 1000),
     d.GeneralizedPareto(0.4, 1000, 0),
     d.GeneralizedPareto(-0.5, 1000, 10),
-    d.Spliced.continuous(d.Lognormal.from_median_sigma(1000, 1.0), d.GeneralizedPareto(0.3, 2000, 5000)),
+    d.Spliced.from_body(d.Lognormal.from_median_sigma(1000, 1.0), d.GeneralizedPareto(0.3, 2000, 5000)),
     d.Pert(0, 10, 100, source_type=EXPERT),
     d.Triangular(5, 5, 6, source_type=EXPERT),
 ]
@@ -713,6 +720,12 @@ SPEC_PHRASES = (
     "test_django_and_the_urlconf_never_import_the_probabilistic_engine",
     "exp_portable",
     "numpy==2.3.3",
+    "standard_error_undefined",
+    "a band from the sample's standard error would not cover at its stated level",
+    "30,000,000 values",
+    "values_held",
+    "chunks of at most 1,000,000",
+    "Every splice's CDF is continuous at u",
 )
 
 
@@ -740,3 +753,122 @@ def test_the_spec_names_every_code():
     ]
     missing = [str(code) for code in codes if f"`{code}`" not in text]
     assert not missing, missing
+
+
+# ------------------------------------------------------ review round 1
+
+
+def test_an_infinite_input_variance_gives_a_mean_but_no_standard_error():
+    """Medium 1: a generalized Pareto of shape in [1/2, 1) has a mean and no
+    variance. The sample mean is given; its standard error and band are not, and
+    standard_error_undefined names the input."""
+    for frequency in (None, d.Poisson(2.0)):
+        result = _run({"tail": d.GeneralizedPareto(0.6, 1000, 0)}, frequency=frequency)
+        record = result.record
+        assert record["mean"] is not None and record["mean_undefined"] is None
+        assert record["standard_error_of_mean"] is None and record["bands"]["mean"] is None
+        assert record["standard_error_undefined"]["parameters"] == ["tail"]
+        assert "variance is infinite" in record["standard_error_undefined"]["reason"]
+        assert result.summary.standard_error is None and result.summary.mean is not None
+        assert record["bands"]["p50"] is not None
+    finite = _run({"tail": d.GeneralizedPareto(0.3, 1000, 0)})
+    assert finite.record["standard_error_undefined"] is None
+    assert finite.record["bands"]["mean"] is not None
+    # An infinite mean has no variance either: both are named.
+    heavy = _run({"tail": d.GeneralizedPareto(1.2, 1000, 0), "x": d.Gamma(2, 1)}, lambda v: v["tail"] + v["x"])
+    assert heavy.record["standard_error_undefined"]["parameters"] == ["tail"]
+    assert heavy.record["mean_undefined"]["parameters"] == ["tail"]
+
+
+def test_a_mean_band_when_given_covers_at_about_its_level():
+    """The regression behind medium 1: at shape 0.3 (finite variance) the 95% band
+    covers the true mean in most of 200 seeded runs; at 0.8 the review measured
+    58%, which is why no band is given there."""
+    true_mean = d.GeneralizedPareto(0.3, 1000, 0).mean
+    covered = 0
+    for seed in range(200):
+        low, high = _run({"tail": d.GeneralizedPareto(0.3, 1000, 0)}, seed=seed, draws=2000).summary.bands["mean"]
+        covered += low <= true_mean <= high
+    assert covered >= 0.85 * 200, covered
+    assert _run({"tail": d.GeneralizedPareto(0.8, 1000, 0)}).summary.bands["mean"] is None
+
+
+def test_a_run_over_the_value_budget_is_refused_before_it_samples():
+    """Medium 2: memory is bounded by the limits. Eight parameters over a million
+    years at about ten events a year held about 855 MiB before; now the run is
+    refused once the years' counts are drawn, before any event is sampled or the
+    function evaluated. A per-draw run is refused before anything is sampled."""
+    calls = []
+
+    def evaluate(v):
+        calls.append(1)
+        return sum(v.values())
+
+    many = {f"p{i}": d.Gamma(2, 1) for i in range(8)}
+    with pytest.raises(s.SimulationRefused) as caught:
+        _run(many, evaluate, frequency=d.Poisson(9.9), draws=1_000_000)
+    assert caught.value.code == "values_over_budget"
+    wide = {f"p{i}": d.Gamma(2, 1) for i in range(28)}
+    with pytest.raises(s.SimulationRefused) as caught:
+        _run(wide, evaluate, draws=1_000_000)
+    assert caught.value.code == "values_over_budget"
+    assert not calls
+    assert s.values_held(27, 1_000_000) == s.MAX_VALUES  # 27 parameters of a million draws: the budget exactly
+    assert s.values_held(28, 1_000_000) > s.MAX_VALUES
+    assert s.values_held(3, 3_500_000, 1_000_000) == 6 * 3_500_000 + 8 * 1_000_000
+    assert s.MAX_VALUES == 30_000_000 and (s.RUN_VECTORS, s.YEAR_VECTORS) == (3, 8)
+
+
+def _peak(call):
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        result = call()
+        return result, tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.parametrize("compound", [False, True], ids=["per_draw", "compound"])
+def test_a_runs_measured_peak_is_within_its_count(compound):
+    """The budget's count holds: a run's traced peak is at most 8 bytes for each
+    value values_held counts, plus about a megabyte of fixed block and chunk
+    buffers (measured: 0.7 to 1.0 of the count for a three-factor product with a
+    splice; 236 MB for 27 parameters of a million draws, at the budget of 240)."""
+    parameters = {"a": d.Lognormal(0, 1), "b": d.Gamma(2, 1), "c": d.Spliced.from_body(
+        d.Lognormal.from_median_sigma(1, 0.5), d.GeneralizedPareto(0.1, 1, 2))}
+    options = {"frequency": d.Poisson(3.0), "draws": 100_000} if compound else {"draws": 300_000}
+    result, peak = _peak(lambda: _run(parameters, lambda v: v["a"] * v["b"] * v["c"], **options))
+    length = result.event_losses.size if compound else options["draws"]
+    held = s.values_held(3, length, options["draws"] if compound else None)
+    assert peak <= 8 * held + s.FIXED_BUFFER_BYTES, (peak, 8 * held)
+
+
+def test_a_year_too_large_for_a_float_is_refused_not_an_invariant_failure():
+    """Low 4: each event is finite, but a year of several sums past the largest
+    float. With an infinite-mean input the summary went straight to the
+    percentiles and raised InvariantBroken; now it is refused, out_of_range."""
+    capped = lambda v: np.minimum(v["tail"], 1.0) * 1.5e308  # noqa: E731
+    with pytest.raises(s.SimulationRefused) as caught:
+        _run({"tail": d.GeneralizedPareto(1.2, 1, 0.5)}, capped, frequency=d.Poisson(5.0), draws=2000)
+    assert caught.value.code == "out_of_range"
+    with pytest.raises(s.SimulationRefused) as caught:
+        s.summarize(np.array([1.0, np.inf] * 600), severe_percentile=Decimal(95), mean_defined=False)
+    assert caught.value.code == "out_of_range"
+
+
+def test_band_ranks_by_hand():
+    """Low 5: the order statistics of 0, 1, ..., 999. For p = 0.1: n p = 100,
+    z sqrt(n p (1 - p)) = 1.959964 x 9.486833 = 18.594, ranks floor(81.406) = 81 and
+    ceil(118.594) = 119, so values 80 and 118; likewise p = 0.5 (30.990: ranks 469
+    and 531), 0.9 (ranks 881 and 919) and 0.95 (13.508: ranks 936 and 964). The
+    mean's band is 499.5 -/+ z sqrt(1000 x 1001 / 12 / 1000)."""
+    summary = s.summarize(np.arange(1000.0), severe_percentile=Decimal(95))
+    assert summary.bands["p10"] == (80.0, 118.0)
+    assert summary.bands["p50"] == (468.0, 530.0)
+    assert summary.bands["p90"] == (880.0, 918.0)
+    assert summary.bands["severe_plausible"] == (935.0, 963.0)
+    half_width = 1.959963984540054 * math.sqrt(1000 * 1001 / 12 / 1000)
+    assert summary.mean == 499.5
+    assert summary.bands["mean"] == (pytest.approx(499.5 - half_width, rel=1e-14), pytest.approx(499.5 + half_width, rel=1e-14))

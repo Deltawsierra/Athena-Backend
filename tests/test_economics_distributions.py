@@ -21,7 +21,12 @@ Pinned here:
 - sampling reads only the generator it is given, never numpy's or Python's
   global state;
 - the portable exp and expm1 the severity samplers use agree with the C library
-  to a unit or two in the last place.
+  to a unit or two in the last place, and give Infinity, zero (or -1) and NaN
+  beyond the range of a float, never garbage;
+- (review round 1) no parameters a distribution accepts give an Infinity or a NaN
+  in a moment or a draw, a CDF keeps its digits far below a large shape, a
+  negative-shape generalized Pareto stops at its endpoint, and a splice's sample
+  holds its own size and one chunk, never several times its size.
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ import ast
 import json
 import math
 import random
+import tracemalloc
+import warnings
 from decimal import Decimal
 from pathlib import Path
 
@@ -64,7 +71,7 @@ def test_the_catalogue_ids_versions_kinds_and_forms():
         "lognormal": (1, "severity", ("native", "median_sigma", "p10_p90", "median_p90"), False, False),
         "gamma": (1, "severity", ("native", "mean_sd"), False, False),
         "generalized_pareto": (1, "severity", ("native", "mean_excess"), False, False),
-        "spliced": (1, "severity", ("native", "continuous_at_threshold"), False, False),
+        "spliced": (1, "severity", ("native", "tail_probability_of_body"), False, False),
         "pert": (1, "expert", ("native",), False, True),
         "triangular": (1, "expert", ("native",), False, True),
     }
@@ -72,7 +79,7 @@ def test_the_catalogue_ids_versions_kinds_and_forms():
 
 
 def _splice_lognormal():
-    return d.Spliced.continuous(d.Lognormal.from_median_sigma(1000, 0.5), d.GeneralizedPareto(0.1, 800, 2000))
+    return d.Spliced.from_body(d.Lognormal.from_median_sigma(1000, 0.5), d.GeneralizedPareto(0.1, 800, 2000))
 
 
 def _splice_gamma():
@@ -177,8 +184,16 @@ def test_customer_forms_return_what_was_given():
     gpd = d.GeneralizedPareto.from_mean_excess(2000, 1500, 0.15)
     assert gpd.mean - 2000 == pytest.approx(1500)
     splice = _splice_lognormal()
-    # Continuous at the threshold: the splice's CDF there is the body's.
-    assert splice.cdf(splice.threshold) == pytest.approx(splice.body.cdf(splice.threshold), rel=1e-14)
+    # The tail probability of the body: below the threshold the splice IS the
+    # body, unscaled.
+    assert splice.record()["form"] == "tail_probability_of_body"
+    for x in (100.0, 900.0, 1500.0, splice.threshold):
+        assert splice.cdf(x) == pytest.approx(splice.body.cdf(x), rel=1e-14)
+    # Any splice's CDF is continuous at the threshold, whatever its tail probability.
+    for tail_probability in (0.01, 0.1, 0.4):
+        native = d.Spliced(d.Gamma(2.0, 1000), d.GeneralizedPareto(0.1, 1500, 4000), tail_probability)
+        assert native.cdf(4000.0) == pytest.approx(1 - tail_probability, rel=1e-14)
+        assert native.cdf(4000.0 * (1 + 1e-12)) == pytest.approx(1 - tail_probability, rel=1e-9)
 
 
 def _ks_statistic(dist, sample: np.ndarray) -> float:
@@ -298,7 +313,7 @@ REFUSED = [
     ("gpd_mean_excess_infinite", lambda: d.GeneralizedPareto.from_mean_excess(1000, 500, 1.0), "shape_out_of_range"),
     ("splice_body", lambda: d.Spliced(d.Poisson(2), _gpd(5000), 0.1), "component_unsupported"),
     ("splice_tail", lambda: d.Spliced(d.Gamma(2, 100), d.Gamma(2, 100), 0.1), "component_unsupported"),
-    ("splice_continuous_body", lambda: d.Spliced.continuous(d.Poisson(2), _gpd(5000)), "component_unsupported"),
+    ("splice_from_body_body", lambda: d.Spliced.from_body(d.Poisson(2), _gpd(5000)), "component_unsupported"),
     (
         "splice_threshold_below_median",
         lambda: d.Spliced(d.Lognormal.from_median_sigma(1000, 1), _gpd(500), 0.1),
@@ -319,6 +334,19 @@ REFUSED = [
     ("triangular_benchmark", lambda: d.Triangular(0, 5, 10, source_type="INDUSTRY_BENCHMARK"), "expert_not_allowed"),
     ("triangular_mode", lambda: d.Triangular(0, 150, 100, source_type=EXPERT), "mode_out_of_range"),
     ("form_unknown", lambda: d.Poisson(3, form="p10_p90"), "form_unrecognised"),
+    # Review round 1, low 1 and low 2: accepted parameters never give Infinity,
+    # NaN or a median of zero.
+    ("lognormal_median_underflows", lambda: d.Lognormal(-746, 1), "out_of_range"),
+    ("lognormal_median_underflows_wide", lambda: d.Lognormal(-1000, 30), "out_of_range"),
+    ("gpd_scale_over_shape_overflows", lambda: d.GeneralizedPareto(1e-300, 1e10), "out_of_range"),
+    ("gpd_negative_scale_over_shape", lambda: d.GeneralizedPareto(-1e-300, 1e10), "out_of_range"),
+    ("gpd_largest_draw_overflows", lambda: d.GeneralizedPareto(2.0, 1e300), "out_of_range"),
+    ("gpd_exponential_largest_draw", lambda: d.GeneralizedPareto(0.0, 1e307), "out_of_range"),
+    ("pert_variance_overflows", lambda: d.Pert(0, 1, 1e200, source_type=EXPERT), "out_of_range"),
+    ("triangular_variance_overflows", lambda: d.Triangular(0, 1, 1e200, source_type=EXPERT), "out_of_range"),
+    ("pert_width_overflows", lambda: d.Pert(-1e308, 0, 1e308, source_type=EXPERT), "out_of_range"),
+    ("triangular_width_overflows", lambda: d.Triangular(-1e308, 0, 1e308, source_type=EXPERT), "out_of_range"),
+    ("pert_mean_overflows", lambda: d.Pert(0, 1e300, 1e300 * 1.5, source_type=EXPERT, shape=1e10), "out_of_range"),
     ("given_malformed", lambda: d.Poisson(3, given=("rate", 3)), "form_unrecognised"),
 ]
 
@@ -406,7 +434,7 @@ def test_a_gpd_whose_variance_alone_is_infinite():
 
 
 def test_a_splice_with_an_infinite_tail_mean_has_none():
-    splice = d.Spliced.continuous(d.Lognormal.from_median_sigma(1000, 1), d.GeneralizedPareto(1.1, 2000, 5000))
+    splice = d.Spliced.from_body(d.Lognormal.from_median_sigma(1000, 1), d.GeneralizedPareto(1.1, 2000, 5000))
     assert splice.mean is None and splice.variance is None
     assert splice.record()["mean"] is None
     assert splice.record()["tail"]["mean"] is None
@@ -527,3 +555,129 @@ def test_special_functions_known_values():
     # A large shape keeps its digits (Stirling's correction in the prefactor):
     # the Poisson CDF at its mean for a rate of a million (mpmath, 40 digits).
     assert d.Poisson(1e6).cdf(1e6) == pytest.approx(0.50026596148628365, rel=1e-12)
+
+
+# ------------------------------------------------- review round 1: the edges
+
+
+def test_the_portable_exp_and_expm1_beyond_the_range_of_a_float():
+    """Low 1: Infinity, zero (or -1) and NaN, as any exp gives them, with no
+    warning; before, Infinity gave NaN, 1e10 gave 0 and -1e300 gave -Infinity."""
+    x = np.array([np.inf, -np.inf, 1e10, -1e300, np.nan, 709.0, -745.0, 1e300])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        exp = d.exp_portable(x)
+        expm1 = d.expm1_portable(x)
+    assert exp[0] == np.inf and exp[1] == 0.0 and exp[2] == np.inf and exp[3] == 0.0 and np.isnan(exp[4])
+    assert exp[5] == pytest.approx(math.exp(709.0), rel=1e-15) and exp[6] == math.exp(-745.0) and exp[7] == np.inf
+    assert expm1[0] == np.inf and expm1[1] == -1.0 and expm1[2] == np.inf and expm1[3] == -1.0
+    assert np.isnan(expm1[4]) and expm1[7] == np.inf
+    # In place, as the samplers call it, and the same bits.
+    y = np.linspace(-50.0, 50.0, 200_001)
+    expected = d.exp_portable(y.copy())
+    assert d.exp_portable(y, out=y) is y
+    assert np.array_equal(y, expected)
+
+
+def test_a_lognormal_with_a_large_sigma_and_a_tiny_median_keeps_a_finite_variance():
+    """The nit: (e^(s^2) - 1) e^(2 mu + s^2) is computed in logarithms, so
+    e^(s^2) - 1 overflowing alone does not refuse a variance of e^400."""
+    wide = d.Lognormal(-700, 30)
+    assert wide.variance == pytest.approx(math.exp(400.0), rel=1e-12)
+    assert np.isfinite(wide.sample(rng(1), 10_000)).all()
+
+
+def test_accepted_extremes_draw_finite_numbers():
+    """Low 2: a generalized Pareto with a tiny shape is about exponential (its
+    draw takes expm1(xi E) / xi first, so sigma / xi never overflows), and a
+    triangle with large bounds and a small width has its small variance."""
+    tiny = d.GeneralizedPareto(1e-12, 1000)
+    drawn = tiny.sample(rng(2), 200_000)
+    assert np.isfinite(drawn).all()
+    assert abs(drawn.mean() - 1000) <= K * 1000 / math.sqrt(200_000)
+    far = d.Triangular(1e154, 1.00000001e154, 1.1e154, source_type=EXPERT)
+    assert math.isfinite(far.variance) and far.variance == pytest.approx((1e153) ** 2 * 0.0555555, rel=1e-5)
+    heavy = d.GeneralizedPareto(2.0, 1e260)
+    assert np.isfinite(heavy.sample(rng(3), 100_000)).all()
+    assert heavy._largest_draw() < 1.8e308
+
+
+@pytest.mark.parametrize("cls", [d.Pert, d.Triangular])
+def test_an_expert_range_wider_than_a_float_is_refused_for_its_width(cls):
+    """Low 2: max - min past the largest float is refused as a width, before its
+    NaN draws or its infinite variance; and each check names what overflowed."""
+    with pytest.raises(d.DistributionRefused) as caught:
+        cls(-1e308, 0, 1e308, source_type=EXPERT)
+    assert caught.value.code == "out_of_range" and "width" in caught.value.detail
+    with pytest.raises(d.DistributionRefused) as caught:
+        cls(0, 1, 1e200, source_type=EXPERT)
+    assert caught.value.code == "out_of_range" and "variance" in caught.value.detail
+    with pytest.raises(d.DistributionRefused) as caught:
+        d.GeneralizedPareto(2.0, 1e300)
+    assert "largest draw" in caught.value.detail
+
+
+@pytest.mark.parametrize(
+    ("dist", "x", "expected"),
+    [
+        (d.Poisson(3.0), 1e17, 1.0),
+        (d.ZeroInflatedPoisson(0.1, 3.0), 1e17, 1.0),
+        (d.Gamma(200.0, 1.0), 1e-15, 0.0),
+        (d.Gamma(1e6, 1.0), 1e-12, 0.0),
+        (d.NegativeBinomial(300.0, 0.5), 1e17, 1.0),
+    ],
+)
+def test_a_cdf_far_from_a_large_shape_does_not_raise(dist, x, expected):
+    """Low 3: (x - a) / a rounded to -1 and log1p(-1) raised a bare ValueError;
+    far below the shape the prefactor now takes a (ln x - ln a) + a - x."""
+    assert dist.cdf(x) == pytest.approx(expected, abs=1e-300)
+
+
+def test_the_far_branch_keeps_its_digits():
+    """The x < a / 4 branch of the gamma prefactor agrees with the direct series
+    where the direct form is still accurate (a = 150, x = 20)."""
+    a, x = 150.0, 20.0
+    term, total = 1.0 / a, 1.0 / a
+    for k in range(1, 400):
+        term *= x / (a + k)
+        total += term
+    direct = total * math.exp(-x + a * math.log(x) - math.lgamma(a))
+    assert d.gamma_p(a, x) == pytest.approx(direct, rel=1e-11)
+    assert d.beta_inc(200.0, 300.0, 1e-20) == 0.0
+    assert d.beta_inc(200.0, 300.0, 1.0 - 1e-16) == 1.0
+    assert 0.0 < d.beta_inc(200.0, 300.0, 0.3) < 1e-3
+
+
+def test_a_negative_shape_pareto_stops_at_its_endpoint():
+    """Low 5: the support of xi < 0 ends at u - sigma / xi (here 10 + 2000)."""
+    gpd = d.GeneralizedPareto(-0.5, 1000, 10)
+    endpoint = 2010.0
+    assert gpd._largest_draw() == endpoint
+    assert gpd.cdf(endpoint) == 1.0
+    assert gpd.cdf(endpoint + 490) == 1.0
+    assert gpd.cdf(10 + 0.95 * 2000) == pytest.approx(1 - 0.05**2, rel=1e-12)
+    assert gpd.cdf(10 + 0.95 * 2000) < 1.0
+    assert gpd.ppf(1 - 1e-12) <= endpoint
+    drawn = gpd.sample(rng(4), 1_000_000)
+    assert drawn.max() <= endpoint
+    assert drawn.max() > 2000  # it reaches toward the endpoint
+
+
+def test_a_splice_sample_holds_its_size_and_one_chunk():
+    """Medium 2: the splice's body is drawn in chunks of at most SPLICE_CHUNK, so
+    a sample of n holds about 2.4 n values at its peak (the sample, the body's
+    share of it, two masks and a chunk), never several times n; before, one
+    round drew about 4 n at once, past MAX_SAMPLE."""
+    assert d.SPLICE_CHUNK <= d.MAX_SAMPLE
+    splice = _splice_lognormal()
+    n = 4_000_000
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        drawn = splice.sample(rng(6), n)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    assert drawn.size == n and np.isfinite(drawn).all()
+    assert peak <= 8 * (2.5 * n + 2.2 * d.SPLICE_CHUNK), peak / (8 * n)
