@@ -612,6 +612,13 @@ def test_date_inversion_is_refused(fx_book, index_book):
             eur("1"), event_date=VALUATION, valuation_date=EVENT, policy=policy(), fx_book=fx_book,
             index_book=index_book,
         )
+    # Refused before any step runs: an event date with no rate is still a date
+    # inversion, never reported as an unavailable rate.
+    with refused("date_inversion"):
+        normalize(
+            eur("1"), event_date=date(2026, 10, 9), valuation_date=VALUATION, policy=policy(), fx_book=fx_book,
+            index_book=index_book,
+        )
     with refused("date_inversion"):
         cost_index.index(usd("1"), VALUATION, EVENT, index_book, US_CPI)
     # A value published before its period began.
