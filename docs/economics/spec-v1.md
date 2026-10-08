@@ -419,8 +419,9 @@ An amount is `Money(amount, currency)`: a `Decimal` and an ISO 4217 code.
 - **A float is refused on entry** (`not_decimal`), and so is an int, a bool, a
   string or anything else that is not a `Decimal`: `0.1` as a float is not one
   tenth, and a figure built on it is wrong before anything is computed.
-  `Money.parse("1234.56", "USD")` reads a decimal string. A multiplier is a
-  `Decimal` too (`money * 1.5` is refused).
+  `Money.parse("1234.56", "USD")` reads a decimal string, in one spelling only:
+  `-?[0-9]+(.[0-9]+)?`, ASCII digits, no exponent, sign or whitespace (section
+  13). A multiplier is a `Decimal` too (`money * 1.5` is refused).
 - NaN and Infinity, signalling or quiet, are refused (`not_finite`).
 - The currency is a code the table holds (`currency_unknown`) that has a minor
   unit (`currency_retired`, core's code for a code no amount is written in). A
@@ -516,7 +517,7 @@ date. `fx.FXPolicy`:
 |---|---|---|
 | `providers` | (required) | tried in order, strongest first: a tenant-required provider, an official reference provider, a licensed market fallback (section 19 of the owner's specification). None with a rate: `unavailable` |
 | `rate_types` | `reference`, `mid` | within each provider, the rate types accepted, in order |
-| `weekend_holiday_rule` | `last_official_rate` | on a day the provider does not publish (Saturday, Sunday, or a holiday in its calendar), the last official rate: its last publication day's. `none` turns the rule off |
+| `weekend_holiday_rule` | `last_official_rate` | on a day the provider does not publish (Saturday, Sunday, or a holiday in its calendar), the last official rate: its last publication day's, at most 31 days back (`fx.MAX_NON_PUBLICATION_RUN`; further is `rate_missing`). `none` turns the rule off |
 | `missing_rate` | `unavailable` | a day the provider publishes on with no rate is missing: `unavailable`, or with `interpolate`, an estimate |
 | `max_interpolation_gap_days` | 7 | an estimate's two observations are no further apart |
 | `freshness_days` | 4 | a rate older than this for the day it is used for is flagged stale |
@@ -538,7 +539,9 @@ date. `fx.FXPolicy`:
   the last observation.
 - **Stale.** A rate whose age (days between the day asked for and the furthest
   observation used) exceeds `freshness_days` is flagged stale, and carries the
-  downgrade `stale_rate`.
+  downgrade `stale_rate`. Any step may be the stale or estimated one -- the
+  event-date step or the valuation-date step -- and the normalization's
+  `estimate`, `stale` and downgrades read every step.
 - **Same currency.** No conversion: the rule `same_currency`, factor 1.
 - **Round trip.** Through one rate, USD to EUR and back returns the amount to
   within 1E-50, relative (`fx.ROUND_TRIP_TOLERANCE`), and exactly at display.
