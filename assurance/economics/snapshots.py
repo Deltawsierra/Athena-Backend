@@ -99,17 +99,42 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
     return registered
 
 
-def fx_book(sources: Iterable[FinancialSource], holidays: Mapping[str, Iterable[date]] | None = None) -> FXBook:
-    """The stored FX observations of ``sources`` as the engine reads them.
+def _tenant_sources(sources: Iterable[FinancialSource], deployment) -> list[int]:
+    """The ids of ``sources``, each of them platform-wide or ``deployment``'s own
+    (``None``: a run for no deployment, platform-wide sources only), read from the
+    STORED rows, never from the objects passed. Any other is refused
+    (``cross_tenant_reference``): one tenant's observations never reach another's
+    run."""
+    ids = [getattr(source, "pk", source) for source in sources]
+    if any(pk is None for pk in ids):
+        raise EconomicsRefused("cross_tenant_reference", "a source that is not stored")
+    tenant = getattr(deployment, "pk", deployment)
+    stored = dict(FinancialSource._base_manager.filter(pk__in=ids).values_list("pk", "deployment_id"))
+    for pk in ids:
+        if pk not in stored:
+            raise EconomicsRefused("cross_tenant_reference", f"source {pk} is not stored")
+        if stored[pk] is not None and stored[pk] != tenant:
+            raise EconomicsRefused("cross_tenant_reference", f"source {pk} belongs to another deployment")
+    return ids
+
+
+def fx_book(
+    sources: Iterable[FinancialSource], *, deployment, holidays: Mapping[str, Iterable[date]] | None = None
+) -> FXBook:
+    """The stored FX observations of ``sources`` as the engine reads them, for a
+    run of ``deployment``: every source platform-wide or that deployment's own.
 
     No model stores a provider's holidays yet: pass them (a snapshot's
     ``holidays``). Without them, a holiday is a day the provider publishes on, so a
     rate missing on it is unavailable -- never filled in."""
-    rows = FXObservation.objects.filter(source__in=list(sources)).select_related("source")
+    ids = _tenant_sources(sources, deployment)
+    rows = FXObservation.objects.filter(source_id__in=ids).select_related("source")
     return FXBook((row.as_engine() for row in rows), holidays)
 
 
-def index_book(sources: Iterable[FinancialSource]) -> IndexBook:
-    """The stored cost-index observations of ``sources`` as the engine reads them."""
-    rows = CostIndexObservation.objects.filter(source__in=list(sources)).select_related("source")
+def index_book(sources: Iterable[FinancialSource], *, deployment) -> IndexBook:
+    """The stored cost-index observations of ``sources`` as the engine reads them,
+    for a run of ``deployment``: every source platform-wide or that deployment's own."""
+    ids = _tenant_sources(sources, deployment)
+    rows = CostIndexObservation.objects.filter(source_id__in=ids).select_related("source")
     return IndexBook(row.as_engine() for row in rows)

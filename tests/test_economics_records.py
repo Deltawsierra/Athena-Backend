@@ -651,8 +651,8 @@ def test_stored_observations_read_back_exactly_and_normalize_the_same():
     from_file = normalize(Money.parse("1000.00", "EUR"), fx_book=snap.fx_book(), index_book=snap.index_book(), **args)
     from_rows = normalize(
         Money.parse("1000.00", "EUR"),
-        fx_book=snapshots.fx_book([source], snap.holidays),
-        index_book=snapshots.index_book([source]),
+        fx_book=snapshots.fx_book([source], deployment=None, holidays=snap.holidays),
+        index_book=snapshots.index_book([source], deployment=None),
         **args,
     )
     assert from_rows.value == from_file.value and from_rows.display() == "1309.52 EUR"
@@ -822,4 +822,33 @@ def test_r1_m3_a_series_stays_on_one_base_in_a_source():
         _index(source, period="2026-10", vintage_date=date(2026, 11, 13), base="")
     assert refused.value.code == "required_field_blank"
     assert CostIndexObservation.objects.count() == 1
+
+
+def test_r1_l5_a_book_reads_only_platform_and_the_runs_own_sources(deployment):
+    """Review round 1, L5: fx_book and index_book read whatever sources they were
+    handed, so one tenant's observations could reach another's run. They take the
+    run's deployment and refuse any source that is neither platform-wide nor its own,
+    as stored."""
+    other = Deployment.objects.create(name="someone-else")
+    theirs = snapshots.register_snapshot(deployment=other)
+    mine = snapshots.register_snapshot(deployment=deployment)
+    platform = snapshots.register_snapshot()
+    for build in (snapshots.fx_book, snapshots.index_book):
+        for sources, run in (([theirs], deployment), ([platform, theirs], deployment), ([mine], None), ([theirs], None)):
+            with pytest.raises(EconomicsRefused) as refused:
+                build(sources, deployment=run)
+            assert refused.value.code == "cross_tenant_reference"
+        # The same snapshot registered three times holds the same observations, so
+        # each allowed read takes one source (two in one book would be duplicates).
+        build([mine], deployment=deployment)
+        build([platform], deployment=deployment)
+        build([platform], deployment=None)
+        build([theirs], deployment=other)
+    # The deployment is read from the stored row, not the object handed in.
+    theirs.deployment_id = deployment.pk
+    with pytest.raises(EconomicsRefused) as refused:
+        snapshots.fx_book([theirs], deployment=deployment)
+    assert refused.value.code == "cross_tenant_reference"
+    book = snapshots.fx_book([mine], deployment=deployment)
+    assert len(book.dates("SYNTHETIC-REF", "reference", "EUR", "USD")) == 9
 

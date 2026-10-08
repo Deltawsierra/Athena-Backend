@@ -739,9 +739,13 @@ hash), a bare `NaN` or `Infinity`, and any other broken document are
 
 `snapshots.register_snapshot(path)` writes, in one transaction, the source version
 and every observation, each through its model's checks; a file already registered
-under its hash is returned, not written again. `snapshots.fx_book` and
-`snapshots.index_book` read stored observations back into the engine, and a test
-shows the normalization from the rows equals the one from the file.
+under its hash is returned, not written again. `snapshots.fx_book(sources,
+deployment=...)` and `snapshots.index_book(sources, deployment=...)` read stored
+observations back into the engine for a run of that deployment: every source must
+be platform-wide or the deployment's own, as stored (`None` is a run for no
+deployment: platform-wide only), and any other is refused
+(`cross_tenant_reference`). A test shows the normalization from the rows equals
+the one from the file.
 
 Django keeps a decimal on SQLite, this service's database, as a float rounded to
 15 significant digits. So every decimal column holds at most 15 digits -- a rate
