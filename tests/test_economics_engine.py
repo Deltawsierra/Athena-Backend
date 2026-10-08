@@ -158,6 +158,8 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "provenance.py",
         "snapshot.py",
         "taxonomy.py",
+        # The scenario builder's templates (spec, section 23).
+        "templates.py",
     }
     core_importers = set()
     for path in files:
