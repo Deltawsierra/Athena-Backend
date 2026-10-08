@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from rest_framework.routers import DefaultRouter
 
+# Economic Exposure's one route module (docs/economics/spec-v1.md, section 19):
+# the customer parameter-set routes. None of them is a stop, and the module does
+# nothing at import but define its views.
+from .economics.api import urlpatterns as economics_urlpatterns
 from .views import (
     AssetViewSet,
     ClaimViewSet,
@@ -25,4 +29,4 @@ router.register(r"unknowns", UnknownViewSet, basename="unknown")
 router.register(r"claims", ClaimViewSet, basename="claim")
 router.register(r"retest-requirements", RetestRequirementViewSet, basename="retest-requirement")
 
-urlpatterns = router.urls
+urlpatterns = router.urls + economics_urlpatterns

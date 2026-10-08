@@ -38,10 +38,14 @@ from assurance.economics.engine import (
     confidence,
     cost_index,
     currency,
+    formulas,
     fx,
     governance,
+    loss,
     money,
     normalization,
+    parameter_set,
+    parameters,
     provenance,
     taxonomy,
 )
@@ -102,8 +106,9 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its ten modules.
-    assert result.stdout.strip() == "imported 11", result.stdout
+    # The package and its fourteen modules (E1's ten, and the scenario engine's four:
+    # parameters, formulas, loss and parameter_set).
+    assert result.stdout.strip() == "imported 15", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -135,10 +140,14 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "confidence.py",
         "cost_index.py",
         "currency.py",
+        "formulas.py",
         "fx.py",
         "governance.py",
+        "loss.py",
         "money.py",
         "normalization.py",
+        "parameter_set.py",
+        "parameters.py",
         "provenance.py",
         "snapshot.py",
         "taxonomy.py",
@@ -630,21 +639,29 @@ def _constants(path: Path, calls: set[str], *, returns: bool = False) -> set[str
 
 def test_every_refusal_a_rule_gives_is_a_published_code():
     """Every code a governance rule returns or a model raises is published, in
-    governance.REFUSALS or (phase E1, the money engine) money.REFUSALS; every code
-    the engine raises is in money.REFUSALS; and every published code is one
-    something gives. A code both tables publish means the same in both."""
+    governance.REFUSALS, (phase E1, the money engine) money.REFUSALS or (the
+    scenario engine) parameters.REFUSALS; every code the money engine raises is in
+    money.REFUSALS, and every code the scenario engine raises as its own is in
+    parameters.REFUSALS; and every published code is one something gives. A code
+    two tables publish means the same in both, and the scenario engine publishes
+    none the money engine already does."""
     economics = REPO / "assurance" / "economics"
     returned = _constants(ENGINE / "governance.py", set(), returns=True)
     raised = _constants(economics / "models.py", {"EconomicsRefused"}) | _constants(
         economics / "snapshots.py", {"EconomicsRefused"}
     )
     engine_raised = set().union(*(_constants(path, {"MoneyRefused"}) for path in ENGINE.glob("*.py")))
+    scenario_raised = set().union(*(_constants(path, {"ParameterRefused"}) for path in ENGINE.glob("*.py")))
     assert returned <= set(governance.REFUSALS)
     assert engine_raised <= set(money.REFUSALS)
-    published = set(governance.REFUSALS) | set(money.REFUSALS)
-    assert returned | raised | engine_raised == published
+    assert scenario_raised <= set(parameters.REFUSALS)
+    assert not set(parameters.REFUSALS) & set(money.REFUSALS)
+    published = set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
+    assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):
         assert governance.REFUSALS[code] == money.REFUSALS[code], code
+    for code in set(governance.REFUSALS) & set(parameters.REFUSALS):
+        assert governance.REFUSALS[code] == parameters.REFUSALS[code], code
 
 
 # ---------------------------------------------------- off every stop path
@@ -670,9 +687,16 @@ def test_a_changed_core_table_never_takes_down_the_scan_stop():
 
 def test_nothing_but_the_models_registration_imports_economics():
     """No economics code on any stop, pause, stand-down, terminate or revoke path:
-    the only first-party module that imports the package is the line in
-    assurance/models.py that registers its models. A later step that serves it adds
-    its route module here -- never a stop-path module -- and says so."""
+    the first-party modules that import the package are the line in
+    assurance/models.py that registers its models and (the scenario step) the line
+    in assurance/urls.py that mounts its one route module,
+    ``assurance.economics.api``, the customer parameter-set routes. None of those
+    routes is a stop (``safety.stops.NOT_STOPS``;
+    tests/test_economics_scenario_records.py, ``test_no_economics_route_is_a_stop``),
+    and the module does nothing at import but define its views, so it cannot take
+    the URLconf down: ``test_a_changed_core_table_never_takes_down_the_scan_stop``
+    loads it with core's table changed. A later step that serves more adds its
+    route module here -- never a stop-path module -- and says so."""
     importers = set()
     skip = {".git", "node_modules", "tests", "__pycache__"}
     for directory, subdirectories, files in os.walk(REPO):
@@ -691,7 +715,12 @@ def test_nothing_but_the_models_registration_imports_economics():
             for module in _imports(path, package):
                 if module == "assurance.economics" or module.startswith("assurance.economics."):
                     importers.add(path.relative_to(REPO).as_posix())
-    assert importers == {"assurance/models.py"}
+    assert importers == {"assurance/models.py", "assurance/urls.py"}
+    mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
+    assert [m for m in mounted if m.startswith("assurance.economics")] == [
+        "assurance.economics.api",
+        "assurance.economics.api.urlpatterns",
+    ]
 
 
 # ------------------------------------------------------------- the spec
@@ -741,6 +770,29 @@ SPEC_PHRASES = (
     "No triangulation",
     "No holiday calendar is stored",
     "Swapping the steps gives a different, wrong answer",
+    # The scenario engine (MVP step 4): formulas, insurance, the parameter set.
+    (
+        "The low result is computed from the low inputs and the high from the high inputs, in the direction each "
+        "input moves the loss"
+    ),
+    "a higher recovery rate lowers loss",
+    "A missing input gives an explicit unknown component, never a zero",
+    "Unknown is never zero",
+    "Insurance is applied once, after the gross components",
+    "The retained loss is never negative",
+    "Market value is never cash",
+    "never_added_to_cash",
+    "Money follows section 13's strict decimal-string rule",
+    "Unknown fields are refused",
+    "a viewer, even the deployment's owner, reads and is refused 403",
+    "Its amounts are never taken from the caller",
+    "Every reference is tenant-scoped",
+    "SYNTHETIC / ILLUSTRATIVE",
+    "test_removing_an_operator_is_never_held_back_by_a_parameter_set",
+    "test_no_economics_route_is_a_stop",
+    "this repository does not use hypothesis",
+    "Deterministic ranges, not distributions",
+    "Decisions this version takes, which the owner may change",
 )
 
 
@@ -769,6 +821,23 @@ def test_the_spec_names_every_code():
         cost_index.LATEST_PUBLISHED_PERIOD,
         *normalization.DOWNGRADES,
         *normalization.ORDER,
+        # The scenario engine.
+        *parameters.REFUSALS,
+        *parameters.Unit,
+        *formulas.Direction,
+        *formulas.UNKNOWN_REASONS,
+        formulas.MARKET_VALUE,
+        formulas.ESTIMATED,
+        formulas.UNKNOWN,
+        formulas.GROSS,
+        *(formula_id for formula_id, _ in formulas.CATALOGUE),
+        *(i.name for f in formulas.CATALOGUE.values() for i in f.inputs),
+        *parameter_set.VARIABLES,
+        *parameter_set.Domain,
+        parameter_set.SCHEMA_VERSION,
+        "deployment-economics-parameter-set",
+        "deployment-economics-parameter-set-versions",
+        *loss.TERM_DIRECTIONS,
     ]
     missing = [str(code) for code in codes if f"`{code}`" not in text]
     assert not missing, missing

@@ -7,12 +7,16 @@ and authority. The owner granted it a freeze exception on 7 Oct 2026 (FREEZE.md 
 Mythos-Core, owner exception 9) and adopted the plan's decisions on 8 Oct 2026.
 
 This file is the specification for phase E0, the foundations, and phase E1,
-money, currency, FX and cost-index normalization. It states the calculation
-policy every later step follows, the vocabularies and the currency table, the
-records and who may write them, the governance rules, how an amount is held,
-converted and normalized and with what provenance, the observation data, and what
-this version does not do. Nothing in phases E0 and E1 scores, simulates or serves
-anything.
+money, currency, FX and cost-index normalization, with the deterministic scenario
+engine (MVP step 4): parameters and their units, the formula catalogue, loss
+events and their components, insurance, and the customer parameter set with its
+API. It states the calculation policy every later step follows, the vocabularies
+and the currency table, the records and who may write them, the governance rules,
+how an amount is held, converted and normalized and with what provenance, the
+observation data, how a loss component is computed and with what invariants, and
+what this version does not do. Nothing in this version simulates; the scenario
+engine computes deterministic low, base and high ranges, and the only route it
+serves is the customer parameter set's (section 19).
 
 ## Contents
 
@@ -29,15 +33,24 @@ anything.
 11. [Money](#11-money)
 12. [FX, cost indices and normalization](#12-fx-cost-indices-and-normalization)
 13. [Observation data and the synthetic snapshot](#13-observation-data-and-the-synthetic-snapshot)
+14. [Parameters and units](#14-parameters-and-units)
+15. [The formula catalogue](#15-the-formula-catalogue)
+16. [Loss events, components and totals](#16-loss-events-components-and-totals)
+17. [Insurance](#17-insurance)
+18. [The invariants](#18-the-invariants)
+19. [The customer parameter set and its API](#19-the-customer-parameter-set-and-its-api)
+20. [The scenario records](#20-the-scenario-records)
+21. [Known-answer fixtures](#21-known-answer-fixtures)
+22. [Limitations of the scenario engine, and decisions for the owner](#22-limitations-of-the-scenario-engine-and-decisions-for-the-owner)
 
 ## 1. Status and scope
 
 | | |
 |---|---|
-| Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1) |
-| Tests | `tests/test_economics_engine.py` and `tests/test_economics_money.py` (no database), `tests/test_economics_records.py` |
+| Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; and the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py` and `tests/test_economics_known_answers.py` (no database), `tests/test_economics_records.py` and `tests/test_economics_scenario_records.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
 
@@ -47,10 +60,12 @@ migrate with the rest of `assurance`. The pure core imports no Django, and of
 mythos-core only its currency table; a test imports it in a fresh interpreter
 with Django and every other part of mythos-core poisoned.
 
-Out of scope for E0 and E1, and added by later steps: formulas, distributions and
-the simulation; the scenario builder; endpoints; feeds and their adapters; source
-disagreement; building or verifying the signed Financial Exposure Receipt
-(`mythos_core.exposure_receipt`, pinned since E1 but not yet called).
+Out of scope, and added by later steps: distributions and the simulation; the
+scenario builder (which resolves SPINE references and writes a scenario's
+parameters, loss events and components from evidence); every endpoint but the
+customer parameter set's; feeds and their adapters; source disagreement; building
+or verifying the signed Financial Exposure Receipt (`mythos_core.exposure_receipt`,
+pinned since E1 but not yet called).
 
 ## 2. Safety
 
@@ -68,7 +83,9 @@ back by them:
 2. **Deleting a deployment** (no route does this today: the admin, and later the
    customer exit). It cascades away the deployment's sources and scenarios, and
    their reviews, overrides and approvals, and the FX and cost-index observations
-   of its sources (E1).
+   of its sources (E1), and its customer parameter sets, every financial
+   parameter, and the loss events and components of its scenarios (the scenario
+   step).
 
 Django runs both through each model's base manager, which is Django's plain
 manager: the append-only refusals are not on that path, and `Meta.base_manager_name`
@@ -83,15 +100,30 @@ and `test_the_records_go_with_their_deployment`, both in
 removing an operator never writes them
 (`test_removing_an_operator_who_registered_a_snapshot_is_never_held_back`), and
 they go with their source and its deployment
-(`test_a_tenants_snapshot_goes_with_its_deployment`).
+(`test_a_tenants_snapshot_goes_with_its_deployment`). A customer parameter set
+names its author as a scenario does, and removing that operator answers `204`
+through the real route, nulls the account and keeps the name
+(`test_removing_an_operator_is_never_held_back_by_a_parameter_set`); the scenario
+records go with their deployment (`test_the_records_go_with_their_deployment` in
+`tests/test_economics_scenario_records.py`). Neither a financial parameter, a loss
+event nor a loss component has an account column.
 
-The package is off every stop path in the other direction too.
-`assurance/models.py` is the only first-party module that imports
-`assurance.economics`, and only to register its models;
-`tests/test_economics_engine.py` fails if anything else imports it. A later step
-that serves economics adds its own route module to that test, and that module is
-never one the stop lane (`safety.stops`) judges. An economics failure is never a
-reason to refuse anything outside economics.
+The package is off every stop path in the other direction too. Two
+first-party modules import `assurance.economics`: `assurance/models.py`, to
+register its models, and `assurance/urls.py`, to mount its one route module,
+`assurance.economics.api`, the customer parameter-set routes (section 19);
+`tests/test_economics_engine.py` fails if anything else imports it. Neither of
+those routes is a stop: both are classified in `safety.stops.NOT_STOPS`, the stop
+tripwire (`tests/test_no_control_holds_back_a_stop.py`) holds them there, and
+`test_no_economics_route_is_a_stop` pins that none is in the stop set or rides its
+exemption. The write is accounted for as one that cannot move the decision
+(`tests/test_every_write_route_keeps_the_decision_current.py`): it writes nothing
+the decision reads. The route module does nothing at import but define its views,
+so it cannot take the URLconf, and every stop with it, down: the test below loads
+it with core's table changed. A later step that serves more adds its route module
+to the import test, and that module is never one the stop lane (`safety.stops`)
+judges. An economics failure is never a reason to refuse anything outside
+economics.
 
 That includes a currency table that is not the pinned one (section 5). Django
 imports the currency adapter when it loads `assurance.models`, so a refusal at
@@ -281,9 +313,11 @@ schema version and scenario title are never blank. A platform-wide source is nev
 licensed or trusted as `customer` data (also a check constraint). None of these
 constraints touches a column a stop's write changes (section 2).
 
-No route, command or signal writes or reads any of these in phases E0 and E1.
-The permitted writers below are the ones the later steps may add, and, for the
-observations, the snapshot loader an operator runs; any other writer is a defect.
+Before the scenario step no route, command or signal wrote or read any of these.
+The scenario step adds one route module (section 19), the only writer of a
+customer parameter set and its parameters. The permitted writers below are the
+ones the later steps may add, and, for the observations, the snapshot loader an
+operator runs; any other writer is a defect.
 
 | Model | Holds | Permitted writers |
 |---|---|---|
@@ -295,6 +329,10 @@ observations, the snapshot loader an operator runs; any other writer is a defect
 | `OverrideApproval` | one approval of one override: approver | an admin, other than the requester; one approval per person |
 | `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; later a feed adapter, after its licensing review |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
+| `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
+| `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`; linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (a later step) |
+| `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (a later step); no route writes one in this version |
+| `LossComponent` (scenarios) | one component of one event: family, formula id and version, as-of date, the parameters it cites by input; its status and amounts are computed on save | the same |
 
 The two observation models are checked on save by the engine's own contracts
 (`fx.FXRate`, `cost_index.IndexPoint`), so a row is refused with the engine's code
@@ -380,8 +418,11 @@ the licensing and legal review The Open Group's terms require first.
 
 ## 10. Limitations
 
-- **No scoring.** Phases E0 and E1 compute no cost range or grade. E1 converts and
-  normalizes a given amount; nothing yet decides what amount a scenario costs.
+- **No grade, no simulation.** E1 converts and normalizes a given amount, and
+  the scenario engine computes a deterministic low, base and high per component
+  and per event from given parameters (sections 14 to 18). Nothing yet assigns a
+  confidence grade, samples a distribution or builds a scenario from evidence;
+  the scenario engine's own limits are section 22.
 - **Fixture data only.** Every source in the MVP is a committed snapshot, and the
   only one committed is SYNTHETIC TEST DATA (section 13). Nothing fetches a feed,
   and nothing is current beyond its retrieval time.
@@ -390,8 +431,9 @@ the licensing and legal review The Open Group's terms require first.
   codes, not all of List Three. It carries no exchange rates and no redenomination
   factors. It is core's table now, and athena-backend reads nothing else.
 - **E1's limits** are listed in section 12.7.
-- **The rules sit on the records, not yet on routes.** No route exists to enforce
-  role checks; the permitted writers in section 6 bind the steps that add them.
+- **The rules sit on the records, and on one route.** The customer parameter-set
+  API (section 19) enforces its role checks; no route writes any other economics
+  record yet, and the permitted writers in section 6 bind the steps that add them.
 - **Append-only is an ORM guard, not a table guard.** These write past the
   refusals: the base manager (`Model._base_manager`, deliberately Django's plain
   manager so the stop's writes in section 2 pass), `django.db.models.Model.save(row)`
@@ -767,3 +809,444 @@ trusted above `unverified` (refused on save, and the check constraint
 `ck_econ_source_synthetic_unverified`). Whether a production run should also
 refuse every `unverified` source, synthetic or not, is the owner's decision; this
 version does not.
+
+## 14. Parameters and units
+
+The scenario engine (MVP step 4), `engine/parameters.py`. Pure: no Django, no
+database. A parameter is one named input to a loss formula
+(`parameters.Parameter`):
+
+| Field | Rule |
+|---|---|
+| `name` | not blank |
+| `unit` | one of the units below (`unit_unrecognised`) |
+| `source_type` | one of the eight source types of section 4.2 (`source_type_unrecognised`) |
+| `low`, `base`, `high` | `low <= base <= high` (`range_inverted`); a value known exactly gives the same figure three times |
+| `evidence_ref` | what the figure rests on, never blank (`evidence_ref_missing`): a questionnaire answer, an evidence id, a benchmark's citation, the person who estimated it |
+| `effective_date` | the date the value holds from |
+| `fresh_until` | where the source says, the last date it may be read as current; before `effective_date` is `date_inversion` |
+| `parameter_id` | the stored row's id (a `FinancialParameter`'s uuid), so a component cites the very row it read |
+
+A value is a `Decimal` only (`not_decimal`: a float or an int is refused),
+finite (`not_finite`), never negative (`negative_value`: no benefit model exists
+yet, so nothing reduces a loss below zero), and a ratio is a fraction from 0 to 1
+(`ratio_out_of_range`).
+
+| Unit | Holds |
+|---|---|
+| `money` | an amount, in the parameter's currency |
+| `money_per_unit` | an amount per one thing: per event, transaction, record, customer, notice, vendor or asset (the name and evidence say which) |
+| `money_per_hour` | an amount per hour: a loaded labor rate, revenue or margin per hour |
+| `money_per_year` | an amount per year: annual revenue, an annual license, a yearly premium increase |
+| `count` | a number of things, possibly an expected, fractional number |
+| `count_per_day` | a number of things per day |
+| `ratio` | a fraction from 0 to 1 |
+| `hours`, `days`, `years` | a duration |
+
+A money unit holds three `Money` in one currency (`currency_mismatch`
+otherwise); a quantity unit holds three `Decimal`. A `Money` given for a
+quantity, or a `Decimal` for money, is `unit_mismatch`, and so is a parameter
+bound to a formula input, or written to a parameter-set variable, that takes
+another unit. Nothing converts one unit into another: hours are never read as
+days, and an amount is normalized into the event's currency (section 12) before a
+formula reads it.
+
+A run is made as of a date. A parameter that holds only from after it is
+`date_inversion`; one past its `fresh_until` is used and flagged stale on the
+component that read it (`stale_inputs`).
+
+The scenario engine's own refusal codes are `parameters.REFUSALS`, raised as
+`ParameterRefused`, which is a `MoneyRefused`, so one `except` catches every
+refusal of the engine; a code the money engine already publishes (section 11.5)
+is raised as that engine's, with its meaning, and is never published twice.
+
+| Code | Refused |
+|---|---|
+| `unit_unrecognised` | a unit that is not one of the engine's |
+| `unit_mismatch` | a parameter of another unit than its formula input or parameter-set variable takes; a money unit holding a quantity or the reverse; a currency on a quantity |
+| `source_type_unrecognised` | a source type that is not one of the eight |
+| `evidence_ref_missing` | a parameter that names no evidence |
+| `negative_value` | a negative count, duration, ratio or amount |
+| `ratio_out_of_range` | a ratio above 1 |
+| `range_inverted` | a low above its base, or a base above its high |
+| `duplicate_id` | two parameters under one name or one id, two components of one id in an event, two events of one key in a scenario, a family excluded twice (a key twice in one JSON object is refused by the API's parser, 400, naming this code) |
+| `formula_unknown` | a formula id and version the catalogue does not hold |
+| `formula_not_for_family` | a formula asked for a family it does not compute |
+| `input_unrecognised` | a parameter bound to an input the formula does not take |
+| `loss_family_unrecognised` | a component family that is not one of the fifteen or `market_value`; a sublimit or exclusion of anything but a cash family |
+| `insurance_applied_twice` | insurance applied to a loss already net of it, or to a component not marked gross |
+| `market_value_in_cash` | a market-value component added to cash loss |
+| `field_unrecognised` | a parameter-set field or variable the schema does not hold |
+| `field_missing` | a parameter-set field the schema requires and does not find |
+| `field_malformed` | a field of the wrong form: not an object, not a list, text longer than its column |
+| `set_key_malformed` | a parameter set's key that is not 1 to 100 of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit |
+| `parent_required` | a financial parameter without exactly one parent |
+| `parameter_set_sealed` | a parameter added to a recorded parameter-set version |
+| `parameter_not_found` | a component citing a parameter that is not recorded |
+
+## 15. The formula catalogue
+
+`engine/formulas.py`. Each formula is a named function in plain explicit form,
+with a formula id and a version, recorded with every result it gives
+(`formulas.CATALOGUE`, keyed by id and version). A changed formula is a new
+version; an old version stays, so a recorded result is recomputed exactly.
+
+Every input says which way it moves the loss. `increases`: a higher value never
+lowers the loss (a count, a duration, a rate, a unit cost, a cap). `decreases`: a
+higher value never raises it (a recovery rate: a higher recovery rate lowers
+loss). **The low result is computed from the low inputs and the high from the
+high inputs, in the direction each input moves the loss**: the LOW result reads
+each input's low where it increases the loss and its high where it decreases it;
+the HIGH result the other way round; the BASE every base. Every formula is
+monotone in every input over the values a parameter may hold, so the low result
+is the smallest the ranges allow and the high the largest.
+
+In the table, `+` is `increases` and `-` is `decreases`.
+
+| Formula | Version | Expression | Inputs (unit, direction) | Families |
+|---|---|---|---|---|
+| `repeat_loss` | 1 | `repeat_count x loss_per_event x (1 - recovery_rate)` | `repeat_count` (count, +); `loss_per_event` (money_per_unit, +); `recovery_rate` (ratio, -) | `direct_financial` |
+| `repeat_in_window` | 1 | `transactions_per_day / 24 x window_hours x success_rate x value_per_transaction x (1 - recovery_rate)` | `transactions_per_day` (count_per_day, +); `window_hours` (hours, +); `success_rate` (ratio, +); `value_per_transaction` (money_per_unit, +); `recovery_rate` (ratio, -) | `direct_financial` |
+| `interruption` | 1 | `interruption_hours x value_per_hour` | `interruption_hours` (hours, +); `value_per_hour` (money_per_hour, +): revenue or margin, its evidence says which | `business_interruption`, `physical_operational` |
+| `fixed_plus_hours` | 1 | `fixed_cost + hourly_rate x hours` | `fixed_cost` (money, +); `hourly_rate` (money_per_hour, +); `hours` (hours, +) | `incident_response`, `recovery`, `legal`, `regulatory_compliance`, `remediation_investment`, `third_party_downstream`, `data_and_ip`, `physical_operational` |
+| `per_affected_plus_fixed` | 1 | `affected x unit_cost + fixed_cost` | `affected` (count, +); `unit_cost` (money_per_unit, +); `fixed_cost` (money, +) | `notification`, `customer_restitution`, `third_party_downstream`, `physical_operational`, `recovery` |
+| `per_affected` | 1 | `affected x amount_per_affected` | `affected` (count, +); `amount_per_affected` (money_per_unit, +) | `customer_restitution`, `notification`, `third_party_downstream` |
+| `support_contacts` | 1 | `affected x contact_rate x handling_hours x loaded_rate` | `affected` (count, +); `contact_rate` (ratio, +); `handling_hours` (hours, +); `loaded_rate` (money_per_hour, +) | `notification`, `customer_restitution` |
+| `capped_credit` | 1 | `min(credit_per_hour x breach_hours, contract_cap)` | `credit_per_hour` (money_per_hour, +); `breach_hours` (hours, +); `contract_cap` (money, +) | `contractual` |
+| `replacement_share` | 1 | `replacement_cost x share_compromised` | `replacement_cost` (money, +); `share_compromised` (ratio, +) | `data_and_ip` |
+| `churned_margin` | 1 | `customers x churn_rate x margin_per_customer_per_year x recovery_years` | `customers` (count, +); `churn_rate` (ratio, +), from `CUSTOMER_PROVIDED` data only; `margin_per_customer_per_year` (money_per_unit, +); `recovery_years` (years, +) | `customer_loss` |
+| `premium_increase` | 1 | `premium_increase_per_year x years` | `premium_increase_per_year` (money_per_year, +); `years` (years, +) | `insurance` |
+| `lump_sum` | 1 | `amount` | `amount` (money, +): a range given whole by its source, a quote, a benchmark or an estimate | every cash family but `customer_loss` |
+| `share_price_reaction` | 1 | `market_capitalisation x price_decline` | `market_capitalisation` (money, +); `price_decline` (ratio, +) | `market_value` only |
+
+The rules every formula keeps. A component is `estimated`, with a low, base and
+high, or `unknown`, with none.
+
+- **Money arithmetic only.** A formula multiplies `Money` by `Decimal` factors and
+  adds `Money` to `Money` in one currency, at 60 significant digits (section 11).
+  Inputs in two currencies are `currency_mismatch`.
+- **Units are checked** (section 14).
+- **A missing input gives an explicit unknown component, never a zero.** A
+  component with an input unbound is `unknown`, with the reason `input_missing`
+  and the inputs it lacks, and carries no amount at all. So is one whose input
+  rests on a source the formula does not accept, `input_source_not_accepted`:
+  customer loss is computed only from the customer's own churn figure (the
+  owner's specification, section 31: otherwise Unknown).
+- **Every result carries its provenance**: the formula id, version and
+  expression, and for each input the parameter it read (its name, id, unit,
+  source type, evidence and dates), which of its values the low and the high
+  read, and those values. A component is always gross of insurance
+  (`insurance_treatment`, `gross`).
+- `market_value` is a component family outside the fifteen (section 4.1), computed
+  only by `share_price_reaction`, never added to cash loss (section 16).
+
+## 16. Loss events, components and totals
+
+`engine/loss.py`. A loss event (`loss.LossEvent`) is the scenario that creates a
+financial consequence, and its components (`formulas.LossComponent`) are the
+losses it causes. Section 6 of the owner's specification: findings are clustered
+into causal loss events, and duplicate findings never create duplicate loss.
+
+- **One id, one thing.** An event's components have distinct ids, and one
+  parameter name or id denotes one parameter across the event (`duplicate_id`): a
+  parameter two components read is the same parameter, never two that share a
+  name.
+- **One currency.** Every component of an event is in the event's currency
+  (`currency_mismatch`).
+- **Unknown is never zero.** The cash total of an event with an unknown cash
+  component is `complete: false`: its figures are the sum of the known components
+  only, a floor that reads "at least", and the unknown components are named beside
+  it. It is never shown as the event's loss.
+- **Market value is never cash.** A `market_value` component is reported on its
+  own line, `never_added_to_cash`, and is never added to cash loss or to any
+  family's total: the cash total refuses one (`market_value_in_cash`), and no
+  insurance policy sees it.
+- The event's low is the sum of its components' lows and its high the sum of
+  their highs. Each component sits at the end of its own ranges, so a parameter
+  two components read in opposite directions widens the event's range; it never
+  narrows it.
+
+`loss.assess(event, policy)` gives the gross cash loss, the loss net of
+insurance when a policy is given (section 17), and the market-value line, with
+every component's provenance. The arithmetic is `Decimal`, 60 significant digits,
+`ROUND_HALF_EVEN`, with no seed and no sampling.
+
+## 17. Insurance
+
+`loss.apply_insurance(gross, policy)`. **Insurance is applied once, after the gross
+components**, never to a loss already net of it and never to a component not
+marked gross (`insurance_applied_twice`). An `InsurancePolicy` holds a
+deductible and an aggregate limit (money parameters), per-family sublimits (money
+parameters), excluded families, and optionally a waiting period (an hours
+parameter), each with its provenance like any other input. Its terms are in one
+currency, the loss's (`currency_mismatch`).
+
+At each point, low, base and high:
+
+1. the covered amount of each cash family is the sum of its known components,
+   unless the family is excluded, or is `insurance` (a premium rise is the
+   policy's own cost, never a loss it pays), or is `business_interruption` while
+   the policy has a waiting period (below);
+2. a family with a sublimit is covered up to it;
+3. the recovery is `min(max(covered - deductible, 0), limit)`;
+4. the retained loss is the gross cash loss less the recovery.
+
+Each term moves the retained loss one way (`loss.TERM_DIRECTIONS`), and is read at
+the end its direction gives, as a formula's inputs are: the low retained loss
+reads the low deductible and the high limit.
+
+| Term | Direction | Low retained loss reads |
+|---|---|---|
+| `deductible` | `increases` | its low |
+| `limit` | `decreases` | its high |
+| `sublimit` | `decreases` | its high |
+| `waiting_period_hours` | `increases` | its low | The retained loss is never negative: the
+recovery is never more than the covered amount, which is never more than the gross
+loss. Insurance on an incomplete gross loss gives a retained floor, still
+`complete: false`.
+
+A policy with a waiting period does not cover business interruption at all in
+this version. The engine does not apportion an outage across the waiting period,
+so it takes the side that never understates the retained loss.
+
+## 18. The invariants
+
+The owner's specification, section 27, and the tests that prove each:
+
+| Invariant | Holds by | Proven by (`tests/`) |
+|---|---|---|
+| `low <= base <= high` for every component, total and retained loss | each input's range is ordered, and every formula is monotone; checked on every evaluation (`InvariantBroken`, a defect, never an input's fault) | `test_economics_scenarios.py`: `test_low_base_high_are_ordered_and_never_negative`, for every formula; `test_retained_loss_is_never_negative` |
+| Monotone in every input | each formula is a sum and product of non-negative inputs, `1 - ratio` and `min`; a decreasing input enters only as `1 - ratio` | `test_every_formula_is_monotone_in_every_input` (a deterministic sweep: this repository does not use hypothesis) and `test_widening_one_input_moves_only_the_end_its_direction_says`, for every formula and input; `test_retained_loss_is_monotone_in_every_term_and_every_component` |
+| Non-negative | no input may be negative (no benefit model is enabled), and a ratio is at most 1 | the adversarial parameters; the ordering tests check `0 <= low` |
+| Seed-free determinism | no randomness, no clock, no set-order dependence | `test_the_same_inputs_give_the_same_result_with_no_seed` (two interpreters, two hash seeds, one digest); `test_no_scenario_module_reads_a_clock_or_a_random_source` |
+| A missing input is unknown, never zero | `formulas.evaluate` and `loss.Total` | `test_a_missing_input_gives_unknown_never_zero`, for every formula and input |
+| Units and currencies are checked | `Parameter`, `evaluate`, `LossEvent`, `InsurancePolicy` | `test_a_parameter_of_another_unit_is_refused`, `test_money_in_two_currencies_is_refused`, for every formula |
+| Insurance once, never a negative retained loss | `apply_insurance` takes a `GrossLoss` only | `test_insurance_is_applied_once`, `test_retained_loss_is_never_negative` |
+| Market value never in cash | `cash_total` refuses it; `assess` reports it apart | `test_market_value_is_never_summed_into_cash` |
+| The adversarial parameters: NaN, Infinity, a float, negative counts, rates above 1, unit mismatch, date inversion, duplicate ids | section 14 | `test_an_adversarial_parameter_is_refused`, `test_duplicate_ids_are_refused`, `test_a_parameter_from_after_the_runs_date_is_refused_and_a_stale_one_flagged` |
+
+## 19. The customer parameter set and its API
+
+A parameter set is one deployment's answers to the executive questionnaire of the
+owner's specification, section 14: customer-specific data, which should dominate
+an estimate wherever it exists. It is deployment-scoped and versioned, and each
+version records its author. `engine/parameter_set.py` holds the schema, schema
+`mythos.economics.parameter-set/v1` (`SCHEMA_VERSION`).
+
+### 19.1 The variables
+
+Thirty variables in nine domains (`parameter_set.VARIABLES`, `parameter_set.Domain`).
+Public-market context (ticker, market capitalisation) is not a variable: it is
+market value, never a cash input.
+
+| Variable | Domain | Unit | Meaning |
+|---|---|---|---|
+| `annual_revenue` | `scale` | `money_per_year` | annual revenue |
+| `operating_margin` | `scale` | `ratio` | operating margin, as a fraction of revenue |
+| `customer_count` | `scale` | `count` | customers |
+| `transactions_per_day` | `transactions` | `count_per_day` | transactions per day |
+| `average_transaction_value` | `transactions` | `money_per_unit` | average transaction value |
+| `maximum_transaction_value` | `transactions` | `money_per_unit` | largest transaction value |
+| `recovery_rate` | `transactions` | `ratio` | share of a misdirected amount settled back or recovered |
+| `customer_record_count` | `data` | `count` | customer records held |
+| `regulated_record_count` | `data` | `count` | health, payment or other regulated records held |
+| `retention_days` | `data` | `days` | how long records are retained |
+| `revenue_per_hour` | `operations` | `money_per_hour` | revenue of the critical service per hour |
+| `margin_per_hour` | `operations` | `money_per_hour` | margin of the critical service per hour |
+| `recovery_time_objective_hours` | `operations` | `hours` | recovery time objective (RTO) |
+| `security_responder_hourly_rate` | `labor` | `money_per_hour` | loaded hourly rate of an incident responder |
+| `engineering_hourly_rate` | `labor` | `money_per_hour` | loaded hourly rate of an engineer |
+| `support_agent_hourly_rate` | `labor` | `money_per_hour` | loaded hourly rate of a support or call-center agent |
+| `incident_team_size` | `labor` | `count` | people on the incident team |
+| `external_counsel_hourly_rate` | `legal` | `money_per_hour` | external counsel's hourly rate |
+| `legal_retainer` | `legal` | `money` | external counsel's retainer |
+| `notification_unit_cost` | `legal` | `money_per_unit` | cost of notifying one person |
+| `notification_fixed_cost` | `legal` | `money` | fixed cost of a notification campaign |
+| `critical_vendor_count` | `vendors` | `count` | critical vendors |
+| `vendor_exit_cost` | `vendors` | `money_per_unit` | cost of exiting or recovering one critical vendor |
+| `vendor_liability_cap` | `vendors` | `money` | contractual cap on a vendor's liability or indemnity |
+| `insurance_deductible` | `insurance` | `money` | deductible or self-insured retention |
+| `insurance_limit` | `insurance` | `money` | aggregate policy limit |
+| `insurance_waiting_period_hours` | `insurance` | `hours` | waiting period before business interruption cover |
+| `remediation_engineering_hours` | `remediation` | `hours` | engineering hours a remediation takes |
+| `remediation_license_cost_per_year` | `remediation` | `money_per_year` | yearly licensing cost of a remediation |
+| `remediation_duration_days` | `remediation` | `days` | days a remediation takes to implement |
+
+Beside them, `insurance_sublimits` (a money entry per cash family, stored as a
+parameter named `insurance_sublimit:` and the family) and `insurance_exclusions`
+(a list of cash families). A version with a deductible and a limit states an
+insurance policy (section 17); without either it states none, and nothing assumes
+one.
+
+### 19.2 The document
+
+```json
+{"variables": {
+   "transactions_per_day": {"unit": "count_per_day", "low": "18000", "base": "18000", "high": "18000",
+                            "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "CFO questionnaire 2026-09",
+                            "effective_date": "2026-09-30"},
+   "legal_retainer": {"unit": "money", "currency": "USD", "low": "50000", "base": "50000", "high": "75000",
+                      "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "engagement letter",
+                      "effective_date": "2026-07-01", "fresh_until": "2027-06-30"}},
+ "insurance_sublimits": {"notification": {"unit": "money", "currency": "USD", "low": "150000", "...": "..."}},
+ "insurance_exclusions": ["regulatory_compliance"]}
+```
+
+Read exactly or refused, with the field's path in the detail. Unknown fields are
+refused (`field_unrecognised`), at the top, in an entry and as a variable name;
+required ones are `field_missing`; a field of the wrong JSON type is
+`field_malformed`. Every entry states its unit, and a unit that is not the
+schema's is `unit_mismatch`: a client that thinks transactions are counted per
+hour is refused, never read as per day. A money entry states its currency, a
+quantity never does. **Money follows section 13's strict decimal-string rule**: a
+value is a decimal string in the one spelling `-?[0-9]+(\.[0-9]+)?`, and a JSON
+number, an exponent, a sign, whitespace, an underscore or `NaN` is `not_decimal`.
+Dates are `YYYY-MM-DD` (`date_malformed`). Every rule of a parameter (section 14)
+holds for every entry.
+
+A version's identity is its `content_digest`: `sha256:` and the SHA-256 of its
+canonical JSON (sorted keys, the one decimal spelling, `schema` included), the
+same whether read from the request or back from the stored rows.
+
+### 19.3 The routes
+
+Mounted under `/api/assurance/` from `assurance/economics/api.py`:
+
+| Route | Name | Does |
+|---|---|---|
+| `GET deployments/<uuid>/economics/parameter-sets/<set_key>/` | `deployment-economics-parameter-set` | the current version (the highest), with every variable, its domain, unit, currency, values, source type, evidence and dates; 404 when the set has none |
+| `GET deployments/<uuid>/economics/parameter-sets/<set_key>/versions/` | `deployment-economics-parameter-set-versions` | every version, newest first, without their figures: version, author, recorded time, digest, variable count; at most 200, and `truncated` says when there are more |
+| `POST` the same | the same | records the next version from a document (append-only), and answers 201 with it |
+
+- **Authentication and tenancy**, as the assurance API's: a signed-in account
+  (401 otherwise); a deployment the caller cannot see is 404, whether or not it
+  exists, exactly as the deployment list scopes them (admins and analysts see
+  every deployment, anyone else their own).
+- **Writers**: an admin or an analyst, the roles section 6 names as a scenario's
+  authors; a viewer, even the deployment's owner, reads and is refused 403. The
+  version's author is the signed-in account, never anything the body says. The
+  reviewer separation of section 7 is unchanged: a scenario is still reviewed by
+  someone who authored no version of it, and a parameter set is not reviewed in
+  this version (section 22).
+- **Append-only**: no route edits or deletes a version (405); a change is a new
+  version, and the earlier one reads back unchanged.
+- **Strict JSON**: the body is JSON only (a form is 415); a key twice in one
+  object and a bare `NaN` or `Infinity` are refused (400). A refusal is 400 with
+  `code` (the engine's) and `detail` (the field's path), and nothing is recorded.
+- **Not on a stop path**: both routes are in `safety.stops.NOT_STOPS`; the POST
+  writes nothing the decision reads.
+
+## 20. The scenario records
+
+`assurance/economics/models.py`, migration `0062_scenario_parameters_and_loss_events.py`.
+All four are append-only like every economics record (section 6), go with their
+deployment, and are checked on save with the engine's codes.
+
+- **`CustomerParameterSet`**: `set_key` names a set within its deployment
+  (`bank_prod_2026q4`, as the owner's specification's scenario request names
+  one); `version` counts from 1 per deployment and key; the highest is current.
+  `CustomerParameterSet.record` writes a version and its parameters in one
+  transaction, refused whole or written whole. `variable_count` and
+  `content_digest` are taken from the validated document before any row is
+  written; a parameter added to a recorded version afterwards is
+  `parameter_set_sealed`, and `intact()` re-reads the rows and compares their
+  count and digest.
+- **`FinancialParameter`**: exactly one parent, a scenario or a parameter-set
+  version (`parent_required`, and the check constraint
+  `ck_econ_parameter_one_parent`); one name per parent (`duplicate_id`, and a
+  unique constraint); a set version's parameter is one of the schema's variables
+  with its unit. Its values are decimal strings in the one spelling (section 12.6),
+  exact at any width where a decimal column on SQLite keeps 15 significant digits;
+  `"200.000"` is stored as `"200"`. The unit and the source type are check
+  constraints too.
+- **`LossEvent`**: a key unique within its scenario (`duplicate_id`, and a unique
+  constraint), a reportable currency, the SPINE effect in SPINE's form (checked
+  for form only, section 10).
+- **`LossComponent`**: its family, formula id and version, as-of date and the
+  parameters it cites by input (`cited_parameters`). **Its amounts are never taken
+  from the caller**: on save, its formula is evaluated from the cited parameters
+  as stored, and the status, currency, low, base and high, or the unknown reason
+  and the missing inputs, are written from that result. Every cited parameter is
+  recorded (`parameter_not_found`) and belongs to the event's own deployment, the
+  scenario's or one of the deployment's parameter sets
+  (`cross_tenant_reference`). A stored component is gross (the check constraint
+  `ck_econ_component_gross`); insurance is applied once, when an event is
+  assessed. `LossEvent.as_engine()` recomputes every component from its rows.
+
+Every reference is tenant-scoped: a component never cites another deployment's
+parameter, a parameter's tenant is its parent's deployment, and the API reads and
+writes only the deployment in its path.
+
+## 21. Known-answer fixtures
+
+`tests/test_economics_known_answers.py` holds the owner's specification's two
+worked examples as committed tests, labelled SYNTHETIC / ILLUSTRATIVE, with every
+expected figure computed by hand in the comments. They are the known-answer seeds
+for Minotaur's economic-exposure tests.
+
+- **Section 30, the bank payment agent.** 18,000 transactions a day, a 0.5 to 2.0
+  hour window, 7 of 20 attempts succeeding, USD 25,000 per transfer, 70% to 95%
+  recovered: direct loss USD 164,062.50 / 1,435,546.875 / 3,937,500 by
+  `repeat_in_window`; with incident response (USD 80k to 250k) and the
+  legal/regulatory response (USD 150k to 1.5M), the event's gross cash loss is USD
+  394,062.50 / 2,425,546.875 / 5,687,500. Where the specification gives a range
+  and no base, the base is the midpoint. The remediation cost is the price of the
+  fix, a mitigation option (section 21 of the owner's specification), and is not a
+  component of this event's loss.
+- **Section 31, cross-customer data exposure.** The specification gives the
+  approach and no figures, so the figures are made up and labelled so. Notification,
+  support, forensics, legal and regulatory bounds give a gross cash loss of at
+  least USD 239,000 / 746,250 / 2,580,000; customer loss is unknown, because its
+  churn figure is a benchmark; and a policy with a USD 100,000 deductible, a USD
+  1,000,000 limit, a USD 150,000 notification sublimit and regulatory excluded
+  leaves at least USD 100,000 / 231,250 / 1,580,000 retained.
+  `tests/test_economics_scenario_records.py` stores the same example as rows and
+  reads back the same answer.
+
+## 22. Limitations of the scenario engine, and decisions for the owner
+
+- **Deterministic ranges, not distributions.** Low, base and high are the ends
+  and the middle of the inputs' ranges, not percentiles: they are not P10, P50 and
+  P90, and nothing here estimates a frequency. The probabilistic engine is a later
+  step; `FinancialParameter` has no distribution type yet.
+- **The event's range is a box, not a joint scenario.** Summing component lows
+  treats every component as at its own low at once, so a parameter two components
+  read in opposite directions widens the range.
+- **No benefit model.** Nothing may be negative, so nothing offsets a loss.
+- **`money_per_unit` does not say per what.** A unit cost per record bound to an
+  input that counts customers is not caught by the unit check; the parameter's name
+  and evidence say which, and the scenario builder must bind them consistently.
+- **Insurance is applied at the event's totals.** The retained loss is not
+  allocated back to families; a waiting period removes business-interruption cover
+  rather than apportioning it; coinsurance, per-occurrence limits and several
+  policies are not modelled.
+- **Freshness is flagged, not graded.** A stale parameter is named on the
+  component that read it; no confidence grade is computed from it yet.
+- **No regulatory penalty is predicted.** A regulatory component is a range its
+  evidence must ground (section 3, rule 8); the engine adds nothing to it.
+- **Categorical inputs are not in the schema.** Data classes, jurisdictions, the
+  critical services and vendor names (section 14 of the owner's specification)
+  are not variables yet; only figures are.
+- **The parameter-set API writes no scenario records.** Scenario parameters, loss
+  events and components are written by the scenario builder, a later step; the
+  models hold the rules for it.
+- **A parameter names its evidence as text.** `evidence_ref` is not yet a link to
+  a `FinancialSource` version or a SPINE evidence id, and nothing checks that it
+  resolves.
+- **No generic cap or floor.** A component is capped only where its formula takes
+  a cap as an input (`capped_credit`); the owner's specification's cap/floor
+  column on a component is not modelled.
+
+Decisions this version takes, which the owner may change:
+
+1. A parameter-set version is recorded by an admin or an analyst and is not
+   reviewed: the scenario that cites it is reviewed under section 7. Whether a
+   set needs a reviewer of its own is open.
+2. Remediation cost is a mitigation's price, never a component of the loss event
+   it mitigates (the owner's specification, section 21); `remediation_investment`
+   components are for remediation the incident itself forces.
+3. A premium rise (`insurance` family) is never covered by the policy, and a
+   waiting period removes business-interruption cover (section 17).
+4. Customer loss is computed only from `CUSTOMER_PROVIDED` churn; any other source
+   gives an unknown component.
+5. Where a worked example gives a range and no base, its base is the midpoint.

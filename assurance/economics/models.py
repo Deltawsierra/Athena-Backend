@@ -39,20 +39,23 @@ from decimal import Context as DecimalContext
 from decimal import Decimal, DecimalException
 
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.db.models import F, Max, Q
 from django.utils import timezone
 
-from .engine import cost_index, fx, governance, money
-from .engine.provenance import LicenseClass, TrustTier
+from .engine import cost_index, formulas, fx, governance, money, parameters
+from .engine import parameter_set as pset
+from .engine import loss as engine_loss
+from .engine.provenance import LicenseClass, SourceType, TrustTier
 
 _LICENSE_CODES = [c.value for c in LicenseClass]
 _TRUST_CODES = [t.value for t in TrustTier]
 _RATE_TYPE_CODES = [t.value for t in fx.RateType]
 
-#: What every refusal code means: the governance rules' (phase E0) and the money,
-#: FX and cost-index engine's (phase E1). A code both publish means the same.
-_REFUSAL_TEXT = {**money.REFUSALS, **governance.REFUSALS}
+#: What every refusal code means: the governance rules' (phase E0), the money,
+#: FX and cost-index engine's (phase E1), and the scenario engine's (parameters,
+#: formulas, loss events and the parameter set). A code two publish means the same.
+_REFUSAL_TEXT = {**parameters.REFUSALS, **money.REFUSALS, **governance.REFUSALS}
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -61,11 +64,12 @@ class EconomicsRewriteRefused(ValueError):
 
 
 class EconomicsRefused(ValueError):
-    """A write one of the governance rules refuses, or one the money engine
-    refuses. ``code`` is the rule's code
-    (:data:`assurance.economics.engine.governance.REFUSALS`, or
-    :data:`assurance.economics.engine.money.REFUSALS` for an observation);
-    ``detail`` names the field, where one does."""
+    """A write one of the governance rules refuses, or one the money or scenario
+    engine refuses. ``code`` is the rule's code
+    (:data:`assurance.economics.engine.governance.REFUSALS`,
+    :data:`assurance.economics.engine.money.REFUSALS` for an observation, or
+    :data:`assurance.economics.engine.parameters.REFUSALS` for a parameter, a
+    parameter set or a loss component); ``detail`` names the field, where one does."""
 
     def __init__(self, code: str, detail: str = ""):
         self.code = code
@@ -813,3 +817,483 @@ class CostIndexObservation(_AppendOnly):
 
     def __str__(self) -> str:
         return f"{self.series_id} {self.period} = {self.value} (vintage {self.vintage_date})"
+
+
+# ---------------------------------------------------------------------------
+# CustomerParameterSet, FinancialParameter, LossEvent, LossComponent: the
+# scenario parameters, loss events and components (spec, sections 14 to 20)
+# ---------------------------------------------------------------------------
+
+_UNIT_CODES = [u.value for u in parameters.Unit]
+_SOURCE_TYPE_CODES = [t.value for t in SourceType]
+_COMPONENT_FAMILY_CODES = sorted(formulas.COMPONENT_FAMILIES)
+_COMPONENT_STATUS_CODES = [formulas.ESTIMATED, formulas.UNKNOWN]
+#: The width of every key column (a set key, an event key, a component key).
+_KEY_MAX = 100
+
+
+def _key(value, field: str) -> None:
+    """A key: text, not blank, at most :data:`_KEY_MAX` characters."""
+    _refuse(governance.required_text_refusal(value), detail=field)
+    if len(value) > _KEY_MAX:
+        raise EconomicsRefused("field_malformed", f"{field} is longer than {_KEY_MAX}")
+
+
+class CustomerParameterSet(_AppendOnly):
+    """One version of one deployment's customer parameter set: the customer's own
+    figures, the thirty variables of :data:`~assurance.economics.engine.pset.VARIABLES`
+    with their units, the per-family insurance sublimits and the excluded
+    families (specification, section 14; spec, section 19).
+
+    Deployment-scoped and versioned: ``set_key`` names the set within its
+    deployment (``bank_prod_2026q4``, as the specification's scenario request
+    names one), ``version`` counts from 1 per deployment and key and is assigned on
+    save, and the highest version is the current one. A change is a new version;
+    no version is edited. ``author`` is the signed-in account that recorded it,
+    with its own username (null only for a version a machine recorded, which no
+    route does in this phase).
+
+    A version's figures are its :class:`FinancialParameter` rows, written with it
+    in one transaction by :meth:`record`. ``variable_count`` and ``content_digest``
+    are taken from the validated document before any row is written; nothing may
+    add a parameter to a recorded version (``parameter_set_sealed``), and
+    :meth:`intact` re-reads the rows and compares their digest.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    deployment = models.ForeignKey(
+        "assurance.Deployment", on_delete=models.CASCADE, related_name="financial_parameter_sets"
+    )
+    set_key = models.SlugField(max_length=_KEY_MAX)
+    version = models.PositiveIntegerField()
+    schema_version = models.CharField(max_length=64, default=pset.SCHEMA_VERSION)
+    # The excluded families, sorted: the one part of a version that is not a parameter.
+    insurance_exclusions = models.JSONField(default=list, blank=True)
+    variable_count = models.PositiveIntegerField()
+    # "sha256:" + 64 hex over the version's canonical document.
+    content_digest = models.CharField(max_length=71)
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_parameter_sets_authored",
+    )
+    author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "set_key", "version", "id"]
+        # No check below names the author column, which removing an operator nulls.
+        constraints = [
+            models.UniqueConstraint(fields=["deployment", "set_key", "version"], name="uq_econ_parameter_set_version"),
+            models.CheckConstraint(condition=Q(version__gte=1), name="ck_econ_parameter_set_version_positive"),
+            models.CheckConstraint(condition=Q(variable_count__gte=1), name="ck_econ_parameter_set_not_empty"),
+        ]
+        indexes = [models.Index(fields=["deployment", "set_key"], name="assurance_econ_pset_key")]
+
+    @classmethod
+    def record(cls, deployment, set_key: str, document, *, author=None) -> CustomerParameterSet:
+        """Record the next version of ``deployment``'s set ``set_key`` from
+        ``document`` (:func:`~assurance.economics.engine.pset.parse_document`),
+        with every parameter it holds, in one transaction. Refused whole, with the
+        engine's code, or written whole."""
+        _engine_refusal(lambda: pset.check_set_key(set_key))
+        content = _engine_refusal(lambda: pset.parse_document(document))
+        rows = content.parameters()
+        with transaction.atomic():
+            version = cls.objects.create(
+                deployment=deployment,
+                set_key=set_key,
+                insurance_exclusions=list(content.exclusions),
+                variable_count=len(rows),
+                content_digest=content.digest(),
+                author=author,
+            )
+            for parameter in rows:
+                FinancialParameter.from_engine(parameter, parameter_set=version).save()
+        return version
+
+    @classmethod
+    def current(cls, deployment, set_key: str) -> CustomerParameterSet | None:
+        """The highest recorded version of ``deployment``'s set ``set_key``."""
+        return cls.objects.filter(deployment=deployment, set_key=set_key).order_by("-version").first()
+
+    def check_new(self) -> None:
+        _engine_refusal(lambda: pset.check_set_key(self.set_key))
+        if self.schema_version != pset.SCHEMA_VERSION:
+            raise EconomicsRefused("code_unrecognised", "schema_version")
+        exclusions = self.insurance_exclusions
+        if not isinstance(exclusions, list):
+            raise EconomicsRefused("field_malformed", "insurance_exclusions is not a list")
+        for family in exclusions:
+            if not isinstance(family, str) or family not in formulas.CASH_FAMILIES:
+                raise EconomicsRefused("loss_family_unrecognised", f"insurance_exclusions {family!r}")
+        if len(set(exclusions)) != len(exclusions):
+            raise EconomicsRefused("duplicate_id", "insurance_exclusions names a family twice")
+        self.insurance_exclusions = sorted(exclusions)
+        if type(self.variable_count) is not int or self.variable_count < 1:
+            raise EconomicsRefused("field_missing", "variables: a version holds at least one variable")
+        _refuse(governance.snapshot_hash_refusal(self.content_digest), detail="content_digest")
+        if self.version is None:
+            earlier = CustomerParameterSet._base_manager.filter(
+                deployment_id=self.deployment_id, set_key=self.set_key
+            ).aggregate(latest=Max("version"))["latest"]
+            self.version = (earlier or 0) + 1
+        self.author_username = _signed_in(self.author).username
+
+    def parameter_rows(self) -> list[FinancialParameter]:
+        """The version's parameters, as stored."""
+        return list(FinancialParameter._base_manager.filter(parameter_set_id=self.pk).order_by("name", "id"))
+
+    def content(self, rows: list[FinancialParameter] | None = None) -> pset.ParameterSetContent:
+        """The version's content, read back from its rows."""
+        rows = self.parameter_rows() if rows is None else rows
+        return _engine_refusal(
+            lambda: pset.content_of([row.as_engine() for row in rows], self.insurance_exclusions)
+        )
+
+    def intact(self, rows: list[FinancialParameter] | None = None) -> bool:
+        """Whether the stored rows are exactly the version that was recorded: as many
+        as it was recorded with, and the same digest."""
+        rows = self.parameter_rows() if rows is None else rows
+        return len(rows) == self.variable_count and self.content(rows).digest() == self.content_digest
+
+    def as_dict(self, *, current_version: int | None = None) -> dict:
+        """The version as the parameter-set API serves it."""
+        rows = self.parameter_rows()
+        content = self.content(rows)
+
+        def entry(parameter: parameters.Parameter, schema: dict) -> dict:
+            row = parameter.as_dict()
+            del row["name"]
+            return {**schema, **row}
+
+        return {
+            "set_key": self.set_key,
+            "version": self.version,
+            "current": current_version is not None and self.version == current_version,
+            "schema": self.schema_version,
+            "author": self.author_username or None,
+            "recorded_at": self.recorded_at.isoformat(),
+            "content_digest": self.content_digest,
+            "intact": len(rows) == self.variable_count and content.digest() == self.content_digest,
+            "variables": {
+                name: entry(p, pset.VARIABLES[name].as_dict()) for name, p in content.variables.items()
+            },
+            "insurance_sublimits": {
+                family: entry(p, {"unit": parameters.Unit.MONEY.value}) for family, p in content.sublimits.items()
+            },
+            "insurance_exclusions": list(content.exclusions),
+        }
+
+    def __str__(self) -> str:
+        return f"parameter set {self.set_key} v{self.version}"
+
+
+class FinancialParameter(_AppendOnly):
+    """One financial parameter: a name, a unit, a ``source_type``, a low, base and
+    high value (a decimal string in the one spelling; money in ``currency``), the
+    evidence it rests on, the date it holds from and, where its source says, the
+    last date it is fresh (specification, section 15).
+
+    It belongs to exactly one parent (``parent_required``, and a check
+    constraint): a scenario version, or a customer parameter-set version, whose
+    deployment is its tenant. A parameter-set version's parameters are its
+    variables, each with the unit its schema gives (``unit_mismatch``), and none is
+    added after the version is recorded (``parameter_set_sealed``). Every row is
+    refused on save unless it makes an engine
+    :class:`~assurance.economics.engine.parameters.Parameter`, with the engine's
+    code; its values are stored in the one decimal spelling, never as a float.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    scenario = models.ForeignKey(
+        FinancialScenario, on_delete=models.CASCADE, null=True, blank=True, related_name="financial_parameters"
+    )
+    parameter_set = models.ForeignKey(
+        CustomerParameterSet, on_delete=models.CASCADE, null=True, blank=True, related_name="parameters"
+    )
+    name = models.CharField(max_length=_KEY_MAX)
+    unit = models.CharField(max_length=32, choices=[(u, u) for u in _UNIT_CODES])
+    source_type = models.CharField(max_length=32, choices=[(t, t) for t in _SOURCE_TYPE_CODES])
+    # Blank for a quantity; the ISO 4217 code of a money parameter.
+    currency = models.CharField(max_length=3, blank=True)
+    # Decimal strings in the one spelling (spec, section 12.6): exact at any width,
+    # where a decimal column on SQLite keeps 15 significant digits.
+    low = models.TextField()
+    base = models.TextField()
+    high = models.TextField()
+    evidence_ref = models.CharField(max_length=pset.EVIDENCE_REF_MAX)
+    effective_date = models.DateField()
+    fresh_until = models.DateField(null=True, blank=True)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(Q(scenario__isnull=False) & Q(parameter_set__isnull=True))
+                | (Q(scenario__isnull=True) & Q(parameter_set__isnull=False)),
+                name="ck_econ_parameter_one_parent",
+            ),
+            models.UniqueConstraint(
+                fields=["scenario", "name"], condition=Q(scenario__isnull=False), name="uq_econ_parameter_scenario_name"
+            ),
+            models.UniqueConstraint(
+                fields=["parameter_set", "name"],
+                condition=Q(parameter_set__isnull=False),
+                name="uq_econ_parameter_set_name",
+            ),
+            models.CheckConstraint(condition=Q(unit__in=_UNIT_CODES), name="ck_econ_parameter_unit"),
+            models.CheckConstraint(condition=Q(source_type__in=_SOURCE_TYPE_CODES), name="ck_econ_parameter_source_type"),
+        ]
+
+    @classmethod
+    def from_engine(cls, parameter: parameters.Parameter, *, scenario=None, parameter_set=None) -> FinancialParameter:
+        """An unsaved row holding ``parameter``, for ``scenario`` or ``parameter_set``."""
+        return cls(
+            scenario=scenario,
+            parameter_set=parameter_set,
+            name=parameter.name,
+            unit=parameter.unit.value,
+            source_type=parameter.source_type.value,
+            currency=parameter.currency or "",
+            low=parameters.Parameter.text(parameter.low),
+            base=parameters.Parameter.text(parameter.base),
+            high=parameters.Parameter.text(parameter.high),
+            evidence_ref=parameter.evidence_ref,
+            effective_date=parameter.effective_date,
+            fresh_until=parameter.fresh_until,
+        )
+
+    @classmethod
+    def deployment_of(cls, pk) -> int | None:
+        """The deployment a stored parameter belongs to, through its parent."""
+        row = (
+            cls._base_manager.filter(pk=pk)
+            .values_list("scenario__deployment_id", "parameter_set__deployment_id")
+            .first()
+        )
+        if row is None:
+            return None
+        return row[0] if row[0] is not None else row[1]
+
+    def as_engine(self) -> parameters.Parameter:
+        """The row as the engine reads it, its uuid as the parameter's id."""
+        unit = parameters.check_unit(self.unit)
+        if unit in parameters.MONEY_UNITS:
+
+            def value(text, point):
+                return money.Money(money.parse_decimal(text, f"{self.name} {point}"), self.currency)
+
+        else:
+            if self.currency:
+                raise parameters.ParameterRefused("unit_mismatch", f"{self.name} is {unit}, a quantity, with a currency")
+
+            def value(text, point):
+                return money.parse_decimal(text, f"{self.name} {point}")
+
+        return parameters.Parameter(
+            name=self.name,
+            unit=unit,
+            source_type=self.source_type,
+            low=value(self.low, "low"),
+            base=value(self.base, "base"),
+            high=value(self.high, "high"),
+            evidence_ref=self.evidence_ref,
+            effective_date=self.effective_date,
+            fresh_until=self.fresh_until,
+            parameter_id=str(self.uuid),
+        )
+
+    def check_new(self) -> None:
+        if (self.scenario_id is None) == (self.parameter_set_id is None):
+            raise EconomicsRefused("parent_required")
+        if self.effective_date is None:
+            raise EconomicsRefused("date_malformed", f"{self.name} has no effective_date")
+        if isinstance(self.evidence_ref, str) and len(self.evidence_ref) > pset.EVIDENCE_REF_MAX:
+            raise EconomicsRefused("field_malformed", f"{self.name} evidence_ref is longer than its column")
+        if isinstance(self.name, str) and len(self.name) > _KEY_MAX:
+            raise EconomicsRefused("field_malformed", f"a parameter name is longer than {_KEY_MAX}")
+        engine = _engine_refusal(self.as_engine)
+        # Stored in the one spelling: "1.10" and "1.1" are one value, written once.
+        self.low, self.base, self.high = (parameters.Parameter.text(engine.at(p)) for p in parameters.POINTS)
+        if self.parameter_set_id is not None:
+            expected = _engine_refusal(lambda: pset.variable_unit(self.name))
+            if engine.unit is not expected:
+                raise EconomicsRefused("unit_mismatch", f"the parameter set's {self.name} is {expected}")
+            sealed = CustomerParameterSet._base_manager.filter(pk=self.parameter_set_id).values_list(
+                "variable_count", flat=True
+            )
+            held = FinancialParameter._base_manager.filter(parameter_set_id=self.parameter_set_id).count()
+            if not sealed or held >= sealed[0]:
+                raise EconomicsRefused("parameter_set_sealed", f"set version {self.parameter_set_id}")
+        parent = (
+            FinancialParameter._base_manager.filter(scenario_id=self.scenario_id)
+            if self.scenario_id is not None
+            else FinancialParameter._base_manager.filter(parameter_set_id=self.parameter_set_id)
+        )
+        if parent.filter(name=self.name).exists():
+            raise EconomicsRefused("duplicate_id", f"parameter {self.name!r} twice in one parent")
+
+    def __str__(self) -> str:
+        return f"parameter {self.name} ({self.unit})"
+
+
+class LossEvent(_AppendOnly):
+    """One causal loss event of a scenario version: the scenario that creates a
+    financial consequence (specification, sections 6 and 15). Its key is unique
+    within the scenario (``duplicate_id``), its effect is named as SPINE names one
+    (``sha256:`` + hex, checked for form), and every component of it is in its
+    ``currency``. Components are :class:`LossComponent` rows."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="loss_events")
+    event_key = models.SlugField(max_length=_KEY_MAX)
+    currency = models.CharField(max_length=3)
+    effect = models.CharField(max_length=71, blank=True)
+    business_process = models.CharField(max_length=200, blank=True)
+    trigger = models.CharField(max_length=200, blank=True)
+    correlation_group = models.CharField(max_length=_KEY_MAX, blank=True)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+        constraints = [models.UniqueConstraint(fields=["scenario", "event_key"], name="uq_econ_loss_event_key")]
+
+    def check_new(self) -> None:
+        _key(self.event_key, "event_key")
+        _engine_refusal(lambda: money.check_reporting_currency(self.currency, "event currency"))
+        if self.effect:
+            _refuse(governance.spine_reference_refusal("effect", self.effect), detail="effect")
+        if LossEvent._base_manager.filter(scenario_id=self.scenario_id, event_key=self.event_key).exists():
+            raise EconomicsRefused("duplicate_id", f"event {self.event_key!r} twice in one scenario")
+
+    def deployment_id_of(self) -> int | None:
+        return FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("deployment_id", flat=True).first()
+
+    def as_engine(self) -> engine_loss.LossEvent:
+        """The event as the engine reads it, its components recomputed from the rows
+        they cite."""
+        rows = LossComponent._base_manager.filter(loss_event_id=self.pk).order_by("id")
+        return _engine_refusal(
+            lambda: engine_loss.LossEvent(self.event_key, self.currency, tuple(row.as_engine() for row in rows))
+        )
+
+    def __str__(self) -> str:
+        return f"loss event {self.event_key}"
+
+
+class LossComponent(_AppendOnly):
+    """One component of one loss event: its loss family (or ``market_value``), the
+    formula id and version that computes it, the as-of date, and the parameters it
+    cites, by formula input (specification, section 15).
+
+    The amounts are never taken from the caller. On save, the row's formula is
+    evaluated from the cited parameters, as stored, and the status, currency, low,
+    base and high, or the unknown reason and the missing inputs, are written from
+    that result: a component is ``unknown``, with no amount, when an input is not
+    cited. Every cited parameter is a recorded one (``parameter_not_found``) of the
+    event's own deployment (``cross_tenant_reference``): the scenario's, or one of
+    the deployment's parameter sets. Stored components are gross of insurance
+    (``insurance_treatment``, a check constraint); insurance is applied once, when
+    an event is assessed.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    loss_event = models.ForeignKey(LossEvent, on_delete=models.CASCADE, related_name="components")
+    component_key = models.SlugField(max_length=_KEY_MAX)
+    family = models.CharField(max_length=32, choices=[(f, f) for f in _COMPONENT_FAMILY_CODES])
+    formula_id = models.CharField(max_length=64)
+    formula_version = models.PositiveIntegerField()
+    as_of = models.DateField()
+    # {formula input name: the cited FinancialParameter's uuid}
+    cited_parameters = models.JSONField(default=dict)
+    status = models.CharField(max_length=16, choices=[(s, s) for s in _COMPONENT_STATUS_CODES], editable=False)
+    currency = models.CharField(max_length=3, blank=True, editable=False)
+    low = models.TextField(blank=True, editable=False)
+    base = models.TextField(blank=True, editable=False)
+    high = models.TextField(blank=True, editable=False)
+    unknown_reason = models.CharField(max_length=32, blank=True, editable=False)
+    missing_inputs = models.JSONField(default=list, editable=False)
+    insurance_treatment = models.CharField(max_length=16, default=formulas.GROSS, editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["loss_event", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["loss_event", "component_key"], name="uq_econ_loss_component_key"),
+            models.CheckConstraint(condition=Q(family__in=_COMPONENT_FAMILY_CODES), name="ck_econ_component_family"),
+            models.CheckConstraint(condition=Q(status__in=_COMPONENT_STATUS_CODES), name="ck_econ_component_status"),
+            models.CheckConstraint(condition=Q(insurance_treatment=formulas.GROSS), name="ck_econ_component_gross"),
+        ]
+
+    def _bindings(self, deployment_id) -> dict[str, parameters.Parameter]:
+        cited = self.cited_parameters
+        if not isinstance(cited, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in cited.items()):
+            raise EconomicsRefused("field_malformed", "cited_parameters maps a formula input to a parameter's uuid")
+        wanted = {}
+        for name, value in cited.items():
+            try:
+                wanted[name] = uuid.UUID(value)
+            except ValueError:
+                raise EconomicsRefused("parameter_not_found", f"{name}: {value!r}") from None
+        rows = {row.uuid: row for row in FinancialParameter._base_manager.filter(uuid__in=list(wanted.values()))}
+        bindings = {}
+        for name, key in wanted.items():
+            row = rows.get(key)
+            if row is None:
+                raise EconomicsRefused("parameter_not_found", f"{name}: {key}")
+            if FinancialParameter.deployment_of(row.pk) != deployment_id:
+                raise EconomicsRefused("cross_tenant_reference", f"{name} cites another deployment's parameter")
+            bindings[name] = _engine_refusal(row.as_engine)
+        return bindings
+
+    def _evaluate(self):
+        event = LossEvent._base_manager.filter(pk=self.loss_event_id).values_list("currency", "scenario_id").first()
+        if event is None:
+            raise EconomicsRefused("parameter_not_found", "the component's loss event is not recorded")
+        currency, scenario_id = event
+        deployment_id = FinancialScenario._base_manager.filter(pk=scenario_id).values_list(
+            "deployment_id", flat=True
+        ).first()
+        bindings = self._bindings(deployment_id)
+        component = _engine_refusal(
+            lambda: formulas.evaluate(
+                self.component_key, self.family, self.formula_id, self.formula_version, bindings, as_of=self.as_of
+            )
+        )
+        if component.currency is not None and component.currency != currency:
+            raise EconomicsRefused(
+                "currency_mismatch", f"the component is in {component.currency}; its event is in {currency}"
+            )
+        return component
+
+    def as_engine(self) -> formulas.LossComponent:
+        """The component recomputed from the rows it cites."""
+        return self._evaluate()
+
+    def check_new(self) -> None:
+        _key(self.component_key, "component_key")
+        if LossComponent._base_manager.filter(
+            loss_event_id=self.loss_event_id, component_key=self.component_key
+        ).exists():
+            raise EconomicsRefused("duplicate_id", f"component {self.component_key!r} twice in one event")
+        component = self._evaluate()
+        estimated = component.status == formulas.ESTIMATED
+        self.status = component.status
+        self.currency = component.currency or ""
+        self.low, self.base, self.high = (
+            (parameters.Parameter.text(component.at(p)) for p in parameters.POINTS) if estimated else ("", "", "")
+        )
+        self.unknown_reason = component.unknown_reason or ""
+        self.missing_inputs = list(component.missing)
+        self.insurance_treatment = formulas.GROSS
+
+    def __str__(self) -> str:
+        return f"{self.family} component {self.component_key} ({self.status})"
