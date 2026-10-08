@@ -90,22 +90,29 @@ def span(
     whole.
     """
     escaped: Exception | None = None
-    with tracing.span(
-        name,
-        engine=ENGINE,
-        subject=subject,
-        attributes=attributes,
-        timings=TIMINGS,
-        component=f"{ENGINE}.{component}" if component else None,
-    ) as active:
-        try:
-            yield active
-        except Exception as exc:  # noqa: BLE001 - raised unchanged once the span closes
-            escaped = exc
-            # Telemetry never replaces what it records: the exception may be a
-            # stop, and a stop must reach its caller as itself.
-            with suppress(Exception):
-                _failed(active, exc)
+    try:
+        with tracing.span(
+            name,
+            engine=ENGINE,
+            subject=subject,
+            attributes=attributes,
+            timings=TIMINGS,
+            component=f"{ENGINE}.{component}" if component else None,
+        ) as active:
+            try:
+                yield active
+            except Exception as exc:  # noqa: BLE001 - raised unchanged once the span closes
+                escaped = exc
+                # Telemetry never replaces what it records: the exception may be a
+                # stop, and a stop must reach its caller as itself.
+                with suppress(Exception):
+                    _failed(active, exc)
+    except Exception:  # noqa: BLE001 - the block's own exception outranks the span's
+        # Ending the span raised (an exporter, a processor). With the block's
+        # exception in hand, that one is what the caller gets: a span that
+        # cannot be ended never replaces a stop.
+        if escaped is None:
+            raise
     if escaped is not None:
         raise escaped
 

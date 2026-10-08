@@ -15,6 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from tests import advisory_register
 from tests.advisory_register import (
     declared_requirements,
     installed_versions,
@@ -59,6 +62,9 @@ def test_the_check_fails_on_each_way_a_fix_can_be_lost():
     # A declared requirement lowered so that it admits an affected version.
     assert violations([by_id["GHSA-9hjg-9r4m-mvj7"]], fine, {"requests": [">=2.31"]})
     assert violations([by_id["GHSA-9hjg-9r4m-mvj7"]], fine, {"requests": [""]})
+    # An exact pin inside the range, which no edge of the range itself reaches.
+    assert violations([by_id["GHSA-9hjg-9r4m-mvj7"]], fine, {"requests": ["==2.31.0"]})
+    assert violations([by_id["GHSA-pq67-6m6q-mj2v"]], fine, {"urllib3": ["~=2.3.0"]})
     # The motivating advisory's dependency installed: at an affected version on
     # either line, and even at a fixed one while the register says it is absent.
     for version in ("1.107.5", "2.43.0", "2.0.0b3"):
@@ -73,3 +79,71 @@ def test_the_check_fails_on_each_way_a_fix_can_be_lost():
     ]
     for version in ("1.107.6", "2.44.0"):
         assert violations(used, {"pydantic-ai": version, "pydantic-ai-slim": version}, {}) == []
+
+
+#: The declarations a lowered pin can hide in, each of which the reader passed
+#: over -- and so a pin lowered through it passed the check. Each is one file
+#: set, and each lowers `requests` below 2.32.4 (GHSA-9hjg-9r4m-mvj7).
+_HIDING_PLACES = {
+    "an included requirements file": {
+        "requirements.txt": "-r base.txt\n",
+        "base.txt": "requests==2.31.0\n",
+    },
+    "an included constraints file": {
+        "requirements.txt": "requests\n-c pins/constraints.txt\n",
+        "pins/constraints.txt": "requests==2.31.0\n",
+    },
+    "a hashed, continued pin": {
+        "requirements.txt": (
+            "requests==2.31.0 \\\n"
+            "    --hash=sha256:58cd2187c01e70e6e26505bca751777aa9f2ee0b7f4300988b709f44e013003f\n"
+        ),
+    },
+    "setup.py naming an extra": {
+        "setup.py": (
+            "from setuptools import setup\n"
+            'setup(name="x", install_requires=["requests[socks]>=2.31", "pyyaml"])\n'
+        ),
+    },
+    "setup.py through a name": {
+        "setup.py": (
+            "from setuptools import setup\n"
+            'REQUIRES = ["requests>=2.31"]\n'
+            'setup(name="x", install_requires=REQUIRES)\n'
+        ),
+    },
+    "setup.py extras": {
+        "setup.py": (
+            "from setuptools import setup\n"
+            'setup(name="x", extras_require={"http": ["requests>=2.31"]})\n'
+        ),
+    },
+}
+
+
+@pytest.mark.parametrize("files", list(_HIDING_PLACES.values()), ids=list(_HIDING_PLACES))
+def test_a_pin_lowered_wherever_it_is_declared_is_seen(tmp_path, files):
+    advisories = [adv for adv in _register() if adv.id == "GHSA-9hjg-9r4m-mvj7"]
+    names = {dep for adv in advisories for dep in adv.dependencies}
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    found = violations(advisories, installed_versions(names), declared_requirements(tmp_path))
+    assert any("requests" in line and "2.31" in line for line in found), found
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"requirements.txt": "requests>=2.32.4\nthis is not a requirement !!\n"},
+        {"requirements.txt": "-r missing.txt\n"},
+        {"setup.py": "from setuptools import setup\nsetup(name='x', install_requires=reqs())\n"},
+        {"setup.py": "from setuptools import setup\nsetup(**metadata)\n"},
+    ],
+    ids=["an unreadable line", "a missing include", "computed requirements", "keyword splat"],
+)
+def test_a_declaration_the_check_cannot_read_fails_it(tmp_path, files):
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    with pytest.raises(advisory_register.RequirementsUnreadable):
+        declared_requirements(tmp_path)

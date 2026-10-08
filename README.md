@@ -484,7 +484,8 @@ and an exception that leaves one is recorded by its type alone (`error.type`, an
 the class name as its status): left to the OpenTelemetry SDK's defaults, an
 exception raised while deriving claims went to the collector with its message,
 stack trace and chained cause, quoting whatever it was reading
-(`tests/test_an_exception_reaches_a_span_as_its_type_alone.py`).
+(`tests/test_an_exception_reaches_a_span_as_its_type_alone.py`). The caller gets
+that exception even when ending the span raises.
 
 `advisories.toml` registers the upstream advisories against the dependencies on
 the path from an engine's answer to this service's record, with the test of this
@@ -497,6 +498,11 @@ differently). Pydantic AI is not a dependency of this service, directly or
 transitively; the same behaviours are tested on its own spans and on the
 scan-target guard (`tests/test_the_target_guard_decides_on_the_host_the_client_dials.py`).
 Nothing here says any deployment was affected.
+
+The register reads every way a requirement can be declared -- `-r` and `-c`
+includes, `\` continuations and `--hash` options, setup.py through `ast` --
+probes both ranges' edges so an exact pin inside an affected range is seen, and
+fails on any declaration it cannot read rather than passing over it.
 
 ## Before deploying
 
