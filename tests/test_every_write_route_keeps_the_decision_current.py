@@ -556,6 +556,15 @@ def _unknown_patch():
     return dep, lambda c: c.patch(f"/api/assurance/unknowns/{unknown.uuid}/", {"notes": "asked"}, format="json")
 
 
+def _economics_parameter_set():
+    from tests.test_economics_scenarios import full_document
+
+    dep = _scanned()
+    return dep, lambda c: c.post(
+        _base(dep) + "economics/parameter-sets/bank_prod_2026q4/versions/", full_document(), format="json"
+    )
+
+
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
         "reads every stream across the portfolio; it writes nothing but the reconcile "
@@ -607,6 +616,11 @@ CANNOT_MOVE = {
     ("UnknownViewSet", "partial_update", "patch"): (
         "the Unknowns register is reported beside the decision, never computed into it",
         _unknown_patch,
+    ),
+    ("ParameterSetVersionsView", "post", "post"): (
+        "records a version of a customer's financial parameter set (Economic Exposure); the decision reads "
+        "no economics record",
+        _economics_parameter_set,
     ),
 }
 

@@ -6,7 +6,7 @@ code that succeeded a retired one, and which codes no amount may be reported in.
 Phase E0 carried a copy of its own here (``data/iso4217.json``); core's table was
 made from that copy entry for entry, and phase E1 dropped the copy, so this
 module is a thin adapter. It adds no entry, changes none and caches nothing of
-its own: every name below is core's object.
+its own: every table name below is core's object.
 
 What it adds is a pin. Core pins the bytes of its own file; this service pins the
 digest of the ENTRIES it was reviewed against (:data:`PINNED_ENTRIES_SHA256`, the
@@ -19,15 +19,21 @@ reported in. ``tests/test_economics_engine.py`` pins the same value, and core's
 file digest, beside the entries #141 pinned (JPY 0, USD 2, KWD 3, the retired
 HRK, GRD and PTE and their successor).
 
-The refusal is LAZY and economics-only. The pin is checked once, at import, and
-its result recorded (:data:`PIN_REFUSAL`); importing never raises. Every use of the
-table -- :func:`currency`, :func:`minor_units`, :func:`current_successor`,
-:func:`reporting_refusal`, and through them every ``Money``, rate and policy --
-raises :class:`CurrencyTableInvalid` while the pin does not hold. This module is
-imported when Django loads ``assurance.models``, so a refusal at import would take
-``django.setup()`` down, and every route with it, the scan's Stop and every other
-stop among them. The safety rule forbids that: an economics fault refuses
-economics, and nothing else.
+NOTHING HAPPENS AT IMPORT, AND THE REFUSAL IS ECONOMICS-ONLY. This module is
+imported when Django loads ``assurance.models``, so anything it did at import that
+could fail -- importing core's module, which reads core's table file, or checking
+the pin -- could take ``django.setup()`` down, and every route with it, the scan's
+Stop and every other stop among them. The safety rule forbids that: an economics
+fault refuses economics, and nothing else. So importing this module imports no
+part of mythos-core and checks nothing. On the first economics use, core's module
+is imported -- a failure is recorded, ``mythos_core.currency cannot be imported``,
+never raised past here -- and the pin is checked once and its result recorded
+(:data:`PIN_REFUSAL`). Every use of the table -- :func:`currency`,
+:func:`minor_units`, :func:`current_successor`, :func:`reporting_refusal`, the
+table names, and through them every ``Money``, rate and policy -- raises
+:class:`CurrencyTableInvalid` while core's module cannot be imported or the pin
+does not hold. :class:`CurrencyTableInvalid` is core's own class when core's
+module imports, and a local one when it does not.
 
 Every amount is a ``Decimal`` with an ISO 4217 code beside it, and the currency
 is never inferred from a locale (owner's specification, sections 9 and 19). The
@@ -44,14 +50,10 @@ refuses them.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
-from mythos_core import currency as _core
-
-Currency = _core.Currency
-CurrencyTableInvalid = _core.CurrencyTableInvalid
-ACTIVE = _core.ACTIVE
-RETIRED = _core.RETIRED
+logger = logging.getLogger(__name__)
 
 #: SHA-256 (hex) over the canonical JSON of the table's entries
 #: (:func:`mythos_core.currency.entries_digest`): the 216 entries athena-backend
@@ -65,34 +67,104 @@ CURRENCY_UNKNOWN = "currency_unknown"
 CURRENCY_RETIRED = "currency_retired"
 CURRENCY_MISMATCH = "currency_mismatch"
 
+#: What economics refuses with when mythos-core's currency module cannot be
+#: imported at all, before any pin can be checked.
+CORE_UNAVAILABLE = "mythos_core.currency cannot be imported"
+
 
 class UnknownCurrency(LookupError):
     """A code the table does not hold. Never guessed at, never normalised: ``usd``
     and ``US$`` are unknown, not USD."""
 
 
-def reportable_from(currencies: Mapping[str, Currency]) -> dict[str, int]:
+class LocalCurrencyTableInvalid(ValueError):
+    """What :class:`CurrencyTableInvalid` is when mythos-core's currency module
+    cannot be imported, so economics still refuses with one class, on use."""
+
+
+_UNSET = object()
+#: What the first use found: core's module (or ``None``), why it could not be
+#: imported, and the pin's result. Filled on first use, never at import.
+_state: dict = {"core": _UNSET, "unavailable": None, "pin": _UNSET}
+
+#: The names this adapter reads from core's module; one missing is a module that
+#: cannot be used, refused like one that cannot be imported.
+_CORE_NAMES = (
+    "CURRENCIES",
+    "REPORTABLE_MINOR_UNITS",
+    "RECORDS",
+    "TABLE_SHA256",
+    "Currency",
+    "CurrencyTableInvalid",
+    "ACTIVE",
+    "RETIRED",
+    "entries_digest",
+)
+
+
+def _load_core():
+    """mythos-core's currency module, imported on the first economics use and never
+    at this module's import; ``None`` when it cannot be imported or lacks a name
+    this adapter reads, with why recorded. Never raises."""
+    if _state["core"] is _UNSET:
+        try:
+            from mythos_core import currency as core
+
+            present = set(dir(core))
+            missing = [name for name in _CORE_NAMES if name not in present]
+            if missing:
+                raise AttributeError(f"it has no {missing}")
+        except Exception as exc:
+            # Logged and recorded, never raised: an economics fault refuses economics.
+            logger.exception("%s; Economic Exposure refuses on use", CORE_UNAVAILABLE)
+            _state["core"] = None
+            _state["unavailable"] = f"{CORE_UNAVAILABLE}: {type(exc).__name__}: {exc}"
+        else:
+            _state["core"] = core
+    return _state["core"]
+
+
+def _invalid() -> type[Exception]:
+    """The class economics refuses with: core's ``CurrencyTableInvalid``, or the
+    local one when core's module cannot be imported."""
+    core = _load_core()
+    return core.CurrencyTableInvalid if core is not None else LocalCurrencyTableInvalid
+
+
+def _core():
+    """Core's module, or :class:`CurrencyTableInvalid` naming why there is none."""
+    core = _load_core()
+    if core is None:
+        raise LocalCurrencyTableInvalid(_state["unavailable"])
+    return core
+
+
+def reportable_from(currencies: Mapping) -> dict[str, int]:
     """The minor unit of every code an amount may be reported in, derived from the
     entries themselves: active, with a minor unit."""
+    active = _core().ACTIVE
     return {
         code: entry.minor_units
         for code, entry in currencies.items()
-        if entry.status == ACTIVE and entry.minor_units is not None
+        if entry.status == active and entry.minor_units is not None
     }
 
 
 def pin_refusal(
-    currencies: Mapping[str, Currency],
+    currencies: Mapping,
     reportable: Mapping[str, int] | None = None,
     pinned: str = PINNED_ENTRIES_SHA256,
 ) -> str | None:
     """``None`` when ``currencies`` hold exactly the entries this service pinned and
     ``reportable`` (core's ``REPORTABLE_MINOR_UNITS`` unless given) is exactly the
     set those entries give; otherwise why not. Never raises."""
+    core = _load_core()
+    if core is None:
+        return _state["unavailable"]
     if reportable is None:
-        reportable = _core.REPORTABLE_MINOR_UNITS
+        reportable = core.REPORTABLE_MINOR_UNITS
     try:
-        digest = _core.entries_digest(currencies)
+        digest = core.entries_digest(currencies)
         derived = reportable_from(currencies)
         given = dict(reportable)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -113,49 +185,75 @@ def pin_refusal(
 
 
 def check_pinned(
-    currencies: Mapping[str, Currency],
+    currencies: Mapping,
     reportable: Mapping[str, int] | None = None,
     pinned: str = PINNED_ENTRIES_SHA256,
 ) -> None:
     """Raise :class:`CurrencyTableInvalid` unless :func:`pin_refusal` finds none."""
     refusal = pin_refusal(currencies, reportable, pinned)
     if refusal is not None:
-        raise CurrencyTableInvalid(refusal)
+        raise _invalid()(refusal)
 
 
-#: Why core's table is not the one pinned, recorded once at import; ``None`` when it
-#: is. Importing never raises on it: :func:`require_pinned` does, on use.
-PIN_REFUSAL: str | None = pin_refusal(_core.CURRENCIES, _core.REPORTABLE_MINOR_UNITS)
+def _pin_in_force() -> str | None:
+    """Why core's table in force is not the one pinned (or cannot be imported),
+    checked once, on the first use, and recorded; ``None`` when it is."""
+    if _state["pin"] is _UNSET:
+        core = _load_core()
+        _state["pin"] = (
+            _state["unavailable"] if core is None else pin_refusal(core.CURRENCIES, core.REPORTABLE_MINOR_UNITS)
+        )
+    return _state["pin"]
 
 
 def require_pinned() -> None:
-    """Raise :class:`CurrencyTableInvalid` while core's table is not the one pinned.
-    Called by every use of the table, never at import."""
-    if PIN_REFUSAL is not None:
-        raise CurrencyTableInvalid(PIN_REFUSAL)
+    """Raise :class:`CurrencyTableInvalid` while core's table cannot be imported or
+    is not the one pinned. Called by every use of the table, never at import."""
+    refusal = _pin_in_force()
+    if refusal is not None:
+        raise _invalid()(refusal)
 
-#: Every currency the table holds, by code (core's mapping, read-only).
-CURRENCIES: Mapping[str, Currency] = _core.CURRENCIES
-#: The table's ``source`` and ``review`` records: where its entries came from and
-#: how far they are checked.
-RECORDS: Mapping = _core.RECORDS
-#: The SHA-256 of core's table file, as core pins it.
-TABLE_SHA256: str = _core.TABLE_SHA256
-#: The minor unit of every code an amount may be reported in.
-REPORTABLE_MINOR_UNITS: Mapping[str, int] = _core.REPORTABLE_MINOR_UNITS
+
+def _table() -> Mapping:
+    return _core().CURRENCIES
+
+
+#: The names read from core's module on use (PEP 562): each is core's own object,
+#: read from core's module at the moment it is asked for, never at import.
+#: :data:`PIN_REFUSAL` is the pin's recorded result; :class:`CurrencyTableInvalid`
+#: core's class, or the local one. Spelled out one by one, so no name is looked up
+#: at runtime.
+_ON_USE = {
+    "CURRENCIES": lambda: _core().CURRENCIES,
+    "REPORTABLE_MINOR_UNITS": lambda: _core().REPORTABLE_MINOR_UNITS,
+    "RECORDS": lambda: _core().RECORDS,
+    "TABLE_SHA256": lambda: _core().TABLE_SHA256,
+    "Currency": lambda: _core().Currency,
+    "ACTIVE": lambda: _core().ACTIVE,
+    "RETIRED": lambda: _core().RETIRED,
+    "CurrencyTableInvalid": _invalid,
+    "PIN_REFUSAL": _pin_in_force,
+}
+
+
+def __getattr__(name: str):
+    reader = _ON_USE.get(name)
+    if reader is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return reader()
 
 
 def entries_digest() -> str:
     """The digest of the entries in force, as core computes it."""
-    return _core.entries_digest(CURRENCIES)
+    return _core().entries_digest(_table())
 
 
-def currency(code: str) -> Currency:
+def currency(code: str):
     """The currency ``code`` names, exactly as written. Raises :class:`UnknownCurrency`,
     and :class:`CurrencyTableInvalid` while the pin does not hold."""
     require_pinned()
     try:
-        return CURRENCIES[code]
+        return _table()[code]
     except (KeyError, TypeError):
         raise UnknownCurrency(f"{code!r} is not an ISO 4217 code in the table") from None
 
@@ -167,17 +265,19 @@ def minor_units(code: str) -> int | None:
     return currency(code).minor_units
 
 
-def current_successor(code: str) -> Currency | None:
+def current_successor(code: str):
     """The active currency a retired one's successors lead to (HRK leads to EUR), or
     ``None`` when ``code`` is active. Core's table guarantees every line of
     successors ends at an active code."""
     require_pinned()
+    active = _core().ACTIVE
     step = currency(code)
-    if step.status == ACTIVE:
+    if step.status == active:
         return None
-    while step.status != ACTIVE and step.successor is not None:
-        step = CURRENCIES[step.successor]
-    return step if step.status == ACTIVE else None
+    table = _table()
+    while step.status != active and step.successor is not None:
+        step = table[step.successor]
+    return step if step.status == active else None
 
 
 def reporting_refusal(code) -> str | None:
@@ -186,8 +286,8 @@ def reporting_refusal(code) -> str | None:
     ``currency_retired`` (retired, or no minor unit). Raises
     :class:`CurrencyTableInvalid` while the pin does not hold."""
     require_pinned()
-    if not isinstance(code, str) or code not in CURRENCIES:
+    if not isinstance(code, str) or code not in _table():
         return CURRENCY_UNKNOWN
-    if code not in REPORTABLE_MINOR_UNITS:
+    if code not in _core().REPORTABLE_MINOR_UNITS:
         return CURRENCY_RETIRED
     return None
