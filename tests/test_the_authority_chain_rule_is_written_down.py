@@ -732,22 +732,37 @@ def test_a_contract_changed_after_the_effect_leaves_the_invocation_proven():
 # ------------------------------------------- the graph's edges, read as of dispatch
 
 
-#: The live graph with every edge the three graph hops read taken away: no declared
-#: edge, no reach, no permission anywhere. The history alone can prove them now.
-BARE = graph(
-    components=(AGENT, component("t1", "mcp_server", "crm-mcp"), ACCOUNT, OTHER_ACCOUNT),
-    declared=frozenset(),
-    reach={},
-)
+def strip(g):
+    """``g`` with every piece of graph state the three graph hops read taken away -- no
+    declared, inferred or reach edge, no gap, no permission declared -- and every
+    component kept, so a node resolves exactly as it does in ``g``. The live graph a
+    test reads through when only the history may decide."""
+    from dataclasses import replace
+
+    return ac.Graph(components=tuple(replace(c, permissions=None) for c in g.components))
+
+
+def history_moving(*steps):
+    """The edge history that noted the graph of each ``(instant, graph)`` step in turn,
+    as :func:`assurance.edge_history.note_edges` does: what came into force at each
+    step, and what went out of it."""
+    history: dict = {}
+    current: frozenset = frozenset()
+    n = 0
+    for instant, g in steps:
+        now = ac.graph_edges(g)
+        for edge in sorted(now ^ current):
+            n += 1
+            history.setdefault(edge, ()) 
+            history[edge] = (*history[edge], ac.EdgeVersion(instant, edge in now, f"r{n}"))
+        current = now
+    return history
+
+
+BARE = strip(graph())
 IDENTITY_EDGE = (ac.EDGE_IDENTITY, "a1", "s1")
-REACH_EDGE = (ac.EDGE_REACH, "a1", "t1")
+REACH_EDGE = (ac.EDGE_INVOKES, "a1", "t1")
 ACTION_EDGE = (ac.EDGE_ACTION, "t1", "customer:update")
-#: Each graph hop, the edge it reads in the reference chain, and what it reads without it.
-GRAPH_HOPS = [
-    ("through_identity", IDENTITY_EDGE, "identity_in_force_at_dispatch", "identity_not_in_force_at_dispatch"),
-    ("invokes", REACH_EDGE, "reach_in_force_at_dispatch", "reach_not_in_force_at_dispatch"),
-    ("performs", ACTION_EDGE, "action_in_force_at_dispatch", "action_not_in_force_at_dispatch"),
-]
 
 
 def with_edge(edge, *versions):
@@ -759,71 +774,117 @@ def with_edge(edge, *versions):
     return history
 
 
-def test_the_edges_the_history_keeps_are_exactly_the_ones_the_graph_hops_read():
+NARROW = component("t1", "mcp_server", "crm-mcp", permissions=("customer:read",))
+#: For each graph hop, the graph at the dispatch that leaves its edge simply NOT IN
+#: FORCE -- nothing contradicts the hop -- and the one that CONTRADICTS it, with what
+#: each reads: the agent declares no identity / acts as svc-admin; only an inferred
+#: edge joins it to the server / a graph fully resolved from it does not reach the
+#: server; the server permits only reads and the account declares nothing / declares
+#: that it may do nothing.
+GRAPH_CASES = [
+    ("through_identity", "absent", graph(declared=frozenset({("a1", "invokes", "t1")})),
+     ac.UNPROVEN, "identity_not_in_force_at_dispatch"),
+    ("through_identity", "contradicted", graph(declared=frozenset({("a1", "invokes", "t1"), ("a1", "acts_as", "s2")})),
+     ac.BROKEN, "acts_as_another"),
+    ("invokes", "absent", graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={}, inferred=frozenset({("a1", "t1")})),
+     ac.UNPROVEN, "reach_not_in_force_at_dispatch"),
+    ("invokes", "contradicted", graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={"a1": frozenset({"s1"})}),
+     ac.BROKEN, "unreachable"),
+    ("performs", "absent", graph(components=(AGENT, NARROW, ACCOUNT, OTHER_ACCOUNT)),
+     ac.UNPROVEN, "action_not_in_force_at_dispatch"),
+    ("performs", "contradicted",
+     graph(components=(AGENT, NARROW, component("s1", "service_account", "svc-x", permissions=()), OTHER_ACCOUNT)),
+     ac.BROKEN, "permission_not_declared"),
+]
+CASE_IDS = [f"{c[0]}-{c[1]}" for c in GRAPH_CASES]
+PROVING = {
+    "through_identity": "identity_in_force_at_dispatch",
+    "invokes": "reach_in_force_at_dispatch",
+    "performs": "action_in_force_at_dispatch",
+}
+
+
+def test_the_state_the_history_keeps_is_exactly_what_the_graph_hops_read():
     assert ac.graph_edges(graph()) == {
-        IDENTITY_EDGE, REACH_EDGE, ACTION_EDGE, (ac.EDGE_ACTION, "t1", "customer:read"),
+        IDENTITY_EDGE, REACH_EDGE, (ac.EDGE_REACH, "a1", "t1"), ACTION_EDGE, (ac.EDGE_ACTION, "t1", "customer:read"),
+        (ac.EDGE_DECLARES, "t1", ""),
     }
-    # Effective reach to a tool counts as reach; to an account it is no reach a hop
-    # reads; an inferred edge is no edge.
-    g = graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={"a1": frozenset({"t1", "s1"})},
-              inferred=frozenset({("a1", "t9")}))
-    assert REACH_EDGE in ac.graph_edges(g) and (ac.EDGE_REACH, "a1", "s1") not in ac.graph_edges(g)
-    assert ac.graph_edges(graph(declared=frozenset(), reach={}, inferred=frozenset({("a1", "t1")}))) == {
-        ACTION_EDGE, (ac.EDGE_ACTION, "t1", "customer:read"),
+    # The state that contradicts a hop, or leaves it open, is kept too: an inferred
+    # edge, an unplaced reference (with its reasons), a component that declares it may
+    # do nothing. Effective reach to an account is no reach a hop reads.
+    g = graph(
+        components=(AGENT, TOOL, component("s1", "service_account", "svc-x", permissions=()), OTHER_ACCOUNT),
+        declared=frozenset(), reach={"a1": frozenset({"s1"})}, inferred=frozenset({("a1", "t1")}),
+        gaps={"a1": (ac.Gap("tools", "billing", ("not_found",)), ac.Gap("identity", "svc", ("ambiguous",)),
+                     ac.Gap("server", "db", ("not_found",)))},
+    )
+    assert ac.graph_edges(g) == {
+        (ac.EDGE_INFERRED, "a1", "t1"),
+        (ac.EDGE_TOOL_GAP, "a1", '["billing",["not_found"]]'),
+        (ac.EDGE_IDENTITY_GAP, "a1", '["svc",["ambiguous"]]'),
+        (ac.EDGE_DECLARES, "s1", ""), (ac.EDGE_DECLARES, "t1", ""),
+        (ac.EDGE_ACTION, "t1", "customer:update"), (ac.EDGE_ACTION, "t1", "customer:read"),
     }
     # The stored rows spell the kinds as the rule does.
     from assurance.models import AuthorityEdgeVersion
 
-    assert AuthorityEdgeVersion.KINDS == (ac.EDGE_IDENTITY, ac.EDGE_ACTION, ac.EDGE_REACH, "begun")
+    assert AuthorityEdgeVersion.KINDS == (
+        ac.EDGE_IDENTITY, ac.EDGE_IDENTITY_GAP, ac.EDGE_INVOKES, ac.EDGE_REACH, ac.EDGE_INFERRED, ac.EDGE_TOOL_GAP,
+        ac.EDGE_DECLARES, ac.EDGE_ACTION, "begun",
+    )
 
 
-@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
-def test_an_edge_in_force_at_the_dispatch_proves_its_hop_citing_the_history_row(relation, edge, proven, unproven):
+@pytest.mark.parametrize(
+    ("relation", "edge"),
+    [("through_identity", IDENTITY_EDGE), ("invokes", REACH_EDGE), ("performs", ACTION_EDGE)],
+    ids=["through_identity", "invokes", "performs"],
+)
+def test_an_edge_in_force_at_the_dispatch_proves_its_hop_citing_the_history_row(relation, edge):
     h = at(ac.verify(chain(), inputs(edge_history=with_edge(edge, ac.EdgeVersion(NOTED, True, "row-7")))), relation)
-    assert h.verdict == ac.PROVEN and proven in codes(h)
-    cited = next(r for r in h.proven_by if r.code == proven).detail
+    assert h.verdict == ac.PROVEN and PROVING[relation] in codes(h)
+    cited = next(r for r in h.proven_by if r.code == PROVING[relation]).detail
     assert "edge history row row-7" in cited and NOTED.isoformat() in cited
 
 
-@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
-def test_an_edge_changed_after_the_effect_leaves_its_hop_proven(relation, edge, proven, unproven):
-    # The edge went out of force an hour after the effect, and the live graph holds
-    # none of the three edges any more: the hop is read at the dispatch.
-    gone = with_edge(edge, ac.EdgeVersion(NOTED, True, "r1"), ac.EdgeVersion(EFFECT_AT + timedelta(hours=1), False, "r2"))
-    result = ac.verify(chain(), inputs(edge_history=gone, graph=BARE))
-    assert result.verdict == ac.PROVEN, [(x.hop.relation, codes(x)) for x in result.hops]
-    assert proven in codes(at(result, relation))
+@pytest.mark.parametrize(("relation", "kind", "moved", "verdict", "code"), GRAPH_CASES, ids=CASE_IDS)
+def test_a_graph_changed_after_the_effect_leaves_its_hop_proven(relation, kind, moved, verdict, code):
+    # Whatever the graph became an hour after the effect -- the edge gone, or a state
+    # that would contradict the hop -- and whatever the live graph holds, the hop is
+    # read at the dispatch, when the reference graph stood.
+    history = history_moving((NOTED, graph()), (EFFECT_AT + timedelta(hours=1), moved))
+    for live in (moved, strip(moved)):
+        result = ac.verify(chain(), inputs(graph=live, edge_history=history))
+        assert result.verdict == ac.PROVEN, [(x.hop.relation, codes(x)) for x in result.hops]
+        assert PROVING[relation] in codes(at(result, relation))
 
 
-@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
-def test_an_edge_removed_before_the_dispatch_and_restored_after_reads_unproven(relation, edge, proven, unproven):
-    # Out of force five minutes before the dispatch, back an hour after the effect: live,
-    # the graph holds it again. At the dispatch it was not in force.
-    restored = with_edge(
-        edge,
-        ac.EdgeVersion(NOTED, True, "r1"),
-        ac.EdgeVersion(DISPATCHED_AT - timedelta(minutes=5), False, "r2"),
-        ac.EdgeVersion(EFFECT_AT + timedelta(hours=1), True, "r3"),
-    )
-    result = ac.verify(chain(), inputs(edge_history=restored))
+@pytest.mark.parametrize(("relation", "kind", "moved", "verdict", "code"), GRAPH_CASES, ids=CASE_IDS)
+def test_a_graph_moved_before_the_dispatch_and_restored_after_reads_as_it_stood_at_the_dispatch(
+    relation, kind, moved, verdict, code
+):
+    # Moved five minutes before the dispatch, back an hour after the effect: live, the
+    # graph is the reference one again. At the dispatch the edge was not in force --
+    # unproven when nothing contradicted the hop, broken when the record did.
+    history = history_moving((NOTED, graph()), (DISPATCHED_AT - timedelta(minutes=5), moved),
+                             (EFFECT_AT + timedelta(hours=1), graph()))
+    result = ac.verify(chain(), inputs(edge_history=history))
     h = at(result, relation)
-    assert h.verdict == ac.UNPROVEN and unproven in codes(h), codes(h)
-    assert result.verdict == ac.UNPROVEN and result.broken == ()
-    assert [x.hop.relation for x in result.unproven] == [relation]
+    assert (h.verdict, codes(h)) == (verdict, {code}), codes(h)
+    assert result.verdict == verdict
+    assert [x.hop.relation for x in result.hops if x.verdict != ac.PROVEN] == [relation]
 
 
-@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
-def test_the_dispatch_instant_is_the_edge_of_the_window(relation, edge, proven, unproven):
-    # Noted at the dispatch instant itself: in force at it.
-    at_it = with_edge(edge, ac.EdgeVersion(DISPATCHED_AT, True, "r1"))
-    assert proven in codes(at(ac.verify(chain(), inputs(edge_history=at_it)), relation))
-    # Noted a microsecond after it, or only after the effect: not in force at it.
-    for late in (DISPATCHED_AT + timedelta(microseconds=1), EFFECT_AT + timedelta(minutes=1)):
-        h = at(ac.verify(chain(), inputs(edge_history=with_edge(edge, ac.EdgeVersion(late, True, "r1")))), relation)
-        assert h.verdict == ac.UNPROVEN and unproven in codes(h)
-    # Gone at the dispatch instant itself: not in force at it.
-    gone = with_edge(edge, ac.EdgeVersion(NOTED, True, "r1"), ac.EdgeVersion(DISPATCHED_AT, False, "r2"))
-    assert unproven in codes(at(ac.verify(chain(), inputs(edge_history=gone)), relation))
+@pytest.mark.parametrize(("relation", "kind", "moved", "verdict", "code"), GRAPH_CASES, ids=CASE_IDS)
+def test_the_dispatch_instant_is_the_edge_of_the_window(relation, kind, moved, verdict, code):
+    # The reference graph noted at the dispatch instant itself: in force at it.
+    h = at(ac.verify(chain(), inputs(edge_history=history_moving((NOTED, moved), (DISPATCHED_AT, graph())))), relation)
+    assert h.verdict == ac.PROVEN
+    # Noted a microsecond after it: the graph before it is what stood.
+    late = history_moving((NOTED, moved), (DISPATCHED_AT + timedelta(microseconds=1), graph()))
+    assert codes(at(ac.verify(chain(), inputs(edge_history=late)), relation)) == {code}
+    # Moved at the dispatch instant itself: the moved graph stood at it.
+    gone = history_moving((NOTED, graph()), (DISPATCHED_AT, moved))
+    assert codes(at(ac.verify(chain(), inputs(edge_history=gone)), relation)) == {code}
 
 
 @pytest.mark.parametrize(
@@ -850,26 +911,26 @@ def test_the_graph_as_it_stands_is_never_what_the_graph_hops_read():
     # A live graph with no edge at all, a history with every edge: proven.
     result = ac.verify(chain(), inputs(graph=BARE))
     assert result.verdict == ac.PROVEN, [(h.hop.relation, codes(h)) for h in result.hops]
-    # A live graph with every edge, a history (begun) with none: unproven, each named.
+    # A live graph with every edge, a history that began with none: at the dispatch
+    # the agent declared no identity, a graph fully resolved from it reached nothing,
+    # and nothing it acted through declared its permissions.
     result = ac.verify(chain(), inputs(edge_history={}))
     assert codes(at(result, "through_identity")) == {"identity_not_in_force_at_dispatch"}
+    assert "unreachable" in codes(at(result, "invokes")) and at(result, "invokes").verdict == ac.BROKEN
     assert codes(at(result, "performs")) == {"action_not_in_force_at_dispatch"}
-    assert "reach_not_in_force_at_dispatch" in codes(at(result, "invokes"))
     # And with no dispatch state at all, the live graph proves none of them.
     result = ac.verify(chain(effect_outcome_id=""), inputs())
     for relation in ("invokes", "through_identity", "performs"):
         assert "dispatch_state_unrecorded" in codes(at(result, relation)), relation
 
 
-def test_an_agent_acting_as_another_account_at_the_dispatch_is_unproven_and_names_it():
-    # At the dispatch the agent acted as svc-admin, by the history; never broken: the
-    # history holds edges, not the unresolved references beside them.
-    history = {**with_edge(IDENTITY_EDGE), (ac.EDGE_IDENTITY, "a1", "s2"): (ac.EdgeVersion(NOTED, True, "r9"),)}
-    h = at(ac.verify(chain(), inputs(edge_history=history)), "through_identity")
-    assert h.verdict == ac.UNPROVEN and codes(h) == {"identity_not_in_force_at_dispatch"}
-    assert "it acted as svc-admin then" in h.reasons[0].detail
+def test_an_agent_acting_as_another_account_at_the_dispatch_breaks_the_identity_hop_and_names_it():
+    acting = graph(declared=frozenset({("a1", "invokes", "t1"), ("a1", "acts_as", "s2")}))
+    h = at(ac.verify(chain(), inputs(edge_history=history_of(acting))), "through_identity")
+    assert h.verdict == ac.BROKEN and codes(h) == {"acts_as_another"}
+    assert "svc-admin" in h.reasons[0].detail and "dispatch" in h.reasons[0].detail
     h = at(ac.verify(chain(), inputs(edge_history=with_edge(IDENTITY_EDGE))), "through_identity")
-    assert "no identity of it was in force then" in h.reasons[0].detail
+    assert h.verdict == ac.UNPROVEN and "declared no identity" in h.reasons[0].detail
 
 
 def test_a_permission_is_read_off_what_the_identity_acted_through_at_the_dispatch():
@@ -891,6 +952,181 @@ def test_a_permission_is_read_off_what_the_identity_acted_through_at_the_dispatc
     # The account's own declaration, in force at the dispatch, proves it too.
     own = {**with_edge(ACTION_EDGE), (ac.EDGE_ACTION, "s1", "customer:update"): (ac.EdgeVersion(NOTED, True, "r8"),)}
     assert at(ac.verify(chain(), inputs(edge_history=own)), "performs").verdict == ac.PROVEN
+
+
+# ------------------- equivalence: master's live rule on G == as of dispatch, G noted
+
+
+def _master_reach(index, actor, tool):
+    """Master's (11366c8) live reach reading, verbatim but for reading the graph's gaps
+    directly: the oracle the as-of-dispatch reading is held to."""
+    graph_ = index.graph
+    names = {tool.identifier, tool.name}
+    gaps = tuple(g for g in graph_.gaps.get(actor.uuid, ()) if g.mechanism == "tools")
+    if [g for g in gaps if g.reference in names]:
+        return ac.Reading(ac.UNPROVEN, "dangling_edge", "")
+    if (actor.uuid, "invokes", tool.uuid) in graph_.declared:
+        return ac.Reading(ac.PROVEN, "declared_edge", "")
+    if tool.uuid in graph_.reach.get(actor.uuid, frozenset()):
+        return ac.Reading(ac.PROVEN, "effective_reach", "")
+    if (actor.uuid, tool.uuid) in graph_.inferred:
+        return ac.Reading(ac.UNPROVEN, "inferred_edge", "")
+    if gaps:
+        return ac.Reading(ac.UNPROVEN, "dangling_edge", "")
+    return ac.Reading(ac.BROKEN, "unreachable", "")
+
+
+def _master_through_identity(chain_, i, target, index):
+    """Master's live ``through_identity`` (11366c8), verbatim but for the details."""
+    actor_node = ac._last_before(chain_, i, {ac.AGENT})
+    if actor_node is None:
+        return [ac.Reading(ac.UNPROVEN, "no_actor", "")]
+    actor, _ = index.resolve(actor_node)
+    if actor is None:
+        return [ac.Reading(ac.UNPROVEN, "actor_unresolved", "")]
+    if tuple(g for g in index.graph.gaps.get(actor.uuid, ()) if g.mechanism == "identity"):
+        return [ac.Reading(ac.UNPROVEN, "identity_unresolved", "")]
+    acts_as = {t for (s, kind, t) in index.graph.declared if s == actor.uuid and kind == "acts_as"}
+    if target is not None and target.uuid in acts_as:
+        return [ac.Reading(ac.PROVEN, "declared_identity", "")]
+    if acts_as:
+        return [ac.Reading(ac.BROKEN, "acts_as_another", "")]
+    return [ac.Reading(ac.UNPROVEN, "no_declared_identity", "")]
+
+
+def _master_permission(chain_, i, source, index):
+    """The graph half of master's live ``performs`` (11366c8), verbatim but for the details."""
+    action = chain_.hops[i].target.ref
+    relevant = {}
+    if source is not None:
+        relevant[source.uuid] = source
+        for uuid in index.graph.reach.get(source.uuid, frozenset()):
+            c = index.by_uuid.get(uuid)
+            if c is not None and c.kind in ac.TOOL_NODE_KINDS:
+                relevant[uuid] = c
+    tool_node = ac._last_before(chain_, i, ac.TOOL_NODE_KINDS)
+    if tool_node is not None:
+        tool, _ = index.resolve(tool_node)
+        if tool is not None:
+            relevant[tool.uuid] = tool
+    if any(c.permissions is not None and action in c.permissions for c in relevant.values()):
+        return ac.Reading(ac.PROVEN, "declared_permission", "")
+    if relevant and all(c.permissions is not None for c in relevant.values()):
+        return ac.Reading(ac.BROKEN, "permission_not_declared", "")
+    return ac.Reading(ac.UNPROVEN, "permissions_undeclared", "")
+
+
+#: What each master code reads as, as of dispatch. A broken one is the same code.
+_AS_OF_DISPATCH = {
+    "declared_identity": {"identity_in_force_at_dispatch"},
+    "no_declared_identity": {"identity_not_in_force_at_dispatch"},
+    "identity_unresolved": {"identity_unresolved"},
+    "acts_as_another": {"acts_as_another"},
+    "declared_edge": {"reach_in_force_at_dispatch"},
+    "effective_reach": {"reach_in_force_at_dispatch"},
+    "inferred_edge": {"reach_not_in_force_at_dispatch"},
+    "dangling_edge": {"dangling_edge", "reach_not_in_force_at_dispatch"},
+    "unreachable": {"unreachable"},
+    "declared_permission": {"action_in_force_at_dispatch"},
+    "permissions_undeclared": {"action_not_in_force_at_dispatch"},
+    "permission_not_declared": {"permission_not_declared"},
+    "no_actor": {"no_actor"},
+    "actor_unresolved": {"actor_unresolved"},
+}
+SHADOW = component("t1", "mcp_server", "crm-mcp", classification="unmanaged", shadow=True, permissions=TOOL.permissions)
+GHOST_ACCOUNT = [hop(AGENT_N, "under_policy", POLICY), hop(POLICY, "invokes", TOOL_N),
+                 hop(TOOL_N, "through_identity", node("service_account", "svc-ghost")),
+                 hop(node("service_account", "svc-ghost"), "performs", ACTION), hop(ACTION, "produces", EFFECT_N)]
+DANGLING_TOOL = [hop(AGENT_N, "under_policy", POLICY), hop(POLICY, "invokes", node("mcp_server", "billing-mcp")),
+                 hop(node("mcp_server", "billing-mcp"), "through_identity", ACCOUNT_N),
+                 hop(ACCOUNT_N, "performs", ACTION), hop(ACTION, "produces", EFFECT_N)]
+NO_AGENT = [hop(POLICY, "invokes", TOOL_N), hop(TOOL_N, "through_identity", ACCOUNT_N),
+            hop(ACCOUNT_N, "performs", ACTION), hop(ACTION, "produces", EFFECT_N)]
+#: Every graph master's tests read these hops over, and the chains they read.
+EQUIVALENCE = {
+    "reference": (graph(), None),
+    "effective-reach-alone": (graph(declared=frozenset({("a1", "acts_as", "s1")})), None),
+    "inferred-edge-alone": (graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={}, inferred=frozenset({("a1", "t1")})), None),
+    "dangling-reference": (graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={},
+                                 gaps={"a1": (ac.Gap("tools", "billing", ("not_found",)),)}), None),
+    "unresolved-reference-to-the-tool": (graph(gaps={"a1": (ac.Gap("tools", "crm-mcp", ("ambiguous", "superseded_identity")),)}), None),
+    "unreachable": (graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={"a1": frozenset({"s1"})}), None),
+    "acts-as-another": (graph(declared=frozenset({("a1", "invokes", "t1"), ("a1", "acts_as", "s2")})), None),
+    "no-identity": (graph(declared=frozenset({("a1", "invokes", "t1")})), None),
+    "unresolved-identity": (graph(gaps={"a1": (ac.Gap("identity", "svc", ("ambiguous",)),)}), None),
+    "permission-not-declared": (graph(components=(AGENT, NARROW, component("s1", "service_account", "svc-x", permissions=()), OTHER_ACCOUNT)), None),
+    "permissions-undeclared": (graph(components=(AGENT, component("t1", "mcp_server", "crm-mcp"), ACCOUNT, OTHER_ACCOUNT)), None),
+    "a-reached-tool-declares-it": (graph(components=(AGENT, NARROW, ACCOUNT, OTHER_ACCOUNT,
+                                                     component("t2", "tool", "refund-tool", permissions=("customer:update",))),
+                                         reach={"a1": frozenset({"t1", "s1"}), "s1": frozenset({"t2"})}), None),
+    "shadow-tool": (graph(components=(AGENT, SHADOW, ACCOUNT, OTHER_ACCOUNT)), None),
+    "unassessed-account": (graph(components=(AGENT, TOOL, component("s1", "service_account", "svc-x", assessed=False), OTHER_ACCOUNT)), None),
+    "ambiguous-tool": (graph(components=(AGENT, TOOL, component("t2", "mcp_server", "crm-mcp"), ACCOUNT)), None),
+    "dangling-tool-node": (graph(), DANGLING_TOOL),
+    "dangling-account-node": (graph(), GHOST_ACCOUNT),
+    "dangling-account-node-no-identity": (graph(declared=frozenset({("a1", "invokes", "t1")})), GHOST_ACCOUNT),
+    "no-agent": (graph(), NO_AGENT),
+    "empty-graph": (graph(declared=frozenset(), reach={}), None),
+}
+
+
+@pytest.mark.parametrize("case", sorted(EQUIVALENCE))
+def test_each_graph_hop_reads_at_the_dispatch_what_masters_live_rule_read_on_the_graph_then(case):
+    """The rule: at the dispatch, each hop reaches the verdict master's live rule reached
+    on the graph as it stood then. G is noted in the history; the live graph is G with
+    every edge, gap and permission taken away, so only the history can decide."""
+    g, raw = EQUIVALENCE[case]
+    c = chain(raw)
+    mine = inputs(graph=strip(g), edge_history=history_of(g))
+    result = ac.verify(c, mine)
+    index = ac._Index(mine.graph, mine.edge_history)
+    oracle = ac._Index(g)
+    graph_codes = set().union(*_AS_OF_DISPATCH.values())
+    for i, h in enumerate(c.hops):
+        if h.relation == "through_identity":
+            target, _ = oracle.resolve(h.target)
+            expected = _master_through_identity(c, i, target, oracle)
+        elif h.relation == "invokes":
+            actor_node = ac._last_before(c, i, {ac.AGENT})
+            actor = oracle.resolve(actor_node)[0] if actor_node is not None else None
+            tool, _ = oracle.resolve(h.target)
+            if actor_node is None:
+                expected = [ac.Reading(ac.UNPROVEN, "no_actor", "")]
+            elif actor is None:
+                expected = [ac.Reading(ac.UNPROVEN, "actor_unresolved", "")]
+            else:
+                expected = [] if tool is None else [_master_reach(oracle, actor, tool)]
+        elif h.relation == "performs":
+            source, _ = oracle.resolve(h.source)
+            expected = [_master_permission(c, i, source, oracle)]
+        else:
+            continue
+        (source, source_readings), (target, target_readings) = index.resolve(h.source), index.resolve(h.target)
+        readings = ac._relation_checks[h.relation](c, i, source, target, mine, index)
+        got = [r for r in readings if r.code in graph_codes]
+        assert [r.verdict for r in got] == [r.verdict for r in expected], (case, h.relation, got, expected)
+        for reading, theirs in zip(got, expected, strict=True):
+            assert reading.code in _AS_OF_DISPATCH[theirs.code], (case, h.relation, reading.code, theirs.code)
+            if theirs.verdict == ac.BROKEN:
+                assert reading.code == theirs.code, (case, h.relation)
+        # And the hop as a whole: the verdict master's graph reading implies, beside
+        # every other reading of the hop.
+        others = [r for r in (*source_readings, *target_readings, *readings) if r.code not in graph_codes]
+        assert at(result, h.relation).verdict == ac.worst(r.verdict for r in (*others, *expected)), (case, h.relation)
+
+
+@pytest.mark.parametrize(
+    ("case", "relation", "code"),
+    [("acts-as-another", "through_identity", "acts_as_another"), ("unreachable", "invokes", "unreachable"),
+     ("permission-not-declared", "performs", "permission_not_declared")],
+    ids=["acts-as-another", "unreachable", "permission-not-declared"],
+)
+def test_masters_broken_chains_read_broken_through_the_history(case, relation, code):
+    g, _ = EQUIVALENCE[case]
+    result = ac.verify(chain(), inputs(graph=strip(g), edge_history=history_of(g)))
+    assert result.verdict == ac.BROKEN and [h.hop.relation for h in result.broken] == [relation]
+    assert codes(at(result, relation)) == {code}
+    assert at(result, relation).reasons[0].verdict == ac.BROKEN
 
 
 def test_a_chain_with_no_agent_names_no_actor():
@@ -993,15 +1229,18 @@ def test_a_hop_is_proven_only_when_every_reading_is():
 
 def test_a_broken_reading_outranks_any_number_of_unproven_ones():
     # The approval in force at the dispatch names another tool (broken); the route then
-    # is not on record and no reach was in force (both unproven).
+    # is not on record (unproven); only an inferred edge joined the agent to the tool
+    # then (unproven).
     other = {WF: (ac.ApprovalVersion(V1.in_force_from, APPROVAL_DIGEST, (("tool", "refund", CONTRACT),)),)}
+    inferred = graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={}, inferred=frozenset({("a1", "t1")}))
     h = at(
         ac.verify(chain(), inputs(approval_history=other, outcomes=with_dispatch(route_at_dispatch=""),
-                                  edge_history=with_edge(REACH_EDGE))),
+                                  edge_history=history_of(inferred))),
         "invokes",
     )
     assert h.verdict == ac.BROKEN
     assert len(h.reasons) == 3 and h.reasons[0].verdict == ac.BROKEN, "the reason that decides comes first"
+    assert {r.code for r in h.reasons[1:]} == {"dispatch_state_unrecorded", "reach_not_in_force_at_dispatch"}
 
 
 def test_the_verdict_order_is_total_and_worst_of_nothing_is_unproven():
@@ -1037,10 +1276,14 @@ def test_every_reading_code_the_rule_emits_is_published_and_every_published_one_
     # emits none of them.
     assert set(ac.RETIRED_REASONS) == {
         "approval_in_force", "approved_contract_in_force", "superseded_contract", "route_moved", "route_unrecorded",
-        "declared_edge", "effective_reach", "inferred_edge", "dangling_edge", "unreachable", "declared_identity",
-        "identity_unresolved", "no_declared_identity", "acts_as_another", "declared_permission",
-        "permissions_undeclared", "permission_not_declared", "within_approval",
+        "declared_edge", "effective_reach", "inferred_edge", "declared_identity", "no_declared_identity",
+        "declared_permission", "permissions_undeclared", "within_approval",
     }
+    # The codes for a contradiction, or a reference left unplaced, are still emitted --
+    # read at the dispatch -- and named as they always were.
+    assert {"acts_as_another", "unreachable", "permission_not_declared", "identity_unresolved", "dangling_edge"} <= set(
+        ac.REASONS
+    )
     assert not set(ac.RETIRED_REASONS) & (emitted | set(ac.REASONS))
 
 

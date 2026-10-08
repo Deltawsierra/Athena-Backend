@@ -8,13 +8,16 @@ read as of dispatch, and ``through_identity``, ``performs`` and the reach half o
 * an effect made through an edge removed before its dispatch read proven once the edge
   was restored.
 
-Now every edge those hops read is kept as an append-only history of when it came into
+Now every piece of graph state those hops read -- the edge that proves a hop and the
+state that contradicts it -- is kept as an append-only history of when it came into
 force and went out of it, as the platform noticed (``AuthorityEdgeVersion``), noted in
 the transaction of every asset write and at every decision refresh, and the hops read
 the edge in force at the effect's signed dispatch instant:
 
 * an edge changed after the effect leaves it proven, citing the history row;
-* an edge removed before the dispatch and restored after reads unproven, named;
+* an edge removed before the dispatch and restored after reads as the graph stood at
+  the dispatch: unproven when nothing contradicted the hop, broken -- named as master
+  named it -- when the record did;
 * a dispatch the history does not cover reads unproven, never live;
 * a person-started chain stays proven across a later re-approval and identity edit;
 * nothing added stands on a stop's path.
@@ -118,6 +121,13 @@ def _edit(dep, name, **metadata):
     asset.save()
 
 
+def _set(dep, name, metadata):
+    """An operator's edit that replaces one component's declaration whole."""
+    asset = _asset(dep, name)
+    asset.metadata = metadata
+    asset.save()
+
+
 def _edges(dep, kind):
     return [
         (r.source, r.target, r.in_force)
@@ -178,26 +188,53 @@ def test_an_identity_edit_after_the_effect_is_in_the_history_and_moves_nothing()
     assert _fresh(dep).decision == lifted
 
 
-# --------------------------------------------- removed before, restored after
+# --------------------------------------------- moved before, restored after
 
 
-@pytest.mark.parametrize(("relation", "remove", "restore", "proven", "unproven"), GRAPH_EDITS, ids=IDS)
-def test_an_edge_removed_before_the_dispatch_and_restored_after_reads_unproven(relation, remove, restore, proven, unproven):
+#: Each graph hop of the world's chain, the edits made before the dispatch (and undone
+#: after it), and what the hop reads at the dispatch. ABSENT: the edge is simply not in
+#: force and nothing contradicts the hop -- unproven. CONTRADICTED: the graph then
+#: contradicted it -- broken, named as master's live rule named it.
+GRAPH_MOVES = [
+    ("through_identity", "absent", [("support-agent", {"identity": ""})],
+     "unproven", "identity_not_in_force_at_dispatch"),
+    ("through_identity", "contradicted", [("support-agent", {"identity": "svc-admin"})],
+     "broken", "acts_as_another"),
+    ("invokes", "absent", [("support-agent", {"tools": ["unplaced-tool"]})],
+     "unproven", "reach_not_in_force_at_dispatch"),
+    ("invokes", "contradicted", [("support-agent", {"tools": []})],
+     "broken", "unreachable"),
+    ("performs", "absent", [("crm-mcp", {"permissions": ["customer:read"]})],
+     "unproven", "action_not_in_force_at_dispatch"),
+    ("performs", "contradicted", [("crm-mcp", {"permissions": ["customer:read"]}), ("svc-x", {"permissions": []})],
+     "broken", "permission_not_declared"),
+]
+MOVE_IDS = [f"{m[0]}-{m[1]}" for m in GRAPH_MOVES]
+
+
+@pytest.mark.parametrize(("relation", "kind", "edits", "verdict", "code"), GRAPH_MOVES, ids=MOVE_IDS)
+def test_a_graph_moved_before_the_dispatch_and_restored_after_reads_as_it_stood_at_the_dispatch(
+    relation, kind, edits, verdict, code
+):
     dep, client, permit, _ = _world()
-    _edit(dep, remove[0], **remove[1])
-    # Dispatched with the edge out of force, presenting the approval as it stands.
+    before = {name: dict(_asset(dep, name).metadata) for name, _ in edits}
+    for name, metadata in edits:
+        _edit(dep, name, **metadata)
+    # Dispatched on the moved graph, presenting the approval as it stands.
     row = signed_chains.record_observed_effect(dep, WF, permit.outcome_id, _now())
-    _edit(dep, restore[0], **restore[1])
+    for name, metadata in before.items():
+        _set(dep, name, metadata)
 
-    # Live, the graph holds the edge again; at the dispatch it did not.
+    # Live, the graph is the world's again; at the dispatch it was the moved one.
     chain = _chain_citing(client, dep, permit, row)
     hop = _hops(chain)[relation]
-    assert hop["verdict"] == "unproven", hop
-    assert unproven in _codes(hop) and proven not in _codes(hop)
-    assert chain["verdict"] == "unproven" and chain["broken_hops"] == []
+    assert (hop["verdict"], _codes(hop)) == (verdict, [code]), hop
+    assert chain["verdict"] == verdict
+    held = "authority_chains_broken" if verdict == "broken" else "authority_chains_unproven"
     support = decision_support(_fresh(dep))
-    assert [c["digest"] for c in support["claims"]["authority_chains_unproven"]] == [chain["digest"]]
-    assert _fresh(dep).decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert [c["digest"] for c in support["claims"][held]] == [chain["digest"]]
+    expected = Deployment.Decision.NEEDS_REMEDIATION if verdict == "broken" else Deployment.Decision.NEEDS_MORE_EVIDENCE
+    assert _fresh(dep).decision == expected
 
 
 def test_the_identity_the_agent_acted_as_at_the_dispatch_is_named():
@@ -206,8 +243,8 @@ def test_the_identity_the_agent_acted_as_at_the_dispatch_is_named():
     row = signed_chains.record_observed_effect(dep, WF, permit.outcome_id, _now())
     _edit(dep, "support-agent", identity="svc-x")
     hop = _hops(_chain_citing(client, dep, permit, row))["through_identity"]
-    assert _codes(hop) == ["identity_not_in_force_at_dispatch"]
-    assert "it acted as svc-admin then" in hop["reasons"][0]["detail"]
+    assert _codes(hop) == ["acts_as_another"]
+    assert "svc-admin" in hop["reasons"][0]["detail"] and "dispatch" in hop["reasons"][0]["detail"]
 
 
 # ------------------------------------------------------------- a missing record
@@ -344,7 +381,9 @@ def test_a_scan_that_declares_an_agent_notes_its_edges_once_in_its_own_transacti
     rows = list(AuthorityEdgeVersion.objects.filter(deployment=dep))
     assert {(r.kind, r.source, r.target, r.in_force) for r in rows} == {
         ("begun", "", "", True),
+        ("invokes", str(agent.uuid), str(reader.uuid), True),
         ("reach", str(agent.uuid), str(reader.uuid), True),
+        ("declares", str(reader.uuid), "", True),
         ("action", str(reader.uuid), "read", True),
     }
     # Noted once, when the reconciliation was done: no half-reconciled graph between.

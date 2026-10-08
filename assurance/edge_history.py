@@ -11,11 +11,13 @@ an effect unproved that effect, and an effect made through an edge removed befor
 dispatch read proven once the edge was restored.
 
 This module keeps that history -- :class:`assurance.models.AuthorityEdgeVersion`,
-append-only -- for exactly the edges those hops read
-(:func:`assurance.authority_chain.graph_edges`): an agent's identity, a component's
-permission, a principal's reach to a tool. Each edge's appearance and disappearance is
-a row, with the instant the platform noticed it; one ``begun`` row says from when the
-history covers the deployment.
+append-only -- for exactly the graph state those hops read
+(:func:`assurance.authority_chain.graph_edges`): an agent's identity, its tools and the
+references it declared that discovery could not place, a principal's effective reach,
+inferred edges, which components declare their permissions and which permissions --
+the state that contradicts a hop as well as the edge that proves it. Each piece's
+appearance and disappearance is a row, with the instant the platform noticed it; one
+``begun`` row says from when the history covers the deployment.
 
 WHEN AN EDGE IS NOTED (:func:`note_edges`). In the same transaction as every write that
 can move one: an asset saved (with a field the graph reads) or deleted

@@ -3739,15 +3739,20 @@ class AuthorityEdgeVersion(models.Model):
     made through an edge removed before its dispatch read proven once the edge came
     back.
 
-    This row is that history (:mod:`assurance.edge_history`), for exactly the edges the
-    rule reads (:func:`assurance.authority_chain.graph_edges`): ``identity`` (an agent
-    declares it acts as a service account: source and target are asset uuids),
-    ``action`` (a component declares a permission: the source is its uuid, the target
-    the permission) and ``reach`` (a principal reaches a tool by a declared edge or
-    effective access: both asset uuids). ``in_force`` says whether the edge appeared
-    (true) or disappeared (false) at ``noticed_at``. One ``begun`` row per deployment,
-    with no edge, says from when the history covers it: before that, nothing records
-    which edges were in force, and a dispatch then reads unrecorded, never live.
+    This row is that history (:mod:`assurance.edge_history`), for exactly the graph
+    state the rule reads (:func:`assurance.authority_chain.graph_edges`) -- the state
+    that contradicts a hop as well as the edge that proves it, so a hop reaches at the
+    dispatch the verdict the graph as it stood then implied: ``identity`` (an agent acts
+    as a service account) and ``identity_gap`` (an identity reference unplaced),
+    ``invokes`` (an agent declares a tool), ``reach`` (effective access reaches a tool),
+    ``inferred`` (only an inferred edge joins them) and ``tool_gap`` (a tool reference
+    unplaced), ``declares`` (a component declares its permissions) and ``action`` (it
+    declares this one). The source is an asset uuid; the target an asset uuid, a gap
+    (its reference and reasons, as JSON) or a permission. ``in_force`` says whether the
+    state appeared (true) or disappeared (false) at ``noticed_at``. One ``begun`` row per
+    deployment, with no edge, says from when the history covers it: before that,
+    nothing records which edges were in force, and a dispatch then reads unrecorded,
+    never live.
 
     Noted in the same transaction as every write that can move an edge -- an asset
     saved or deleted (:mod:`assurance.signals`), and the asset reconciliation's bulk
@@ -3762,16 +3767,17 @@ class AuthorityEdgeVersion(models.Model):
 
     # Spelled as the rule spells them (assurance.authority_chain.EDGE_IDENTITY, ...;
     # held equal by test), so this module stays free of the rule.
-    KINDS = ("identity", "action", "reach", "begun")
+    KINDS = ("identity", "identity_gap", "invokes", "reach", "inferred", "tool_gap", "declares", "action", "begun")
 
     id = models.BigAutoField(primary_key=True)
     deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="authority_edge_versions")
     kind = models.CharField(max_length=16, choices=[(k, k) for k in KINDS])
     # An asset uuid; blank on the ``begun`` row.
     source = models.CharField(max_length=64, blank=True)
-    # An asset uuid, or the permission an ``action`` edge declares (any length: a
-    # permission is what the inventory declares, and a write is never refused for
-    # its length); blank on the ``begun`` row.
+    # An asset uuid, a gap (its reference and reasons, as canonical JSON), or the
+    # permission an ``action`` row declares -- any length: they are what the inventory
+    # declares, and a write is never refused for their length. Blank on the ``begun``
+    # and ``declares`` rows.
     target = models.TextField(blank=True)
     in_force = models.BooleanField()
     noticed_at = models.DateTimeField()

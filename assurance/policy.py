@@ -253,9 +253,11 @@ def _policy_document() -> dict:
             "running_epoch_state": _authority_chain.RUNNING_EPOCH_STATE,
             "epoch_separator": _authority_chain.EPOCH_SEPARATOR,
             # Its follow-up: the graph hops are read as of dispatch against the edge
-            # history, whose stored rows spell each kind of edge so.
+            # history, whose stored rows spell each kind of graph state so.
             "edge_kinds": [
-                _authority_chain.EDGE_IDENTITY, _authority_chain.EDGE_ACTION, _authority_chain.EDGE_REACH,
+                _authority_chain.EDGE_IDENTITY, _authority_chain.EDGE_IDENTITY_GAP, _authority_chain.EDGE_INVOKES,
+                _authority_chain.EDGE_REACH, _authority_chain.EDGE_INFERRED, _authority_chain.EDGE_TOOL_GAP,
+                _authority_chain.EDGE_DECLARES, _authority_chain.EDGE_ACTION,
             ],
         },
         # Which effects need an authority chain (assurance.consequential): the

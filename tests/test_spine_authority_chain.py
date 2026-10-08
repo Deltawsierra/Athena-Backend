@@ -276,7 +276,27 @@ def test_the_roadmap_chain_is_reconstructed_hop_by_hop_and_every_unproven_hop_is
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
 
-def _broken_body(client, dep, permit):
+def test_a_broken_hop_holds_the_decision_at_needs_remediation_and_the_note_names_it():
+    # The agent acts as svc-admin, and the chain says the effect went through svc-x.
+    # Since the graph hops are read as of dispatch, the chain cites the dispatch whose
+    # graph that was: the history records the agent acting as svc-admin then.
+    dep, client, permit, _ = _world(identity="svc-admin")
+    answer = _post(client, dep, _dispatched_body(client, dep, permit))
+    assert answer.status_code == 201, answer.content
+    chain = answer.json()["chains"][0]
+    assert chain["verdict"] == "broken" and chain["broken_hops"] == [2]
+    reasons = _by_relation(chain)["through_identity"]["reasons"]
+    assert reasons[0]["code"] == "acts_as_another" and "svc-admin" in reasons[0]["detail"]
+
+    assert _fresh(dep).decision == D.NEEDS_REMEDIATION
+    support = decision_support(_fresh(dep))
+    assert support["claim_cap"] == D.NEEDS_REMEDIATION
+    assert [c["verdict"] for c in support["claims"]["authority_chains_broken"]] == ["broken"]
+    assert support["note"].startswith("Held at 'needs remediation' by 1 authority chain(s)")
+    assert "through_identity" in support["note"]
+
+
+def _outside_approval_body(client, dep, permit):
     """A chain, citing a real dispatch, that claims the effect was a delete -- an action
     the approval in force at the dispatch approved the server for (update and read)
     does not cover. The record contradicts its performs hop: broken."""
@@ -288,40 +308,16 @@ def _broken_body(client, dep, permit):
     return body
 
 
-def test_a_broken_hop_holds_the_decision_at_needs_remediation_and_the_note_names_it():
-    # Until the graph's edges were read as of dispatch this was an agent acting as
-    # svc-admin, read live: an edge the history holds can say an identity was not in
-    # force at the dispatch, never that the record contradicts the hop (that case is
-    # below). An action outside the approval in force at the dispatch is a
-    # contradiction the history does hold.
+def test_an_action_outside_the_approval_in_force_at_the_dispatch_breaks_the_performs_hop():
     dep, client, permit, _ = _world()
-    answer = _post(client, dep, _broken_body(client, dep, permit))
+    answer = _post(client, dep, _outside_approval_body(client, dep, permit))
     assert answer.status_code == 201, answer.content
     chain = answer.json()["chains"][0]
     assert chain["verdict"] == "broken" and chain["broken_hops"] == [3]
     reasons = _by_relation(chain)["performs"]["reasons"]
     assert reasons[0]["code"] == "outside_approval" and "customer:delete" in reasons[0]["detail"]
-
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
-    support = decision_support(_fresh(dep))
-    assert support["claim_cap"] == D.NEEDS_REMEDIATION
-    assert [c["verdict"] for c in support["claims"]["authority_chains_broken"]] == ["broken"]
-    assert support["note"].startswith("Held at 'needs remediation' by 1 authority chain(s)")
-    assert "performs" in support["note"]
-
-
-def test_an_agent_acting_as_another_account_at_the_dispatch_leaves_the_identity_hop_unproven_and_named():
-    # The agent acts as svc-admin, and the chain says the effect went through svc-x:
-    # at the dispatch, by the edge history, no identity edge to svc-x was in force.
-    dep, client, permit, _ = _world(identity="svc-admin")
-    answer = _post(client, dep, _dispatched_body(client, dep, permit))
-    assert answer.status_code == 201, answer.content
-    chain = answer.json()["chains"][0]
-    assert chain["verdict"] == "unproven" and chain["unproven_hops"] == [2] and chain["broken_hops"] == []
-    reasons = _by_relation(chain)["through_identity"]["reasons"]
-    assert [r["code"] for r in reasons] == ["identity_not_in_force_at_dispatch"]
-    assert "svc-admin" in reasons[0]["detail"]
-    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
+    assert "performs" in decision_support(_fresh(dep))["note"]
 
 
 def test_an_action_the_gate_refused_breaks_the_chain_that_claims_it():
@@ -345,7 +341,7 @@ def test_a_tool_outside_the_approval_is_unauthorized_and_blocks_ready():
     chain = _post(client, dep, body).json()["chains"][0]
     invokes = _by_relation(chain)["invokes"]
     assert invokes["verdict"] == "broken"
-    assert {"outside_approval", "reach_not_in_force_at_dispatch"} <= {r["code"] for r in invokes["reasons"]}
+    assert {"outside_approval", "unreachable"} <= {r["code"] for r in invokes["reasons"]}
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
 
 
@@ -629,8 +625,8 @@ def test_the_chain_and_every_hops_verdict_appear_in_the_receipt_and_the_verifier
 
 
 def test_a_broken_chain_holds_no_stop():
-    dep, client, permit, _ = _world()
-    _post(client, dep, _broken_body(client, dep, permit))
+    dep, client, permit, _ = _world(identity="svc-admin")
+    _post(client, dep, _dispatched_body(client, dep, permit))
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
     paused = client.post(_base(dep) + "recompute/", {"paused": True}, format="json")
     assert paused.status_code == 200, paused.content

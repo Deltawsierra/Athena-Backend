@@ -83,21 +83,24 @@ What each check reads, per hop:
   ``dispatched_under_superseded_contract``), and the served route at that instant is
   on record -- bound when the effect was recorded -- and is the one the gate signed,
   if it signed one; and the nearest agent before it REACHED it at the dispatch
-  instant, by the graph's edge history (:mod:`assurance.edge_history`): a reach edge
-  -- a declared ``invokes`` edge or effective access -- in force then
-  (``reach_in_force_at_dispatch``), or unproven (``reach_not_in_force_at_dispatch``).
-* ``through_identity`` (tool -> service account): AS OF DISPATCH, the nearest agent
-  acted as this account at the dispatch instant, by the edge history: its declared
-  identity edge to it was in force then (``identity_in_force_at_dispatch``), or
-  unproven (``identity_not_in_force_at_dispatch``, naming the account it acted as
-  then, if any).
-* ``performs`` (account or agent -> action): AS OF DISPATCH, the action was a
-  permission declared at the dispatch instant, by the edge history, by the identity,
-  the tool it acts through or a tool it reached then (``action_in_force_at_dispatch``;
-  none: unproven, ``action_not_in_force_at_dispatch``); it was within what the tools
-  of the approval in force at that instant were approved to permit, read off the
-  contracts they were approved under (outside, every one declaring its permissions:
-  broken; some declaring none: unproven); and the chain cites the Action Gate
+  instant, by the graph's edge history (:mod:`assurance.edge_history`): a declared
+  ``invokes`` edge or effective access in force then (``reach_in_force_at_dispatch``);
+  a reference to the tool unplaced then (unproven, ``dangling_edge``); only an inferred
+  edge, or tool references unplaced then (unproven, ``reach_not_in_force_at_dispatch``);
+  neither, over a graph fully resolved from the agent then (broken, ``unreachable``).
+* ``through_identity`` (tool -> service account): AS OF DISPATCH, by the edge
+  history, the nearest agent declared an identity that was unplaced then (unproven,
+  ``identity_unresolved``), this account then (``identity_in_force_at_dispatch``),
+  another account then and not this one (broken, ``acts_as_another``), or none
+  (unproven, ``identity_not_in_force_at_dispatch``).
+* ``performs`` (account or agent -> action): AS OF DISPATCH, by the edge history, the
+  action was a permission declared at the dispatch instant by the identity, the tool
+  it acts through or a tool it reached then (``action_in_force_at_dispatch``; every
+  one of them declaring its permissions then and none this one: broken,
+  ``permission_not_declared``; otherwise unproven, ``action_not_in_force_at_dispatch``);
+  it was within what the tools of the approval in force at that instant were approved
+  to permit, read off the contracts they were approved under (outside, every one
+  declaring its permissions: broken; some declaring none: unproven); and the chain cites the Action Gate
   decision that let it through -- an Achilles-signed outcome for the same workflow
   that verifies now: a permit proves it, a refusal breaks it, anything else is
   unproven.
@@ -155,10 +158,13 @@ it, and one removed before the dispatch reads unproven even once it is restored.
 history says when the platform NOTICED a change -- in the transaction of the write, or
 at the next decision refresh for a write no signal sees -- not when the customer made
 it. A dispatch the history does not cover (no observed effect, a v1 one, or one before
-the history began) reads ``dispatch_state_unrecorded``: never read live instead. An
-edge absent at the dispatch reads UNPROVEN, never broken: the history holds edges, not
-the gaps and undeclared permissions beside them, so it can say an edge was not in
-force but not that the record contradicted the hop.
+the history began) reads ``dispatch_state_unrecorded``: never read live instead. The
+history keeps the state that contradicts a hop as well as the edge that proves it --
+another identity, references discovery could not place, inferred edges, which
+components declare their permissions -- so each hop reaches, at the dispatch, the
+verdict the graph as it stood then implied: a contradiction then is BROKEN, named as
+it always was (``acts_as_another``, ``unreachable``, ``permission_not_declared``); an
+edge simply not in force then is UNPROVEN (``*_not_in_force_at_dispatch``).
 
 Everything else is read as the record stands NOW: which component each node names,
 shadow and coverage, and whether each signature verifies under the keyring in force.
@@ -169,6 +175,7 @@ about deploying now has to.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -267,13 +274,28 @@ DISPATCH_EFFECT_WINDOW_SECONDS = 60
 RUNNING_EPOCH_STATE = "running"
 EPOCH_SEPARATOR = "#"
 
-#: The kinds of graph edge the history keeps (:func:`graph_edges`), spelled as the
-#: stored rows spell them (:class:`assurance.models.AuthorityEdgeVersion`), so a
-#: renamed one changes what the same stored history proves: an agent acts as a service
-#: account; a component declares a permission; a principal reaches a tool.
+#: The kinds of graph state the edge history keeps (:func:`graph_edges`): everything the
+#: graph hops read to reach their verdict, the state that contradicts a hop as well as
+#: the edge that proves it. Spelled as the stored rows spell them
+#: (:class:`assurance.models.AuthorityEdgeVersion`), so a renamed one changes what the
+#: same stored history proves.
+#: An agent declares that it acts as a service account.
 EDGE_IDENTITY = "identity"
-EDGE_ACTION = "action"
+#: An agent declares an identity that discovery could not place cleanly (a gap).
+EDGE_IDENTITY_GAP = "identity_gap"
+#: An agent declares that it invokes a tool.
+EDGE_INVOKES = "invokes"
+#: A principal's effective access reaches a tool.
 EDGE_REACH = "reach"
+#: Only an inferred edge -- the shape of the pipeline -- joins a component to a tool.
+EDGE_INFERRED = "inferred"
+#: An agent declares a tool reference that discovery could not place cleanly (a gap).
+EDGE_TOOL_GAP = "tool_gap"
+#: A component declares its permissions (possibly none): what makes "none of them is
+#: this one" a contradiction rather than a silence.
+EDGE_DECLARES = "declares"
+#: A component declares a permission.
+EDGE_ACTION = "action"
 
 #: The document a chain's digest is taken over, and an engine's signature covers.
 CHAIN_SCHEMA = "mythos.authority-chain/v1"
@@ -336,16 +358,24 @@ REASONS: Mapping[str, str] = {
     "no_actor": "no agent in the chain before this hop acts",
     "actor_unresolved": "the acting agent does not resolve to one governed component",
     "reach_not_in_force_at_dispatch": (
-        "the graph's edge history holds no reach from the acting agent to this tool in force at the dispatch "
-        "instant"
+        "at the dispatch instant, by the graph's edge history, no reach from the acting agent to this tool was in "
+        "force, and nothing contradicted it: only an inferred edge joined them, or the agent's tool references "
+        "were not all placed"
     ),
     "identity_not_in_force_at_dispatch": (
-        "the graph's edge history holds no identity edge from the acting agent to this account in force at "
-        "the dispatch instant"
+        "at the dispatch instant, by the graph's edge history, the acting agent declared no identity"
     ),
     "action_not_in_force_at_dispatch": (
-        "the graph's edge history holds no declaration of this permission, by anything the identity acted "
-        "through, in force at the dispatch instant"
+        "at the dispatch instant, by the graph's edge history, nothing the identity acted through declared this "
+        "permission, and not everything it acted through declared its permissions"
+    ),
+    "dangling_edge": (
+        "at the dispatch instant, by the graph's edge history, the acting agent named this tool by a reference "
+        "discovery could not place"
+    ),
+    "identity_unresolved": (
+        "at the dispatch instant, by the graph's edge history, the acting agent's declared identity did not "
+        "resolve cleanly"
     ),
     "no_gate_decision": "the chain cites no Action Gate decision",
     "gate_decision_not_recorded": "the Action Gate decision the chain cites is not recorded here",
@@ -416,6 +446,18 @@ REASONS: Mapping[str, str] = {
     "unchecked": "no check speaks for this hop",
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
+    "unreachable": (
+        "at the dispatch instant, by the graph's edge history, effective access over a graph fully resolved from "
+        "the acting agent did not reach this tool"
+    ),
+    "acts_as_another": (
+        "at the dispatch instant, by the graph's edge history, the acting agent declared that it acted as another "
+        "account, and not this one"
+    ),
+    "permission_not_declared": (
+        "at the dispatch instant, by the graph's edge history, every component the identity acted through declared "
+        "its permissions, and none this one"
+    ),
     "gate_refused": "the Action Gate refused this workflow's action",
     "effect_violated": "the observed-effect outcome cited says the effect was produced outside its authority",
 }
@@ -426,9 +468,10 @@ REASONS: Mapping[str, str] = {
 #: and route in force at the dispatch instant; its follow-up reads ``through_identity``,
 #: ``performs`` and reach as of dispatch too, against the graph's edge history and the
 #: approval in force then -- so nothing reads them against the record in force when
-#: the receipt is computed. An edge absent at the dispatch reads unproven, never broken
-#: (the history holds edges, not the gaps and undeclared permissions beside them), so
-#: the three live contradictions retire with the live reads. Published still, for
+#: the receipt is computed. The codes for what the graph contradicted or left
+#: unresolved (``acts_as_another``, ``unreachable``, ``permission_not_declared``,
+#: ``identity_unresolved``, ``dangling_edge``) are still emitted, read at the dispatch
+#: instant; the ones below named a live reading and are replaced. Published still, for
 #: receipts that carry them (the v6.0 spec lists them as retired); never in
 #: :data:`REASONS`, which is exactly what the rule emits.
 RETIRED_REASONS: Mapping[str, str] = {
@@ -442,17 +485,12 @@ RETIRED_REASONS: Mapping[str, str] = {
     "effective_reach": "effective access reaches this tool from the acting agent over declared edges",
     # Replaced by reach_not_in_force_at_dispatch.
     "inferred_edge": "only an inferred edge -- the shape of the pipeline, not a declaration -- joins them",
-    "dangling_edge": "the acting agent declares references discovery could not place",
-    "unreachable": "effective access over a fully resolved graph says the acting agent cannot reach this tool",
     # Replaced by identity_in_force_at_dispatch and identity_not_in_force_at_dispatch.
     "declared_identity": "the acting agent declares that it acts as this account",
-    "identity_unresolved": "the acting agent's declared identity does not resolve cleanly",
     "no_declared_identity": "the acting agent declares no identity",
-    "acts_as_another": "the acting agent declares that it acts as another account",
     # Replaced by action_in_force_at_dispatch and action_not_in_force_at_dispatch.
     "declared_permission": "a component the identity acts through declares this permission",
     "permissions_undeclared": "the components the identity acts through do not all declare their permissions",
-    "permission_not_declared": "every component the identity acts through declares its permissions, and none this one",
     # Replaced by within_approval_at_dispatch.
     "within_approval": "a tool the approval names was approved with this permission",
 }
@@ -673,29 +711,61 @@ class Graph:
     reach: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
-def graph_edges(graph: Graph) -> frozenset[tuple[str, str, str]]:
-    """Every edge ``through_identity``, ``performs`` and reach read, as ``(kind, source,
-    target)``, of ``graph`` as it stands: what the edge history keeps
-    (:mod:`assurance.edge_history`), and so exactly what those hops are read against
-    as of dispatch.
+def gap_target(gap: Gap) -> str:
+    """How a gap is spelled as the target of a stored gap row: its reference and the
+    reasons it is unresolved, as canonical JSON -- one row per distinct gap."""
+    return json.dumps([gap.reference, sorted(set(gap.reasons))], separators=(",", ":"))
 
-    * :data:`EDGE_IDENTITY` ``(agent uuid, account uuid)``: a declared ``acts_as`` edge.
-    * :data:`EDGE_REACH` ``(principal uuid, tool uuid)``: a declared ``invokes`` edge, or
-      a tool in the principal's effective reach -- a tool node kind only
-      (:data:`TOOL_NODE_KINDS`), the one thing a reach is read for.
-    * :data:`EDGE_ACTION` ``(component uuid, permission)``: a permission the component
-      declares."""
+
+def _gap_of(target: str) -> tuple[str, tuple[str, ...]]:
+    """``(reference, reasons)`` of a stored gap row's target (:func:`gap_target`). A
+    target that does not parse is a reference with no reason given."""
+    try:
+        reference, reasons = json.loads(target)
+        return str(reference), tuple(str(r) for r in reasons)
+    except (TypeError, ValueError):
+        return target, ()
+
+
+def graph_edges(graph: Graph) -> frozenset[tuple[str, str, str]]:
+    """Every piece of graph state ``through_identity``, ``performs`` and reach read, as
+    ``(kind, source, target)``, of ``graph`` as it stands: what the edge history keeps
+    (:mod:`assurance.edge_history`), and so exactly what those hops are read against
+    as of dispatch -- the state that contradicts a hop as well as the edge that proves
+    it, so the verdict at the dispatch is the one the graph as it stood then implied.
+
+    * :data:`EDGE_IDENTITY` ``(agent, account)``: a declared ``acts_as`` edge.
+    * :data:`EDGE_IDENTITY_GAP` ``(agent, gap)``: an identity reference not placed cleanly.
+    * :data:`EDGE_INVOKES` ``(agent, tool)``: a declared ``invokes`` edge.
+    * :data:`EDGE_REACH` ``(principal, tool)``: a tool in the principal's effective reach.
+    * :data:`EDGE_INFERRED` ``(component, tool)``: an inferred edge to a tool.
+    * :data:`EDGE_TOOL_GAP` ``(agent, gap)``: a tool reference not placed cleanly.
+    * :data:`EDGE_DECLARES` ``(component, "")``: the component declares its permissions.
+    * :data:`EDGE_ACTION` ``(component, permission)``: a permission it declares.
+
+    Sources and targets are component uuids, but a gap's target (:func:`gap_target`)
+    and a permission. Edges to tools are kept to the tool node kinds
+    (:data:`TOOL_NODE_KINDS`), the one thing a reach is read for."""
     kinds = {c.uuid: c.kind for c in graph.components}
     edges: set[tuple[str, str, str]] = set()
     for source, kind, target in graph.declared:
         if kind == "acts_as":
             edges.add((EDGE_IDENTITY, source, target))
         elif kind == "invokes" and kinds.get(target) in TOOL_NODE_KINDS:
-            edges.add((EDGE_REACH, source, target))
+            edges.add((EDGE_INVOKES, source, target))
     for principal, targets in graph.reach.items():
         edges.update((EDGE_REACH, principal, t) for t in targets if kinds.get(t) in TOOL_NODE_KINDS)
+    edges.update((EDGE_INFERRED, s, t) for s, t in graph.inferred if kinds.get(t) in TOOL_NODE_KINDS)
+    for uuid, gaps in graph.gaps.items():
+        for gap in gaps:
+            if gap.mechanism == _refs.MECHANISM_IDENTITY:
+                edges.add((EDGE_IDENTITY_GAP, uuid, gap_target(gap)))
+            elif gap.mechanism == _refs.MECHANISM_TOOLS:
+                edges.add((EDGE_TOOL_GAP, uuid, gap_target(gap)))
     for component in graph.components:
-        edges.update((EDGE_ACTION, component.uuid, p) for p in component.permissions or ())
+        if component.permissions is not None:
+            edges.add((EDGE_DECLARES, component.uuid, ""))
+            edges.update((EDGE_ACTION, component.uuid, p) for p in component.permissions)
     return frozenset(edges)
 
 
@@ -995,8 +1065,10 @@ class _Index:
             )
         return component, readings
 
-    def gaps(self, component: Component, mechanism: str) -> tuple[Gap, ...]:
-        return tuple(g for g in self.graph.gaps.get(component.uuid, ()) if g.mechanism == mechanism)
+    def gaps_at(self, kind: str, source: str, instant: datetime) -> list[tuple[str, tuple[str, ...]]]:
+        """Every gap of ``kind`` the agent ``source`` declared, in force at ``instant``,
+        as ``(reference, reasons)``."""
+        return sorted(_gap_of(target) for target in self.edges_from_at(kind, source, instant))
 
 
 def _last_before(chain: Chain, index: int, kinds) -> Node | None:
@@ -1332,34 +1404,69 @@ def _cited(version: EdgeVersion) -> str:
     return f"in force from {_when(version.noticed_at)} ({row})"
 
 
+def _why(gaps) -> str:
+    return ", ".join(sorted({r for _, reasons in gaps for r in reasons})) or "unresolved"
+
+
 def _reach_at_dispatch(index: _Index, inputs: Inputs, actor: Component, tool: Component, dispatch: DispatchState) -> Reading:
     """Whether the acting agent reached the tool at the dispatch instant, by the edge
-    history: a reach edge -- a declared ``invokes`` edge or effective access -- in force
-    then proves it, citing the change that put it in force; none leaves it unproven."""
+    history: the verdict the graph as it stood then implied. A reference to the tool
+    itself unplaced then: unproven (``dangling_edge``). A declared ``invokes`` edge or
+    effective access in force then: proven, citing the change that put it in force. Only
+    an inferred edge, or tool references unplaced then: not in force, and nothing
+    contradicts it -- unproven. None of that, over a graph fully resolved from the agent
+    at the dispatch: the record contradicts the hop -- broken (``unreachable``)."""
     unrecorded = _edges_unrecorded(inputs, dispatch)
     if unrecorded is not None:
         return unrecorded
-    at = _when(dispatch.dispatched_at)
-    record = index.edge_at(EDGE_REACH, actor.uuid, tool.uuid, dispatch.dispatched_at)
-    if record is None:
+    instant = dispatch.dispatched_at
+    at = _when(instant)
+    gaps = index.gaps_at(EDGE_TOOL_GAP, actor.uuid, instant)
+    about_this = [g for g in gaps if g[0] in {tool.identifier, tool.name}]
+    if about_this:
+        return Reading(
+            UNPROVEN,
+            "dangling_edge",
+            f"at the dispatch at {at}, agent {actor.name!r} named {tool.name!r} by a reference that was "
+            f"{_why(about_this)}",
+        )
+    for kind, how in ((EDGE_INVOKES, "declared that it invokes"), (EDGE_REACH, "reached by effective access")):
+        record = index.edge_at(kind, actor.uuid, tool.uuid, instant)
+        if record is not None:
+            return Reading(
+                PROVEN,
+                "reach_in_force_at_dispatch",
+                f"at the dispatch at {at}, agent {actor.name!r} {how} {tool.name!r}: {_cited(record)}",
+            )
+    if index.edge_at(EDGE_INFERRED, actor.uuid, tool.uuid, instant) is not None:
         return Reading(
             UNPROVEN,
             "reach_not_in_force_at_dispatch",
-            f"no reach from agent {actor.name!r} to {tool.name!r} was in force at the dispatch at {at}, by the "
-            "graph's edge history",
+            f"at the dispatch at {at}, only an inferred edge joined agent {actor.name!r} to {tool.name!r}; nothing "
+            "declared it",
+        )
+    if gaps:
+        return Reading(
+            UNPROVEN,
+            "reach_not_in_force_at_dispatch",
+            f"at the dispatch at {at}, no reach from agent {actor.name!r} to {tool.name!r} was in force, and the "
+            f"agent declared {len(gaps)} tool reference(s) discovery could not place, so its reach was not known whole",
         )
     return Reading(
-        PROVEN,
-        "reach_in_force_at_dispatch",
-        f"agent {actor.name!r} reached {tool.name!r} at the dispatch at {at}: {_cited(record)}",
+        BROKEN,
+        "unreachable",
+        f"at the dispatch at {at}, effective access over a graph fully resolved from agent {actor.name!r} did not "
+        f"reach {tool.name!r}, by the graph's edge history",
     )
 
 
 def _through_identity(chain, i, source, target, inputs, index) -> list[Reading]:
-    """Read AS OF DISPATCH: the acting agent declared that it acts as this account at
-    the dispatch instant, by the graph's edge history. An identity edited after the
-    effect does not unprove it; one that was not this account's at the dispatch does,
-    even once it is restored."""
+    """Read AS OF DISPATCH: the verdict the agent's declared identity at the dispatch
+    instant implied, by the graph's edge history. An identity unplaced then: unproven
+    (``identity_unresolved``). This account then: proven, citing the change. Another
+    account then, and not this one: the record contradicts the hop -- broken
+    (``acts_as_another``). No identity then: unproven. An identity edited after the
+    effect moves none of it; one restored after the dispatch does not lift it."""
     readings: list[Reading] = []
     dispatch, missing = _dispatch_state(chain, inputs)
     if missing is not None:
@@ -1373,29 +1480,46 @@ def _through_identity(chain, i, source, target, inputs, index) -> list[Reading]:
             *readings,
             Reading(UNPROVEN, "actor_unresolved", f"agent {actor_node.ref!r} does not resolve to one component"),
         ]
-    if dispatch is None or target is None:
+    if dispatch is None:
         return readings
     unrecorded = _edges_unrecorded(inputs, dispatch)
     if unrecorded is not None:
         return [unrecorded]
-    at = _when(dispatch.dispatched_at)
-    record = index.edge_at(EDGE_IDENTITY, actor.uuid, target.uuid, dispatch.dispatched_at)
-    if record is not None:
+    instant = dispatch.dispatched_at
+    at = _when(instant)
+    gaps = index.gaps_at(EDGE_IDENTITY_GAP, actor.uuid, instant)
+    if gaps:
+        return [
+            Reading(
+                UNPROVEN,
+                "identity_unresolved",
+                f"at the dispatch at {at}, agent {actor.name!r} declared an identity that was {_why(gaps)}",
+            )
+        ]
+    acts_as = index.edges_from_at(EDGE_IDENTITY, actor.uuid, instant)
+    if target is not None and target.uuid in acts_as:
         return [
             Reading(
                 PROVEN,
                 "identity_in_force_at_dispatch",
-                f"agent {actor.name!r} acted as {target.name!r} at the dispatch at {at}: {_cited(record)}",
+                f"agent {actor.name!r} acted as {target.name!r} at the dispatch at {at}: {_cited(acts_as[target.uuid])}",
             )
         ]
-    others = sorted(index.name(u) for u in index.edges_from_at(EDGE_IDENTITY, actor.uuid, dispatch.dispatched_at))
-    then = f"it acted as {', '.join(others)} then" if others else "no identity of it was in force then"
+    if acts_as:
+        others = ", ".join(sorted(index.name(u) for u in acts_as))
+        return [
+            Reading(
+                BROKEN,
+                "acts_as_another",
+                f"at the dispatch at {at}, agent {actor.name!r} declared that it acted as {others}, not "
+                f"{chain.hops[i].target.ref!r}, by the graph's edge history",
+            )
+        ]
     return [
         Reading(
             UNPROVEN,
             "identity_not_in_force_at_dispatch",
-            f"agent {actor.name!r} did not act as {target.name!r} at the dispatch at {at}, by the graph's edge "
-            f"history: {then}",
+            f"at the dispatch at {at}, agent {actor.name!r} declared no identity, by the graph's edge history",
         )
     ]
 
@@ -1417,9 +1541,12 @@ def _performs(chain, i, source, target, inputs, index) -> list[Reading]:
 
 
 def _action_at_dispatch(chain, i, source, action: str, dispatch: DispatchState, inputs: Inputs, index: _Index) -> Reading:
-    """Whether a component the identity acted through declared ``action`` at the
-    dispatch instant, by the edge history: the identity itself, the tool it acts through
-    in this chain, and every tool it reached then."""
+    """The verdict the permissions declared at the dispatch instant implied, by the edge
+    history, of what the identity acted through then: the identity itself, the tool it
+    acts through in this chain, and every tool its effective access reached then. One of
+    them declared ``action``: proven. Every one of them declared its permissions and
+    none this one: the record contradicts the hop -- broken (``permission_not_declared``).
+    Otherwise not in force, and nothing contradicts it: unproven."""
     unrecorded = _edges_unrecorded(inputs, dispatch)
     if unrecorded is not None:
         return unrecorded
@@ -1442,18 +1569,26 @@ def _action_at_dispatch(chain, i, source, action: str, dispatch: DispatchState, 
         ),
         key=lambda held: (held[0], held[1].noticed_at, held[1].record),
     )
-    if not holders:
+    if holders:
         return Reading(
-            UNPROVEN,
-            "action_not_in_force_at_dispatch",
-            f"nothing the identity acted through declared the permission {action!r} at the dispatch at {at}, by "
-            "the graph's edge history",
+            PROVEN,
+            "action_in_force_at_dispatch",
+            f"{', '.join(f'{name} ({_cited(record)})' for name, record in holders)} declared the permission "
+            f"{action!r} at the dispatch at {at}",
+        )
+    declaring = [uuid for uuid in relevant if index.edge_at(EDGE_DECLARES, uuid, "", instant) is not None]
+    if relevant and len(declaring) == len(relevant):
+        return Reading(
+            BROKEN,
+            "permission_not_declared",
+            f"at the dispatch at {at}, {', '.join(sorted(index.name(u) for u in relevant))} declared their "
+            f"permissions, and none of them was {action!r}, by the graph's edge history",
         )
     return Reading(
-        PROVEN,
-        "action_in_force_at_dispatch",
-        f"{', '.join(f'{name} ({_cited(record)})' for name, record in holders)} declared the permission "
-        f"{action!r} at the dispatch at {at}",
+        UNPROVEN,
+        "action_not_in_force_at_dispatch",
+        f"at the dispatch at {at}, nothing the identity acted through declared {action!r}, and not everything it "
+        "acted through declared its permissions, by the graph's edge history",
     )
 
 
