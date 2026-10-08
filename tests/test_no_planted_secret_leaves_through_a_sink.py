@@ -381,10 +381,9 @@ class Engine:
             run_id = str(uuid.uuid4())
             # The engine names a target with its userinfo replaced (athena-engine's
             # engine/utils/redaction.py), as this one does.
-            from pentest.models import target_shown
-
+            target = re.sub(r"//[^/@]*@", "//[redacted]@", str(document.get("target") or ""))
             self.runs[run_id] = {
-                "run_id": run_id, "kind": "scan", "target": target_shown(document.get("target")), "state": "running",
+                "run_id": run_id, "kind": "scan", "target": target, "state": "running",
                 "done": False, "reason": None, "result": None, "key_hash": "operator-key-hash",
             }
             return 202, dict(self.accepted, run_id=run_id, status_url=f"/api/scans/{run_id}")
@@ -1287,6 +1286,8 @@ ROUTES.update(
         "deployment-recompute": _DOCS + "recomputes the decision; read as deployment-detail",
         "deployment-recompute-claims": _DOCS + "re-derives the claims; read as assurance-claims",
         "deployment-record-bom-drift": _DOCS + "records the BOM's drift; read as bom-drift",
+        "deployment-economics-parameter-set": _READ,
+        "deployment-economics-parameter-set-versions": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1325,6 +1326,11 @@ def _readable_urls(world):
                 from tests.test_spine_authority_chain import WF
 
                 options = [{**o, "workflow": WF} for o in options]
+            if name.startswith("deployment-economics-parameter-set"):
+                from assurance.economics.models import CustomerParameterSet
+
+                keys = sorted(set(CustomerParameterSet.objects.values_list("set_key", flat=True))) or ["canary-set"]
+                options = [{**o, "set_key": key} for o in options for key in keys[:2]]
             if name == "deployment-assurance-pack":
                 from assurance.packs import _PACKS_BY_KEY
 
