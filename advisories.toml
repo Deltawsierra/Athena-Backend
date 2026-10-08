@@ -46,6 +46,7 @@ installed = false
 use = "Not a dependency. The same comparison at this service's edge: the scan-target guard and an engagement's scope against the host the client dials, over Mythos-Core#47's corpus."
 tests = [
   "tests/test_the_target_guard_decides_on_the_host_the_client_dials.py::test_what_the_backend_admits_is_the_host_the_client_dials",
+  "tests/test_the_target_guard_decides_on_the_host_the_client_dials.py::test_a_host_written_otherwise_than_the_client_dials_it_is_refused",
   "tests/test_the_target_guard_decides_on_the_host_the_client_dials.py::test_the_scope_is_compared_in_the_form_the_client_dials",
 ]
 
