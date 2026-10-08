@@ -1,11 +1,13 @@
-"""The Economic Exposure records (phase E0): sources, the model inventory, and the
-scenario, review and override records the separation rules are enforced on.
+"""The Economic Exposure records: sources, the model inventory, and the scenario,
+review and override records the separation rules are enforced on (phase E0); and
+the FX and cost-index observations read from a source's snapshot (phase E1).
 
 These are ``assurance`` models: :mod:`assurance.models` imports this module, so
 Django files them under the ``assurance`` app and they migrate in
-``assurance/migrations/``. Nothing uses them yet -- no route, command or signal
-writes or reads one in this phase. ``docs/economics/spec-v1.md`` (section 6)
-names each model's permitted writers for the steps that add them.
+``assurance/migrations/``. Nothing serves them yet -- no route, command or signal
+writes or reads one; the observations are written only by the snapshot loader an
+operator runs (:mod:`assurance.economics.snapshots`). ``docs/economics/spec-v1.md``
+(section 6) names each model's permitted writers.
 
 The rules themselves are pure functions in :mod:`assurance.economics.engine.governance`;
 each model calls them on save and refuses a write with the rule's code
@@ -33,17 +35,24 @@ ever read on a row whose account was removed after it was written.
 from __future__ import annotations
 
 import uuid
+from decimal import Context as DecimalContext
+from decimal import Decimal, DecimalException
 
 from django.conf import settings
 from django.db import models
-from django.db.models import Max, Q
+from django.db.models import F, Max, Q
 from django.utils import timezone
 
-from .engine import governance
+from .engine import cost_index, fx, governance, money
 from .engine.provenance import LicenseClass, TrustTier
 
 _LICENSE_CODES = [c.value for c in LicenseClass]
 _TRUST_CODES = [t.value for t in TrustTier]
+_RATE_TYPE_CODES = [t.value for t in fx.RateType]
+
+#: What every refusal code means: the governance rules' (phase E0) and the money,
+#: FX and cost-index engine's (phase E1). A code both publish means the same.
+_REFUSAL_TEXT = {**money.REFUSALS, **governance.REFUSALS}
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -52,15 +61,17 @@ class EconomicsRewriteRefused(ValueError):
 
 
 class EconomicsRefused(ValueError):
-    """A write one of the governance rules refuses. ``code`` is the rule's code
-    (:data:`assurance.economics.engine.governance.REFUSALS`); ``detail`` names the
-    field, where one does."""
+    """A write one of the governance rules refuses, or one the money engine
+    refuses. ``code`` is the rule's code
+    (:data:`assurance.economics.engine.governance.REFUSALS`, or
+    :data:`assurance.economics.engine.money.REFUSALS` for an observation);
+    ``detail`` names the field, where one does."""
 
     def __init__(self, code: str, detail: str = ""):
         self.code = code
         self.detail = detail
         suffix = f" ({detail})" if detail else ""
-        super().__init__(f"{code}: {governance.REFUSALS[code]}{suffix}")
+        super().__init__(f"{code}: {_REFUSAL_TEXT[code]}{suffix}")
 
 
 class SeparationOfDutiesRefused(EconomicsRefused):
@@ -168,7 +179,8 @@ class FinancialSource(_AppendOnly):
     1 and is assigned on save when it is not given. A changed snapshot, license class
     or trust tier is a new version, and the older one stays as the record of what an
     earlier run read. In this phase every source is a committed fixture snapshot; no
-    feed writes one.
+    feed writes one. A source's FX and cost-index observations hang off its version
+    (``fx_observations``, ``cost_index_observations``) and go with it.
 
     ``deployment`` is the tenant: empty for a platform-wide source (an official
     statistics series, a public price list), set for one customer's own data, which
@@ -611,3 +623,174 @@ class OverrideApproval(_AppendOnly):
 
     def __str__(self) -> str:
         return f"approval of override {self.override_id}"
+
+
+# ---------------------------------------------------------------------------
+# FXObservation, CostIndexObservation -- what a source's snapshot holds (E1)
+# ---------------------------------------------------------------------------
+
+#: Each decimal column's exact capacity: digits in all, and digits after the
+#: point. Django keeps a decimal on SQLite (this service's database) to 15
+#: significant digits, so no column holds more, and a value a column cannot hold
+#: EXACTLY is refused (``value_precision``), never rounded to fit.
+RATE_DIGITS, RATE_PLACES = 15, 9
+INDEX_DIGITS, INDEX_PLACES = 15, 6
+
+
+def _fits(value: Decimal, digits: int, places: int) -> bool:
+    """Whether a column of ``digits`` digits, ``places`` of them after the point,
+    holds ``value`` exactly."""
+    try:
+        held = value.quantize(Decimal(1).scaleb(-places), context=DecimalContext(prec=digits))
+    except (DecimalException, TypeError, AttributeError):
+        return False
+    return held == value
+
+
+def _engine_refusal(build):
+    """Build the engine's object for a row, and refuse the row with the engine's
+    code if the engine refuses it."""
+    try:
+        return build()
+    except money.MoneyRefused as refused:
+        raise EconomicsRefused(refused.code, refused.detail) from None
+
+
+class FXObservation(_AppendOnly):
+    """One exchange rate read from a source version's snapshot: ``1 base = rate
+    quote``, its rate type (``reference``, ``mid``, ``bid`` or ``ask``), its provider,
+    when it was observed, the date it is the rate for, and the snapshot hash
+    (specification, section 15).
+
+    The pure contract is :class:`assurance.economics.engine.fx.FXRate`, and a row is
+    refused on save unless it makes one -- a rate that is not a ``Decimal`` (a float),
+    NaN or Infinity, zero or negative; a code the currency table does not hold, or
+    one with no minor unit; a pair of one code; an unknown rate type; a naive
+    instant -- with the engine's code. It is refused too unless its
+    ``source_snapshot_hash`` is its source version's own (``snapshot_hash_mismatch``),
+    and unless the column holds its rate exactly (``value_precision``).
+
+    It goes with its source, which goes with its deployment. A corrected rate is a
+    new snapshot: a new source version, and new rows."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    source = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="fx_observations")
+    base_currency = models.CharField(max_length=3)
+    quote_currency = models.CharField(max_length=3)
+    rate = models.DecimalField(max_digits=RATE_DIGITS, decimal_places=RATE_PLACES)
+    rate_type = models.CharField(max_length=16, choices=[(t, t) for t in _RATE_TYPE_CODES])
+    provider = models.CharField(max_length=200)
+    observed_at = models.DateTimeField()
+    effective_date = models.DateField()
+    # "sha256:" + 64 hex: the snapshot the rate was read from, equal to its source's.
+    source_snapshot_hash = models.CharField(max_length=71)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["source", "provider", "base_currency", "quote_currency", "rate_type", "effective_date", "id"]
+        verbose_name = "FX observation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "provider", "base_currency", "quote_currency", "rate_type", "effective_date"],
+                name="uq_econ_fx_observation",
+            ),
+            models.CheckConstraint(condition=Q(rate__gt=0), name="ck_econ_fx_rate_positive"),
+            models.CheckConstraint(condition=Q(rate_type__in=_RATE_TYPE_CODES), name="ck_econ_fx_rate_type"),
+            models.CheckConstraint(condition=~Q(base_currency=F("quote_currency")), name="ck_econ_fx_pair"),
+        ]
+        indexes = [
+            models.Index(fields=["base_currency", "quote_currency", "effective_date"], name="assurance_econ_fx_pair_day")
+        ]
+
+    def as_engine(self) -> fx.FXRate:
+        """The row as the engine reads it, with its source version named."""
+        source = self.source if self.source_id is not None else None
+        return fx.FXRate(
+            base=self.base_currency,
+            quote=self.quote_currency,
+            rate=self.rate,
+            rate_type=self.rate_type,
+            provider=self.provider,
+            observed_at=self.observed_at,
+            effective_date=self.effective_date,
+            source_snapshot_hash=self.source_snapshot_hash,
+            source_key=source.source_key if source else "",
+            source_version=source.version if source else None,
+        )
+
+    def check_new(self) -> None:
+        _engine_refusal(self.as_engine)
+        if not _fits(self.rate, RATE_DIGITS, RATE_PLACES):
+            raise EconomicsRefused("value_precision", f"rate {self.rate}")
+        stored = FinancialSource._base_manager.filter(pk=self.source_id).values_list("snapshot_hash", flat=True)
+        if list(stored) != [self.source_snapshot_hash]:
+            raise EconomicsRefused("snapshot_hash_mismatch")
+
+    def __str__(self) -> str:
+        return f"{self.base_currency}/{self.quote_currency} {self.rate} {self.rate_type} on {self.effective_date}"
+
+
+class CostIndexObservation(_AppendOnly):
+    """One published value of one cost-index series, read from a source version's
+    snapshot: series id, geography, category, period (a month, ``YYYY-MM``), value,
+    and the date that vintage was published (specification, sections 13 and 15).
+
+    The pure contract is :class:`assurance.economics.engine.cost_index.IndexPoint`,
+    and a row is refused on save unless it makes one -- a value that is not a
+    ``Decimal``, NaN, zero or negative; a malformed period; a vintage published
+    before its period began (``date_inversion``) -- with the engine's code; unless
+    the column holds its value exactly (``value_precision``); and unless its series
+    is the one geography and category it already is in this source
+    (``index_series_mismatch``). It goes with its source."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    source = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="cost_index_observations")
+    series_id = models.CharField(max_length=100)
+    geography = models.CharField(max_length=32)
+    category = models.CharField(max_length=200)
+    period = models.CharField(max_length=7)
+    value = models.DecimalField(max_digits=INDEX_DIGITS, decimal_places=INDEX_PLACES)
+    vintage_date = models.DateField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["source", "series_id", "period", "vintage_date", "id"]
+        verbose_name = "cost index observation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "series_id", "period", "vintage_date"], name="uq_econ_cost_index_observation"
+            ),
+            models.CheckConstraint(condition=Q(value__gt=0), name="ck_econ_cost_index_positive"),
+        ]
+
+    def as_engine(self) -> cost_index.IndexPoint:
+        """The row as the engine reads it, with its source version and snapshot named."""
+        source = self.source if self.source_id is not None else None
+        return cost_index.IndexPoint(
+            series_id=self.series_id,
+            geography=self.geography,
+            category=self.category,
+            period=self.period,
+            value=self.value,
+            vintage_date=self.vintage_date,
+            source_snapshot_hash=source.snapshot_hash if source else "",
+            source_key=source.source_key if source else "",
+            source_version=source.version if source else None,
+        )
+
+    def check_new(self) -> None:
+        _engine_refusal(self.as_engine)
+        if not _fits(self.value, INDEX_DIGITS, INDEX_PLACES):
+            raise EconomicsRefused("value_precision", f"value {self.value}")
+        other = (
+            CostIndexObservation._base_manager.filter(source_id=self.source_id, series_id=self.series_id)
+            .exclude(geography=self.geography, category=self.category)
+            .exists()
+        )
+        if other:
+            raise EconomicsRefused("index_series_mismatch", self.series_id)
+
+    def __str__(self) -> str:
+        return f"{self.series_id} {self.period} = {self.value} (vintage {self.vintage_date})"

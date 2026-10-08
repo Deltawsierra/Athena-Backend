@@ -14,22 +14,34 @@ inherits the rule rather than re-implementing it:
   them its requester;
 - a scenario points into SPINE by SPINE's ids and never at another tenant's record.
 
-Review round 1 added a section per finding at the end, each named for it.
+Review round 1 added a section per finding, each named for it. Phase E1 adds the
+FX and cost-index observations at the end: the committed SYNTHETIC TEST DATA
+snapshot registered as a source (licence ``open``, trust ``unverified``), its
+observations stored exactly and read back into the same normalization, and every
+refusal the engine gives held on the row too.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, models, transaction
 
+from assurance.economics import snapshots
+from assurance.economics.engine.cost_index import IndexSelector
+from assurance.economics.engine.fx import FXPolicy
+from assurance.economics.engine.money import Money
+from assurance.economics.engine.normalization import NormalizationPolicy, normalize
 from assurance.economics.models import (
+    CostIndexObservation,
     EconomicsRefused,
     EconomicsRewriteRefused,
     FinancialScenario,
     FinancialSource,
+    FXObservation,
     ModelInventoryEntry,
     OverrideApproval,
     ScenarioReview,
@@ -80,13 +92,46 @@ def _scenario(deployment, author, **over):
 # ------------------------------------------------------------- append-only
 
 
+def _fx(source, **over):
+    fields = {
+        "source": source,
+        "base_currency": "EUR",
+        "quote_currency": "USD",
+        "rate": Decimal("1.0850"),
+        "rate_type": "reference",
+        "provider": "SYNTHETIC-REF",
+        "observed_at": RETRIEVED,
+        "effective_date": date(2026, 10, 1),
+        "source_snapshot_hash": source.snapshot_hash,
+    }
+    fields.update(over)
+    return FXObservation.objects.create(**fields)
+
+
+def _index(source, **over):
+    fields = {
+        "source": source,
+        "series_id": "SYN-CPI-US",
+        "geography": "US",
+        "category": "consumer prices, all items (SYNTHETIC)",
+        "period": "2026-09",
+        "value": Decimal("124.500"),
+        "vintage_date": date(2026, 10, 1),
+    }
+    fields.update(over)
+    return CostIndexObservation.objects.create(**fields)
+
+
 def _every_record(deployment, people):
     scenario = _scenario(deployment, people["alice"])
     override = SensitiveOverride.objects.create(
         scenario=scenario, subject="revenue_per_hour", reason="customer-confirmed", requested_by=people["alice"]
     )
+    source = _source()
     return [
-        _source(),
+        source,
+        _fx(source),
+        _index(source),
         ModelInventoryEntry.objects.create(
             model_id="banking-payments", version="0.1.0", owner="model risk", intended_use="u", limitations="l"
         ),
@@ -443,7 +488,8 @@ def test_l1_the_base_manager_stays_djangos_plain_one():
     manager; setting ``Meta.base_manager_name`` to the append-only manager would
     refuse them (spec, sections 2 and 10)."""
     for model in (
-        FinancialSource, ModelInventoryEntry, FinancialScenario, ScenarioReview, SensitiveOverride, OverrideApproval
+        FinancialSource, ModelInventoryEntry, FinancialScenario, ScenarioReview, SensitiveOverride, OverrideApproval,
+        FXObservation, CostIndexObservation,
     ):
         assert model._meta.base_manager_name is None, model
         assert type(model._base_manager) is models.Manager, model
@@ -564,3 +610,162 @@ def test_removing_an_operator_is_never_held_back_by_economics_rows(deployment, p
     assert FinancialScenario.objects.get(pk=mine.pk).author_username == "leaver"
     assert ScenarioReview.objects.get().reviewer_id is None
     assert asked.in_force and approved.in_force
+
+
+# ===================================================== phase E1: observations
+
+#: The committed snapshot's hash (tests/test_economics_money.py pins it too).
+SYNTHETIC_HASH = "sha256:54ff61637f36e517d02bb146615e94e9867db5270355bc76eb0fd41b4b4001a5"
+US_CPI = IndexSelector("SYN-CPI-US", "US", "consumer prices, all items (SYNTHETIC)", "USD")
+
+
+def test_the_synthetic_snapshot_is_registered_open_and_unverified():
+    source = snapshots.register_snapshot()
+    assert (source.source_key, source.version, source.deployment_id) == ("synthetic-fx-and-cost-index", 1, None)
+    assert (source.license_class, source.trust_tier) == ("open", "unverified")
+    assert source.snapshot_hash == SYNTHETIC_HASH
+    assert source.dataset.startswith("SYNTHETIC TEST DATA")
+    assert source.fx_observations.count() == 17 and source.cost_index_observations.count() == 7
+    assert set(source.fx_observations.values_list("source_snapshot_hash", flat=True)) == {SYNTHETIC_HASH}
+    # Registering the same bytes again writes nothing.
+    assert snapshots.register_snapshot().pk == source.pk
+    assert FinancialSource.objects.count() == 1 and FXObservation.objects.count() == 17
+
+
+def test_stored_observations_read_back_exactly_and_normalize_the_same():
+    """Django keeps a decimal on SQLite as a float rounded to 15 digits; every
+    column holds 15 at most, so what is read back is what was written, and the
+    normalization from the rows equals the one from the file."""
+    snap = snapshots.read_snapshot()
+    source = snapshots.register_snapshot()
+    stored = {(r.provider, r.rate_type, r.base, r.quote, r.effective_date): r.rate for r in
+              (row.as_engine() for row in FXObservation.objects.filter(source=source))}
+    assert stored == {(r.provider, r.rate_type, r.base, r.quote, r.effective_date): r.rate for r in snap.fx_rates}
+    assert all(type(v) is Decimal for v in stored.values())
+    assert sorted(CostIndexObservation.objects.values_list("value", flat=True)) == sorted(
+        p.value for p in snap.index_points
+    )
+    policy = NormalizationPolicy("USD", "EUR", FXPolicy(("SYNTHETIC-REF",)), US_CPI)
+    args = {"event_date": date(2020, 3, 2), "valuation_date": date(2026, 10, 8), "policy": policy}
+    from_file = normalize(Money.parse("1000.00", "EUR"), fx_book=snap.fx_book(), index_book=snap.index_book(), **args)
+    from_rows = normalize(
+        Money.parse("1000.00", "EUR"),
+        fx_book=snapshots.fx_book([source], snap.holidays),
+        index_book=snapshots.index_book([source]),
+        **args,
+    )
+    assert from_rows.value == from_file.value and from_rows.display() == "1309.52 EUR"
+    rows_chain, file_chain = from_rows.as_dict()["chain"], from_file.as_dict()["chain"]
+    # The rows name their source version; otherwise the chains are the same.
+    for step in rows_chain:
+        for observation in step["observations"]:
+            assert observation.pop("source_version") == 1
+    for step in file_chain:
+        for observation in step["observations"]:
+            assert observation.pop("source_version") is None
+    assert rows_chain == file_chain
+
+
+@pytest.mark.parametrize(
+    "over, code",
+    [
+        ({"rate": 1.085}, "not_decimal"),
+        ({"rate": "1.085"}, "not_decimal"),
+        ({"rate": Decimal("NaN")}, "not_finite"),
+        ({"rate": Decimal("0")}, "rate_not_positive"),
+        ({"rate": Decimal("-1.085")}, "rate_not_positive"),
+        ({"rate": Decimal("1.0850000001")}, "value_precision"),
+        ({"rate": Decimal("1234567.123456789")}, "value_precision"),
+        ({"quote_currency": "EUR"}, "pair_malformed"),
+        ({"quote_currency": "XAU"}, "currency_retired"),
+        ({"base_currency": "eur"}, "currency_unknown"),
+        ({"rate_type": "spot"}, "rate_type_unrecognised"),
+        ({"provider": " "}, "required_field_blank"),
+        ({"observed_at": datetime(2026, 10, 1, 9)}, "date_malformed"),
+        ({"source_snapshot_hash": "sha256:" + "00" * 32}, "snapshot_hash_mismatch"),
+        ({"source_snapshot_hash": "00" * 32}, "snapshot_hash_malformed"),
+    ],
+)
+def test_an_fx_observation_the_engine_refuses_is_refused(over, code):
+    source = _source()
+    with pytest.raises(EconomicsRefused) as refused:
+        _fx(source, **over)
+    assert refused.value.code == code
+    assert not FXObservation.objects.exists()
+
+
+@pytest.mark.parametrize(
+    "over, code",
+    [
+        ({"value": 124.5}, "not_decimal"),
+        ({"value": Decimal("Infinity")}, "not_finite"),
+        ({"value": Decimal("0")}, "index_value_not_positive"),
+        ({"value": Decimal("124.5000001")}, "value_precision"),
+        ({"period": "2026-9"}, "period_malformed"),
+        ({"vintage_date": date(2026, 8, 31)}, "date_inversion"),
+        ({"series_id": ""}, "required_field_blank"),
+    ],
+)
+def test_a_cost_index_observation_the_engine_refuses_is_refused(over, code):
+    source = _source()
+    with pytest.raises(EconomicsRefused) as refused:
+        _index(source, **over)
+    assert refused.value.code == code
+    assert not CostIndexObservation.objects.exists()
+
+
+def test_a_series_stays_one_geography_and_category_in_a_source():
+    source = _source()
+    _index(source)
+    with pytest.raises(EconomicsRefused) as refused:
+        _index(source, period="2026-10", geography="EA")
+    assert refused.value.code == "index_series_mismatch"
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _index(source, value=Decimal("124.600"))  # same series, period and vintage
+
+
+def test_the_database_refuses_a_bad_rate_written_past_save():
+    source = _source()
+    for over in ({"rate": Decimal("0")}, {"rate_type": "spot"}, {"quote_currency": "EUR"}):
+        row = FXObservation(
+            **{
+                "source": source, "base_currency": "EUR", "quote_currency": "USD", "rate": Decimal("1.1"),
+                "rate_type": "reference", "provider": "p", "observed_at": RETRIEVED,
+                "effective_date": date(2026, 10, 1), "source_snapshot_hash": source.snapshot_hash, **over,
+            }
+        )
+        with pytest.raises(IntegrityError), transaction.atomic():
+            models.Model.save(row, force_insert=True)
+    index = CostIndexObservation(
+        source=source, series_id="s", geography="US", category="c", period="2026-09", value=Decimal("-1"),
+        vintage_date=date(2026, 10, 1),
+    )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        models.Model.save(index, force_insert=True)
+
+
+def test_a_tenants_snapshot_goes_with_its_deployment(deployment):
+    snapshots.register_snapshot(deployment=deployment)
+    platform = snapshots.register_snapshot()
+    assert FinancialSource.objects.count() == 2 and FXObservation.objects.count() == 34
+    deployment.delete()
+    assert list(FinancialSource.objects.all()) == [platform]
+    assert FXObservation.objects.count() == 17 and CostIndexObservation.objects.count() == 7
+    assert set(FXObservation.objects.values_list("source_id", flat=True)) == {platform.pk}
+
+
+def test_removing_an_operator_who_registered_a_snapshot_is_never_held_back(people):
+    """The observations name no account; the source the operator recorded keeps
+    their name, and the stop answers 204."""
+    from rest_framework.test import APIClient
+
+    admin = User.objects.create_user(username="rv-admin", password="x", role="admin")
+    leaver = User.objects.create_user(username="leaver", password="x", role="analyst")
+    source = snapshots.register_snapshot(recorded_by=leaver)
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    response = client.delete(f"/api/accounts/users/{leaver.pk}/")
+    assert response.status_code == 204, response.content
+    stored = FinancialSource.objects.get(pk=source.pk)
+    assert (stored.recorded_by_id, stored.recorded_by_username) == (None, "leaver")
+    assert stored.fx_observations.count() == 17

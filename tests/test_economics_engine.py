@@ -2,15 +2,19 @@
 
 :mod:`assurance.economics.engine` holds the vocabularies every later step reads
 (the fifteen loss families, ``source_type``, the confidence grades, the license
-classes and trust tiers), the ISO 4217 currency table, and the governance rules.
-Pinned here:
+classes and trust tiers), the adapter over mythos-core's ISO 4217 currency table,
+the governance rules, and (phase E1) money, FX and cost-index normalization,
+whose own tests are ``tests/test_economics_money.py``. Pinned here:
 
-- the engine imports with Django poisoned, and no module of it names Django;
+- the engine imports with Django poisoned and with every part of mythos-core but
+  its currency table poisoned, and no module of it names Django;
 - every code is pinned exactly, so a rename or a reuse is a reviewed change here;
-- the currency table: JPY 0, USD 2, KWD 3, the retired HRK, GRD and PTE and their
-  successor, and the digest of the whole document, entries and source and review
-  records alike, so an edit to the file fails until the pin moves;
-- each governance rule, and that every refusal it gives is a published code;
+- the currency table is core's, the ONE table (Mythos-Core#49): JPY 0, USD 2,
+  KWD 3, the retired HRK, GRD and PTE and their successor, as #141 pinned them,
+  now against core's table; core's entries digest equals the value pinned here
+  and in the adapter, and core's file digest is pinned too, so a core bump that
+  changes the table, or what it says about its sources, fails until the pins move;
+- each governance rule, and that every refusal anything gives is a published code;
 - nothing but :mod:`assurance.models` imports the package, so no economics code
   sits on a stop, pause or revoke path;
 - the spec (``docs/economics/spec-v1.md``) states the policy and every code.
@@ -19,6 +23,8 @@ Pinned here:
 from __future__ import annotations
 
 import ast
+import dataclasses
+import hashlib
 import json
 import os
 import subprocess
@@ -30,8 +36,12 @@ import pytest
 
 from assurance.economics.engine import (
     confidence,
+    cost_index,
     currency,
+    fx,
     governance,
+    money,
+    normalization,
     provenance,
     taxonomy,
 )
@@ -46,18 +56,25 @@ SPEC = REPO / "docs" / "economics" / "spec-v1.md"
 
 
 def test_the_engine_imports_with_django_poisoned():
-    """A fresh interpreter in which importing Django (or the REST framework, or
-    mythos-core) raises, and no settings module is named: every engine module still
-    imports, and nothing outside the engine package is loaded."""
+    """A fresh interpreter in which importing Django, the REST framework, or any
+    part of mythos-core but its currency table raises, and no settings module is
+    named: every engine module still imports, nothing outside the engine package is
+    loaded, and of mythos-core only the package and its currency table are.
+
+    Phase E0 poisoned mythos-core whole; phase E1 reads core's ONE currency table
+    (Mythos-Core#49) instead of a copy of its own, so exactly that module is let
+    through, and everything else in core stays poisoned."""
     script = textwrap.dedent(
         """
         import importlib, pkgutil, sys
 
-        POISONED = {"django", "rest_framework", "mythos_core"}
+        POISONED = {"django", "rest_framework"}
+        CORE_ALLOWED = {"mythos_core", "mythos_core.currency"}
 
         class Poison:
             def find_spec(self, name, path=None, target=None):
-                if name.split(".")[0] in POISONED:
+                root = name.split(".")[0]
+                if root in POISONED or (root == "mythos_core" and name not in CORE_ALLOWED):
                     raise ImportError("poisoned: " + name)
                 return None
 
@@ -75,6 +92,8 @@ def test_the_engine_imports_with_django_poisoned():
             if m.startswith("assurance.") and not m.startswith("assurance.economics")
         )
         assert not outside, outside
+        core = sorted(m for m in sys.modules if m.split(".")[0] == "mythos_core")
+        assert core == sorted(CORE_ALLOWED), core
         print("imported", len(names))
         """
     )
@@ -83,8 +102,8 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its five modules.
-    assert result.stdout.strip() == "imported 6", result.stdout
+    # The package and its ten modules.
+    assert result.stdout.strip() == "imported 11", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -108,22 +127,33 @@ def _imports(path: Path, package: str):
 
 def test_no_engine_module_names_django_or_the_rest_of_the_app():
     """Read, not run: an import inside a function would pass the poisoned import and
-    fail here."""
+    fail here. Of mythos-core, only the currency adapter imports anything, and only
+    the currency table."""
     files = sorted(ENGINE.glob("*.py"))
     assert {f.name for f in files} == {
         "__init__.py",
         "confidence.py",
+        "cost_index.py",
         "currency.py",
+        "fx.py",
         "governance.py",
+        "money.py",
+        "normalization.py",
         "provenance.py",
+        "snapshot.py",
         "taxonomy.py",
     }
+    core_importers = set()
     for path in files:
         for module in _imports(path, "assurance.economics.engine"):
             root = module.split(".")[0]
-            assert root not in {"django", "rest_framework", "mythos_core"}, (path.name, module)
+            assert root not in {"django", "rest_framework"}, (path.name, module)
+            if root == "mythos_core":
+                assert module in {"mythos_core", "mythos_core.currency"}, (path.name, module)
+                core_importers.add(path.name)
             if root == "assurance":
                 assert module.startswith("assurance.economics.engine"), (path.name, module)
+    assert core_importers == {"currency.py"}
 
 
 # ------------------------------------------------------------------ the codes
@@ -184,10 +214,82 @@ def test_source_types_grades_license_classes_and_trust_tiers():
 
 # ------------------------------------------------------------- the currencies
 
-#: The digest of the whole of data/iso4217.json: its entries, and its source and
-#: review records. An edit to any of it moves the digest: change it here, in the
-#: same reviewed change, and say what moved.
-TABLE_DIGEST = "a8a3e2565ba133dbd28d05813ad9eedd4c2362dc5e1a0d2480b4bfffdc3285aa"
+#: mythos-core's entries digest (mythos_core.currency.entries_digest): the 216
+#: entries athena-backend #141 reviewed, carried into core by Mythos-Core#49. It is
+#: also the adapter's PINNED_ENTRIES_SHA256, which refuses any other table at
+#: import. A core bump that changes an entry moves it: change it here and in the
+#: adapter, in the same reviewed change, and say what moved.
+CORE_ENTRIES_SHA256 = "00cb16d39eea4ed912c1f8fb9d43b58e19d96328090a3ad766f9cf03a868038a"
+#: The SHA-256 of core's table file: its entries and its source and review records
+#: (what #141's whole-document digest covered). A core bump that changes what the
+#: table says about where its entries came from, or how far they are checked, moves
+#: it.
+CORE_TABLE_SHA256 = "b23e144243e33946633529178e494ce7a43ef332408a3fd4271eceeefeaa2f9a"
+
+
+def test_the_engine_reads_cores_one_table():
+    """Mythos-Core#49 made core's table the single table: the adapter holds core's
+    own objects, and the engine carries no table file of its own."""
+    import mythos_core.currency as core
+
+    assert currency.CURRENCIES is core.CURRENCIES
+    assert currency.RECORDS is core.RECORDS
+    assert currency.REPORTABLE_MINOR_UNITS is core.REPORTABLE_MINOR_UNITS
+    assert currency.Currency is core.Currency
+    assert len(currency.CURRENCIES) == 216
+    assert not (ENGINE / "data").exists()
+    assert not list(REPO.joinpath("assurance").rglob("iso4217*.json"))
+
+
+def test_cores_entries_digest_is_the_one_pinned_here():
+    import mythos_core.currency as core
+
+    assert core.entries_digest(core.CURRENCIES) == CORE_ENTRIES_SHA256
+    assert currency.PINNED_ENTRIES_SHA256 == CORE_ENTRIES_SHA256
+    assert currency.entries_digest() == CORE_ENTRIES_SHA256
+    assert core.TABLE_SHA256 == currency.TABLE_SHA256 == CORE_TABLE_SHA256
+    assert hashlib.sha256(core.TABLE_PATH.read_bytes()).hexdigest() == CORE_TABLE_SHA256
+
+
+def test_the_adapter_refuses_a_table_it_has_not_pinned():
+    import mythos_core.currency as core
+
+    currency.check_pinned(core.CURRENCIES)
+    changed = dict(core.CURRENCIES)
+    changed["KWD"] = dataclasses.replace(changed["KWD"], minor_units=2)
+    dropped = {code: c for code, c in core.CURRENCIES.items() if code != "GRD"}
+    renamed = dict(core.CURRENCIES)
+    renamed["USD"] = dataclasses.replace(renamed["USD"], name="Dollar")
+    for table in (changed, dropped, renamed):
+        with pytest.raises(currency.CurrencyTableInvalid):
+            currency.check_pinned(table)
+
+
+def test_a_core_bump_that_changes_the_table_fails_at_import():
+    """A fresh interpreter whose mythos-core table has one entry changed, as a core
+    bump might: importing the engine's currency adapter is refused, so nothing
+    shows an amount at a precision nobody reviewed."""
+    script = textwrap.dedent(
+        """
+        import dataclasses, types
+        import mythos_core.currency as core
+
+        table = dict(core.CURRENCIES)
+        table["USD"] = dataclasses.replace(table["USD"], minor_units=3)
+        core.CURRENCIES = types.MappingProxyType(table)
+        try:
+            import assurance.economics.engine.currency
+        except core.CurrencyTableInvalid as refused:
+            print("refused", "athena-backend pinned" in str(refused))
+        else:
+            print("imported")
+        """
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"}
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.stdout.strip() == "refused True", (result.stdout, result.stderr)
 
 
 def test_minor_units_are_pinned():
@@ -195,20 +297,21 @@ def test_minor_units_are_pinned():
     assert currency.minor_units("USD") == 2
     assert currency.minor_units("KWD") == 3
     for code in ("JPY", "USD", "KWD"):
-        assert currency.currency(code).active
+        assert currency.currency(code).status == currency.ACTIVE
+        assert currency.reporting_refusal(code) is None
 
 
 def test_a_retired_code_and_its_successor():
     kuna = currency.currency("HRK")
     assert (kuna.status, kuna.minor_units, kuna.successor) == ("retired", 2, "EUR")
-    assert not kuna.active
     assert currency.current_successor("HRK") is currency.currency("EUR")
     assert currency.current_successor("EUR") is None
+    assert currency.reporting_refusal("HRK") == "currency_retired"
 
 
 def test_the_euros_predecessors_include_the_drachma_and_the_escudo():
     """Review round 1, L6: the table said it held the euro's predecessors and left
-    out GRD and PTE."""
+    out GRD and PTE. Pinned against core's table now."""
     for code in ("GRD", "PTE"):
         retired = currency.currency(code)
         assert (retired.status, retired.minor_units, retired.successor) == ("retired", 0, "EUR"), code
@@ -221,43 +324,82 @@ def test_the_euros_predecessors_include_the_drachma_and_the_escudo():
     assert currency.minor_units("ROL") == 0
 
 
-def test_the_digest_covers_the_source_and_review_records(tmp_path):
-    """Review round 1, L6: what the file says about where its entries came from and
-    how far they are checked is reviewed data too, so editing it moves the pin."""
-    document = json.loads(currency.TABLE_PATH.read_text(encoding="utf-8"))
-    assert currency.table_digest(document) == currency.TABLE_DIGEST
-    for record, key in (("review", "status"), ("source", "how_made")):
-        edited = json.loads(json.dumps(document))
-        edited[record][key] = "verified"
-        path = tmp_path / f"{record}.json"
-        path.write_text(json.dumps(edited), encoding="utf-8")
-        assert currency.load_table(path)[2] != TABLE_DIGEST, record
-
-
-def test_the_table_is_the_reviewed_file_and_records_its_source():
-    assert currency.TABLE_DIGEST == TABLE_DIGEST
-    records = currency.TABLE_RECORDS
+def test_the_table_records_its_source():
+    records = currency.RECORDS
     assert "ISO 4217" in records["source"]["standard"]
     assert records["source"]["how_made"] and records["review"]["status"]
-    statuses = {c.status for c in currency.CURRENCIES.values()}
-    assert statuses == {"active", "retired"}
+    assert {c.status for c in currency.CURRENCIES.values()} == {"active", "retired"}
     # Minor units of N.A. are null, never a guessed zero.
     assert currency.minor_units("XAU") is None and currency.minor_units("XXX") is None
     assert currency.minor_units("CLF") == 4
+
+
+def test_the_file_digest_covers_the_source_and_review_records(tmp_path):
+    """Review round 1, L6, against core's table: what the file says about where its
+    entries came from and how far they are checked is reviewed data too, so editing
+    it moves the pinned digest, and core refuses the file against the old one."""
+    import mythos_core.currency as core
+
+    document = json.loads(core.TABLE_PATH.read_bytes())
+    for record, key in (("review", "status"), ("source", "how_made")):
+        edited = json.loads(json.dumps(document))
+        edited[record][key] = "verified"
+        data = core.canonical(edited)
+        path = tmp_path / f"{record}.json"
+        path.write_bytes(data)
+        assert hashlib.sha256(data).hexdigest() != CORE_TABLE_SHA256, record
+        with pytest.raises(core.CurrencyTableInvalid):
+            core.load_table(path)
+        # The entries are unchanged, so their digest is too: only the file pin moves.
+        assert core.entries_digest(core.load_table(path, sha256=hashlib.sha256(data).hexdigest())[0]) == (
+            CORE_ENTRIES_SHA256
+        )
 
 
 @pytest.mark.parametrize("code", ["usd", "US$", "XYZ", "", None, ["USD"]])
 def test_a_code_is_read_exactly_as_written(code):
     with pytest.raises(currency.UnknownCurrency):
         currency.currency(code)
+    assert currency.reporting_refusal(code) == "currency_unknown"
+
+
+def test_a_reporting_currency_is_refused_exactly_as_cores_receipt_refuses_it():
+    """The brief's rule: a retired or non-reportable currency is refused as a
+    reporting currency, matching core's ``currency_retired``. For every code in the
+    table, the adapter refuses exactly the codes core's receipt has no minor unit
+    for, with core's spelling."""
+    from mythos_core import exposure_receipt as receipt
+
+    assert (currency.CURRENCY_UNKNOWN, currency.CURRENCY_RETIRED, currency.CURRENCY_MISMATCH) == (
+        receipt.CURRENCY_UNKNOWN,
+        receipt.CURRENCY_RETIRED,
+        receipt.CURRENCY_MISMATCH,
+    )
+    for code in currency.CURRENCIES:
+        expected = None if code in receipt.MINOR_UNITS else receipt.CURRENCY_RETIRED
+        assert currency.reporting_refusal(code) == expected, code
+    assert currency.reporting_refusal("XAU") == "currency_retired"
 
 
 def _table(tmp_path, entries, **over):
-    document = {"schema": currency.TABLE_SCHEMA, "source": {"s": 1}, "review": {"r": 1}, "currencies": entries}
+    """A table document in core's canonical form, and its SHA-256, so that core's
+    loader reaches the rule under test rather than refusing the digest."""
+    import mythos_core.currency as core
+
+    entries = sorted(entries, key=lambda e: str(e.get("code")))
+    non_reportable = sorted(
+        e["code"] for e in entries
+        if isinstance(e, dict) and (e.get("status") != "active" or e.get("minor_units") is None)
+    )
+    document = {
+        "schema": core.TABLE_SCHEMA, "source": {"s": 1}, "review": {"r": 1},
+        "non_reportable": non_reportable, "currencies": entries,
+    }
     document.update(over)
+    data = core.canonical(document)
     path = tmp_path / "table.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
-    return path
+    path.write_bytes(data)
+    return path, hashlib.sha256(data).hexdigest()
 
 
 USD = {"code": "USD", "name": "US Dollar", "minor_units": 2, "status": "active", "successor": None}
@@ -289,19 +431,28 @@ USD = {"code": "USD", "name": "US Dollar", "minor_units": 2, "status": "active",
             ],
             {},
         ),
+        ([USD], {"non_reportable": ["USD"]}),
     ],
 )
 def test_a_broken_table_does_not_load(tmp_path, entries, over):
-    with pytest.raises(currency.CurrencyTableInvalid):
-        currency.load_table(_table(tmp_path, entries, **over))
+    """#141's table rules, held now by core's loader, which the engine reads."""
+    import mythos_core.currency as core
+
+    path, digest = _table(tmp_path, entries, **over)
+    with pytest.raises(core.CurrencyTableInvalid):
+        core.load_table(path, sha256=digest)
 
 
 def test_a_well_formed_table_loads(tmp_path):
+    import mythos_core.currency as core
+
     old = {**USD, "code": "OLD", "status": "retired", "successor": "USD"}
-    path = _table(tmp_path, [USD, old])
-    table, records, digest = currency.load_table(path)
+    path, digest = _table(tmp_path, [USD, old])
+    table, records = core.load_table(path, sha256=digest)
     assert table["OLD"].successor == "USD" and records["review"] == {"r": 1}
-    assert digest == currency.table_digest(json.loads(path.read_text(encoding="utf-8")))
+    # The same bytes against any other pin are refused.
+    with pytest.raises(core.CurrencyTableInvalid):
+        core.load_table(path, sha256=CORE_TABLE_SHA256)
 
 
 # ----------------------------------------------------------------- the rules
@@ -396,23 +547,45 @@ def test_codes_and_required_text():
         assert governance.required_text_refusal("ok", bad) == "required_field_blank"
 
 
+def _constants(path: Path, calls: set[str], *, returns: bool = False) -> set[str]:
+    """The string constants ``path`` passes as the first argument to a call of one
+    of ``calls``, and (``returns``) the ones it returns, read off its source."""
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if (
+            returns
+            and isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            found.add(node.value.value)
+        if (
+            isinstance(node, ast.Call)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and getattr(node.func, "id", "") in calls
+        ):
+            found.add(node.args[0].value)
+    return found
+
+
 def test_every_refusal_a_rule_gives_is_a_published_code():
-    """Every code a rule returns is in REFUSALS, read off the module's source, and
-    every published code is one something gives."""
-    source = (ENGINE / "governance.py").read_text(encoding="utf-8")
-    returned = {
-        node.value.value
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-    }
-    models_source = (REPO / "assurance" / "economics" / "models.py").read_text(encoding="utf-8")
-    raised = {
-        node.args[0].value
-        for node in ast.walk(ast.parse(models_source))
-        if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
-        and getattr(node.func, "id", "") == "EconomicsRefused"
-    }
-    assert returned | raised == set(governance.REFUSALS)
+    """Every code a governance rule returns or a model raises is published, in
+    governance.REFUSALS or (phase E1, the money engine) money.REFUSALS; every code
+    the engine raises is in money.REFUSALS; and every published code is one
+    something gives. A code both tables publish means the same in both."""
+    economics = REPO / "assurance" / "economics"
+    returned = _constants(ENGINE / "governance.py", set(), returns=True)
+    raised = _constants(economics / "models.py", {"EconomicsRefused"}) | _constants(
+        economics / "snapshots.py", {"EconomicsRefused"}
+    )
+    engine_raised = set().union(*(_constants(path, {"MoneyRefused"}) for path in ENGINE.glob("*.py")))
+    assert returned <= set(governance.REFUSALS)
+    assert engine_raised <= set(money.REFUSALS)
+    published = set(governance.REFUSALS) | set(money.REFUSALS)
+    assert returned | raised | engine_raised == published
+    for code in set(governance.REFUSALS) & set(money.REFUSALS):
+        assert governance.REFUSALS[code] == money.REFUSALS[code], code
 
 
 # ---------------------------------------------------- off every stop path
@@ -470,6 +643,24 @@ SPEC_PHRASES = (
     # L4: references are checked for form only.
     "SPINE references are checked for form only",
     "The scenario builder must resolve every reference within the scenario's own deployment",
+    # Phase E1: one currency table, money, FX and normalization, and their limits.
+    "`mythos_core.currency` is the one currency table",
+    CORE_ENTRIES_SHA256,
+    CORE_TABLE_SHA256,
+    "A float is refused on entry",
+    "60 significant digits",
+    "`ROUND_HALF_EVEN`",
+    "Two amounts in different currencies never add",
+    "the last official rate",
+    "A missing rate is unavailable",
+    "never interpolated unless the policy says `interpolate`",
+    "flagged stale",
+    "The original native amount and currency are never overwritten",
+    "SYNTHETIC TEST DATA",
+    "licence class `open` and trust tier `unverified`",
+    "No triangulation",
+    "No holiday calendar is stored",
+    "Swapping the steps gives a different, wrong answer",
 )
 
 
@@ -487,6 +678,17 @@ def test_the_spec_names_every_code():
         *provenance.LicenseClass,
         *provenance.TrustTier,
         *governance.REFUSALS,
+        *money.REFUSALS,
+        *money.UNAVAILABLE_REASONS,
+        *fx.RateType,
+        *fx.RULES,
+        fx.NO_FALLBACK,
+        fx.UNAVAILABLE,
+        fx.INTERPOLATE,
+        cost_index.EXACT_PERIOD,
+        cost_index.LATEST_PUBLISHED_PERIOD,
+        *normalization.DOWNGRADES,
+        *normalization.ORDER,
     ]
     missing = [str(code) for code in codes if f"`{code}`" not in text]
     assert not missing, missing

@@ -5,6 +5,9 @@ assumption (owner's specification, section 8). It never stands alone: a report
 shows the range, the grade and the reason for it together. ``Unknown`` is a grade
 of its own, not the absence of one: Mythos cannot responsibly quantify the
 scenario, and says so rather than printing a number.
+
+An estimated or a stale exchange rate or index lowers a grade one step each
+(:func:`downgraded`, used by :meth:`.normalization.Normalization.graded`).
 """
 
 from __future__ import annotations
@@ -54,3 +57,19 @@ GRADES: Mapping[ConfidenceGrade, tuple[str, str]] = MappingProxyType(
     }
 )
 
+
+
+#: The grades a downgrade steps through, strongest first. ``Unknown`` is not on it:
+#: it means Mythos will not quantify the scenario, which no downgrade decides.
+_LADDER = (ConfidenceGrade.A, ConfidenceGrade.B, ConfidenceGrade.C, ConfidenceGrade.D)
+
+
+def downgraded(grade: ConfidenceGrade, steps: int) -> ConfidenceGrade:
+    """``grade`` lowered ``steps`` places (an estimated or a stale rate is one each),
+    no lower than D. ``Unknown`` stays ``Unknown``."""
+    grade = ConfidenceGrade(grade)
+    if type(steps) is not int or steps < 0:
+        raise ValueError(f"a downgrade is a whole number of steps, not {steps!r}")
+    if grade is ConfidenceGrade.UNKNOWN:
+        return grade
+    return _LADDER[min(_LADDER.index(grade) + steps, len(_LADDER) - 1)]

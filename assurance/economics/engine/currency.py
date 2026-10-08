@@ -1,49 +1,58 @@
-"""The ISO 4217 currency table: each code's minor unit, whether it is active or
-retired, and the code that succeeded a retired one.
+"""The ISO 4217 currency table Economic Exposure reads: mythos-core's.
+
+There is ONE currency table for the capability, :mod:`mythos_core.currency`
+(Mythos-Core#49): each code's minor unit, whether it is active or retired, the
+code that succeeded a retired one, and which codes no amount may be reported in.
+Phase E0 carried a copy of its own here (``data/iso4217.json``); core's table was
+made from that copy entry for entry, and phase E1 dropped the copy, so this
+module is a thin adapter. It adds no entry, changes none and caches nothing of
+its own: every name below is core's object.
+
+What it adds is a pin. Core pins the bytes of its own file; this service pins the
+digest of the ENTRIES it was reviewed against (:data:`PINNED_ENTRIES_SHA256`, the
+value #141's working copy had), and refuses to import against any other table
+(:class:`CurrencyTableInvalid`). A mythos-core bump that adds, drops or changes an
+entry therefore fails here, loudly, until the pin moves in the same reviewed
+change -- never a silent change to how an amount is shown or which codes may be
+reported in. ``tests/test_economics_engine.py`` pins the same value, and core's
+file digest, beside the entries #141 pinned (JPY 0, USD 2, KWD 3, the retired
+HRK, GRD and PTE and their successor).
 
 Every amount is a ``Decimal`` with an ISO 4217 code beside it, and the currency
 is never inferred from a locale (owner's specification, sections 9 and 19). The
-minor unit is stored separately from the amount: it says how a value is shown
-(JPY has none, USD two, KWD three), never how precisely it is computed.
+minor unit says how a value is shown (JPY has none, USD two, KWD three), never
+how precisely it is computed.
 
-The table is data, not code: ``data/iso4217.json``, a reviewed file that records
-its own source and review state. It is read and checked once, when this module is
-imported, and a table that fails a check does not load at all
-(:class:`CurrencyTableInvalid`): a currency engine with a half-read table would
-show amounts at the wrong precision without saying so. ``tests/test_economics_engine.py``
-pins JPY, USD, KWD and a retired code, and the digest of the whole document -- the
-entries and the ``source`` and ``review`` records that say where they came from and
-how far they are checked -- so an edit to any of it is a reviewed change to the
-test as well.
+A code is REPORTABLE when it is active and has a minor unit. A code the table
+holds but no amount may be reported in -- a retired code, or one with no minor
+unit -- is refused as a reporting (or base) currency with core's own code,
+``currency_retired``; a code the table does not hold with ``currency_unknown``
+(:func:`reporting_refusal`), exactly as :mod:`mythos_core.exposure_receipt`
+refuses them.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from collections.abc import Mapping
-from dataclasses import dataclass
-from pathlib import Path
-from types import MappingProxyType
 
-#: The schema the data file declares; any other is refused.
-TABLE_SCHEMA = "mythos.economics.currency-table/v1"
-TABLE_PATH = Path(__file__).resolve().parent / "data" / "iso4217.json"
+from mythos_core import currency as _core
 
-ACTIVE = "active"
-RETIRED = "retired"
-STATUSES = frozenset({ACTIVE, RETIRED})
+Currency = _core.Currency
+CurrencyTableInvalid = _core.CurrencyTableInvalid
+ACTIVE = _core.ACTIVE
+RETIRED = _core.RETIRED
 
-#: The largest minor unit ISO 4217 assigns (CLF and UYW have four).
-MAX_MINOR_UNITS = 4
+#: SHA-256 (hex) over the canonical JSON of the table's entries
+#: (:func:`mythos_core.currency.entries_digest`): the 216 entries athena-backend
+#: #141 reviewed and Mythos-Core#49 carried over. Moving it is a reviewed change
+#: to the entries, with tests/test_economics_engine.py in the same change.
+PINNED_ENTRIES_SHA256 = "00cb16d39eea4ed912c1f8fb9d43b58e19d96328090a3ad766f9cf03a868038a"
 
-_CODE = re.compile(r"[A-Z]{3}")
-_FIELDS = frozenset({"code", "name", "minor_units", "status", "successor"})
-
-
-class CurrencyTableInvalid(ValueError):
-    """The currency data file breaks one of the table's rules. Nothing is loaded."""
+#: core's refusal codes, spelled as mythos_core.exposure_receipt spells them
+#: (CURRENCY_UNKNOWN, CURRENCY_RETIRED, CURRENCY_MISMATCH); a test holds them equal.
+CURRENCY_UNKNOWN = "currency_unknown"
+CURRENCY_RETIRED = "currency_retired"
+CURRENCY_MISMATCH = "currency_mismatch"
 
 
 class UnknownCurrency(LookupError):
@@ -51,90 +60,33 @@ class UnknownCurrency(LookupError):
     and ``US$`` are unknown, not USD."""
 
 
-@dataclass(frozen=True)
-class Currency:
-    code: str
-    name: str
-    #: Digits after the decimal point in the minor unit; ``None`` where ISO 4217
-    #: assigns none (precious metals, bond-market units, the SDR, XTS, XXX).
-    minor_units: int | None
-    status: str
-    #: The code that replaced a retired currency; ``None`` for an active one. It
-    #: says WHICH currency replaced it, never at what rate.
-    successor: str | None
-
-    @property
-    def active(self) -> bool:
-        return self.status == ACTIVE
+def check_pinned(currencies: Mapping[str, Currency], pinned: str = PINNED_ENTRIES_SHA256) -> None:
+    """Raise :class:`CurrencyTableInvalid` unless ``currencies`` hold exactly the
+    entries this service pinned. Run once, against core's table, at import."""
+    digest = _core.entries_digest(currencies)
+    if digest != pinned:
+        raise CurrencyTableInvalid(
+            f"mythos-core's currency entries digest to {digest}, not the {pinned} athena-backend pinned: "
+            "a core bump that changes the table moves PINNED_ENTRIES_SHA256 in the same reviewed change"
+        )
 
 
-def _check_entry(entry) -> Currency:
-    if not isinstance(entry, dict) or set(entry) != _FIELDS:
-        raise CurrencyTableInvalid(f"an entry must have exactly the fields {sorted(_FIELDS)}: {entry!r}")
-    code, name, minor, status, successor = (entry[k] for k in ("code", "name", "minor_units", "status", "successor"))
-    if not isinstance(code, str) or not _CODE.fullmatch(code):
-        raise CurrencyTableInvalid(f"a code is three capital letters: {code!r}")
-    if not isinstance(name, str) or not name.strip():
-        raise CurrencyTableInvalid(f"{code} has no name")
-    if minor is not None and (
-        isinstance(minor, bool) or not isinstance(minor, int) or not 0 <= minor <= MAX_MINOR_UNITS
-    ):
-        raise CurrencyTableInvalid(f"{code}: minor units are null or an integer from 0 to {MAX_MINOR_UNITS}: {minor!r}")
-    if status not in STATUSES:
-        raise CurrencyTableInvalid(f"{code}: status is one of {sorted(STATUSES)}: {status!r}")
-    if status == ACTIVE and successor is not None:
-        raise CurrencyTableInvalid(f"{code} is active and names a successor ({successor!r})")
-    if successor is not None and (not isinstance(successor, str) or successor == code):
-        raise CurrencyTableInvalid(f"{code}: a successor is another code: {successor!r}")
-    return Currency(code=code, name=name, minor_units=minor, status=status, successor=successor)
+check_pinned(_core.CURRENCIES)
+
+#: Every currency the table holds, by code (core's mapping, read-only).
+CURRENCIES: Mapping[str, Currency] = _core.CURRENCIES
+#: The table's ``source`` and ``review`` records: where its entries came from and
+#: how far they are checked.
+RECORDS: Mapping = _core.RECORDS
+#: The SHA-256 of core's table file, as core pins it.
+TABLE_SHA256: str = _core.TABLE_SHA256
+#: The minor unit of every code an amount may be reported in.
+REPORTABLE_MINOR_UNITS: Mapping[str, int] = _core.REPORTABLE_MINOR_UNITS
 
 
-def table_digest(document) -> str:
-    """SHA-256 over the canonical JSON of the whole table document (sorted keys,
-    compact separators, the discipline the receipt's digests keep): the schema, the
-    entries, and the source and review records. A change to any entry, or to what
-    the file says about its source or its review, moves it; a change to the file's
-    whitespace does not."""
-    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def load_table(path: Path = TABLE_PATH) -> tuple[Mapping[str, Currency], Mapping, str]:
-    """Read and check the table at ``path``: the currencies by code, the file's
-    ``source`` and ``review`` records, and the digest of the whole document. Raises
-    :class:`CurrencyTableInvalid` on any broken rule."""
-    document = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(document, dict) or document.get("schema") != TABLE_SCHEMA:
-        raise CurrencyTableInvalid(f"the table declares schema {TABLE_SCHEMA!r}")
-    for record in ("source", "review"):
-        if not isinstance(document.get(record), dict) or not document[record]:
-            raise CurrencyTableInvalid(f"the table records its {record}")
-    entries = document.get("currencies")
-    if not isinstance(entries, list) or not entries:
-        raise CurrencyTableInvalid("the table holds no currencies")
-    table: dict[str, Currency] = {}
-    for entry in entries:
-        currency_ = _check_entry(entry)
-        if currency_.code in table:
-            raise CurrencyTableInvalid(f"{currency_.code} appears twice")
-        table[currency_.code] = currency_
-    for currency_ in table.values():
-        seen = {currency_.code}
-        step = currency_
-        while step.successor is not None:
-            if step.successor not in table:
-                raise CurrencyTableInvalid(f"{step.code}'s successor {step.successor} is not in the table")
-            step = table[step.successor]
-            if step.code in seen:
-                raise CurrencyTableInvalid(f"the successors from {currency_.code} go round in a circle")
-            seen.add(step.code)
-    meta = MappingProxyType({"source": document["source"], "review": document["review"]})
-    return MappingProxyType(table), meta, table_digest(document)
-
-
-#: Every currency the table holds, by code; its source and review records; and the
-#: digest of the whole document.
-CURRENCIES, TABLE_RECORDS, TABLE_DIGEST = load_table()
+def entries_digest() -> str:
+    """The digest of the entries in force, as core computes it."""
+    return _core.entries_digest(CURRENCIES)
 
 
 def currency(code: str) -> Currency:
@@ -146,18 +98,29 @@ def currency(code: str) -> Currency:
 
 
 def minor_units(code: str) -> int | None:
-    """The minor-unit exponent of ``code``: 0 for JPY, 2 for USD, 3 for KWD."""
+    """The minor-unit exponent of ``code``: 0 for JPY, 2 for USD, 3 for KWD; ``None``
+    where ISO 4217 gives none."""
     return currency(code).minor_units
 
 
 def current_successor(code: str) -> Currency | None:
     """The active currency a retired one's successors lead to (HRK leads to EUR), or
-    ``None`` when ``code`` is active or its line of successors ends without one."""
+    ``None`` when ``code`` is active. Core's table guarantees every line of
+    successors ends at an active code."""
     step = currency(code)
-    if step.active:
+    if step.status == ACTIVE:
         return None
-    while step.successor is not None:
+    while step.status != ACTIVE and step.successor is not None:
         step = CURRENCIES[step.successor]
-        if step.active:
-            return step
+    return step if step.status == ACTIVE else None
+
+
+def reporting_refusal(code) -> str | None:
+    """``None`` when an amount may be reported in ``code``; otherwise core's code
+    for why not: ``currency_unknown`` (the table does not hold it) or
+    ``currency_retired`` (retired, or no minor unit)."""
+    if not isinstance(code, str) or code not in CURRENCIES:
+        return CURRENCY_UNKNOWN
+    if code not in REPORTABLE_MINOR_UNITS:
+        return CURRENCY_RETIRED
     return None
