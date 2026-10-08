@@ -3,8 +3,9 @@
 
 It changes one entry of mythos-core's currency table (USD gets three minor units)
 as a core bump that changed the table would, and it does so at import, before
-pytest-django loads Django -- so ``assurance.economics.engine.currency`` records
-its pin against the changed table when ``assurance.models`` is first imported.
+pytest-django loads Django -- so ``assurance.economics.engine.currency`` checks its
+pin against the changed table on the first economics use (it checks nothing at
+import).
 It is never loaded by the suite itself: its name does not match ``test_*.py``.
 """
 

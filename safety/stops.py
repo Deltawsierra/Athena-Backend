@@ -490,6 +490,14 @@ NOT_STOPS = {
         "POST": "the grant collector records a signed delegation grant or revocation as evidence for an "
         "authority chain; it starts and stops nothing"
     },
+    # Economic Exposure (assurance.economics.api): a customer's financial figures,
+    # read and versioned. Nothing a stop or the decision reads.
+    "deployment-economics-parameter-set": _get(),
+    "deployment-economics-parameter-set-versions": {
+        "GET": _READ,
+        "POST": "records a new version of a customer's financial parameter set: economics inputs, append-only; "
+        "it starts and stops nothing",
+    },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

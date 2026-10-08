@@ -395,6 +395,30 @@ or from the environment when the settings name none.
   (`deliver_owed_stops`) among them. No credential setting ever fails a record, a
   command or the start.
 
+## Economic Exposure: the customer parameter set
+
+Economic Exposure estimates what a finding could cost, as a range with its sources
+(`assurance/economics/`, specified in `docs/economics/spec-v1.md`). The scenario
+engine computes a deterministic low, base and high per loss component from
+parameters that each carry their unit, `source_type` and evidence (sections 14 to
+18); it simulates nothing yet. One route module serves the customer's own figures,
+a deployment-scoped, versioned parameter set (section 19):
+
+- `GET /api/assurance/deployments/<uuid>/economics/parameter-sets/<set_key>/`: the
+  current version;
+- `GET .../parameter-sets/<set_key>/versions/`: every version, newest first;
+- `POST .../parameter-sets/<set_key>/versions/`: the next version, append-only,
+  from a document of the schema's thirty variables, each with its unit; an admin
+  or analyst only, attributed to the caller.
+
+A deployment the caller cannot see is 404. The body is strict JSON of at most 64
+KiB (413 otherwise): an unknown field, a JSON number where a decimal string
+belongs, and a key twice in one object are refused with the engine's code. None of
+these routes is a stop, and `assurance/urls.py` imports their module guarded: if it
+fails to import, its routes are logged and not served, and every stop and the
+system checks load without them. While economics cannot read mythos-core's
+currency table, the write answers 503; nothing at import reads the table.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each
