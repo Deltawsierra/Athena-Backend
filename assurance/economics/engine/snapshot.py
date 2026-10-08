@@ -41,7 +41,7 @@ _SOURCE = frozenset(
     {"source_key", "provider", "dataset", "url", "license_class", "trust_tier", "retrieved_at", "schema_version"}
 )
 _FX = frozenset({"base", "quote", "rate", "rate_type", "provider", "observed_at", "effective_date"})
-_INDEX = frozenset({"series_id", "geography", "category", "period", "value", "vintage_date"})
+_INDEX = frozenset({"series_id", "geography", "category", "base", "period", "value", "vintage_date"})
 
 
 def snapshot_hash(data: bytes) -> str:
@@ -157,6 +157,7 @@ def parse_snapshot(data: bytes) -> Snapshot:
             series_id=entry["series_id"],
             geography=entry["geography"],
             category=entry["category"],
+            base=entry["base"],
             period=entry["period"],
             value=parse_decimal(entry["value"], "index value"),
             vintage_date=_date(entry["vintage_date"], "vintage_date"),

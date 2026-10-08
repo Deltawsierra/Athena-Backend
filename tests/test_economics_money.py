@@ -44,12 +44,13 @@ SPEC = REPO / "docs" / "economics" / "spec-v1.md"
 #: The committed snapshot's hash: SHA-256 of its bytes. Registered as the
 #: FinancialSource's snapshot_hash, and named in the spec. An edit to the file moves
 #: it: change it here and in the spec, in the same reviewed change.
-SNAPSHOT_HASH = "sha256:54ff61637f36e517d02bb146615e94e9867db5270355bc76eb0fd41b4b4001a5"
+SNAPSHOT_HASH = "sha256:20fea6b1b1ed1939a5fd71b2f084d32e141afa585d64203fa5c96dd8f1594a19"
 
 REF, MKT = "SYNTHETIC-REF", "SYNTHETIC-MKT"
 CPI = "consumer prices, all items (SYNTHETIC)"
-US_CPI = IndexSelector("SYN-CPI-US", "US", CPI, "USD")
-EA_HICP = IndexSelector("SYN-HICP-EA", "EA", CPI, "EUR")
+BASE = "2020-03=100"
+US_CPI = IndexSelector("SYN-CPI-US", "US", CPI, BASE, "USD")
+EA_HICP = IndexSelector("SYN-HICP-EA", "EA", CPI, BASE, "EUR")
 EVENT, VALUATION = date(2020, 3, 2), date(2026, 10, 8)
 HASH = "sha256:" + "ab" * 32
 OBSERVED = datetime(2020, 3, 2, 15, tzinfo=UTC)
@@ -111,6 +112,7 @@ def point(period="2020-03", value="100", vintage=date(2020, 4, 10), **over) -> I
         "series_id": US_CPI.series_id,
         "geography": "US",
         "category": CPI,
+        "base": BASE,
         "period": period,
         "value": Decimal(value) if isinstance(value, str) else value,
         "vintage_date": vintage,
@@ -604,6 +606,29 @@ def test_a_unit_or_currency_mismatch_is_refused(index_book):
         index_book.value(dataclasses.replace(US_CPI, geography="GB"), "2020-03", VALUATION)
     with refused("period_malformed"):
         point(period="2020-13")
+
+
+def test_r1_m3_a_rebased_series_never_divides_one_base_by_another():
+    """Review round 1, M3. SYN-CPI-US is 100 for 2020-03 on the base 2020-03=100;
+    its publisher rebases it to 2026=100 and the 2026-09 value arrives as 98.4 on
+    the new base. Divided by the old 100, that reads as 1.6% deflation over six
+    years. A series is one base, so the two are never in one book, and a selector
+    names the base it expects."""
+    old = point(period="2020-03", value="100", vintage=date(2020, 4, 10))
+    rebased = point(period="2026-09", value="98.4", vintage=date(2026, 10, 14), base="2026=100")
+    with refused("index_series_mismatch"):
+        IndexBook([old, rebased])
+    # A later vintage of an old period, republished on the new base, is refused too.
+    with refused("index_series_mismatch"):
+        IndexBook([old, point(period="2020-03", value="79.9", vintage=date(2026, 10, 14), base="2026=100")])
+    same_base = IndexBook([old, point(period="2026-09", value="125", vintage=date(2026, 10, 14))])
+    step = cost_index.index(usd("100"), EVENT, date(2026, 9, 30), same_base, US_CPI, as_of=date(2026, 10, 14))
+    assert step.from_point.base == step.to_point.base == US_CPI.base == BASE
+    assert step.as_dict()["base"] == BASE and step.as_dict()["observations"][0]["base"] == BASE
+    with refused("index_series_mismatch"):
+        same_base.value(dataclasses.replace(US_CPI, base="2026=100"), "2020-03", VALUATION)
+    with refused("required_field_blank"):
+        point(base=" ")
 
 
 def test_date_inversion_is_refused(fx_book, index_book):

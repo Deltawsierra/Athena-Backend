@@ -91,6 +91,7 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
                 series_id=point.series_id,
                 geography=point.geography,
                 category=point.category,
+                base=point.base,
                 period=point.period,
                 value=point.value,
                 vintage_date=point.vintage_date,

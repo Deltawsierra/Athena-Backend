@@ -3,18 +3,22 @@ the step that moves an amount from one date's prices to another's.
 
 An :class:`IndexPoint` is one published value of one series -- a consumer-price
 index, a legal-services producer-price index (owner's specification, section 13)
--- for one calendar month, in one vintage: series id, geography, category, period
-(``YYYY-MM``), value, the date that vintage was published, and the snapshot it
-was read from. It is the pure mirror of
+-- for one calendar month, in one vintage: series id, geography, category, the
+base it is expressed on (``2020-03=100``), period (``YYYY-MM``), value, the date
+that vintage was published, and the snapshot it was read from. It is the pure mirror of
 :class:`assurance.economics.models.CostIndexObservation`.
 
 :func:`index` multiplies an amount by ``value(to period) / value(from period)``
 (``docs/economics/spec-v1.md``, section 12):
 
-- **One series, one currency.** An :class:`IndexSelector` names the series, its
-  geography and category, and the currency its prices are in. An amount in any
-  other currency is never indexed by it (``currency_mismatch``), and a book whose
-  series mixes geographies or categories is refused (``index_series_mismatch``).
+- **One series, one base, one currency.** A series is one geography, one
+  category and one base: a book whose series mixes them is refused
+  (``index_series_mismatch``), so a ratio's two values are always on the same
+  base -- a series rebased from ``2020-03=100`` to ``2026=100`` is two series, and
+  dividing a value on one by a value on the other is refused, never read as
+  inflation or deflation. An :class:`IndexSelector` names the series, its
+  geography, category and base, and the currency its prices are in. An amount in
+  any other currency is never indexed by it (``currency_mismatch``).
 - **Vintages.** Each period's value is the latest vintage published on or before
   the as-of date (the valuation date unless the policy says otherwise), and the
   step records which.
@@ -88,6 +92,9 @@ class IndexPoint:
     series_id: str
     geography: str
     category: str
+    #: What the values are expressed relative to (``2020-03=100``): part of the
+    #: series' identity, so two values on different bases are never divided.
+    base: str
     period: str
     value: Decimal
     vintage_date: date
@@ -96,7 +103,7 @@ class IndexPoint:
     source_version: int | None = None
 
     def __post_init__(self):
-        check_text(series_id=self.series_id, geography=self.geography, category=self.category)
+        check_text(series_id=self.series_id, geography=self.geography, category=self.category, base=self.base)
         check_period(self.period)
         check_decimal(self.value, "index value")
         if self.value <= 0:
@@ -114,6 +121,7 @@ class IndexPoint:
             "series_id": self.series_id,
             "geography": self.geography,
             "category": self.category,
+            "base": self.base,
             "period": self.period,
             "value": decimal_text(self.value),
             "vintage_date": self.vintage_date.isoformat(),
@@ -125,41 +133,49 @@ class IndexPoint:
 
 @dataclass(frozen=True)
 class IndexSelector:
-    """Which series an amount is indexed by, and the currency its prices are in."""
+    """Which series an amount is indexed by -- its id, geography, category and
+    base -- and the currency its prices are in."""
 
     series_id: str
     geography: str
     category: str
+    base: str
     currency: str
 
     def __post_init__(self):
-        check_text(series_id=self.series_id, geography=self.geography, category=self.category)
+        check_text(series_id=self.series_id, geography=self.geography, category=self.category, base=self.base)
         check_reporting_currency(self.currency, "index currency")
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return (self.geography, self.category, self.base)
 
     def as_dict(self) -> dict:
         return {
             "series_id": self.series_id,
             "geography": self.geography,
             "category": self.category,
+            "base": self.base,
             "currency": self.currency,
         }
 
 
 class IndexBook:
-    """The index values an indexing step may read. A series is one geography and
-    one category; each (series, period, vintage) is held once."""
+    """The index values an indexing step may read. A series is one geography, one
+    category and one base; each (series, period, vintage) is held once."""
 
     def __init__(self, points: Iterable[IndexPoint]):
-        series: dict[str, tuple[str, str]] = {}
+        series: dict[str, tuple[str, str, str]] = {}
         values: dict[str, dict[str, dict[date, IndexPoint]]] = {}
         for point in points:
             if not isinstance(point, IndexPoint):
                 raise TypeError(f"an IndexBook holds IndexPoints, not {type(point).__name__}")
-            identity = series.setdefault(point.series_id, (point.geography, point.category))
-            if identity != (point.geography, point.category):
+            own = (point.geography, point.category, point.base)
+            identity = series.setdefault(point.series_id, own)
+            if identity != own:
                 raise MoneyRefused(
                     "index_series_mismatch",
-                    f"{point.series_id} is {identity}, and also {(point.geography, point.category)}",
+                    f"{point.series_id} is (geography, category, base) {identity}, and also {own}",
                 )
             vintages = values.setdefault(point.series_id, {}).setdefault(point.period, {})
             if point.vintage_date in vintages:
@@ -176,10 +192,10 @@ class IndexBook:
         identity = self._series.get(selector.series_id)
         if identity is None:
             return None
-        if identity != (selector.geography, selector.category):
+        if identity != selector.identity:
             raise MoneyRefused(
                 "index_series_mismatch",
-                f"{selector.series_id} is {identity}, not {(selector.geography, selector.category)}",
+                f"{selector.series_id} is (geography, category, base) {identity}, not {selector.identity}",
             )
         vintages = self._values[selector.series_id].get(period, {})
         published = [vintage for vintage in vintages if vintage <= as_of]

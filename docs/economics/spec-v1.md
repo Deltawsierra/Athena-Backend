@@ -294,7 +294,7 @@ observations, the snapshot loader an operator runs; any other writer is a defect
 | `SensitiveOverride` | a request to override a parameter or value: subject, reason, requester | an admin or analyst |
 | `OverrideApproval` | one approval of one override: approver | an admin, other than the requester; one approval per person |
 | `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; later a feed adapter, after its licensing review |
-| `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
+| `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
 
 The two observation models are checked on save by the engine's own contracts
 (`fx.FXRate`, `cost_index.IndexPoint`), so a row is refused with the engine's code
@@ -303,8 +303,8 @@ or negative rate or value, an unknown code or one with no minor unit, a pair of
 one code, an unknown rate type, a naive instant, a malformed period, a vintage
 before its period. An FX row is refused unless its snapshot hash is its source
 version's own (`snapshot_hash_mismatch`), and either row unless its column holds
-its value exactly (`value_precision`, section 13). A series stays one geography
-and one category within a source (`index_series_mismatch`). The database holds a
+its value exactly (`value_precision`, section 13). A series stays one geography,
+one category and one base within a source (`index_series_mismatch`). The database holds a
 positive rate and value, a known rate type and a pair of two codes as check
 constraints, and one row per provider, pair, rate type and date (one per series,
 period and vintage) as unique constraints. Neither model has an account column.
@@ -479,7 +479,7 @@ publish keeps its meaning.
 | `rate_type_unrecognised` | a rate type other than `reference`, `mid`, `bid` and `ask` |
 | `pair_malformed` | an exchange rate whose base and quote are one code |
 | `index_value_not_positive` | a zero or negative index value |
-| `index_series_mismatch` | a series with two geographies or categories, or a selector naming the wrong ones |
+| `index_series_mismatch` | a series with two geographies, categories or bases, or a selector naming the wrong ones |
 | `period_malformed` | a period that is not `YYYY-MM` |
 | `date_malformed` | a date that is a datetime or text, an instant without a time zone |
 | `date_inversion` | an event after its valuation date; indexing from a later date to an earlier; an index value published before its period began |
@@ -549,9 +549,14 @@ The rules a step records are `same_currency`, `exact`, `last_official_rate` and
 
 An index value (`cost_index.IndexPoint`, stored as `CostIndexObservation`) is one
 published value of one series for one calendar month, in one vintage: series id,
-geography, category, period (`YYYY-MM`), value, vintage date and snapshot hash. An
-`IndexSelector` names the series, its geography and category, and the currency its
-prices are in.
+geography, category, base, period (`YYYY-MM`), value, vintage date and snapshot
+hash. A series is one geography, one category and one base: the base
+(`2020-03=100`) is what its values are expressed relative to, and a book or a
+source whose series mixes bases is refused (`index_series_mismatch`), so a
+ratio's two values always share one. A series rebased by its publisher is a new
+series; dividing a value on the new base by one on the old would read a rebase as
+inflation or deflation. An `IndexSelector` names the series, its geography,
+category and base, and the currency its prices are in.
 
 `cost_index.index(amount, from_date, to_date, book, selector)` multiplies an amount
 by the series' value for `to_date`'s month over its value for `from_date`'s month.
@@ -640,7 +645,7 @@ and the same rate read back from its column are written alike. Abridged:
    "observations": [{"provider": "SYNTHETIC-REF", "base": "EUR", "quote": "USD", "rate": "1.1",
                      "rate_type": "reference", "effective_date": "2020-03-02",
                      "observed_at": "2020-03-02T15:00:00+00:00",
-                     "source_snapshot_hash": "sha256:54ff...01a5",
+                     "source_snapshot_hash": "sha256:20fe...4a19",
                      "source_key": "synthetic-fx-and-cost-index", "source_version": 1}],
    "input": {"amount": "1000", "currency": "EUR"}, "output": {"amount": "1100", "currency": "USD"}},
   {"step": "cost_index", "series_id": "SYN-CPI-US", "geography": "US", "category": "...", "currency": "USD",
@@ -648,7 +653,7 @@ and the same rate read back from its column are written alike. Abridged:
    "period_used": "2026-10", "as_of": "2026-10-08", "rule": "exact_period", "lag_months": 0,
    "ratio": "1.25", "stale": false, "estimate": false, "downgrades": [],
    "observations": [{"series_id": "SYN-CPI-US", "period": "2020-03", "value": "100", "vintage_date": "2020-04-10",
-                     "source_snapshot_hash": "sha256:54ff...01a5", "...": "..."},
+                     "source_snapshot_hash": "sha256:20fe...4a19", "...": "..."},
                     {"series_id": "SYN-CPI-US", "period": "2026-10", "value": "125", "vintage_date": "2026-10-08",
                      "...": "..."}],
    "input": {"amount": "1100", "currency": "USD"}, "output": {"amount": "1375", "currency": "USD"}},
@@ -697,7 +702,7 @@ real price index. Every number in it was made up for tests, and none is a source
 for a customer figure. It says so in its `label`, in its source's `dataset`, in
 its providers' names (`SYNTHETIC-REF`, a reference publisher; `SYNTHETIC-MKT`, a
 market with bid, mid and ask) and in its series' category. Its hash is
-`sha256:54ff61637f36e517d02bb146615e94e9867db5270355bc76eb0fd41b4b4001a5`, pinned
+`sha256:20fea6b1b1ed1939a5fd71b2f084d32e141afa585d64203fa5c96dd8f1594a19`, pinned
 by `tests/test_economics_money.py` and `tests/test_economics_records.py`, and it is
 registered as a `FinancialSource` (`source_key` `synthetic-fx-and-cost-index`,
 platform-wide) with licence class `open` and trust tier `unverified`: the data is

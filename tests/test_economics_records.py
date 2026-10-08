@@ -114,6 +114,7 @@ def _index(source, **over):
         "series_id": "SYN-CPI-US",
         "geography": "US",
         "category": "consumer prices, all items (SYNTHETIC)",
+        "base": "2020-03=100",
         "period": "2026-09",
         "value": Decimal("124.500"),
         "vintage_date": date(2026, 10, 1),
@@ -615,8 +616,8 @@ def test_removing_an_operator_is_never_held_back_by_economics_rows(deployment, p
 # ===================================================== phase E1: observations
 
 #: The committed snapshot's hash (tests/test_economics_money.py pins it too).
-SYNTHETIC_HASH = "sha256:54ff61637f36e517d02bb146615e94e9867db5270355bc76eb0fd41b4b4001a5"
-US_CPI = IndexSelector("SYN-CPI-US", "US", "consumer prices, all items (SYNTHETIC)", "USD")
+SYNTHETIC_HASH = "sha256:20fea6b1b1ed1939a5fd71b2f084d32e141afa585d64203fa5c96dd8f1594a19"
+US_CPI = IndexSelector("SYN-CPI-US", "US", "consumer prices, all items (SYNTHETIC)", "2020-03=100", "USD")
 
 
 def test_the_synthetic_snapshot_is_registered_open_and_unverified():
@@ -804,4 +805,18 @@ def test_r1_m1_a_synthetic_source_is_never_trusted_above_unverified():
     with pytest.raises(IntegrityError), transaction.atomic():
         models.Model.save(row, force_insert=True)
     assert _source(synthetic=True).trust_tier == "unverified"
+
+
+def test_r1_m3_a_series_stays_on_one_base_in_a_source():
+    """Review round 1, M3: a stored series rebased within one source is refused,
+    so no book read from the rows can divide one base by another."""
+    source = _source()
+    _index(source)
+    with pytest.raises(EconomicsRefused) as refused:
+        _index(source, period="2026-10", vintage_date=date(2026, 11, 13), base="2026=100", value=Decimal("98.4"))
+    assert refused.value.code == "index_series_mismatch"
+    with pytest.raises(EconomicsRefused) as refused:
+        _index(source, period="2026-10", vintage_date=date(2026, 11, 13), base="")
+    assert refused.value.code == "required_field_blank"
+    assert CostIndexObservation.objects.count() == 1
 

@@ -748,16 +748,18 @@ class FXObservation(_AppendOnly):
 
 class CostIndexObservation(_AppendOnly):
     """One published value of one cost-index series, read from a source version's
-    snapshot: series id, geography, category, period (a month, ``YYYY-MM``), value,
-    and the date that vintage was published (specification, sections 13 and 15).
+    snapshot: series id, geography, category, the base its values are expressed on
+    (``2020-03=100``), period (a month, ``YYYY-MM``), value, and the date that
+    vintage was published (specification, sections 13 and 15).
 
     The pure contract is :class:`assurance.economics.engine.cost_index.IndexPoint`,
     and a row is refused on save unless it makes one -- a value that is not a
     ``Decimal``, NaN, zero or negative; a malformed period; a vintage published
     before its period began (``date_inversion``) -- with the engine's code; unless
     the column holds its value exactly (``value_precision``); and unless its series
-    is the one geography and category it already is in this source
-    (``index_series_mismatch``). It goes with its source."""
+    is the one geography, category and base it already is in this source
+    (``index_series_mismatch``), so a ratio never divides one base by another. It
+    goes with its source."""
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -765,6 +767,7 @@ class CostIndexObservation(_AppendOnly):
     series_id = models.CharField(max_length=100)
     geography = models.CharField(max_length=32)
     category = models.CharField(max_length=200)
+    base = models.CharField(max_length=64)
     period = models.CharField(max_length=7)
     value = models.DecimalField(max_digits=INDEX_DIGITS, decimal_places=INDEX_PLACES)
     vintage_date = models.DateField()
@@ -787,6 +790,7 @@ class CostIndexObservation(_AppendOnly):
             series_id=self.series_id,
             geography=self.geography,
             category=self.category,
+            base=self.base,
             period=self.period,
             value=self.value,
             vintage_date=self.vintage_date,
@@ -801,7 +805,7 @@ class CostIndexObservation(_AppendOnly):
             raise EconomicsRefused("value_precision", f"value {self.value}")
         other = (
             CostIndexObservation._base_manager.filter(source_id=self.source_id, series_id=self.series_id)
-            .exclude(geography=self.geography, category=self.category)
+            .exclude(geography=self.geography, category=self.category, base=self.base)
             .exists()
         )
         if other:
