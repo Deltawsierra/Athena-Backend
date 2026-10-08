@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from mythos_core import outcome as oc
@@ -121,6 +121,29 @@ def live_presented(deployment, workflow, *, route=None, assertion=None, grant=No
     }
 
 
+#: ``observed_effect(reading=LIVE)``: the reading the gate would make now.
+LIVE = object()
+
+
+def live_reading(deployment, workflow, read_at=None) -> dict | None:
+    """What Achilles' gate reads from this backend's approval-in-force route now
+    (:mod:`assurance.gate_approval`), as it signs it into a v3 document's
+    ``dispatch.verified.workflow_approval``; None when the route would refuse."""
+    from assurance import gate_approval
+
+    status, body = gate_approval.approval_in_force(deployment, workflow)
+    if status != 200:
+        return None
+    instant = read_at if read_at is not None else datetime.now(dt_timezone.utc)
+    return {
+        "deployment": body["deployment"],
+        "workflow": body["workflow"],
+        "version": body["version"],
+        "digest": body["digest"],
+        "read_at": _stamp(instant),
+    }
+
+
 def observed_effect(
     deployment,
     workflow,
@@ -137,6 +160,8 @@ def observed_effect(
     dispatched_at=None,
     presented=None,
     gate=None,
+    reading=LIVE,
+    approvals_digest=None,
 ) -> tuple[dict, dict]:
     """``(envelope, evidence)``: what Achilles posts when its dispatch saw a permitted
     action's effect -- the ``mythos.observed-effect/v2`` document, and the outcome its
@@ -146,7 +171,10 @@ def observed_effect(
     any of it), the instant the dispatch left (``dispatched_at``, the effect's own
     instant by default), and what it was ``presented`` under (:func:`live_presented` by
     default: the approval and contracts as they stand when this is called).
-    ``schema="v1"``: the v1 document, which records no dispatch state."""
+    ``schema="v1"``: the v1 document, which records no dispatch state. ``schema="v3"``:
+    the v2 block and ``verified`` -- ``approvals_digest`` and the gate's ``reading`` of
+    the approval in force (:func:`live_reading` by default; None for a gate with no
+    link)."""
     instant = observed_at.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     evidence = {
         "schema": f"mythos.observed-effect/{schema}",
@@ -166,13 +194,20 @@ def observed_effect(
         },
         "observed_at": instant,
     }
-    if schema == "v2":
+    if schema in ("v2", "v3"):
         left = dispatched_at if dispatched_at is not None else observed_at
         evidence["dispatch"] = {
             **GATE_STATE,
             **(gate or {}),
             "dispatched_at": _stamp(left),
             "presented": presented if presented is not None else live_presented(deployment, workflow),
+        }
+    if schema == "v3":
+        evidence["dispatch"]["verified"] = {
+            "approvals_digest": approvals_digest,
+            "workflow_approval": (
+                live_reading(deployment, workflow, left - timedelta(seconds=1)) if reading is LIVE else reading
+            ),
         }
     outcome = oc.build_outcome(
         deployment=str(deployment.uuid),

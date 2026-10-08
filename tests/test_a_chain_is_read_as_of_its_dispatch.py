@@ -406,7 +406,8 @@ def test_this_backend_verifies_the_v2_conformance_vector_achilles_signed():
     assert verdict.verdict == oc.AUTHENTIC, verdict.reason
     assert observed_effects.examine(verdict.outcome, v["evidence"]) == ""
     assert oc.evidence_digest_of(v["evidence"]) == v["evidence_digest"] == verdict.outcome["evidence_digest"]
-    assert v["evidence"]["schema"] == observed_effects.EVIDENCE_SCHEMA == "mythos.observed-effect/v2"
+    # v3 is what a dispatch signs now (short 3); this vector is v2's, still read as before.
+    assert v["evidence"]["schema"] == observed_effects.EVIDENCE_SCHEMA_V2 == "mythos.observed-effect/v2"
     # The dispatch state reads as the rule reads it.
     from assurance.authority_chain_records import dispatch_state
 
