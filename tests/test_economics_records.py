@@ -769,3 +769,39 @@ def test_removing_an_operator_who_registered_a_snapshot_is_never_held_back(peopl
     stored = FinancialSource.objects.get(pk=source.pk)
     assert (stored.recorded_by_id, stored.recorded_by_username) == (None, "leaver")
     assert stored.fx_observations.count() == 17
+
+
+# ===================================================================== review round 1 (E1)
+
+
+def test_r1_m1_the_synthetic_snapshot_is_never_usable_for_production(deployment):
+    """Review round 1, M1: the fixture is licensed ``open``, a reviewed class, so the
+    licence-only gate returned made-up rates to a production run. A synthetic source
+    is refused whatever its licence."""
+    source = snapshots.register_snapshot()
+    assert source not in FinancialSource.objects.usable_for_production(None)
+    assert source not in FinancialSource.objects.usable_for_production(deployment)
+    assert source.synthetic is True and FinancialSource.objects.get(pk=source.pk).synthetic is True
+    assert source.production_use_refusal(None) == "synthetic_source"
+    with pytest.raises(SourceNotUsableForProduction) as refused:
+        source.check_usable_for_production(None)
+    assert refused.value.code == "synthetic_source"
+    # A real, reviewed source beside it still is usable.
+    real = _source(source_key="fed-h10", license_class="open", trust_tier="authoritative")
+    assert list(FinancialSource.objects.usable_for_production(None)) == [real]
+    assert real.synthetic is False
+
+
+def test_r1_m1_a_synthetic_source_is_never_trusted_above_unverified():
+    with pytest.raises(EconomicsRefused) as refused:
+        _source(synthetic=True, license_class="open", trust_tier="authoritative")
+    assert (refused.value.code, refused.value.detail) == ("synthetic_source", "trust_tier")
+    assert not FinancialSource.objects.exists()
+    row = FinancialSource(
+        source_key="written-past-save", version=1, provider="p", dataset="d", retrieved_at=RETRIEVED,
+        snapshot_hash=SNAPSHOT, schema_version="1", synthetic=True, trust_tier="benchmark",
+    )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        models.Model.save(row, force_insert=True)
+    assert _source(synthetic=True).trust_tier == "unverified"
+

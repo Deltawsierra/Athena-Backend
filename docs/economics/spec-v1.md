@@ -310,10 +310,11 @@ constraints, and one row per provider, pair, rate type and date (one per series,
 period and vintage) as unique constraints. Neither model has an account column.
 
 `FinancialSource.check_usable_for_production(deployment)` raises unless a production
-run for that deployment may use that version: a reviewed license class, and either
-platform-wide or the deployment's own. `FinancialSource.objects.usable_for_production(deployment)`
+run for that deployment may use that version: a reviewed license class, not
+synthetic, and either platform-wide or the deployment's own. `FinancialSource.objects.usable_for_production(deployment)`
 returns exactly those: the reviewed platform-wide sources and the deployment's own,
-never an `unreviewed` one and never another deployment's. `SensitiveOverride.check_in_force()` raises unless two
+never an `unreviewed` one, never a synthetic one (`FinancialSource.synthetic`, set
+from a snapshot's own flag) and never another deployment's. `SensitiveOverride.check_in_force()` raises unless two
 different people, neither the requester, have approved it. Whatever would use a
 source or apply an override calls these first.
 
@@ -335,6 +336,7 @@ that code (`EconomicsRefused.code`).
 | `approver_already_approved` | nobody approves the same override twice (also a unique constraint) |
 | `override_needs_two_approvers` | a sensitive override is in force only with two different named approvers, neither of them the requester |
 | `unreviewed_license` | a production run never uses an `unreviewed` source |
+| `synthetic_source` | a production run never uses a synthetic source (made-up test data), whatever its licence, and a synthetic source is never trusted above `unverified` (also a check constraint) |
 | `license_class_unrecognised` | nor a source whose license class this platform does not know |
 | `snapshot_hash_malformed` | a snapshot hash is `sha256:` and 64 lowercase hex digits |
 | `inventory_entry_incomplete` | an inventory entry names its model, version, owner, intended use and limitations |
@@ -726,8 +728,12 @@ up to 999,999.999999999 (9 after the point), an index value up to
 exactly is refused (`value_precision`), never rounded to fit. The engine itself
 has no such limit.
 
-**For the owner to decide.** The synthetic snapshot is licensed `open`, which is a
-reviewed licence class, so `FinancialSource.objects.usable_for_production()` would
-return it. Nothing runs in production in E1; before anything does, either the
-production gate also refuses `unverified` sources, or synthetic sources are kept
-out of production databases.
+**Kept out of production.** The synthetic snapshot is licensed `open`, a reviewed
+class, so a licence-only gate would have let a production run read it. It is
+registered with `FinancialSource.synthetic` set from its own `synthetic` flag, and
+a synthetic source is refused by `check_usable_for_production` and left out of
+`usable_for_production` whatever its licence (`synthetic_source`), and is never
+trusted above `unverified` (refused on save, and the check constraint
+`ck_econ_source_synthetic_unverified`). Whether a production run should also
+refuse every `unverified` source, synthetic or not, is the owner's decision; this
+version does not.

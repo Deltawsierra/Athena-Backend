@@ -572,6 +572,9 @@ def test_an_unreviewed_source_is_never_used_by_a_production_run():
     assert governance.production_use_refusal("") == "license_class_unrecognised"
     for reviewed in ("open", "restricted", "licensed", "customer"):
         assert governance.production_use_refusal(reviewed) is None
+        # Review round 1, M1: synthetic test data, whatever its licence.
+        assert governance.production_use_refusal(reviewed, synthetic=True) == "synthetic_source"
+    assert governance.production_use_refusal("unreviewed", synthetic=True) == "synthetic_source"
 
 
 def test_snapshot_hashes_spine_references_and_inventory_entries():

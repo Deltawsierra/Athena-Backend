@@ -162,12 +162,13 @@ class FinancialSourceQuerySet(AppendOnlyQuerySet):
         platform-wide sources and that deployment's own, and only those whose
         license class someone has reviewed. ``unreviewed`` (the default) is never
         among them, and another deployment's source never is. ``deployment=None``
-        is a run for no deployment: platform-wide sources only."""
+        is a run for no deployment: platform-wide sources only. A synthetic source
+        is never among them, whatever its licence."""
         reviewed = [c for c in _LICENSE_CODES if governance.production_use_refusal(c) is None]
         tenant = Q(deployment__isnull=True)
         if deployment is not None:
             tenant |= Q(deployment=deployment)
-        return self.filter(tenant, license_class__in=reviewed)
+        return self.filter(tenant, license_class__in=reviewed, synthetic=False)
 
 
 class FinancialSource(_AppendOnly):
@@ -191,6 +192,12 @@ class FinancialSource(_AppendOnly):
     ``license_class`` defaults to ``unreviewed``, and an unreviewed source is never
     used by a production run: :meth:`check_usable_for_production` refuses it, and
     :meth:`FinancialSourceQuerySet.usable_for_production` leaves it out.
+
+    ``synthetic`` marks made-up test data, such as the committed fixture snapshot
+    (set by :func:`assurance.economics.snapshots.register_snapshot` from the
+    snapshot's own flag). A synthetic source is never used by a production run,
+    whatever its licence (``synthetic_source``), and is never trusted above
+    ``unverified`` (refused on save, and a check constraint).
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -218,6 +225,8 @@ class FinancialSource(_AppendOnly):
     # "sha256:" + 64 hex over the snapshot's bytes, as the platform's other digests.
     snapshot_hash = models.CharField(max_length=71)
     schema_version = models.CharField(max_length=64)
+    # Made-up test data: never used by a production run, never trusted above unverified.
+    synthetic = models.BooleanField(default=False)
     recorded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -253,6 +262,10 @@ class FinancialSource(_AppendOnly):
                 | ~(Q(license_class=LicenseClass.CUSTOMER.value) | Q(trust_tier=TrustTier.CUSTOMER.value)),
                 name="ck_econ_source_customer_has_tenant",
             ),
+            models.CheckConstraint(
+                condition=Q(synthetic=False) | Q(trust_tier=TrustTier.UNVERIFIED.value),
+                name="ck_econ_source_synthetic_unverified",
+            ),
         ]
         indexes = [models.Index(fields=["deployment", "source_key"], name="assurance_econ_source_key")]
 
@@ -266,6 +279,8 @@ class FinancialSource(_AppendOnly):
             self.license_class == LicenseClass.CUSTOMER.value or self.trust_tier == TrustTier.CUSTOMER.value
         ):
             raise EconomicsRefused("customer_source_without_tenant")
+        if self.synthetic is not False and self.trust_tier != TrustTier.UNVERIFIED.value:
+            raise EconomicsRefused("synthetic_source", "trust_tier")
         _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
         if self.version is None:
             earlier = FinancialSource._base_manager.filter(
@@ -277,7 +292,7 @@ class FinancialSource(_AppendOnly):
     def production_use_refusal(self, deployment) -> str | None:
         """``None`` when a production run for ``deployment`` may use this version;
         otherwise why not."""
-        refusal = governance.production_use_refusal(self.license_class)
+        refusal = governance.production_use_refusal(self.license_class, synthetic=self.synthetic)
         if refusal is not None:
             return refusal
         if self.deployment_id is not None and self.deployment_id != getattr(deployment, "pk", deployment):

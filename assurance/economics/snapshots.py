@@ -70,6 +70,7 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
             retrieved_at=source["retrieved_at"],
             snapshot_hash=snapshot.snapshot_hash,
             schema_version=source["schema_version"],
+            synthetic=snapshot.synthetic,
             recorded_by=recorded_by,
         )
         for rate in snapshot.fx_rates:
