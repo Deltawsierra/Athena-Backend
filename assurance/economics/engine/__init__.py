@@ -12,7 +12,7 @@ fixtures and the tests all read the same codes:
 - :mod:`.confidence`: the confidence grades A, B, C, D and Unknown;
 - :mod:`.currency`: the ISO 4217 table (minor units, active or retired,
   successor), which is mythos-core's one table, read through a thin adapter that
-  refuses any table but the one pinned;
+  refuses, on use and never at import, any table but the one pinned;
 - :mod:`.governance`: who may review a scenario, how many people approve a
   sensitive override, which sources a production run may use, and the refusal
   code each rule gives;

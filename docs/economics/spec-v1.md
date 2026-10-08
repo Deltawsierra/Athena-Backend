@@ -93,6 +93,16 @@ that serves economics adds its own route module to that test, and that module is
 never one the stop lane (`safety.stops`) judges. An economics failure is never a
 reason to refuse anything outside economics.
 
+That includes a currency table that is not the pinned one (section 5). Django
+imports the currency adapter when it loads `assurance.models`, so a refusal at
+import would take `django.setup()` down, and every route with it, every stop
+among them. The adapter therefore records the pin at import and refuses only on
+economics use. `test_a_changed_core_table_never_takes_down_the_scan_stop` runs a
+fresh pytest with one entry of core's table changed before Django loads
+(`tests/economics_mismatched_core.py`): Django loads, the scan's Stop route
+resolves, answers and saves the Stop, and economics use refuses
+(`tests/economics_mismatched_core_cases.py`).
+
 ## 3. Calculation policy
 
 Every later step computes under these rules. A step that cannot follow one says
@@ -216,9 +226,12 @@ the same reviewed change:
 - **The entries.** The SHA-256 of the canonical JSON of the 216 entries
   (`mythos_core.currency.entries_digest`) is
   `00cb16d39eea4ed912c1f8fb9d43b58e19d96328090a3ad766f9cf03a868038a`, the value
-  #141's copy had. The adapter refuses to import against any other table
-  (`CurrencyTableInvalid`), and `tests/test_economics_engine.py` pins the same
-  value.
+  #141's copy had. `tests/test_economics_engine.py` pins the same value. The
+  adapter records at import whether core's table is the pinned one, and never
+  raises there: every economics USE of the table -- `currency()`,
+  `minor_units()`, `current_successor()`, `reporting_refusal()`, and through them
+  every `Money`, rate and policy -- raises `CurrencyTableInvalid` while it is not
+  (section 2).
 - **The file.** core pins the SHA-256 of its file's bytes, entries and `source`
   and `review` records together:
   `b23e144243e33946633529178e494ce7a43ef332408a3fd4271eceeefeaa2f9a`. The test

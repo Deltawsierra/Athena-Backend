@@ -265,31 +265,48 @@ def test_the_adapter_refuses_a_table_it_has_not_pinned():
             currency.check_pinned(table)
 
 
-def test_a_core_bump_that_changes_the_table_fails_at_import():
+def test_a_core_bump_that_changes_the_table_refuses_economics_use_not_import():
     """A fresh interpreter whose mythos-core table has one entry changed, as a core
-    bump might: importing the engine's currency adapter is refused, so nothing
-    shows an amount at a precision nobody reviewed."""
+    bump might. Review round 1, M2: importing the adapter must NOT raise -- Django
+    imports it while loading ``assurance.models``, and a refusal there took every
+    route down, the scan's Stop with them. The pin is recorded at import, and every
+    economics use of the table refuses instead."""
     script = textwrap.dedent(
         """
         import dataclasses, types
+        from decimal import Decimal
         import mythos_core.currency as core
 
         table = dict(core.CURRENCIES)
         table["USD"] = dataclasses.replace(table["USD"], minor_units=3)
         core.CURRENCIES = types.MappingProxyType(table)
-        try:
-            import assurance.economics.engine.currency
-        except core.CurrencyTableInvalid as refused:
-            print("refused", "athena-backend pinned" in str(refused))
-        else:
-            print("imported")
+        from assurance.economics.engine import currency, money
+        print("imported", "athena-backend pinned" in (currency.PIN_REFUSAL or ""))
+        refused = []
+        for name, use in (
+            ("currency", lambda: currency.currency("USD")),
+            ("minor_units", lambda: currency.minor_units("USD")),
+            ("current_successor", lambda: currency.current_successor("HRK")),
+            ("reporting_refusal", lambda: currency.reporting_refusal("USD")),
+            ("Money", lambda: money.Money(Decimal("1"), "USD")),
+        ):
+            try:
+                use()
+            except core.CurrencyTableInvalid:
+                refused.append(name)
+        print("refused", len(refused))
         """
     )
     env = {k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"}
     result = subprocess.run(
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
-    assert result.stdout.strip() == "refused True", (result.stdout, result.stderr)
+    assert result.stdout.split() == ["imported", "True", "refused", "5"], (result.stdout, result.stderr)
+
+
+def test_the_pin_holds_on_the_table_in_force():
+    assert currency.PIN_REFUSAL is None
+    currency.require_pinned()
 
 
 def test_minor_units_are_pinned():
@@ -591,6 +608,24 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
 # ---------------------------------------------------- off every stop path
 
 
+def test_a_changed_core_table_never_takes_down_the_scan_stop():
+    """Review round 1, M2 (the safety rule). A fresh pytest, under a plugin that
+    changes one entry of mythos-core's currency table before Django loads, runs
+    ``tests/economics_mismatched_core_cases.py``: Django loads, the scan's Stop
+    route resolves and answers, the Stop is saved, and economics use refuses."""
+    env = dict(os.environ, DJANGO_SECRET_KEY=os.environ.get("DJANGO_SECRET_KEY", "ci-secret-key-not-used-outside-ci"))
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "tests.economics_mismatched_core",
+            "-q", "tests/economics_mismatched_core_cases.py",
+        ],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
+    )
+    assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
+    assert "3 passed" in result.stdout, result.stdout[-2000:]
+
+
+
 def test_nothing_but_the_models_registration_imports_economics():
     """No economics code on any stop, pause, stand-down, terminate or revoke path:
     the only first-party module that imports the package is the line in
@@ -642,6 +677,9 @@ SPEC_PHRASES = (
     "a plain `QuerySet(model)`, raw SQL, and a migration",
     # L4: references are checked for form only.
     "SPINE references are checked for form only",
+    # Review round 1, M2: a changed core table never takes a stop down.
+    "test_a_changed_core_table_never_takes_down_the_scan_stop",
+    "records the pin at import and refuses only on economics use",
     "The scenario builder must resolve every reference within the scenario's own deployment",
     # Phase E1: one currency table, money, FX and normalization, and their limits.
     "`mythos_core.currency` is the one currency table",

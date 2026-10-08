@@ -245,7 +245,9 @@ class Unavailable:
 
 def check_money_currency(code, what: str = "currency") -> str:
     """A code an amount may be written in: one the table holds, with a minor unit.
-    A retired code with a minor unit passes (a native historical amount)."""
+    A retired code with a minor unit passes (a native historical amount). Raises
+    :class:`.currency.CurrencyTableInvalid` while core's table is not the pinned one."""
+    _currency.require_pinned()
     if not isinstance(code, str) or code not in _currency.CURRENCIES:
         raise MoneyRefused("currency_unknown", f"{what} {code!r}")
     if _currency.CURRENCIES[code].minor_units is None:
