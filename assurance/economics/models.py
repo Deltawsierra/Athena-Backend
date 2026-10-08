@@ -12,13 +12,22 @@ each model calls them on save and refuses a write with the rule's code
 (:class:`EconomicsRefused`). Every model here is APPEND-ONLY, as the assurance
 history is: a recorded row is never edited or deleted (:class:`EconomicsRewriteRefused`),
 its queryset refuses a bulk update, delete or create, and a row goes only with its
-deployment (the foreign key's cascade, which Django runs through the base manager).
-A change is a new row: a new version of a source, a new revision of an inventory
-entry, a scenario that supersedes another.
+deployment. A change is a new row: a new version of a source, a new revision of an
+inventory entry, a scenario that supersedes another.
+
+The refusals guard the ORM paths code is written against, not the table. The base
+manager, ``Model.save`` called directly, a plain ``QuerySet(model)``, raw SQL and a
+migration all write past them (spec, section 10). The base manager MUST stay
+Django's plain one -- never set ``Meta.base_manager_name`` here -- because it is the
+path the two writes from outside economics take: removing an operator, a stop,
+nulls the account columns, and deleting a deployment cascades its rows away.
 
 People are named as :class:`assurance.models.ClaimEvent` names them: an account
-foreign key, nulled if the account is removed, and the account's username written
-once with the row and never cleared, so attribution outlives the account.
+foreign key, nulled if the account is removed, and the account's username. The
+username is ALWAYS the account's own, written from the account when the row is
+written and never taken from the caller; a review, an override request and an
+approval are refused without an account. So a username with no account is only
+ever read on a row whose account was removed after it was written.
 """
 
 from __future__ import annotations
@@ -33,6 +42,9 @@ from django.utils import timezone
 from .engine import governance
 from .engine.provenance import LicenseClass, TrustTier
 
+_LICENSE_CODES = [c.value for c in LicenseClass]
+_TRUST_CODES = [t.value for t in TrustTier]
+
 
 class EconomicsRewriteRefused(ValueError):
     """A recorded economics row was asked to change or go away. The records are
@@ -41,21 +53,26 @@ class EconomicsRewriteRefused(ValueError):
 
 class EconomicsRefused(ValueError):
     """A write one of the governance rules refuses. ``code`` is the rule's code
-    (:data:`assurance.economics.engine.governance.REFUSALS`)."""
+    (:data:`assurance.economics.engine.governance.REFUSALS`); ``detail`` names the
+    field, where one does."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, detail: str = ""):
         self.code = code
-        super().__init__(f"{code}: {governance.REFUSALS[code]}")
+        self.detail = detail
+        suffix = f" ({detail})" if detail else ""
+        super().__init__(f"{code}: {governance.REFUSALS[code]}{suffix}")
 
 
 class SeparationOfDutiesRefused(EconomicsRefused):
-    """An author reviewing their own scenario, a requester approving their own
-    override, a second approval from the same person, or an override read as in
-    force without two different approvers."""
+    """An author of any version reviewing a scenario, a review, request or approval
+    with no account behind it, a requester approving their own override, a second
+    approval from the same person, or an override read as in force without two
+    different approvers."""
 
 
 class SourceNotUsableForProduction(EconomicsRefused):
-    """A production run asked to use a source whose license nobody has reviewed."""
+    """A production run asked to use a source whose license nobody has reviewed, or
+    another deployment's source."""
 
 
 class AppendOnlyQuerySet(models.QuerySet):
@@ -105,13 +122,22 @@ class _AppendOnly(models.Model):
         raise EconomicsRewriteRefused(f"A recorded {self._meta.verbose_name} is history and is never deleted.")
 
 
-def _username(account) -> str:
-    return (getattr(account, "username", "") or "")[:150]
+def _signed_in(account) -> governance.Person:
+    """The person a row is written by: the account and the account's OWN username,
+    or nobody. Whatever username the caller put on the row is not read."""
+    if account is None or account.pk is None:
+        return governance.Person()
+    return governance.Person(id=account.pk, username=(account.get_username() or "")[:150])
 
 
-def _refuse(refusal: str | None, error=EconomicsRefused) -> None:
+def _refuse(refusal: str | None, error=EconomicsRefused, detail: str = "") -> None:
     if refusal is not None:
-        raise error(refusal)
+        raise error(refusal, detail)
+
+
+def _require_text(**fields) -> None:
+    for name, value in fields.items():
+        _refuse(governance.required_text_refusal(value), detail=name)
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +146,17 @@ def _refuse(refusal: str | None, error=EconomicsRefused) -> None:
 
 
 class FinancialSourceQuerySet(AppendOnlyQuerySet):
-    def usable_for_production(self):
-        """The versions a production run may use: those whose license class someone
-        has reviewed. ``unreviewed`` (the default) is never among them."""
-        reviewed = [c.value for c in LicenseClass if governance.production_use_refusal(c.value) is None]
-        return self.filter(license_class__in=reviewed)
+    def usable_for_production(self, deployment):
+        """The versions a production run for ``deployment`` may use: the
+        platform-wide sources and that deployment's own, and only those whose
+        license class someone has reviewed. ``unreviewed`` (the default) is never
+        among them, and another deployment's source never is. ``deployment=None``
+        is a run for no deployment: platform-wide sources only."""
+        reviewed = [c for c in _LICENSE_CODES if governance.production_use_refusal(c) is None]
+        tenant = Q(deployment__isnull=True)
+        if deployment is not None:
+            tenant |= Q(deployment=deployment)
+        return self.filter(tenant, license_class__in=reviewed)
 
 
 class FinancialSource(_AppendOnly):
@@ -140,7 +172,9 @@ class FinancialSource(_AppendOnly):
 
     ``deployment`` is the tenant: empty for a platform-wide source (an official
     statistics series, a public price list), set for one customer's own data, which
-    no other deployment's scenario may read.
+    no other deployment's run may read. A platform-wide source is never licensed or
+    trusted as ``customer`` data. Keys are per tenant: a deployment's source may use
+    the key of a platform-wide one, and a run names a source by key AND deployment.
 
     ``license_class`` defaults to ``unreviewed``, and an unreviewed source is never
     used by a production run: :meth:`check_usable_for_production` refuses it, and
@@ -163,10 +197,10 @@ class FinancialSource(_AppendOnly):
     # Where it was read from: a URL or an API endpoint. Blank for a customer file.
     url = models.URLField(max_length=2048, blank=True)
     license_class = models.CharField(
-        max_length=32, choices=[(c.value, c.value) for c in LicenseClass], default=LicenseClass.UNREVIEWED.value
+        max_length=32, choices=[(c, c) for c in _LICENSE_CODES], default=LicenseClass.UNREVIEWED.value
     )
     trust_tier = models.CharField(
-        max_length=32, choices=[(t.value, t.value) for t in TrustTier], default=TrustTier.UNVERIFIED.value
+        max_length=32, choices=[(t, t) for t in _TRUST_CODES], default=TrustTier.UNVERIFIED.value
     )
     retrieved_at = models.DateTimeField()
     # "sha256:" + 64 hex over the snapshot's bytes, as the platform's other digests.
@@ -186,6 +220,8 @@ class FinancialSource(_AppendOnly):
 
     class Meta:
         ordering = ["source_key", "version", "id"]
+        # The checks below touch no column a cascade or a SET_NULL writes, so no
+        # stop's write can trip them.
         constraints = [
             models.UniqueConstraint(
                 fields=["source_key", "version"],
@@ -198,26 +234,48 @@ class FinancialSource(_AppendOnly):
                 name="uq_econ_source_tenant_version",
             ),
             models.CheckConstraint(condition=Q(version__gte=1), name="ck_econ_source_version_positive"),
+            models.CheckConstraint(condition=Q(license_class__in=_LICENSE_CODES), name="ck_econ_source_license_class"),
+            models.CheckConstraint(condition=Q(trust_tier__in=_TRUST_CODES), name="ck_econ_source_trust_tier"),
+            models.CheckConstraint(
+                condition=Q(deployment__isnull=False)
+                | ~(Q(license_class=LicenseClass.CUSTOMER.value) | Q(trust_tier=TrustTier.CUSTOMER.value)),
+                name="ck_econ_source_customer_has_tenant",
+            ),
         ]
         indexes = [models.Index(fields=["deployment", "source_key"], name="assurance_econ_source_key")]
 
     def check_new(self) -> None:
-        _refuse(governance.snapshot_hash_refusal(self.snapshot_hash))
+        _require_text(
+            source_key=self.source_key, provider=self.provider, dataset=self.dataset, schema_version=self.schema_version
+        )
+        _refuse(governance.code_refusal(self.license_class, _LICENSE_CODES), detail="license_class")
+        _refuse(governance.code_refusal(self.trust_tier, _TRUST_CODES), detail="trust_tier")
+        if self.deployment_id is None and (
+            self.license_class == LicenseClass.CUSTOMER.value or self.trust_tier == TrustTier.CUSTOMER.value
+        ):
+            raise EconomicsRefused("customer_source_without_tenant")
+        _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
         if self.version is None:
             earlier = FinancialSource._base_manager.filter(
                 deployment_id=self.deployment_id, source_key=self.source_key
             ).aggregate(latest=Max("version"))["latest"]
             self.version = (earlier or 0) + 1
-        if self.recorded_by_id is not None and not self.recorded_by_username:
-            self.recorded_by_username = _username(self.recorded_by)
+        self.recorded_by_username = _signed_in(self.recorded_by).username
 
-    def production_use_refusal(self) -> str | None:
-        return governance.production_use_refusal(self.license_class)
+    def production_use_refusal(self, deployment) -> str | None:
+        """``None`` when a production run for ``deployment`` may use this version;
+        otherwise why not."""
+        refusal = governance.production_use_refusal(self.license_class)
+        if refusal is not None:
+            return refusal
+        if self.deployment_id is not None and self.deployment_id != getattr(deployment, "pk", deployment):
+            return "cross_tenant_reference"
+        return None
 
-    def check_usable_for_production(self) -> None:
-        """Raise :class:`SourceNotUsableForProduction` unless a production run may
-        use this version. Called by the run before it reads the source."""
-        _refuse(self.production_use_refusal(), SourceNotUsableForProduction)
+    def check_usable_for_production(self, deployment) -> None:
+        """Raise :class:`SourceNotUsableForProduction` unless a production run for
+        ``deployment`` may use this version. Called by the run before it reads it."""
+        _refuse(self.production_use_refusal(deployment), SourceNotUsableForProduction)
 
     def __str__(self) -> str:
         return f"{self.source_key} v{self.version} ({self.license_class})"
@@ -283,15 +341,14 @@ class ModelInventoryEntry(_AppendOnly):
                 model_id=self.model_id, version=self.version
             ).aggregate(latest=Max("revision"))["latest"]
             self.revision = (earlier or 0) + 1
-        if self.recorded_by_id is not None and not self.recorded_by_username:
-            self.recorded_by_username = _username(self.recorded_by)
+        self.recorded_by_username = _signed_in(self.recorded_by).username
 
     def __str__(self) -> str:
         return f"{self.model_id} {self.version} r{self.revision}"
 
 
 # ---------------------------------------------------------------------------
-# FinancialScenario, ScenarioReview -- a reviewer is never the author
+# FinancialScenario, ScenarioReview -- a reviewer authored no version
 # ---------------------------------------------------------------------------
 
 
@@ -306,9 +363,10 @@ class FinancialScenario(_AppendOnly):
     SPINE is referenced, never copied (section 16): ``system_fingerprint`` as an
     assurance claim binds to a system state, ``causal_effect`` as the receipt names
     an effect (``sha256:`` + hex), both checked against
-    :data:`~assurance.economics.engine.governance.REFERENCE_FORMS` and blank until
-    known. A revised scenario is a new row that ``supersedes`` this one, in the same
-    deployment.
+    :data:`~assurance.economics.engine.governance.REFERENCE_FORMS` -- for their form
+    only -- and blank until known. A revised scenario is a new row that
+    ``supersedes`` this one, in the same deployment; the versions it supersedes,
+    transitively, are all its versions for the review rule.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -322,7 +380,7 @@ class FinancialScenario(_AppendOnly):
     supersedes = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="superseded_by"
     )
-    # Null when a machine drafted the scenario; see ScenarioReview.
+    # Null when a machine drafted the version; see ScenarioReview.
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -337,34 +395,64 @@ class FinancialScenario(_AppendOnly):
         ordering = ["deployment", "id"]
         indexes = [models.Index(fields=["deployment"], name="assurance_econ_scenario_dep")]
 
-    @property
-    def author_person(self) -> governance.Person:
-        return governance.Person(id=self.author_id, username=self.author_username)
+    @classmethod
+    def authors_of(cls, scenario_id) -> list[governance.Person]:
+        """The author of every version of a scenario, as STORED: the version
+        ``scenario_id`` names and each one it supersedes, transitively, read through
+        the base manager so nothing in memory stands in for a row."""
+        authors: list[governance.Person] = []
+        seen: set = set()
+        step = scenario_id
+        while step is not None and step not in seen:
+            seen.add(step)
+            row = (
+                cls._base_manager.filter(pk=step)
+                .values_list("author_id", "author_username", "supersedes_id")
+                .first()
+            )
+            if row is None:
+                break
+            author_id, username, step = row
+            authors.append(governance.Person(id=author_id, username=username))
+        return authors
 
     def check_new(self) -> None:
+        _require_text(title=self.title)
         if self.system_fingerprint:
-            _refuse(governance.spine_reference_refusal("system_fingerprint", self.system_fingerprint))
+            _refuse(
+                governance.spine_reference_refusal("system_fingerprint", self.system_fingerprint),
+                detail="system_fingerprint",
+            )
         if self.causal_effect:
-            _refuse(governance.spine_reference_refusal("effect", self.causal_effect))
-        if self.supersedes_id is not None and self.supersedes.deployment_id != self.deployment_id:
-            raise EconomicsRefused("cross_tenant_reference")
-        if self.author_id is not None and not self.author_username:
-            self.author_username = _username(self.author)
+            _refuse(governance.spine_reference_refusal("effect", self.causal_effect), detail="causal_effect")
+        if self.supersedes_id is not None:
+            stored = FinancialScenario._base_manager.filter(pk=self.supersedes_id).values_list(
+                "deployment_id", flat=True
+            )
+            if list(stored) != [self.deployment_id]:
+                raise EconomicsRefused("cross_tenant_reference", "supersedes")
+        self.author_username = _signed_in(self.author).username
 
     def __str__(self) -> str:
         return f"scenario {self.title}"
 
 
-class ScenarioReview(_AppendOnly):
-    """One person's review of one scenario. The reviewer is never the scenario's
-    author (``author_reviews_own_scenario``): checked when the review is written,
-    against the author's account and the username recorded with the scenario, so a
-    removed author's scenario is still theirs. A scenario a machine drafted (no
-    author) may be reviewed by any named person."""
+class ReviewVerdict(models.TextChoices):
+    APPROVED = "approved", "Approved"
+    RETURNED = "returned", "Returned to the author"
 
-    class Verdict(models.TextChoices):
-        APPROVED = "approved", "Approved"
-        RETURNED = "returned", "Returned to the author"
+
+class ScenarioReview(_AppendOnly):
+    """One person's review of one scenario version.
+
+    Written only by a signed-in account. The reviewer authored NO version of the
+    scenario -- neither the one reviewed nor any it supersedes, transitively
+    (``author_reviews_own_scenario``) -- matched on the account and on each
+    version's recorded username, so a removed author is still the author. A line of
+    versions none of which names an author (all machine-drafted) is not reviewable
+    (``author_not_named``): a person authors a version first."""
+
+    Verdict = ReviewVerdict
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -383,12 +471,16 @@ class ScenarioReview(_AppendOnly):
 
     class Meta:
         ordering = ["scenario", "id"]
+        constraints = [
+            models.CheckConstraint(condition=Q(verdict__in=ReviewVerdict.values), name="ck_econ_review_verdict"),
+        ]
 
     def check_new(self) -> None:
-        if self.reviewer_id is not None and not self.reviewer_username:
-            self.reviewer_username = _username(self.reviewer)
-        reviewer = governance.Person(id=self.reviewer_id, username=self.reviewer_username)
-        _refuse(governance.review_refusal(self.scenario.author_person, reviewer), SeparationOfDutiesRefused)
+        _refuse(governance.code_refusal(self.verdict, self.Verdict.values), detail="verdict")
+        reviewer = _signed_in(self.reviewer)
+        self.reviewer_username = reviewer.username
+        authors = FinancialScenario.authors_of(self.scenario_id)
+        _refuse(governance.review_refusal(authors, reviewer), SeparationOfDutiesRefused)
 
     def __str__(self) -> str:
         return f"{self.verdict} review of scenario {self.scenario_id}"
@@ -401,12 +493,13 @@ class ScenarioReview(_AppendOnly):
 
 class SensitiveOverride(_AppendOnly):
     """A request to override something in a scenario -- a parameter, a computed
-    value -- that is sensitive enough to need two approvers.
+    value -- that is sensitive enough to need two approvers. Written only by a
+    signed-in account.
 
     Recording the request puts nothing in force. It is in force only once two
-    different named people, neither of them the requester, have approved it
+    different people, neither of them the requester, have approved it
     (:meth:`approval_refusal`, ``override_needs_two_approvers``), and that is read
-    from the approvals each time it is asked, never stored.
+    from the stored rows each time it is asked, never stored.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -428,22 +521,31 @@ class SensitiveOverride(_AppendOnly):
     class Meta:
         ordering = ["scenario", "id"]
 
-    @property
-    def requester(self) -> governance.Person:
-        return governance.Person(id=self.requested_by_id, username=self.requested_by_username)
+    @classmethod
+    def requester_of(cls, override_id) -> governance.Person:
+        """Who asked for the override, as STORED."""
+        row = (
+            cls._base_manager.filter(pk=override_id).values_list("requested_by_id", "requested_by_username").first()
+        )
+        return governance.Person(id=row[0], username=row[1]) if row else governance.Person()
 
-    def approvers(self) -> list[governance.Person]:
-        """Everyone who has approved it, as the approvals name them, read now."""
+    @classmethod
+    def approvers_of(cls, override_id) -> list[governance.Person]:
+        """Everyone who has approved the override, as the stored approvals name them."""
         return [
             governance.Person(id=account_id, username=username)
-            for account_id, username in OverrideApproval._base_manager.filter(override_id=self.pk)
+            for account_id, username in OverrideApproval._base_manager.filter(override_id=override_id)
             .order_by("id")
             .values_list("approver_id", "approver_username")
         ]
 
+    def approvers(self) -> list[governance.Person]:
+        return self.approvers_of(self.pk)
+
     def approval_refusal(self) -> str | None:
-        """``None`` when the override is in force; otherwise why it is not."""
-        return governance.override_refusal(self.requester, self.approvers())
+        """``None`` when the override is in force; otherwise why it is not. Read
+        from the stored rows, never from this instance's fields."""
+        return governance.override_refusal(self.requester_of(self.pk), self.approvers_of(self.pk))
 
     @property
     def in_force(self) -> bool:
@@ -455,10 +557,10 @@ class SensitiveOverride(_AppendOnly):
         _refuse(self.approval_refusal(), SeparationOfDutiesRefused)
 
     def check_new(self) -> None:
-        if self.requested_by_id is not None and not self.requested_by_username:
-            self.requested_by_username = _username(self.requested_by)
+        requester = _signed_in(self.requested_by)
+        self.requested_by_username = requester.username
         _refuse(
-            governance.override_request_refusal(self.requester, self.subject, self.reason),
+            governance.override_request_refusal(requester, self.subject, self.reason),
             SeparationOfDutiesRefused,
         )
 
@@ -467,9 +569,10 @@ class SensitiveOverride(_AppendOnly):
 
 
 class OverrideApproval(_AppendOnly):
-    """One person's approval of one sensitive override. The requester never
-    approves their own override, and nobody approves the same override twice
-    (checked on save, and by a unique constraint for two writes racing)."""
+    """One person's approval of one sensitive override, written only by a signed-in
+    account. The requester never approves their own override, and nobody approves
+    the same override twice (checked on save, and by a unique constraint for two
+    writes racing)."""
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -495,12 +598,14 @@ class OverrideApproval(_AppendOnly):
         ]
 
     def check_new(self) -> None:
-        if self.approver_id is not None and not self.approver_username:
-            self.approver_username = _username(self.approver)
-        approver = governance.Person(id=self.approver_id, username=self.approver_username)
-        override = self.override
+        approver = _signed_in(self.approver)
+        self.approver_username = approver.username
         _refuse(
-            governance.approval_refusal(override.requester, override.approvers(), approver),
+            governance.approval_refusal(
+                SensitiveOverride.requester_of(self.override_id),
+                SensitiveOverride.approvers_of(self.override_id),
+                approver,
+            ),
             SeparationOfDutiesRefused,
         )
 

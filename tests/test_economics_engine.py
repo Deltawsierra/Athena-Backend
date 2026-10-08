@@ -7,8 +7,9 @@ Pinned here:
 
 - the engine imports with Django poisoned, and no module of it names Django;
 - every code is pinned exactly, so a rename or a reuse is a reviewed change here;
-- the currency table: JPY 0, USD 2, KWD 3, the retired HRK and its successor, and
-  the digest of every entry, so an edit to the table fails until the pin moves;
+- the currency table: JPY 0, USD 2, KWD 3, the retired HRK, GRD and PTE and their
+  successor, and the digest of the whole document, entries and source and review
+  records alike, so an edit to the file fails until the pin moves;
 - each governance rule, and that every refusal it gives is a published code;
 - nothing but :mod:`assurance.models` imports the package, so no economics code
   sits on a stop, pause or revoke path;
@@ -183,9 +184,10 @@ def test_source_types_grades_license_classes_and_trust_tiers():
 
 # ------------------------------------------------------------- the currencies
 
-#: The digest of every entry in data/iso4217.json. An edit to any entry moves it:
-#: change it here, in the same reviewed change, and say what moved.
-TABLE_DIGEST = "23e6b9dcf024522bec5e53b6ba92a6636aed2e8a43218c49c062e7ef0cf296d9"
+#: The digest of the whole of data/iso4217.json: its entries, and its source and
+#: review records. An edit to any of it moves the digest: change it here, in the
+#: same reviewed change, and say what moved.
+TABLE_DIGEST = "a8a3e2565ba133dbd28d05813ad9eedd4c2362dc5e1a0d2480b4bfffdc3285aa"
 
 
 def test_minor_units_are_pinned():
@@ -202,6 +204,34 @@ def test_a_retired_code_and_its_successor():
     assert not kuna.active
     assert currency.current_successor("HRK") is currency.currency("EUR")
     assert currency.current_successor("EUR") is None
+
+
+def test_the_euros_predecessors_include_the_drachma_and_the_escudo():
+    """Review round 1, L6: the table said it held the euro's predecessors and left
+    out GRD and PTE."""
+    for code in ("GRD", "PTE"):
+        retired = currency.currency(code)
+        assert (retired.status, retired.minor_units, retired.successor) == ("retired", 0, "EUR"), code
+    euro_legacy = {c.code for c in currency.CURRENCIES.values() if c.successor == "EUR"}
+    assert euro_legacy == {
+        "ATS", "BEF", "DEM", "ESP", "FIM", "FRF", "GRD", "IEP", "ITL", "LUF", "NLG", "PTE",
+        "SIT", "CYP", "MTL", "SKK", "EEK", "LVL", "LTL", "HRK", "BGN",
+    }
+    # Cross-checked against OpenJDK 21.0.10's table, which corrected it from 2.
+    assert currency.minor_units("ROL") == 0
+
+
+def test_the_digest_covers_the_source_and_review_records(tmp_path):
+    """Review round 1, L6: what the file says about where its entries came from and
+    how far they are checked is reviewed data too, so editing it moves the pin."""
+    document = json.loads(currency.TABLE_PATH.read_text(encoding="utf-8"))
+    assert currency.table_digest(document) == currency.TABLE_DIGEST
+    for record, key in (("review", "status"), ("source", "how_made")):
+        edited = json.loads(json.dumps(document))
+        edited[record][key] = "verified"
+        path = tmp_path / f"{record}.json"
+        path.write_text(json.dumps(edited), encoding="utf-8")
+        assert currency.load_table(path)[2] != TABLE_DIGEST, record
 
 
 def test_the_table_is_the_reviewed_file_and_records_its_source():
@@ -268,9 +298,10 @@ def test_a_broken_table_does_not_load(tmp_path, entries, over):
 
 def test_a_well_formed_table_loads(tmp_path):
     old = {**USD, "code": "OLD", "status": "retired", "successor": "USD"}
-    table, records, digest = currency.load_table(_table(tmp_path, [USD, old]))
+    path = _table(tmp_path, [USD, old])
+    table, records, digest = currency.load_table(path)
     assert table["OLD"].successor == "USD" and records["review"] == {"r": 1}
-    assert digest == currency.table_digest([USD, old])
+    assert digest == currency.table_digest(json.loads(path.read_text(encoding="utf-8")))
 
 
 # ----------------------------------------------------------------- the rules
@@ -281,14 +312,26 @@ CAROL = Person(id=3, username="carol")
 
 
 def test_an_author_never_reviews_their_own_scenario():
-    assert governance.review_refusal(ALICE, BOB) is None
-    assert governance.review_refusal(ALICE, ALICE) == "author_reviews_own_scenario"
+    assert governance.review_refusal([ALICE], BOB) is None
+    assert governance.review_refusal([ALICE], ALICE) == "author_reviews_own_scenario"
     # The account removed since: the username recorded with the scenario still names them.
-    assert governance.review_refusal(Person(None, "alice"), Person(9, "Alice")) == "author_reviews_own_scenario"
-    assert governance.review_refusal(ALICE, Person(1, "renamed")) == "author_reviews_own_scenario"
-    assert governance.review_refusal(ALICE, Person()) == "reviewer_not_named"
-    # A scenario a machine drafted has no author: any named person may review it.
-    assert governance.review_refusal(Person(), BOB) is None
+    assert governance.review_refusal([Person(None, "alice")], Person(9, "Alice")) == "author_reviews_own_scenario"
+    assert governance.review_refusal([ALICE], Person(1, "renamed")) == "author_reviews_own_scenario"
+    assert governance.review_refusal([ALICE], Person()) == "reviewer_not_named"
+
+
+def test_a_reviewer_authored_no_version_of_the_scenario():
+    """Review round 1, M1: the authors are every version's -- the one reviewed and
+    each it supersedes -- and a line with no named author is not reviewable."""
+    # v2 drafted by a machine, superseding alice's v1: alice still may not review it.
+    assert governance.review_refusal([Person(), ALICE], ALICE) == "author_reviews_own_scenario"
+    # v2 by bob, superseding alice's v1: neither may; carol may.
+    assert governance.review_refusal([BOB, ALICE], ALICE) == "author_reviews_own_scenario"
+    assert governance.review_refusal([BOB, ALICE], BOB) == "author_reviews_own_scenario"
+    assert governance.review_refusal([BOB, ALICE], CAROL) is None
+    # No version names an author: nothing shows the reviewer is someone else.
+    assert governance.review_refusal([Person(), Person()], CAROL) == "author_not_named"
+    assert governance.review_refusal([], CAROL) == "author_not_named"
 
 
 def test_a_sensitive_override_needs_two_different_approvers():
@@ -343,6 +386,16 @@ def test_snapshot_hashes_spine_references_and_inventory_entries():
         assert governance.inventory_refusal(**{**entry, field: "  "}) == "inventory_entry_incomplete"
 
 
+def test_codes_and_required_text():
+    """Review round 1, L2."""
+    assert governance.code_refusal("approved", ["approved", "returned"]) is None
+    for bad in ("", "rubber-stamp", "Approved", None):
+        assert governance.code_refusal(bad, ["approved", "returned"]) == "code_unrecognised"
+    assert governance.required_text_refusal("fed-h10", "Federal Reserve") is None
+    for bad in ("", "  ", None):
+        assert governance.required_text_refusal("ok", bad) == "required_field_blank"
+
+
 def test_every_refusal_a_rule_gives_is_a_published_code():
     """Every code a rule returns is in REFUSALS, read off the module's source, and
     every published code is one something gives."""
@@ -394,20 +447,39 @@ def test_nothing_but_the_models_registration_imports_economics():
 # ------------------------------------------------------------- the spec
 
 
-def test_the_spec_states_the_policy_and_every_code():
+#: What the spec must say, read with its line breaks folded so a phrase may wrap.
+SPEC_PHRASES = (
+    "Decimal",
+    (
+        "native amount, then event-date FX into the base currency, then the cost index to the valuation date, "
+        "then valuation-date FX into the reporting currency"
+    ),
+    "never interpolated silently",
+    "never added to cash loss",
+    "No Open FAIR conformance is claimed",
+    "No economics code is on any stop, pause, stand-down, terminate or revoke path",
+    # Review round 1, L5: the two writes from outside economics, and their tests.
+    "Removing an operator, which is a stop",
+    "Deleting a deployment",
+    "test_removing_an_operator_is_never_held_back_by_economics_rows",
+    "test_the_records_go_with_their_deployment",
+    # L1: what writes past the append-only refusals.
+    "Append-only is an ORM guard, not a table guard",
+    "`Model._base_manager`",
+    "a plain `QuerySet(model)`, raw SQL, and a migration",
+    # L4: references are checked for form only.
+    "SPINE references are checked for form only",
+    "The scenario builder must resolve every reference within the scenario's own deployment",
+)
+
+
+@pytest.mark.parametrize("phrase", SPEC_PHRASES)
+def test_the_spec_states_the_policy(phrase):
+    assert phrase in " ".join(SPEC.read_text(encoding="utf-8").split())
+
+
+def test_the_spec_names_every_code():
     text = SPEC.read_text(encoding="utf-8")
-    for phrase in (
-        "Decimal",
-        (
-            "native amount, then event-date FX into the base currency, then the cost index to the valuation date, "
-            "then valuation-date FX into the reporting currency"
-        ),
-        "never interpolated silently",
-        "never added to cash loss",
-        "No Open FAIR conformance is claimed",
-        "No economics code is on any stop, pause, stand-down, terminate or revoke path",
-    ):
-        assert phrase in text, phrase
     codes = [
         *taxonomy.LossFamily,
         *provenance.SourceType,
@@ -418,4 +490,3 @@ def test_the_spec_states_the_policy_and_every_code():
     ]
     missing = [str(code) for code in codes if f"`{code}`" not in text]
     assert not missing, missing
-

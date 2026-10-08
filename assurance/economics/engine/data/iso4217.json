@@ -9,7 +9,12 @@
     },
     "published_at": "https://www.six-group.com/en/products-services/financial-information/data-standards.html",
     "transcribed_on": "2026-10-08",
-    "how_made": "Transcribed, not generated from the published files: the download of List One and List Three from the Maintenance Agency's site was refused by the build environment's network policy on 2026-10-08. The active codes and their names were checked against Debian iso-codes 4.16.0 (iso_4217.json), which is built from List One, with the changes listed under after_cross_check applied by hand. Minor units are List One's minor-unit column; an entry whose minor unit List One gives as N.A. (precious metals, bond-market units, the SDR, the Sucre, the ADB unit, and the test and no-currency codes) has null. The retired entries are a selection from List Three: the euro's predecessors and the redenominations whose successor is a single active code.",
+    "how_made": "Transcribed, not generated from the published files: the download of List One and List Three from the Maintenance Agency's site was refused by the build environment's network policy on 2026-10-08. The active codes and their names were checked against Debian iso-codes 4.16.0 (iso_4217.json), which is built from List One, with the changes listed under after_cross_check applied by hand. Minor units are List One's minor-unit column; an entry whose minor unit List One gives as N.A. (precious metals, bond-market units, the SDR, the Sucre, the ADB unit, and the test and no-currency codes) has null. The retired entries are a selection from List Three: the twelve currencies the euro replaced in 2002 and those of every later adopter, and the redenominations whose successor is a single active code.",
+    "cross_checks": [
+      "Active codes and names: Debian iso-codes 4.16.0 (iso_4217.json), built from List One.",
+      "Minor units of every entry: OpenJDK 21.0.10 (2026-01-20) java.util.Currency.getDefaultFractionDigits, which follows ISO 4217 including historic codes. All agree except UYW, which OpenJDK does not carry (List One gives 4, kept), and ROL, transcribed as 2 and corrected to OpenJDK's 0. N.A. entries are -1 there and null here.",
+      "The changes under after_cross_check: OpenJDK 21.0.10's country table gives HR and BG the EUR, CW and SX the XCG, and ZW the ZWG."
+    ],
     "after_cross_check": [
       "HRK retired, successor EUR (Croatia adopted the euro on 2023-01-01)",
       "BGN retired, successor EUR (Bulgaria adopted the euro on 2026-01-01)",
@@ -25,12 +30,12 @@
     }
   },
   "review": {
-    "status": "transcribed: verify against the current List One and List Three before a production run reads any entry the tests do not pin",
+    "status": "transcribed and cross-checked locally: verify against the current List One and List Three before a production run reads any entry the tests do not pin",
     "open_questions": [
       "SLL and CUC are kept active, as the cross-check source lists them; confirm whether List One still carries them",
       "confirm the entries under after_cross_check against the Maintenance Agency's amendments"
     ],
-    "pinned_by": "tests/test_economics_engine.py pins JPY 0, USD 2, KWD 3, the retired HRK and its successor, and the digest of the whole table: any edit to an entry fails it until the pin moves in the same reviewed change"
+    "pinned_by": "tests/test_economics_engine.py pins JPY 0, USD 2, KWD 3, the retired HRK, GRD and PTE and their successor, and the digest of the whole document (the entries and these source and review records): any edit to it fails the test until the pin moves in the same reviewed change"
   },
   "currencies": [
     {"code": "AED", "name": "UAE Dirham", "minor_units": 2, "status": "active", "successor": null},
@@ -102,6 +107,7 @@
     {"code": "GIP", "name": "Gibraltar Pound", "minor_units": 2, "status": "active", "successor": null},
     {"code": "GMD", "name": "Dalasi", "minor_units": 2, "status": "active", "successor": null},
     {"code": "GNF", "name": "Guinean Franc", "minor_units": 0, "status": "active", "successor": null},
+    {"code": "GRD", "name": "Drachma", "minor_units": 0, "status": "retired", "successor": "EUR"},
     {"code": "GTQ", "name": "Quetzal", "minor_units": 2, "status": "active", "successor": null},
     {"code": "GYD", "name": "Guyana Dollar", "minor_units": 2, "status": "active", "successor": null},
     {"code": "HKD", "name": "Hong Kong Dollar", "minor_units": 2, "status": "active", "successor": null},
@@ -170,9 +176,10 @@
     {"code": "PHP", "name": "Philippine Peso", "minor_units": 2, "status": "active", "successor": null},
     {"code": "PKR", "name": "Pakistan Rupee", "minor_units": 2, "status": "active", "successor": null},
     {"code": "PLN", "name": "Zloty", "minor_units": 2, "status": "active", "successor": null},
+    {"code": "PTE", "name": "Portuguese Escudo", "minor_units": 0, "status": "retired", "successor": "EUR"},
     {"code": "PYG", "name": "Guarani", "minor_units": 0, "status": "active", "successor": null},
     {"code": "QAR", "name": "Qatari Rial", "minor_units": 2, "status": "active", "successor": null},
-    {"code": "ROL", "name": "Leu", "minor_units": 2, "status": "retired", "successor": "RON"},
+    {"code": "ROL", "name": "Leu", "minor_units": 0, "status": "retired", "successor": "RON"},
     {"code": "RON", "name": "Romanian Leu", "minor_units": 2, "status": "active", "successor": null},
     {"code": "RSD", "name": "Serbian Dinar", "minor_units": 2, "status": "active", "successor": null},
     {"code": "RUB", "name": "Russian Ruble", "minor_units": 2, "status": "active", "successor": null},

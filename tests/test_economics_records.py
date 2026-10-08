@@ -13,6 +13,8 @@ inherits the rule rather than re-implementing it:
 - a sensitive override is in force only with two different approvers, neither of
   them its requester;
 - a scenario points into SPINE by SPINE's ids and never at another tenant's record.
+
+Review round 1 added a section per finding at the end, each named for it.
 """
 
 from __future__ import annotations
@@ -166,11 +168,11 @@ def test_an_unreviewed_source_is_never_usable_for_production():
     unreviewed = _source()
     assert unreviewed.license_class == "unreviewed"  # the default
     with pytest.raises(SourceNotUsableForProduction) as refused:
-        unreviewed.check_usable_for_production()
+        unreviewed.check_usable_for_production(None)
     assert refused.value.code == "unreviewed_license"
     reviewed = _source(license_class="open", trust_tier="authoritative")
-    reviewed.check_usable_for_production()
-    assert list(FinancialSource.objects.usable_for_production()) == [reviewed]
+    reviewed.check_usable_for_production(None)
+    assert list(FinancialSource.objects.usable_for_production(None)) == [reviewed]
 
 
 def test_a_malformed_snapshot_hash_is_refused():
@@ -291,3 +293,274 @@ def test_a_scenario_never_supersedes_another_tenants(deployment, people):
     with pytest.raises(EconomicsRefused) as refused:
         _scenario(other, people["alice"], supersedes=mine)
     assert refused.value.code == "cross_tenant_reference"
+
+
+# ===================================================================== review round 1
+
+
+# --- M1: the reviewer authored no version of the scenario -------------------
+
+
+def test_m1_an_author_cannot_review_through_a_machine_drafted_superseding_version(deployment, people):
+    """The reviewer's P1: alice's v1, superseded by a v2 nobody authored. Alice
+    approving v2 approved her own work."""
+    v1 = _scenario(deployment, people["alice"], title="v1")
+    v2 = _scenario(deployment, None, title="v1 again", supersedes=v1)
+    with pytest.raises(SeparationOfDutiesRefused) as refused:
+        ScenarioReview.objects.create(scenario=v2, reviewer=people["alice"], verdict="approved")
+    assert refused.value.code == "author_reviews_own_scenario"
+    assert ScenarioReview.objects.create(scenario=v2, reviewer=people["bob"], verdict="approved").pk
+
+
+def test_m1_an_author_cannot_review_through_a_colleagues_superseding_version(deployment, people):
+    """The reviewer's P1b: alice's v1, superseded by bob's v2, and again by carol's v3."""
+    v1 = _scenario(deployment, people["alice"], title="v1")
+    v2 = _scenario(deployment, people["bob"], title="v2", supersedes=v1)
+    v3 = _scenario(deployment, people["carol"], title="v3", supersedes=v2)
+    for author in ("alice", "bob", "carol"):
+        with pytest.raises(SeparationOfDutiesRefused) as refused:
+            ScenarioReview.objects.create(scenario=v3, reviewer=people[author], verdict="approved")
+        assert refused.value.code == "author_reviews_own_scenario", author
+    dave = User.objects.create_user(username="dave", password="x")
+    assert ScenarioReview.objects.create(scenario=v3, reviewer=dave, verdict="approved").pk
+    # The earlier version is reviewed against its own line only.
+    assert ScenarioReview.objects.create(scenario=v1, reviewer=people["bob"], verdict="returned").pk
+
+
+def test_m1_a_line_no_person_authored_is_not_reviewable(deployment, people):
+    v1 = _scenario(deployment, None, title="drafted")
+    v2 = _scenario(deployment, None, title="redrafted", supersedes=v1)
+    for version in (v1, v2):
+        with pytest.raises(SeparationOfDutiesRefused) as refused:
+            ScenarioReview.objects.create(scenario=version, reviewer=people["bob"], verdict="approved")
+        assert refused.value.code == "author_not_named"
+
+
+def test_m1_the_authors_are_read_from_the_rows_not_the_object_passed(deployment, people):
+    v1 = _scenario(deployment, people["alice"], title="v1")
+    v2 = _scenario(deployment, people["bob"], title="v2", supersedes=v1)
+    # An in-memory version told it has no author and supersedes nothing.
+    v2.author, v2.author_username, v2.supersedes = None, "", None
+    with pytest.raises(SeparationOfDutiesRefused) as refused:
+        ScenarioReview.objects.create(scenario=v2, reviewer=people["alice"], verdict="approved")
+    assert refused.value.code == "author_reviews_own_scenario"
+
+
+# --- M2: a review, request or approval needs an account -----------------------
+
+
+def test_m2_an_override_is_never_in_force_on_approvals_that_name_no_account(deployment, people):
+    """The reviewer's P2 and P2b: typed-in names stood for approvers."""
+    override = SensitiveOverride.objects.create(
+        scenario=_scenario(deployment, people["carol"]), subject="x", reason="y", requested_by=people["alice"]
+    )
+    for name in ("ghost-1", "bob-other-hat"):
+        with pytest.raises(SeparationOfDutiesRefused) as refused:
+            OverrideApproval.objects.create(override=override, approver=None, approver_username=name)
+        assert refused.value.code == "approver_not_named"
+    OverrideApproval.objects.create(override=override, approver=people["bob"])
+    assert override.approval_refusal() == "override_needs_two_approvers"
+    assert override.approvals.count() == 1
+
+
+def test_m2_the_username_is_always_the_accounts_own(deployment, people):
+    scenario = FinancialScenario.objects.create(
+        deployment=deployment, title="s", author=people["alice"], author_username="someone-else"
+    )
+    assert FinancialScenario.objects.get(pk=scenario.pk).author_username == "alice"
+    override = SensitiveOverride.objects.create(
+        scenario=scenario, subject="x", reason="y", requested_by=people["bob"], requested_by_username="alice"
+    )
+    approval = OverrideApproval.objects.create(override=override, approver=people["carol"], approver_username="bob")
+    review = ScenarioReview.objects.create(
+        scenario=scenario, reviewer=people["carol"], reviewer_username="bob", verdict="approved"
+    )
+    source = _source(recorded_by=people["bob"], recorded_by_username="alice")
+    stored = (
+        SensitiveOverride.objects.get(pk=override.pk).requested_by_username,
+        OverrideApproval.objects.get(pk=approval.pk).approver_username,
+        ScenarioReview.objects.get(pk=review.pk).reviewer_username,
+        FinancialSource.objects.get(pk=source.pk).recorded_by_username,
+    )
+    assert stored == ("bob", "carol", "carol", "bob")
+
+
+def test_m2_no_account_no_name(deployment, people):
+    """A typed-in name with no account is never written: a scenario's author name
+    is blank without an author, and a review or request without one is refused."""
+    machine = FinancialScenario.objects.create(deployment=deployment, title="s", author=None, author_username="alice")
+    assert FinancialScenario.objects.get(pk=machine.pk).author_username == ""
+    with pytest.raises(SeparationOfDutiesRefused) as refused:
+        ScenarioReview.objects.create(scenario=machine, reviewer=None, reviewer_username="bob", verdict="approved")
+    assert refused.value.code == "reviewer_not_named"
+    with pytest.raises(SeparationOfDutiesRefused) as refused:
+        SensitiveOverride.objects.create(
+            scenario=machine, subject="x", reason="y", requested_by=None, requested_by_username="alice"
+        )
+    assert refused.value.code == "requester_not_named"
+
+
+def test_m2_a_removed_accounts_name_still_counts_when_read(deployment, people):
+    """The one place a username stands without its account: a row read after the
+    account was removed. The approval still counts, and still bars that person."""
+    override = SensitiveOverride.objects.create(
+        scenario=_scenario(deployment, people["carol"]), subject="x", reason="y", requested_by=people["alice"]
+    )
+    OverrideApproval.objects.create(override=override, approver=people["bob"])
+    people["bob"].delete()
+    assert [p.username for p in override.approvers()] == ["bob"]
+    returning = User.objects.create_user(username="bob", password="x")
+    with pytest.raises(SeparationOfDutiesRefused) as refused:
+        OverrideApproval.objects.create(override=override, approver=returning)
+    assert refused.value.code == "approver_already_approved"
+    OverrideApproval.objects.create(override=override, approver=people["carol"])
+    assert override.in_force
+
+
+def test_m2_in_force_is_read_from_the_rows_not_the_object(deployment, people):
+    override = SensitiveOverride.objects.create(
+        scenario=_scenario(deployment, people["carol"]), subject="x", reason="y", requested_by=people["alice"]
+    )
+    OverrideApproval.objects.create(override=override, approver=people["bob"])
+    # An in-memory override told someone else asked for it: alice is still the
+    # requester, so she still may not approve, and carol still may.
+    override.requested_by, override.requested_by_username = people["carol"], "carol"
+    with pytest.raises(SeparationOfDutiesRefused) as refused:
+        OverrideApproval.objects.create(override=override, approver=people["alice"])
+    assert refused.value.code == "requester_approves_own_override"
+    OverrideApproval.objects.create(override=override, approver=people["carol"])
+    # Told bob asked for it, it is still in force: bob and carol approved alice's request.
+    override.requested_by, override.requested_by_username = people["bob"], "bob"
+    assert override.in_force
+    override.check_in_force()
+
+
+# --- L1: nothing may intercept the base manager the stop's writes use ---------
+
+
+def test_l1_the_base_manager_stays_djangos_plain_one():
+    """Removing an operator and the deployment cascade write through the base
+    manager; setting ``Meta.base_manager_name`` to the append-only manager would
+    refuse them (spec, sections 2 and 10)."""
+    for model in (
+        FinancialSource, ModelInventoryEntry, FinancialScenario, ScenarioReview, SensitiveOverride, OverrideApproval
+    ):
+        assert model._meta.base_manager_name is None, model
+        assert type(model._base_manager) is models.Manager, model
+        assert not isinstance(model._base_manager.all(), type(model.objects.all())), model
+
+
+# --- L2: codes and required text --------------------------------------------
+
+
+def test_l2_a_coded_field_holds_one_of_its_codes(deployment, people):
+    """The reviewer's P4."""
+    scenario = _scenario(deployment, people["alice"])
+    for verdict in ("", "rubber-stamp"):
+        with pytest.raises(EconomicsRefused) as refused:
+            ScenarioReview.objects.create(scenario=scenario, reviewer=people["bob"], verdict=verdict)
+        assert (refused.value.code, refused.value.detail) == ("code_unrecognised", "verdict")
+    for field in ("license_class", "trust_tier"):
+        with pytest.raises(EconomicsRefused) as refused:
+            _source(**{field: "bogus"})
+        assert (refused.value.code, refused.value.detail) == ("code_unrecognised", field)
+
+
+def test_l2_required_text_is_never_blank(deployment, people):
+    for field in ("source_key", "provider", "dataset", "schema_version"):
+        with pytest.raises(EconomicsRefused) as refused:
+            _source(**{field: " "})
+        assert (refused.value.code, refused.value.detail) == ("required_field_blank", field)
+    with pytest.raises(EconomicsRefused) as refused:
+        _scenario(deployment, people["alice"], title="")
+    assert (refused.value.code, refused.value.detail) == ("required_field_blank", "title")
+    assert not FinancialSource.objects.exists() and not FinancialScenario.objects.exists()
+
+
+def test_l2_the_database_refuses_a_code_written_past_save(deployment, people):
+    """The check constraints hold where save is bypassed."""
+    review = ScenarioReview(
+        scenario=_scenario(deployment, people["alice"]), reviewer=people["bob"], verdict="rubber-stamp"
+    )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        models.Model.save(review, force_insert=True)
+    for field in ("license_class", "trust_tier"):
+        row = FinancialSource(
+            source_key=f"k-{field}", version=1, provider="p", dataset="d", retrieved_at=RETRIEVED,
+            snapshot_hash=SNAPSHOT, schema_version="1", **{field: "bogus"},
+        )
+        with pytest.raises(IntegrityError), transaction.atomic():
+            models.Model.save(row, force_insert=True)
+
+
+# --- L3: production use is per tenant ----------------------------------------
+
+
+def test_l3_a_run_uses_the_platform_sources_and_its_own_deployments_only(deployment):
+    """The reviewer's P5: every tenant's sources were usable by any run."""
+    other = Deployment.objects.create(name="other-tenant")
+    platform = _source(license_class="open")
+    mine = _source(deployment=deployment, license_class="customer", trust_tier="customer", source_key="revenue")
+    theirs = _source(deployment=other, license_class="customer", source_key="revenue")
+    _source(deployment=deployment, source_key="unreviewed-feed")
+    assert set(FinancialSource.objects.usable_for_production(deployment)) == {platform, mine}
+    assert set(FinancialSource.objects.usable_for_production(other)) == {platform, theirs}
+    assert set(FinancialSource.objects.usable_for_production(None)) == {platform}
+    mine.check_usable_for_production(deployment)
+    platform.check_usable_for_production(other)
+    with pytest.raises(SourceNotUsableForProduction) as refused:
+        theirs.check_usable_for_production(deployment)
+    assert refused.value.code == "cross_tenant_reference"
+
+
+def test_l3_a_platform_wide_source_is_never_customer_data(deployment):
+    for field in ("license_class", "trust_tier"):
+        with pytest.raises(EconomicsRefused) as refused:
+            _source(**{field: "customer"})
+        assert refused.value.code == "customer_source_without_tenant"
+        row = FinancialSource(
+            source_key=f"k-{field}", version=1, provider="p", dataset="d", retrieved_at=RETRIEVED,
+            snapshot_hash=SNAPSHOT, schema_version="1", **{field: "customer"},
+        )
+        with pytest.raises(IntegrityError), transaction.atomic():
+            models.Model.save(row, force_insert=True)
+    assert _source(deployment=deployment, license_class="customer", trust_tier="customer").pk
+
+
+# --- L5: the stop's writes are never held back --------------------------------
+
+
+def test_removing_an_operator_is_never_held_back_by_economics_rows(deployment, people):
+    """Removing an operator is a stop (``accounts:user-detail`` DELETE). With the
+    operator named in every economics role, it answers 204 through the real route,
+    nulls the account columns, keeps the names, and the override approved by them
+    stays in force."""
+    from rest_framework.test import APIClient
+
+    admin = User.objects.create_user(username="rv-admin", password="x", role="admin")
+    leaver = User.objects.create_user(username="leaver", password="x", role="analyst")
+    _source(recorded_by=leaver)
+    ModelInventoryEntry.objects.create(
+        model_id="m", version="1", owner="o", intended_use="u", limitations="l", recorded_by=leaver
+    )
+    mine = _scenario(deployment, leaver, title="theirs to write")
+    theirs = _scenario(deployment, people["alice"], title="someone else's")
+    ScenarioReview.objects.create(scenario=theirs, reviewer=leaver, verdict="approved")
+    asked = SensitiveOverride.objects.create(scenario=mine, subject="x", reason="y", requested_by=leaver)
+    approved = SensitiveOverride.objects.create(scenario=theirs, subject="x", reason="y", requested_by=people["bob"])
+    OverrideApproval.objects.create(override=asked, approver=people["alice"])
+    OverrideApproval.objects.create(override=asked, approver=people["bob"])
+    OverrideApproval.objects.create(override=approved, approver=leaver)
+    OverrideApproval.objects.create(override=approved, approver=people["carol"])
+
+    client = APIClient()
+    client.force_authenticate(user=admin)
+    response = client.delete(f"/api/accounts/users/{leaver.pk}/")
+    assert response.status_code == 204, response.content
+    assert not User.objects.filter(pk=leaver.pk).exists()
+
+    assert list(FinancialSource.objects.values_list("recorded_by_id", "recorded_by_username")) == [(None, "leaver")]
+    assert list(ModelInventoryEntry.objects.values_list("recorded_by_id", flat=True)) == [None]
+    assert FinancialScenario.objects.get(pk=mine.pk).author_username == "leaver"
+    assert ScenarioReview.objects.get().reviewer_id is None
+    assert asked.in_force and approved.in_force

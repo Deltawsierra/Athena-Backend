@@ -3,7 +3,7 @@
 The owner adopted three on 8 Oct 2026 for Economic Exposure, and the model-risk
 discipline of the specification (section 26) adds the inventory's:
 
-- a scenario's reviewer is someone other than its author;
+- a scenario's reviewer is someone other than the author of any version of it;
 - a sensitive override is in force only with two approvals, from two different
   people, neither of them the person who asked for it;
 - a source whose license nobody has reviewed is never used by a production run;
@@ -32,11 +32,18 @@ REQUIRED_OVERRIDE_APPROVERS = 2
 REFUSALS: Mapping[str, str] = MappingProxyType(
     {
         "author_reviews_own_scenario": (
-            "the reviewer wrote this scenario: a scenario is reviewed by someone other than its author"
+            "the reviewer wrote this scenario or a version it supersedes: a scenario is reviewed by someone other "
+            "than the author of any of its versions"
         ),
-        "reviewer_not_named": "the review names no reviewer: a review is a named person's",
-        "requester_not_named": "the override names nobody who asked for it: an override is a named person's request",
-        "approver_not_named": "the approval names no approver: an approval is a named person's",
+        "author_not_named": (
+            "no version of this scenario names its author, so nothing shows the reviewer is someone else: a person "
+            "authors a version before it is reviewed"
+        ),
+        "reviewer_not_named": "the review names no reviewer account: a review is written by a signed-in person",
+        "requester_not_named": (
+            "the override names no requester account: an override is requested by a signed-in person"
+        ),
+        "approver_not_named": "the approval names no approver account: an approval is written by a signed-in person",
         "requester_approves_own_override": (
             "the approver asked for this override: its approvals come from people other than the one who asked"
         ),
@@ -64,6 +71,12 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "bulk_create_refused": (
             "an economics record is written one at a time, through the checks its model runs when it is saved"
         ),
+        "code_unrecognised": "a coded field holds a value outside its codes",
+        "required_field_blank": "a required field is blank",
+        "customer_source_without_tenant": (
+            "a customer's own data belongs to that customer's deployment: a platform-wide source is never licensed "
+            "or trusted as customer data"
+        ),
     }
 )
 
@@ -87,8 +100,14 @@ REFERENCE_FORMS: Mapping[str, str] = MappingProxyType(
 @dataclass(frozen=True)
 class Person:
     """Who did something, as the record names them: the account's id and the
-    username it had then. Either can be missing -- an account removed since is
-    ``id=None`` with its username kept -- and a person named by neither is nobody."""
+    username it had then.
+
+    When a record is WRITTEN, the person is the signed-in account and nothing else:
+    the Django half builds a Person from the account alone (its id and its own
+    username), and an empty Person when there is none, so a typed-in name never
+    stands for anyone. When a record is READ, an account removed since is
+    ``id=None`` with its username kept, and still names that person. A person named
+    by neither is nobody."""
 
     id: object = None
     username: str = ""
@@ -108,12 +127,19 @@ def same_person(a: Person, b: Person) -> bool:
     return bool(name_a) and name_a == name_b
 
 
-def review_refusal(author: Person, reviewer: Person) -> str | None:
-    """Whether ``reviewer`` may review a scenario ``author`` wrote. A scenario with
-    no named author (one a machine drafted) may be reviewed by any named person."""
+def review_refusal(authors: Iterable[Person], reviewer: Person) -> str | None:
+    """Whether ``reviewer`` may review a scenario whose versions -- the one reviewed
+    and every one it supersedes, transitively -- were written by ``authors``.
+
+    The reviewer authored none of them. A version a machine drafted names no
+    author, and a line of versions in which none names one cannot be reviewed:
+    nothing would show the reviewer is someone else."""
     if not reviewer.named:
         return "reviewer_not_named"
-    if author.named and same_person(author, reviewer):
+    named = [author for author in authors if author.named]
+    if not named:
+        return "author_not_named"
+    if any(same_person(author, reviewer) for author in named):
         return "author_reviews_own_scenario"
     return None
 
@@ -186,6 +212,20 @@ def spine_reference_refusal(kind: str, value: str) -> str | None:
     if form is not None and isinstance(value, str) and re.fullmatch(form, value):
         return None
     return "spine_reference_malformed"
+
+
+def code_refusal(value, codes: Iterable[str]) -> str | None:
+    """Whether ``value`` is one of ``codes``, exactly as written."""
+    if isinstance(value, str) and value in set(codes):
+        return None
+    return "code_unrecognised"
+
+
+def required_text_refusal(*values) -> str | None:
+    """Whether every one of ``values`` is text that is not blank."""
+    if all(isinstance(v, str) and v.strip() for v in values):
+        return None
+    return "required_field_blank"
 
 
 def inventory_refusal(*, model_id: str, version: str, owner: str, intended_use: str, limitations: str) -> str | None:

@@ -48,10 +48,33 @@ version depends on none of it).
 
 No economics code is on any stop, pause, stand-down, terminate or revoke path, or
 on a scan's Stop. Nothing in this package refuses, delays or holds back a stop,
-and no stop reads, waits for or writes an economics record.
+and no stop reads or waits for an economics record.
 
-This is checked, not only stated. `assurance/models.py` is the only first-party
-module that imports `assurance.economics`, and only to register its models;
+Two writes reach these tables from outside economics, and neither can be held
+back by them:
+
+1. **Removing an operator, which is a stop** (`accounts:user-detail` `DELETE` in
+   `safety.stops`). It sets every economics account column the operator is named
+   in to NULL: `recorded_by`, `author`, `reviewer`, `requested_by` and `approver`.
+   The usernames written with the rows stay, so attribution outlives the account.
+2. **Deleting a deployment** (no route does this today: the admin, and later the
+   customer exit). It cascades away the deployment's sources and scenarios, and
+   their reviews, overrides and approvals.
+
+Django runs both through each model's base manager, which is Django's plain
+manager: the append-only refusals are not on that path, and `Meta.base_manager_name`
+is never set on these models (a test pins it). Nor can a database constraint
+refuse either write: a delete violates none, and a NULL account satisfies every
+constraint that names an account column (the one-approval-each constraint leaves
+NULL approvers out, and no check constraint names an account). The tests that pin
+them are `test_removing_an_operator_is_never_held_back_by_economics_rows`, which
+removes an operator named in every role through the real route and reads `204`,
+and `test_the_records_go_with_their_deployment`, both in
+`tests/test_economics_records.py`.
+
+The package is off every stop path in the other direction too.
+`assurance/models.py` is the only first-party module that imports
+`assurance.economics`, and only to register its models;
 `tests/test_economics_engine.py` fails if anything else imports it. A later step
 that serves economics adds its own route module to that test, and that module is
 never one the stop lane (`safety.stops`) judges. An economics failure is never a
@@ -167,15 +190,24 @@ does not load at all. Each entry has:
 The file records its own source (ISO 4217 List One and List Three, maintained by
 SIX Financial Information as the ISO 4217 Maintenance Agency), how it was made,
 and its review state. The E0 table was transcribed rather than generated from the
-published files, because the build environment could not download them; its
-active codes were cross-checked against Debian iso-codes 4.16.0, and the changes
-since that release are listed in the file. Its review state says to verify it
-against the current lists before a production run reads an entry the tests do
-not pin, and names the open questions.
+published files, because the build environment could not download them. It was
+cross-checked locally against two independent derivations of the standard: the
+active codes and names against Debian iso-codes 4.16.0, and every entry's minor
+unit against OpenJDK 21.0.10's `java.util.Currency`, which carries the historic
+codes too. They agree, except that OpenJDK lacks UYW (4 is kept) and that ROL was
+corrected to OpenJDK's 0. The changes since iso-codes 4.16.0 are listed in the
+file. Its review state says to verify it against the current lists before a
+production run reads an entry the tests do not pin, and names the open questions.
 
-The tests pin JPY 0, USD 2, KWD 3, the retired HRK and its successor EUR, and the
-SHA-256 of every entry's canonical JSON. Any edit to the table therefore changes
-the test in the same reviewed change.
+The retired entries are the twelve currencies the euro replaced in 2002 (GRD and
+PTE among them), those of every later euro adopter, and the redenominations whose
+successor is one active code.
+
+The tests pin JPY 0, USD 2, KWD 3, the retired HRK, GRD and PTE with their
+successor EUR, and the SHA-256 of the whole document's canonical JSON: the entries
+and the `source` and `review` records, since what the file says about where its
+entries came from and how far they are checked is reviewed data as well. Any edit
+to the file therefore changes the test in the same reviewed change.
 
 ## 6. Records and their permitted writers
 
@@ -183,9 +215,21 @@ All are `assurance` models in `assurance/economics/models.py`. Every one is
 append-only: a recorded row is never saved again or deleted, its queryset refuses
 `update`, `bulk_update`, `delete` and `bulk_create`, and a new instance carrying a
 recorded row's key fails rather than overwriting it. A row goes only with its
-deployment, through the foreign key's cascade. People are named as claim events
-name them: an account foreign key, nulled if the account is removed, and the
-username written once with the row and never cleared.
+deployment, through the foreign key's cascade. These refusals guard the ORM paths
+code is written against, not the table (section 10).
+
+People are named as claim events name them: an account foreign key, nulled if the
+account is removed, and a username. The username is always the account's own,
+written from the account when the row is written; whatever the caller passes is
+overwritten. A review, an override request and an approval need an account at
+write time, so a username with no account is only ever read on a row whose account
+was removed afterwards, and then still names that person.
+
+Each coded field is checked on save and by a database check constraint: the
+verdict, the license class and the trust tier. A source key, provider, dataset,
+schema version and scenario title are never blank. A platform-wide source is never
+licensed or trusted as `customer` data (also a check constraint). None of these
+constraints touches a column a stop's write changes (section 2).
 
 No route, command or signal writes or reads any of these in phase E0. The
 permitted writers below are the ones the later steps may add; any other writer is
@@ -196,13 +240,15 @@ a defect.
 | `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review; an admin may record a reviewed license class as a new version |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint, causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
-| `ScenarioReview` | one review of one scenario: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who is not the scenario's author |
+| `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
 | `SensitiveOverride` | a request to override a parameter or value: subject, reason, requester | an admin or analyst |
 | `OverrideApproval` | one approval of one override: approver | an admin, other than the requester; one approval per person |
 
-`FinancialSource.check_usable_for_production()` raises unless a production run may
-use that version, and `FinancialSource.objects.usable_for_production()` leaves out
-every `unreviewed` one. `SensitiveOverride.check_in_force()` raises unless two
+`FinancialSource.check_usable_for_production(deployment)` raises unless a production
+run for that deployment may use that version: a reviewed license class, and either
+platform-wide or the deployment's own. `FinancialSource.objects.usable_for_production(deployment)`
+returns exactly those: the reviewed platform-wide sources and the deployment's own,
+never an `unreviewed` one and never another deployment's. `SensitiveOverride.check_in_force()` raises unless two
 different people, neither the requester, have approved it. Whatever would use a
 source or apply an override calls these first.
 
@@ -214,11 +260,12 @@ that code (`EconomicsRefused.code`).
 
 | Code | Rule |
 |---|---|
-| `author_reviews_own_scenario` | a scenario is reviewed by someone other than its author, matched on the account and on the username recorded with the scenario |
-| `reviewer_not_named` | a review names its reviewer |
-| `requester_not_named` | an override names the person who asked for it |
+| `author_reviews_own_scenario` | the reviewer authored no version of the scenario: neither the one reviewed nor any it supersedes, transitively, matched on the account and on each version's recorded username |
+| `author_not_named` | a line of versions none of which names an author (all machine-drafted) is not reviewed: a person authors a version first |
+| `reviewer_not_named` | a review is written by a signed-in account |
+| `requester_not_named` | an override is requested by a signed-in account |
 | `override_incomplete` | an override says what it overrides and why |
-| `approver_not_named` | an approval names its approver |
+| `approver_not_named` | an approval is written by a signed-in account |
 | `requester_approves_own_override` | the requester never approves their own override |
 | `approver_already_approved` | nobody approves the same override twice (also a unique constraint) |
 | `override_needs_two_approvers` | a sensitive override is in force only with two different named approvers, neither of them the requester |
@@ -227,10 +274,15 @@ that code (`EconomicsRefused.code`).
 | `snapshot_hash_malformed` | a snapshot hash is `sha256:` and 64 lowercase hex digits |
 | `inventory_entry_incomplete` | an inventory entry names its model, version, owner, intended use and limitations |
 | `spine_reference_malformed` | a reference into SPINE is in SPINE's form (section 8) |
-| `cross_tenant_reference` | a record never points at another deployment's record |
+| `cross_tenant_reference` | a record never points at another deployment's record, and a run never uses another deployment's source |
+| `customer_source_without_tenant` | a platform-wide source is never licensed or trusted as `customer` data |
+| `code_unrecognised` | a verdict, license class or trust tier is one of its codes |
+| `required_field_blank` | a source key, provider, dataset, schema version or scenario title is not blank |
 | `bulk_create_refused` | records are written one at a time, through the checks above |
 
-A scenario a machine drafted has no author, and any named person may review it.
+The rules read what is stored, never what a caller's in-memory object says: the
+authors of a scenario's versions, an override's requester and its approvals are
+read from the rows through the base manager each time.
 
 ## 8. References into SPINE
 
@@ -271,9 +323,18 @@ the licensing and legal review The Open Group's terms require first.
   factors.
 - **The rules sit on the records, not yet on routes.** No route exists to enforce
   role checks; the permitted writers in section 6 bind the steps that add them.
-  Raw SQL, or a migration, can still write a table directly.
-- **Separation is per scenario version.** A reviewer is checked against the
-  author of the version reviewed, not against the authors of the versions it
-  supersedes.
+- **Append-only is an ORM guard, not a table guard.** These write past the
+  refusals: the base manager (`Model._base_manager`, deliberately Django's plain
+  manager so the stop's writes in section 2 pass), `django.db.models.Model.save(row)`
+  called past the model's own `save`, a plain `QuerySet(model)`, raw SQL, and a
+  migration. No code may use them to write an economics row: review holds that
+  line, and at the database only the constraints of section 6 hold.
+- **SPINE references are checked for form only.** A well-formed system
+  fingerprint or effect digest is accepted whether or not SPINE holds it, and
+  whatever deployment it belongs to. The scenario builder must resolve every
+  reference within the scenario's own deployment before anything uses it.
+- **Source keys are per tenant.** A deployment's source may carry the key of a
+  platform-wide one, and both count versions from 1; a run names a source by key
+  and deployment, never by key alone.
 - **No legal, accounting, underwriting or materiality decisions**, and no
   investment advice: outputs are decision support, with their assumptions shown.

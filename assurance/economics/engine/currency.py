@@ -11,8 +11,10 @@ its own source and review state. It is read and checked once, when this module i
 imported, and a table that fails a check does not load at all
 (:class:`CurrencyTableInvalid`): a currency engine with a half-read table would
 show amounts at the wrong precision without saying so. ``tests/test_economics_engine.py``
-pins JPY, USD, KWD and a retired code, and the digest of the whole table, so an
-edit to any entry is a reviewed change to the test as well.
+pins JPY, USD, KWD and a retired code, and the digest of the whole document -- the
+entries and the ``source`` and ``review`` records that say where they came from and
+how far they are checked -- so an edit to any of it is a reviewed change to the
+test as well.
 """
 
 from __future__ import annotations
@@ -87,17 +89,19 @@ def _check_entry(entry) -> Currency:
     return Currency(code=code, name=name, minor_units=minor, status=status, successor=successor)
 
 
-def table_digest(entries) -> str:
-    """SHA-256 over the canonical JSON of the entries (sorted keys, compact
-    separators, the discipline the receipt's digests keep), so a change to any
-    entry moves it and a change to the file's whitespace does not."""
-    canonical = json.dumps(list(entries), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def table_digest(document) -> str:
+    """SHA-256 over the canonical JSON of the whole table document (sorted keys,
+    compact separators, the discipline the receipt's digests keep): the schema, the
+    entries, and the source and review records. A change to any entry, or to what
+    the file says about its source or its review, moves it; a change to the file's
+    whitespace does not."""
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def load_table(path: Path = TABLE_PATH) -> tuple[Mapping[str, Currency], Mapping, str]:
     """Read and check the table at ``path``: the currencies by code, the file's
-    ``source`` and ``review`` records, and the table's digest. Raises
+    ``source`` and ``review`` records, and the digest of the whole document. Raises
     :class:`CurrencyTableInvalid` on any broken rule."""
     document = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(document, dict) or document.get("schema") != TABLE_SCHEMA:
@@ -125,11 +129,11 @@ def load_table(path: Path = TABLE_PATH) -> tuple[Mapping[str, Currency], Mapping
                 raise CurrencyTableInvalid(f"the successors from {currency_.code} go round in a circle")
             seen.add(step.code)
     meta = MappingProxyType({"source": document["source"], "review": document["review"]})
-    return MappingProxyType(table), meta, table_digest(entries)
+    return MappingProxyType(table), meta, table_digest(document)
 
 
 #: Every currency the table holds, by code; its source and review records; and the
-#: digest of its entries.
+#: digest of the whole document.
 CURRENCIES, TABLE_RECORDS, TABLE_DIGEST = load_table()
 
 
