@@ -16,6 +16,7 @@ from django.core.exceptions import RequestDataTooBig
 from django.http import JsonResponse, UnreadablePostError
 from urllib3.exceptions import HTTPError as Urllib3Error
 
+from safety import outbound
 from safety.stops import is_stop
 
 logger = logging.getLogger(__name__)
@@ -1310,7 +1311,8 @@ class DefenderMiddleware:
         It logs nothing and records nothing; the request thread does, so a call
         that outlives its request cannot report a failure twice."""
         try:
-            response = requests.post(
+            # safety.outbound: no redirect followed, nothing read from the environment.
+            response = outbound.post(
                 f"{self.engine_url}/defend",
                 json=ctx,
                 headers={

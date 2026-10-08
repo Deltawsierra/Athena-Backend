@@ -128,12 +128,15 @@ class RequestsFetcher:
 
     def fetch(self, resource: str, *, params: dict | None = None) -> Response:
         # Imported lazily so merely importing this package pulls in no HTTP client
-        # and nothing here can be mistaken for a call site.
-        import requests
+        # and nothing here can be mistaken for a call site. safety.outbound follows
+        # no redirect (a read of the source the binding names, whose token went to
+        # wherever Location pointed), and reads no .netrc or proxy from the
+        # environment: a .netrc login replaced the binding's own Authorization.
+        from safety import outbound
 
         base = (self.base_url or "").rstrip("/")
         url = f"{base}/{resource.lstrip('/')}" if base else resource
-        return requests.get(url, headers=self.headers, params=params, timeout=self.timeout)
+        return outbound.get(url, headers=self.headers, params=params, timeout=self.timeout)
 
 
 # ---------------------------------------------------------------------------

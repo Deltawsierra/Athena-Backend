@@ -526,6 +526,45 @@ includes, `\` continuations and `--hash` options, setup.py through `ast` --
 probes both ranges' edges so an exact pin inside an affected range is seen, and
 fails on any declaration it cannot read rather than passing over it.
 
+## Where a secret cannot go
+
+A credential this service holds or is sent reaches no answer, record, export,
+e-mail, log, file, span or command output: a connector's or posture binding's
+token, the key they are encrypted under, the engine's `X-API-Key`, the closure
+forward's `MINOTAUR_OUTCOMES_KEY`, the gate's and the observed-effect service's
+tokens, the closure-evidence and failsafe tokens, a signing key, a proxy's
+userinfo, a password. And an error page says that something failed, never what it
+was given or what the exception said.
+
+`tests/test_no_planted_secret_leaves_through_a_sink.py` holds the service to that.
+It plants a distinct canary in every one of those origins, and in what a tenant
+sends (a request body, a scan target's userinfo, an uploaded file, a closure
+document); drives a scan that completes, fails, times out and is reconciled, and
+is stopped (its Stop delivered, and owed and delivered by `deliver_owed_stops`),
+connector pushes and posture reads that succeed, fail and run past their
+deadline, a closure forwarded and retried, the gate's read, an observed effect, a
+signed receipt, the failsafe's poll and a stop draft, uploads, every outbound call
+with a credentialed proxy in the environment, and a route that raises; and then
+searches every sink whole, in every encoding (the engines' search, Athena-Engine
+#76): every API answer, receipt and pack, the PDFs, e-mail, every record of every
+logger at every level with stdout and stderr, every row of every model, every file
+under `MEDIA_ROOT`, every span, and every management command's output. A route,
+model, management command, file writer, log configuration or span attribute it
+does not classify fails it, so a new sink cannot ship unchecked. What a tenant
+sends is the record itself in most of those places; where it is found is printed
+(`test_the_observed_matrix`), never claimed absent.
+
+Every request this service sends with `requests` itself -- to the engine, from the
+defender gateway, to a customer's connector or posture source, and the closure
+forward to Minotaur -- goes through `safety/outbound.py`: no redirect is followed,
+nothing is read from the environment (no `.netrc` login, no proxy), an error is
+cut to the scheme, host and port of any URL in it with every header value
+withheld, and an answer is read with every credential the request carried
+withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
+A deployment that reached the engine or a connector through `HTTP_PROXY` or
+`HTTPS_PROXY` must reach it directly: no call site here needs a proxy, and one
+that comes to need one names it in a setting of its own.
+
 ## Before deploying
 
 ```bash

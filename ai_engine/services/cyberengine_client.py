@@ -8,6 +8,8 @@ from django.conf import settings
 from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.exceptions import ProxyError as _ProxyConnectError
 
+from safety import outbound
+
 
 # (connect, read). Overridable so a long scan can be given more room without
 # editing source.
@@ -408,7 +410,9 @@ class CyberEngineClient:
     def _send_get(self, path: str) -> requests.Response:
         """The engine's answer to a GET, whatever its status; raises only when there was none."""
         try:
-            return requests.get(
+            # Following no redirect and reading nothing from the environment (no
+            # .netrc, no proxy), and quoting no credential if it fails: safety.outbound.
+            return outbound.get(
                 f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT
             )
         except requests.RequestException as e:
@@ -418,7 +422,7 @@ class CyberEngineClient:
         """The engine's answer to a POST, whatever its status; raises only when there was
         none. ``headers`` are sent beside the client's own."""
         try:
-            return requests.post(
+            return outbound.post(
                 f"{self.base_url}{path}",
                 json=payload,
                 headers={**self.headers, **headers} if headers else self.headers,
@@ -643,6 +647,14 @@ class CyberEngineClient:
         held = self._key_held(resp)
         if held is not None:
             raise LaunchOutcomeUnknown(held, status=resp.status_code)
+        if 300 <= resp.status_code < 400:
+            # No redirect is followed (safety.outbound), and the engine answers a launch
+            # with none: whatever answered may have passed the launch on first.
+            raise LaunchOutcomeUnknown(
+                f"The launch was answered {resp.status_code}, a redirect, which is not "
+                f"followed: it may have reached the engine, which may have started a run.",
+                status=resp.status_code,
+            )
         if resp.status_code >= 500 and _header_run_id(resp) is None and not self._engine_wrote(resp):
             raise LaunchOutcomeUnknown(
                 f"The launch was answered {resp.status_code} with nothing the engine wrote: it "
@@ -952,7 +964,7 @@ class CyberEngineClient:
         }
 
         try:
-            resp = requests.post(
+            resp = outbound.post(
                 f"{self.base_url}/api/defend-log/file",
                 headers={"X-API-Key": self.headers["X-API-Key"]},
                 files=files,

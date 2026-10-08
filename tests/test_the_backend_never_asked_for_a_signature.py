@@ -806,8 +806,6 @@ def test_a_refusing_engine_is_classified_with_its_status(
     so the status could stop travelling at the source with the reason-formatting test
     still green.
     """
-    import requests
-
     from ai_engine.services import cyberengine_client
 
     class _Resp:
@@ -817,8 +815,8 @@ def test_a_refusing_engine_is_classified_with_its_status(
         def json(self):
             return {}
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp())
-    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
+    monkeypatch.setattr(cyberengine_client.outbound, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(cyberengine_client.outbound, "post", lambda *a, **k: _Resp())
     client = cyberengine_client.CyberEngineClient("http://engine", "key")
 
     with pytest.raises(EngineError) as raised:
@@ -840,8 +838,8 @@ def test_an_unreachable_engine_is_classified_unreachable_at_every_call(monkeypat
     def _boom(*args, **kwargs):
         raise requests.RequestException("no route to host")
 
-    monkeypatch.setattr(requests, "get", _boom)
-    monkeypatch.setattr(requests, "post", _boom)
+    monkeypatch.setattr(cyberengine_client.outbound, "get", _boom)
+    monkeypatch.setattr(cyberengine_client.outbound, "post", _boom)
     client = cyberengine_client.CyberEngineClient("http://engine", "key")
 
     for attempt in (lambda: client._get("/api/x"), lambda: client._post("/api/x", {})):

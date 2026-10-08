@@ -128,7 +128,7 @@ def test_the_engine_is_asked_at_the_right_url_on_the_standard_header(factory, mi
     spending a redirect inside a 500ms budget.
     """
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(factory.get("/api/thing"))
 
     args, kwargs = post.call_args
@@ -144,7 +144,7 @@ def test_the_engine_is_asked_at_the_right_url_on_the_standard_header(factory, mi
 def test_credentials_are_never_forwarded_to_the_engine(factory, middleware):
     """The body of every request was forwarded, including sign-in bodies."""
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(
             factory.post(
                 "/api/token/",
@@ -160,7 +160,7 @@ def test_credentials_are_never_forwarded_to_the_engine(factory, middleware):
 
 def test_a_sensitive_field_elsewhere_is_redacted(factory, middleware):
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(
             factory.post(
                 "/api/pentest/scan/",
@@ -184,7 +184,7 @@ def test_an_uploaded_file_is_not_copied_into_the_engine(factory, middleware):
     """
     upload = SimpleUploadedFile("evidence.bin", b"x" * 100, content_type="application/octet-stream")
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(
             factory.post(
                 "/api/pentest/scan/",
@@ -208,7 +208,7 @@ def test_the_log_analysis_endpoint_is_not_scored_as_the_callers_own_behaviour(
     analyst's own address blocked from every endpoint for five minutes.
     """
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(
             factory.post(
                 "/api/detection/defender/text/",
@@ -238,7 +238,7 @@ def test_a_body_too_large_to_inspect_is_reported_not_silently_emptied(
 
     post = engine_says()
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
-        with mock.patch("audit.middleware.requests.post", post):
+        with mock.patch("audit.middleware.outbound.post", post):
             middleware()(oversized)
 
     assert post.call_args.kwargs["json"]["body"] == ""
@@ -247,7 +247,7 @@ def test_a_body_too_large_to_inspect_is_reported_not_silently_emptied(
 
 def test_static_paths_are_not_sent_to_the_engine(factory, middleware):
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(factory.get("/static/app.css"))
 
     post.assert_not_called()
@@ -260,7 +260,7 @@ def test_static_paths_are_not_sent_to_the_engine(factory, middleware):
 
 def test_a_block_decision_is_enforced_when_not_monitoring_only(factory, middleware):
     with mock.patch(
-        "audit.middleware.requests.post",
+        "audit.middleware.outbound.post",
         engine_says({"action": "block", "allow": False, "reason": "sqli"}),
     ):
         result = middleware(DEFENDER_MONITOR_ONLY=False)(factory.get("/api/thing"))
@@ -276,7 +276,7 @@ def test_a_refusal_is_honoured_whatever_the_engine_calls_it(factory, middleware,
     sends an explicit allow boolean, and it was being thrown away.
     """
     with mock.patch(
-        "audit.middleware.requests.post",
+        "audit.middleware.outbound.post",
         engine_says({"action": action, "allow": False, "reason": "x"}),
     ):
         result = middleware(DEFENDER_MONITOR_ONLY=False)(factory.get("/api/thing"))
@@ -294,7 +294,7 @@ def test_a_block_is_recorded_rather_than_discarded_in_monitor_mode(
     """
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
         with mock.patch(
-            "audit.middleware.requests.post",
+            "audit.middleware.outbound.post",
             engine_says({"action": "block", "allow": False, "reason": "sqli"}),
         ):
             result = middleware(DEFENDER_MONITOR_ONLY=True)(factory.get("/api/thing"))
@@ -306,7 +306,7 @@ def test_a_block_is_recorded_rather_than_discarded_in_monitor_mode(
 def test_a_throttle_answers_429_rather_than_sleeping(factory, middleware):
     """Sleeping spent one of our own workers on the caller's behalf."""
     with mock.patch(
-        "audit.middleware.requests.post",
+        "audit.middleware.outbound.post",
         engine_says({"action": "throttle", "allow": True, "block_seconds": 30}),
     ):
         result = middleware(DEFENDER_MONITOR_ONLY=False)(factory.get("/api/thing"))
@@ -320,7 +320,7 @@ def test_a_decision_that_is_not_an_object_does_not_500_every_request(
 ):
     """Valid JSON of the wrong shape reached .get() and raised AttributeError."""
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
-        with mock.patch("audit.middleware.requests.post", engine_says(["allow"])):
+        with mock.patch("audit.middleware.outbound.post", engine_says(["allow"])):
             result = middleware(DEFENDER_MONITOR_ONLY=False)(factory.get("/api/thing"))
 
     assert result.status_code == 200
@@ -330,7 +330,7 @@ def test_a_decision_that_is_not_an_object_does_not_500_every_request(
 def test_a_body_that_is_not_json_is_reported(factory, middleware, caplog):
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
         with mock.patch(
-            "audit.middleware.requests.post", engine_says(ValueError("no json"))
+            "audit.middleware.outbound.post", engine_says(ValueError("no json"))
         ):
             result = middleware()(factory.get("/api/thing"))
 
@@ -347,7 +347,7 @@ def test_a_refused_key_is_logged_rather_than_passing_in_silence(
     factory, middleware, caplog
 ):
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
-        with mock.patch("audit.middleware.requests.post", engine_says(status=403)):
+        with mock.patch("audit.middleware.outbound.post", engine_says(status=403)):
             result = middleware()(factory.get("/api/thing"))
 
     assert result.status_code == 200, "the request is still allowed"
@@ -357,7 +357,7 @@ def test_a_refused_key_is_logged_rather_than_passing_in_silence(
 def test_an_unreachable_engine_is_logged(factory, middleware, caplog):
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
         with mock.patch(
-            "audit.middleware.requests.post",
+            "audit.middleware.outbound.post",
             engine_says(raises=requests.ConnectionError("refused")),
         ):
             result = middleware()(factory.get("/api/thing"))
@@ -378,9 +378,9 @@ def test_a_half_dead_engine_still_escalates(factory, middleware, caplog):
 
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
         for _ in range(8):
-            with mock.patch("audit.middleware.requests.post", failing):
+            with mock.patch("audit.middleware.outbound.post", failing):
                 app(factory.get("/api/thing"))
-            with mock.patch("audit.middleware.requests.post", working):
+            with mock.patch("audit.middleware.outbound.post", working):
                 app(factory.get("/api/thing"))
 
     assert any(record.levelno == logging.ERROR for record in caplog.records)
@@ -403,7 +403,7 @@ def test_the_first_alert_is_not_suppressed_on_a_freshly_booted_machine(
         with mock.patch(
             "audit.middleware.time.monotonic", side_effect=[0.1 * i for i in range(1, 40)]
         ):
-            with mock.patch("audit.middleware.requests.post", failing):
+            with mock.patch("audit.middleware.outbound.post", failing):
                 for _ in range(6):
                     app(factory.get("/api/thing"))
 
@@ -415,7 +415,7 @@ def test_neither_the_operator_key_nor_a_password_reaches_a_log(
 ):
     with caplog.at_level(logging.DEBUG, logger="audit.middleware"):
         with mock.patch(
-            "audit.middleware.requests.post",
+            "audit.middleware.outbound.post",
             engine_says(raises=requests.ConnectionError("http://127.0.0.1:8001 failed")),
         ):
             middleware()(
@@ -489,7 +489,7 @@ def test_a_credential_never_reaches_the_engine(factory, middleware, content_type
     """
     post = engine_says()
     request = factory.post("/api/pentest/scan/", data=body, content_type=content_type)
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(request)
 
     forwarded = post.call_args.kwargs["json"]["body"]
@@ -500,7 +500,7 @@ def test_a_credential_never_reaches_the_engine(factory, middleware, content_type
 def test_a_credential_in_the_query_string_is_redacted_too(factory, middleware):
     """QUERY_STRING was copied through with no redaction path at all."""
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(factory.get("/api/pentest/scans/?token=%s&page=2" % SECRET))
 
     query = post.call_args.kwargs["json"]["query"]
@@ -516,7 +516,7 @@ def test_an_attack_payload_in_an_ordinary_field_reaches_the_engine_intact(factor
         data="q=%27+OR+1%3D1--&password=" + SECRET,
         content_type="application/x-www-form-urlencoded",
     )
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(request)
 
     forwarded = post.call_args.kwargs["json"]["body"]
@@ -540,7 +540,7 @@ def test_a_secret_at_the_truncation_boundary_is_redacted_and_the_cut_is_reported
 
     post = engine_says()
     request = factory.post("/api/pentest/scan/", data=body, content_type="application/json")
-    with caplog.at_level(logging.WARNING), mock.patch("audit.middleware.requests.post", post):
+    with caplog.at_level(logging.WARNING), mock.patch("audit.middleware.outbound.post", post):
         middleware(DEFENDER_MAX_BODY_BYTES=limit)(request)
 
     forwarded = post.call_args.kwargs["json"]["body"]
@@ -556,7 +556,7 @@ def test_every_spelling_of_no_is_a_refusal(factory, middleware, action):
     "block" was, so a decision of {"action": "deny"} was permission.
     """
     post = engine_says({"allow": True, "action": action, "reason": "x"})
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         response = middleware(DEFENDER_MONITOR_ONLY=False)(factory.get("/api/pentest/scans/"))
 
     assert response.status_code == 403
@@ -646,7 +646,7 @@ def test_the_text_fallback_is_linear_in_the_body(factory, middleware, body):
     post = engine_says()
     request = factory.post("/api/pentest/scan/", data=body, content_type="text/plain")
     started = time.perf_counter()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware(DEFENDER_MAX_BODY_BYTES=64 * 1024)(request)
     assert time.perf_counter() - started < 2.0
 
@@ -1271,7 +1271,7 @@ def test_a_charset_that_is_not_read_here_is_reported(middleware, factory, charse
 )
 def test_a_query_string_that_is_not_a_form_is_read_as_text_too(factory, middleware, query, forwarded):
     post = engine_says()
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         middleware()(factory.get("/api/x/", QUERY_STRING=query))
     assert post.call_args.kwargs["json"]["query"] == forwarded
 
@@ -1279,7 +1279,7 @@ def test_a_query_string_that_is_not_a_form_is_read_as_text_too(factory, middlewa
 def test_a_query_string_value_with_no_certain_end_is_reported(factory, middleware, caplog):
     post = engine_says()
     with caplog.at_level(logging.WARNING, logger="audit.middleware"):
-        with mock.patch("audit.middleware.requests.post", post):
+        with mock.patch("audit.middleware.outbound.post", post):
             middleware()(factory.get("/api/x/", QUERY_STRING='debug&note=token:"x&q=UNION+SELECT'))
     assert post.call_args.kwargs["json"]["query"] == "debug&note=token: [redacted]"
     assert "query string could not be fully inspected" in logged(caplog)
@@ -1628,7 +1628,7 @@ def test_a_swallowed_keys_value_on_the_next_line_never_reaches_the_engine(
     post = engine_says()
     with (
         caplog.at_level(logging.WARNING, logger="audit.middleware"),
-        mock.patch("audit.middleware.requests.post", post),
+        mock.patch("audit.middleware.outbound.post", post),
     ):
         middleware()(factory.post("/api/x/", data=body, content_type="text/plain"))
     assert post.call_args.kwargs["json"]["body"] == forwarded
@@ -1791,7 +1791,7 @@ def test_a_quoted_value_that_closes_a_key_never_forwards_that_keys_value(
     post = engine_says()
     with (
         caplog.at_level(logging.WARNING, logger="audit.middleware"),
-        mock.patch("audit.middleware.requests.post", post),
+        mock.patch("audit.middleware.outbound.post", post),
     ):
         middleware()(factory.post("/api/x/", data=body, content_type="text/plain"))
     assert post.call_args.kwargs["json"]["body"] == forwarded
@@ -1898,7 +1898,7 @@ def test_a_split_keys_value_never_reaches_the_engine_whatever_its_blanks_or_sepa
     post = engine_says()
     with (
         caplog.at_level(logging.WARNING, logger="audit.middleware"),
-        mock.patch("audit.middleware.requests.post", post),
+        mock.patch("audit.middleware.outbound.post", post),
     ):
         middleware()(factory.post("/api/x/", data=body, content_type="text/plain"))
     assert post.call_args.kwargs["json"]["body"] == forwarded
@@ -1933,7 +1933,7 @@ def test_a_key_that_lost_its_opening_quote_after_a_secret_never_forwards_its_val
     post = engine_says()
     with (
         caplog.at_level(logging.WARNING, logger="audit.middleware"),
-        mock.patch("audit.middleware.requests.post", post),
+        mock.patch("audit.middleware.outbound.post", post),
     ):
         middleware()(factory.post("/api/x/", data=body, content_type="application/json"))
     assert post.call_args.kwargs["json"]["body"] == forwarded

@@ -2526,11 +2526,10 @@ def test_absent_is_trusted_only_once_the_attempt_is_older_than_the_claim():
 
 
 def test_the_look_has_a_total_deadline_too(monkeypatch):
-    import requests
-
     from assurance.connectors.base import DeadlineExceeded, RequestsTransport
+    from safety import outbound
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: time.sleep(3))
+    monkeypatch.setattr(outbound, "get", lambda *a, **k: time.sleep(3))
     began = time.monotonic()
     with pytest.raises(DeadlineExceeded):
         RequestsTransport(deadline=0.2).get("https://jira.example/x", headers={}, params={})

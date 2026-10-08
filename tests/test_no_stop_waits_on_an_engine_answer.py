@@ -196,7 +196,7 @@ def test_an_answer_longer_than_the_parse_bound_is_unreadable_and_never_scanned(m
 
 
 def _engine_answers(monkeypatch, body):
-    monkeypatch.setattr(cec.requests, "get", lambda url, headers=None, timeout=None, **_: _response(200, body))
+    monkeypatch.setattr(cec.outbound, "get", lambda url, headers=None, timeout=None, **_: _response(200, body))
 
 
 @pytest.mark.django_db

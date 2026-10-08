@@ -1266,7 +1266,7 @@ def test_enforce_mode_never_refuses_a_stop(configure, sample, answer):
     _name, method, path, body, extra = sample
     configure(DEFENDER_MONITOR_ONLY=False, FAILSAFE_POLL_TOKEN=POLL_TOKEN)
     post = mock.Mock(side_effect=AssertionError("a stop was sent to the engine"))
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         response = DefenderMiddleware(lambda request: HttpResponse("the view ran"))(
             _request(method, path, body, extra)
         )
@@ -1295,7 +1295,7 @@ def test_the_same_routes_are_still_enforced_when_the_request_is_not_a_stop(confi
     _label, method, path, body, content_type, extra = sample
     configure(DEFENDER_MONITOR_ONLY=False, FAILSAFE_POLL_TOKEN=POLL_TOKEN)
     post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
-    with mock.patch("audit.middleware.requests.post", post):
+    with mock.patch("audit.middleware.outbound.post", post):
         response = DefenderMiddleware(lambda request: HttpResponse("the view ran"))(
             _request(method, path, body, extra, content_type)
         )
@@ -1373,7 +1373,7 @@ def enforcing(configure, monkeypatch):
 def test_an_answer_larger_than_the_limit_is_not_read_and_the_request_is_allowed(enforcing, monkeypatch):
     app, problems = enforcing
     oversized = b'{"allow": false, "action": "block", "pad": "' + b"a" * (70 * 1024) + b'"}'
-    monkeypatch.setattr("audit.middleware.requests.post", _engine_answers(raw=oversized))
+    monkeypatch.setattr("audit.middleware.outbound.post", _engine_answers(raw=oversized))
     response = app(_request("GET", "/api/failsafe/audit/", None, {}))
     assert response.status_code == 200
     assert problems == [f"engine answer is larger than {gateway_module._ANSWER_LIMIT} bytes"]
@@ -1402,7 +1402,7 @@ def test_an_answer_that_cannot_be_read_is_recorded_and_the_request_is_allowed(en
         response.raw = urllib3.HTTPResponse(body=Broken(), status=200, preload_content=False)
         return response
 
-    monkeypatch.setattr("audit.middleware.requests.post", mock.Mock(side_effect=answer))
+    monkeypatch.setattr("audit.middleware.outbound.post", mock.Mock(side_effect=answer))
     response = app(_request("GET", "/api/failsafe/audit/", None, {}))
     assert response.status_code == 200
     assert len(problems) == 1 and problems[0].startswith("engine answer could not be read: ")
@@ -1425,7 +1425,7 @@ def test_a_call_that_cannot_start_gives_its_slot_back(enforcing, monkeypatch, co
 
 def test_an_error_that_is_not_a_request_failure_is_raised_as_before(enforcing, monkeypatch):
     app, problems = enforcing
-    monkeypatch.setattr("audit.middleware.requests.post", mock.Mock(side_effect=ValueError("a bug")))
+    monkeypatch.setattr("audit.middleware.outbound.post", mock.Mock(side_effect=ValueError("a bug")))
     with pytest.raises(ValueError, match="a bug"):
         app(_request("GET", "/api/failsafe/audit/", None, {}))
     assert app._slots.acquire(timeout=0)
@@ -1453,7 +1453,7 @@ def rates(monkeypatch, configure):
     cache.clear()
     configure(DEFENDER_MONITOR_ONLY=True, FAILSAFE_POLL_TOKEN=POLL_TOKEN)
     # The gateway answers allow at once: these tests are about the throttles.
-    monkeypatch.setattr("audit.middleware.requests.post", _engine_answers({"allow": True, "action": "allow"}))
+    monkeypatch.setattr("audit.middleware.outbound.post", _engine_answers({"allow": True, "action": "allow"}))
     # The state view's engine read answers at once, whatever engine is configured.
     monkeypatch.setattr(
         "ai_engine.services.cyberengine_client.CyberEngineClient.from_settings",
@@ -1727,7 +1727,7 @@ def test_enforce_mode_never_refuses_a_stop_through_the_whole_stack(rates, config
     everything in enforce mode: every stop is served, and a read is refused."""
     configure(DEFENDER_MONITOR_ONLY=False)
     monkeypatch.setattr(
-        "audit.middleware.requests.post", _engine_answers({"allow": False, "action": "block", "reason": "x"})
+        "audit.middleware.outbound.post", _engine_answers({"allow": False, "action": "block", "reason": "x"})
     )
     operator = _admin()
     client = _client_for(operator)
@@ -1746,7 +1746,7 @@ def test_enforce_mode_still_refuses_what_is_not_a_stop_through_the_whole_stack(r
 
     configure(DEFENDER_MONITOR_ONLY=False)
     monkeypatch.setattr(
-        "audit.middleware.requests.post", _engine_answers({"allow": False, "action": "block", "reason": "x"})
+        "audit.middleware.outbound.post", _engine_answers({"allow": False, "action": "block", "reason": "x"})
     )
     operator = _admin()
     client = _client_for(operator)
@@ -1888,7 +1888,7 @@ def saturated(rates, configure, monkeypatch):
 
     def apply(payload):
         _saturate_every_throttle(monkeypatch)
-        monkeypatch.setattr("audit.middleware.requests.post", _engine_answers(payload))
+        monkeypatch.setattr("audit.middleware.outbound.post", _engine_answers(payload))
 
     return apply
 
@@ -2148,7 +2148,7 @@ def test_the_dashboards_stops_need_no_password_sign_in(rates, service, operator_
 
     configure(DEFENDER_MONITOR_ONLY=False)
     monkeypatch.setattr(
-        "audit.middleware.requests.post", _engine_answers({"allow": False, "action": "block", "reason": "x"})
+        "audit.middleware.outbound.post", _engine_answers({"allow": False, "action": "block", "reason": "x"})
     )
     cache.clear()
     assert _sign_in(service.username, "svc-password").status_code == 403
@@ -2224,7 +2224,7 @@ def test_a_cancel_of_a_stop_needs_its_initiator_or_an_admin_and_goes_through_the
     assert _client_for(admin_).post(f"/api/failsafe/commands/{commands_[1].uuid}/cancel/", {}, format="json").status_code == 200
     configure(DEFENDER_MONITOR_ONLY=False)
     post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
-    monkeypatch.setattr("audit.middleware.requests.post", post)
+    monkeypatch.setattr("audit.middleware.outbound.post", post)
     blocked = _client_for(admin_).post(f"/api/failsafe/commands/{commands_[2].uuid}/cancel/", {}, format="json")
     assert blocked.status_code == 403 and post.call_count == 1
     assert FailsafeCommand.objects.get(pk=commands_[2].pk).status == "awaiting_signatures"
@@ -2683,7 +2683,7 @@ def test_a_spent_refresh_token_no_longer_verifies_and_is_not_exempt(rates, confi
 
     configure(DEFENDER_MONITOR_ONLY=False)
     post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
-    monkeypatch.setattr("audit.middleware.requests.post", post)
+    monkeypatch.setattr("audit.middleware.outbound.post", post)
     assert APIClient().post("/api/token/refresh/", {"refresh": first}, format="json").status_code == 403
     assert post.call_count == 1
     assert APIClient().post("/api/token/refresh/", {"refresh": second}, format="json").status_code == 200
@@ -2726,7 +2726,7 @@ def test_a_removed_or_deactivated_operators_refresh_is_not_exempt_and_is_a_401(r
         assert answer.status_code == 401, answer.content
     configure(DEFENDER_MONITOR_ONLY=False)
     post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
-    monkeypatch.setattr("audit.middleware.requests.post", post)
+    monkeypatch.setattr("audit.middleware.outbound.post", post)
     for token in (gone_token, off_token):
         assert APIClient().post("/api/token/refresh/", {"refresh": token}, format="json").status_code == 403
     assert post.call_count == 2
@@ -2802,7 +2802,7 @@ def test_enforce_mode_never_refuses_a_valid_refresh(rates, configure, monkeypatc
 
     configure(DEFENDER_MONITOR_ONLY=False)
     post = _engine_answers({"allow": False, "action": "block", "reason": "x"})
-    monkeypatch.setattr("audit.middleware.requests.post", post)
+    monkeypatch.setattr("audit.middleware.outbound.post", post)
     operator = User.objects.create_user(username="op324", password="x", role="admin")
     answer = APIClient().post("/api/token/refresh/", {"refresh": str(RefreshToken.for_user(operator))}, format="json")
     assert answer.status_code == 200
