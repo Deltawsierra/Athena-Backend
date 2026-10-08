@@ -148,6 +148,22 @@ superseded reads unproven even once that approval is restored. The dispatch inst
 bounds the effect's (:data:`DISPATCH_EFFECT_WINDOW_SECONDS`), and when the gate saw
 a sign-in assertion or a grant, only those records prove the person hops.
 
+THE APPROVAL THE GATE READ ITSELF (authority chain short 3, the owner's 8 Oct
+decision). With a link to this backend, Achilles' gate reads the approval of the
+chain's workflow in force from this backend's approval-in-force route at decide time
+(:mod:`assurance.gate_approval`) -- the approval version's id and digest -- binds it
+into its permit and signs it into the observed effect (``mythos.observed-effect/v3``,
+``dispatch.verified.workflow_approval``), never copying the caller's digest. That
+reading is GATE-ATTESTED, and ``under_policy`` reads it first
+(:class:`GateApproval`): the version it names must be on record for this workflow
+with that digest, and the dispatcher must not have presented another, or the hop is
+BROKEN (``approval_digest_contradicts_gate``); then it is proven when that version
+was the one in force at the dispatch instant (``approval_attested_in_force_at_dispatch``),
+and unproven when it had been superseded by then (``dispatched_under_superseded_policy``)
+or the history does not cover the dispatch with it (``dispatch_state_unrecorded``).
+Only a caller-presented digest -- a v2 document, or a v3 one from a gate with no link
+-- is read exactly as before, and its readings say it was presented.
+
 THE GRAPH'S EDGES ARE READ AS OF DISPATCH TOO (the follow-up to part 5). The edges
 ``through_identity``, ``performs`` and reach read -- an agent's identity, a component's
 permission, a principal's reach to a tool (:func:`graph_edges`) -- are kept as an
@@ -349,8 +365,13 @@ REASONS: Mapping[str, str] = {
         "for a window holding the effect, not revoked as of the effect"
     ),
     "approval_in_force_at_dispatch": (
-        "the approval version the gate signed at dispatch is the chain's, and was the version in force at "
-        "the dispatch instant"
+        "the approval version the gate signed at dispatch, as the dispatcher presented it, is the chain's, and "
+        "was the version in force at the dispatch instant"
+    ),
+    "approval_attested_in_force_at_dispatch": (
+        "the gate read this approval version in force from this platform itself, at decide time, and signed it "
+        "into the dispatch: it is the chain's, on record with that digest, and was the version in force at the "
+        "dispatch instant"
     ),
     "contract_in_force_at_dispatch": (
         "the approval in force at dispatch names this tool under the contract that was in force at the "
@@ -461,6 +482,11 @@ REASONS: Mapping[str, str] = {
     "unchecked": "no check speaks for this hop",
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
+    "approval_digest_contradicts_gate": (
+        "the approval the gate read from this platform and signed contradicts this platform's record: the "
+        "version it names is not on record for this workflow with that digest, or the dispatcher presented "
+        "another digest beside it"
+    ),
     "unreachable": (
         "at the dispatch instant, by the graph's edge history -- or, with no dispatch recorded, in the graph as it "
         "stands -- effective access over a graph fully resolved from the acting agent did not reach this tool"
@@ -794,6 +820,23 @@ def graph_edges(graph: Graph) -> frozenset[tuple[str, str, str]]:
 
 
 @dataclass(frozen=True)
+class GateApproval:
+    """The approval of the chain's workflow in force as the GATE read it from this
+    backend at decide time (``mythos.observed-effect/v3``'s
+    ``dispatch.verified.workflow_approval``, :mod:`assurance.gate_approval`), signed by
+    Achilles' observed-effect key with the rest of the document -- never the caller's
+    word: ``version`` is the :class:`ApprovalVersion` row the route answered with
+    (:attr:`ApprovalVersion.record`), ``digest`` its digest, ``read_at`` when the gate
+    read it, on Achilles' clock."""
+
+    deployment: str
+    workflow: str
+    version: str
+    digest: str
+    read_at: datetime
+
+
+@dataclass(frozen=True)
 class DispatchState:
     """The state an effect's dispatch ran under, as the gate signed it into the observed
     effect (``mythos.observed-effect/v2``'s ``dispatch`` block), read against its signed
@@ -821,17 +864,21 @@ class DispatchState:
     assertion_digest: str | None = None
     grant_digest: str | None = None
     route_at_dispatch: str = ""
+    #: What the gate read itself (v3), or None: a v2 document, or a gate with no link.
+    gate_approval: GateApproval | None = None
 
 
 @dataclass(frozen=True)
 class ApprovalVersion:
     """One recorded version of a workflow's approval (:mod:`assurance.approval_history`):
     its digest (blank once withdrawn), the tools it bound as ``(kind, identifier,
-    contract digest)``, and when the platform noted it in force."""
+    contract digest)``, when the platform noted it in force, and the history row that
+    records it (``record``: the row's id, which a gate-attested reading names)."""
 
     in_force_from: datetime
     digest: str
     tools: tuple[tuple[str, str, str], ...] = ()
+    record: str = ""
 
 
 @dataclass(frozen=True)
@@ -1256,6 +1303,8 @@ def _under_policy(chain, i, source, target, inputs, index) -> list[Reading]:
     if missing is not None:
         return [missing]
     readings = _gate_epoch(dispatch)
+    if dispatch.gate_approval is not None:
+        return _under_gate_attested_policy(chain, policy, dispatch, readings, inputs)
     presented = dispatch.approval_digest
     at = _when(dispatch.dispatched_at)
     if presented is None:
@@ -1266,7 +1315,7 @@ def _under_policy(chain, i, source, target, inputs, index) -> list[Reading]:
                 UNPROVEN,
                 "policy_version_not_in_force",
                 f"the chain ran under version {policy.version} of {policy.ref!r}; the gate signed version "
-                f"{presented} at the dispatch at {at}",
+                f"{presented} at the dispatch at {at}, as the dispatcher presented it",
             )
         )
     versions = inputs.approval_history.get(chain.workflow, ())
@@ -1288,14 +1337,113 @@ def _under_policy(chain, i, source, target, inputs, index) -> list[Reading]:
                 f"version {presented} of {policy.ref!r} was not in force; {current.digest} was "
                 f"(from {_when(current.in_force_from)})"
             )
-        readings.append(Reading(UNPROVEN, "dispatched_under_superseded_policy", f"{why} at the dispatch at {at}"))
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_policy",
+                f"{why} at the dispatch at {at} (the version the dispatcher presented)",
+            )
+        )
     elif not readings:
         readings.append(
             Reading(
                 PROVEN,
                 "approval_in_force_at_dispatch",
                 f"approval {policy.ref!r} at {presented}, the version in force (from "
-                f"{_when(current.in_force_from)}) at the dispatch at {at}, under gate epoch {dispatch.epoch!r}",
+                f"{_when(current.in_force_from)}) at the dispatch at {at}, under gate epoch {dispatch.epoch!r}; "
+                "presented by the dispatcher, not attested by the gate",
+            )
+        )
+    return readings
+
+
+def _under_gate_attested_policy(chain, policy, dispatch: DispatchState, readings: list, inputs) -> list[Reading]:
+    """``under_policy`` read against the approval the GATE read from this backend and
+    signed (:class:`GateApproval`): a contradiction with this backend's own record is
+    broken, the version in force at the dispatch instant is proven, and anything else
+    is unproven, naming why. Never read against the approval as it stands now."""
+    gate = dispatch.gate_approval
+    at = _when(dispatch.dispatched_at)
+    read = f"the gate read version {gate.version} of {policy.ref!r} at {gate.digest} (at {_when(gate.read_at)})"
+    versions = inputs.approval_history.get(chain.workflow, ())
+    cited_at = next((n for n, v in enumerate(versions) if v.record == gate.version), None)
+    cited = None if cited_at is None else versions[cited_at]
+    if gate.workflow != chain.workflow:
+        return [
+            *readings,
+            Reading(
+                BROKEN,
+                "approval_digest_contradicts_gate",
+                f"{read}, for workflow {gate.workflow!r}; this chain serves {chain.workflow!r}",
+            ),
+        ]
+    if cited is None:
+        return [
+            *readings,
+            Reading(
+                BROKEN,
+                "approval_digest_contradicts_gate",
+                f"{read}; no version {gate.version} of {policy.ref!r} is on record here",
+            ),
+        ]
+    if cited.digest != gate.digest:
+        return [
+            *readings,
+            Reading(
+                BROKEN,
+                "approval_digest_contradicts_gate",
+                f"{read}; version {gate.version} is on record here at {cited.digest or 'withdrawn'} "
+                f"(from {_when(cited.in_force_from)})",
+            ),
+        ]
+    if dispatch.approval_digest is not None and dispatch.approval_digest != gate.digest:
+        return [
+            *readings,
+            Reading(
+                BROKEN,
+                "approval_digest_contradicts_gate",
+                f"{read}; the dispatcher presented {dispatch.approval_digest} beside it",
+            ),
+        ]
+    if policy.version != gate.digest:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "policy_version_not_in_force",
+                f"the chain ran under version {policy.version} of {policy.ref!r}; {read}, attested by the gate",
+            )
+        )
+    current, _ = _version_at(versions, dispatch.dispatched_at, lambda v: v.in_force_from)
+    current_at = None if current is None else versions.index(current)
+    if current is None or current_at < cited_at:
+        readings.append(
+            _unrecorded(
+                f"{read}, attested by the gate; this platform's history notes that version from "
+                f"{_when(cited.in_force_from)}, and has no version of it in force at the dispatch at {at}"
+                if current is None
+                else f"{read}, attested by the gate; this platform's history notes that version from "
+                f"{_when(cited.in_force_from)}, after the dispatch at {at}, so it does not cover the dispatch "
+                "with it"
+            )
+        )
+    elif current_at > cited_at:
+        readings.append(
+            Reading(
+                UNPROVEN,
+                "dispatched_under_superseded_policy",
+                f"{read}, attested by the gate; it had been superseded by "
+                f"{current.digest or 'its withdrawal'} (version {current.record}, from "
+                f"{_when(current.in_force_from)}) by the dispatch at {at}",
+            )
+        )
+    elif not readings:
+        readings.append(
+            Reading(
+                PROVEN,
+                "approval_attested_in_force_at_dispatch",
+                f"{read} and signed it into observed effect {chain.effect_outcome_id}; version "
+                f"{cited.record} is on record here at {cited.digest}, in force (from "
+                f"{_when(cited.in_force_from)}) at the dispatch at {at}, under gate epoch {dispatch.epoch!r}",
             )
         )
     return readings
