@@ -520,6 +520,15 @@ def test_grouping_is_deterministic_and_order_free():
     assert [p.event_key for p in more] == [p.event_key for p in once]
 
 
+@pytest.mark.parametrize("process", [tpl.BusinessProcess.PAYMENTS, tpl.BusinessProcess.FRAUD_AML])
+def test_an_effect_two_templates_cover_makes_one_plan(process):
+    effect = _input("bypass", effect_type=tpl.EffectType.APPROVAL_BYPASSED, process=process)
+    (plan,) = builder.group([effect], _links("bypass", 2))
+    assert len(tpl.in_scope(effect.effect_type, process)) == 2
+    assert plan.template is tpl.select(effect.effect_type, process).template
+    assert [e.key for e in plan.effects] == ["bypass"]
+
+
 def test_the_grouping_key_names_no_finding():
     effect = _input("redirect")
     selection = tpl.select(effect.effect_type, effect.business_process)
