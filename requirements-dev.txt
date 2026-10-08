@@ -28,15 +28,15 @@ pytest-django>=4.8
 # Pinned to a commit rather than a tag (tag refs cannot be pushed from these
 # sessions -- the remote answers 403 for refs/tags/*; see Mythos-Core#10). What
 # the pins since 539538c added is written out beside the pin in requirements.txt:
-# Mythos-Core#24 to #48, the outcome verifier (#27, #28, #34) and the
+# Mythos-Core#24 to #49, the outcome verifier (#27, #28, #34) and the
 # evidence-class table claims read their confidence from (#31) chief among them
-# for this service, and the egress policy its target guard decides through
-# (#47). This pin and the one in requirements.txt must name
+# for this service, the egress policy its target guard decides through (#47),
+# and the one ISO 4217 currency table Economic Exposure reads (#49). This pin and the one in requirements.txt must name
 # the SAME commit -- two files that can drift apart would install two different
 # foundations for the same service, and tests/test_mythos_core_pin.py fails if
 # they ever disagree.
 cryptography>=41.0
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@6cd53439c3a6690fa4ac804fab5314bb54a006dd
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@104fdc9aa41ea3c658daf4ae718fe7b4fcd6b474
 
 # Ruff is a CI gate (see .github/workflows/ci.yml), so it is a pinned dependency
 # rather than whatever version a contributor happens to have. Its default rule

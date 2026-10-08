@@ -1,0 +1,255 @@
+{
+  "schema": "mythos.economics.observation-snapshot/v1",
+  "label": "SYNTHETIC TEST DATA: not real exchange rates and not a real price index. Every number here was made up for tests; none is a source for a customer figure.",
+  "synthetic": true,
+  "source": {
+    "source_key": "synthetic-fx-and-cost-index",
+    "provider": "Mythos (synthetic test data)",
+    "dataset": "SYNTHETIC TEST DATA: FX and cost-index observations, v1",
+    "url": "",
+    "license_class": "open",
+    "trust_tier": "unverified",
+    "retrieved_at": "2026-10-08T00:00:00+00:00",
+    "schema_version": "1"
+  },
+  "calendars": {
+    "SYNTHETIC-REF": {
+      "non_publication_dates": [
+        "2020-04-10",
+        "2020-04-13"
+      ]
+    },
+    "SYNTHETIC-MKT": {
+      "non_publication_dates": []
+    }
+  },
+  "fx": [
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.1000",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-02T15:00:00+00:00",
+      "effective_date": "2020-03-02"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.1200",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-03T15:00:00+00:00",
+      "effective_date": "2020-03-03"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.1300",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-05T15:00:00+00:00",
+      "effective_date": "2020-03-05"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.1400",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-06T15:00:00+00:00",
+      "effective_date": "2020-03-06"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.1450",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-09T15:00:00+00:00",
+      "effective_date": "2020-03-09"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0900",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-04-09T15:00:00+00:00",
+      "effective_date": "2020-04-09"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0920",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-04-14T15:00:00+00:00",
+      "effective_date": "2020-04-14"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0480",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2026-09-29T15:00:00+00:00",
+      "effective_date": "2026-09-29"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0500",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2026-09-30T15:00:00+00:00",
+      "effective_date": "2026-09-30"
+    },
+    {
+      "base": "USD",
+      "quote": "JPY",
+      "rate": "107.50",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-02T15:00:00+00:00",
+      "effective_date": "2020-03-02"
+    },
+    {
+      "base": "USD",
+      "quote": "JPY",
+      "rate": "147.00",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2026-09-29T15:00:00+00:00",
+      "effective_date": "2026-09-29"
+    },
+    {
+      "base": "USD",
+      "quote": "JPY",
+      "rate": "149.00",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2026-10-01T15:00:00+00:00",
+      "effective_date": "2026-10-01"
+    },
+    {
+      "base": "USD",
+      "quote": "KWD",
+      "rate": "0.3050",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2020-03-02T15:00:00+00:00",
+      "effective_date": "2020-03-02"
+    },
+    {
+      "base": "USD",
+      "quote": "KWD",
+      "rate": "0.3075",
+      "rate_type": "reference",
+      "provider": "SYNTHETIC-REF",
+      "observed_at": "2026-09-30T15:00:00+00:00",
+      "effective_date": "2026-09-30"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.1260",
+      "rate_type": "mid",
+      "provider": "SYNTHETIC-MKT",
+      "observed_at": "2020-03-04T21:00:00+00:00",
+      "effective_date": "2020-03-04"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0495",
+      "rate_type": "bid",
+      "provider": "SYNTHETIC-MKT",
+      "observed_at": "2026-09-30T21:00:00+00:00",
+      "effective_date": "2026-09-30"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0500",
+      "rate_type": "mid",
+      "provider": "SYNTHETIC-MKT",
+      "observed_at": "2026-09-30T21:00:00+00:00",
+      "effective_date": "2026-09-30"
+    },
+    {
+      "base": "EUR",
+      "quote": "USD",
+      "rate": "1.0505",
+      "rate_type": "ask",
+      "provider": "SYNTHETIC-MKT",
+      "observed_at": "2026-09-30T21:00:00+00:00",
+      "effective_date": "2026-09-30"
+    }
+  ],
+  "cost_index": [
+    {
+      "series_id": "SYN-CPI-US",
+      "geography": "US",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2020-03",
+      "value": "100.000",
+      "vintage_date": "2020-04-10"
+    },
+    {
+      "series_id": "SYN-CPI-US",
+      "geography": "US",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2020-04",
+      "value": "100.400",
+      "vintage_date": "2020-05-12"
+    },
+    {
+      "series_id": "SYN-CPI-US",
+      "geography": "US",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2026-08",
+      "value": "124.000",
+      "vintage_date": "2026-09-11"
+    },
+    {
+      "series_id": "SYN-CPI-US",
+      "geography": "US",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2026-09",
+      "value": "125.000",
+      "vintage_date": "2026-09-30"
+    },
+    {
+      "series_id": "SYN-CPI-US",
+      "geography": "US",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2026-09",
+      "value": "125.500",
+      "vintage_date": "2026-10-07"
+    },
+    {
+      "series_id": "SYN-HICP-EA",
+      "geography": "EA",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2020-03",
+      "value": "100.000",
+      "vintage_date": "2020-04-01"
+    },
+    {
+      "series_id": "SYN-HICP-EA",
+      "geography": "EA",
+      "category": "consumer prices, all items (SYNTHETIC)",
+      "base": "2020-03=100",
+      "period": "2026-09",
+      "value": "118.000",
+      "vintage_date": "2026-09-30"
+    }
+  ]
+}

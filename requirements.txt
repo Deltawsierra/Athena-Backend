@@ -229,4 +229,20 @@ zopfli==0.2.3.post1
 # with the tool and makes no safe_http request.
 # tests/test_failsafe_control_plane.py verifies what it signs with this pin's
 # verify_command.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@6cd53439c3a6690fa4ac804fab5314bb54a006dd
+#
+# What the pin since 6cd5343 (Mythos-Core#48) adds:
+#
+# Mythos-Core#49 -- the reason for the 104fdc9 pin: SPINE Economic Exposure's
+# shared halves. mythos_core.currency is the ONE ISO 4217 table for the
+# capability (216 entries; the file's bytes are SHA-256 pinned in core, and its
+# entries_digest is the digest this service's working copy of #141 had).
+# assurance/economics/engine/currency.py now reads it and keeps no table of its
+# own, and tests/test_economics_engine.py pins core's entries_digest and file
+# digest, so a core bump that changes the table fails here until the pins move
+# in the same reviewed change. mythos_core.exposure_receipt is the signed
+# Financial Exposure Receipt (mythos.financial-exposure-receipt/v1); this
+# service does not build or verify one yet. #49 touches outcome.py only to
+# comment that the receipt shares its token, digest, base64 and key helpers;
+# no behaviour moves, and tests/test_failsafe_control_plane.py and the observed-
+# outcome tests run unchanged against it.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@104fdc9aa41ea3c658daf4ae718fe7b4fcd6b474

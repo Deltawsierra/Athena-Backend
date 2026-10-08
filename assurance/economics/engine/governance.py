@@ -55,6 +55,10 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "for it, have approved it"
         ),
         "unreviewed_license": "nobody has reviewed this source's license terms, so no production run may use it",
+        "synthetic_source": (
+            "the source is synthetic test data: no production run ever uses it, whatever its licence, and it is "
+            "never trusted above unverified"
+        ),
         "license_class_unrecognised": "the source's license class is not one this platform knows, so no production "
         "run may use it",
         "snapshot_hash_malformed": "a snapshot hash is 'sha256:' followed by 64 lowercase hexadecimal digits",
@@ -182,9 +186,14 @@ def override_refusal(requester: Person, approved_by: Iterable[Person]) -> str | 
     return None
 
 
-def production_use_refusal(license_class: str) -> str | None:
+def production_use_refusal(license_class: str, *, synthetic: bool = False) -> str | None:
     """Whether a production run may use a source of ``license_class``. Only a
-    reviewed class may; a class this platform does not know is refused as well."""
+    reviewed class may; a class this platform does not know is refused as well. A
+    synthetic source -- made-up test data, such as the committed fixture snapshot --
+    is refused whatever its licence: its licence says who may copy the numbers, not
+    that they are true."""
+    if synthetic is not False:
+        return "synthetic_source"
     try:
         recognised = LicenseClass(license_class)
     except ValueError:
