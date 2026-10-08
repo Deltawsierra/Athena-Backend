@@ -474,6 +474,10 @@ NOT_STOPS = {
     "deployment-observed-effects": {
         "POST": "the observed-effect service records a signed observed effect: evidence, and it stops nothing"
     },
+    "deployment-approval-in-force": {
+        "GET": "the Action Gate reads a workflow's approval in force (assurance.gate_approval): a read, and it "
+        "starts and stops nothing"
+    },
     "deployment-authentications": {
         "POST": "the sign-in collector records a signed sign-in as evidence for an authority chain; it starts "
         "and stops nothing"

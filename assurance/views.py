@@ -34,7 +34,7 @@ from .access import assess_effective_access
 from .bom import build_ai_bom
 from .bom_drift import assess_bom_drift, record_bom_drift_findings
 from .boundary import assess_boundary
-from . import identity_evidence, observability, observed_effects, observed_outcomes
+from . import gate_approval, identity_evidence, observability, observed_effects, observed_outcomes
 from .approval_history import note_approvals
 from .bundle import assurance_bundle
 from .claims import ClaimChanged, ClaimsKeptMoving, IllegalClaimTransition, apply_claim_transition, derive_claims
@@ -2083,6 +2083,35 @@ class DeploymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewse
             },
             status=status.HTTP_201_CREATED,
         )
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"workflows/(?P<workflow>[-a-zA-Z0-9_]{1,200})/approval-in-force",
+        # The gate's read credential first; an operator's session after it, so an
+        # operator is told 403 -- refused -- rather than 401.
+        authentication_classes=[
+            gate_approval.GateApprovalAuthentication,
+            *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+        ],
+        permission_classes=[gate_approval.IsGateApprovalReader],
+    )
+    def approval_in_force(self, request, uuid=None, workflow=None):
+        """The approval of ``workflow`` in force for this deployment, for Achilles' gate
+        to read itself at decide time (:mod:`assurance.gate_approval`): the approval
+        version's id -- its history row -- and the digest this backend computes for it.
+        ``404`` for no approval in force, ``409`` while its history is not level with
+        it. Reads only: nothing is written, and nothing stops or starts."""
+        # Not ``get_object``: the gate's account sees no deployment, and needs none.
+        valid = _valid_uuid(uuid)
+        deployment = Deployment.objects.filter(uuid=valid).first() if valid else None
+        if deployment is None:
+            return Response(
+                {"error": "no such deployment", "code": gate_approval.NO_APPROVAL_IN_FORCE},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        code, body = gate_approval.approval_in_force(deployment, workflow)
+        return Response(body, status=code)
 
     def _identity_evidence(self, request, uuid, kind):
         """Record one signed sign-in or delegation record of ``kind``

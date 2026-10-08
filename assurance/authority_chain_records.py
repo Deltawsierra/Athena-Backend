@@ -236,13 +236,27 @@ def load_inputs(
 
 
 def dispatch_state(document: dict, row) -> rule.DispatchState | None:
-    """The state an observed effect's dispatch ran under, from its v2 document (read
-    against its signed digest by the caller) and the route this backend bound for the
-    dispatch instant when it recorded the row; ``None`` for a v1 document."""
+    """The state an observed effect's dispatch ran under, from its v2 or v3 document
+    (read against its signed digest by the caller) and the route this backend bound for
+    the dispatch instant when it recorded the row; ``None`` for a v1 document. A v3
+    document's ``verified.workflow_approval`` -- the approval the gate read from this
+    backend itself -- is :attr:`~assurance.authority_chain.DispatchState.gate_approval`;
+    a v2 document has none, and neither does a v3 one whose reading is null."""
     block = document.get("dispatch")
     if not isinstance(block, dict):
         return None
     presented = block["presented"]
+    verified = block.get("verified") if document.get("schema") == observed_effects.EVIDENCE_SCHEMA else None
+    reading = verified.get("workflow_approval") if isinstance(verified, dict) else None
+    gate = None
+    if isinstance(reading, dict):
+        gate = rule.GateApproval(
+            deployment=reading["deployment"],
+            workflow=reading["workflow"],
+            version=reading["version"],
+            digest=reading["digest"],
+            read_at=observed_outcomes._instant(reading["read_at"]),
+        )
     return rule.DispatchState(
         dispatched_at=observed_outcomes._instant(block["dispatched_at"]),
         epoch=block["epoch"],
@@ -256,6 +270,7 @@ def dispatch_state(document: dict, row) -> rule.DispatchState | None:
         assertion_digest=presented["assertion_digest"],
         grant_digest=presented["grant_digest"],
         route_at_dispatch=row.dispatch_route_fingerprint or "",
+        gate_approval=gate,
     )
 
 
@@ -274,6 +289,7 @@ def histories(deployment, workflows) -> tuple[dict, dict]:
                 in_force_from=v.in_force_from,
                 digest=v.digest,
                 tools=tuple(tuple(str(x) for x in t) for t in (v.tools if isinstance(v.tools, list) else [])),
+                record=str(v.id),
             )
             for v in versions
         )
