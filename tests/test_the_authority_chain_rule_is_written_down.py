@@ -44,16 +44,6 @@ def graph(**over):
     return ac.Graph(**base)
 
 
-def approval(**over):
-    base = {
-        "slug": WF,
-        "digest": APPROVAL_DIGEST,
-        "tools": (ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, CONTRACT, ("customer:update",)),),
-    }
-    base.update(over)
-    return ac.Approval(**base)
-
-
 GATE = ac.CitedOutcome("gate1", WF, comp.HELD, comp.EVIDENCE_AUTHORIZATION_CHECK)
 #: What the observed effect's evidence document says: the CRM tool, observed on the
 #: dispatch of gate decision ``gate1``.
@@ -87,16 +77,34 @@ EFFECT = ac.CitedOutcome("eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT, O
 #: CRM server under CONTRACT; and that contract, recorded two days before.
 V1 = ac.ApprovalVersion(EFFECT_AT - timedelta(days=1), APPROVAL_DIGEST, (("mcp_server", "crm-mcp", CONTRACT),))
 APPROVAL_HISTORY = {WF: (V1,)}
-CONTRACT_HISTORY = {("mcp_server", "crm-mcp"): (ac.ContractVersion(EFFECT_AT - timedelta(days=2), CONTRACT),)}
+#: The contract the approval bound, which declared that the server may update a record.
+CONTRACT_HISTORY = {
+    ("mcp_server", "crm-mcp"): (ac.ContractVersion(EFFECT_AT - timedelta(days=2), CONTRACT, ("customer:update",)),)
+}
+#: When the platform began noting the graph's edges (assurance.edge_history): the day
+#: before the dispatch.
+NOTED = EFFECT_AT - timedelta(days=1)
+
+
+def history_of(g, at=NOTED):
+    """The edge history that noted every edge of graph ``g`` coming into force at ``at``
+    and nothing since -- each change cited by a row id of its own."""
+    return {edge: (ac.EdgeVersion(at, True, f"r{n}"),) for n, edge in enumerate(sorted(ac.graph_edges(g)))}
+
+
+#: The reference graph's edges, noted the day before the dispatch: the agent acts as
+#: svc-x and reaches the CRM server, which declares that it updates and reads records.
+EDGE_HISTORY = history_of(graph())
 
 
 def inputs(**over):
     base = {
         "graph": graph(),
-        "approvals": {WF: approval()},
         "outcomes": {"gate1": GATE, "eff1": EFFECT},
         "approval_history": APPROVAL_HISTORY,
         "contract_history": CONTRACT_HISTORY,
+        "edge_history": EDGE_HISTORY,
+        "edges_noted_from": NOTED,
     }
     base.update(over)
     return ac.Inputs(**base)
@@ -188,9 +196,11 @@ def test_a_chain_every_hop_of_which_the_record_supports_is_proven_and_says_by_wh
     assert result.verdict == ac.PROVEN
     assert verdicts(result) == [ac.PROVEN] * 5
     assert codes(at(result, "under_policy")) == {"approval_in_force_at_dispatch"}
-    assert codes(at(result, "invokes")) == {"contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"}
-    assert codes(at(result, "through_identity")) == {"declared_identity"}
-    assert codes(at(result, "performs")) == {"declared_permission", "within_approval", "gate_permit"}
+    assert codes(at(result, "invokes")) == {
+        "contract_in_force_at_dispatch", "route_at_dispatch", "reach_in_force_at_dispatch",
+    }
+    assert codes(at(result, "through_identity")) == {"identity_in_force_at_dispatch"}
+    assert codes(at(result, "performs")) == {"action_in_force_at_dispatch", "within_approval_at_dispatch", "gate_permit"}
     assert codes(at(result, "produces")) == {"observed_effect"}
 
 
@@ -221,13 +231,17 @@ def test_a_hop_type_with_no_data_is_unproven_never_proven(monkeypatch):
 def test_nothing_observes_an_effect_today_so_the_best_chain_stops_short_of_proven():
     result = ac.verify(chain(effect_outcome_id=""), inputs())
     assert result.verdict == ac.UNPROVEN
-    # Since part 5 the policy and the invocation are read as of dispatch, and with no
-    # observed effect nothing records the state the dispatch ran under: they read
-    # unproven too, never live in its place.
-    assert [h.hop.relation for h in result.unproven] == ["under_policy", "invokes", "produces"]
+    # Since part 5 the policy and the invocation are read as of dispatch, and since its
+    # follow-up the identity and the action too; with no observed effect nothing records
+    # the state the dispatch ran under: they read unproven, never live in its place.
+    assert [h.hop.relation for h in result.unproven] == [
+        "under_policy", "invokes", "through_identity", "performs", "produces",
+    ]
     assert codes(at(result, "produces")) == {"effect_not_observed"}
     assert codes(at(result, "under_policy")) == {"dispatch_state_unrecorded"}
-    assert "dispatch_state_unrecorded" in codes(at(result, "invokes"))
+    assert codes(at(result, "through_identity")) == {"dispatch_state_unrecorded"}
+    for relation in ("invokes", "performs"):
+        assert "dispatch_state_unrecorded" in codes(at(result, relation)), relation
 
 
 @pytest.mark.parametrize(
@@ -565,20 +579,19 @@ def test_a_node_two_components_answer_to_is_ambiguous():
 
 
 def test_no_approval_on_record_leaves_every_policy_check_unproven():
-    # No version of the approval recorded by the dispatch: the policy and the
-    # invocation have no state to be read against. The approval's permissions, which
-    # `performs` reads as they stand, are missing live.
-    result = ac.verify(chain(), inputs(approvals={}, approval_history={}))
-    for relation in ("under_policy", "invokes"):
+    # No version of the approval recorded by the dispatch: the policy, the invocation
+    # and the approval half of the action have no state to be read against.
+    result = ac.verify(chain(), inputs(approval_history={}))
+    for relation in ("under_policy", "invokes", "performs"):
         assert "dispatch_state_unrecorded" in codes(at(result, relation)), relation
         assert at(result, relation).verdict == ac.UNPROVEN
-    assert "no_approval" in codes(at(result, "performs"))
     # Withdrawn before the dispatch: no approval was in force at it.
     withdrawn = {WF: (V1, ac.ApprovalVersion(DISPATCHED_AT - timedelta(minutes=5), ""))}
     result = ac.verify(chain(), inputs(approval_history=withdrawn))
     assert codes(at(result, "under_policy")) == {"dispatched_under_superseded_policy"}
     assert "withdrawn" in at(result, "under_policy").reasons[0].detail
     assert codes(at(result, "invokes")) == {"no_approval"}
+    assert codes(at(result, "performs")) == {"no_approval"}
 
 
 def test_the_policy_version_must_be_the_one_in_force():
@@ -601,10 +614,10 @@ V2 = "a2" * 32
 
 
 def test_a_re_approval_after_the_dispatch_leaves_it_proven_citing_the_version_it_ran_under():
-    # Live, approval v2 is in force now (approvals= is what stands); the history says
-    # v1 was in force at the dispatch, and v1 is what the gate signed.
+    # Approval v2 is in force now; the history says v1 was in force at the dispatch,
+    # and v1 is what the gate signed.
     later = {WF: (V1, ac.ApprovalVersion(EFFECT_AT + timedelta(hours=1), V2, V1.tools))}
-    result = ac.verify(chain(), inputs(approvals={WF: approval(digest=V2)}, approval_history=later))
+    result = ac.verify(chain(), inputs(approval_history=later))
     h = at(result, "under_policy")
     assert result.verdict == ac.PROVEN and codes(h) == {"approval_in_force_at_dispatch"}
     assert APPROVAL_DIGEST in h.proven_by[0].detail and V2 not in h.proven_by[0].detail
@@ -648,14 +661,15 @@ def test_a_dispatch_under_a_superseded_gate_epoch_or_policy_reads_unproven(over,
 @pytest.mark.parametrize(
     ("outcomes", "relations"),
     [
-        # A v1 observed effect: it proves produces, and records no dispatch state.
+        # A v1 observed effect: it proves produces, and records no dispatch state -- so
+        # neither the approval nor the graph's edges can be read as of a dispatch.
         (
             {"gate1": GATE, "eff1": ac.CitedOutcome(
                 "eff1", WF, comp.HELD, comp.EVIDENCE_OBSERVED_EFFECT,
                 ac.ObservedEffect("mcp_server", "crm-mcp", "gate1", "d" * 32, "sha256:" + "e" * 64,
                                   "customer:update", observed_at=EFFECT_AT),
             )},
-            ("under_policy", "invokes"),
+            ("under_policy", "invokes", "through_identity", "performs"),
         ),
         (with_dispatch(epoch="", permit_epoch=""), ("under_policy",)),
         (with_dispatch(approval_digest=None), ("under_policy",)),
@@ -672,8 +686,10 @@ def test_a_dispatch_time_record_that_is_missing_reads_unproven_never_live(outcom
 
 
 def test_no_history_at_the_dispatch_instant_reads_unproven():
+    # No contract on record: nothing says which was in force at the dispatch (invokes),
+    # nor what the approved one permitted (performs).
     result = ac.verify(chain(), inputs(contract_history={}))
-    assert [h.hop.relation for h in result.unproven] == ["invokes"]
+    assert [h.hop.relation for h in result.unproven] == ["invokes", "performs"]
     assert "no contract of mcp_server 'crm-mcp' is recorded" in at(result, "invokes").reasons[0].detail
     late = {("mcp_server", "crm-mcp"): (ac.ContractVersion(EFFECT_AT + timedelta(seconds=1), CONTRACT),)}
     assert "dispatch_state_unrecorded" in codes(at(ac.verify(chain(), inputs(contract_history=late)), "invokes"))
@@ -703,51 +719,190 @@ def test_a_tool_approved_under_a_contract_superseded_by_the_dispatch_is_unproven
 
 
 def test_a_contract_changed_after_the_effect_leaves_the_invocation_proven():
-    # Live, the binding is superseded (current digest moved); at the dispatch it was not.
-    moved_live = approval(tools=(ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, "99" * 32, ("customer:update",)),))
+    # Now the contract has moved (and declares nothing); at the dispatch it had not.
     after = {("mcp_server", "crm-mcp"): (*CONTRACT_HISTORY[("mcp_server", "crm-mcp")],
                                          ac.ContractVersion(EFFECT_AT + timedelta(minutes=1), "99" * 32))}
-    result = ac.verify(chain(), inputs(approvals={WF: moved_live}, contract_history=after))
+    result = ac.verify(chain(), inputs(contract_history=after))
     assert result.verdict == ac.PROVEN
-    assert codes(at(result, "invokes")) == {"contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"}
+    assert codes(at(result, "invokes")) == {
+        "contract_in_force_at_dispatch", "route_at_dispatch", "reach_in_force_at_dispatch",
+    }
 
 
-# --------------------------------------------------------------------- the reach
+# ------------------------------------------- the graph's edges, read as of dispatch
 
 
-def test_reach_over_effective_access_alone_proves_the_invocation():
-    g = graph(declared=frozenset({("a1", "acts_as", "s1")}))
-    assert "effective_reach" in codes(at(ac.verify(chain(), inputs(graph=g)), "invokes"))
+#: The live graph with every edge the three graph hops read taken away: no declared
+#: edge, no reach, no permission anywhere. The history alone can prove them now.
+BARE = graph(
+    components=(AGENT, component("t1", "mcp_server", "crm-mcp"), ACCOUNT, OTHER_ACCOUNT),
+    declared=frozenset(),
+    reach={},
+)
+IDENTITY_EDGE = (ac.EDGE_IDENTITY, "a1", "s1")
+REACH_EDGE = (ac.EDGE_REACH, "a1", "t1")
+ACTION_EDGE = (ac.EDGE_ACTION, "t1", "customer:update")
+#: Each graph hop, the edge it reads in the reference chain, and what it reads without it.
+GRAPH_HOPS = [
+    ("through_identity", IDENTITY_EDGE, "identity_in_force_at_dispatch", "identity_not_in_force_at_dispatch"),
+    ("invokes", REACH_EDGE, "reach_in_force_at_dispatch", "reach_not_in_force_at_dispatch"),
+    ("performs", ACTION_EDGE, "action_in_force_at_dispatch", "action_not_in_force_at_dispatch"),
+]
 
 
-def test_an_inferred_edge_alone_is_unproven():
-    g = graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={}, inferred=frozenset({("a1", "t1")}))
-    h = at(ac.verify(chain(), inputs(graph=g)), "invokes")
-    assert h.verdict == ac.UNPROVEN and "inferred_edge" in codes(h)
+def with_edge(edge, *versions):
+    """The reference edge history with ``edge``'s changes replaced by ``versions``."""
+    history = dict(EDGE_HISTORY)
+    history.pop(edge, None)
+    if versions:
+        history[edge] = tuple(versions)
+    return history
 
 
-def test_a_dangling_reference_from_the_agent_leaves_its_reach_unproven():
-    g = graph(
-        declared=frozenset({("a1", "acts_as", "s1")}), reach={},
-        gaps={"a1": (ac.Gap("tools", "billing", ("not_found",)),)},
+def test_the_edges_the_history_keeps_are_exactly_the_ones_the_graph_hops_read():
+    assert ac.graph_edges(graph()) == {
+        IDENTITY_EDGE, REACH_EDGE, ACTION_EDGE, (ac.EDGE_ACTION, "t1", "customer:read"),
+    }
+    # Effective reach to a tool counts as reach; to an account it is no reach a hop
+    # reads; an inferred edge is no edge.
+    g = graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={"a1": frozenset({"t1", "s1"})},
+              inferred=frozenset({("a1", "t9")}))
+    assert REACH_EDGE in ac.graph_edges(g) and (ac.EDGE_REACH, "a1", "s1") not in ac.graph_edges(g)
+    assert ac.graph_edges(graph(declared=frozenset(), reach={}, inferred=frozenset({("a1", "t1")}))) == {
+        ACTION_EDGE, (ac.EDGE_ACTION, "t1", "customer:read"),
+    }
+    # The stored rows spell the kinds as the rule does.
+    from assurance.models import AuthorityEdgeVersion
+
+    assert AuthorityEdgeVersion.KINDS == (ac.EDGE_IDENTITY, ac.EDGE_ACTION, ac.EDGE_REACH, "begun")
+
+
+@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
+def test_an_edge_in_force_at_the_dispatch_proves_its_hop_citing_the_history_row(relation, edge, proven, unproven):
+    h = at(ac.verify(chain(), inputs(edge_history=with_edge(edge, ac.EdgeVersion(NOTED, True, "row-7")))), relation)
+    assert h.verdict == ac.PROVEN and proven in codes(h)
+    cited = next(r for r in h.proven_by if r.code == proven).detail
+    assert "edge history row row-7" in cited and NOTED.isoformat() in cited
+
+
+@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
+def test_an_edge_changed_after_the_effect_leaves_its_hop_proven(relation, edge, proven, unproven):
+    # The edge went out of force an hour after the effect, and the live graph holds
+    # none of the three edges any more: the hop is read at the dispatch.
+    gone = with_edge(edge, ac.EdgeVersion(NOTED, True, "r1"), ac.EdgeVersion(EFFECT_AT + timedelta(hours=1), False, "r2"))
+    result = ac.verify(chain(), inputs(edge_history=gone, graph=BARE))
+    assert result.verdict == ac.PROVEN, [(x.hop.relation, codes(x)) for x in result.hops]
+    assert proven in codes(at(result, relation))
+
+
+@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
+def test_an_edge_removed_before_the_dispatch_and_restored_after_reads_unproven(relation, edge, proven, unproven):
+    # Out of force five minutes before the dispatch, back an hour after the effect: live,
+    # the graph holds it again. At the dispatch it was not in force.
+    restored = with_edge(
+        edge,
+        ac.EdgeVersion(NOTED, True, "r1"),
+        ac.EdgeVersion(DISPATCHED_AT - timedelta(minutes=5), False, "r2"),
+        ac.EdgeVersion(EFFECT_AT + timedelta(hours=1), True, "r3"),
     )
-    h = at(ac.verify(chain(), inputs(graph=g)), "invokes")
-    assert h.verdict == ac.UNPROVEN and "dangling_edge" in codes(h)
+    result = ac.verify(chain(), inputs(edge_history=restored))
+    h = at(result, relation)
+    assert h.verdict == ac.UNPROVEN and unproven in codes(h), codes(h)
+    assert result.verdict == ac.UNPROVEN and result.broken == ()
+    assert [x.hop.relation for x in result.unproven] == [relation]
 
 
-def test_a_reference_to_the_tool_itself_that_is_unresolved_is_unproven_even_with_its_edge():
-    g = graph(gaps={"a1": (ac.Gap("tools", "crm-mcp", ("ambiguous", "superseded_identity")),)})
-    h = at(ac.verify(chain(), inputs(graph=g)), "invokes")
-    assert h.verdict == ac.UNPROVEN and "dangling_edge" in codes(h)
-    assert "superseded_identity" in h.reasons[0].detail
+@pytest.mark.parametrize(("relation", "edge", "proven", "unproven"), GRAPH_HOPS, ids=[h[0] for h in GRAPH_HOPS])
+def test_the_dispatch_instant_is_the_edge_of_the_window(relation, edge, proven, unproven):
+    # Noted at the dispatch instant itself: in force at it.
+    at_it = with_edge(edge, ac.EdgeVersion(DISPATCHED_AT, True, "r1"))
+    assert proven in codes(at(ac.verify(chain(), inputs(edge_history=at_it)), relation))
+    # Noted a microsecond after it, or only after the effect: not in force at it.
+    for late in (DISPATCHED_AT + timedelta(microseconds=1), EFFECT_AT + timedelta(minutes=1)):
+        h = at(ac.verify(chain(), inputs(edge_history=with_edge(edge, ac.EdgeVersion(late, True, "r1")))), relation)
+        assert h.verdict == ac.UNPROVEN and unproven in codes(h)
+    # Gone at the dispatch instant itself: not in force at it.
+    gone = with_edge(edge, ac.EdgeVersion(NOTED, True, "r1"), ac.EdgeVersion(DISPATCHED_AT, False, "r2"))
+    assert unproven in codes(at(ac.verify(chain(), inputs(edge_history=gone)), relation))
 
 
-def test_effective_access_over_a_resolved_graph_that_cannot_reach_the_tool_breaks_the_hop():
-    g = graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={"a1": frozenset({"s1"})})
-    result = ac.verify(chain(), inputs(graph=g))
-    h = at(result, "invokes")
-    assert h.verdict == ac.BROKEN and "unreachable" in codes(h)
-    assert result.verdict == ac.BROKEN and [x.index for x in result.broken] == [1]
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"edges_noted_from": None},
+        {"edges_noted_from": DISPATCHED_AT + timedelta(microseconds=1)},
+        {"edges_noted_from": None, "edge_history": {}},
+    ],
+    ids=["never-began", "began-after-the-dispatch", "no-history-at-all"],
+)
+def test_a_history_that_does_not_cover_the_dispatch_reads_unrecorded_never_live(over):
+    # The live graph holds every edge; nothing records which were in force at the
+    # dispatch, and the rule does not read the graph as it stands in its place.
+    result = ac.verify(chain(), inputs(**over))
+    for relation in ("invokes", "through_identity", "performs"):
+        h = at(result, relation)
+        assert h.verdict == ac.UNPROVEN, relation
+        assert any(r.code == "dispatch_state_unrecorded" and "graph's edges" in r.detail for r in h.reasons), relation
+    assert [h.hop.relation for h in result.unproven] == ["invokes", "through_identity", "performs"]
+
+
+def test_the_graph_as_it_stands_is_never_what_the_graph_hops_read():
+    # A live graph with no edge at all, a history with every edge: proven.
+    result = ac.verify(chain(), inputs(graph=BARE))
+    assert result.verdict == ac.PROVEN, [(h.hop.relation, codes(h)) for h in result.hops]
+    # A live graph with every edge, a history (begun) with none: unproven, each named.
+    result = ac.verify(chain(), inputs(edge_history={}))
+    assert codes(at(result, "through_identity")) == {"identity_not_in_force_at_dispatch"}
+    assert codes(at(result, "performs")) == {"action_not_in_force_at_dispatch"}
+    assert "reach_not_in_force_at_dispatch" in codes(at(result, "invokes"))
+    # And with no dispatch state at all, the live graph proves none of them.
+    result = ac.verify(chain(effect_outcome_id=""), inputs())
+    for relation in ("invokes", "through_identity", "performs"):
+        assert "dispatch_state_unrecorded" in codes(at(result, relation)), relation
+
+
+def test_an_agent_acting_as_another_account_at_the_dispatch_is_unproven_and_names_it():
+    # At the dispatch the agent acted as svc-admin, by the history; never broken: the
+    # history holds edges, not the unresolved references beside them.
+    history = {**with_edge(IDENTITY_EDGE), (ac.EDGE_IDENTITY, "a1", "s2"): (ac.EdgeVersion(NOTED, True, "r9"),)}
+    h = at(ac.verify(chain(), inputs(edge_history=history)), "through_identity")
+    assert h.verdict == ac.UNPROVEN and codes(h) == {"identity_not_in_force_at_dispatch"}
+    assert "it acted as svc-admin then" in h.reasons[0].detail
+    h = at(ac.verify(chain(), inputs(edge_history=with_edge(IDENTITY_EDGE))), "through_identity")
+    assert "no identity of it was in force then" in h.reasons[0].detail
+
+
+def test_a_permission_is_read_off_what_the_identity_acted_through_at_the_dispatch():
+    # The account itself declares nothing and the chain's tool declares nothing at the
+    # dispatch; a second tool the account REACHED then declared the permission.
+    other = component("t2", "tool", "refund-tool")
+    g = graph(components=(AGENT, TOOL, ACCOUNT, OTHER_ACCOUNT, other))
+    reached = {
+        **with_edge(ACTION_EDGE),
+        (ac.EDGE_REACH, "s1", "t2"): (ac.EdgeVersion(NOTED, True, "r5"),),
+        (ac.EDGE_ACTION, "t2", "customer:update"): (ac.EdgeVersion(NOTED, True, "r6"),),
+    }
+    h = at(ac.verify(chain(), inputs(graph=g, edge_history=reached)), "performs")
+    assert h.verdict == ac.PROVEN and "refund-tool" in next(r.detail for r in h.proven_by if r.code == "action_in_force_at_dispatch")
+    # The account reached it only after the dispatch: it did not act through it then.
+    late = {**reached, (ac.EDGE_REACH, "s1", "t2"): (ac.EdgeVersion(EFFECT_AT + timedelta(minutes=1), True, "r5"),)}
+    h = at(ac.verify(chain(), inputs(graph=g, edge_history=late)), "performs")
+    assert h.verdict == ac.UNPROVEN and codes(h) == {"action_not_in_force_at_dispatch"}
+    # The account's own declaration, in force at the dispatch, proves it too.
+    own = {**with_edge(ACTION_EDGE), (ac.EDGE_ACTION, "s1", "customer:update"): (ac.EdgeVersion(NOTED, True, "r8"),)}
+    assert at(ac.verify(chain(), inputs(edge_history=own)), "performs").verdict == ac.PROVEN
+
+
+def test_a_chain_with_no_agent_names_no_actor():
+    raw = [
+        hop(POLICY, "invokes", TOOL_N),
+        hop(TOOL_N, "through_identity", ACCOUNT_N),
+        hop(ACCOUNT_N, "performs", ACTION),
+        hop(ACTION, "produces", EFFECT_N),
+    ]
+    result = ac.verify(chain(raw), inputs())
+    assert "no_actor" in codes(at(result, "invokes"))
+    assert "no_actor" in codes(at(result, "through_identity"))
 
 
 @pytest.mark.parametrize("route", [comp.ROUTE_MOVED, comp.ROUTE_UNRECORDED, comp.ROUTE_CURRENT])
@@ -765,61 +920,40 @@ def test_a_dispatch_the_gate_signed_on_another_route_reads_unproven():
     assert same.verdict == ac.PROVEN
 
 
-def test_a_chain_with_no_agent_names_no_actor():
-    raw = [
-        hop(POLICY, "invokes", TOOL_N),
-        hop(TOOL_N, "through_identity", ACCOUNT_N),
-        hop(ACCOUNT_N, "performs", ACTION),
-        hop(ACTION, "produces", EFFECT_N),
-    ]
-    result = ac.verify(chain(raw), inputs())
-    assert "no_actor" in codes(at(result, "invokes"))
-    assert "no_actor" in codes(at(result, "through_identity"))
+# --------------------------------------------- the approval's permissions, at dispatch
 
 
-# ------------------------------------------------------------------ the identity
+def _approved_under(permissions, digest=CONTRACT, at_=EFFECT_AT - timedelta(days=2)):
+    return {("mcp_server", "crm-mcp"): (ac.ContractVersion(at_, digest, permissions),)}
 
 
-def test_an_agent_that_acts_as_another_account_breaks_the_identity_hop():
-    g = graph(declared=frozenset({("a1", "invokes", "t1"), ("a1", "acts_as", "s2")}))
-    h = at(ac.verify(chain(), inputs(graph=g)), "through_identity")
-    assert h.verdict == ac.BROKEN and "acts_as_another" in codes(h)
-    assert "svc-admin" in h.reasons[0].detail
-
-
-def test_an_agent_that_declares_no_identity_or_an_unresolved_one_is_unproven():
-    g = graph(declared=frozenset({("a1", "invokes", "t1")}))
-    assert "no_declared_identity" in codes(at(ac.verify(chain(), inputs(graph=g)), "through_identity"))
-    g = graph(gaps={"a1": (ac.Gap("identity", "svc", ("ambiguous",)),)})
-    h = at(ac.verify(chain(), inputs(graph=g)), "through_identity")
-    assert h.verdict == ac.UNPROVEN and "identity_unresolved" in codes(h)
-
-
-# --------------------------------------------------------------- the action
-
-
-def test_an_action_no_declaring_component_permits_is_broken():
-    narrow = component("t1", "mcp_server", "crm-mcp", permissions=("customer:read",))
-    account = component("s1", "service_account", "svc-x", permissions=())
-    g = graph(components=(AGENT, narrow, account, OTHER_ACCOUNT))
-    h = at(ac.verify(chain(), inputs(graph=g)), "performs")
-    assert h.verdict == ac.BROKEN and "permission_not_declared" in codes(h)
-
-
-def test_an_action_nothing_declares_either_way_is_unproven():
-    silent = component("t1", "mcp_server", "crm-mcp")
-    g = graph(components=(AGENT, silent, ACCOUNT, OTHER_ACCOUNT))
-    h = at(ac.verify(chain(), inputs(graph=g)), "performs")
-    assert h.verdict == ac.UNPROVEN and "permissions_undeclared" in codes(h)
-
-
-def test_an_action_outside_what_the_approval_permits_is_broken():
-    other = approval(tools=(ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, CONTRACT, ("customer:read",)),))
-    h = at(ac.verify(chain(), inputs(approvals={WF: other})), "performs")
+def test_an_action_outside_what_the_approval_in_force_at_the_dispatch_permits_is_broken():
+    h = at(ac.verify(chain(), inputs(contract_history=_approved_under(("customer:read",)))), "performs")
     assert h.verdict == ac.BROKEN and "outside_approval" in codes(h)
-    undeclared = approval(tools=(ac.ApprovedTool("mcp_server", "crm-mcp", CONTRACT, CONTRACT, None),))
-    h = at(ac.verify(chain(), inputs(approvals={WF: undeclared})), "performs")
+    h = at(ac.verify(chain(), inputs(contract_history=_approved_under(None))), "performs")
     assert h.verdict == ac.UNPROVEN and "approval_permissions_undeclared" in codes(h)
+
+
+def test_a_re_approval_after_the_effect_under_another_contract_leaves_the_action_within_the_approval():
+    # v2, after the effect, binds the server under a contract that permits only reads;
+    # at the dispatch v1 was in force, under the contract that permitted the update.
+    narrow = "99" * 32
+    later = {WF: (V1, ac.ApprovalVersion(EFFECT_AT + timedelta(hours=1), V2, (("mcp_server", "crm-mcp", narrow),)))}
+    contracts = {("mcp_server", "crm-mcp"): (
+        *CONTRACT_HISTORY[("mcp_server", "crm-mcp")], ac.ContractVersion(EFFECT_AT + timedelta(hours=1), narrow, ("customer:read",)),
+    )}
+    h = at(ac.verify(chain(), inputs(approval_history=later, contract_history=contracts)), "performs")
+    assert h.verdict == ac.PROVEN and "within_approval_at_dispatch" in codes(h)
+    # The other way round: v2 narrowed before the dispatch, so it was outside then.
+    earlier = {WF: (V1, ac.ApprovalVersion(DISPATCHED_AT - timedelta(minutes=5), V2, (("mcp_server", "crm-mcp", narrow),)))}
+    h = at(ac.verify(chain(), inputs(approval_history=earlier, contract_history=contracts)), "performs")
+    assert h.verdict == ac.BROKEN and "outside_approval" in codes(h)
+
+
+def test_an_approved_contract_nothing_recorded_reads_unrecorded():
+    h = at(ac.verify(chain(), inputs(contract_history={})), "performs")
+    assert h.verdict == ac.UNPROVEN
+    assert any(r.code == "dispatch_state_unrecorded" and "no contract is recorded" in r.detail for r in h.reasons)
 
 
 @pytest.mark.parametrize(
@@ -858,10 +992,16 @@ def test_a_hop_is_proven_only_when_every_reading_is():
 
 
 def test_a_broken_reading_outranks_any_number_of_unproven_ones():
-    g = graph(declared=frozenset({("a1", "acts_as", "s1")}), reach={"a1": frozenset({"s1"})})
-    h = at(ac.verify(chain(route=comp.ROUTE_UNRECORDED), inputs(approvals={}, graph=g)), "invokes")
+    # The approval in force at the dispatch names another tool (broken); the route then
+    # is not on record and no reach was in force (both unproven).
+    other = {WF: (ac.ApprovalVersion(V1.in_force_from, APPROVAL_DIGEST, (("tool", "refund", CONTRACT),)),)}
+    h = at(
+        ac.verify(chain(), inputs(approval_history=other, outcomes=with_dispatch(route_at_dispatch=""),
+                                  edge_history=with_edge(REACH_EDGE))),
+        "invokes",
+    )
     assert h.verdict == ac.BROKEN
-    assert h.reasons[0].verdict == ac.BROKEN, "the reason that decides comes first"
+    assert len(h.reasons) == 3 and h.reasons[0].verdict == ac.BROKEN, "the reason that decides comes first"
 
 
 def test_the_verdict_order_is_total_and_worst_of_nothing_is_unproven():
@@ -893,9 +1033,13 @@ def test_every_reading_code_the_rule_emits_is_published_and_every_published_one_
     source = Path(ac.__file__).read_text(encoding="utf-8")
     emitted = set(re.findall(r'Reading\(\s*(?:PROVEN|UNPROVEN|BROKEN),\s*"([a-z_]+)"', source))
     assert emitted == set(ac.REASONS), (sorted(emitted - set(ac.REASONS)), sorted(set(ac.REASONS) - emitted))
-    # The codes part 5 retired are published apart, and the rule emits none of them.
+    # The codes part 5 and its follow-up retired are published apart, and the rule
+    # emits none of them.
     assert set(ac.RETIRED_REASONS) == {
         "approval_in_force", "approved_contract_in_force", "superseded_contract", "route_moved", "route_unrecorded",
+        "declared_edge", "effective_reach", "inferred_edge", "dangling_edge", "unreachable", "declared_identity",
+        "identity_unresolved", "no_declared_identity", "acts_as_another", "declared_permission",
+        "permissions_undeclared", "permission_not_declared", "within_approval",
     }
     assert not set(ac.RETIRED_REASONS) & (emitted | set(ac.REASONS))
 

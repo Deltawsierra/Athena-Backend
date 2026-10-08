@@ -101,12 +101,15 @@ def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles"
     assert put.status_code == 200, put.content
     # And the approval and the contracts it bound as the platform noted them an hour
     # ago, like the route: so an effect dispatched a minute ago was dispatched under
-    # them, as of dispatch (part 5). A fixture placing the world in the past, written
-    # once here; the rows are append-only to every writer the platform has.
-    from assurance.models import ApprovalVersion, ToolContract
+    # them, as of dispatch (part 5). And the graph's edges, which the identity, the
+    # action and the reach are read against as of dispatch (its follow-up). A fixture
+    # placing the world in the past, written once here; the rows are append-only to
+    # every writer the platform has.
+    from assurance.models import ApprovalVersion, AuthorityEdgeVersion, ToolContract
 
     ApprovalVersion.objects.filter(deployment=dep).update(in_force_from=now - timedelta(hours=1))
     ToolContract.objects.filter(deployment=dep).update(recorded_at=now - timedelta(hours=1))
+    AuthorityEdgeVersion.objects.filter(deployment=dep).update(noticed_at=now - timedelta(hours=1))
     permit = record_signed(dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=2), engine=engine)
     refusal = None
     if gate != oc.HELD:
@@ -195,9 +198,10 @@ def _dispatched_body(client, dep, permit, **kw):
 @pytest.mark.parametrize(
     ("engine", "before", "unproven"),
     [
-        # Hop 0, the policy, too since part 5: the chain cites no observed effect, so
-        # nothing records the state its dispatch ran under (dispatch_state_unrecorded).
-        ("achilles", D.READY_RESTRICTED, [0, 1, 2, 4]),
+        # Hop 0, the policy, too since part 5, and hop 3, the action, since its
+        # follow-up: the chain cites no observed effect, so nothing records the state
+        # its dispatch ran under (dispatch_state_unrecorded).
+        ("achilles", D.READY_RESTRICTED, [0, 1, 2, 3, 4]),
         # An Athena scan is no Action Gate decision: cited as one, the action is unproven too.
         ("athena", D.READY, [0, 1, 2, 3, 4]),
     ],
@@ -259,34 +263,65 @@ def test_the_roadmap_chain_is_reconstructed_hop_by_hop_and_every_unproven_hop_is
         # recorded here, so each hop names the record it lacks.
         "authenticated_as": ("unproven", {"no_authentication_record"}),
         "delegates_to": ("unproven", {"no_delegation_record"}),
-        # Part 5: read as of dispatch, and with no observed effect cited nothing
-        # records the state the dispatch ran under -- never read live in its place.
+        # Part 5 and its follow-up: read as of dispatch, and with no observed effect
+        # cited nothing records the state the dispatch ran under -- the approval, the
+        # contracts, the route or the graph's edges -- never read live in its place.
         "under_policy": ("unproven", {"dispatch_state_unrecorded"}),
         "invokes": ("unproven", {"dispatch_state_unrecorded"}),
-        "through_identity": ("proven", {"declared_identity"}),
-        "performs": ("proven", {"declared_permission", "within_approval", "gate_permit"}),
+        "through_identity": ("unproven", {"dispatch_state_unrecorded"}),
+        "performs": ("unproven", {"dispatch_state_unrecorded"}),
         "produces": ("unproven", {"effect_not_observed"}),
     }
-    assert chain["unproven_hops"] == [0, 1, 2, 3, 6] and chain["broken_hops"] == []
+    assert chain["unproven_hops"] == [0, 1, 2, 3, 4, 5, 6] and chain["broken_hops"] == []
     assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
 
+def _broken_body(client, dep, permit):
+    """A chain, citing a real dispatch, that claims the effect was a delete -- an action
+    the approval in force at the dispatch approved the server for (update and read)
+    does not cover. The record contradicts its performs hop: broken."""
+    body = _dispatched_body(client, dep, permit)
+    for hop in body["hops"]:
+        for end in ("from", "to"):
+            if hop[end]["kind"] == "action":
+                hop[end]["ref"] = "customer:delete"
+    return body
+
+
 def test_a_broken_hop_holds_the_decision_at_needs_remediation_and_the_note_names_it():
-    # The agent acts as svc-admin, and the chain says the effect went through svc-x.
-    dep, client, permit, _ = _world(identity="svc-admin")
-    answer = _post(client, dep, _chain_body(client, dep, permit))
+    # Until the graph's edges were read as of dispatch this was an agent acting as
+    # svc-admin, read live: an edge the history holds can say an identity was not in
+    # force at the dispatch, never that the record contradicts the hop (that case is
+    # below). An action outside the approval in force at the dispatch is a
+    # contradiction the history does hold.
+    dep, client, permit, _ = _world()
+    answer = _post(client, dep, _broken_body(client, dep, permit))
     assert answer.status_code == 201, answer.content
     chain = answer.json()["chains"][0]
-    assert chain["verdict"] == "broken" and chain["broken_hops"] == [2]
-    reasons = _by_relation(chain)["through_identity"]["reasons"]
-    assert reasons[0]["code"] == "acts_as_another" and "svc-admin" in reasons[0]["detail"]
+    assert chain["verdict"] == "broken" and chain["broken_hops"] == [3]
+    reasons = _by_relation(chain)["performs"]["reasons"]
+    assert reasons[0]["code"] == "outside_approval" and "customer:delete" in reasons[0]["detail"]
 
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
     support = decision_support(_fresh(dep))
     assert support["claim_cap"] == D.NEEDS_REMEDIATION
     assert [c["verdict"] for c in support["claims"]["authority_chains_broken"]] == ["broken"]
     assert support["note"].startswith("Held at 'needs remediation' by 1 authority chain(s)")
-    assert "through_identity" in support["note"]
+    assert "performs" in support["note"]
+
+
+def test_an_agent_acting_as_another_account_at_the_dispatch_leaves_the_identity_hop_unproven_and_named():
+    # The agent acts as svc-admin, and the chain says the effect went through svc-x:
+    # at the dispatch, by the edge history, no identity edge to svc-x was in force.
+    dep, client, permit, _ = _world(identity="svc-admin")
+    answer = _post(client, dep, _dispatched_body(client, dep, permit))
+    assert answer.status_code == 201, answer.content
+    chain = answer.json()["chains"][0]
+    assert chain["verdict"] == "unproven" and chain["unproven_hops"] == [2] and chain["broken_hops"] == []
+    reasons = _by_relation(chain)["through_identity"]["reasons"]
+    assert [r["code"] for r in reasons] == ["identity_not_in_force_at_dispatch"]
+    assert "svc-admin" in reasons[0]["detail"]
+    assert _fresh(dep).decision == D.NEEDS_MORE_EVIDENCE
 
 
 def test_an_action_the_gate_refused_breaks_the_chain_that_claims_it():
@@ -310,7 +345,7 @@ def test_a_tool_outside_the_approval_is_unauthorized_and_blocks_ready():
     chain = _post(client, dep, body).json()["chains"][0]
     invokes = _by_relation(chain)["invokes"]
     assert invokes["verdict"] == "broken"
-    assert {"outside_approval", "unreachable"} <= {r["code"] for r in invokes["reasons"]}
+    assert {"outside_approval", "reach_not_in_force_at_dispatch"} <= {r["code"] for r in invokes["reasons"]}
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
 
 
@@ -323,9 +358,9 @@ def test_a_component_the_coverage_manifest_has_not_assessed_leaves_its_hops_unpr
     # Read live: once something assesses it, that reason is gone without a rewrite.
     Asset.objects.filter(deployment=dep, name="svc-x").update(assessed_at=timezone.now())
     chain = _client(_admin()).get(_base(dep) + "authority-chains/").json()["chains"][0]
-    # Only what no observed effect records: the dispatch's state (hops 0 and 1, part
-    # 5) and the effect itself.
-    assert chain["unproven_hops"] == [0, 1, 4], "only what no observed effect records"
+    # Only what no observed effect records: the dispatch's state (hops 0 to 3, part 5
+    # and its follow-up) and the effect itself.
+    assert chain["unproven_hops"] == [0, 1, 2, 3, 4], "only what no observed effect records"
 
 
 def _reapprove(client, dep, description="update any customer record"):
@@ -393,7 +428,9 @@ def test_a_route_that_moved_after_the_effect_leaves_the_invocation_proven():
     assert chain["route"] == "moved"
     invokes = _by_relation(chain)["invokes"]
     assert invokes["verdict"] == "proven", invokes
-    assert {r["code"] for r in invokes["proven_by"]} == {"contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"}
+    assert {r["code"] for r in invokes["proven_by"]} == {
+        "contract_in_force_at_dispatch", "route_at_dispatch", "reach_in_force_at_dispatch",
+    }
 
 
 def test_a_contract_changed_after_the_effect_leaves_the_invocation_proven():
@@ -592,8 +629,8 @@ def test_the_chain_and_every_hops_verdict_appear_in_the_receipt_and_the_verifier
 
 
 def test_a_broken_chain_holds_no_stop():
-    dep, client, permit, _ = _world(identity="svc-admin")
-    _post(client, dep, _chain_body(client, dep, permit))
+    dep, client, permit, _ = _world()
+    _post(client, dep, _broken_body(client, dep, permit))
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
     paused = client.post(_base(dep) + "recompute/", {"paused": True}, format="json")
     assert paused.status_code == 200, paused.content

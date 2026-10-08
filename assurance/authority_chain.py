@@ -82,19 +82,25 @@ What each check reads, per hop:
   one the gate signed (either superseded by then: unproven,
   ``dispatched_under_superseded_contract``), and the served route at that instant is
   on record -- bound when the effect was recorded -- and is the one the gate signed,
-  if it signed one; and, as the graph stands, the nearest agent before it reaches it
-  over a declared edge (only an inferred edge, or a dangling reference from that
-  agent: unproven; neither, over a graph with no gap from that agent: broken).
-* ``through_identity`` (tool -> service account): the nearest agent declares
-  that it acts as this account (it declares another one: broken; none, or one
-  that does not resolve cleanly: unproven).
-* ``performs`` (account or agent -> action): the action is a permission the
-  identity, the tool it acts through, or a tool it reaches declares (every one of
-  them declares its permissions and none this one: broken; some declare none:
-  unproven); it is within what the approval's tools were approved to permit
-  (outside: broken); and the chain cites the Action Gate decision that let it
-  through -- an Achilles-signed outcome for the same workflow that verifies now:
-  a permit proves it, a refusal breaks it, anything else is unproven.
+  if it signed one; and the nearest agent before it REACHED it at the dispatch
+  instant, by the graph's edge history (:mod:`assurance.edge_history`): a reach edge
+  -- a declared ``invokes`` edge or effective access -- in force then
+  (``reach_in_force_at_dispatch``), or unproven (``reach_not_in_force_at_dispatch``).
+* ``through_identity`` (tool -> service account): AS OF DISPATCH, the nearest agent
+  acted as this account at the dispatch instant, by the edge history: its declared
+  identity edge to it was in force then (``identity_in_force_at_dispatch``), or
+  unproven (``identity_not_in_force_at_dispatch``, naming the account it acted as
+  then, if any).
+* ``performs`` (account or agent -> action): AS OF DISPATCH, the action was a
+  permission declared at the dispatch instant, by the edge history, by the identity,
+  the tool it acts through or a tool it reached then (``action_in_force_at_dispatch``;
+  none: unproven, ``action_not_in_force_at_dispatch``); it was within what the tools
+  of the approval in force at that instant were approved to permit, read off the
+  contracts they were approved under (outside, every one declaring its permissions:
+  broken; some declaring none: unproven); and the chain cites the Action Gate
+  decision that let it through -- an Achilles-signed outcome for the same workflow
+  that verifies now: a permit proves it, a refusal breaks it, anything else is
+  unproven.
 * ``produces`` (action -> effect): the chain cites an ``observed_effect`` outcome
   for the same workflow, whose evidence document (``mythos.observed-effect`` v1 or v2,
   re-read against its signed digest) names the tool the chain's ``invokes`` hop
@@ -139,11 +145,26 @@ superseded reads unproven even once that approval is restored. The dispatch inst
 bounds the effect's (:data:`DISPATCH_EFFECT_WINDOW_SECONDS`), and when the gate saw
 a sign-in assertion or a grant, only those records prove the person hops.
 
-Everything else is read as the record stands NOW: the graph (reach, identity,
-permissions), shadow and coverage, the approval's permissions ``performs`` reads, and
-whether each signature verifies under the keyring in force. No history of the graph
-is kept, so a chain can still move from proven to unproven without anyone touching
-it, which errs in the direction a decision about deploying now has to.
+THE GRAPH'S EDGES ARE READ AS OF DISPATCH TOO (the follow-up to part 5). The edges
+``through_identity``, ``performs`` and reach read -- an agent's identity, a component's
+permission, a principal's reach to a tool (:func:`graph_edges`) -- are kept as an
+append-only history of when each came into force and went out of it, as the platform
+noticed (:class:`assurance.models.AuthorityEdgeVersion`), and those hops read the edge
+in force at the dispatch instant: an edge changed after the effect does not unprove
+it, and one removed before the dispatch reads unproven even once it is restored. The
+history says when the platform NOTICED a change -- in the transaction of the write, or
+at the next decision refresh for a write no signal sees -- not when the customer made
+it. A dispatch the history does not cover (no observed effect, a v1 one, or one before
+the history began) reads ``dispatch_state_unrecorded``: never read live instead. An
+edge absent at the dispatch reads UNPROVEN, never broken: the history holds edges, not
+the gaps and undeclared permissions beside them, so it can say an edge was not in
+force but not that the record contradicted the hop.
+
+Everything else is read as the record stands NOW: which component each node names,
+shadow and coverage, and whether each signature verifies under the keyring in force.
+So a chain can still move from proven to unproven without anyone touching it -- a
+component reclassified, a key withdrawn -- which errs in the direction a decision
+about deploying now has to.
 """
 
 from __future__ import annotations
@@ -246,6 +267,14 @@ DISPATCH_EFFECT_WINDOW_SECONDS = 60
 RUNNING_EPOCH_STATE = "running"
 EPOCH_SEPARATOR = "#"
 
+#: The kinds of graph edge the history keeps (:func:`graph_edges`), spelled as the
+#: stored rows spell them (:class:`assurance.models.AuthorityEdgeVersion`), so a
+#: renamed one changes what the same stored history proves: an agent acts as a service
+#: account; a component declares a permission; a principal reaches a tool.
+EDGE_IDENTITY = "identity"
+EDGE_ACTION = "action"
+EDGE_REACH = "reach"
+
 #: The document a chain's digest is taken over, and an engine's signature covers.
 CHAIN_SCHEMA = "mythos.authority-chain/v1"
 
@@ -253,11 +282,22 @@ CHAIN_SCHEMA = "mythos.authority-chain/v1"
 #: receipt carries (names stay out of it); the words are for a reader.
 REASONS: Mapping[str, str] = {
     # proven by
-    "declared_edge": "the inventory declares that the acting agent invokes this tool",
-    "effective_reach": "effective access reaches this tool from the acting agent over declared edges",
-    "declared_identity": "the acting agent declares that it acts as this account",
-    "declared_permission": "a component the identity acts through declares this permission",
-    "within_approval": "a tool the approval names was approved with this permission",
+    "reach_in_force_at_dispatch": (
+        "the graph's edge history says the acting agent reached this tool -- a declared invokes edge or "
+        "effective access -- at the dispatch instant"
+    ),
+    "identity_in_force_at_dispatch": (
+        "the graph's edge history says the acting agent declared that it acts as this account at the "
+        "dispatch instant"
+    ),
+    "action_in_force_at_dispatch": (
+        "the graph's edge history says a component the identity acted through declared this permission at "
+        "the dispatch instant"
+    ),
+    "within_approval_at_dispatch": (
+        "a tool the approval in force at the dispatch instant names was approved, under the contract it was "
+        "approved under, with this permission"
+    ),
     "gate_permit": "the Action Gate authorized this workflow's action at dispatch (a signed permit check)",
     "observed_effect": (
         "the dispatch that carried the action out saw the provider complete it, and signed that with "
@@ -295,11 +335,18 @@ REASONS: Mapping[str, str] = {
     "approval_permissions_undeclared": "the approved tool contracts do not declare what they permit",
     "no_actor": "no agent in the chain before this hop acts",
     "actor_unresolved": "the acting agent does not resolve to one governed component",
-    "inferred_edge": "only an inferred edge -- the shape of the pipeline, not a declaration -- joins them",
-    "dangling_edge": "the acting agent declares references discovery could not place",
-    "identity_unresolved": "the acting agent's declared identity does not resolve cleanly",
-    "no_declared_identity": "the acting agent declares no identity",
-    "permissions_undeclared": "the components the identity acts through do not all declare their permissions",
+    "reach_not_in_force_at_dispatch": (
+        "the graph's edge history holds no reach from the acting agent to this tool in force at the dispatch "
+        "instant"
+    ),
+    "identity_not_in_force_at_dispatch": (
+        "the graph's edge history holds no identity edge from the acting agent to this account in force at "
+        "the dispatch instant"
+    ),
+    "action_not_in_force_at_dispatch": (
+        "the graph's edge history holds no declaration of this permission, by anything the identity acted "
+        "through, in force at the dispatch instant"
+    ),
     "no_gate_decision": "the chain cites no Action Gate decision",
     "gate_decision_not_recorded": "the Action Gate decision the chain cites is not recorded here",
     "gate_decision_other_workflow": "the Action Gate decision the chain cites is for another workflow",
@@ -342,7 +389,8 @@ REASONS: Mapping[str, str] = {
     "delegation_revoked": "the delegation was revoked before (or at) the instant of the effect",
     "dispatch_state_unrecorded": (
         "nothing records the state the effect's dispatch ran under -- no observed effect signed with it, or "
-        "no approval, contract or route on record at the dispatch instant -- so the hop is not read live instead"
+        "no approval, contract, route or graph edge history on record at the dispatch instant -- so the hop "
+        "is not read live instead"
     ),
     "dispatched_under_superseded_policy": (
         "the dispatch ran under an approval, or a gate epoch or operator policy, already superseded at the "
@@ -368,26 +416,45 @@ REASONS: Mapping[str, str] = {
     "unchecked": "no check speaks for this hop",
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
-    "unreachable": "effective access over a fully resolved graph says the acting agent cannot reach this tool",
-    "acts_as_another": "the acting agent declares that it acts as another account",
-    "permission_not_declared": "every component the identity acts through declares its permissions, and none this one",
     "gate_refused": "the Action Gate refused this workflow's action",
     "effect_violated": "the observed-effect outcome cited says the effect was produced outside its authority",
 }
 
 
-#: Codes this rule emitted before part 5 of the 7 Oct decision and no longer does:
-#: ``under_policy`` and ``invokes`` are read as of dispatch now, against the approval,
-#: contracts and route in force at the dispatch instant, so nothing reads them against
-#: the record in force when the receipt is computed. Published still, for receipts that
-#: carry them (the v6.0 spec lists them as retired); never in :data:`REASONS`, which is
-#: exactly what the rule emits.
+#: Codes this rule emitted before and no longer does. Part 5 of the 7 Oct decision
+#: read ``under_policy`` and ``invokes`` as of dispatch, against the approval, contracts
+#: and route in force at the dispatch instant; its follow-up reads ``through_identity``,
+#: ``performs`` and reach as of dispatch too, against the graph's edge history and the
+#: approval in force then -- so nothing reads them against the record in force when
+#: the receipt is computed. An edge absent at the dispatch reads unproven, never broken
+#: (the history holds edges, not the gaps and undeclared permissions beside them), so
+#: the three live contradictions retire with the live reads. Published still, for
+#: receipts that carry them (the v6.0 spec lists them as retired); never in
+#: :data:`REASONS`, which is exactly what the rule emits.
 RETIRED_REASONS: Mapping[str, str] = {
     "approval_in_force": "the policy node names the approval in force, at its current version",
     "approved_contract_in_force": "the approval names this tool, under the contract in force",
     "superseded_contract": "the tool was approved under a contract that has since changed",
     "route_moved": "the chain was recorded against a served route that no longer serves",
     "route_unrecorded": "nothing records which served route the chain was taken against",
+    # Retired by the graph hops' follow-up: replaced by reach_in_force_at_dispatch.
+    "declared_edge": "the inventory declares that the acting agent invokes this tool",
+    "effective_reach": "effective access reaches this tool from the acting agent over declared edges",
+    # Replaced by reach_not_in_force_at_dispatch.
+    "inferred_edge": "only an inferred edge -- the shape of the pipeline, not a declaration -- joins them",
+    "dangling_edge": "the acting agent declares references discovery could not place",
+    "unreachable": "effective access over a fully resolved graph says the acting agent cannot reach this tool",
+    # Replaced by identity_in_force_at_dispatch and identity_not_in_force_at_dispatch.
+    "declared_identity": "the acting agent declares that it acts as this account",
+    "identity_unresolved": "the acting agent's declared identity does not resolve cleanly",
+    "no_declared_identity": "the acting agent declares no identity",
+    "acts_as_another": "the acting agent declares that it acts as another account",
+    # Replaced by action_in_force_at_dispatch and action_not_in_force_at_dispatch.
+    "declared_permission": "a component the identity acts through declares this permission",
+    "permissions_undeclared": "the components the identity acts through do not all declare their permissions",
+    "permission_not_declared": "every component the identity acts through declares its permissions, and none this one",
+    # Replaced by within_approval_at_dispatch.
+    "within_approval": "a tool the approval names was approved with this permission",
 }
 
 
@@ -606,31 +673,30 @@ class Graph:
     reach: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class ApprovedTool:
-    """One tool an approval binds (:func:`assurance.tool_contract.approved_tools`),
-    with the permissions the APPROVED contract declared (``None``: it declared
-    none) and the digest in force now (``None``: no longer registered)."""
+def graph_edges(graph: Graph) -> frozenset[tuple[str, str, str]]:
+    """Every edge ``through_identity``, ``performs`` and reach read, as ``(kind, source,
+    target)``, of ``graph`` as it stands: what the edge history keeps
+    (:mod:`assurance.edge_history`), and so exactly what those hops are read against
+    as of dispatch.
 
-    kind: str
-    identifier: str
-    approved_digest: str
-    current_digest: str | None
-    permissions: tuple[str, ...] | None = None
-
-    @property
-    def superseded(self) -> bool:
-        return self.current_digest != self.approved_digest
-
-
-@dataclass(frozen=True)
-class Approval:
-    """An approved workflow as a policy node is checked against: its digest in
-    force (:func:`assurance.authority_chain_records.approval_digest`) and its tools."""
-
-    slug: str
-    digest: str
-    tools: tuple[ApprovedTool, ...] = ()
+    * :data:`EDGE_IDENTITY` ``(agent uuid, account uuid)``: a declared ``acts_as`` edge.
+    * :data:`EDGE_REACH` ``(principal uuid, tool uuid)``: a declared ``invokes`` edge, or
+      a tool in the principal's effective reach -- a tool node kind only
+      (:data:`TOOL_NODE_KINDS`), the one thing a reach is read for.
+    * :data:`EDGE_ACTION` ``(component uuid, permission)``: a permission the component
+      declares."""
+    kinds = {c.uuid: c.kind for c in graph.components}
+    edges: set[tuple[str, str, str]] = set()
+    for source, kind, target in graph.declared:
+        if kind == "acts_as":
+            edges.add((EDGE_IDENTITY, source, target))
+        elif kind == "invokes" and kinds.get(target) in TOOL_NODE_KINDS:
+            edges.add((EDGE_REACH, source, target))
+    for principal, targets in graph.reach.items():
+        edges.update((EDGE_REACH, principal, t) for t in targets if kinds.get(t) in TOOL_NODE_KINDS)
+    for component in graph.components:
+        edges.update((EDGE_ACTION, component.uuid, p) for p in component.permissions or ())
+    return frozenset(edges)
 
 
 @dataclass(frozen=True)
@@ -677,10 +743,25 @@ class ApprovalVersion:
 @dataclass(frozen=True)
 class ContractVersion:
     """One recorded contract of a tool (:class:`assurance.models.ToolContract`): its
-    digest, and when it was recorded -- in force from then until the next one."""
+    digest, and when it was recorded -- in force from then until the next one -- and
+    the permissions it declared (``None``: it declared none), which is what an approval
+    of the tool under this digest approved it to permit."""
 
     recorded_at: datetime
     digest: str
+    permissions: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class EdgeVersion:
+    """One recorded change of one graph edge (:class:`assurance.models.AuthorityEdgeVersion`):
+    whether the edge came into force (``True``) or went out of it, when the platform
+    noticed, and the history row that records it (``record``), which a hop proven by it
+    cites. In force from ``noticed_at`` until the edge's next change."""
+
+    noticed_at: datetime
+    in_force: bool
+    record: str = ""
 
 
 @dataclass(frozen=True)
@@ -762,8 +843,10 @@ class Delegation:
 
 @dataclass(frozen=True)
 class Inputs:
+    #: The graph as it stands: which component each node names, and whether it is
+    #: shadow or assessed. The edges ``through_identity``, ``performs`` and reach read
+    #: are not read from it but from ``edge_history``, as of dispatch.
     graph: Graph = field(default_factory=Graph)
-    approvals: Mapping[str, Approval] = field(default_factory=dict)
     outcomes: Mapping[str, CitedOutcome] = field(default_factory=dict)
     #: How many chains in force cite each observed-effect outcome, by its id: one
     #: observation proves one chain.
@@ -774,10 +857,16 @@ class Inputs:
     delegations: tuple[Delegation, ...] = ()
     #: Every recorded version of the chains' workflows' approvals, oldest first, by
     #: slug; and every recorded contract of the tools they bound, oldest first, by
-    #: ``(kind, identifier)``. What ``under_policy`` and ``invokes`` are read against,
-    #: as of each chain's dispatch instant.
+    #: ``(kind, identifier)``. What ``under_policy``, ``invokes`` and the approval half
+    #: of ``performs`` are read against, as of each chain's dispatch instant.
     approval_history: Mapping[str, tuple[ApprovalVersion, ...]] = field(default_factory=dict)
     contract_history: Mapping[tuple[str, str], tuple[ContractVersion, ...]] = field(default_factory=dict)
+    #: Every recorded change of every graph edge (:func:`graph_edges`), oldest first,
+    #: by ``(kind, source, target)``; and from when that history covers the deployment
+    #: (``None``: it never began). What ``through_identity``, ``performs`` and reach are
+    #: read against, as of each chain's dispatch instant.
+    edge_history: Mapping[tuple[str, str, str], tuple[EdgeVersion, ...]] = field(default_factory=dict)
+    edges_noted_from: datetime | None = None
 
 
 # ------------------------------------------------------------------ the verdict
@@ -840,12 +929,33 @@ def _hop_verdict(index: int, hop: Hop, readings: list[Reading]) -> HopVerdict:
 
 
 class _Index:
-    """The graph, indexed once per verification."""
+    """The graph, and its edge history, indexed once per verification."""
 
-    def __init__(self, graph: Graph):
+    def __init__(self, graph: Graph, edge_history: Mapping[tuple[str, str, str], tuple[EdgeVersion, ...]] | None = None):
         self.graph = graph
         self.by_identifier, self.by_name = _refs.reference_index(graph.components)
         self.by_uuid = {c.uuid: c for c in graph.components}
+        self.edges: dict[tuple[str, str], dict[str, tuple[EdgeVersion, ...]]] = {}
+        for (kind, source, target), versions in (edge_history or {}).items():
+            self.edges.setdefault((kind, source), {})[target] = tuple(versions)
+
+    def edge_at(self, kind: str, source: str, target: str, instant: datetime) -> EdgeVersion | None:
+        """The recorded change that put the edge in force at ``instant``, if it was."""
+        return _in_force_at(self.edges.get((kind, source), {}).get(target, ()), instant)
+
+    def edges_from_at(self, kind: str, source: str, instant: datetime) -> dict[str, EdgeVersion]:
+        """Every edge of ``kind`` from ``source`` in force at ``instant``, by target."""
+        found = {}
+        for target, versions in self.edges.get((kind, source), {}).items():
+            version = _in_force_at(versions, instant)
+            if version is not None:
+                found[target] = version
+        return found
+
+    def name(self, uuid: str) -> str:
+        """A component's name for a reader: the graph's now, or its uuid if it is gone."""
+        component = self.by_uuid.get(uuid)
+        return component.name if component is not None else uuid
 
     def resolve(self, node: Node) -> tuple[Component | None, list[Reading]]:
         """The component a graph node names, and what is wrong with it. ``None``
@@ -1163,10 +1273,11 @@ def _route_at_dispatch(dispatch: DispatchState) -> Reading:
 
 def _invokes(chain, i, source, target, inputs, index) -> list[Reading]:
     """The approval, contract and route are read AS OF DISPATCH (part 5 of the 7 Oct
-    decision): a contract changed or a route moved after the effect does not unprove
-    it, and a dispatch whose state nothing records is unproven rather than read live.
-    The graph -- whether the acting agent reaches the tool -- is read as it stands: no
-    history of it is kept."""
+    decision), and so is the reach (its follow-up): a contract changed, a route moved or
+    a reach edge removed after the effect does not unprove it, and a dispatch whose state
+    nothing records is unproven rather than read live. Whether the acting agent reached
+    the tool is the graph's edge history at the dispatch instant, never the graph as it
+    stands."""
     readings: list[Reading] = []
     node = chain.hops[i].target
     dispatch, missing = _dispatch_state(chain, inputs)
@@ -1185,153 +1296,228 @@ def _invokes(chain, i, source, target, inputs, index) -> list[Reading]:
             readings.append(
                 Reading(UNPROVEN, "actor_unresolved", f"agent {actor_node.ref!r} does not resolve to one component")
             )
-        elif target is not None:
-            readings.append(_reach(index, actor, target))
+        elif target is not None and dispatch is not None:
+            readings.append(_reach_at_dispatch(index, inputs, actor, target, dispatch))
     return readings
 
 
-def _reach(index: _Index, actor: Component, tool: Component) -> Reading:
-    graph = index.graph
-    names = {tool.identifier, tool.name}
-    gaps = index.gaps(actor, _refs.MECHANISM_TOOLS)
-    about_this = [g for g in gaps if g.reference in names]
-    if about_this:
-        why = ", ".join(sorted({r for g in about_this for r in g.reasons})) or "unresolved"
-        return Reading(
-            UNPROVEN, "dangling_edge", f"agent {actor.name!r} names {tool.name!r} by a reference that is {why}"
+def _in_force_at(versions, instant: datetime) -> EdgeVersion | None:
+    """The recorded change of an edge (``versions``, oldest first) in force at
+    ``instant`` -- the last one at or before it -- if it put the edge in force."""
+    current, _ = _version_at(versions, instant, lambda v: v.noticed_at)
+    return current if current is not None and current.in_force else None
+
+
+def _edges_unrecorded(inputs: Inputs, dispatch: DispatchState) -> Reading | None:
+    """Why the graph's edge history cannot say which edges were in force at the
+    dispatch, or ``None`` when it covers it. A dispatch before the history began is not
+    one through no edge: it is one nothing records, and never read live instead."""
+    begun = inputs.edges_noted_from
+    if begun is not None and begun <= dispatch.dispatched_at:
+        return None
+    at = _when(dispatch.dispatched_at)
+    if begun is None:
+        return _unrecorded(
+            f"no history of the graph's edges is recorded for this deployment, so nothing says which were in "
+            f"force at the dispatch at {at}"
         )
-    if (actor.uuid, "invokes", tool.uuid) in graph.declared:
-        return Reading(PROVEN, "declared_edge", f"agent {actor.name!r} declares that it invokes {tool.name!r}")
-    if tool.uuid in graph.reach.get(actor.uuid, frozenset()):
-        return Reading(
-            PROVEN, "effective_reach", f"effective access reaches {tool.name!r} from agent {actor.name!r}"
-        )
-    if (actor.uuid, tool.uuid) in graph.inferred:
+    return _unrecorded(
+        f"the history of the graph's edges begins at {_when(begun)}, after the dispatch at {at}: nothing says "
+        "which were in force then"
+    )
+
+
+def _cited(version: EdgeVersion) -> str:
+    row = f"edge history row {version.record}" if version.record else "the edge history"
+    return f"in force from {_when(version.noticed_at)} ({row})"
+
+
+def _reach_at_dispatch(index: _Index, inputs: Inputs, actor: Component, tool: Component, dispatch: DispatchState) -> Reading:
+    """Whether the acting agent reached the tool at the dispatch instant, by the edge
+    history: a reach edge -- a declared ``invokes`` edge or effective access -- in force
+    then proves it, citing the change that put it in force; none leaves it unproven."""
+    unrecorded = _edges_unrecorded(inputs, dispatch)
+    if unrecorded is not None:
+        return unrecorded
+    at = _when(dispatch.dispatched_at)
+    record = index.edge_at(EDGE_REACH, actor.uuid, tool.uuid, dispatch.dispatched_at)
+    if record is None:
         return Reading(
             UNPROVEN,
-            "inferred_edge",
-            f"only an inferred edge joins agent {actor.name!r} to {tool.name!r}; nothing declares it",
-        )
-    if gaps:
-        return Reading(
-            UNPROVEN,
-            "dangling_edge",
-            f"agent {actor.name!r} declares {len(gaps)} tool reference(s) discovery could not place, so "
-            f"its reach is not known whole",
+            "reach_not_in_force_at_dispatch",
+            f"no reach from agent {actor.name!r} to {tool.name!r} was in force at the dispatch at {at}, by the "
+            "graph's edge history",
         )
     return Reading(
-        BROKEN,
-        "unreachable",
-        f"effective access over a fully resolved graph: agent {actor.name!r} cannot reach {tool.name!r}",
+        PROVEN,
+        "reach_in_force_at_dispatch",
+        f"agent {actor.name!r} reached {tool.name!r} at the dispatch at {at}: {_cited(record)}",
     )
 
 
 def _through_identity(chain, i, source, target, inputs, index) -> list[Reading]:
+    """Read AS OF DISPATCH: the acting agent declared that it acts as this account at
+    the dispatch instant, by the graph's edge history. An identity edited after the
+    effect does not unprove it; one that was not this account's at the dispatch does,
+    even once it is restored."""
+    readings: list[Reading] = []
+    dispatch, missing = _dispatch_state(chain, inputs)
+    if missing is not None:
+        readings.append(missing)
     actor_node = _last_before(chain, i, {AGENT})
     if actor_node is None:
-        return [Reading(UNPROVEN, "no_actor", "no agent in the chain before this hop acts through an identity")]
+        return [*readings, Reading(UNPROVEN, "no_actor", "no agent in the chain before this hop acts through an identity")]
     actor, _ = index.resolve(actor_node)
     if actor is None:
-        return [Reading(UNPROVEN, "actor_unresolved", f"agent {actor_node.ref!r} does not resolve to one component")]
-    gaps = index.gaps(actor, _refs.MECHANISM_IDENTITY)
-    if gaps:
-        why = ", ".join(sorted({r for g in gaps for r in g.reasons})) or "unresolved"
         return [
-            Reading(UNPROVEN, "identity_unresolved", f"agent {actor.name!r} declares an identity that is {why}")
+            *readings,
+            Reading(UNPROVEN, "actor_unresolved", f"agent {actor_node.ref!r} does not resolve to one component"),
         ]
-    acts_as = {t for (s, kind, t) in index.graph.declared if s == actor.uuid and kind == "acts_as"}
-    if target is not None and target.uuid in acts_as:
-        return [Reading(PROVEN, "declared_identity", f"agent {actor.name!r} declares that it acts as {target.name!r}")]
-    if acts_as:
-        others = ", ".join(sorted(index.by_uuid[u].name for u in acts_as if u in index.by_uuid))
+    if dispatch is None or target is None:
+        return readings
+    unrecorded = _edges_unrecorded(inputs, dispatch)
+    if unrecorded is not None:
+        return [unrecorded]
+    at = _when(dispatch.dispatched_at)
+    record = index.edge_at(EDGE_IDENTITY, actor.uuid, target.uuid, dispatch.dispatched_at)
+    if record is not None:
         return [
             Reading(
-                BROKEN,
-                "acts_as_another",
-                f"agent {actor.name!r} declares that it acts as {others}, not {chain.hops[i].target.ref!r}",
+                PROVEN,
+                "identity_in_force_at_dispatch",
+                f"agent {actor.name!r} acted as {target.name!r} at the dispatch at {at}: {_cited(record)}",
             )
         ]
-    return [Reading(UNPROVEN, "no_declared_identity", f"agent {actor.name!r} declares no identity")]
+    others = sorted(index.name(u) for u in index.edges_from_at(EDGE_IDENTITY, actor.uuid, dispatch.dispatched_at))
+    then = f"it acted as {', '.join(others)} then" if others else "no identity of it was in force then"
+    return [
+        Reading(
+            UNPROVEN,
+            "identity_not_in_force_at_dispatch",
+            f"agent {actor.name!r} did not act as {target.name!r} at the dispatch at {at}, by the graph's edge "
+            f"history: {then}",
+        )
+    ]
 
 
 def _performs(chain, i, source, target, inputs, index) -> list[Reading]:
+    """Read AS OF DISPATCH: the permission was declared at the dispatch instant by what
+    the identity acted through then, and the approval in force then approved it. The
+    gate decision is the signed outcome the chain cites, as it verifies now."""
     action = chain.hops[i].target.ref
     readings: list[Reading] = []
+    dispatch, missing = _dispatch_state(chain, inputs)
+    if missing is not None:
+        readings.append(missing)
+    else:
+        readings.append(_action_at_dispatch(chain, i, source, action, dispatch, inputs, index))
+        readings.append(_within_approval_at_dispatch(chain, action, dispatch, inputs))
+    readings.append(_gate(chain, inputs))
+    return readings
 
-    # What the identity can do: its own declared permissions, the tool it acts
-    # through in this chain, and every tool its effective access reaches.
-    relevant: dict[str, Component] = {}
+
+def _action_at_dispatch(chain, i, source, action: str, dispatch: DispatchState, inputs: Inputs, index: _Index) -> Reading:
+    """Whether a component the identity acted through declared ``action`` at the
+    dispatch instant, by the edge history: the identity itself, the tool it acts through
+    in this chain, and every tool it reached then."""
+    unrecorded = _edges_unrecorded(inputs, dispatch)
+    if unrecorded is not None:
+        return unrecorded
+    instant = dispatch.dispatched_at
+    at = _when(instant)
+    relevant: set[str] = set()
     if source is not None:
-        relevant[source.uuid] = source
-        for uuid in index.graph.reach.get(source.uuid, frozenset()):
-            component = index.by_uuid.get(uuid)
-            if component is not None and component.kind in TOOL_NODE_KINDS:
-                relevant[uuid] = component
+        relevant.add(source.uuid)
+        relevant.update(index.edges_from_at(EDGE_REACH, source.uuid, instant))
     tool_node = _last_before(chain, i, TOOL_NODE_KINDS)
     if tool_node is not None:
         tool, _ = index.resolve(tool_node)
         if tool is not None:
-            relevant[tool.uuid] = tool
-    holders = sorted(c.name for c in relevant.values() if c.permissions is not None and action in c.permissions)
-    declaring = [c for c in relevant.values() if c.permissions is not None]
-    if holders:
-        readings.append(
-            Reading(PROVEN, "declared_permission", f"{', '.join(holders)} declare(s) the permission {action!r}")
+            relevant.add(tool.uuid)
+    holders = sorted(
+        (
+            (index.name(uuid), record)
+            for uuid in relevant
+            if (record := index.edge_at(EDGE_ACTION, uuid, action, instant)) is not None
+        ),
+        key=lambda held: (held[0], held[1].noticed_at, held[1].record),
+    )
+    if not holders:
+        return Reading(
+            UNPROVEN,
+            "action_not_in_force_at_dispatch",
+            f"nothing the identity acted through declared the permission {action!r} at the dispatch at {at}, by "
+            "the graph's edge history",
         )
-    elif relevant and len(declaring) == len(relevant):
-        readings.append(
-            Reading(
-                BROKEN,
-                "permission_not_declared",
-                f"{', '.join(sorted(c.name for c in relevant.values()))} declare their permissions, "
-                f"and none of them is {action!r}",
-            )
-        )
-    else:
-        readings.append(
-            Reading(
-                UNPROVEN,
-                "permissions_undeclared",
-                f"nothing the identity acts through declares {action!r}, and not everything it acts "
-                "through declares its permissions",
-            )
-        )
+    return Reading(
+        PROVEN,
+        "action_in_force_at_dispatch",
+        f"{', '.join(f'{name} ({_cited(record)})' for name, record in holders)} declared the permission "
+        f"{action!r} at the dispatch at {at}",
+    )
 
-    approval = inputs.approvals.get(chain.workflow)
+
+def _approved_permissions(inputs: Inputs, kind: str, identifier: str, digest: str, instant: datetime):
+    """``(found, permissions)``: what the contract of ``kind``/``identifier`` recorded
+    under ``digest`` declared -- the one in force at ``instant`` if it was, else the
+    latest recorded under that digest (the digest is taken over the declaration, so one
+    is any) -- and whether any is on record at all."""
+    versions = [v for v in inputs.contract_history.get((kind, identifier), ()) if v.digest == digest]
+    if not versions:
+        return False, None
+    before = [v for v in versions if v.recorded_at <= instant]
+    return True, (before or versions)[-1].permissions
+
+
+def _within_approval_at_dispatch(chain: Chain, action: str, dispatch: DispatchState, inputs: Inputs) -> Reading:
+    """The approval half of ``performs``, as of dispatch: a tool of the approval in force
+    at the dispatch instant was approved, under the contract it was approved under, with
+    this permission. A re-approval after the effect does not move it."""
+    at = _when(dispatch.dispatched_at)
+    approval, _ = _version_at(
+        inputs.approval_history.get(chain.workflow, ()), dispatch.dispatched_at, lambda v: v.in_force_from
+    )
     if approval is None:
-        readings.append(Reading(UNPROVEN, "no_approval", f"no approval of {chain.workflow!r} is on record"))
-    elif not approval.tools:
-        readings.append(
-            Reading(UNPROVEN, "approval_names_no_tools", f"the approval of {chain.workflow!r} names no tools")
+        return _unrecorded(f"no version of the approval of {chain.workflow!r} is recorded at or before the dispatch at {at}")
+    if not approval.digest:
+        return Reading(
+            UNPROVEN, "no_approval", f"the approval of {chain.workflow!r} had been withdrawn by the dispatch at {at}"
         )
-    else:
-        within = sorted(t.identifier for t in approval.tools if t.permissions is not None and action in t.permissions)
-        if within:
-            readings.append(
-                Reading(
-                    PROVEN,
-                    "within_approval",
-                    f"{', '.join(within)} {'was' if len(within) == 1 else 'were'} approved with {action!r}",
-                )
-            )
-        elif all(t.permissions is not None for t in approval.tools):
-            readings.append(
-                Reading(
-                    BROKEN,
-                    "outside_approval",
-                    f"no tool the approval of {chain.workflow!r} names was approved with {action!r}",
-                )
-            )
-        else:
-            readings.append(
-                Reading(
-                    UNPROVEN,
-                    "approval_permissions_undeclared",
-                    f"the approval of {chain.workflow!r} names tools whose approved contracts declare no permissions",
-                )
-            )
-    readings.append(_gate(chain, inputs))
-    return readings
+    if not approval.tools:
+        return Reading(
+            UNPROVEN,
+            "approval_names_no_tools",
+            f"the approval of {chain.workflow!r} in force at the dispatch at {at} names no tools",
+        )
+    read = {(kind, ident): _approved_permissions(inputs, kind, ident, digest, dispatch.dispatched_at)
+            for kind, ident, digest in approval.tools}
+    within = sorted(ident for (_, ident), (_, perms) in read.items() if perms is not None and action in perms)
+    if within:
+        return Reading(
+            PROVEN,
+            "within_approval_at_dispatch",
+            f"{', '.join(within)} {'was' if len(within) == 1 else 'were'} approved with {action!r} by the approval "
+            f"of {chain.workflow!r} in force at the dispatch at {at}",
+        )
+    unread = sorted(f"{kind} {ident!r}" for (kind, ident), (found, _) in read.items() if not found)
+    if unread:
+        return _unrecorded(
+            f"no contract is recorded under the digest the approval in force at the dispatch at {at} bound "
+            f"{', '.join(unread)} under, so nothing says what it was approved to permit"
+        )
+    if all(perms is not None for _, perms in read.values()):
+        return Reading(
+            BROKEN,
+            "outside_approval",
+            f"no tool the approval of {chain.workflow!r} in force at the dispatch at {at} names was approved with "
+            f"{action!r}",
+        )
+    return Reading(
+        UNPROVEN,
+        "approval_permissions_undeclared",
+        f"the approval of {chain.workflow!r} in force at the dispatch at {at} names tools whose approved contracts "
+        "declare no permissions",
+    )
 
 
 def _gate(chain: Chain, inputs: Inputs) -> Reading:
@@ -1756,7 +1942,7 @@ def verify(chain: Chain, inputs: Inputs) -> ChainVerdict:
     a grammar since changed -- is unproven, read rather than refused: a stored
     chain is never dropped from the decision for being malformed. A relation in
     :data:`NO_RECORD_RELATIONS` is unproven whatever its checks would say."""
-    index = _Index(inputs.graph)
+    index = _Index(inputs.graph, inputs.edge_history)
     out = []
     for i, hop in enumerate(chain.hops):
         if not _in_grammar(hop):

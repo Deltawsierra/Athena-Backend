@@ -439,7 +439,17 @@ def test_the_backstop_watches_every_table_the_decision_reads(engine_keyring):
     Evidence.objects.create(finding=finding, classification=EvidenceClass.UNKNOWN)
     DeclaredComponent.objects.create(deployment=dep, kind=Asset.Kind.MODEL, name="gpt", identifier="gpt")
     Asset.objects.create(deployment=dep, kind=Asset.Kind.MODEL, name="gpt", identifier="gpt")
-    ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="refund")
+    workflow = ApprovedWorkflow.objects.create(deployment=dep, slug="refund-over-limit", name="refund")
+    # The approval binds a tool, so the contract it was approved under is read too: the
+    # chain's actions are read against what that contract permitted, as of dispatch,
+    # through the approval's history (assurance.approval_history).
+    from assurance.tool_contract import bind_workflow
+
+    refund = Asset.objects.create(
+        deployment=dep, kind=Asset.Kind.TOOL, name="refund", identifier="refund@payments",
+        metadata={"permissions": ["refund:issue"]},
+    )
+    bind_workflow(workflow, refund)
     record_signed(dep, "refund-over-limit", oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=5))
     # A recorded chain that starts at a person, so the sign-in and delegation records
     # its first hops are proven by (assurance.identity_evidence) are read too.

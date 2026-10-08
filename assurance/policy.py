@@ -252,6 +252,11 @@ def _policy_document() -> dict:
             "dispatch_effect_window_seconds": _authority_chain.DISPATCH_EFFECT_WINDOW_SECONDS,
             "running_epoch_state": _authority_chain.RUNNING_EPOCH_STATE,
             "epoch_separator": _authority_chain.EPOCH_SEPARATOR,
+            # Its follow-up: the graph hops are read as of dispatch against the edge
+            # history, whose stored rows spell each kind of edge so.
+            "edge_kinds": [
+                _authority_chain.EDGE_IDENTITY, _authority_chain.EDGE_ACTION, _authority_chain.EDGE_REACH,
+            ],
         },
         # Which effects need an authority chain (assurance.consequential): the
         # declared effect classes that make a tool's effect consequential and the ones
