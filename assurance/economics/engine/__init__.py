@@ -1,6 +1,6 @@
 """The pure core of Economic Exposure: vocabularies, the currency table, the
-separation-of-duties rules, and money, FX and cost-index normalization, with no
-Django and no database.
+separation-of-duties rules, money, FX and cost-index normalization, and the
+deterministic scenario engine, with no Django and no database.
 
 Everything a calculation will later depend on is stated here once, as data and
 pure functions, so the Django half (:mod:`assurance.economics.models`), the
@@ -23,7 +23,14 @@ fixtures and the tests all read the same codes:
 - :mod:`.cost_index` (E1): cost-index observations and the indexing step;
 - :mod:`.normalization` (E1): native amount, event-date FX, cost index,
   valuation-date FX, in that order, with the provenance chain;
-- :mod:`.snapshot` (E1): reading a committed observation snapshot and its hash.
+- :mod:`.snapshot` (E1): reading a committed observation snapshot and its hash;
+- :mod:`.parameters` (scenarios): a parameter's low, base and high, its unit, its
+  source type and evidence, and the scenario engine's refusal codes;
+- :mod:`.formulas` (scenarios): the versioned formula catalogue, each input's
+  direction, and a loss component with its provenance;
+- :mod:`.loss` (scenarios): loss events, their totals, insurance applied once,
+  and the market-value line kept apart from cash;
+- :mod:`.parameter_set` (scenarios): the customer parameter set's typed schema.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of
