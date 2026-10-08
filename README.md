@@ -496,6 +496,34 @@ overrides only the database, mail and throttling. The engine contract tests in
 The frontend's tests run with `npm test` (`node --test`, Node 22.6 or later):
 `frontend/src/lib/refresh-token.test.ts` and `frontend/src/lib/idempotency.test.ts`.
 
+## What a span carries, and the advisories this service tracks
+
+A span (`assurance/observability.py`) carries the deployment's primary key and
+the step, never a deployment's name or a finding (`tests/test_assurance_tracing.py`),
+and an exception that leaves one is recorded by its type alone (`error.type`, and
+the class name as its status): left to the OpenTelemetry SDK's defaults, an
+exception raised while deriving claims went to the collector with its message,
+stack trace and chained cause, quoting whatever it was reading
+(`tests/test_an_exception_reaches_a_span_as_its_type_alone.py`). The caller gets
+that exception even when ending the span raises.
+
+`advisories.toml` registers the upstream advisories against the dependencies on
+the path from an engine's answer to this service's record, with the test of this
+service's own that pins each; `tests/test_every_registered_advisory_is_fixed_here.py`
+fails in CI, with no network, when one is installed or declared at an affected
+version. Two Pydantic AI advisories fixed in 1.107.6 and 2.44.0 started it
+(GHSA-4x9p-g9wm-8q7f, telemetry content escaping a disabled-content setting;
+GHSA-22h6-qm39-v87j, a domain list bypassed by a hostname the resolver normalises
+differently). Pydantic AI is not a dependency of this service, directly or
+transitively; the same behaviours are tested on its own spans and on the
+scan-target guard (`tests/test_the_target_guard_decides_on_the_host_the_client_dials.py`).
+Nothing here says any deployment was affected.
+
+The register reads every way a requirement can be declared -- `-r` and `-c`
+includes, `\` continuations and `--hash` options, setup.py through `ast` --
+probes both ranges' edges so an exact pin inside an affected range is seen, and
+fails on any declaration it cannot read rather than passing over it.
+
 ## Before deploying
 
 ```bash

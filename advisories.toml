@@ -1,0 +1,87 @@
+# Upstream advisories Athena-Backend tracks, as a standing regression source.
+#
+# One entry per published advisory against a dependency on the path from an
+# engine's answer to this service's record -- the HTTP client every engine call,
+# connector and posture read goes through, the telemetry and agent frameworks a
+# collector is built on -- with the versions it affects, the
+# versions that fix it, whether the dependency is installed here at all, and the
+# test of this service's own that pins the advisory's behaviour against this
+# service's use of it.
+#
+# tests/test_every_registered_advisory_is_fixed_here.py reads this file in CI,
+# with no network: it fails when a registered dependency is installed at an
+# affected version, when a requirement this repository declares admits one, when
+# a dependency recorded as absent turns up installed (its use then has to be
+# reviewed against the advisory and recorded here), and when a named test no
+# longer exists.
+#
+# `installed` records what the dependency trees showed when the entry was
+# written (the trees are in the pull request that added it). It says nothing
+# about any deployment: an advisory listed here is not a claim that this
+# service, or anything built on it, was ever affected.
+#
+# To add an entry: the advisory's own id, affected ranges and fixed versions,
+# copied from the advisory; and a test that fails if this engine's use of the
+# dependency behaves the way the advisory describes.
+
+[[advisory]]
+id = "GHSA-4x9p-g9wm-8q7f"
+dependency = ["pydantic-ai", "pydantic-ai-slim"]
+summary = "OpenTelemetry instrumentation: include_content=False does not redact exceptions, error statuses, instructions or the output template"
+affected = [">=0.3.4,<1.107.6", ">=2.0.0b1,<2.44.0"]
+fixed = ["1.107.6", "2.44.0"]
+installed = false
+use = "Not a dependency. The same channel on this service's own spans: an exception, chained, leaving the span a claim derivation runs under."
+tests = [
+  "tests/test_an_exception_reaches_a_span_as_its_type_alone.py::test_a_derivation_that_fails_leaves_its_span_as_one_type",
+]
+
+[[advisory]]
+id = "GHSA-22h6-qm39-v87j"
+dependency = ["pydantic-ai", "pydantic-ai-slim"]
+summary = "web_fetch_tool blocked_domains bypass via a hostname the resolver normalizes differently"
+affected = [">=1.77.0,<1.107.6", ">=2.0.0b1,<2.44.0"]
+fixed = ["1.107.6", "2.44.0"]
+installed = false
+use = "Not a dependency. The same comparison at this service's edge: the scan-target guard and an engagement's scope against the host the client dials, over Mythos-Core#47's corpus."
+tests = [
+  "tests/test_the_target_guard_decides_on_the_host_the_client_dials.py::test_what_the_backend_admits_is_the_host_the_client_dials",
+  "tests/test_the_target_guard_decides_on_the_host_the_client_dials.py::test_a_host_written_otherwise_than_the_client_dials_it_is_refused",
+  "tests/test_the_target_guard_decides_on_the_host_the_client_dials.py::test_the_scope_is_compared_in_the_form_the_client_dials",
+]
+
+[[advisory]]
+id = "GHSA-9hjg-9r4m-mvj7"
+dependency = ["requests"]
+summary = "Requests vulnerable to .netrc credentials leak via malicious URLs (CVE-2024-47081)"
+affected = ["<2.32.4"]
+fixed = ["2.32.4"]
+installed = true
+use = "The engine client, the connectors and the posture readers call requests directly, through a Session that reads ~/.netrc."
+tests = [
+  "tests/test_no_client_here_meets_an_advisory_s_precondition.py::test_a_netrc_login_reaches_no_host_but_the_one_it_names",
+]
+
+[[advisory]]
+id = "GHSA-34jh-p97f-mpxf"
+dependency = ["urllib3"]
+summary = "Proxy-Authorization request header isn't stripped during cross-origin redirects (CVE-2024-37891)"
+affected = ["<1.26.19", ">=2.0.0,<2.2.2"]
+fixed = ["1.26.19", "2.2.2"]
+installed = true
+use = "Not reached: no client here sets a Proxy-Authorization header by hand; requests follows redirects itself."
+tests = [
+  "tests/test_no_client_here_meets_an_advisory_s_precondition.py::test_no_client_here_sets_a_proxy_credential_by_hand",
+]
+
+[[advisory]]
+id = "GHSA-pq67-6m6q-mj2v"
+dependency = ["urllib3"]
+summary = "urllib3 redirects are not disabled when retries are disabled on PoolManager instantiation (CVE-2025-50181)"
+affected = ["<2.5.0"]
+fixed = ["2.5.0"]
+installed = true
+use = "Not reached: no client here builds a urllib3 PoolManager or relies on its retries to disable redirects."
+tests = [
+  "tests/test_no_client_here_meets_an_advisory_s_precondition.py::test_no_client_here_disables_redirects_through_a_pool_manager",
+]
