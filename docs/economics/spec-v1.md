@@ -10,13 +10,15 @@ This file is the specification for phase E0, the foundations, and phase E1,
 money, currency, FX and cost-index normalization, with the deterministic scenario
 engine (MVP step 4): parameters and their units, the formula catalogue, loss
 events and their components, insurance, and the customer parameter set with its
-API. It states the calculation policy every later step follows, the vocabularies
+API; and the scenario builder (MVP step 5, section 23), which builds a scenario's
+loss events from SPINE effects and findings through six banking templates. It states the calculation policy every later step follows, the vocabularies
 and the currency table, the records and who may write them, the governance rules,
 how an amount is held, converted and normalized and with what provenance, the
 observation data, how a loss component is computed and with what invariants, and
 what this version does not do. Nothing in this version simulates; the scenario
-engine computes deterministic low, base and high ranges, and the only route it
-serves is the customer parameter set's (section 19).
+engine computes deterministic low, base and high ranges, and the routes it serves
+are the customer parameter set's (section 19) and the scenario builder's (section
+23).
 
 ## Contents
 
@@ -42,15 +44,16 @@ serves is the customer parameter set's (section 19).
 20. [The scenario records](#20-the-scenario-records)
 21. [Known-answer fixtures](#21-known-answer-fixtures)
 22. [Limitations of the scenario engine, and decisions for the owner](#22-limitations-of-the-scenario-engine-and-decisions-for-the-owner)
+23. [The scenario builder (MVP step 5)](#23-the-scenario-builder-mvp-step-5)
 
 ## 1. Status and scope
 
 | | |
 |---|---|
-| Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; and the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py` and `tests/test_economics_known_answers.py` (no database), `tests/test_economics_records.py` and `tests/test_economics_scenario_records.py` |
+| Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py`, the scenario builder in `builder.py` and its routes in `scenario_api.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py` and `tests/test_economics_builder.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
 
@@ -60,10 +63,8 @@ migrate with the rest of `assurance`. The pure core imports no Django, and of
 mythos-core only its currency table; a test imports it in a fresh interpreter
 with Django and every other part of mythos-core poisoned.
 
-Out of scope, and added by later steps: distributions and the simulation; the
-scenario builder (which resolves SPINE references and writes a scenario's
-parameters, loss events and components from evidence); every endpoint but the
-customer parameter set's; feeds and their adapters; source disagreement; building
+Out of scope, and added by later steps: distributions and the simulation; every
+endpoint but the customer parameter set's and the scenario builder's; feeds and their adapters; source disagreement; building
 or verifying the signed Financial Exposure Receipt (`mythos_core.exposure_receipt`,
 pinned since E1 but not yet called).
 
@@ -110,10 +111,14 @@ event nor a loss component has an account column.
 
 The package is off every stop path in the other direction too. Two
 first-party modules import `assurance.economics`: `assurance/models.py`, to
-register its models, and `assurance/urls.py`, to mount its one route module,
-`assurance.economics.api`, the customer parameter-set routes (section 19);
-`tests/test_economics_engine.py` fails if anything else imports it. Neither of
-those routes is a stop: both are classified in `safety.stops.NOT_STOPS`, the stop
+register its models, and `assurance/urls.py`, to mount its two route modules,
+`assurance.economics.api`, the customer parameter-set routes (section 19), and
+`assurance.economics.scenario_api`, the scenario builder's (section 23), each in a
+guard of its own; `tests/test_economics_engine.py` fails if anything else imports
+it. The builder and its template module are imported by that route module only,
+never on Django's load path, so a fault in either leaves only the builder's routes
+unserved (`test_a_builder_fault_never_takes_down_a_stop`). None of those routes is a
+stop: both are classified in `safety.stops.NOT_STOPS`, the stop
 tripwire (`tests/test_no_control_holds_back_a_stop.py`) holds them there, and
 `test_no_economics_route_is_a_stop` pins that none is in the stop set or rides its
 exemption. The write is accounted for as one that cannot move the decision
@@ -337,7 +342,9 @@ constraints touches a column a stop's write changes (section 2).
 
 Before the scenario step no route, command or signal wrote or read any of these.
 The scenario step adds one route module (section 19), the only writer of a
-customer parameter set and its parameters. The permitted writers below are the
+customer parameter set and its parameters; the builder step adds another (section
+23), the only writer of a built scenario, its parameters, events, components,
+effects, finding links and build record. The permitted writers below are the
 ones the later steps may add, and, for the observations, the snapshot loader an
 operator runs; any other writer is a defect.
 
@@ -352,9 +359,12 @@ operator runs; any other writer is a defect.
 | `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; later a feed adapter, after its licensing review |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
 | `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
-| `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`; linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (a later step) |
-| `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (a later step); no route writes one in this version |
+| `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`; linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 23) |
+| `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (section 23), through its build route |
 | `LossComponent` (scenarios) | one component of one event: family, formula id and version, as-of date, the parameters it cites by input; its status and amounts are computed on save | the same |
+| `ScenarioBuild` (builder) | how one scenario version was built: its parameter-set version, currency, as-of date, versions, canonical inputs and their digest, unique per deployment | the scenario builder only |
+| `CausalEffect` (builder) | one effect of a built scenario version, in exactly one of its loss events (section 23.1) | the same |
+| `EffectFinding` (builder) | one finding enabling one effect, and its role | the same |
 
 The two observation models are checked on save by the engine's own contracts
 (`fx.FXRate`, `cost_index.IndexPoint`), so a row is refused with the engine's code
@@ -442,9 +452,10 @@ the licensing and legal review The Open Group's terms require first.
 
 - **No grade, no simulation.** E1 converts and normalizes a given amount, and
   the scenario engine computes a deterministic low, base and high per component
-  and per event from given parameters (sections 14 to 18). Nothing yet assigns a
-  confidence grade, samples a distribution or builds a scenario from evidence;
-  the scenario engine's own limits are section 22.
+  and per event from given parameters (sections 14 to 18); the scenario builder
+  builds a scenario's events from SPINE effects and findings (section 23). Nothing
+  yet assigns a confidence grade or samples a distribution; the scenario engine's
+  own limits are section 22, the builder's section 23.9.
 - **Fixture data only.** Every source in the MVP is a committed snapshot, and the
   only one committed is SYNTHETIC TEST DATA (section 13). Nothing fetches a feed,
   and nothing is current beyond its retrieval time.
@@ -1304,7 +1315,7 @@ for Minotaur's economic-exposure tests.
   critical services and vendor names (section 14 of the owner's specification)
   are not variables yet; only figures are.
 - **The parameter-set API writes no scenario records.** Scenario parameters, loss
-  events and components are written by the scenario builder, a later step; the
+  events and components are written by the scenario builder (section 23); the
   models hold the rules for it.
 - **A parameter names its evidence as text.** `evidence_ref` is not yet a link to
   a `FinancialSource` version or a SPINE evidence id, and nothing checks that it
@@ -1331,3 +1342,448 @@ Decisions this version takes, which the owner may change:
    never understates the retained loss; whether to change to the usual order, the
    retention off the loss first and the payment capped at the sublimit, is the
    owner's decision, recorded as open.
+
+## 23. The scenario builder (MVP step 5)
+
+The scenario builder turns SPINE effects, and the findings that enable them, into
+causal loss events, through six templates of the banking pack (the owner's
+specification, sections 6 and 22). **Findings that enable the same effect join ONE
+loss event**: the engine never attaches a figure to a finding, and five findings that
+enable one payment loss make ONE event whose loss is not multiplied (the
+specification's own test, section 27). The pure half is
+`assurance/economics/engine/templates.py` (the templates, the attributes and the
+vocabularies; no Django); the Django half is `assurance/economics/builder.py`
+(resolving, grouping, writing and reading) and `assurance/economics/scenario_api.py`
+(the two routes). Migration `0063_causal_graph_and_scenario_builds.py`. Tests:
+`tests/test_economics_templates.py` (no database) and
+`tests/test_economics_builder.py`.
+
+### 23.1 The causal graph
+
+The graph is the smallest set of records that makes the invariant enforceable. It
+reuses what exists -- SPINE's findings (`Finding`), assets (`Asset`) and signed
+observed effects (`WorkflowChainOutcome` rows carrying a `mythos.observed-effect`
+document), #141's `FinancialScenario`, and #146's `CustomerParameterSet`,
+`FinancialParameter`, `LossEvent` and `LossComponent` -- and adds three records, all
+append-only, tenant-scoped through their scenario, and versioned with it (a rebuilt
+scenario is a new version that supersedes the old, section 6):
+
+| Record | Holds |
+|---|---|
+| `CausalEffect` | one effect of one scenario version: its key, origin (`observed` or `hypothetical`), type, the asset it is bound to (a node, by uuid) and the business process; for an observed effect, the SPINE row's uuid (`observed_effect`), the digest its signature covers (`observation`), the effect as the receipt names it (`spine_effect`: workflow and tool) and when it was observed; the template it is assigned to and every template that covers it; whether it leads its event; and the ONE `LossEvent` it is in |
+| `EffectFinding` | one finding enabling one effect, as a `prerequisite`, an `amplifier` or an `alternate_path` (Finding ENABLES Effect) |
+| `ScenarioBuild` | how one scenario version was built: the parameter-set version it read, the currency and as-of date, the builder, grouping and pack versions, the canonical inputs, and their content digest, unique per deployment |
+
+The linkage is finding to effect (`EffectFinding`), effect to loss event
+(`CausalEffect.loss_event`), and loss event to its components, which cite the
+parameters they read (#146). An effect's attributes are the scenario's financial
+parameters, named `<effect key>.<attribute>`, each with its `source_type` and
+evidence. A finding, an asset and an observed effect are named by uuid, never copied
+(section 8), and resolved in the scenario's own deployment when the scenario is built.
+
+None of the three has an account column; each goes with its deployment through its
+scenario's cascade; their foreign keys have no reverse accessor (`related_name="+"`);
+the base manager is Django's plain one. Their permitted writer is the builder, and
+only it (section 6).
+
+### 23.2 Effects
+
+An effect is a SPINE observed effect or a declared hypothetical effect:
+
+- `observed`: the build names the SPINE observed effect by its row's uuid. It must
+  stand: its signature verifies NOW against the configured keyring, the key is an
+  observed-effect key (`observed_effect` evidence), it is `held`, and its evidence is
+  exactly the document its signature names, for this deployment
+  (`observed_effect_not_in_force` otherwise). Its time is the row's, never the
+  caller's.
+- `hypothetical`: declared by an analyst, it rests on at least one finding that
+  enables it (`effect_without_finding`), and none of its attributes is
+  `MYTHOS_OBSERVED`: nothing was observed (`observed_source_on_hypothetical`).
+
+Each effect has a type and a business process from the pack's vocabularies, and
+states the attributes the templates read, each in the parameter-set document's form
+(unit, low, base, high, currency for money, `source_type`, `evidence_ref`,
+`effective_date`, optionally `fresh_until`), so every rule of a parameter (section
+14) holds for it.
+
+Effect types:
+
+| Code | Meaning |
+|---|---|
+| `funds_transfer_altered` | an agent initiated a payment, wire or ACH transfer, or changed one (its destination, its amount), outside its authority |
+| `approval_bypassed` | an agent's action took effect without the approval it needed |
+| `cross_customer_disclosure` | one customer's data reached another customer |
+| `customer_misstatement` | a customer-service AI told customers something false about a fee, a rate, a product or a policy |
+| `fraud_aml_control_failure` | a fraud or AML workflow missed, closed or failed to escalate cases it should have caught |
+| `provider_outage` | a third-party model or provider a critical operation depends on was unavailable |
+
+Business processes: `payments`, `lending`, `account_servicing`, `customer_service`,
+`fraud_aml`, `operations`. Origins: `observed`, `hypothetical`. Finding roles:
+`prerequisite`, `amplifier`, `alternate_path`.
+
+The attributes (`templates.ATTRIBUTES`):
+
+| Attribute | Unit | Meaning |
+|---|---|---|
+| `success_rate` | `ratio` | the share of attempts that produced the effect, as tested |
+| `exploitable_window_hours` | `hours` | how long the condition stays exploitable before detection |
+| `incident_response_cost` | `money` | incident response, as a range its evidence gives |
+| `legal_response_cost` | `money` | legal and regulatory response, as one range its evidence gives |
+| `affected_customers` | `count` | customers the effect reaches |
+| `contact_rate` | `ratio` | the share of affected customers who contact support |
+| `handling_hours` | `hours` | average handling time per contact |
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation |
+| `investigation_hours` | `hours` | hours of forensics or investigation |
+| `counsel_hours` | `hours` | hours of external counsel |
+| `regulatory_response_cost` | `money` | regulatory response, as scenario bounds its evidence grounds (never a predicted penalty) |
+| `churn_rate` | `ratio` | the extra share of affected customers who leave, from the customer's own data |
+| `margin_per_customer_per_year` | `money_per_unit` | recurring margin per customer per year |
+| `churn_recovery_years` | `years` | years until lost margin is won back |
+| `market_capitalisation` | `money` | the company's market capitalisation (public-company analysis) |
+| `share_price_decline` | `ratio` | the share-price decline attributed to the effect |
+| `restitution_per_customer` | `money_per_unit` | the amount owed to each affected customer |
+| `missed_cases` | `count` | fraud or AML cases the workflow missed |
+| `loss_per_missed_case` | `money_per_unit` | the fraud loss per missed case |
+| `rework_cost` | `money` | reworking and reprocessing the cases, as a range |
+| `repeat_count` | `count` | how many times the unauthorized effect repeats |
+| `loss_per_event` | `money_per_unit` | the amount one unauthorized effect moves or loses, as observed |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service |
+| `outage_hours` | `hours` | how long the provider is unavailable |
+| `sla_credit_per_hour` | `money_per_hour` | SLA credits owed to customers per hour of outage |
+| `sla_credit_cap` | `money` | the contracts' cap on those credits |
+
+### 23.3 The six templates
+
+`mythos.economics.banking-pack/v1` (`templates.PACK`). Six of the specification's
+eight banking families: payment, wire and ACH agent misuse; cross-customer data
+exposure; customer-service AI misstatement; fraud/AML workflow failure; agent
+approval bypass; third-party model or provider outage. Loan or underwriting agent
+error and model drift are not modelled in this version.
+
+A template is a versioned, named mapping from an effect's type, process and
+attributes to its loss event's components: for each, the family, the formula of the
+catalogue (section 15) and, for every input of the formula, its ONE source, either a
+variable of the customer parameter set (`parameter_set`) or an attribute of the
+effect (`effect_attribute`). **A template never invents a number**: a source is a kind
+and a name, and nothing else (`test_a_template_holds_no_figure`). Every value a
+component reads is a parameter recorded with its `source_type` and evidence; an input
+whose source holds nothing is left unbound, and the formula makes the component
+`unknown`, never zero (section 15): with no parameter set and no attribute, every
+component of every template is unknown and names every input it lacks
+(`test_a_source_that_holds_nothing_leaves_the_component_unknown_never_zero`). A
+template binds no insurance term; insurance is applied once, from the parameter set's
+policy, when an event is assessed (section 17). In the tables, `+` is an input that
+increases the loss and `-` one that decreases it.
+
+#### `payment_agent_misuse`, version 1, precedence 1: Payment / wire / ACH agent misuse
+
+Covers `funds_transfer_altered` on any process; `approval_bypassed` on `payments`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `direct-loss` | `direct_financial` | `repeat_in_window` v1 | `transactions_per_day` (+) from the set: `transactions_per_day`; `window_hours` (+) from the effect: `exploitable_window_hours`; `success_rate` (+) from the effect: `success_rate`; `value_per_transaction` (+) from the set: `average_transaction_value`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `incident-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `incident_response_cost` |
+| `legal-regulatory-response` | `legal` | `lump_sum` v1 | `amount` (+) from the effect: `legal_response_cost` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the exploitable window is the largest uncertainty (specification, section 30); a longer window never lowers the loss
+- the success rate is the tested proportion (7 of 20 in section 30), a point; its interval is the probabilistic engine's
+- transactions per day and the average transfer are the customer's own figures, never the test's amounts
+- a lump-sum range is read as its evidence gives it, low, base and high; where the evidence gives a range and no base, the declaration's base is its midpoint (spec, section 22, decision 5)
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `cross_customer_data_exposure`, version 1, precedence 2: Cross-customer data exposure
+
+Covers `cross_customer_disclosure` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `notification` | `notification` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `affected_customers`; `unit_cost` (+) from the set: `notification_unit_cost`; `fixed_cost` (+) from the set: `notification_fixed_cost` |
+| `support` | `notification` | `support_contacts` v1 | `affected` (+) from the effect: `affected_customers`; `contact_rate` (+) from the effect: `contact_rate`; `handling_hours` (+) from the effect: `handling_hours`; `loaded_rate` (+) from the set: `support_agent_hourly_rate` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `regulatory` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+| `customer-loss` | `customer_loss` | `churned_margin` v1 | `customers` (+) from the effect: `affected_customers`; `churn_rate` (+) from the effect: `churn_rate`; `margin_per_customer_per_year` (+) from the effect: `margin_per_customer_per_year`; `recovery_years` (+) from the effect: `churn_recovery_years` |
+| `share-price-reaction` | `market_value` | `share_price_reaction` v1 | `market_capitalisation` (+) from the effect: `market_capitalisation`; `price_decline` (+) from the effect: `share_price_decline` |
+
+Direction notes:
+
+- the affected population drives notification, support and customer loss alike: one parameter, read by each in the same direction
+- customer loss is computed only from the customer's own churn figure (CUSTOMER_PROVIDED); any other source makes it unknown (specification, section 31)
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- the share-price reaction is market value: reported on its own line and never added to cash loss; unknown unless the effect states the market capitalisation and the decline
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `customer_service_ai_misstatement`, version 1, precedence 3: Customer-service AI misstatement
+
+Covers `customer_misstatement` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `restitution` | `customer_restitution` | `per_affected` v1 | `affected` (+) from the effect: `affected_customers`; `amount_per_affected` (+) from the effect: `restitution_per_customer` |
+| `complaint-handling` | `notification` | `support_contacts` v1 | `affected` (+) from the effect: `affected_customers`; `contact_rate` (+) from the effect: `contact_rate`; `handling_hours` (+) from the effect: `handling_hours`; `loaded_rate` (+) from the set: `support_agent_hourly_rate` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `compliance-review` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+
+Direction notes:
+
+- the customers told the misstatement drive restitution and complaint handling alike
+- complaint handling is the call-center work the misstatement causes (the notification family, which holds call-center cost)
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `fraud_aml_workflow_failure`, version 1, precedence 4: Fraud/AML workflow failure
+
+Covers `fraud_aml_control_failure` on any process; `approval_bypassed` on `fraud_aml`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `missed-fraud` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `missed_cases`; `loss_per_event` (+) from the effect: `loss_per_missed_case`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `case-rework` | `recovery` | `lump_sum` v1 | `amount` (+) from the effect: `rework_cost` |
+| `investigation` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `regulatory-response` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- missed cases are the cases the workflow should have caught, not every case it saw
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `agent_approval_bypass`, version 1, precedence 5: Agent approval bypass
+
+Covers `approval_bypassed` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `unauthorized-effect` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `repeat_count`; `loss_per_event` (+) from the effect: `loss_per_event`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `control-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `incident-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `incident_response_cost` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the size of one unauthorized effect is the effect's own (observed where the effect is observed); the repeat count is how often it recurs before the approval control is restored
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `third_party_provider_outage`, version 1, precedence 6: Third-party model/provider outage
+
+Covers `provider_outage` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `interruption` | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `outage_hours`; `value_per_hour` (+) from the set: `margin_per_hour` |
+| `failover-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `sla-credits` | `contractual` | `capped_credit` v1 | `credit_per_hour` (+) from the effect: `sla_credit_per_hour`; `breach_hours` (+) from the effect: `outage_hours`; `contract_cap` (+) from the effect: `sla_credit_cap` |
+
+Direction notes:
+
+- the outage's length drives the interruption and the SLA credits alike: one parameter, read by both in the same direction
+- the interruption is read at the critical service's MARGIN per hour, not its revenue: revenue lost is not all loss
+- the customer's recovery time objective is a target, never read as the outage's length
+- SLA credits are capped by the contracts' cap; a higher cap never lowers the loss
+
+Each template has a worked example in `tests/test_economics_templates.py`, every
+figure computed by hand in the comments and labelled SYNTHETIC / ILLUSTRATIVE.
+Section 30's bank payment agent through `payment_agent_misuse` gives exactly #146's
+known answer (direct loss USD 164,062.50 / 1,435,546.875 / 3,937,500; gross cash loss
+USD 394,062.50 / 2,425,546.875 / 5,687,500), and so does section 31's cross-customer
+exposure through `cross_customer_data_exposure` (at least USD 239,000 / 746,250 /
+2,580,000 gross, and at least USD 100,000 / 231,250 / 1,580,000 retained under the
+set's policy). `tests/test_economics_builder.py` builds both again from effects,
+section 30 from a SPINE observed effect, and reads back the same figures.
+
+### 23.4 Scope and precedence
+
+A template covers the effect types it names, on any business process or only on
+those it names. Where two cover one effect, the one of lower precedence takes it, and
+ONLY it (`templates.select`): the precedence is a total order, 1 to 6 in the order
+above. Two overlaps exist in this version, both of an `approval_bypassed` effect: on
+`payments` it is a payment loss (`payment_agent_misuse`, precedence 1, not
+`agent_approval_bypass`, 5), and on `fraud_aml` a fraud/AML workflow failure
+(`fraud_aml_workflow_failure`, 4). Every effect type is covered on every process.
+The effect records every template that covers it (`in_scope_of`) beside the one it was
+assigned to.
+
+### 23.5 The grouping key
+
+`mythos.economics.grouping/v1` (`builder.GROUPING_VERSION`). The members of a build
+are its finding links and the effects no finding enables (an observed effect rests on
+its observation). Each member's key is the template its effect is assigned to (id and
+version), the effect's type, its asset and its business process: the grouping key
+never names a finding, so every finding that enables one effect has that effect's key
+and a finding never makes an event of its own. Within one key:
+
+- observed effects are ordered by when they occurred; an event's window opens at its
+  first and runs 24 hours (`builder.GROUPING_WINDOW`); an effect within the window
+  joins that event, and the first after it opens another;
+- an effect with no time (a hypothetical one) cannot be placed in a window and is
+  never counted as an occurrence of its own: it joins the key's first event, or, where
+  the key has no observed effect, the hypothetical effects make one event together.
+
+An event's key is `ev-` and 24 hex digits of the SHA-256 of the grouping version, the
+key and the instant its window opens (`undated` for an event of hypothetical effects),
+so a finding added later leaves it unchanged. The event's LEAD is its first effect:
+the components read the lead's attributes, once, whatever other effects and findings
+the event has.
+
+### 23.6 Idempotency
+
+A build's identity is the content digest (`sha256:` and the SHA-256 of the canonical
+JSON) of everything it is built from (`builder.build_document`): the builder
+(`mythos.economics.scenario-builder/v1`, `builder.BUILDER_VERSION`), grouping and pack
+versions and the window; every template version; the deployment; the
+parameter-set version's key, number and content digest; the currency and as-of date;
+every effect as resolved, with its observation, SPINE effect, time and every
+attribute; and every finding link and role. The title and the scenario superseded name
+the draft and are not in it. `ScenarioBuild` holds the digest, unique per deployment
+(`uq_econ_build_digest`):
+
+- the same inputs, in any order, by anyone, return the scenario already built (200,
+  `created: false`) and write nothing: never a second;
+- two builds of the same inputs racing past that lookup are refused by the
+  constraint: the later answers 409 and writes nothing, since the whole build is one
+  transaction;
+- any changed input -- an attribute's value or source, a finding or its role, the
+  parameter-set version -- is a different digest and a new scenario
+  (`test_the_digest_changes_with_every_input`).
+
+A finding found later, which enables an effect already built, is a new build of the
+inputs with it (superseding the earlier scenario, `supersedes`): its event has the
+same key and the same components, with the finding beside the others, and the same
+totals (`test_a_late_finding_joins_its_event_and_adds_no_component`).
+
+### 23.7 The double-count invariant
+
+Enforced in code and in the database, not by convention:
+
+| Invariant | Holds by | Proven by |
+|---|---|---|
+| findings never multiply a loss | the grouping key names no finding; components are made per event, from its lead | `test_one_two_and_five_findings_on_one_effect_make_one_event_with_the_same_totals`, `test_findings_never_make_events_of_their_own` |
+| one effect is in exactly one loss event of its scenario version | `CausalEffect.loss_event` is one foreign key, not null; an effect key, and a SPINE observation, are unique within a scenario (`uq_econ_effect_key`, `uq_econ_effect_observation`), checked on save (`duplicate_id`) and by the database | `test_the_database_holds_an_effect_to_one_event` |
+| an effect two templates cover is assigned to one | `templates.select`, by precedence | `test_an_effect_two_templates_cover_is_in_one_event`, `test_an_effect_two_templates_cover_is_assigned_to_one_by_precedence` |
+| two distinct effects are two events | different keys, or outside one window | `test_two_distinct_effects_make_two_events` |
+| a rebuild duplicates nothing | the digest, unique per deployment | `test_a_rebuild_returns_the_same_scenario_and_writes_nothing`, `test_a_build_raced_by_the_same_build_is_409_and_writes_nothing` |
+| market value stays apart | each event's market-value line is #146's (section 16); the scenario's totals sum gross cash and market value separately, and never one into the other | `test_market_value_is_reported_apart_and_never_summed_into_cash` |
+
+The scenario's totals are each event's loss once, given it happens: the events are
+distinct causal losses. They are not an annual figure; frequency is the probabilistic
+engine's.
+
+### 23.8 The routes
+
+Mounted under `/api/assurance/` from `assurance/economics/scenario_api.py`, imported
+GUARDED in a guard of its own (section 2):
+
+| Route | Name | Does |
+|---|---|---|
+| `POST deployments/<uuid>/economics/scenarios/build/` | `deployment-economics-scenario-build` | builds a scenario draft: 201 with the scenario, its build and its events; 200 with the scenario already built from the same inputs; 409 on a race |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's events, each with its template, grouping key, effects (the lead first) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, or the effect's attribute), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
+
+The body:
+
+```json
+{"title": "Payment agent: destination changed after approval",
+ "parameter_set": {"set_key": "bank_prod_2026q4", "version": 1},
+ "currency": "USD", "as_of": "2026-10-06",
+ "effects": [{"key": "redirect", "origin": "observed", "observed_effect": "<the SPINE row's uuid>",
+              "effect_type": "funds_transfer_altered", "asset": "<asset uuid>", "business_process": "payments",
+              "attributes": {"success_rate": {"unit": "ratio", "low": "0.35", "base": "0.35", "high": "0.35",
+                                              "source_type": "MYTHOS_OBSERVED", "evidence_ref": "7 of 20 attempts",
+                                              "effective_date": "2026-10-01"}}}],
+ "findings": [{"finding": "<finding uuid>", "effect": "redirect", "role": "prerequisite"}],
+ "supersedes": "<an earlier scenario's uuid, optional>"}
+```
+
+- **Authentication, tenancy and roles**, as the parameter-set routes' (section 19.3):
+  a signed-in account (401); a deployment the caller cannot see, or a scenario of
+  another deployment, is 404; only an admin or an analyst builds (403 for a viewer,
+  even the owner), and anyone who sees the deployment reads. Every finding, asset,
+  observed effect, parameter-set version and superseded scenario is looked up in the
+  path's deployment only: another deployment's is not found, and the refusal does not
+  say whether it exists elsewhere (`finding_not_found`, `asset_not_found`,
+  `observed_effect_not_found`, `parameter_set_not_found`, `scenario_not_found`).
+- **Author-recorded, and reviewed under section 7**: the draft names the signed-in
+  account as its author, so its author never reviews it; another admin or analyst
+  does, through `ScenarioReview`.
+- **Strict JSON**: exactly the fields at every level, the 64 KiB cap (413 on the
+  declared length, and the parser never reads past it), a key twice in one object and
+  a bare `NaN` refused by the parser, the strict decimal-string rule for every value.
+  A refusal is 400 with `code` and `detail`, and nothing is recorded. At most 50
+  effects and 500 finding links.
+- **Unavailable**: while economics cannot read its currency table, both answer 503
+  and record nothing.
+- **Not on a stop path**: both are in `safety.stops.NOT_STOPS`; the build writes
+  nothing the decision reads (`tests/test_every_write_route_keeps_the_decision_current.py`).
+  A builder or template module that will not import leaves these two routes unserved
+  and nothing else: under `tests/economics_broken_builder.py`, the scan's Stop
+  answers 202, `deliver_owed_stops` runs its checks and reaches its handler,
+  `manage.py check` passes and the parameter-set routes are served
+  (`test_a_builder_fault_never_takes_down_a_stop`).
+
+The builder's refusal codes (`templates.REFUSALS`, raised as `BuildRefused`, a
+`MoneyRefused`); a code the money or scenario engine already publishes
+(`duplicate_id`, `field_unrecognised`, `field_missing`, `field_malformed`,
+`unit_mismatch`, `not_decimal`, `date_malformed`, `date_inversion`, `currency_unknown`
+and the rest) is raised as that engine's:
+
+| Code | Refused |
+|---|---|
+| `effect_type_unrecognised` | an effect's type is one of the pack's effect types |
+| `business_process_unrecognised` | an effect's business process is one of the pack's business processes |
+| `origin_unrecognised` | an effect is observed (a SPINE observed effect) or hypothetical (declared) |
+| `finding_role_unrecognised` | a finding enables an effect as a prerequisite, an amplifier or an alternate path |
+| `attribute_unrecognised` | an effect states only the pack's attributes, each in its unit |
+| `effect_key_malformed` | an effect's key is 1 to 60 characters: lowercase ASCII letters and digits, '-' and '_', starting with a letter or digit |
+| `effect_out_of_scope` | no template of the pack covers the effect's type on its business process |
+| `effect_not_declared` | a finding names an effect the build does not declare |
+| `effect_without_finding` | a hypothetical effect rests on at least one finding that enables it; an observed effect rests on its signed observation |
+| `observed_source_on_hypothetical` | an attribute of a hypothetical effect is never MYTHOS_OBSERVED: nothing was observed; declare the effect observed, naming the SPINE observed effect, or give the attribute's real source |
+| `observed_effect_not_found` | the observed effect is not one of this deployment's SPINE observed effects |
+| `observed_effect_not_in_force` | the SPINE observed effect does not stand: its signature does not verify now, it is not signed by an observed-effect key, or its evidence is not the document its signature names |
+| `finding_not_found` | the finding is not one of this deployment's findings |
+| `asset_not_found` | the asset is not one of this deployment's assets |
+| `parameter_set_not_found` | the customer parameter-set version is not one of this deployment's |
+| `scenario_not_found` | the scenario superseded is not one of this deployment's |
+
+### 23.9 Limitations, and decisions for the owner
+
+- **An event reads its lead's attributes.** Effects that join one event (two
+  observations in one window) may state different attributes; the components read
+  the lead's, once. The others are recorded, and shown beside it, but not merged into
+  a wider range.
+- **The window is a fixed 24 hours from the event's first observation.** Observations
+  of one effect type on one asset and process further apart are separate events, so a
+  test campaign spread over two days builds two; declaring one observed effect, with
+  the tested success rate as its attribute, avoids that.
+- **Hypothetical effects have no time**: within one key they make one event, or join
+  the key's first observed event.
+- **A rebuild by another person returns the first author's draft.** The digest is the
+  inputs', not the author's; that person did not author it and may review it.
+- **Nothing is normalized here.** Every money parameter a build reads is in its
+  currency already (`currency_mismatch` otherwise); FX and the cost index (section 12)
+  are a later step's.
+- **The window, the precedence and the attribute vocabulary are this version's**; a
+  change to any is a new grouping, pack or template version.
+- **Not modelled**: loan or underwriting agent error and model drift, the other two
+  banking families; a system fingerprint on the built scenario; claims and authority
+  edges as graph nodes (they are read, not linked); controls and mitigations
+  (section 21 of the owner's specification, a later step).
+
+Decisions this version takes, which the owner may change:
+
+1. The six templates are the six families above; loan/underwriting error and model
+   drift are left for a later pack version.
+2. The grouping window is 24 hours from an event's first observed effect, and an
+   effect with no time joins its key's first event.
+3. The precedence is the order above, so an approval bypass on payments is a payment
+   loss and on fraud/AML a workflow failure.
+4. An observed effect counts only while its signature verifies now; one that does not
+   is refused, never built as observed.
+5. Customer figures dominate: transactions per day, the average transfer, recovery,
+   labour rates and the notification costs come from the parameter set, never from
+   the effect; what the parameter set does not hold (a window, a lump-sum range, an
+   affected population) comes from the effect's declared attributes, each with its
+   source.

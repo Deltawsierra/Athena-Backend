@@ -113,9 +113,9 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its fourteen modules (E1's ten, and the scenario engine's four:
-    # parameters, formulas, loss and parameter_set).
-    assert result.stdout.strip() == "imported 15", result.stdout
+    # The package and its fifteen modules (E1's ten, the scenario engine's four:
+    # parameters, formulas, loss and parameter_set; and the builder's templates).
+    assert result.stdout.strip() == "imported 16", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -158,6 +158,8 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "provenance.py",
         "snapshot.py",
         "taxonomy.py",
+        # The scenario builder's templates (spec, section 23).
+        "templates.py",
     }
     core_importers = set()
     for path in files:
@@ -722,8 +724,10 @@ def test_an_economics_fault_never_takes_down_a_stop(fault, plugin):
 
 
 def test_the_economics_routes_are_imported_guarded():
-    """Read, not run: assurance/urls.py imports the economics route module inside a
-    try whose handler logs and serves no economics route, never re-raising."""
+    """Read, not run: assurance/urls.py imports each economics route module -- the
+    parameter-set routes, and the scenario builder's (section 23) -- inside a try of
+    its own whose handler logs and serves none of that module's routes, never
+    re-raising. A fault in one leaves the other served."""
     tree = ast.parse((REPO / "assurance" / "urls.py").read_text(encoding="utf-8"))
     guarded = [
         node for node in ast.walk(tree)
@@ -733,10 +737,15 @@ def test_the_economics_routes_are_imported_guarded():
             for inner in node.body
         )
     ]
-    assert len(guarded) == 1, "the economics route module is imported outside a guard"
-    (handler,) = guarded[0].handlers
-    assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception"
-    assert not any(isinstance(node, ast.Raise) for node in ast.walk(handler))
+    modules = sorted(
+        inner.module for node in guarded for inner in node.body if isinstance(inner, ast.ImportFrom)
+    )
+    assert modules == ["economics.api", "economics.scenario_api"], "an economics route module is imported unguarded"
+    for node in guarded:
+        assert len([inner for inner in node.body if isinstance(inner, ast.ImportFrom)]) == 1, "one module per guard"
+        (handler,) = node.handlers
+        assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception"
+        assert not any(isinstance(inner, ast.Raise) for inner in ast.walk(handler))
     top_level = [n for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("economics")]
     assert top_level == []
 
@@ -775,9 +784,12 @@ def test_nothing_but_the_models_registration_imports_economics():
                     importers.add(path.relative_to(REPO).as_posix())
     assert importers == {"assurance/models.py", "assurance/urls.py"}
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
+    # The scenario step's route module, and (section 23) the scenario builder's.
     assert [m for m in mounted if m.startswith("assurance.economics")] == [
         "assurance.economics.api",
         "assurance.economics.api.urlpatterns",
+        "assurance.economics.scenario_api",
+        "assurance.economics.scenario_api.urlpatterns",
     ]
 
 

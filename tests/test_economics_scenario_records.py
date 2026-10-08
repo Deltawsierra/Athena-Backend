@@ -637,7 +637,13 @@ def test_no_economics_route_is_a_stop():
                 found[pattern.name] = view
 
     walk(get_resolver().url_patterns)
-    assert set(found) == {"deployment-economics-parameter-set", "deployment-economics-parameter-set-versions"}
+    assert set(found) == {
+        "deployment-economics-parameter-set",
+        "deployment-economics-parameter-set-versions",
+        # The scenario builder's (spec, section 23).
+        "deployment-economics-scenario-build",
+        "deployment-economics-scenario-events",
+    }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
         assert name in stops.NOT_STOPS

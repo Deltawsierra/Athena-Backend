@@ -1301,3 +1301,209 @@ class LossComponent(_AppendOnly):
 
     def __str__(self) -> str:
         return f"{self.family} component {self.component_key} ({self.status})"
+
+
+# ---------------------------------------------------------------------------
+# ScenarioBuild, CausalEffect, EffectFinding: the causal graph a built scenario
+# rests on (spec, section 23). Written by the scenario builder only.
+# ---------------------------------------------------------------------------
+
+#: An effect's origin and a finding's role, spelled here and not imported: this
+#: module is on Django's load path, and the builder's template module is kept off
+#: it (spec, section 2). ``tests/test_economics_builder.py`` pins them equal to
+#: :class:`assurance.economics.engine.templates.Origin` and ``FindingRole``.
+EFFECT_ORIGINS = ("observed", "hypothetical")
+FINDING_ROLES = ("prerequisite", "amplifier", "alternate_path")
+#: The width of an effect key: an attribute is stored as a scenario parameter named
+#: ``<effect key>.<attribute>``, which fits the parameter's name column.
+EFFECT_KEY_MAX = 60
+_UUID_TEXT = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def _uuid_text(value, field: str) -> None:
+    """A SPINE row named by its uuid, as the edge history names a node: lowercase and
+    hyphenated, checked for form only (resolved by the builder, in the deployment)."""
+    _refuse(governance.spine_reference_refusal("node", value), detail=field)
+
+
+class ScenarioBuild(_AppendOnly):
+    """How one scenario version was built: the deployment, the customer
+    parameter-set version it read, its currency and as-of date, the builder, the
+    grouping key and the template pack, and the CONTENT DIGEST of everything it was
+    built from (spec, section 23). The digest is unique per deployment, so the same
+    inputs never build a second scenario: a rebuild returns this one, and two builds
+    racing are refused by the constraint (409), not duplicated."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    scenario = models.OneToOneField(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    parameter_set = models.ForeignKey(CustomerParameterSet, on_delete=models.CASCADE, related_name="+")
+    # "sha256:" + 64 hex over the build's canonical inputs.
+    build_digest = models.CharField(max_length=71)
+    builder_version = models.CharField(max_length=100)
+    grouping_version = models.CharField(max_length=100)
+    pack = models.CharField(max_length=100)
+    currency = models.CharField(max_length=3)
+    as_of = models.DateField()
+    # The canonical inputs the digest is taken over, kept whole.
+    inputs = models.JSONField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["deployment", "build_digest"], name="uq_econ_build_digest"),
+        ]
+
+    def check_new(self) -> None:
+        _refuse(governance.snapshot_hash_refusal(self.build_digest), detail="build_digest")
+        _require_text(
+            builder_version=self.builder_version, grouping_version=self.grouping_version, pack=self.pack
+        )
+        _engine_refusal(lambda: money.check_reporting_currency(self.currency, "build currency"))
+        if self.as_of is None:
+            raise EconomicsRefused("date_malformed", "the build has no as_of date")
+        scenario = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("deployment_id", flat=True)
+        if list(scenario) != [self.deployment_id]:
+            raise EconomicsRefused("cross_tenant_reference", "scenario")
+        pset_tenant = CustomerParameterSet._base_manager.filter(pk=self.parameter_set_id).values_list(
+            "deployment_id", flat=True
+        )
+        if list(pset_tenant) != [self.deployment_id]:
+            raise EconomicsRefused("cross_tenant_reference", "parameter_set")
+        # A second build of the same digest is not looked for here: the builder reads
+        # the one recorded and returns it, and two builds racing past that read are
+        # refused by the unique constraint, which no check made before it can be.
+
+    def __str__(self) -> str:
+        return f"build {self.build_digest} of scenario {self.scenario_id}"
+
+
+class CausalEffect(_AppendOnly):
+    """One effect of a built scenario version, the node its loss follows from (spec,
+    section 23; specification, section 6): a SPINE observed effect, named by its
+    row's uuid with the digest its signature covers, or a hypothetical effect an
+    analyst declared. It is bound to an asset of the deployment (a node, by uuid) and
+    to a business process, has a type, the time it occurred when it was observed,
+    and the template it was assigned to.
+
+    THE INVARIANT, held here and in the database: an effect is in exactly ONE loss
+    event of its scenario version. ``loss_event`` is one foreign key, not null; an
+    effect key is unique within the scenario, and so is a SPINE observation (a
+    unique constraint each), so neither one effect nor one observation can be put
+    in two events. Its attributes are the scenario's financial parameters named
+    ``<effect_key>.<attribute>``."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    loss_event = models.ForeignKey(LossEvent, on_delete=models.CASCADE, related_name="+")
+    effect_key = models.SlugField(max_length=EFFECT_KEY_MAX)
+    origin = models.CharField(max_length=16, choices=[(c, c) for c in EFFECT_ORIGINS])
+    # An observed effect: its WorkflowChainOutcome's uuid, and the evidence digest its
+    # signature covers (the observation). Blank for a hypothetical effect.
+    observed_effect = models.CharField(max_length=36, blank=True)
+    observation = models.CharField(max_length=71, blank=True)
+    # The effect as the receipt names one (workflow and tool): blank when unknown.
+    spine_effect = models.CharField(max_length=71, blank=True)
+    effect_type = models.CharField(max_length=64)
+    asset = models.CharField(max_length=36)
+    business_process = models.CharField(max_length=64)
+    # When it was observed, from the SPINE row; null for a hypothetical effect.
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    template_id = models.CharField(max_length=100)
+    template_version = models.PositiveIntegerField()
+    # Every template that covers the effect, [[id, version], ...], in precedence order.
+    in_scope_of = models.JSONField(default=list)
+    # Whether the event's components read this effect's attributes.
+    lead = models.BooleanField(default=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["scenario", "effect_key"], name="uq_econ_effect_key"),
+            models.UniqueConstraint(
+                fields=["scenario", "observation"], condition=~Q(observation=""), name="uq_econ_effect_observation"
+            ),
+            models.CheckConstraint(condition=Q(origin__in=EFFECT_ORIGINS), name="ck_econ_effect_origin"),
+            models.CheckConstraint(
+                condition=(Q(origin="observed") & ~Q(observation="") & ~Q(observed_effect=""))
+                | (Q(origin="hypothetical") & Q(observation="") & Q(observed_effect="")),
+                name="ck_econ_effect_observed_has_observation",
+            ),
+        ]
+
+    def check_new(self) -> None:
+        _refuse(governance.required_text_refusal(self.effect_key), detail="effect_key")
+        if len(self.effect_key) > EFFECT_KEY_MAX:
+            raise EconomicsRefused("field_malformed", f"effect_key is longer than {EFFECT_KEY_MAX}")
+        _refuse(governance.code_refusal(self.origin, EFFECT_ORIGINS), detail="origin")
+        _require_text(effect_type=self.effect_type, business_process=self.business_process, template_id=self.template_id)
+        _uuid_text(self.asset, "asset")
+        if self.origin == "observed":
+            _uuid_text(self.observed_effect, "observed_effect")
+            _refuse(governance.spine_reference_refusal("effect", self.observation), detail="observation")
+        elif self.observed_effect or self.observation:
+            raise EconomicsRefused("field_malformed", "a hypothetical effect names no observed effect")
+        if self.spine_effect:
+            _refuse(governance.spine_reference_refusal("effect", self.spine_effect), detail="spine_effect")
+        event = LossEvent._base_manager.filter(pk=self.loss_event_id).values_list("scenario_id", flat=True)
+        if list(event) != [self.scenario_id]:
+            raise EconomicsRefused("cross_tenant_reference", "the effect's loss event is another scenario's")
+        mine = CausalEffect._base_manager.filter(scenario_id=self.scenario_id)
+        if mine.filter(effect_key=self.effect_key).exists():
+            raise EconomicsRefused("duplicate_id", f"effect {self.effect_key!r} twice in one scenario")
+        if self.observation and mine.filter(observation=self.observation).exists():
+            raise EconomicsRefused("duplicate_id", f"observation {self.observation} in two effects of one scenario")
+
+    def attribute_rows(self) -> list[FinancialParameter]:
+        """The effect's attributes, as stored: the scenario's parameters named
+        ``<effect_key>.<attribute>``."""
+        prefix = f"{self.effect_key}."
+        return [
+            row
+            for row in FinancialParameter._base_manager.filter(
+                scenario_id=self.scenario_id, name__startswith=prefix
+            ).order_by("name", "id")
+            if row.name[len(prefix):] and "." not in row.name[len(prefix):]
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.origin} effect {self.effect_key} ({self.effect_type})"
+
+
+class EffectFinding(_AppendOnly):
+    """One finding enabling one effect of a built scenario version, as a
+    prerequisite, an amplifier or an alternate path (specification, section 6:
+    Finding ENABLES Effect). The finding is named by its uuid; the builder resolves it
+    in the scenario's own deployment. A finding enables an effect once (a unique
+    constraint); findings that enable one effect join that effect's ONE event, and add
+    no component to it."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    effect = models.ForeignKey(CausalEffect, on_delete=models.CASCADE, related_name="+")
+    finding = models.CharField(max_length=36)
+    role = models.CharField(max_length=16, choices=[(c, c) for c in FINDING_ROLES])
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["effect", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["effect", "finding"], name="uq_econ_effect_finding"),
+            models.CheckConstraint(condition=Q(role__in=FINDING_ROLES), name="ck_econ_effect_finding_role"),
+        ]
+
+    def check_new(self) -> None:
+        _uuid_text(self.finding, "finding")
+        _refuse(governance.code_refusal(self.role, FINDING_ROLES), detail="role")
+        if EffectFinding._base_manager.filter(effect_id=self.effect_id, finding=self.finding).exists():
+            raise EconomicsRefused("duplicate_id", f"finding {self.finding} enables one effect twice")
+
+    def __str__(self) -> str:
+        return f"finding {self.finding} {self.role} of effect {self.effect_id}"
