@@ -67,7 +67,8 @@ def test_the_engine_imports_with_django_poisoned():
 
     Phase E0 poisoned mythos-core whole; phase E1 reads core's ONE currency table
     (Mythos-Core#49) instead of a copy of its own, so exactly that module is let
-    through, and everything else in core stays poisoned."""
+    through, and everything else in core stays poisoned. Importing the engine loads
+    none of mythos-core; the first use loads the currency module alone."""
     script = textwrap.dedent(
         """
         import importlib, pkgutil, sys
@@ -96,6 +97,12 @@ def test_the_engine_imports_with_django_poisoned():
             if m.startswith("assurance.") and not m.startswith("assurance.economics")
         )
         assert not outside, outside
+        # Importing loads no part of mythos-core (review round 1 of #146, H2): core's
+        # currency module is imported on the first economics use, and then only it.
+        core = sorted(m for m in sys.modules if m.split(".")[0] == "mythos_core")
+        assert core == [], core
+        from assurance.economics.engine import currency
+        assert currency.minor_units("USD") == 2
         core = sorted(m for m in sys.modules if m.split(".")[0] == "mythos_core")
         assert core == sorted(CORE_ALLOWED), core
         print("imported", len(names))
@@ -684,6 +691,56 @@ def test_a_changed_core_table_never_takes_down_the_scan_stop():
     assert "3 passed" in result.stdout, result.stdout[-2000:]
 
 
+@pytest.mark.parametrize(
+    "fault, plugin",
+    [("api", "tests.economics_broken_api"), ("core", "tests.economics_missing_core")],
+    ids=["route-module-does-not-import", "core-currency-module-does-not-import"],
+)
+def test_an_economics_fault_never_takes_down_a_stop(fault, plugin):
+    """Review round 1 of #146, H1 and H2 (the safety rule). A fresh pytest, under a
+    plugin that breaks Economic Exposure before Django loads -- its route module
+    does not import (H1), or mythos-core's currency module does not (H2) -- runs
+    ``tests/economics_fault_cases.py``: Django loads, the scan's Stop is answered
+    (202) and saved, ``deliver_owed_stops`` runs the system checks, the URL check
+    among them, and reaches its handler, ``manage.py check`` passes, and only
+    economics refuses (its routes are not served, or its use raises
+    ``CurrencyTableInvalid`` and its write answers 503)."""
+    env = dict(
+        os.environ,
+        DJANGO_SECRET_KEY=os.environ.get("DJANGO_SECRET_KEY", "ci-secret-key-not-used-outside-ci"),
+        ECONOMICS_FAULT=fault,
+    )
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", plugin,
+            "-q", "tests/economics_fault_cases.py",
+        ],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
+    )
+    assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
+    assert "4 passed" in result.stdout, result.stdout[-2000:]
+
+
+def test_the_economics_routes_are_imported_guarded():
+    """Read, not run: assurance/urls.py imports the economics route module inside a
+    try whose handler logs and serves no economics route, never re-raising."""
+    tree = ast.parse((REPO / "assurance" / "urls.py").read_text(encoding="utf-8"))
+    guarded = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(inner, ast.ImportFrom) and (inner.module or "").startswith("economics")
+            for inner in node.body
+        )
+    ]
+    assert len(guarded) == 1, "the economics route module is imported outside a guard"
+    (handler,) = guarded[0].handlers
+    assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception"
+    assert not any(isinstance(node, ast.Raise) for node in ast.walk(handler))
+    top_level = [n for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("economics")]
+    assert top_level == []
+
+
 
 def test_nothing_but_the_models_registration_imports_economics():
     """No economics code on any stop, pause, stand-down, terminate or revoke path:
@@ -692,11 +749,12 @@ def test_nothing_but_the_models_registration_imports_economics():
     in assurance/urls.py that mounts its one route module,
     ``assurance.economics.api``, the customer parameter-set routes. None of those
     routes is a stop (``safety.stops.NOT_STOPS``;
-    tests/test_economics_scenario_records.py, ``test_no_economics_route_is_a_stop``),
-    and the module does nothing at import but define its views, so it cannot take
-    the URLconf down: ``test_a_changed_core_table_never_takes_down_the_scan_stop``
-    loads it with core's table changed. A later step that serves more adds its
-    route module here -- never a stop-path module -- and says so."""
+    tests/test_economics_scenario_records.py, ``test_no_economics_route_is_a_stop``).
+    The import is GUARDED (``test_the_economics_routes_are_imported_guarded``): a
+    route module that does not import is logged and not served, and the URLconf,
+    every stop and the system checks load without it
+    (``test_an_economics_fault_never_takes_down_a_stop``). A later step that serves
+    more adds its route module here -- never a stop-path module -- and says so."""
     importers = set()
     skip = {".git", "node_modules", "tests", "__pycache__"}
     for directory, subdirectories, files in os.walk(REPO):
@@ -750,7 +808,10 @@ SPEC_PHRASES = (
     "SPINE references are checked for form only",
     # Review round 1, M2: a changed core table never takes a stop down.
     "test_a_changed_core_table_never_takes_down_the_scan_stop",
-    "records the pin at import and refuses only on economics use",
+    # Review round 1 of #146, H2: nothing at import; the pin on first use.
+    "imports no part of mythos-core and checks nothing at import",
+    "mythos_core.currency cannot be imported",
+    "test_an_economics_fault_never_takes_down_a_stop",
     "The scenario builder must resolve every reference within the scenario's own deployment",
     # Phase E1: one currency table, money, FX and normalization, and their limits.
     "`mythos_core.currency` is the one currency table",

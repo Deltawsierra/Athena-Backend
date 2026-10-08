@@ -643,3 +643,164 @@ def test_no_economics_route_is_a_stop():
         assert name in stops.NOT_STOPS
     assert set(stops.NOT_STOPS["deployment-economics-parameter-set-versions"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-parameter-set"]) == {"GET"}
+
+
+# ============================================ review round 1 of #146: L3 to L6
+
+
+def test_a_body_too_large_is_refused_before_it_is_read(deployment, people):
+    """L3: refused 413 on the declared Content-Length, nothing parsed or recorded."""
+    from assurance.economics.api import MAX_BODY_BYTES
+
+    client = _client(people["analyst"])
+    document = full_document()
+    document["variables"]["recovery_rate"]["evidence_ref"] = "x" * 400
+    body = json.dumps(document)
+    padded = body[:-1] + ", " + json.dumps({"padding": "x" * MAX_BODY_BYTES})[1:]
+    assert len(padded.encode()) > MAX_BODY_BYTES
+    response = _post(client, deployment, padded, raw=True)
+    assert response.status_code == 413, response.content
+    assert not CustomerParameterSet.objects.exists() and not FinancialParameter.objects.exists()
+    # Refused on the DECLARED length, before the parser reads a byte: a declared
+    # length over the limit is 413 even when the body sent is a valid version.
+    declared = client.post(
+        _url(deployment, versions=True), data=json.dumps(full_document()), content_type="application/json",
+        CONTENT_LENGTH=str(MAX_BODY_BYTES + 1),
+    )
+    assert declared.status_code == 413, declared.content
+    assert not CustomerParameterSet.objects.exists()
+    # A body within the limit is read as ever.
+    assert _post(client, deployment, full_document()).status_code == 201
+
+
+def test_the_parser_never_reads_past_the_limit():
+    """L3: whatever the declared length says, or if it says nothing, the parser reads
+    at most one byte past the limit and refuses the body as too large."""
+    import io
+
+    from assurance.economics.api import MAX_BODY_BYTES, BodyTooLarge, StrictJSONParser
+
+    class Counted(io.BytesIO):
+        taken = 0
+
+        def read(self, size=-1):
+            data = super().read(size)
+            Counted.taken += len(data)
+            return data
+
+    stream = Counted(b"[" + b"0," * (MAX_BODY_BYTES * 20) + b"0]")
+    with pytest.raises(BodyTooLarge) as refused:
+        StrictJSONParser().parse(stream)
+    assert refused.value.status_code == 413
+    assert Counted.taken == MAX_BODY_BYTES + 1
+    assert StrictJSONParser().parse(io.BytesIO(b'{"variables": {}}')) == {"variables": {}}
+
+
+def test_an_overlong_value_is_refused_never_an_error_or_a_zero(deployment, people):
+    """L4: a million-digit count raised an overflow (500), and a million places
+    were stored as "0". Both are refused, value_too_long, on the row and over the API."""
+    scenario = _scenario(deployment)
+    for low, base, high in (("9" * 1_000_001,) * 3, ("0." + "0" * 1_000_000 + "1",) * 3):
+        with pytest.raises(EconomicsRefused) as refused:
+            _parameter(scenario, low=low, base=base, high=high)
+        assert refused.value.code == "value_too_long"
+    assert not FinancialParameter.objects.exists()
+    document = full_document()
+    document["variables"]["customer_count"].update(low="1" + "0" * 30, base="1" + "0" * 30, high="1" + "0" * 30)
+    response = _post(_client(people["analyst"]), deployment, document)
+    assert response.status_code == 400 and response.json()["code"] == "value_too_long", response.content
+    document = full_document()
+    document["variables"]["legal_retainer"].update(low="1." + "0" * 21)
+    response = _post(_client(people["analyst"]), deployment, document)
+    assert response.status_code == 400 and response.json()["code"] == "value_too_long", response.content
+    assert not CustomerParameterSet.objects.exists()
+
+
+def test_no_scenario_record_has_a_related_manager_to_write_through(deployment, people):
+    """L5: a related manager's add(), set(), remove() and clear() write through the
+    base manager's update, past the append-only checks; the scenario records' foreign
+    keys have no reverse accessor, so there is no such manager."""
+    version = CustomerParameterSet.record(deployment, "q4", full_document(), author=people["analyst"])
+    scenario = _scenario(deployment)
+    event = _event(scenario)
+    for owner, names in (
+        (deployment, ("financial_parameter_sets", "customerparameterset_set")),
+        (version, ("parameters", "financialparameter_set")),
+        (scenario, ("financial_parameters", "loss_events", "financialparameter_set", "lossevent_set")),
+        (event, ("components", "losscomponent_set")),
+    ):
+        for name in names:
+            assert name not in dir(owner), (type(owner).__name__, name)
+    for model in (CustomerParameterSet, FinancialParameter, LossEvent, LossComponent):
+        for field in model._meta.get_fields():
+            if field.many_to_one and field.related_model is not get_user_model():
+                assert field.remote_field.related_name == "+", (model.__name__, field.name)
+
+
+def test_a_row_moved_past_the_append_only_checks_is_detected(deployment, other_deployment, people):
+    """L5: the base manager still writes past every check (spec, section 10); a
+    parameter moved to another version that way leaves both versions not intact."""
+    mine = CustomerParameterSet.record(deployment, "q4", full_document(), author=people["analyst"])
+    lacking = full_document()
+    lacking["variables"].pop("legal_retainer")
+    theirs = CustomerParameterSet.record(other_deployment, "q4", lacking, author=people["admin"])
+    assert mine.intact() and theirs.intact()
+    moved = next(row for row in mine.parameter_rows() if row.name == "legal_retainer")
+    # One name per version holds at the database even here (a unique constraint).
+    duplicate = next(row for row in theirs.parameter_rows() if row.name == "customer_count")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        FinancialParameter._base_manager.filter(pk=duplicate.pk).update(parameter_set=mine)
+    # Another deployment's version takes it, past every check; both read as not intact.
+    FinancialParameter._base_manager.filter(pk=moved.pk).update(parameter_set=theirs)
+    assert not mine.intact()
+    assert not theirs.intact()
+    assert "legal_retainer" in theirs.content().variables
+
+
+def test_the_versions_list_is_the_deployments_own(deployment, other_deployment, people):
+    """L6 (a): the same set key in another deployment is another set."""
+    admin = _client(people["admin"])
+    assert _post(admin, other_deployment, full_document()).status_code == 201
+    assert _post(admin, other_deployment, full_document()).status_code == 201
+    assert _post(admin, deployment, full_document()).status_code == 201
+    listed = admin.get(_url(deployment, versions=True)).json()
+    assert [v["version"] for v in listed["versions"]] == [1] and listed["current"] == 1
+    mine = CustomerParameterSet.objects.get(deployment=deployment)
+    assert [v["content_digest"] for v in listed["versions"]] == [mine.content_digest]
+    other = admin.get(_url(other_deployment, versions=True)).json()
+    assert [v["version"] for v in other["versions"]] == [2, 1]
+
+
+def test_a_version_raced_by_another_is_409_and_writes_nothing(deployment, people, monkeypatch):
+    """L6 (b): two posts that read the same latest version both take the next number;
+    the unique constraint refuses the second, which answers 409 and writes nothing."""
+    client = _client(people["analyst"])
+    assert _post(client, deployment, full_document()).status_code == 201
+    original = CustomerParameterSet.check_new
+
+    def stale(self):
+        original(self)
+        self.version = 1  # as a writer that read the set before version 1 was recorded
+
+    monkeypatch.setattr(CustomerParameterSet, "check_new", stale)
+    response = _post(client, deployment, full_document())
+    assert response.status_code == 409, response.content
+    assert CustomerParameterSet.objects.filter(deployment=deployment).count() == 1
+    assert FinancialParameter.objects.count() == 31
+    assert CustomerParameterSet.objects.get().intact()
+
+
+def test_a_bare_nan_is_refused_by_the_parser_itself(deployment, people):
+    """L6 (c): a bare NaN never reaches the schema, where a float would be refused as
+    not_decimal: the parser refuses it, as a constant JSON does not have."""
+    body = json.dumps(full_document()).replace('"0.85"', "NaN", 1)
+    response = _post(_client(people["analyst"]), deployment, body, raw=True)
+    assert response.status_code == 400, response.content
+    payload = response.json()
+    assert "code" not in payload, payload
+    assert "NaN is not a value" in payload["detail"], payload
+    for constant in ("Infinity", "-Infinity"):
+        body = json.dumps(full_document()).replace('"0.85"', constant, 1)
+        response = _post(_client(people["analyst"]), deployment, body, raw=True)
+        assert response.status_code == 400 and f"{constant} is not a value" in response.json()["detail"]
+    assert not CustomerParameterSet.objects.exists()

@@ -30,7 +30,12 @@ sections 6 and 15; ``docs/economics/spec-v1.md``, sections 16 and 17). The rules
   they are the cost of, and a policy with a waiting period does not cover
   business interruption at all in this version: the engine does not apportion an
   outage across the waiting period, so it takes the side that never understates
-  the retained loss.
+  the retained loss. A policy that states no waiting period is read the same way:
+  unstated is unknown, never zero.
+- The sublimit caps a family's covered amount BEFORE the deductible comes off the
+  total. The usual policy wording takes the retention off the loss first and caps
+  the payment at the sublimit; this order retains as much or more, so it never
+  understates the retained loss, and it is disclosed (spec, section 17).
 - The low total is the sum of the components' lows, the high the sum of their
   highs: each component is at the end of its own ranges, so a parameter two
   components read in opposite directions widens the range rather than narrowing
@@ -194,9 +199,11 @@ class GrossLoss:
 @dataclass(frozen=True)
 class InsurancePolicy:
     """The terms insurance is applied on: a deductible, an aggregate limit, per-family
-    sublimits, excluded families and, optionally, a waiting period. Each amount is a
-    money parameter, and the waiting period an hours parameter, so its provenance is
-    kept like any other input's."""
+    sublimits, excluded families and a waiting period. Each amount is a money
+    parameter, and the waiting period an hours parameter, so its provenance is kept
+    like any other input's. A waiting period left unstated (``None``) is unknown, and
+    business interruption is then not covered, as under any waiting period above
+    zero."""
 
     deductible: Parameter
     limit: Parameter
@@ -333,7 +340,10 @@ def apply_insurance(gross: GrossLoss, policy: InsurancePolicy) -> InsuredLoss:
             else None
         )
         uncovered = set(policy.exclusions) | NEVER_COVERED
-        if waiting is not None and waiting > 0:
+        # A waiting period the policy does not state is unknown, never zero: like one
+        # it states, it removes business-interruption cover, the side that never
+        # understates what is kept.
+        if waiting is None or waiting > 0:
             uncovered.add(LossFamily.BUSINESS_INTERRUPTION.value)
         by_family: dict[str, Money] = {}
         for component in known:

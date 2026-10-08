@@ -217,6 +217,9 @@ def test_every_formula_has_a_known_answer_and_every_family_a_formula():
     assert CATALOGUE[("share_price_reaction", 1)].families == {MARKET_VALUE}
     # Customer loss only from the customer's own churn figure: never a lump sum.
     assert "customer_loss" not in CATALOGUE[("lump_sum", 1)].families
+    # The insurance family only from a premium rise (review round 1 of #146, L2): a
+    # lump sum filed as insurance could be the deductible, counted twice.
+    assert {f.formula_id for f in CATALOGUE.values() if "insurance" in f.families} == {"premium_increase"}
 
 
 @pytest.mark.parametrize("formula_id", sorted(KNOWN_ANSWERS))
@@ -458,6 +461,7 @@ def test_formula_family_and_input_refusals():
         (("c", "share_price", "fixed_plus_hours", 1, bindings), "loss_family_unrecognised"),
         (("c", MARKET_VALUE, "lump_sum", 1, {"amount": param("a", "money", 1)}), "formula_not_for_family"),
         (("c", "legal", "share_price_reaction", 1, {}), "formula_not_for_family"),
+        (("c", "insurance", "lump_sum", 1, {"amount": param("deductible", "money", 1)}), "formula_not_for_family"),
         (("c", family, "fixed_plus_hours", 1, {**bindings, "minutes": param("m", "hours", 1)}), "input_unrecognised"),
         (("", family, "fixed_plus_hours", 1, bindings), "required_field_blank"),
     ]
@@ -478,6 +482,14 @@ ADVERSARIAL_PARAMETERS = [
     ("a negative amount", lambda: param("n", "money", "-0.01", 2, 3), "negative_value"),
     ("a negative duration", lambda: param("n", "hours", 0, 0, "-1"), "negative_value"),
     ("a rate above 1", lambda: param("n", "ratio", "0.5", "0.9", "1.01"), "ratio_out_of_range"),
+    ("31 digits before the point", lambda: param("n", "count", "1" + "0" * 30), "value_too_long"),
+    ("21 digits after the point", lambda: param("n", "money", "0." + "0" * 20 + "1"), "value_too_long"),
+    ("trailing zeros past 20 places", lambda: param("n", "count", "1." + "0" * 21), "value_too_long"),
+    ("a million and one digits", lambda: param("n", "count", "9" * 1_000_001), "value_too_long"),
+    ("a million and one places", lambda: param("n", "count", "0." + "0" * 1_000_000 + "1"), "value_too_long"),
+    ("an exponent past the bound", lambda: Parameter("n", Unit.COUNT, "CUSTOMER_PROVIDED", Decimal("1E+1000001"),
+                                                     Decimal("1E+1000001"), Decimal("1E+1000001"), "e"),
+     "value_too_long"),
     ("a low above its base", lambda: param("n", "count", 3, 2, 4), "range_inverted"),
     ("a base above its high", lambda: param("n", "money", 1, 5, 4), "range_inverted"),
     ("money for a count", lambda: Parameter("n", Unit.COUNT, "CUSTOMER_PROVIDED", money(1), money(1), money(1), "e"), "unit_mismatch"),
@@ -676,13 +688,60 @@ def test_what_a_policy_never_covers():
         "premium_increase_per_year": param("p", "money_per_year", 1000), "years": param("y", "years", 2)}, as_of=AS_OF)
     bi = evaluate("bi", "business_interruption", "lump_sum", 1, {"amount": param("bi", "money", 5000)}, as_of=AS_OF)
     event = LossEvent("e", "USD", (premium, bi))
-    # The premium rise is the policy's own cost: never covered. 5,000 BI covered in full.
-    assert _retained(event, _policy((0,), (10**9,))) == (Decimal(2000),) * 3
+    # The premium rise is the policy's own cost: never covered. With a waiting
+    # period stated as zero, the 5,000 of BI is covered in full.
+    none = param("insurance_waiting_period_hours", "hours", 0)
+    assert _retained(event, _policy((0,), (10**9,), waiting_period_hours=none)) == (Decimal(2000),) * 3
     # A waiting period the engine does not apportion: BI not covered at all (the
     # side that never understates what is kept).
     waiting = param("insurance_waiting_period_hours", "hours", 0, 0, 12)
     low, base, high = _retained(event, _policy((0,), (10**9,), waiting_period_hours=waiting))
     assert (low, base, high) == (Decimal(2000), Decimal(2000), Decimal(7000))
+
+
+def test_an_unstated_waiting_period_is_unknown_not_zero():
+    """Review round 1 of #146, L1: a policy that states no waiting period does not
+    cover business interruption, as one with a waiting period does not; read as
+    zero, it would cover all of it and understate what is kept."""
+    bi = evaluate("bi", "business_interruption", "lump_sum", 1, {"amount": param("bi", "money", 5000)}, as_of=AS_OF)
+    legal = _legal((1000, 1000, 1000))
+    event = LossEvent("e", "USD", (bi, legal))
+    unstated = assess(event, _policy((0,), (10**9,))).insured
+    # The 1,000 of legal is covered; the 5,000 of BI is kept.
+    assert tuple(unstated.retained.at(p).amount for p in POINTS) == (Decimal(5000),) * 3
+    assert "business_interruption" in unstated.points[Point.BASE].uncovered_families
+    zero = param("insurance_waiting_period_hours", "hours", 0)
+    stated = assess(event, _policy((0,), (10**9,), waiting_period_hours=zero)).insured
+    assert tuple(stated.retained.at(p).amount for p in POINTS) == (Decimal(0),) * 3
+    # A parameter set without the variable states no policy waiting period either.
+    document = full_document()
+    document["variables"].pop("insurance_waiting_period_hours")
+    policy = parameter_set.parse_document(document).insurance_policy()
+    assert policy.waiting_period_hours is None
+    assert tuple(assess(event, policy).insured.points[p].covered_by_family.get("business_interruption")
+                 for p in POINTS) == (None, None, None)
+
+
+def test_the_sublimit_is_applied_before_the_deductible_as_disclosed():
+    """Review round 1 of #146, M1, kept by the lead's decision and disclosed (spec,
+    sections 17 and 22): the engine caps a family at its sublimit and then takes the
+    deductible off the covered total. Pinned here, so a change to the usual order
+    -- the retention off the loss first, the payment capped at the sublimit -- is a
+    deliberate one.
+
+    Notification 300,000; notification sublimit 150,000; deductible 100,000; limit
+    1,000,000.
+      The engine: covered min(300,000, 150,000) = 150,000; recovery
+      min(150,000 - 100,000, 1,000,000) = 50,000; retained 300,000 - 50,000 = 250,000.
+      The usual reading: 300,000 - 100,000 = 200,000, capped at 150,000 paid;
+      retained 150,000 -- less than the engine's, never more."""
+    event = LossEvent("e", "USD", (_legal((300000,) * 3, "notice", "notification"),))
+    sub = {"notification": param("insurance_sublimit:notification", "money", 150000)}
+    insured = assess(event, _policy((100000,), (1000000,), sublimits=sub)).insured
+    point = insured.points[Point.BASE]
+    assert (point.covered.amount, point.recovery.amount, point.retained.amount) == (150000, 50000, 250000)
+    usual = min(Decimal(300000) - Decimal(100000), Decimal(150000))
+    assert Decimal(300000) - usual == 150000 < point.retained.amount
 
 
 def test_a_policy_is_refused_when_its_terms_are_wrong():

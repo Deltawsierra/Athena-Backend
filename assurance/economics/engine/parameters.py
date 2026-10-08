@@ -14,7 +14,8 @@ The rules (``docs/economics/spec-v1.md``, section 14):
   another: hours are never read as days.
 - **Values.** Decimal only (``not_decimal``: a float is refused), finite
   (``not_finite``), never negative (``negative_value``: no benefit model exists
-  yet), and a ratio is a fraction from 0 to 1 (``ratio_out_of_range``).
+  yet), a ratio is a fraction from 0 to 1 (``ratio_out_of_range``), and a value
+  has at most 30 digits before its point and 20 after (``value_too_long``).
 - **Provenance.** Every parameter carries its ``source_type`` (section 4.2) and a
   non-blank evidence reference (``evidence_ref_missing``): what the figure rests
   on, a questionnaire answer, an evidence id, a benchmark's citation, the person
@@ -62,6 +63,10 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "reduces a loss below zero"
         ),
         "ratio_out_of_range": "a ratio is a fraction from 0 to 1",
+        "value_too_long": (
+            "a value has at most 30 digits before the point and 20 after it: a longer one is refused, never "
+            "rounded, truncated or read as zero"
+        ),
         "range_inverted": "a parameter's low is at most its base, and its base at most its high",
         "duplicate_id": (
             "one id names one thing: two parameters of one name, two components of one id in an event, or two "
@@ -145,6 +150,13 @@ UNITS: Mapping[Unit, str] = MappingProxyType(
 #: The units whose values are ``Money``; every other unit's values are ``Decimal``.
 MONEY_UNITS = frozenset({Unit.MONEY, Unit.MONEY_PER_UNIT, Unit.MONEY_PER_HOUR, Unit.MONEY_PER_YEAR})
 
+#: The most digits a parameter's value has before its point, and after it. Fifty in
+#: all, inside the engine's 60 significant digits, so a sum of values is exact; a
+#: longer value is refused (``value_too_long``), never rounded, truncated or read
+#: as zero.
+MAX_INTEGER_DIGITS = 30
+MAX_FRACTION_DIGITS = 20
+
 
 class Point(StrEnum):
     """The three values every parameter and every result has."""
@@ -155,6 +167,23 @@ class Point(StrEnum):
 
 
 POINTS = (Point.LOW, Point.BASE, Point.HIGH)
+
+
+def check_digits(value: Decimal, what: str) -> Decimal:
+    """``value`` itself, when it has at most :data:`MAX_INTEGER_DIGITS` digits before
+    its point and :data:`MAX_FRACTION_DIGITS` after it, as written (``1.000`` has three
+    after); ``value_too_long`` otherwise. Read off the value's digits and exponent,
+    so it costs nothing however long the value is."""
+    _sign, digits, exponent = value.as_tuple()
+    fraction = -exponent if exponent < 0 else 0
+    integer = len(digits) + exponent
+    if fraction > MAX_FRACTION_DIGITS or integer > MAX_INTEGER_DIGITS:
+        raise ParameterRefused(
+            "value_too_long",
+            f"{what}: {max(integer, 0)} digits before the point and {fraction} after "
+            f"(at most {MAX_INTEGER_DIGITS} and {MAX_FRACTION_DIGITS})",
+        )
+    return value
 
 
 def check_unit(value) -> Unit:
@@ -214,6 +243,7 @@ class Parameter:
                 check_decimal(value, f"{self.name} {point}")
             amounts = list(values)
         for point, amount in zip(POINTS, amounts, strict=True):
+            check_digits(amount, f"{self.name} {point}")
             if amount < 0:
                 raise ParameterRefused("negative_value", f"{self.name} {point} is {amount}")
             if self.unit is Unit.RATIO and amount > 1:

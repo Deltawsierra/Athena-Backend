@@ -118,22 +118,44 @@ tripwire (`tests/test_no_control_holds_back_a_stop.py`) holds them there, and
 `test_no_economics_route_is_a_stop` pins that none is in the stop set or rides its
 exemption. The write is accounted for as one that cannot move the decision
 (`tests/test_every_write_route_keeps_the_decision_current.py`): it writes nothing
-the decision reads. The route module does nothing at import but define its views,
-so it cannot take the URLconf, and every stop with it, down: the test below loads
-it with core's table changed. A later step that serves more adds its route module
-to the import test, and that module is never one the stop lane (`safety.stops`)
-judges. An economics failure is never a reason to refuse anything outside
-economics.
+the decision reads. `assurance/urls.py` imports the route module GUARDED: the
+root URLconf imports `assurance/urls.py`, so an import that raised there would take
+the URLconf down, and every route with it -- the scan's Stop, every other stop, and
+the URL check that `manage.py check` and `deliver_owed_stops` run first. A route
+module that does not import is logged and its routes are not served; nothing else
+changes (`test_the_economics_routes_are_imported_guarded`, read off the source).
+A later step that serves more adds its route module to the import test, and that
+module is never one the stop lane (`safety.stops`) judges. An economics failure is
+never a reason to refuse anything outside economics.
 
-That includes a currency table that is not the pinned one (section 5). Django
-imports the currency adapter when it loads `assurance.models`, so a refusal at
-import would take `django.setup()` down, and every route with it, every stop
-among them. The adapter therefore records the pin at import and refuses only on
-economics use. `test_a_changed_core_table_never_takes_down_the_scan_stop` runs a
-fresh pytest with one entry of core's table changed before Django loads
-(`tests/economics_mismatched_core.py`): Django loads, the scan's Stop route
-resolves, answers and saves the Stop, and economics use refuses
-(`tests/economics_mismatched_core_cases.py`).
+That includes a currency table that is not the pinned one (section 5), and one
+that cannot be imported at all. Django imports the economics models, and through
+them the money engine and its currency adapter, when it loads `assurance.models`,
+so anything the adapter did at import that could fail -- importing core's module,
+which reads core's table file, or checking the pin -- would take `django.setup()`
+down, and every route with it, every stop among them. The adapter therefore
+imports no part of mythos-core and checks nothing at import. On the first
+economics use it imports core's module -- a failure is logged and recorded as
+`mythos_core.currency cannot be imported`, never raised past it -- and checks the
+pin once, recording the result; every economics use refuses with
+`CurrencyTableInvalid` (core's class, or a local one when core's module will not
+import) while either holds. No other module the models import does work at import
+that reads the environment: the vocabularies, the formula catalogue and the
+parameter-set schema are built from constants.
+
+Three fresh pytest runs, each breaking economics before Django loads, hold this:
+
+| Fault | Plugin | Test |
+|---|---|---|
+| one entry of core's table changed | `tests/economics_mismatched_core.py` | `test_a_changed_core_table_never_takes_down_the_scan_stop` (`tests/economics_mismatched_core_cases.py`) |
+| the route module does not import | `tests/economics_broken_api.py` | `test_an_economics_fault_never_takes_down_a_stop` (`tests/economics_fault_cases.py`) |
+| `mythos_core.currency` does not import | `tests/economics_missing_core.py` | the same |
+
+Under each, Django loads, the scan's Stop route resolves, answers (202) and saves
+the Stop, and economics use refuses. Under the last two, `deliver_owed_stops` also
+runs the system checks, the URL check among them, and reaches its handler, and
+`manage.py check` passes; the parameter-set write answers 503 while the table
+cannot be read, and records nothing.
 
 ## 3. Calculation policy
 
@@ -259,11 +281,11 @@ the same reviewed change:
   (`mythos_core.currency.entries_digest`) is
   `00cb16d39eea4ed912c1f8fb9d43b58e19d96328090a3ad766f9cf03a868038a`, the value
   #141's copy had. `tests/test_economics_engine.py` pins the same value. The
-  adapter records at import whether core's table is the pinned one, and never
-  raises there: every economics USE of the table -- `currency()`,
-  `minor_units()`, `current_successor()`, `reporting_refusal()`, and through them
-  every `Money`, rate and policy -- raises `CurrencyTableInvalid` while it is not
-  (section 2).
+  adapter checks, on the first economics use and never at import, whether core's
+  table is the pinned one, and records the result: every economics USE of the
+  table -- `currency()`, `minor_units()`, `current_successor()`,
+  `reporting_refusal()`, the table names, and through them every `Money`, rate
+  and policy -- raises `CurrencyTableInvalid` while it is not (section 2).
 - **The file.** core pins the SHA-256 of its file's bytes, entries and `source`
   and `review` records together:
   `b23e144243e33946633529178e494ce7a43ef332408a3fd4271eceeefeaa2f9a`. The test
@@ -439,7 +461,18 @@ the licensing and legal review The Open Group's terms require first.
   manager so the stop's writes in section 2 pass), `django.db.models.Model.save(row)`
   called past the model's own `save`, a plain `QuerySet(model)`, raw SQL, and a
   migration. No code may use them to write an economics row: review holds that
-  line, and at the database only the constraints of section 6 hold.
+  line, and at the database only the constraints of section 6 hold. A related
+  manager's `add()`, `set()`, `remove()` and `clear()` write through the base
+  manager's `update` too, so they could move a recorded row to another parent, even
+  another deployment's. The scenario records' foreign keys therefore have no
+  reverse accessor (`related_name="+"`), so no such manager exists for them; their
+  rows are read by filtering, and the deployment's cascade still reaches them. The
+  E0 and E1 records still have theirs (`superseded_by`, `reviews`,
+  `sensitive_overrides`, `approvals`, `financial_sources`, `financial_scenarios`,
+  `fx_observations`, `cost_index_observations`), and the same write reaches them:
+  a later change removes them. A parameter-set version moved past its seal is
+  detected: `intact()` re-reads its rows against the count and digest it was
+  recorded with (`test_a_row_moved_past_the_append_only_checks_is_detected`).
 - **SPINE references are checked for form only.** A well-formed system
   fingerprint or effect digest is accepted whether or not SPINE holds it, and
   whatever deployment it belongs to. The scenario builder must resolve every
@@ -829,8 +862,11 @@ database. A parameter is one named input to a loss formula
 
 A value is a `Decimal` only (`not_decimal`: a float or an int is refused),
 finite (`not_finite`), never negative (`negative_value`: no benefit model exists
-yet, so nothing reduces a loss below zero), and a ratio is a fraction from 0 to 1
-(`ratio_out_of_range`).
+yet, so nothing reduces a loss below zero), a ratio is a fraction from 0 to 1
+(`ratio_out_of_range`), and a value has at most 30 digits before its point and 20
+after it as written (`value_too_long`): fifty in all, inside the 60 significant
+digits of section 11, so a sum of values is exact. A longer value is refused,
+never rounded, truncated, read as zero or carried into an overflow.
 
 | Unit | Holds |
 |---|---|
@@ -868,6 +904,7 @@ is raised as that engine's, with its meaning, and is never published twice.
 | `evidence_ref_missing` | a parameter that names no evidence |
 | `negative_value` | a negative count, duration, ratio or amount |
 | `ratio_out_of_range` | a ratio above 1 |
+| `value_too_long` | a value with more than 30 digits before its point or 20 after it, as written: refused, never rounded, truncated or read as zero |
 | `range_inverted` | a low above its base, or a base above its high |
 | `duplicate_id` | two parameters under one name or one id, two components of one id in an event, two events of one key in a scenario, a family excluded twice (a key twice in one JSON object is refused by the API's parser, 400, naming this code) |
 | `formula_unknown` | a formula id and version the catalogue does not hold |
@@ -916,7 +953,7 @@ In the table, `+` is `increases` and `-` is `decreases`.
 | `replacement_share` | 1 | `replacement_cost x share_compromised` | `replacement_cost` (money, +); `share_compromised` (ratio, +) | `data_and_ip` |
 | `churned_margin` | 1 | `customers x churn_rate x margin_per_customer_per_year x recovery_years` | `customers` (count, +); `churn_rate` (ratio, +), from `CUSTOMER_PROVIDED` data only; `margin_per_customer_per_year` (money_per_unit, +); `recovery_years` (years, +) | `customer_loss` |
 | `premium_increase` | 1 | `premium_increase_per_year x years` | `premium_increase_per_year` (money_per_year, +); `years` (years, +) | `insurance` |
-| `lump_sum` | 1 | `amount` | `amount` (money, +): a range given whole by its source, a quote, a benchmark or an estimate | every cash family but `customer_loss` |
+| `lump_sum` | 1 | `amount` | `amount` (money, +): a range given whole by its source, a quote, a benchmark or an estimate | every cash family but `customer_loss` and `insurance` |
 | `share_price_reaction` | 1 | `market_capitalisation x price_decline` | `market_capitalisation` (money, +); `price_decline` (ratio, +) | `market_value` only |
 
 The rules every formula keeps. A component is `estimated`, with a low, base and
@@ -939,6 +976,9 @@ high, or `unknown`, with none.
   (`insurance_treatment`, `gross`).
 - `market_value` is a component family outside the fifteen (section 4.1), computed
   only by `share_price_reaction`, never added to cash loss (section 16).
+- The `insurance` family is computed only by `premium_increase`: a lump sum filed
+  as insurance could be the deductible, which the insurance step already keeps, and
+  would count it twice (`formula_not_for_family`).
 
 ## 16. Loss events, components and totals
 
@@ -1000,14 +1040,38 @@ reads the low deductible and the high limit.
 | `deductible` | `increases` | its low |
 | `limit` | `decreases` | its high |
 | `sublimit` | `decreases` | its high |
-| `waiting_period_hours` | `increases` | its low | The retained loss is never negative: the
-recovery is never more than the covered amount, which is never more than the gross
-loss. Insurance on an incomplete gross loss gives a retained floor, still
-`complete: false`.
+| `waiting_period_hours` | `increases` | its low |
+
+The retained loss is never negative: the recovery is never more than the covered
+amount, which is never more than the gross loss. Insurance on an incomplete gross
+loss gives a retained floor, still `complete: false`.
 
 A policy with a waiting period does not cover business interruption at all in
 this version. The engine does not apportion an outage across the waiting period,
-so it takes the side that never understates the retained loss.
+so it takes the side that never understates the retained loss. **A policy that
+states no waiting period is read the same way**: unstated is unknown, never zero,
+so business interruption is not covered unless the policy states a waiting period
+of zero.
+
+**The order of the sublimit and the deductible is not the usual one, and it is
+disclosed.** The engine caps each family's covered amount at its sublimit first
+and then takes the deductible off the covered total (steps 2 and 3). The usual
+policy wording takes the retention off the loss first and caps the payment at the
+sublimit. The two differ when a family's loss exceeds its sublimit. Worked: a
+notification loss of USD 300,000, a notification sublimit of USD 150,000, a
+deductible of USD 100,000 and a limit of USD 1,000,000.
+
+- The engine: covered `min(300,000, 150,000)` = 150,000; recovery
+  `min(150,000 - 100,000, 1,000,000)` = 50,000; **retained USD 250,000**.
+- The usual reading: `300,000 - 100,000` = 200,000 after the retention; payment
+  capped at the sublimit, 150,000; **retained USD 150,000**.
+
+The engine's order never retains less than the usual reading, so it never
+understates the retained loss, which is why it is kept for now; it overstates it
+by up to the deductible where a sublimit binds. Choosing the usual order is an
+owner decision (section 22), and
+`test_the_sublimit_is_applied_before_the_deductible_as_disclosed` pins the current
+figures so a change is deliberate.
 
 ## 18. The invariants
 
@@ -1130,9 +1194,16 @@ Mounted under `/api/assurance/` from `assurance/economics/api.py`:
   this version (section 22).
 - **Append-only**: no route edits or deletes a version (405); a change is a new
   version, and the earlier one reads back unchanged.
-- **Strict JSON**: the body is JSON only (a form is 415); a key twice in one
-  object and a bare `NaN` or `Infinity` are refused (400). A refusal is 400 with
-  `code` (the engine's) and `detail` (the field's path), and nothing is recorded.
+- **Strict JSON**: the body is JSON only (a form is 415) and at most 64 KiB (413,
+  on its declared `Content-Length` before anything reads it, and the parser never
+  reads past the limit); a key twice in one object and a bare `NaN` or `Infinity`
+  are refused by the parser (400). A refusal is 400 with `code` (the engine's) and
+  `detail` (the field's path), and nothing is recorded.
+- **Unavailable**: while economics cannot read its currency table (section 2),
+  the write and the read of a version answer 503 and record nothing; the list of
+  versions, which reads no amount, still answers.
+- **A race**: two versions posted at the same moment that would take one number
+  are refused by the unique constraint: the later is 409 and writes nothing.
 - **Not on a stop path**: both routes are in `safety.stops.NOT_STOPS`; the POST
   writes nothing the decision reads.
 
@@ -1217,9 +1288,14 @@ for Minotaur's economic-exposure tests.
   input that counts customers is not caught by the unit check; the parameter's name
   and evidence say which, and the scenario builder must bind them consistently.
 - **Insurance is applied at the event's totals.** The retained loss is not
-  allocated back to families; a waiting period removes business-interruption cover
-  rather than apportioning it; coinsurance, per-occurrence limits and several
-  policies are not modelled.
+  allocated back to families; a waiting period, stated or not, removes
+  business-interruption cover rather than apportioning it; coinsurance,
+  per-occurrence limits and several policies are not modelled.
+- **The sublimit comes before the deductible** (section 17): with a notification
+  loss of USD 300,000, a USD 150,000 sublimit, a USD 100,000 deductible and a USD
+  1,000,000 limit, the engine retains USD 250,000 where the usual policy reading
+  retains USD 150,000. It never understates the retained loss, and overstates it
+  by up to the deductible where a sublimit binds.
 - **Freshness is flagged, not graded.** A stale parameter is named on the
   component that read it; no confidence grade is computed from it yet.
 - **No regulatory penalty is predicted.** A regulatory component is a range its
@@ -1245,8 +1321,13 @@ Decisions this version takes, which the owner may change:
 2. Remediation cost is a mitigation's price, never a component of the loss event
    it mitigates (the owner's specification, section 21); `remediation_investment`
    components are for remediation the incident itself forces.
-3. A premium rise (`insurance` family) is never covered by the policy, and a
-   waiting period removes business-interruption cover (section 17).
+3. A premium rise (`insurance` family) is never covered by the policy, and only
+   `premium_increase` computes that family; a waiting period, or one the policy
+   does not state, removes business-interruption cover (section 17).
 4. Customer loss is computed only from `CUSTOMER_PROVIDED` churn; any other source
    gives an unknown component.
 5. Where a worked example gives a range and no base, its base is the midpoint.
+6. The sublimit is applied before the deductible (section 17), the side that
+   never understates the retained loss; whether to change to the usual order, the
+   retention off the loss first and the payment capped at the sublimit, is the
+   owner's decision, recorded as open.

@@ -862,9 +862,12 @@ class CustomerParameterSet(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    deployment = models.ForeignKey(
-        "assurance.Deployment", on_delete=models.CASCADE, related_name="financial_parameter_sets"
-    )
+    # No reverse accessor (related_name "+"), here and on every foreign key of the
+    # scenario records: a related manager's add(), set(), remove() and clear() write
+    # through the base manager's update, past the append-only refusals, and could
+    # move a recorded row to another parent, even another deployment's. The rows
+    # are read by filtering, and the cascade from the deployment still reaches them.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
     set_key = models.SlugField(max_length=_KEY_MAX)
     version = models.PositiveIntegerField()
     schema_version = models.CharField(max_length=64, default=pset.SCHEMA_VERSION)
@@ -1010,11 +1013,10 @@ class FinancialParameter(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    scenario = models.ForeignKey(
-        FinancialScenario, on_delete=models.CASCADE, null=True, blank=True, related_name="financial_parameters"
-    )
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, null=True, blank=True, related_name="+")
     parameter_set = models.ForeignKey(
-        CustomerParameterSet, on_delete=models.CASCADE, null=True, blank=True, related_name="parameters"
+        CustomerParameterSet, on_delete=models.CASCADE, null=True, blank=True, related_name="+"
     )
     name = models.CharField(max_length=_KEY_MAX)
     unit = models.CharField(max_length=32, choices=[(u, u) for u in _UNIT_CODES])
@@ -1152,7 +1154,8 @@ class LossEvent(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="loss_events")
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
     event_key = models.SlugField(max_length=_KEY_MAX)
     currency = models.CharField(max_length=3)
     effect = models.CharField(max_length=71, blank=True)
@@ -1206,7 +1209,8 @@ class LossComponent(_AppendOnly):
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
-    loss_event = models.ForeignKey(LossEvent, on_delete=models.CASCADE, related_name="components")
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    loss_event = models.ForeignKey(LossEvent, on_delete=models.CASCADE, related_name="+")
     component_key = models.SlugField(max_length=_KEY_MAX)
     family = models.CharField(max_length=32, choices=[(f, f) for f in _COMPONENT_FAMILY_CODES])
     formula_id = models.CharField(max_length=64)

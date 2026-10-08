@@ -360,7 +360,11 @@ def _formulas() -> tuple[Formula, ...]:
             "lump_sum",
             1,
             "amount",
-            _ALL_CASH - {LossFamily.CUSTOMER_LOSS},
+            # Not customer loss (only from the customer's own churn figure), and not
+            # insurance: a lump sum filed as insurance could be the deductible, which
+            # the insurance step already keeps, counted a second time. Only
+            # premium_increase computes the insurance family.
+            _ALL_CASH - {LossFamily.CUSTOMER_LOSS, LossFamily.INSURANCE},
             (Input("amount", Unit.MONEY, INC, "an amount given as a range by its source (a quote, a benchmark, an estimate)"),),
             lambda v: v["amount"],
         ),
