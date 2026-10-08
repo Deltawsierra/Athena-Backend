@@ -245,4 +245,25 @@ zopfli==0.2.3.post1
 # comment that the receipt shares its token, digest, base64 and key helpers;
 # no behaviour moves, and tests/test_failsafe_control_plane.py and the observed-
 # outcome tests run unchanged against it.
-mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@104fdc9aa41ea3c658daf4ae718fe7b4fcd6b474
+#
+# What the pin since 104fdc9 (Mythos-Core#49) adds:
+#
+# Mythos-Core#50 -- the reason for the b1f6e9d pin: the core's part of the
+# collector hardening. safe_http trusts nothing in the environment for
+# credentials (a Session that did read ~/.netrc put the login kept for a
+# request's host on the request, GHSA-9hjg-9r4m-mvj7; the control plane's own
+# login is looked up for a control read and the terminate attestation, so a
+# stand-down still arrives); a hop to another origin drops every header whose
+# name says it authenticates, besides its list, and keeps the rest; a refused
+# proxy is quoted with its userinfo replaced; and tracing.span records an
+# exception that leaves it by its type alone and raises it on unchanged. The
+# core's advisories.toml registers the advisories against the HTTP client and
+# the span, and the core now requires requests>=2.32.4, which requests==2.32.5
+# here already meets. Carried, not reached: this service makes no safe_http
+# request (pentest/views.py asks egress.check_target, which #50 does not
+# change), and assurance/observability.py records an exception by its type alone
+# itself, before it reaches the core's span. mythos_core.currency is byte for
+# byte what it was at 104fdc9 (the same git blobs: iso4217.json sha256
+# b23e144243e3...), so the table pins in tests/test_economics_engine.py hold
+# unchanged.
+mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@b1f6e9d855a54421e073ffd178c03a90116a371f
