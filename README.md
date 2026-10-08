@@ -419,6 +419,26 @@ fails to import, its routes are logged and not served, and every stop and the
 system checks load without them. While economics cannot read mythos-core's
 currency table, the write answers 503; nothing at import reads the table.
 
+### The scenario builder
+
+A second route module, imported guarded in a guard of its own, builds a scenario's
+causal loss events from SPINE effects (signed observed effects, or hypothetical
+ones an analyst declares) and the findings that enable them, through six banking
+templates (section 23):
+
+- `POST /api/assurance/deployments/<uuid>/economics/scenarios/build/`: a scenario
+  draft from the effects, findings and parameter-set version the body names; an
+  admin or analyst only, the draft authored by the caller. The same inputs return
+  the scenario already built (200), never a second; a build raced by the same build
+  is 409 and writes nothing;
+- `GET .../economics/scenarios/<scenario uuid>/events/`: its events, each with its
+  effects, findings, components and where every input came from.
+
+Findings that enable one effect join that effect's one loss event, so five findings
+on one payment loss never multiply it. Every reference is looked up in the path's
+deployment only. A fault in the builder leaves these two routes unserved and nothing
+else; neither is a stop.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each

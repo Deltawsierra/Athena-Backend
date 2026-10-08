@@ -3,7 +3,8 @@
 Phases E0 and E1 (``docs/economics/spec-v1.md``): the foundations; money,
 currency, FX and cost-index normalization; and the deterministic scenario engine
 (parameters, the formula catalogue, loss events and components, insurance) with
-the customer parameter set and its API. Nothing here simulates yet.
+the customer parameter set and its API; and the scenario builder. Nothing here
+simulates yet.
 
 - :mod:`assurance.economics.engine` is the pure core: the loss taxonomy, the
   source and confidence vocabularies, the adapter over mythos-core's ISO 4217
@@ -21,8 +22,14 @@ the customer parameter set and its API. Nothing here simulates yet.
   as a source and its observations; ``snapshots/`` holds the one committed, which
   is SYNTHETIC TEST DATA.
 
-- :mod:`assurance.economics.api` is the one route module: the customer
-  parameter-set routes, mounted by :mod:`assurance.urls`.
+- :mod:`assurance.economics.api` is the customer parameter-set routes, mounted by
+  :mod:`assurance.urls`.
+- :mod:`assurance.economics.builder` is the scenario builder (MVP step 5): it builds
+  a scenario's causal loss events from SPINE effects and findings through the
+  templates of :mod:`assurance.economics.engine.templates`;
+  :mod:`assurance.economics.scenario_api` is its two routes, mounted by
+  :mod:`assurance.urls` in a guard of its own. Nothing on Django's load path imports
+  either.
 
 This package is never on a stop, pause, stand-down, terminate or revoke path:
 :mod:`assurance.models` (registering the models) and :mod:`assurance.urls`

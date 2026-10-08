@@ -565,6 +565,36 @@ def _economics_parameter_set():
     )
 
 
+def _economics_scenario_build():
+    from tests.test_economics_scenarios import _entry
+
+    from assurance.economics.models import CustomerParameterSet
+
+    dep = _scanned()
+    asset = Asset.objects.create(deployment=dep, kind="agent", name="payments-agent", identifier="agent://payments")
+    finding = Finding.objects.create(
+        deployment=dep, fingerprint="econ-build", finding_type="approval_check_missing", title="no approval check"
+    )
+    # The set-up's own writes are decision inputs: the decision is brought up to date
+    # before the build, which must leave it where it is.
+    recompute_decision(dep)
+
+    CustomerParameterSet.record(
+        dep, "bank_prod_2026q4", {"variables": {"transactions_per_day": _entry("count_per_day", "18000")}},
+        author=_admin(),
+    )
+    body = {
+        "title": "payment redirect",
+        "parameter_set": {"set_key": "bank_prod_2026q4", "version": 1},
+        "currency": "USD",
+        "as_of": "2026-10-06",
+        "effects": [{"key": "redirect", "origin": "hypothetical", "effect_type": "funds_transfer_altered",
+                     "asset": str(asset.uuid), "business_process": "payments", "attributes": {}}],
+        "findings": [{"finding": str(finding.uuid), "effect": "redirect", "role": "prerequisite"}],
+    }
+    return dep, lambda c: c.post(_base(dep) + "economics/scenarios/build/", body, format="json")
+
+
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
         "reads every stream across the portfolio; it writes nothing but the reconcile "
@@ -621,6 +651,11 @@ CANNOT_MOVE = {
         "records a version of a customer's financial parameter set (Economic Exposure); the decision reads "
         "no economics record",
         _economics_parameter_set,
+    ),
+    ("ScenarioBuildView", "post", "post"): (
+        "builds an Economic Exposure scenario draft from effects and findings it only reads; the decision "
+        "reads no economics record",
+        _economics_scenario_build,
     ),
 }
 

@@ -498,6 +498,13 @@ NOT_STOPS = {
         "POST": "records a new version of a customer's financial parameter set: economics inputs, append-only; "
         "it starts and stops nothing",
     },
+    # The scenario builder (assurance.economics.scenario_api): a scenario draft built
+    # from effects and findings, and its events read. Economics records only.
+    "deployment-economics-scenario-build": {
+        "POST": "builds a scenario draft from SPINE effects, findings and a customer parameter set: economics "
+        "records, append-only; it starts and stops nothing",
+    },
+    "deployment-economics-scenario-events": _get(),
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),
