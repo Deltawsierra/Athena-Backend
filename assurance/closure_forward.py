@@ -131,21 +131,30 @@ class Credential:
         )
 
 
-def _setting(name: str, *, environment: bool = False) -> str | None:
-    """A non-empty text setting; with ``environment``, the environment variable of the
-    same name when the settings name none."""
-    value = getattr(settings, name, None)
-    if value is None and environment:
-        value = os.environ.get(name)
+def _text(value) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _outcomes_key() -> str | None:
+    """Blue's key: the ``MINOTAUR_OUTCOMES_KEY`` setting, or the environment variable of
+    that name when the settings name none. Read by its literal name."""
+    value = getattr(settings, "MINOTAUR_OUTCOMES_KEY", None)
+    if value is None:
+        value = os.environ.get(OUTCOMES_KEY)
+    return _text(value)
+
+
+def _legacy_runner_key() -> str | None:
+    """The legacy ``MINOTAUR_RUNNER_KEY`` setting, read by its literal name."""
+    return _text(getattr(settings, "MINOTAUR_RUNNER_KEY", None))
 
 
 def credential() -> Credential:
     """The credential the forward sends (:class:`Credential`). Blue's outcome-recorder
     key when it is set; else the legacy runner key, with separation not in force; and
     never a secret set as both, which is one credential for two roles."""
-    outcomes = _setting(OUTCOMES_KEY, environment=True)
-    legacy = _setting(LEGACY_RUNNER_KEY)
+    outcomes = _outcomes_key()
+    legacy = _legacy_runner_key()
     if outcomes is not None and legacy is not None and hmac.compare_digest(outcomes, legacy):
         return Credential(
             key=None,
@@ -193,7 +202,7 @@ def credential_problems() -> list[tuple[str, str, str]]:
                 "closure forward",
             )
         ]
-    if found.setting == OUTCOMES_KEY and _setting(LEGACY_RUNNER_KEY) is not None:
+    if found.setting == OUTCOMES_KEY and _legacy_runner_key() is not None:
         return [
             (
                 "warning",
