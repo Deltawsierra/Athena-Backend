@@ -767,11 +767,13 @@ def _approval_binding_saved(sender, instance, raw=False, **kwargs):
 
 #: The Asset columns the graph's edges are computed from (assurance.authority_chain.
 #: graph_edges, over assurance.authority_chain_records.load_graph): which component it
-#: is, what it declares, and whether it is in the graph at all (graph_refs.retired, a
-#: metadata key). A save that names none of them -- the coverage stamp's
-#: ``assessed_at`` -- cannot move an edge, and notes nothing.
+#: is, what it declares, whether it is in the graph at all (graph_refs.retired, a
+#: metadata key), and the provider the graph's readers load with it. A save that names
+#: none of them -- the coverage stamp's ``assessed_at`` -- cannot move an edge, and
+#: notes nothing.
 EDGE_COLUMNS = frozenset(
-    {"deployment", "deployment_id", "kind", "identifier", "name", "metadata", "classification"}
+    {"deployment", "deployment_id", "kind", "identifier", "name", "metadata", "classification", "provider",
+     "provider_id"}
 )
 
 def _moves_an_edge(update_fields) -> bool:

@@ -19,12 +19,16 @@ the edge in force at the effect's signed dispatch instant:
   the dispatch: unproven when nothing contradicted the hop, broken -- named as master
   named it -- when the record did;
 * a dispatch the history does not cover reads unproven, never live;
+* a component re-created or renamed after the effect reads unproven, never broken;
+* a chain that records no dispatch is never proven by the graph as it stands, and is
+  still broken by a contradiction present in it, as on master;
 * a person-started chain stays proven across a later re-approval and identity edit;
 * nothing added stands on a stop's path.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 import pytest
@@ -247,6 +251,107 @@ def test_the_identity_the_agent_acted_as_at_the_dispatch_is_named():
     assert "svc-admin" in hop["reasons"][0]["detail"] and "dispatch" in hop["reasons"][0]["detail"]
 
 
+# --------------------------------------- re-created or renamed after the effect
+
+
+@pytest.mark.parametrize("name", ["svc-x", "support-agent", "crm-mcp"])
+def test_a_component_deleted_and_recreated_after_the_effect_reads_unproven_never_broken(name):
+    """Review round 1: the re-created component is a new row the history never saw,
+    and no record contradicts the hop about it. Unproven, and nothing held at
+    needs_remediation (it read broken at ecdce9a)."""
+    dep, client, permit, _ = _world()
+    row = signed_chains.record_observed_effect(dep, WF, permit.outcome_id, _now())
+    assert _chain_citing(client, dep, permit, row)["verdict"] == "proven"
+    old = _asset(dep, name)
+    fields = {f: getattr(old, f) for f in ("kind", "name", "identifier", "classification", "metadata", "provider")}
+    old.delete()
+    new = Asset.objects.create(deployment=dep, **fields)
+    Asset.objects.filter(pk=new.pk).update(assessed_at=_now(), assessed_by="test")
+
+    chain = _chains(client, dep)[0]
+    assert chain["verdict"] == "unproven" and chain["broken_hops"] == [], _readings(chain)
+    codes = {c for cs in _readings(chain).values() for c in cs}
+    assert not codes & {"acts_as_another", "unreachable", "permission_not_declared"}
+    assert any(
+        "re-created or renamed" in r["detail"] for h in chain["hops"] for r in h["reasons"]
+    ), _readings(chain)
+    support = decision_support(_fresh(dep))
+    assert support["claims"]["authority_chains_broken"] == []
+    assert support["decision"] != Deployment.Decision.NEEDS_REMEDIATION
+
+
+def test_a_rename_swap_after_the_effect_reads_unproven_never_broken():
+    """svc-x and svc-admin swap names after the effect: the chain's svc-x now names the
+    row that was svc-admin at the dispatch, which the agent did not act as. That row is
+    not, as named now, the one the history names -- unproven, not acts_as_another."""
+    dep, client, permit, _ = _world()
+    row = signed_chains.record_observed_effect(dep, WF, permit.outcome_id, _now())
+    assert _chain_citing(client, dep, permit, row)["verdict"] == "proven"
+    svc_x, svc_admin = _asset(dep, "svc-x"), _asset(dep, "svc-admin")
+    for asset, to in ((svc_x, "svc-swap"), (svc_admin, "svc-x"), (svc_x, "svc-admin")):
+        asset.identifier = asset.name = to
+        asset.save()
+
+    chain = _chains(client, dep)[0]
+    hop = _hops(chain)["through_identity"]
+    assert chain["broken_hops"] == [] and hop["verdict"] == "unproven", _readings(chain)
+    assert _codes(hop) == ["identity_not_in_force_at_dispatch"]
+    assert "re-created or renamed" in hop["reasons"][0]["detail"]
+    assert decision_support(_fresh(dep))["claims"]["authority_chains_broken"] == []
+
+
+# ------------------------------------- no dispatch recorded: a present contradiction
+
+
+#: Master's misconfigurations, on a chain that cites no dispatch (master's own body):
+#: the hop, its code and index, and the edits that make the graph contradict it now.
+NO_DISPATCH_BROKEN = [
+    ("through_identity", "acts_as_another", 2, [("support-agent", {"identity": "svc-admin"})], None),
+    ("invokes", "unreachable", 1, [("support-agent", {"tools": []})], None),
+    ("performs", "permission_not_declared", 3,
+     [("crm-mcp", {"permissions": ["customer:read"]}), ("svc-x", {"permissions": []})], None),
+    ("performs", "outside_approval", 3, [], "customer:delete"),
+]
+
+
+@pytest.mark.parametrize(
+    ("relation", "code", "index", "edits", "action"), NO_DISPATCH_BROKEN,
+    ids=["acts-as-another", "unreachable", "permission-not-declared", "outside-approval"],
+)
+def test_with_no_dispatch_recorded_a_contradiction_in_the_graph_as_it_stands_still_breaks_the_hop(
+    relation, code, index, edits, action
+):
+    """Review round 1, the owner's decision: a chain that records no dispatch cannot be
+    proven by the graph as it stands, but a misconfiguration present in it is still
+    broken -- master's verdict and code (master read these broken; ecdce9a read them
+    dispatch_state_unrecorded)."""
+    dep, client, permit, _ = _world()
+    for name, metadata in edits:
+        _edit(dep, name, **metadata)
+    body = _chain_body(client, dep, permit)
+    if action is not None:
+        for hop in body["hops"]:
+            for end in ("from", "to"):
+                if hop[end]["kind"] == "action":
+                    hop[end]["ref"] = action
+    chain = _post(client, dep, body).json()["chains"][0]
+    hop = _hops(chain)[relation]
+    assert hop["verdict"] == "broken" and hop["reasons"][0]["code"] == code, _readings(chain)
+    assert "no dispatch is recorded" in hop["reasons"][0]["detail"]
+    assert "dispatch_state_unrecorded" in _codes(hop), "the graph as it stands proves nothing"
+    assert chain["broken_hops"] == [index]
+    assert _fresh(dep).decision == Deployment.Decision.NEEDS_REMEDIATION
+
+
+def test_with_no_dispatch_recorded_the_graph_as_it_stands_proves_nothing():
+    dep, client, permit, _ = _world()
+    chain = _post(client, dep, _chain_body(client, dep, permit)).json()["chains"][0]
+    for relation in ("invokes", "through_identity", "performs"):
+        hop = _hops(chain)[relation]
+        assert hop["verdict"] == "unproven" and "dispatch_state_unrecorded" in _codes(hop), relation
+    assert chain["broken_hops"] == []
+
+
 # ------------------------------------------------------------- a missing record
 
 
@@ -254,7 +359,7 @@ def test_a_dispatch_before_the_edge_history_began_reads_unrecorded_never_live():
     dep, client, permit, _ = _world()
     # The approval, contracts and route were noted an hour ago; the graph's edges only
     # now. A dispatch half a minute ago is one whose edges nothing records.
-    AuthorityEdgeVersion.objects.filter(deployment=dep).update(noticed_at=_now())
+    AuthorityEdgeVersion._base_manager.filter(deployment=dep).update(noticed_at=_now())
     row = signed_chains.record_observed_effect(dep, WF, permit.outcome_id, _now() - timedelta(seconds=30))
     chain = _chain_citing(client, dep, permit, row)
     hops = _hops(chain)
@@ -385,6 +490,8 @@ def test_a_scan_that_declares_an_agent_notes_its_edges_once_in_its_own_transacti
         ("reach", str(agent.uuid), str(reader.uuid), True),
         ("declares", str(reader.uuid), "", True),
         ("action", str(reader.uuid), "read", True),
+        *(("component", str(a.uuid), json.dumps([a.kind, a.identifier, a.name], separators=(",", ":")), True)
+          for a in Asset.objects.filter(deployment=dep)),
     }
     # Noted once, when the reconciliation was done: no half-reconciled graph between.
     assert len({r.noticed_at for r in rows}) == 1
@@ -410,6 +517,44 @@ def test_an_asset_moved_to_another_deployment_moves_its_edges_out_of_the_one_it_
     crm.save(update_fields=["deployment"])
     assert (str(crm.uuid), "customer:update", False) in _edges(dep, "action")
     assert (str(crm.uuid), "customer:update", True) in _edges(other, "action")
+
+
+def test_the_history_refuses_a_queryset_rewrite_and_goes_only_with_its_deployment():
+    """Review round 1: append-only held only on instances; a queryset update or delete
+    went through."""
+    dep, _, _, _ = _world()
+    rows = AuthorityEdgeVersion.objects.filter(deployment=dep)
+    count = rows.count()
+    with pytest.raises(AuthorityEdgeVersionRewriteRefused):
+        rows.update(in_force=False)
+    with pytest.raises(AuthorityEdgeVersionRewriteRefused):
+        rows.delete()
+    with pytest.raises(AuthorityEdgeVersionRewriteRefused):
+        AuthorityEdgeVersion.objects.bulk_update(list(rows), ["in_force"])
+    assert AuthorityEdgeVersion.objects.filter(deployment=dep).count() == count
+    assert not AuthorityEdgeVersion.objects.filter(deployment=dep, kind="identity", in_force=False).exists()
+    # The deployment's cascade still takes it: an instance delete and a queryset delete.
+    pk = dep.pk
+    dep.delete()
+    assert not AuthorityEdgeVersion._base_manager.filter(deployment_id=pk).exists()
+    other, _, _, _ = _world()
+    Deployment.objects.filter(pk=other.pk).delete()
+    assert not AuthorityEdgeVersion._base_manager.filter(deployment_id=other.pk).exists()
+
+
+def test_a_save_that_names_only_the_provider_is_noted(monkeypatch):
+    from assurance import edge_history
+
+    dep, _, _, _ = _world()
+    noted = []
+    real = edge_history.note_edges
+    monkeypatch.setattr(edge_history, "note_edges", lambda deployment, **kw: noted.append(deployment.pk) or real(deployment, **kw))
+    crm = _asset(dep, "crm-mcp")
+    crm.save(update_fields=["provider"])
+    assert noted == [dep.pk]
+    crm.assessed_at = _now()
+    crm.save(update_fields=["assessed_at"])
+    assert noted == [dep.pk], "a save of nothing the graph reads notes nothing"
 
 
 # ------------------------------------------------------------------- the safety

@@ -109,7 +109,9 @@ def _world(*, tool=A.APPROVED, identity="svc-x", gate=oc.HELD, engine="achilles"
 
     ApprovalVersion.objects.filter(deployment=dep).update(in_force_from=now - timedelta(hours=1))
     ToolContract.objects.filter(deployment=dep).update(recorded_at=now - timedelta(hours=1))
-    AuthorityEdgeVersion.objects.filter(deployment=dep).update(noticed_at=now - timedelta(hours=1))
+    # The edge history refuses a queryset update to every writer; a fixture goes
+    # through the base manager, as the deployment's cascade does.
+    AuthorityEdgeVersion._base_manager.filter(deployment=dep).update(noticed_at=now - timedelta(hours=1))
     permit = record_signed(dep, WF, oc.HELD, datetime.now(dt_timezone.utc) - timedelta(minutes=2), engine=engine)
     refusal = None
     if gate != oc.HELD:
@@ -278,10 +280,8 @@ def test_the_roadmap_chain_is_reconstructed_hop_by_hop_and_every_unproven_hop_is
 
 def test_a_broken_hop_holds_the_decision_at_needs_remediation_and_the_note_names_it():
     # The agent acts as svc-admin, and the chain says the effect went through svc-x.
-    # Since the graph hops are read as of dispatch, the chain cites the dispatch whose
-    # graph that was: the history records the agent acting as svc-admin then.
     dep, client, permit, _ = _world(identity="svc-admin")
-    answer = _post(client, dep, _dispatched_body(client, dep, permit))
+    answer = _post(client, dep, _chain_body(client, dep, permit))
     assert answer.status_code == 201, answer.content
     chain = answer.json()["chains"][0]
     assert chain["verdict"] == "broken" and chain["broken_hops"] == [2]
@@ -294,6 +294,18 @@ def test_a_broken_hop_holds_the_decision_at_needs_remediation_and_the_note_names
     assert [c["verdict"] for c in support["claims"]["authority_chains_broken"]] == ["broken"]
     assert support["note"].startswith("Held at 'needs remediation' by 1 authority chain(s)")
     assert "through_identity" in support["note"]
+
+
+def test_an_agent_that_acted_as_another_account_at_the_dispatch_breaks_the_identity_hop():
+    # The same misconfiguration, on a chain that cites its dispatch: the edge history
+    # records the agent acting as svc-admin then, and the record contradicts the hop.
+    dep, client, permit, _ = _world(identity="svc-admin")
+    chain = _post(client, dep, _dispatched_body(client, dep, permit)).json()["chains"][0]
+    assert chain["verdict"] == "broken" and chain["broken_hops"] == [2]
+    reasons = _by_relation(chain)["through_identity"]["reasons"]
+    assert [r["code"] for r in reasons] == ["acts_as_another"]
+    assert "svc-admin" in reasons[0]["detail"] and "dispatch at" in reasons[0]["detail"]
+    assert _fresh(dep).decision == D.NEEDS_REMEDIATION
 
 
 def _outside_approval_body(client, dep, permit):
@@ -626,7 +638,7 @@ def test_the_chain_and_every_hops_verdict_appear_in_the_receipt_and_the_verifier
 
 def test_a_broken_chain_holds_no_stop():
     dep, client, permit, _ = _world(identity="svc-admin")
-    _post(client, dep, _dispatched_body(client, dep, permit))
+    _post(client, dep, _chain_body(client, dep, permit))
     assert _fresh(dep).decision == D.NEEDS_REMEDIATION
     paused = client.post(_base(dep) + "recompute/", {"paused": True}, format="json")
     assert paused.status_code == 200, paused.content

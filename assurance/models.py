@@ -3726,6 +3726,24 @@ class AuthorityEdgeVersionRewriteRefused(ValueError):
     append-only: an edge that moved is a NEW row, and the one before it stays."""
 
 
+class AuthorityEdgeVersionQuerySet(models.QuerySet):
+    """The edge history is never edited and never deleted on its own: a queryset
+    ``update``, ``bulk_update`` or ``delete`` is refused, as a row's ``save`` and
+    ``delete`` are. It goes only with its deployment (the foreign key's cascade, which
+    Django runs through the base manager)."""
+
+    def update(self, **kwargs):
+        raise AuthorityEdgeVersionRewriteRefused("The edge history is never rewritten; record a new change.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise AuthorityEdgeVersionRewriteRefused("The edge history is never rewritten; record a new change.")
+
+    def delete(self):
+        raise AuthorityEdgeVersionRewriteRefused("The edge history is never deleted; it goes with its deployment.")
+
+    delete.queryset_only = True
+
+
 class AuthorityEdgeVersion(models.Model):
     """One change of one graph edge an authority chain's ``through_identity``,
     ``performs`` or reach is read against: the edge came into force, or went out of it,
@@ -3746,8 +3764,10 @@ class AuthorityEdgeVersion(models.Model):
     as a service account) and ``identity_gap`` (an identity reference unplaced),
     ``invokes`` (an agent declares a tool), ``reach`` (effective access reaches a tool),
     ``inferred`` (only an inferred edge joins them) and ``tool_gap`` (a tool reference
-    unplaced), ``declares`` (a component declares its permissions) and ``action`` (it
-    declares this one). The source is an asset uuid; the target an asset uuid, a gap
+    unplaced), ``declares`` (a component declares its permissions), ``action`` (it
+    declares this one) and ``component`` (the component exists, as named: a
+    contradiction is read only of a component that is, as the chain names it now, the
+    one the history names). The source is an asset uuid; the target an asset uuid, a gap
     (its reference and reasons, as JSON) or a permission. ``in_force`` says whether the
     state appeared (true) or disappeared (false) at ``noticed_at``. One ``begun`` row per
     deployment, with no edge, says from when the history covers it: before that,
@@ -3760,14 +3780,18 @@ class AuthorityEdgeVersion(models.Model):
     every decision refresh as a backstop, so ``noticed_at`` is when the platform
     NOTICED: at or after the change, never when the customer made it.
 
-    APPEND-ONLY: the model refuses an update or a delete of a recorded row
-    (:class:`AuthorityEdgeVersionRewriteRefused`). An edge that returns is appended again:
-    the history says it went and came back.
+    APPEND-ONLY: the model refuses an update or a delete of a recorded row, and its
+    queryset a bulk one (:class:`AuthorityEdgeVersionRewriteRefused`); only the
+    deployment's cascade removes rows. An edge that returns is appended again: the
+    history says it went and came back.
     """
 
     # Spelled as the rule spells them (assurance.authority_chain.EDGE_IDENTITY, ...;
     # held equal by test), so this module stays free of the rule.
-    KINDS = ("identity", "identity_gap", "invokes", "reach", "inferred", "tool_gap", "declares", "action", "begun")
+    KINDS = (
+        "identity", "identity_gap", "invokes", "reach", "inferred", "tool_gap", "declares", "action", "component",
+        "begun",
+    )
 
     id = models.BigAutoField(primary_key=True)
     deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="authority_edge_versions")
@@ -3782,6 +3806,8 @@ class AuthorityEdgeVersion(models.Model):
     in_force = models.BooleanField()
     noticed_at = models.DateTimeField()
     recorded_at = models.DateTimeField(default=timezone.now)
+
+    objects = AuthorityEdgeVersionQuerySet.as_manager()
 
     class Meta:
         ordering = ["deployment", "noticed_at", "id"]

@@ -257,7 +257,7 @@ def _policy_document() -> dict:
             "edge_kinds": [
                 _authority_chain.EDGE_IDENTITY, _authority_chain.EDGE_IDENTITY_GAP, _authority_chain.EDGE_INVOKES,
                 _authority_chain.EDGE_REACH, _authority_chain.EDGE_INFERRED, _authority_chain.EDGE_TOOL_GAP,
-                _authority_chain.EDGE_DECLARES, _authority_chain.EDGE_ACTION,
+                _authority_chain.EDGE_DECLARES, _authority_chain.EDGE_ACTION, _authority_chain.EDGE_COMPONENT,
             ],
         },
         # Which effects need an authority chain (assurance.consequential): the

@@ -164,7 +164,18 @@ another identity, references discovery could not place, inferred edges, which
 components declare their permissions -- so each hop reaches, at the dispatch, the
 verdict the graph as it stood then implied: a contradiction then is BROKEN, named as
 it always was (``acts_as_another``, ``unreachable``, ``permission_not_declared``); an
-edge simply not in force then is UNPROVEN (``*_not_in_force_at_dispatch``).
+edge simply not in force then is UNPROVEN (``*_not_in_force_at_dispatch``). A
+contradiction is read only of components that are, as the chain names them now, the
+ones the history names: one re-created or renamed since the dispatch reads unproven,
+never broken (:data:`EDGE_COMPONENT`).
+
+A chain that records NO dispatch (no observed effect, a v1 one) has no older graph to
+be read against. Its graph hops read ``dispatch_state_unrecorded`` -- the graph as it
+stands never proves them -- unless the graph as it stands CONTRADICTS one as master's
+live rule did (``acts_as_another``, ``unreachable``, ``permission_not_declared``, and
+``outside_approval`` against the approval as it stands): a misconfiguration present
+now is broken whether or not anything was dispatched through it. A chain that records a
+dispatch is read as of it alone, so no change after the dispatch unproves or breaks it.
 
 Everything else is read as the record stands NOW: which component each node names,
 shadow and coverage, and whether each signature verifies under the keyring in force.
@@ -296,6 +307,10 @@ EDGE_TOOL_GAP = "tool_gap"
 EDGE_DECLARES = "declares"
 #: A component declares a permission.
 EDGE_ACTION = "action"
+#: A component exists, as it is named (its kind, identifier and name): what a
+#: contradiction is only read for -- a component re-created or renamed since the
+#: dispatch is not the one the history names, and reads unproven, never broken.
+EDGE_COMPONENT = "component"
 
 #: The document a chain's digest is taken over, and an engine's signature covers.
 CHAIN_SCHEMA = "mythos.authority-chain/v1"
@@ -447,16 +462,16 @@ REASONS: Mapping[str, str] = {
     # broken
     "outside_approval": "the approval names other tools, or permissions, and not this one",
     "unreachable": (
-        "at the dispatch instant, by the graph's edge history, effective access over a graph fully resolved from "
-        "the acting agent did not reach this tool"
+        "at the dispatch instant, by the graph's edge history -- or, with no dispatch recorded, in the graph as it "
+        "stands -- effective access over a graph fully resolved from the acting agent did not reach this tool"
     ),
     "acts_as_another": (
-        "at the dispatch instant, by the graph's edge history, the acting agent declared that it acted as another "
-        "account, and not this one"
+        "at the dispatch instant, by the graph's edge history -- or, with no dispatch recorded, in the graph as it "
+        "stands -- the acting agent declared that it acted as another account, and not this one"
     ),
     "permission_not_declared": (
-        "at the dispatch instant, by the graph's edge history, every component the identity acted through declared "
-        "its permissions, and none this one"
+        "at the dispatch instant, by the graph's edge history -- or, with no dispatch recorded, in the graph as it "
+        "stands -- every component the identity acted through declared its permissions, and none this one"
     ),
     "gate_refused": "the Action Gate refused this workflow's action",
     "effect_violated": "the observed-effect outcome cited says the effect was produced outside its authority",
@@ -711,6 +726,12 @@ class Graph:
     reach: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
+def component_target(component: Component) -> str:
+    """How a component is spelled as the target of its existence row: its kind,
+    identifier and name, as canonical JSON -- so a rename is a new row."""
+    return json.dumps([component.kind, component.identifier, component.name], separators=(",", ":"))
+
+
 def gap_target(gap: Gap) -> str:
     """How a gap is spelled as the target of a stored gap row: its reference and the
     reasons it is unresolved, as canonical JSON -- one row per distinct gap."""
@@ -742,6 +763,8 @@ def graph_edges(graph: Graph) -> frozenset[tuple[str, str, str]]:
     * :data:`EDGE_TOOL_GAP` ``(agent, gap)``: a tool reference not placed cleanly.
     * :data:`EDGE_DECLARES` ``(component, "")``: the component declares its permissions.
     * :data:`EDGE_ACTION` ``(component, permission)``: a permission it declares.
+    * :data:`EDGE_COMPONENT` ``(component, naming)``: the component exists, as named
+      (:func:`component_target`).
 
     Sources and targets are component uuids, but a gap's target (:func:`gap_target`)
     and a permission. Edges to tools are kept to the tool node kinds
@@ -763,6 +786,7 @@ def graph_edges(graph: Graph) -> frozenset[tuple[str, str, str]]:
             elif gap.mechanism == _refs.MECHANISM_TOOLS:
                 edges.add((EDGE_TOOL_GAP, uuid, gap_target(gap)))
     for component in graph.components:
+        edges.add((EDGE_COMPONENT, component.uuid, component_target(component)))
         if component.permissions is not None:
             edges.add((EDGE_DECLARES, component.uuid, ""))
             edges.update((EDGE_ACTION, component.uuid, p) for p in component.permissions)
@@ -915,7 +939,8 @@ class Delegation:
 class Inputs:
     #: The graph as it stands: which component each node names, and whether it is
     #: shadow or assessed. The edges ``through_identity``, ``performs`` and reach read
-    #: are not read from it but from ``edge_history``, as of dispatch.
+    #: are read from ``edge_history``, as of dispatch; from this, only a contradiction
+    #: of a hop whose chain records no dispatch -- never a proof.
     graph: Graph = field(default_factory=Graph)
     outcomes: Mapping[str, CitedOutcome] = field(default_factory=dict)
     #: How many chains in force cite each observed-effect outcome, by its id: one
@@ -1021,6 +1046,34 @@ class _Index:
             if version is not None:
                 found[target] = version
         return found
+
+    def existed_as_now(self, component: Component, instant: datetime) -> bool:
+        """Whether ``component`` existed at ``instant`` as it is named now: the same row,
+        kind, identifier and name. Not, for one re-created (a new row) or renamed since."""
+        return self.edge_at(EDGE_COMPONENT, component.uuid, component_target(component), instant) is not None
+
+    def named_at(self, kind: str, ref: str, instant: datetime) -> bool:
+        """Whether a component of ``kind`` answered to ``ref`` (identifier or name) at
+        ``instant``, by the history: a reference that dangles now named one then."""
+        for (edge_kind, _source), targets in self.edges.items():
+            if edge_kind != EDGE_COMPONENT:
+                continue
+            for target, versions in targets.items():
+                try:
+                    named_kind, identifier, name = json.loads(target)
+                except (TypeError, ValueError):
+                    continue
+                if named_kind == kind and ref in (identifier, name) and _in_force_at(versions, instant) is not None:
+                    return True
+        return False
+
+    def same_at(self, node: Node, component: Component | None, instant: datetime) -> bool:
+        """Whether the node a contradiction names was, at ``instant``, what it resolves to
+        now: the component it resolves to existed then as named now, or -- dangling now --
+        nothing of its kind answered to its reference then either."""
+        if component is not None:
+            return self.existed_as_now(component, instant)
+        return not self.named_at(node.kind, node.ref, instant)
 
     def name(self, uuid: str) -> str:
         """A component's name for a reader: the graph's now, or its uuid if it is gone."""
@@ -1370,6 +1423,8 @@ def _invokes(chain, i, source, target, inputs, index) -> list[Reading]:
             )
         elif target is not None and dispatch is not None:
             readings.append(_reach_at_dispatch(index, inputs, actor, target, dispatch))
+        elif target is not None:
+            readings.extend(_live_unreachable(index, actor, target))
     return readings
 
 
@@ -1452,6 +1507,10 @@ def _reach_at_dispatch(index: _Index, inputs: Inputs, actor: Component, tool: Co
             f"at the dispatch at {at}, no reach from agent {actor.name!r} to {tool.name!r} was in force, and the "
             f"agent declared {len(gaps)} tool reference(s) discovery could not place, so its reach was not known whole",
         )
+    if not (index.existed_as_now(actor, instant) and index.existed_as_now(tool, instant)):
+        return _not_the_same(
+            "reach_not_in_force_at_dispatch", f"no reach from agent {actor.name!r} to {tool.name!r} was in force", at
+        )
     return Reading(
         BROKEN,
         "unreachable",
@@ -1481,7 +1540,7 @@ def _through_identity(chain, i, source, target, inputs, index) -> list[Reading]:
             Reading(UNPROVEN, "actor_unresolved", f"agent {actor_node.ref!r} does not resolve to one component"),
         ]
     if dispatch is None:
-        return readings
+        return [*readings, *_live_acts_as_another(chain, i, actor, target, index)]
     unrecorded = _edges_unrecorded(inputs, dispatch)
     if unrecorded is not None:
         return [unrecorded]
@@ -1507,6 +1566,14 @@ def _through_identity(chain, i, source, target, inputs, index) -> list[Reading]:
         ]
     if acts_as:
         others = ", ".join(sorted(index.name(u) for u in acts_as))
+        if not (index.existed_as_now(actor, instant) and index.same_at(chain.hops[i].target, target, instant)):
+            return [
+                _not_the_same(
+                    "identity_not_in_force_at_dispatch",
+                    f"agent {actor.name!r} acted as {others}, not {chain.hops[i].target.ref!r}",
+                    at,
+                )
+            ]
         return [
             Reading(
                 BROKEN,
@@ -1524,6 +1591,123 @@ def _through_identity(chain, i, source, target, inputs, index) -> list[Reading]:
     ]
 
 
+def _not_the_same(code: str, what: str, at: str) -> Reading:
+    """An as-of-dispatch reading that would have contradicted the hop, about a
+    component that is not, as the chain names it now, the one the history names: one
+    re-created (a new row) or renamed since the dispatch. Not a contradiction of the
+    hop -- the record does not show the component the chain names doing otherwise --
+    so unproven, never broken."""
+    return Reading(
+        UNPROVEN,
+        code,
+        f"at the dispatch at {at}, {what}, by the graph's edge history; but a component the chain names is not, "
+        "as it is named now, the one the history names then (re-created or renamed since), so nothing there "
+        "contradicts the hop",
+    )
+
+
+def _as_it_stands(what: str = "the graph") -> str:
+    """Said of every reading taken from the record as it stands: a contradiction found
+    there, because no dispatch is recorded to read an older one against. Never a proof."""
+    return f"in {what} as it stands -- no dispatch is recorded, so nothing older can be read --"
+
+
+def _live_acts_as_another(chain: Chain, i: int, actor: Component, target: Component | None, index: _Index) -> list[Reading]:
+    """With no dispatch recorded, the one thing the graph as it stands may still say of
+    ``through_identity``: that it contradicts the hop -- the agent declares, cleanly,
+    that it acts as another account and not this one (master's live rule). Never that
+    it proves it."""
+    if any(g.mechanism == _refs.MECHANISM_IDENTITY for g in index.graph.gaps.get(actor.uuid, ())):
+        return []
+    acts_as = {t for (s, kind, t) in index.graph.declared if s == actor.uuid and kind == "acts_as"}
+    if not acts_as or (target is not None and target.uuid in acts_as):
+        return []
+    others = ", ".join(sorted(index.name(u) for u in acts_as))
+    return [
+        Reading(
+            BROKEN,
+            "acts_as_another",
+            f"{_as_it_stands()} agent {actor.name!r} declares that it acts as {others}, not {chain.hops[i].target.ref!r}",
+        )
+    ]
+
+
+def _live_unreachable(index: _Index, actor: Component, tool: Component) -> list[Reading]:
+    """With no dispatch recorded: the graph as it stands contradicts the reach when it is
+    fully resolved from the agent, nothing inferred joins them, and effective access
+    does not reach the tool (master's live rule). Never a proof."""
+    graph = index.graph
+    if any(g.mechanism == _refs.MECHANISM_TOOLS for g in graph.gaps.get(actor.uuid, ())):
+        return []
+    if (
+        (actor.uuid, "invokes", tool.uuid) in graph.declared
+        or tool.uuid in graph.reach.get(actor.uuid, frozenset())
+        or (actor.uuid, tool.uuid) in graph.inferred
+    ):
+        return []
+    return [
+        Reading(
+            BROKEN,
+            "unreachable",
+            f"{_as_it_stands()} effective access over a graph fully resolved from agent {actor.name!r} does not reach "
+            f"{tool.name!r}",
+        )
+    ]
+
+
+def _live_permission_not_declared(chain: Chain, i: int, source, action: str, index: _Index) -> list[Reading]:
+    """With no dispatch recorded: the graph as it stands contradicts ``performs`` when the
+    identity, the tool it acts through and every tool its effective access reaches
+    declare their permissions, and none of them this one (master's live rule)."""
+    relevant: dict[str, Component] = {}
+    if source is not None:
+        relevant[source.uuid] = source
+        for uuid in index.graph.reach.get(source.uuid, frozenset()):
+            component = index.by_uuid.get(uuid)
+            if component is not None and component.kind in TOOL_NODE_KINDS:
+                relevant[uuid] = component
+    tool_node = _last_before(chain, i, TOOL_NODE_KINDS)
+    if tool_node is not None:
+        tool, _ = index.resolve(tool_node)
+        if tool is not None:
+            relevant[tool.uuid] = tool
+    if not relevant or any(c.permissions is None or action in c.permissions for c in relevant.values()):
+        return []
+    return [
+        Reading(
+            BROKEN,
+            "permission_not_declared",
+            f"{_as_it_stands()} {', '.join(sorted(c.name for c in relevant.values()))} declare their permissions, and "
+            f"none of them is {action!r}",
+        )
+    ]
+
+
+def _live_outside_approval(chain: Chain, action: str, inputs: Inputs) -> list[Reading]:
+    """With no dispatch recorded: the approval as it stands -- its latest recorded version
+    -- contradicts ``performs`` when every tool it names was approved under a contract
+    that declares its permissions, and none of them this one (master's live rule)."""
+    versions = inputs.approval_history.get(chain.workflow, ())
+    approval = versions[-1] if versions else None
+    if approval is None or not approval.digest or not approval.tools:
+        return []
+    perms = []
+    for kind, identifier, digest in approval.tools:
+        recorded = [v for v in inputs.contract_history.get((kind, identifier), ()) if v.digest == digest]
+        if not recorded or recorded[-1].permissions is None:
+            return []
+        perms.append(recorded[-1].permissions)
+    if any(action in p for p in perms):
+        return []
+    return [
+        Reading(
+            BROKEN,
+            "outside_approval",
+            f"{_as_it_stands(f'the approval of {chain.workflow!r}')} no tool it names was approved with {action!r}",
+        )
+    ]
+
+
 def _performs(chain, i, source, target, inputs, index) -> list[Reading]:
     """Read AS OF DISPATCH: the permission was declared at the dispatch instant by what
     the identity acted through then, and the approval in force then approved it. The
@@ -1533,6 +1717,8 @@ def _performs(chain, i, source, target, inputs, index) -> list[Reading]:
     dispatch, missing = _dispatch_state(chain, inputs)
     if missing is not None:
         readings.append(missing)
+        readings.extend(_live_permission_not_declared(chain, i, source, action, index))
+        readings.extend(_live_outside_approval(chain, action, inputs))
     else:
         readings.append(_action_at_dispatch(chain, i, source, action, dispatch, inputs, index))
         readings.append(_within_approval_at_dispatch(chain, action, dispatch, inputs))
@@ -1578,6 +1764,15 @@ def _action_at_dispatch(chain, i, source, action: str, dispatch: DispatchState, 
         )
     declaring = [uuid for uuid in relevant if index.edge_at(EDGE_DECLARES, uuid, "", instant) is not None]
     if relevant and len(declaring) == len(relevant):
+        named = [(chain.hops[i].source, source)]
+        if tool_node is not None:
+            named.append((tool_node, index.resolve(tool_node)[0]))
+        if not all(index.same_at(node, component, instant) for node, component in named):
+            return _not_the_same(
+                "action_not_in_force_at_dispatch",
+                f"nothing the identity acted through declared {action!r}",
+                at,
+            )
         return Reading(
             BROKEN,
             "permission_not_declared",
