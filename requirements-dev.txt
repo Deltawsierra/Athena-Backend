@@ -44,3 +44,16 @@ mythos-core @ git+https://github.com/Deltawsierra/Mythos-Core@104fdc9aa41ea3c658
 # an unpinned linter turns CI red on its own release schedule, with no change to
 # this repository. The target version is pinned alongside it, in ruff.toml.
 ruff==0.16.8
+
+# Economic Exposure's probabilistic engine (assurance/economics/engine/
+# distributions.py and simulation.py) samples with numpy's Generator(PCG64): one
+# explicit, seeded bit generator per parameter sub-stream, vectorised over the
+# 100,000 draws a run takes by default. numpy is already pinned in
+# requirements.txt at this same version; the light set needs it too because
+# tests/test_economics_engine.py imports every engine module, and the
+# distribution and simulation tests run here. The two pins must name the SAME
+# version: a different numpy may draw a different stream from the same seed,
+# and a run's digest would then differ between CI and the service. Nothing
+# Django loads imports either module (tests/test_economics_distributions.py
+# pins that), so a numpy fault cannot reach a stop route.
+numpy==2.3.3

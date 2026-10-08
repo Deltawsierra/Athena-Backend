@@ -30,6 +30,11 @@ anything.
 12. [FX, cost indices and normalization](#12-fx-cost-indices-and-normalization)
 13. [Observation data and the synthetic snapshot](#13-observation-data-and-the-synthetic-snapshot)
 
+Phase E2, MVP step 7a, numbered to follow the scenario engine's sections 14 to 22
+(MVP step 4), which land separately:
+
+23. [Distributions and simulation](#23-distributions-and-simulation)
+
 ## 1. Status and scope
 
 | | |
@@ -767,3 +772,309 @@ trusted above `unverified` (refused on save, and the check constraint
 `ck_econ_source_synthetic_unverified`). Whether a production run should also
 refuse every `unverified` source, synthetic or not, is the owner's decision; this
 version does not.
+
+## 23. Distributions and simulation
+
+Phase E2, MVP step 7a: the distribution library and the seeded Monte Carlo
+sampler of the owner's specification, sections 7.1 to 7.3. It is numbered to
+follow the scenario engine's sections 14 to 22 (MVP step 4), which land
+separately. Both modules are pure, and nothing calls them yet: wiring them to the
+formulas and the records is step 7b (section 23.11).
+
+| | |
+|---|---|
+| Code | `assurance/economics/engine/distributions.py` (the catalogue) and `assurance/economics/engine/simulation.py` (the sampler); no model, no migration, no route |
+| Tests | `tests/test_economics_distributions.py` and `tests/test_economics_simulation.py` (no database), with the plugin `tests/economics_probabilistic_poisoned.py` |
+| Dependency | numpy, `Generator(PCG64)`: `numpy==2.3.3`, the pin `requirements.txt` already had, now in `requirements-dev.txt` too (CI's set), and a test holds the two alike |
+
+### 23.1 The catalogue
+
+Each distribution is a frozen value whose parameters are checked when it is
+built. It is built from its native parameters (form `native`) or from a form a
+customer gives, and records which form and the values given. Each has a stable
+id, never reused, and a version: a change to how one samples, or how its
+parameters are read, is a new version. Every sample set records both
+(`Distribution.record()`), with the native parameters, the form, the values given,
+and the mean and variance.
+
+| Id | Kind | Native parameters | Customer forms | Mean, variance |
+|---|---|---|---|---|
+| `poisson` | `frequency` | rate > 0 | | rate, rate |
+| `negative_binomial` | `frequency` | size r > 0, p in (0, 1) (numpy's: failures before the r-th success) | `mean_variance`: p = m / v, r = m^2 / (v - m), refused unless v > m (`not_overdispersed`) | r(1-p)/p, r(1-p)/p^2 |
+| `zero_inflated_poisson` | `frequency` | zero inflation pi in [0, 1), rate > 0 | | (1-pi) rate, (1-pi) rate (1 + pi rate) |
+| `beta_binomial_rate` | `rate` | alpha, beta > 0 | `prior_and_trials`: Beta(a0, b0) prior and k successes of n trials give Beta(a0 + k, b0 + n - k); the prior defaults to Beta(1, 1) and is recorded | alpha/(alpha+beta), alpha beta / ((alpha+beta)^2 (alpha+beta+1)) |
+| `lognormal` | `severity` | mu, sigma > 0 | `median_sigma`; `p10_p90`: mu = (ln P10 + ln P90)/2, sigma = (ln P90 - ln P10)/(2 z90); `median_p90`: sigma = (ln P90 - ln median)/z90; z90 = 1.2815515655446004 | exp(mu + sigma^2/2), (e^(sigma^2) - 1) e^(2mu + sigma^2) |
+| `gamma` | `severity` | shape k > 0, scale theta > 0 | `mean_sd`: k = (m/s)^2, theta = s^2/m | k theta, k theta^2 |
+| `generalized_pareto` | `severity` | shape xi in (-1, 2], scale sigma > 0, threshold u >= 0 | `mean_excess`: sigma = (1 - xi) e, for xi < 1 | u + sigma/(1-xi) for xi < 1, else `None`; sigma^2/((1-xi)^2 (1-2xi)) for xi < 1/2, else `None` |
+| `spliced` | `severity` | a `lognormal` or `gamma` body truncated to (0, u], a `generalized_pareto` tail above u, the tail probability pi in (0, 1); u at or above the body's median | `continuous_at_threshold`: pi = the body's own probability above u | from the body's partial moments and the tail's; `None` where the tail's is |
+| `pert` | `expert` | min < max, mode in [min, max], weight w > 0 (4 unless stated); a beta with alpha = 1 + w (mode - min)/(max - min), beta = 1 + w (max - mode)/(max - min) | | (min + w mode + max)/(w + 2), the scaled beta's |
+| `triangular` | `expert` | min < max, mode in [min, max] | | (min + mode + max)/3, (a^2 + b^2 + c^2 - ab - ac - bc)/18 |
+
+**Expert ranges keep their assumptions explicit.** A `pert` or `triangular` takes
+the parameter's `source_type` and a `sparse` mark, and is refused
+(`expert_not_allowed`) unless the source type is `EXPERT_ESTIMATE` or the data
+are marked sparse: an expert's range never stands in for data that exists
+(owner's specification, section 7.1). Both are written into the record, and a run
+lists the parameters that rest on an expert range (`expert_parameters`), which
+should lower the confidence grade (step 7b).
+
+**Infinite moments are `None`, never a float Infinity.** A generalized Pareto's
+mean is infinite for xi >= 1 and its variance for xi >= 1/2; a splice whose tail
+has either inherits it. A moment that is finite in theory but too large for a
+binary64 float (a lognormal with a very large sigma) is refused when the
+distribution is built (`out_of_range`), so no output ever holds Infinity.
+
+Every distribution gives `sample(rng, n)`, `cdf(x)`, `ppf(p)` (also `quantile`),
+`mean` and `variance`. A quantile is the smallest x with `cdf(x) >= p`, for
+0 < p < 1: closed form where there is one (lognormal, generalized Pareto,
+triangular, and a splice through its parts), otherwise by bisection to the last
+bit of a float (gamma, beta, PERT), and the smallest whole number for a count.
+The CDFs use no third-party special functions: the regularized incomplete gamma
+and beta functions are computed here (series and continued fractions, with
+Stirling's correction for large shapes so the prefactor keeps its digits), and the
+normal quantile is the standard library's (`statistics.NormalDist`, Wichura's
+AS241). During development they were checked against SciPy 1.16.2 and mpmath to
+about 1e-12, relative, over the ranges the tests use; neither is a dependency.
+
+`sample` draws only from the `numpy.random.Generator` it is given: never numpy's
+or Python's global RNG, and never a `RandomState` (`rng_malformed`). A count's
+draws are int64, a cost's float64.
+
+### 23.2 Refusal codes
+
+`distributions.REFUSALS`, raised as `DistributionRefused`:
+
+| Code | Refused |
+|---|---|
+| `not_a_number` | a parameter that is not an int, a float or a Decimal: a bool, text, None |
+| `not_finite` | NaN or Infinity |
+| `out_of_range` | a mean, variance or count too large to hold as a float or to sample |
+| `scale_not_positive` | a scale (sigma, a gamma or Pareto scale) or a rate at or below zero |
+| `value_not_positive` | a value a form is built from at or below zero: a lognormal's median or quantile, a mean, a standard deviation, a variance, a mean excess |
+| `shape_out_of_range` | a gamma or beta shape or a negative-binomial size at or below zero, a PERT weight at or below zero, a generalized Pareto shape outside (-1, 2] |
+| `probability_out_of_range` | a zero inflation outside [0, 1); a negative-binomial p, a splice's tail probability or a quantile's p outside (0, 1) |
+| `range_inverted` | min not below max, P10 not below P90, a median not below P90 |
+| `mode_out_of_range` | an expert's mode outside [min, max] |
+| `not_overdispersed` | a negative binomial whose variance is not above its mean |
+| `threshold_out_of_range` | a negative Pareto threshold; a splice threshold at zero or below its body's median |
+| `component_unsupported` | a splice whose body is not a lognormal or gamma, or whose tail is not a generalized Pareto |
+| `trials_malformed` | trials and successes not whole numbers with 0 <= successes <= trials, trials >= 1 |
+| `expert_not_allowed` | a PERT or triangular for a source other than `EXPERT_ESTIMATE` whose data are not marked sparse |
+| `source_type_unrecognised` | a source type not one of the eight |
+| `sparse_malformed` | a sparse mark that is not True or False |
+| `form_unrecognised` | a form the distribution does not list, or `given` not (name, value) pairs |
+| `rng_malformed` | a sample from anything but an explicit numpy Generator |
+| `sample_size_out_of_range` | a sample size that is not a whole number from 0 to 10,000,000 |
+
+`simulation.REFUSALS`, raised as `SimulationRefused`:
+
+| Code | Refused |
+|---|---|
+| `seed_malformed` | a seed that is not a whole number from 0 to 2^64 - 1 |
+| `draws_out_of_range` | draws that are not a whole number from 1,000 to 1,000,000 |
+| `events_over_limit` | a compound run whose events, across all its years, exceed 10,000,000 (checked before any event is sampled) |
+| `parameter_name_malformed` | a name that is not 1 to 100 lowercase ASCII letters, digits and `_`, starting with a letter |
+| `parameters_malformed` | parameters that are not a non-empty mapping of names to distributions |
+| `frequency_not_a_count` | a frequency that is not a count distribution |
+| `evaluate_missing` | no function for more than one parameter, or one that cannot be called |
+| `outcome_malformed` | a function that does not return one number per draw |
+| `outcome_not_finite` | an outcome that is NaN or Infinity |
+| `outcome_negative` | an outcome below zero: every outcome is a loss, and no benefit model is enabled |
+| `out_of_range` | a mean or variance of the outcomes too large to hold as a float |
+| `percentile_out_of_range` | a severe-but-plausible percentile that is not an int or Decimal from 90 to below 100 |
+| `model_version_blank` | a run that does not name its model version |
+| `scenario_id_malformed` | a scenario id that is blank or not text |
+
+A reporting currency is checked as money checks it (section 11.4), with money's
+codes. A broken runtime invariant (section 23.5) is `InvariantBroken`: a defect in
+the engine or in the function it evaluated, never the input's fault.
+
+### 23.3 Randomness: one seed, named sub-streams
+
+A run has one seed, a whole number from 0 to 2^64 - 1. Each parameter draws from
+its own stream, `Generator(PCG64(SeedSequence(entropy=seed, spawn_key=K)))`,
+where K is the SHA-256 of `mythos.economics.substream/v1`, a zero byte and the
+parameter name's UTF-8, read as eight little-endian 32-bit words. A parameter's
+draws depend on the seed and its own name only: adding, removing or reordering
+another parameter never changes them. The frequency draws from the stream named
+`@frequency`, which no parameter name can spell. A run issues each stream once (a
+second request is a defect: two parameters would draw the same numbers), reads no
+global RNG, and depends on nothing that varies with `PYTHONHASHSEED`. The first
+draws of one sub-stream are pinned by a test, so a change to the derivation, or to
+numpy's PCG64 or SeedSequence, fails until `SAMPLER_VERSION` moves with the pin.
+
+### 23.4 A run
+
+`simulation.run(parameters, evaluate, seed=, model_version=, reporting_currency=,
+frequency=None, draws=100_000, severe_percentile=95, scenario_id=None)`.
+`evaluate` maps a dict of draw vectors (read-only, one per parameter) to one
+outcome per draw, vectorised and pure; step 7b passes the scenario engine's
+formulas. A run of one parameter may omit it.
+
+- **Without a frequency** (basis `per_draw`) a draw is one evaluation, and the
+  summary is of the outcome. There is no expected annual loss: the engine does not
+  know the outcome is annual, and says so (`null`) rather than guessing.
+- **With a frequency** (basis `annual_loss`) a draw is a simulated year. N events
+  are drawn from the frequency for each year; every event's parameters are drawn
+  afresh and evaluated; and the year's loss is the sum of its N event losses,
+  accumulated in event order (`compound_annual`), zero for a year with none. The
+  percentiles, mean and severe-but-plausible are of the annual loss, the expected
+  annual loss is its mean, and the event-loss distribution is summarised beside it
+  (when the run has at least 1,000 events).
+
+**Reproducibility is enforced at run time.** The run is sampled twice, each time
+from fresh sub-streams, and the two outcome vectors must be identical bit for bit;
+a function that reads a global RNG or otherwise is not pure is caught here.
+
+### 23.5 Summary, percentiles and bands
+
+Severe-but-plausible is P95 of annual loss (of the outcome, in a `per_draw` run)
+unless the run states another percentile, from 90 to below 100; the percentile is
+written into the result.
+
+- **Quantiles** are Hyndman and Fan's type 7, numpy's `'linear'`: sort the n
+  outcomes; h = (n - 1) p, computed exactly from the percentile as a fraction;
+  q = x[floor(h)] + (h - floor(h)) (x[floor(h) + 1] - x[floor(h)]), in binary64,
+  clamped to that interval.
+- **The mean** is `math.fsum` of the outcomes (a correctly rounded sum) over n;
+  the sample variance is `fsum` of the squared deviations over n - 1; the standard
+  error of the mean is the square root of variance over n.
+- **Bands**, at 95%: a percentile's is the pair of order statistics at ranks
+  floor(np - z s) and ceil(np + z s), s = sqrt(n p (1 - p)), clamped to [1, n]
+  (distribution-free); the mean's is the mean minus and plus z standard errors;
+  z is the standard normal's 97.5th percentile. They make "within tolerance"
+  measurable.
+- **Invariants**, checked on every summary: p10 <= p50 <= p90 <= severe, all at
+  least zero, a mean at least zero, and each figure inside its band.
+- **A mean that does not exist is not estimated.** When any parameter's mean is
+  infinite, the mean, the expected annual loss, their standard error and band are
+  `null`, and `mean_undefined` names the parameters; the percentiles are given.
+
+### 23.6 Precision
+
+Floats inside, Decimal outside. Draws and arithmetic are binary64. Each summary
+float becomes the Decimal of its repr: the shortest decimal string that reads
+back as exactly that float (Python's repr, the same on every IEEE-754 platform),
+converted with no rounding, and written in money's one spelling (plain notation,
+no exponent, no trailing zeros; section 12.6). It is rounded to the reporting
+currency's minor unit only to be shown (`Money.display`, ROUND_HALF_EVEN; section
+11.3): 568764.7227033532 is shown as 568764.72 USD. A record holds no float.
+
+### 23.7 The result and its digest
+
+The record carries the owner's specification's result fields (section 15:
+`scenario_id`, `model_version`, `seed`, `simulations`, `p10`, `p50`, `p90`,
+`mean`, `expected_annual_loss`, `severe_plausible`, `reporting_currency`), and
+beside them the basis, the severe percentile, the standard error, the bands, the
+events, every parameter's and the frequency's record (id, version, parameters,
+form, values given), the expert parameters, the sampler's version and methods,
+and `outcomes_sha256`: the SHA-256 of every outcome as little-endian binary64,
+so the digest covers every draw. `scenario_id` is a placeholder until step 7b.
+The schema is `mythos.economics.simulation/v1`. The seed is written as text, so a
+reader that holds numbers as doubles cannot round it.
+
+The digest is `sha256:` and the SHA-256 of the record's canonical JSON (sorted
+keys, no whitespace, ASCII, no float). It changes with the seed, the draws, any
+parameter, the frequency, the model version, the scenario id, the reporting
+currency and the severe percentile. The library versions are kept outside it, as
+provenance (`numpy`): the digest already covers every draw. Abridged, from 100,000
+simulated years of three parameters at seed 2026:
+
+```json
+{"schema": "mythos.economics.simulation/v1", "scenario_id": null, "model_version": "example-1",
+ "seed": "2026", "simulations": 100000, "reporting_currency": "USD", "basis": "annual_loss",
+ "p10": "31200.21030638023", "p50": "568764.7227033532", "p90": "3648776.83702994",
+ "mean": "1644950.0589876557", "expected_annual_loss": "1644950.0589876557",
+ "severe_plausible": "6053720.566941129", "severe_percentile": "95",
+ "standard_error_of_mean": "16636.019599060797", "confidence_level": "0.95",
+ "bands": {"p50": ["561945.9126726118", "576212.1189518626"], "...": "..."},
+ "mean_undefined": null, "events": {"total": 299232, "summary": {"...": "..."}},
+ "parameters": {"records": {"id": "lognormal", "version": 1, "kind": "severity",
+   "params": {"mu": "7.600902459542082", "sigma": "1.7967166947477073"},
+   "form": "median_p90", "given": {"median": "2000", "p90": "20000"},
+   "mean": "10046.683913013187", "variance": "2446075982.1362333"}, "...": "..."},
+ "frequency": {"id": "poisson", "version": 1, "params": {"rate": "3"}, "...": "..."},
+ "expert_parameters": [], "sampler": {"version": 1, "bit_generator": "PCG64", "...": "..."},
+ "outcomes_sha256": "sha256:959e1af3...0162f",
+ "digest": "sha256:24c9bdb9...afb7a",
+ "display": {"p50": "568764.72 USD", "...": "..."}, "provenance": {"numpy": "2.3.3"}}
+```
+
+### 23.8 Reproducibility across machines
+
+The same seed, inputs, model version and numpy give the same digest. The tests
+show it for two interpreters with different `PYTHONHASHSEED`, and for numpy's
+SIMD dispatch: numpy picks an AVX-512, AVX2 or baseline implementation of its own
+`exp` and `log` by CPU, and they differ in the last bit, so the samplers use none
+of them. A lognormal's and a generalized Pareto's draws go through `exp_portable`
+and `expm1_portable`, built from IEEE-754 basic operations alone (Cody and Waite's
+reduction, Taylor's series, an exact power-of-two scale), within one and two units
+in the last place; every other draw is numpy's own C sampler. During development
+the digests were also the same with glibc's FMA variants turned off
+(`GLIBC_TUNABLES`), which change libm's `exp`. What remains platform-dependent is
+the C library's `log`, `log1p` and `pow` that numpy's samplers call in rare
+branches (a ziggurat's tail, a rejection test, a gamma shape below 1): a libm
+that differs there in the last bit can change a draw, and the digest with it,
+while the summary agrees to the last few digits. That is the tolerance of the
+owner's specification, section 35; a replay on another platform compares the
+summary, not only the digest.
+
+### 23.9 Limits and timing
+
+100,000 draws by default, from 1,000 to 1,000,000; at most 10,000,000 events
+across a compound run's years; at most 10,000,000 draws from one `sample` call.
+Measured on the build machine (4 cores, numpy 2.3.3), each run sampled twice as
+section 23.4 says: 100,000 draws of one lognormal in 0.023 s; 100,000 simulated
+years of a three-parameter formula with a Poisson(3) frequency (about 300,000
+events) in 0.12 s; 1,000,000 such years in 1.7 s. The test of a default run
+allows 60 s, so it catches a per-draw Python loop and never CI load.
+
+### 23.10 Safety
+
+Neither module is on any stop path, and nothing Django loads at start imports
+either, or numpy: `test_django_and_the_urlconf_never_import_the_probabilistic_engine`
+runs `django.setup()` and loads every URLconf in a fresh interpreter and finds
+neither module nor numpy loaded.
+`test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop` runs a fresh
+pytest under a plugin that makes numpy and both modules unimportable before Django
+loads, as an import-time fault would: the scan's Stop still resolves, answers 202
+and is saved. `test_nothing_but_the_models_registration_imports_economics`
+(section 2) still holds: nothing outside the package imports it but the models'
+registration.
+
+### 23.11 What is not wired yet (step 7b)
+
+- **No formula is evaluated.** The scenario engine's formulas (MVP step 4) are not
+  called; a run evaluates whatever function it is given.
+- **Nothing is stored.** `FinancialParameter` has no distribution type, no model
+  holds a result, and no migration is added; `scenario_id` is a placeholder.
+- **Nothing is served,** and no receipt is built or signed.
+- **No confidence grade is computed.** Expert parameters are listed, not yet
+  downgraded.
+- **No sensitivity analysis, and no dependency between parameters:** every
+  parameter is independent (no copula, no shared-cause event), and the frequency's
+  parameters are fixed for the run.
+- **Every event's parameters are redrawn per event.** Uncertainty shared by all of
+  a year's events (what the parameter is) is not yet separated from variation
+  between events (what each event costs).
+- **One currency.** A run is in its reporting currency; nothing converts inside
+  it, and currency uncertainty stays separate (section 3, rule 6).
+
+### 23.12 Decisions this step takes, which the owner may change
+
+1. Severe-but-plausible is P95 of annual loss unless a run states another
+   percentile, from 90 to below 100.
+2. The confidence bands are at 95%.
+3. A generalized Pareto shape is accepted in (-1, 2]: below -1 the density rises
+   toward its endpoint, which is no tail, and above 2 the tail is heavier than
+   any loss data this engine is calibrated for.
+4. A splice's threshold is at or above its body's median.
+5. The Beta-Binomial update's default prior is the uniform Beta(1, 1); a stated
+   prior is recorded with the evidence.
+6. PERT's weight on the mode is 4 unless stated.
+7. A run takes 1,000 to 1,000,000 draws, and at most 10,000,000 events.
+8. A run whose inputs include an infinite mean reports no mean and no expected
+   annual loss, rather than a sample mean that estimates nothing, even where the
+   function it evaluates might cap the loss.
+9. numpy is pinned in CI's set as well as the service's, at the same version
+   (`numpy==2.3.3`).
