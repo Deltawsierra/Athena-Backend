@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 from mythos_core import tracing
@@ -77,7 +77,19 @@ def span(
 
     Yields the underlying span when one exists and ``None`` otherwise, so a caller
     must treat the yielded value as optional.
+
+    An exception that leaves the block is recorded on the span by its type
+    alone, then raised on unchanged and at once. Left to the OpenTelemetry SDK it
+    is recorded whole -- its message and stack trace as an ``exception`` event,
+    the message again as the status description, a chained cause's text in the
+    trace -- and an exception raised while deriving a deployment's claims can
+    quote what it was reading: a finding's location, a deployment's name, an
+    engine answer's excerpt. A span leaves the assessment's trust boundary (the
+    subject is the deployment's primary key for that reason), so it says what
+    failed and nothing the exception says. The caller still gets the exception,
+    whole.
     """
+    escaped: Exception | None = None
     with tracing.span(
         name,
         engine=ENGINE,
@@ -86,7 +98,36 @@ def span(
         timings=TIMINGS,
         component=f"{ENGINE}.{component}" if component else None,
     ) as active:
-        yield active
+        try:
+            yield active
+        except Exception as exc:  # noqa: BLE001 - raised unchanged once the span closes
+            escaped = exc
+            # Telemetry never replaces what it records: the exception may be a
+            # stop, and a stop must reach its caller as itself.
+            with suppress(Exception):
+                _failed(active, exc)
+    if escaped is not None:
+        raise escaped
+
+
+def _failed(active: Any, exc: Exception) -> None:
+    """Mark ``active`` failed, naming the exception's type and nothing it says.
+
+    ``error.type`` is the OpenTelemetry convention for exactly this, and the
+    ERROR status carries the class name where the SDK would put the message.
+    """
+    if active is None:
+        return
+    kind = type(exc)
+    name = kind.__qualname__
+    if kind.__module__ not in (None, "builtins"):
+        name = f"{kind.__module__}.{name}"
+    active.set_attribute("error.type", name)
+    try:
+        from opentelemetry.trace import Status, StatusCode
+    except ImportError:  # a span object without the API installed: no status type
+        return
+    active.set_status(Status(StatusCode.ERROR, kind.__name__))
 
 
 def configure(endpoint: str | None = None) -> bool:
