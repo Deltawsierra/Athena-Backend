@@ -5,8 +5,8 @@ which finding type, came to which outcome" (Minotaur-Backend
 ``minotaur_backend/remediation_outcomes.py``). The engine service's evidence
 document (:mod:`assurance.closure_evidence`) IS that dataset's row, so after it is
 stored here it is sent on, unchanged, to Minotaur-Backend's
-``POST /remediation-outcomes`` as its runner. Minotaur computes the row's outcome
-itself; nothing here tells it what the replay came to.
+``POST /remediation-outcomes`` as Blue's outcome recorder. Minotaur computes the row's
+outcome itself; nothing here tells it what the replay came to.
 
 Why this backend pushes, rather than Minotaur pulling: the document arrives here,
 once, already validated against the row's own shape; Minotaur already has the
@@ -18,8 +18,27 @@ smaller sound wiring.
 It never stands in the store's way:
 
 - **Off unless configured.** ``MINOTAUR_OUTCOMES_URL`` (Minotaur-Backend's base URL)
-  and ``MINOTAUR_RUNNER_KEY`` (a key of the runner role, sent as ``X-Minotaur-Key``)
-  must both be set. Without them nothing is queued and nothing is sent.
+  and a credential, sent as ``X-Minotaur-Key``, must both be set. Without them nothing
+  is queued and nothing is sent.
+- **Its own credential (role separation).** The credential is ``MINOTAUR_OUTCOMES_KEY``:
+  a key of Minotaur-Backend's ``outcome-recorder`` role, Blue's, which records
+  remediation outcomes and nothing else -- it cannot drive a campaign, post a release
+  decision, import a run or abort one. Read from the Django setting of that name, or
+  from the environment when the settings name none.
+
+  The LEGACY credential, ``MINOTAUR_RUNNER_KEY`` (a key of Minotaur-Backend's
+  ``runner`` role), is still sent when it is the only one set, so a deployment that has
+  not moved keeps forwarding. But that one key also drives campaigns, posts release
+  decisions, imports runs and aborts, so role separation is NOT in force: ``manage.py
+  check`` warns (``assurance.W304``), every process says so once at start, and
+  :func:`credential` reports it. The same secret set as both is one credential for two
+  roles: it is never sent, and forwarding is off until they differ -- logged as an
+  error at start, and a WARNING in ``manage.py check`` (``assurance.W305``), never an
+  error: an error there would refuse every command that runs the checks, the scheduled
+  Stop delivery (``manage.py deliver_owed_stops``) among them.
+- **Never in front of the store or a stop.** No credential setting -- missing, shared,
+  or one no comparison can read -- raises out of :func:`queue`, the check, or the start
+  line: forwarding is off, and the record and every command go ahead.
 - **Never blocks or fails the store.** The forward is queued as a
   :class:`~assurance.models.ClosureEvidenceForward` row in the store's own
   transaction, and sent only after it commits, on a background thread: the engine
@@ -44,8 +63,11 @@ Nothing here is a stop, holds one back, or is read by one.
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import threading
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from django.conf import settings
@@ -58,9 +80,21 @@ from .models import ClosureEvidenceForward
 
 logger = logging.getLogger(__name__)
 
-#: Minotaur-Backend's route for one replay row, and its runner key's header.
+#: Minotaur-Backend's route for one replay row, and its credential's header.
 ROUTE = "/remediation-outcomes"
 KEY_HEADER = "X-Minotaur-Key"
+
+#: The credential sent: a key of Minotaur-Backend's ``outcome-recorder`` role (Blue's
+#: outcome recorder), which reaches ``POST /remediation-outcomes`` and nothing else.
+OUTCOMES_KEY = "MINOTAUR_OUTCOMES_KEY"
+#: The legacy credential: a key of Minotaur-Backend's ``runner`` role, which also drives
+#: campaigns, posts release decisions, imports runs and aborts. Sent only when
+#: :data:`OUTCOMES_KEY` is not set, and said loudly.
+LEGACY_RUNNER_KEY = "MINOTAUR_RUNNER_KEY"
+
+#: Whether the credential sent is one role's alone (:func:`credential`).
+SEPARATION_IN_FORCE = "in force"
+SEPARATION_NOT_IN_FORCE = "not in force"
 
 #: How long a forward may sit ``pending`` or ``sending`` before the retry command
 #: takes it as left behind by a process that died.
@@ -70,13 +104,142 @@ STALE_AFTER = timedelta(minutes=10)
 TIMEOUT = (3.05, 10.0)
 
 
+@dataclass(frozen=True)
+class Credential:
+    """The credential the forward sends, and what it says about role separation.
+
+    ``key`` is None when none may be sent: none is set, or ``problem`` says why the one
+    set is refused. ``setting`` names where the key came from. ``separation`` is
+    :data:`SEPARATION_IN_FORCE` only for Blue's own outcome-recorder key.
+    """
+
+    #: Never in a repr: it is the credential.
+    key: str | None = field(repr=False)
+    setting: str | None
+    separation: str
+    problem: str = ""
+
+    def report(self) -> str:
+        """One line for an operator; never the key."""
+        if self.problem:
+            return f"closure forward credential refused: {self.problem}"
+        if self.setting is None:
+            return f"closure forward credential: none ({OUTCOMES_KEY} is not set)"
+        if self.setting == LEGACY_RUNNER_KEY:
+            return (
+                f"closure forward credential: {LEGACY_RUNNER_KEY}, Minotaur-Backend's shared "
+                f"runner key; role separation is {SEPARATION_NOT_IN_FORCE}"
+            )
+        return (
+            f"closure forward credential: {OUTCOMES_KEY}, Minotaur-Backend's outcome-recorder "
+            f"key; role separation is {SEPARATION_IN_FORCE}"
+        )
+
+
+def _text(value) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _same_secret(a: str, b: str) -> bool:
+    """Whether two secrets are one, compared in constant time on their bytes: text
+    holding anything but ASCII cannot be compared as text (``compare_digest`` raises
+    on it), and a lone surrogate an environment carries still encodes."""
+    return hmac.compare_digest(a.encode("utf-8", "surrogatepass"), b.encode("utf-8", "surrogatepass"))
+
+
+def _outcomes_key() -> str | None:
+    """Blue's key: the ``MINOTAUR_OUTCOMES_KEY`` setting, or the environment variable of
+    that name when the settings name none. Read by its literal name."""
+    value = getattr(settings, "MINOTAUR_OUTCOMES_KEY", None)
+    if value is None:
+        value = os.environ.get(OUTCOMES_KEY)
+    return _text(value)
+
+
+def _legacy_runner_key() -> str | None:
+    """The legacy ``MINOTAUR_RUNNER_KEY`` setting, read by its literal name."""
+    return _text(getattr(settings, "MINOTAUR_RUNNER_KEY", None))
+
+
+def credential() -> Credential:
+    """The credential the forward sends (:class:`Credential`). Blue's outcome-recorder
+    key when it is set; else the legacy runner key, with separation not in force; and
+    never a secret set as both, which is one credential for two roles."""
+    outcomes = _outcomes_key()
+    legacy = _legacy_runner_key()
+    if outcomes is not None and legacy is not None and _same_secret(outcomes, legacy):
+        return Credential(
+            key=None,
+            setting=None,
+            separation=SEPARATION_NOT_IN_FORCE,
+            problem=(
+                f"{OUTCOMES_KEY} is the same secret as {LEGACY_RUNNER_KEY}: one credential for "
+                "two roles (Blue's outcome recorder and Minotaur-Backend's runner) is not "
+                "separation, so nothing is sent until they differ"
+            ),
+        )
+    if outcomes is not None:
+        return Credential(key=outcomes, setting=OUTCOMES_KEY, separation=SEPARATION_IN_FORCE)
+    if legacy is not None:
+        return Credential(key=legacy, setting=LEGACY_RUNNER_KEY, separation=SEPARATION_NOT_IN_FORCE)
+    return Credential(key=None, setting=None, separation=SEPARATION_NOT_IN_FORCE)
+
+
 def configured() -> tuple[str, str] | None:
-    """``(base_url, runner_key)``, or None when forwarding is off."""
+    """``(base_url, key)``, or None when forwarding is off. ``key`` is
+    :func:`credential`'s."""
     url = getattr(settings, "MINOTAUR_OUTCOMES_URL", None)
-    key = getattr(settings, "MINOTAUR_RUNNER_KEY", None)
-    if not isinstance(url, str) or not url.strip() or not isinstance(key, str) or not key:
+    key = credential().key
+    if not isinstance(url, str) or not url.strip() or key is None:
         return None
     return url.strip().rstrip("/"), key
+
+
+def credential_problems() -> list[tuple[str, str, str]]:
+    """``(log level, id, message)`` for what :func:`credential` finds wrong: a secret set
+    as both credentials (logged as an error at start: nothing is sent), the legacy runner
+    key forwarding alone (separation is not in force), or the legacy key set beside
+    Blue's and unused. Each is only ever a WARNING in ``manage.py check``
+    (:func:`assurance.checks.closure_forward_credentials`). Empty when there is nothing
+    to say."""
+    found = credential()
+    if found.problem:
+        return [("error", "assurance.W305", found.problem)]
+    if found.setting == LEGACY_RUNNER_KEY:
+        return [
+            (
+                "warning",
+                "assurance.W304",
+                f"{LEGACY_RUNNER_KEY} is Minotaur-Backend's shared runner key: the one credential "
+                "drives campaigns, records Blue's remediation outcomes, posts release decisions, "
+                f"imports runs and aborts, so role separation is {SEPARATION_NOT_IN_FORCE} for the "
+                "closure forward",
+            )
+        ]
+    if found.setting == OUTCOMES_KEY and _legacy_runner_key() is not None:
+        return [
+            (
+                "warning",
+                "assurance.W304",
+                f"{LEGACY_RUNNER_KEY} is set beside {OUTCOMES_KEY} and is not sent: unset it, so no "
+                "shared runner key is held here",
+            )
+        ]
+    return []
+
+
+def say_credential() -> None:
+    """Said once by each process at start (:meth:`AssuranceConfig.ready`): which
+    credential forwards, and loudly when role separation is not in force. Never the
+    key, never raises, and never in front of anything."""
+    try:
+        problems = credential_problems()
+    except Exception:  # noqa: BLE001 - saying a setting never stops a process starting
+        logger.exception("the closure forward's credential could not be read")
+        return
+    for level, ident, message in problems:
+        log = logger.error if level == "error" else logger.warning
+        log("ROLE SEPARATION: %s (%s)", message, ident)
 
 
 def _transport():
@@ -101,7 +264,12 @@ def queue(record) -> bool:
     """Queue ``record``'s document for the dataset, inside the caller's transaction,
     and send it once that commits. False -- nothing queued -- when forwarding is off
     or the record carries no document."""
-    if configured() is None or not isinstance(record.document, dict):
+    try:
+        target = configured()
+    except Exception:  # noqa: BLE001 - a setting that cannot be read never fails the store
+        logger.exception("the closure forward's settings could not be read: forwarding is off")
+        target = None
+    if target is None or not isinstance(record.document, dict):
         return False
     forward = ClosureEvidenceForward.objects.create(record=record)
     transaction.on_commit(lambda: _spawn(lambda: deliver(forward.pk)))
@@ -153,7 +321,12 @@ def _send(pk: int, transport) -> str:
     Status = ClosureEvidenceForward.Status
     target = configured()
     if target is None:
-        _settle(pk, Status.FAILED, error="forwarding is not configured (MINOTAUR_OUTCOMES_URL, MINOTAUR_RUNNER_KEY)")
+        problem = credential().problem
+        _settle(
+            pk,
+            Status.FAILED,
+            error=problem or f"forwarding is not configured (MINOTAUR_OUTCOMES_URL, {OUTCOMES_KEY})",
+        )
         return Status.FAILED
     url, key = target
     forward = ClosureEvidenceForward.objects.select_related("record").get(pk=pk)

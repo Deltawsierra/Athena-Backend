@@ -373,6 +373,28 @@ field is refused by name) and sits inside the document's canonical digest, which
 Minotaur-Backend's `POST /remediation-outcomes` computes byte-identically for the
 same document: it accepts and stores the block too.
 
+**Sent on to Minotaur's dataset, under Blue's own key.** Each recorded document is
+forwarded to Minotaur-Backend's `POST /remediation-outcomes` after its record commits
+(`assurance/closure_forward.py`; retried by `manage.py retry_closure_forwards`). It is
+off unless `MINOTAUR_OUTCOMES_URL` and a credential are set. The credential is
+`MINOTAUR_OUTCOMES_KEY`: a key of Minotaur-Backend's `outcome-recorder` role, Blue's,
+which records remediation outcomes and cannot drive a campaign, post a release
+decision, import a run or abort one. It is read from the Django setting of that name,
+or from the environment when the settings name none.
+
+- **Legacy:** `MINOTAUR_RUNNER_KEY`, a Minotaur-Backend `runner` key, is still sent
+  when it is the only credential set, so an unmoved deployment keeps forwarding. That
+  key spans campaign driving, outcome recording, release decisions, run imports and
+  aborts, so role separation is not in force. `manage.py check` warns
+  (`assurance.W304`), each process logs it once at start, and the retry command
+  prints which credential it sends under.
+- **Refused:** the same secret set as both is one credential for two roles. It is
+  never sent, and forwarding is off until they differ: logged as an error at start,
+  and a warning in `manage.py check` (`assurance.W305`). Never a check error, which
+  would refuse every command that runs the checks, the scheduled Stop delivery
+  (`deliver_owed_stops`) among them. No credential setting ever fails a record, a
+  command or the start.
+
 ## Economic Exposure: the customer parameter set
 
 Economic Exposure estimates what a finding could cost, as a range with its sources
@@ -389,9 +411,13 @@ a deployment-scoped, versioned parameter set (section 19):
   from a document of the schema's thirty variables, each with its unit; an admin
   or analyst only, attributed to the caller.
 
-A deployment the caller cannot see is 404. The body is strict JSON: an unknown
-field, a JSON number where a decimal string belongs, and a key twice in one object
-are refused with the engine's code. None of these routes is a stop.
+A deployment the caller cannot see is 404. The body is strict JSON of at most 64
+KiB (413 otherwise): an unknown field, a JSON number where a decimal string
+belongs, and a key twice in one object are refused with the engine's code. None of
+these routes is a stop, and `assurance/urls.py` imports their module guarded: if it
+fails to import, its routes are logged and not served, and every stop and the
+system checks load without them. While economics cannot read mythos-core's
+currency table, the write answers 503; nothing at import reads the table.
 
 ## When a dependency fails
 
