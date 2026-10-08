@@ -312,6 +312,18 @@ def test_a_read_credential_that_is_another_services_is_refused(gate, monkeypatch
     assert gate.get(_base(dep) + f"workflows/{WF}/approval-in-force/").status_code == 401
 
 
+@pytest.mark.parametrize("name", ["FAILSAFE_SERVICE_TOKEN", "FAILSAFE_POLL_TOKEN", "CLOSURE_EVIDENCE_SERVICE_TOKEN"])
+def test_a_read_credential_that_is_the_failsafes_or_another_settings_token_is_refused(gate, settings, name):
+    """Review round 1: a read credential that could also stop the platform, or poll its
+    commands, is not one that only reads -- refused as the environment's tokens are."""
+    dep, _client, _permit, _ = _world()
+    url = _base(dep) + f"workflows/{WF}/approval-in-force/"
+    assert gate.get(url).status_code == 200
+    setattr(settings, name, READ_TOKEN)
+    assert gate_approval.configured_token() is None
+    assert gate.get(url).status_code == 401
+
+
 def test_the_read_route_is_a_read_and_no_stop():
     assert stops.NOT_STOPS["deployment-approval-in-force"].keys() == {"GET"}
 

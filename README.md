@@ -179,17 +179,19 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
   chain's `produces` hop when the document names that chain's tool and gate decision.
   A v3 document also carries the workflow approval the gate read in force itself,
   which `under_policy` reads as gate-attested.
-
-The Action Gate reads the approval in force itself (authority chain short 3):
-`GET /api/assurance/deployments/<uuid>/workflows/<slug>/approval-in-force/` with
-`X-Gate-Approval-Token` (`ASSURANCE_GATE_APPROVAL_TOKEN` / `_USER`, a credential of
-its own: one that is also another service's is refused) answers the approval
-version's id and digest (`200`), `404` for none in force, or `409` while its history
-is not level with it (`assurance/gate_approval.py`). It reads only.
 - `unclassified`: signed by a trusted key for an engine not listed above.
 - `attested`: typed in by an operator, or signed by a key the keyring no longer
   trusts.
 - `unknown`: typed in without saying what it rests on.
+
+The Action Gate reads the approval in force itself (authority chain short 3):
+`GET /api/assurance/deployments/<uuid>/workflows/<slug>/approval-in-force/` with
+`X-Gate-Approval-Token` (`ASSURANCE_GATE_APPROVAL_TOKEN` / `_USER`, a credential of
+its own: one that is also the observed-effect, sign-in collector, grant collector or
+closure-evidence service's token, or the failsafe's `FAILSAFE_SERVICE_TOKEN` or
+`FAILSAFE_POLL_TOKEN`, is treated as unset) answers the approval
+version's id and digest (`200`), `404` for none in force, or `409` while its history
+is not level with it (`assurance/gate_approval.py`). It reads only.
 
 Two more signers sign records that are not chain outcomes, each on its own route
 with its own service credential (`assurance/identity_evidence.py`), and each proving

@@ -32,8 +32,9 @@ authenticating as the one account ``ASSURANCE_GATE_APPROVAL_USER`` names -- the
 observed-effect route's pattern. It is accepted on this route only, and it reads and
 does nothing else. ROLE SEPARATION: a read credential that is also any other service
 credential this backend accepts -- the observed-effect service's, the sign-in and grant
-collectors', the closure-evidence service's -- is treated as unset and logged, so the
-credential that posts observations can never read an approval, nor the reverse. With
+collectors', the closure-evidence service's, the failsafe's stop service token and its
+poll token -- is treated as unset and logged, so the credential that posts
+observations, or stops the platform, can never read an approval, nor the reverse. With
 it unset, too short, or its account missing, the route answers 401; an operator's
 session, an admin's included, is answered 403.
 
@@ -67,6 +68,15 @@ OTHER_TOKEN_ENVS: tuple[str, ...] = (
     "ASSURANCE_AUTHENTICATION_EVIDENCE_TOKEN",
     "ASSURANCE_DELEGATION_EVIDENCE_TOKEN",
 )
+#: And every one it reads from its settings: the closure-evidence service's, and the
+#: failsafe's -- the stop service token (``safety.service_token``) and the poll token
+#: (``failsafe.views``). A read credential that could also stop the platform, or poll
+#: its commands, is not one that only reads.
+OTHER_TOKEN_SETTINGS: tuple[str, ...] = (
+    "CLOSURE_EVIDENCE_SERVICE_TOKEN",
+    "FAILSAFE_SERVICE_TOKEN",
+    "FAILSAFE_POLL_TOKEN",
+)
 NO_APPROVAL_IN_FORCE = "no_approval_in_force"
 HISTORY_NOT_LEVEL = "approval_history_not_level"
 
@@ -81,7 +91,7 @@ def _others() -> list[str]:
     values = [os.environ.get(name) or "" for name in OTHER_TOKEN_ENVS]
     from django.conf import settings
 
-    values.append(str(getattr(settings, "CLOSURE_EVIDENCE_SERVICE_TOKEN", "") or ""))
+    values.extend(str(getattr(settings, name, "") or "") for name in OTHER_TOKEN_SETTINGS)
     return [v for v in values if v]
 
 
