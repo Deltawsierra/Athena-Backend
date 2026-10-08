@@ -34,6 +34,7 @@ The refusal codes of the money, FX, cost-index and normalization engine are
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -156,12 +157,22 @@ def check_decimal(value, what: str) -> Decimal:
     return value
 
 
+#: The one spelling of a decimal string: an optional minus, ASCII digits, and an
+#: optional point followed by ASCII digits. ``Decimal()`` itself also reads
+#: underscores, surrounding whitespace, exponents, a plus sign, NaN, Infinity and
+#: digits of other scripts; none of them is a decimal string here.
+_DECIMAL_STRING = re.compile(r"-?[0-9]+(\.[0-9]+)?")
+
+
 def parse_decimal(text, what: str) -> Decimal:
-    """A finite ``Decimal`` read from a decimal string; anything else refused."""
+    """A ``Decimal`` read from a decimal string (``-?[0-9]+([.][0-9]+)?``, nothing
+    else); anything else refused (``not_decimal``)."""
     if not isinstance(text, str):
         raise MoneyRefused("not_decimal", f"{what} is a {type(text).__name__}, not a decimal string")
+    if not _DECIMAL_STRING.fullmatch(text):
+        raise MoneyRefused("not_decimal", f"{what} {text!r} is not a plain decimal string")
     try:
-        value = Decimal(text.strip())
+        value = Decimal(text)
     except (InvalidOperation, ValueError):
         raise MoneyRefused("not_decimal", f"{what} {text!r} is not a decimal") from None
     return check_decimal(value, what)

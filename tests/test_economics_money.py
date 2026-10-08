@@ -162,7 +162,8 @@ def test_a_float_is_refused_by_every_entry_point():
 def test_nan_and_infinity_are_refused(text):
     with refused("not_finite"):
         Money(Decimal(text), "USD")
-    with refused("not_finite"):
+    # Not a decimal string at all (review round 1, L4).
+    with refused("not_decimal"):
         Money.parse(text, "USD")
     with refused("not_finite"):
         usd("1").times(Decimal(text))
@@ -803,7 +804,7 @@ def _edited(change) -> bytes:
     [
         (lambda d: d["fx"][0].update(rate=1.1), "not_decimal"),
         (lambda d: d["cost_index"][0].update(value=100), "not_decimal"),
-        (lambda d: d["fx"][0].update(rate="NaN"), "not_finite"),
+        (lambda d: d["fx"][0].update(rate="NaN"), "not_decimal"),
         (lambda d: d["fx"][0].update(rate="-1.1"), "rate_not_positive"),
         (lambda d: d["fx"][0].update(observed_at="2020-03-02T15:00:00"), "date_malformed"),
         (lambda d: d["fx"].append(dict(d["fx"][0])), "observation_duplicate"),
@@ -818,6 +819,47 @@ def _edited(change) -> bytes:
 def test_a_broken_snapshot_is_refused(change, code):
     with refused(code):
         snapshot.parse_snapshot(_edited(change))
+
+
+NOT_DECIMAL_STRINGS = [
+    "1_000", " 1.1", "1.1 ", "1.1\n", "1e3", "1E+3", "+1.1", ".5", "1.", "1,000", "0x10", "Infinity", "NaN",
+    "\u0661\u066b\u0665", "\u0661", "\uff11", "1\u00a0000", "",
+]
+
+
+@pytest.mark.parametrize("text", NOT_DECIMAL_STRINGS)
+def test_r1_l4_a_decimal_string_has_one_spelling(text):
+    """Review round 1, L4: Decimal() reads underscores, surrounding whitespace,
+    exponents, a plus sign and the digits of other scripts. A decimal string is
+    ``-?[0-9]+(.[0-9]+)?`` and nothing else, in Money.parse and in a snapshot."""
+    with refused("not_decimal"):
+        Money.parse(text, "USD")
+    with refused("not_decimal"):
+        snapshot.parse_snapshot(_edited(lambda d: d["fx"][0].update(rate=text)))
+    with refused("not_decimal"):
+        snapshot.parse_snapshot(_edited(lambda d: d["cost_index"][0].update(value=text)))
+
+
+def test_r1_l4_the_plain_spellings_still_read():
+    for text, value in (("1", 1), ("-1.25", Decimal("-1.25")), ("0.000", Decimal(0)), ("1000.00", 1000)):
+        assert Money.parse(text, "USD").amount == value
+
+
+def test_r1_l4_a_key_twice_in_one_object_is_refused():
+    """Two readers -- one keeping the first ``rate``, one the last -- would read two
+    different snapshots under one hash."""
+    data = SNAPSHOT_PATH.read_bytes()
+    twice = data.replace(b'"rate": "1.1000",', b'"rate": "1.1000", "rate": "9.9999",', 1)
+    assert twice != data
+    with refused("snapshot_malformed"):
+        snapshot.parse_snapshot(twice)
+    top = data.replace(b'"synthetic": true,', b'"synthetic": true, "synthetic": false,', 1)
+    assert top != data
+    with refused("snapshot_malformed"):
+        snapshot.parse_snapshot(top)
+    bare_nan = data.replace(b'"rate": "1.1000"', b'"rate": NaN', 1)
+    with refused("snapshot_malformed"):
+        snapshot.parse_snapshot(bare_nan)
 
 
 def test_the_snapshot_hash_moves_with_any_edit():

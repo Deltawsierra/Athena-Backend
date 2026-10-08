@@ -11,8 +11,12 @@ source version.
 The document (schema :data:`SNAPSHOT_SCHEMA`) holds exactly ``schema``, ``label``,
 ``synthetic``, ``source`` (what the source is registered as), ``calendars`` (each
 provider's non-publication dates), ``fx`` and ``cost_index``. Every rate and value
-is a decimal STRING: a JSON number is refused (``not_decimal``), because a reader
-that parses it as a float has already changed it.
+is a decimal STRING in one spelling, ``-?[0-9]+([.][0-9]+)?``: a JSON number is
+refused (``not_decimal``), because a reader that parses it as a float has already
+changed it, and so is a string ``Decimal()`` alone would read (``1_000``, `` 1.1``,
+``1e3``, ``+1``, ``NaN``, digits of another script). A key that appears twice in
+one object, and ``NaN`` or ``Infinity`` as a bare JSON constant, are
+``snapshot_malformed``.
 
 A synthetic snapshot says so where it cannot be missed: ``synthetic`` is true,
 its ``label`` and its source's dataset both begin ``SYNTHETIC TEST DATA``, and its
@@ -47,6 +51,22 @@ _INDEX = frozenset({"series_id", "geography", "category", "base", "period", "val
 def snapshot_hash(data: bytes) -> str:
     """``sha256:`` and the SHA-256 of the snapshot's bytes."""
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _no_duplicate_keys(pairs: list) -> dict:
+    """A JSON object, refused when it names a key twice: a reader that keeps the
+    first and one that keeps the last would read two different snapshots under one
+    hash."""
+    document: dict = {}
+    for key, value in pairs:
+        if key in document:
+            raise MoneyRefused("snapshot_malformed", f"the key {key!r} appears twice in one object")
+        document[key] = value
+    return document
+
+
+def _no_constant(name: str):
+    raise MoneyRefused("snapshot_malformed", f"{name} is not JSON")
 
 
 def _object(value, fields: frozenset, what: str) -> dict:
@@ -98,7 +118,11 @@ def parse_snapshot(data: bytes) -> Snapshot:
         raise TypeError("a snapshot is read from its bytes")
     digest = snapshot_hash(data)
     try:
-        document = json.loads(data.decode("utf-8"))
+        document = json.loads(
+            data.decode("utf-8"), object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constant
+        )
+    except MoneyRefused:
+        raise
     except (ValueError, UnicodeError):
         raise MoneyRefused("snapshot_malformed", "not UTF-8 JSON") from None
     _object(document, _DOCUMENT, "the snapshot")

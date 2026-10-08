@@ -728,9 +728,14 @@ vintage is dated no earlier than the last day of its month.
 
 The document (schema `mythos.economics.observation-snapshot/v1`, `engine/snapshot.py`)
 has exactly `schema`, `label`, `synthetic`, `source`, `calendars`, `fx` and
-`cost_index`. Every rate and value is a decimal string; a JSON number is refused
-(`not_decimal`), because a reader that parses it as a float has already changed
-it. A broken document is `snapshot_malformed`.
+`cost_index`. Every rate and value is a decimal string in one spelling,
+`-?[0-9]+(\.[0-9]+)?`: a JSON number is refused (`not_decimal`), because a reader
+that parses it as a float has already changed it, and so is a string `Decimal()`
+alone would read -- underscores, surrounding whitespace, an exponent, a plus sign,
+`NaN`, digits of another script. `Money.parse` reads the same spelling. A key that
+appears twice in one object (two readers could keep different ones under one
+hash), a bare `NaN` or `Infinity`, and any other broken document are
+`snapshot_malformed`.
 
 `snapshots.register_snapshot(path)` writes, in one transaction, the source version
 and every observation, each through its model's checks; a file already registered
