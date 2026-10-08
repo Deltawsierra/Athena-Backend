@@ -425,6 +425,11 @@ DECISION_INPUTS = {
     # beside the approval write that moves it, which refreshes anyway; watched because
     # the rule reads it.
     "assurance.ApprovalVersion": ("deployment",),
+    # The graph edges in force at a dispatch instant: a chain's through_identity,
+    # performs and reach are read against them, as of dispatch (assurance.edge_history).
+    # Appended beside the asset write that moves them, which refreshes anyway; watched
+    # because the rule reads it.
+    "assurance.AuthorityEdgeVersion": ("deployment",),
 }
 
 def _deployments_serving_through(instance) -> set:
@@ -758,6 +763,74 @@ def _approval_binding_saved(sender, instance, raw=False, **kwargs):
     from .approval_history import note_approvals
 
     note_approvals(instance.deployment)
+
+
+#: The Asset columns the graph's edges are computed from (assurance.authority_chain.
+#: graph_edges, over assurance.authority_chain_records.load_graph): which component it
+#: is, what it declares, whether it is in the graph at all (graph_refs.retired, a
+#: metadata key), and the provider the graph's readers load with it. A save that names
+#: none of them -- the coverage stamp's ``assessed_at`` -- cannot move an edge, and
+#: notes nothing.
+EDGE_COLUMNS = frozenset(
+    {"deployment", "deployment_id", "kind", "identifier", "name", "metadata", "classification", "provider",
+     "provider_id"}
+)
+
+def _moves_an_edge(update_fields) -> bool:
+    return update_fields is None or bool(EDGE_COLUMNS & set(update_fields))
+
+
+@receiver(pre_save, sender="assurance.Asset", dispatch_uid="assurance_edges_prior_deployment")
+def _asset_saving(sender, instance, raw=False, update_fields=None, **kwargs):
+    """Before a save that could move an asset to another deployment, note the one it
+    is leaving (on the instance, until post_save): its edges go with the asset."""
+    if hasattr(instance, "_assurance_edges_prior_deployment"):
+        # Left by a save that failed before its post_save: not this save's.
+        del instance._assurance_edges_prior_deployment
+    if raw or instance._state.adding or instance.pk is None:
+        return
+    if update_fields is not None and not ({"deployment", "deployment_id"} & set(update_fields)):
+        return
+    prior = type(instance)._default_manager.filter(pk=instance.pk).values_list("deployment_id", flat=True).first()
+    if prior is not None and prior != instance.deployment_id:
+        instance._assurance_edges_prior_deployment = prior
+
+
+@receiver(post_save, sender="assurance.Asset", dispatch_uid="assurance_edges_noted_on_asset_save")
+def _asset_saved(sender, instance, raw=False, update_fields=None, **kwargs):
+    """An asset saved may have moved an edge a chain's ``through_identity``,
+    ``performs`` or reach is read against: the edges are noted in the same transaction
+    (:func:`assurance.edge_history.note_edges`), so the history a chain is read against
+    as of dispatch never lags the write. A failure fails the write: an asset and its
+    history commit together. No stop writes one."""
+    prior = getattr(instance, "_assurance_edges_prior_deployment", None)
+    if prior is not None:
+        del instance._assurance_edges_prior_deployment
+    if raw or not _moves_an_edge(update_fields):
+        return
+    from .edge_history import note_edges
+    from .models import Deployment
+
+    if prior is None:
+        note_edges(instance.deployment)
+        return
+    for deployment in Deployment.objects.filter(pk__in={instance.deployment_id, prior}).order_by("pk"):
+        note_edges(deployment)
+
+
+@receiver(post_delete, sender="assurance.Asset", dispatch_uid="assurance_edges_noted_on_asset_delete")
+def _asset_deleted(sender, instance, origin=None, **kwargs):
+    """An asset deleted takes its edges with it: noted in the same transaction. Not when
+    the deployment itself is being deleted: its history goes with it."""
+    from .models import Deployment
+
+    if isinstance(origin, Deployment) or (isinstance(origin, QuerySet) and origin.model is Deployment):
+        return
+    from .edge_history import note_edges
+
+    deployment = Deployment.objects.filter(pk=instance.deployment_id).first()
+    if deployment is not None:
+        note_edges(deployment)
 
 
 @receiver(post_save, sender="assurance.Deployment", dispatch_uid="assurance_route_noted_at_creation")

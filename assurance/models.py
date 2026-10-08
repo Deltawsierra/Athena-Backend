@@ -3721,6 +3721,115 @@ class ApprovalVersion(models.Model):
         return f"approval {self.workflow} @ {(self.digest or 'withdrawn')[:12]} from {self.in_force_from.isoformat()}"
 
 
+class AuthorityEdgeVersionRewriteRefused(ValueError):
+    """A recorded change of a graph edge was asked to change or go away. The history is
+    append-only: an edge that moved is a NEW row, and the one before it stays."""
+
+
+class AuthorityEdgeVersionQuerySet(models.QuerySet):
+    """The edge history is never edited and never deleted on its own: a queryset
+    ``update``, ``bulk_update`` or ``delete`` is refused, as a row's ``save`` and
+    ``delete`` are. It goes only with its deployment (the foreign key's cascade, which
+    Django runs through the base manager)."""
+
+    def update(self, **kwargs):
+        raise AuthorityEdgeVersionRewriteRefused("The edge history is never rewritten; record a new change.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise AuthorityEdgeVersionRewriteRefused("The edge history is never rewritten; record a new change.")
+
+    def delete(self):
+        raise AuthorityEdgeVersionRewriteRefused("The edge history is never deleted; it goes with its deployment.")
+
+    delete.queryset_only = True
+
+
+class AuthorityEdgeVersion(models.Model):
+    """One change of one graph edge an authority chain's ``through_identity``,
+    ``performs`` or reach is read against: the edge came into force, or went out of it,
+    and when the platform noticed.
+
+    The graph those hops read (:func:`assurance.authority_chain_records.load_graph`) is
+    computed from the deployment's :class:`Asset` rows as they stand NOW: an agent's
+    declared identity and tools, a component's declared permissions, effective access
+    over them. Nothing kept what it was at an instant in the past -- so an identity,
+    action or reach edge changed after an effect unproved that effect, and an effect
+    made through an edge removed before its dispatch read proven once the edge came
+    back.
+
+    This row is that history (:mod:`assurance.edge_history`), for exactly the graph
+    state the rule reads (:func:`assurance.authority_chain.graph_edges`) -- the state
+    that contradicts a hop as well as the edge that proves it, so a hop reaches at the
+    dispatch the verdict the graph as it stood then implied: ``identity`` (an agent acts
+    as a service account) and ``identity_gap`` (an identity reference unplaced),
+    ``invokes`` (an agent declares a tool), ``reach`` (effective access reaches a tool),
+    ``inferred`` (only an inferred edge joins them) and ``tool_gap`` (a tool reference
+    unplaced), ``declares`` (a component declares its permissions), ``action`` (it
+    declares this one) and ``component`` (the component exists, as named: a
+    contradiction is read only of a component that is, as the chain names it now, the
+    one the history names). The source is an asset uuid; the target an asset uuid, a gap
+    (its reference and reasons, as JSON) or a permission. ``in_force`` says whether the
+    state appeared (true) or disappeared (false) at ``noticed_at``. One ``begun`` row per
+    deployment, with no edge, says from when the history covers it: before that,
+    nothing records which edges were in force, and a dispatch then reads unrecorded,
+    never live.
+
+    Noted in the same transaction as every write that can move an edge -- an asset
+    saved or deleted (:mod:`assurance.signals`), and the asset reconciliation's bulk
+    writes, which no signal sees (:func:`assurance.assets.derive_assets`) -- and again at
+    every decision refresh as a backstop, so ``noticed_at`` is when the platform
+    NOTICED: at or after the change, never when the customer made it.
+
+    APPEND-ONLY: the model refuses an update or a delete of a recorded row, and its
+    queryset a bulk one (:class:`AuthorityEdgeVersionRewriteRefused`); only the
+    deployment's cascade removes rows. An edge that returns is appended again: the
+    history says it went and came back.
+    """
+
+    # Spelled as the rule spells them (assurance.authority_chain.EDGE_IDENTITY, ...;
+    # held equal by test), so this module stays free of the rule.
+    KINDS = (
+        "identity", "identity_gap", "invokes", "reach", "inferred", "tool_gap", "declares", "action", "component",
+        "begun",
+    )
+
+    id = models.BigAutoField(primary_key=True)
+    deployment = models.ForeignKey(Deployment, on_delete=models.CASCADE, related_name="authority_edge_versions")
+    kind = models.CharField(max_length=16, choices=[(k, k) for k in KINDS])
+    # An asset uuid; blank on the ``begun`` row.
+    source = models.CharField(max_length=64, blank=True)
+    # An asset uuid, a gap (its reference and reasons, as canonical JSON), or the
+    # permission an ``action`` row declares -- any length: they are what the inventory
+    # declares, and a write is never refused for their length. Blank on the ``begun``
+    # and ``declares`` rows.
+    target = models.TextField(blank=True)
+    in_force = models.BooleanField()
+    noticed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    objects = AuthorityEdgeVersionQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["deployment", "noticed_at", "id"]
+        indexes = [
+            models.Index(fields=["deployment", "kind", "source"], name="assurance_edge_version"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise AuthorityEdgeVersionRewriteRefused(
+                "A recorded edge change is history and is never rewritten; record the new change as a new row."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AuthorityEdgeVersionRewriteRefused("A recorded edge change is history and is never deleted.")
+
+    def __str__(self) -> str:
+        state = "in force" if self.in_force else "out of force"
+        return f"{self.kind} {self.source[:8]} -> {self.target[:40]} {state} from {self.noticed_at.isoformat()}"
+
+
 class IdentityEvidenceRewriteRefused(ValueError):
     """A recorded sign-in or delegation record was asked to change or go away. The
     record is append-only: a revocation is a NEW record of the same grant."""

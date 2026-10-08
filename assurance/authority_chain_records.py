@@ -4,14 +4,12 @@
 module is the thin layer that hands it what it reads, and nothing it decides is
 decided here:
 
-* :func:`load_inputs` reads the graph the hop checks are made against -- the route
-  map's declared and inferred edges and its unresolved references
-  (:func:`assurance.route.build_route_map`), each principal's effective reach
-  (:func:`assurance.access.assess_effective_access`), shadow and assessed per
-  component (:func:`assurance.governance.is_shadow`,
-  :func:`assurance.coverage.coverage_manifest`) -- with the approvals and the
-  contracts they bind (:mod:`assurance.tool_contract`) and the outcomes the chains
-  cite, each at its basis IN FORCE (:func:`assurance.observed_outcomes.basis_in_force`).
+* :func:`load_inputs` reads the graph the chains' nodes are resolved against
+  (:func:`load_graph`: the route map, effective access, shadow and assessed per
+  component), the outcomes the chains cite, each at its basis IN FORCE
+  (:func:`assurance.observed_outcomes.basis_in_force`), and the histories the hops are
+  read against as of dispatch: the approvals' versions and the tools' contracts
+  (:func:`histories`), and the graph's edges (:mod:`assurance.edge_history`).
 * :func:`read_chains` reads every recorded chain, decides which stand
   (:func:`assurance.authority_chain.in_force`) and verifies each.
 * :func:`record_chain` appends one, typed in (``attested``) or signed by an engine
@@ -35,7 +33,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from django.db.models import Prefetch
 from mythos_core import outcome as _oc
 
 from . import authority_chain as rule
@@ -108,30 +105,25 @@ def _permissions(metadata) -> tuple[str, ...] | None:
     return tuple(p for p in raw if isinstance(p, str))
 
 
-def load_inputs(
-    deployment, cited_ids, keyring, *, effect_citations=None, principals=(), workflows=()
-) -> rule.Inputs:
-    """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``.
-
-    ``cited_ids``: the outcome ids the chains cite (their gate decisions and
-    observed effects). ``keyring``: the one the decision is read under, so a
-    citation verifies against the same keys as the composition beside it.
-    ``effect_citations``: how many chains in force cite each observed effect.
-    ``principals``: the principals the chains' sign-in and delegation hops name; the
-    signed records that name one are read, in force under the same keyring
-    (:func:`assurance.identity_evidence.records_for`) -- one query, none when no chain
-    names a principal. ``workflows``: the chains' workflows, whose approval history and
-    the contract history of the tools it bound are read
-    (:func:`histories`) -- two queries, none for no workflow."""
+def load_graph(deployment, *, coverage: bool = True) -> rule.Graph:
+    """The graph a chain's nodes are resolved against, and the edges
+    :func:`assurance.authority_chain.graph_edges` takes from it: the route map's declared
+    and inferred edges and its unresolved references
+    (:func:`assurance.route.build_route_map`), each principal's effective reach
+    (:func:`assurance.access.assess_effective_access`), and shadow and assessed per
+    component. ``coverage=False`` reads no coverage manifest and takes every component
+    as assessed: what the edge history notes (:mod:`assurance.edge_history`), which no
+    edge depends on."""
     from .access import assess_effective_access
     from .coverage import coverage_manifest
     from .governance import is_shadow
     from .graph_refs import in_graph
     from .route import build_route_map
-    from .tool_contract import current_digests
 
     assets = in_graph(list(deployment.assets.all()))
-    unassessed = {entity["asset_uuid"] for entity in coverage_manifest(deployment)["unassessed"]}
+    unassessed = (
+        {entity["asset_uuid"] for entity in coverage_manifest(deployment)["unassessed"]} if coverage else set()
+    )
     components = tuple(
         rule.Component(
             uuid=str(a.uuid),
@@ -167,7 +159,7 @@ def load_inputs(
         for principal in access["principals"]
         if principal["key"].startswith("asset:")
     }
-    graph = rule.Graph(
+    return rule.Graph(
         components=components,
         declared=declared,
         inferred=inferred,
@@ -175,32 +167,27 @@ def load_inputs(
         reach=reach,
     )
 
-    digests = current_digests(deployment)
-    approvals = {}
-    for workflow in deployment.approved_workflows.prefetch_related(
-        Prefetch(
-            "tool_contract_bindings",
-            queryset=ToolContractBinding.objects.filter(released_at__isnull=True)
-            .select_related("contract")
-            .order_by("tool_kind", "tool_identifier"),
-            to_attr="live_tool_bindings",
-        )
-    ):
-        live = workflow.live_tool_bindings
-        approvals[workflow.slug] = rule.Approval(
-            slug=workflow.slug,
-            digest=approval_digest(workflow, live),
-            tools=tuple(
-                rule.ApprovedTool(
-                    kind=b.tool_kind,
-                    identifier=b.tool_identifier,
-                    approved_digest=b.contract_digest,
-                    current_digest=digests.get((str(b.tool_kind), str(b.tool_identifier))),
-                    permissions=_permissions(b.contract.contract if b.contract is not None else None),
-                )
-                for b in live
-            ),
-        )
+
+def load_inputs(
+    deployment, cited_ids, keyring, *, effect_citations=None, principals=(), workflows=()
+) -> rule.Inputs:
+    """Everything :func:`assurance.authority_chain.verify` reads, for ``deployment``.
+
+    ``cited_ids``: the outcome ids the chains cite (their gate decisions and
+    observed effects). ``keyring``: the one the decision is read under, so a
+    citation verifies against the same keys as the composition beside it.
+    ``effect_citations``: how many chains in force cite each observed effect.
+    ``principals``: the principals the chains' sign-in and delegation hops name; the
+    signed records that name one are read, in force under the same keyring
+    (:func:`assurance.identity_evidence.records_for`) -- one query, none when no chain
+    names a principal. ``workflows``: the chains' workflows, whose approval history and
+    the contract history of the tools it bound are read
+    (:func:`histories`) -- two queries, none for no workflow. And the graph's edge
+    history (:func:`assurance.edge_history.history`), one query: what
+    ``through_identity``, ``performs`` and reach are read against, as of dispatch."""
+    from . import edge_history
+
+    graph = load_graph(deployment)
 
     outcomes = {}
     ids = sorted({i for i in cited_ids if i})
@@ -234,15 +221,17 @@ def load_inputs(
             )
     authentications, delegations = identity_evidence.records_for(deployment, principals, keyring)
     approval_history, contract_history = histories(deployment, workflows)
+    edges_noted_from, edges = edge_history.history(deployment)
     return rule.Inputs(
         graph=graph,
-        approvals=approvals,
         outcomes=outcomes,
         effect_citations=dict(effect_citations or {}),
         authentications=authentications,
         delegations=delegations,
         approval_history=approval_history,
         contract_history=contract_history,
+        edge_history=edges,
+        edges_noted_from=edges_noted_from,
     )
 
 
@@ -299,7 +288,11 @@ def histories(deployment, workflows) -> tuple[dict, dict]:
         for row in rows:
             key = (str(row.tool_kind), str(row.tool_identifier))
             if key in keys:
-                contracts.setdefault(key, []).append(rule.ContractVersion(recorded_at=row.recorded_at, digest=row.digest))
+                contracts.setdefault(key, []).append(
+                    rule.ContractVersion(
+                        recorded_at=row.recorded_at, digest=row.digest, permissions=_permissions(row.contract)
+                    )
+                )
     return approvals, {key: tuple(versions) for key, versions in contracts.items()}
 
 

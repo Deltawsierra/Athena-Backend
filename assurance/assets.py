@@ -779,7 +779,19 @@ def derive_assets(deployment: Deployment, scan) -> list[Asset]:
     """Reconcile the deployment's assets from a scan, and attach its findings.
 
     Returns the assets touched. Safe to call repeatedly; preserves human
-    classification and never fabricates a component the data does not attest."""
+    classification and never fabricates a component the data does not attest.
+
+    The graph edges an authority chain is read against as of dispatch are noted
+    once, when the reconciliation is done, in the caller's transaction
+    (:mod:`assurance.edge_history`): some of its writes are bulk, which no signal
+    sees, and a note per save would record every half-reconciled graph between."""
+    from .edge_history import edges_noted_once
+
+    with edges_noted_once(deployment):
+        return _derive_assets(deployment, scan)
+
+
+def _derive_assets(deployment: Deployment, scan) -> list[Asset]:
     now = timezone.now()
     touched: list[Asset] = []
 

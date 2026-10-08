@@ -475,6 +475,10 @@ _GOVERNING = [
         # Part 5: the dispatch window an effect must fall in, and the gate epoch a
         # dispatch is authority under.
         "DISPATCH_EFFECT_WINDOW_SECONDS", "RUNNING_EPOCH_STATE", "EPOCH_SEPARATOR",
+        # Its follow-up: how the stored edge history spells each kind of graph state
+        # the graph hops are read against as of dispatch.
+        "EDGE_IDENTITY", "EDGE_IDENTITY_GAP", "EDGE_INVOKES", "EDGE_REACH", "EDGE_INFERRED", "EDGE_TOOL_GAP",
+        "EDGE_DECLARES", "EDGE_ACTION", "EDGE_COMPONENT",
     )],
     *[("assurance.authority_chain", "_VERDICT_RANK", key) for key in ("proven", "unproven", "broken")],
     *[("assurance.authority_chain", "GRAMMAR", key) for key in (

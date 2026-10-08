@@ -301,9 +301,9 @@ def test_a_person_started_chain_stays_proven_across_a_later_re_approval(collecto
         "authenticated_as": ["authentication"],
         "delegates_to": ["delegation"],
         "under_policy": ["approval_in_force_at_dispatch"],
-        "invokes": ["contract_in_force_at_dispatch", "route_at_dispatch", "declared_edge"],
-        "through_identity": ["declared_identity"],
-        "performs": ["declared_permission", "within_approval", "gate_permit"],
+        "invokes": ["contract_in_force_at_dispatch", "route_at_dispatch", "reach_in_force_at_dispatch"],
+        "through_identity": ["identity_in_force_at_dispatch"],
+        "performs": ["action_in_force_at_dispatch", "within_approval_at_dispatch", "gate_permit"],
         "produces": ["observed_effect"],
     }
     assert v1 in hops["under_policy"]["proven_by"][0]["detail"]
