@@ -173,10 +173,19 @@ these routes publish says what kind of evidence it is (`evidence_kind`,
 - `observed_effect`: signed by Achilles' observed-effect key (observer
   `achilles-effect`, a key that signs nothing else): the dispatch that carried a
   permitted action out saw its provider complete it. Recorded only with its
-  `mythos.observed-effect/v1` evidence document, through
+  `mythos.observed-effect` evidence document (v1, v2 or v3), through
   `POST /api/assurance/deployments/<uuid>/observed-effects/` and the observed-effect
   service's credential (`assurance/observed_effects.py`); it proves an authority
   chain's `produces` hop when the document names that chain's tool and gate decision.
+  A v3 document also carries the workflow approval the gate read in force itself,
+  which `under_policy` reads as gate-attested.
+
+The Action Gate reads the approval in force itself (authority chain short 3):
+`GET /api/assurance/deployments/<uuid>/workflows/<slug>/approval-in-force/` with
+`X-Gate-Approval-Token` (`ASSURANCE_GATE_APPROVAL_TOKEN` / `_USER`, a credential of
+its own: one that is also another service's is refused) answers the approval
+version's id and digest (`200`), `404` for none in force, or `409` while its history
+is not level with it (`assurance/gate_approval.py`). It reads only.
 - `unclassified`: signed by a trusted key for an engine not listed above.
 - `attested`: typed in by an operator, or signed by a key the keyring no longer
   trusts.
