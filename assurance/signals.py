@@ -774,11 +774,6 @@ EDGE_COLUMNS = frozenset(
     {"deployment", "deployment_id", "kind", "identifier", "name", "metadata", "classification"}
 )
 
-#: Where an asset's deployment is kept between pre_save and post_save when the save
-#: could move it to another deployment: the edges of both move.
-_PRIOR_EDGE_DEPLOYMENT = "_assurance_edges_prior_deployment"
-
-
 def _moves_an_edge(update_fields) -> bool:
     return update_fields is None or bool(EDGE_COLUMNS & set(update_fields))
 
@@ -786,14 +781,17 @@ def _moves_an_edge(update_fields) -> bool:
 @receiver(pre_save, sender="assurance.Asset", dispatch_uid="assurance_edges_prior_deployment")
 def _asset_saving(sender, instance, raw=False, update_fields=None, **kwargs):
     """Before a save that could move an asset to another deployment, note the one it
-    is leaving: its edges go with the asset."""
+    is leaving (on the instance, until post_save): its edges go with the asset."""
+    if hasattr(instance, "_assurance_edges_prior_deployment"):
+        # Left by a save that failed before its post_save: not this save's.
+        del instance._assurance_edges_prior_deployment
     if raw or instance._state.adding or instance.pk is None:
         return
     if update_fields is not None and not ({"deployment", "deployment_id"} & set(update_fields)):
         return
     prior = type(instance)._default_manager.filter(pk=instance.pk).values_list("deployment_id", flat=True).first()
     if prior is not None and prior != instance.deployment_id:
-        instance.__dict__[_PRIOR_EDGE_DEPLOYMENT] = prior
+        instance._assurance_edges_prior_deployment = prior
 
 
 @receiver(post_save, sender="assurance.Asset", dispatch_uid="assurance_edges_noted_on_asset_save")
@@ -803,7 +801,9 @@ def _asset_saved(sender, instance, raw=False, update_fields=None, **kwargs):
     (:func:`assurance.edge_history.note_edges`), so the history a chain is read against
     as of dispatch never lags the write. A failure fails the write: an asset and its
     history commit together. No stop writes one."""
-    prior = instance.__dict__.pop(_PRIOR_EDGE_DEPLOYMENT, None)
+    prior = getattr(instance, "_assurance_edges_prior_deployment", None)
+    if prior is not None:
+        del instance._assurance_edges_prior_deployment
     if raw or not _moves_an_edge(update_fields):
         return
     from .edge_history import note_edges

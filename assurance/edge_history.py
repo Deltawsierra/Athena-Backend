@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import logging
 
 from django.db import transaction
@@ -56,15 +57,20 @@ _NOTED_ONCE: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
 
 def edges_now(deployment) -> frozenset[tuple[str, str, str]]:
     """Every edge ``through_identity``, ``performs`` and reach read, as the graph of
-    ``deployment`` stands now: ``(kind, source, target)``. Three asset queries."""
+    ``deployment`` stands now: ``(kind, source, target)``. The assets are read once
+    (with their providers), for every reader of the graph: this runs in the
+    transaction of the write it notes."""
+    from django.db.models import prefetch_related_objects
+
     from .authority_chain import graph_edges
     from .authority_chain_records import load_graph
 
-    if "assets" in getattr(deployment, "_prefetched_objects_cache", {}):
-        # A caller's prefetched assets are the graph as it was when they were read,
-        # not as the write being noted left it.
-        deployment = type(deployment)._default_manager.get(pk=deployment.pk)
-    return graph_edges(load_graph(deployment, coverage=False))
+    # A copy, so a caller's own prefetched assets -- the graph as it was when it read
+    # them, not as the write being noted left it -- are neither read nor replaced.
+    fresh = copy.copy(deployment)
+    fresh._prefetched_objects_cache = {}
+    prefetch_related_objects([fresh], "assets__provider")
+    return graph_edges(load_graph(fresh, coverage=False))
 
 
 def _latest(deployment) -> tuple[bool, dict[tuple[str, str, str], tuple[bool, object]]]:
