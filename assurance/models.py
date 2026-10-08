@@ -27,6 +27,7 @@ from django.utils import timezone
 from mythos_core import evidence as core_evidence
 
 from . import composition
+from .economics import models as economics_models  # noqa: F401 -- Economic Exposure's models are this app's
 
 # ---------------------------------------------------------------------------
 # Shared vocabularies
