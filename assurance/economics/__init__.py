@@ -34,6 +34,12 @@ distributions, the seeded sampler and the simulation of a stored scenario versio
   and records the run (MVP step 7b); it imports the probabilistic engine, and
   numpy, only when called. No route serves it yet, and nothing on Django's load
   path imports it.
+- :mod:`assurance.economics.validity_service` makes a stored result's sensitivity
+  analysis, confidence grade and Financial Exposure Validity Card, and
+  :mod:`assurance.economics.receipt_service` its signed Financial Exposure Receipt
+  (MVP step 8), recording each once per result. Both import the engine, numpy and
+  ``mythos_core.exposure_receipt`` only when called; no route serves them yet, and
+  nothing on Django's load path imports them.
 
 This package is never on a stop, pause, stand-down, terminate or revoke path:
 :mod:`assurance.models` (registering the models) and :mod:`assurance.urls`

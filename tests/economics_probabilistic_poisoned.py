@@ -3,9 +3,10 @@ by ``tests/test_economics_simulation.py::test_a_broken_probabilistic_engine_neve
 
 It makes numpy and the probabilistic engine's modules
 (``assurance.economics.engine.distributions``, ``.simulation``, step 7b's
-``.scenario_simulation`` and ``.twins``, and ``assurance.economics.simulation_service``)
-unimportable, as an import-time fault in any of them would, before pytest-django
-loads Django.
+``.scenario_simulation`` and ``.twins``, and ``assurance.economics.simulation_service``;
+step 8's ``.sensitivity`` and ``.grade``, ``assurance.economics.validity_service`` and
+``.receipt_service``, and ``mythos_core.exposure_receipt``) unimportable, as an
+import-time fault in any of them would, before pytest-django loads Django.
 The scan's Stop must still resolve, answer and be saved. It is never loaded by
 the suite itself: its name does not match ``test_*.py``.
 """
@@ -21,6 +22,11 @@ POISONED = (
     "assurance.economics.engine.scenario_simulation",
     "assurance.economics.engine.twins",
     "assurance.economics.simulation_service",
+    "assurance.economics.engine.sensitivity",
+    "assurance.economics.engine.grade",
+    "assurance.economics.validity_service",
+    "assurance.economics.receipt_service",
+    "mythos_core.exposure_receipt",
 )
 
 

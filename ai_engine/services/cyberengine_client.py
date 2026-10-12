@@ -325,6 +325,43 @@ def _json_of(resp: requests.Response, *, max_body: int | None = None):
         raise ValueError("the body nests too deeply to be read") from exc
 
 
+class ExposureReceiptRefused(EngineError):
+    """The engine read a Financial Exposure Receipt and refused to sign it: a 400 whose
+    ``detail`` is ``{"code": <mythos_core.exposure_receipt's code>, "reason": ...}``
+    (athena-engine #88, which validates the document with core before it signs).
+    The document was refused, by the rule ``code`` names; the signer is not
+    unavailable, and a caller must not say it is. ``code`` is as the engine sent it:
+    the receipt service carries it as core's only where it is one of core's own
+    (``exposure_receipt.MALFORMED_CODES``), and shows any other."""
+
+    def __init__(self, message: str, *, code: str, reason: str, status: int) -> None:
+        super().__init__(message, kind=ENGINE_REFUSED, status=status)
+        self.code = code
+        self.reason = reason
+
+
+#: A refusal code as core spells one: lowercase ASCII words joined by ``_``.
+_REFUSAL_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+#: The most of an engine's refusal reason a caller is handed.
+_REFUSAL_REASON_MAX = 500
+
+
+def _document_refusal(resp: requests.Response) -> tuple[str, str] | None:
+    """The core code and reason of an engine 400 that refused a document
+    (``{"detail": {"code": ..., "reason": ...}}``), or None for any other body."""
+    try:
+        body = _json_of(resp)
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if not isinstance(detail, dict):
+        return None
+    code, reason = detail.get("code"), detail.get("reason")
+    if not isinstance(code, str) or not _REFUSAL_CODE.fullmatch(code) or not isinstance(reason, str):
+        return None
+    return code, reason[:_REFUSAL_REASON_MAX]
+
+
 def _header_run_id(resp: requests.Response) -> str | None:
     """The run #71 names in ``X-Run-Id``. Read where the body cannot be: a proxy
     that replaced a 500's body with its own page keeps the engine's headers, and
@@ -580,6 +617,33 @@ class CyberEngineClient:
         serve a bare receipt that looks like a deliberate choice.
         """
         return self._post("/api/assurance/receipt/sign", {"receipt": receipt})
+
+    def sign_exposure_receipt(self, receipt: dict) -> dict:
+        """Ask the engine to sign a Financial Exposure Receipt
+        (``mythos.financial-exposure-receipt/v1``), returning a DSSE envelope under
+        the receipt's own payload type, signed by a key in the ``economics-receipt``
+        role (``mythos_core.exposure_receipt``).
+
+        The same path as :meth:`sign_assurance_receipt`: the engine holds the keys
+        and this backend does not. athena-engine #88 serves the route, and validates
+        the document with core before it signs: a document core refuses is a 400
+        naming core's code, raised here as :class:`ExposureReceiptRefused` with that
+        code, never as the signer being unavailable. Any other failure (a 503 for a
+        role not configured, a connection failure, a timeout, an engine without the
+        route) is an EngineError as from every route, and the receipt service records
+        no receipt and says why (``signer_unavailable``). Nothing here is on a stop
+        path."""
+        path = "/api/economics/exposure-receipt/sign"
+        resp = self._send_post(path, {"receipt": receipt})
+        if resp.status_code == 400:
+            refused = _document_refusal(resp)
+            if refused is not None:
+                raise ExposureReceiptRefused(
+                    f"Engine refused the receipt ({refused[0]})", code=refused[0], reason=refused[1], status=400
+                )
+        if not (200 <= resp.status_code < 300):
+            raise self._refused(resp)
+        return self._read_json(resp, path)
 
     def assurance_keyring(self) -> dict:
         """The engine's published public keyring, for an auditor verifying offline.
