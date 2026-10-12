@@ -113,12 +113,12 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its nineteen modules: E1's ten, the scenario engine's four
+    # The package and its twenty-one modules: E1's ten, the scenario engine's four
     # (parameters, formulas, loss and parameter_set), the probabilistic engine's
     # two (distributions and simulation, which import numpy as well), the scenario
-    # builder's templates, and step 7b's two (twins and scenario_simulation, numpy
-    # too).
-    assert result.stdout.strip() == "imported 20", result.stdout
+    # builder's templates, step 7b's two (twins and scenario_simulation, numpy
+    # too), and step 8's two (sensitivity, numpy too, and grade).
+    assert result.stdout.strip() == "imported 22", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -168,6 +168,9 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         # Step 7b's formula twins and scenario simulation (spec, section 25).
         "twins.py",
         "scenario_simulation.py",
+        # Step 8's sensitivity analysis and confidence grade (spec, section 26).
+        "sensitivity.py",
+        "grade.py",
     }
     core_importers = set()
     for path in files:
@@ -658,12 +661,13 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     """Every code a governance rule returns or a model raises is published, in
     governance.REFUSALS, (phase E1, the money engine) money.REFUSALS or (the
     scenario engine) parameters.REFUSALS, or (a stored simulation result, step 7b)
-    models.SIMULATION_RECORD_REFUSALS; every code the money engine raises is in
+    models.SIMULATION_RECORD_REFUSALS, or (a Validity Card or receipt row, step 8)
+    models.CARD_RECORD_REFUSALS; every code the money engine raises is in
     money.REFUSALS, and every code the scenario engine raises as its own is in
     parameters.REFUSALS; and every published code is one something gives. A code
     two tables publish means the same in both, and the scenario engine publishes
     none the money engine already does."""
-    from assurance.economics.models import SIMULATION_RECORD_REFUSALS
+    from assurance.economics.models import CARD_RECORD_REFUSALS, SIMULATION_RECORD_REFUSALS
 
     economics = REPO / "assurance" / "economics"
     returned = _constants(ENGINE / "governance.py", set(), returns=True)
@@ -678,9 +682,13 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     assert not set(parameters.REFUSALS) & set(money.REFUSALS)
     published = (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS)
     )
     assert not set(SIMULATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
+    )
+    assert not set(CARD_RECORD_REFUSALS) & (
+        set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
     )
     assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):

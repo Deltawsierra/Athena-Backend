@@ -544,6 +544,19 @@ class CyberEngineClient:
         """
         return self._post("/api/assurance/receipt/sign", {"receipt": receipt})
 
+    def sign_exposure_receipt(self, receipt: dict) -> dict:
+        """Ask the engine to sign a Financial Exposure Receipt
+        (``mythos.financial-exposure-receipt/v1``), returning a DSSE envelope under
+        the receipt's own payload type, signed by a key in the ``economics-receipt``
+        role (``mythos_core.exposure_receipt``).
+
+        The same path as :meth:`sign_assurance_receipt`: the engine holds the keys
+        and this backend does not. The engine route is not served yet (an engine
+        change, recorded in docs/economics/spec-v1.md section 26.9): until it is,
+        this raises EngineError, and the receipt service records no receipt and
+        says why (``signer_unavailable``). Nothing here is on a stop path."""
+        return self._post("/api/economics/exposure-receipt/sign", {"receipt": receipt})
+
     def assurance_keyring(self) -> dict:
         """The engine's published public keyring, for an auditor verifying offline.
 

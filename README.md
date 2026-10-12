@@ -460,6 +460,20 @@ version, input digest, seed and draws as a `SimulationResult`, with every versio
 limit it rests on and no float. It serves no route yet, never raises, and nothing Django loads
 at start imports it or numpy.
 
+### The Validity Card and the receipt
+
+`assurance/economics/validity_service.py` takes a stored `SimulationResult` (section
+26): it ranks the parameters by their contribution to the variance of the gross cash
+loss, on the run's own draws, with a P10/P90 tornado; grades the run A, B, C, D or
+Unknown from its evidence mix, each parameter weighted by that importance, with
+spec-v1's downgrades; and records the Financial Exposure Validity Card, every field of
+the owner's table, once per result. `assurance/economics/receipt_service.py` builds the
+signed Financial Exposure Receipt with `mythos_core.exposure_receipt`, has the engine
+sign it as it signs assurance receipts, records it once per result, and verifies a
+stored one, refusing a tampered card, result, source snapshot or signature with its
+code. Neither serves a route yet or raises, and nothing Django loads at start imports
+either.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each
