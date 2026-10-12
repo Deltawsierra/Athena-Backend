@@ -1,7 +1,7 @@
-"""The customer parameter-set API: the one Economic Exposure route module.
+"""The customer parameter-set API, and raising a source's trust tier.
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`
-(``docs/economics/spec-v1.md``, section 19):
+(``docs/economics/spec-v1.md``, section 19, and section 6.1 for the trust raises):
 
 - ``GET  deployments/<uuid>/economics/parameter-sets/<set_key>/``: the current
   version of the deployment's set ``set_key`` (the highest); 404 when it has none.
@@ -26,6 +26,31 @@ schema does not hold. A refusal is 400 with the engine's code and the field's
 path. While economics cannot read its currency table, what needs the table is
 refused 503 and nothing is recorded.
 
+Raising a financial source's trust tier (the owner's decision of 12 Oct 2026;
+:class:`~assurance.economics.models.FinancialSourceTrustRaise`):
+
+- ``GET  economics/sources/<uuid>/trust-raises/``: every raise of the source the
+  version ``<uuid>`` belongs to (its tenant and key, every version), newest first.
+- ``POST economics/sources/<uuid>/trust-raises/``: raise that version to
+  ``to_tier`` for ``reason`` (the body's only two fields). Below ``authoritative``
+  the new version is recorded at once (201, ``done``); ``authoritative`` is
+  recorded ``pending`` (201), and no version is written until a second admin
+  approves it.
+- ``POST economics/trust-raises/<uuid>/approve/``: a pending raise approved by an
+  admin other than its requester (200, ``done``, the new version recorded).
+- ``POST economics/trust-raises/<uuid>/withdraw/``: a pending raise withdrawn by its
+  requester (200, ``withdrawn``).
+
+A source is visible as a deployment is: a platform-wide one to every signed-in
+account, a tenant's to those who see that deployment (404 otherwise, whether or not
+it exists). Reading needs no more. Every write is an admin's only, refused 403
+(``admin_required``) for anyone else, before the body is read; so is an approval by
+the requester (``second_person_required``) and a withdrawal by anyone but the
+requester (``withdrawn_by_requester_only``). A raise whose state or source moved
+meanwhile is 409 (``trust_raise_not_pending``, ``source_superseded``), and every
+other refusal 400 with its code. The body is read as the parameter-set route reads
+one: strict JSON, at most :data:`MAX_BODY_BYTES` (413).
+
 None of these routes is a stop, and none sits on a stop's path: each is classified
 in ``safety.stops.NOT_STOPS``, and none reads or writes anything a stop or the
 decision reads. This module does nothing at import but define its views, and
@@ -40,6 +65,7 @@ from __future__ import annotations
 import json
 
 from django.db import IntegrityError
+from django.db.models import Q
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404
 from django.urls import path
@@ -54,7 +80,13 @@ from config.parsers import SafeJSONParser
 from .engine import currency as _currency
 from .engine import parameter_set as pset
 from .engine.parameters import ParameterRefused
-from .models import CustomerParameterSet, EconomicsRefused
+from .models import (
+    CustomerParameterSet,
+    EconomicsRefused,
+    FinancialSource,
+    FinancialSourceTrustRaise,
+    require_trust_admin,
+)
 
 #: The most versions the list returns: a custom view's list is not paginated by
 #: the project's default pagination, so it carries its own bound.
@@ -244,6 +276,165 @@ class ParameterSetVersionsView(APIView):
         return Response({"deployment": str(deployment.uuid), **served}, status=status.HTTP_201_CREATED)
 
 
+# ---------------------------------------------------------------------------
+# Raising a source's trust tier
+# ---------------------------------------------------------------------------
+
+#: The most raises the list returns, newest first.
+TRUST_RAISE_LIST_LIMIT = 200
+
+#: The fields a raise is posted with, and nothing else.
+_TRUST_RAISE_FIELDS = frozenset({"to_tier", "reason"})
+
+#: The answer to a refused raise, by its code: a person who may not do this (403),
+#: and a raise whose state or source moved meanwhile (409). Any other code is a
+#: body the rules refuse (400).
+_TRUST_REFUSAL_STATUS = {
+    "admin_required": status.HTTP_403_FORBIDDEN,
+    "second_person_required": status.HTTP_403_FORBIDDEN,
+    "withdrawn_by_requester_only": status.HTTP_403_FORBIDDEN,
+    "trust_raise_not_pending": status.HTTP_409_CONFLICT,
+    "source_superseded": status.HTTP_409_CONFLICT,
+}
+
+
+def _visible(prefix: str, user) -> Q:
+    """Platform-wide sources, and those of a deployment ``user`` may see, as
+    :func:`visible_deployments` scopes them."""
+    return Q(**{f"{prefix}deployment__isnull": True}) | Q(**{f"{prefix}deployment__in": visible_deployments(user)})
+
+
+def _visible_source(request, source_uuid) -> FinancialSource:
+    return get_object_or_404(FinancialSource.objects.filter(_visible("", request.user)), uuid=source_uuid)
+
+
+def _visible_raise(request, raise_uuid) -> FinancialSourceTrustRaise:
+    return get_object_or_404(
+        FinancialSourceTrustRaise.objects.filter(_visible("from_version__", request.user)), uuid=raise_uuid
+    )
+
+
+def _trust_refused(refused: EconomicsRefused) -> Response:
+    return Response(
+        {"code": refused.code, "detail": refused.detail or str(refused)},
+        status=_TRUST_REFUSAL_STATUS.get(refused.code, status.HTTP_400_BAD_REQUEST),
+    )
+
+
+def _trust_admin(request) -> Response | None:
+    """The admin check, before anything else is read: a 403 with its code."""
+    try:
+        require_trust_admin(request.user)
+    except EconomicsRefused as refused:
+        return _trust_refused(refused)
+    return None
+
+
+def _declared_length(request) -> None:
+    """The DECLARED length, before the body is read, as the parameter-set route does."""
+    try:
+        declared = int(request.META.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        raise ValidationError({"detail": "Content-Length is not a number"}) from None
+    if declared > MAX_BODY_BYTES:
+        raise BodyTooLarge()
+
+
+def _raced() -> Response:
+    return Response(
+        {"detail": "Another version of this source was recorded at the same moment; nothing was recorded."},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+class SourceTrustRaisesView(APIView):
+    """Every raise of one source's trust tier, and requesting the next."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def get(self, request, uuid):
+        source = _visible_source(request, uuid)
+        raises = list(
+            FinancialSourceTrustRaise.objects.filter(
+                from_version__deployment_id=source.deployment_id, from_version__source_key=source.source_key
+            )
+            .select_related("from_version", "from_version__deployment", "to_version")
+            .order_by("-id")[: TRUST_RAISE_LIST_LIMIT + 1]
+        )
+        truncated = len(raises) > TRUST_RAISE_LIST_LIMIT
+        return Response(
+            {
+                "source_key": source.source_key,
+                "deployment": str(source.deployment.uuid) if source.deployment_id is not None else None,
+                "truncated": truncated,
+                "raises": [raised.as_dict() for raised in raises[:TRUST_RAISE_LIST_LIMIT]],
+            }
+        )
+
+    def post(self, request, uuid):
+        source = _visible_source(request, uuid)
+        refused = _trust_admin(request)
+        if refused is not None:
+            return refused
+        _declared_length(request)
+        body = request.data
+        if isinstance(body, QueryDict):
+            raise UnsupportedMediaType(request.content_type)
+        if not isinstance(body, dict):
+            raise ValidationError({"detail": "Send an object with to_tier and reason."})
+        unknown = sorted(set(body) - _TRUST_RAISE_FIELDS)
+        if unknown:
+            raise ValidationError({"detail": f"A raise holds to_tier and reason only; not {unknown}."})
+        try:
+            raised = FinancialSourceTrustRaise.request(source, body.get("to_tier"), body.get("reason"), by=request.user)
+        except EconomicsRefused as refused:
+            return _trust_refused(refused)
+        except IntegrityError:
+            return _raced()
+        return Response(FinancialSourceTrustRaise.objects.get(pk=raised.pk).as_dict(), status=status.HTTP_201_CREATED)
+
+
+class TrustRaiseApproveView(APIView):
+    """A pending raise approved by an admin other than the one who requested it."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def post(self, request, uuid):
+        found = _visible_raise(request, uuid)
+        refused = _trust_admin(request)
+        if refused is not None:
+            return refused
+        _declared_length(request)
+        try:
+            done = found.approve(by=request.user)
+        except EconomicsRefused as refused:
+            return _trust_refused(refused)
+        except IntegrityError:
+            return _raced()
+        return Response(done.as_dict())
+
+
+class TrustRaiseWithdrawView(APIView):
+    """A pending raise withdrawn by the admin who requested it."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def post(self, request, uuid):
+        found = _visible_raise(request, uuid)
+        refused = _trust_admin(request)
+        if refused is not None:
+            return refused
+        _declared_length(request)
+        try:
+            withdrawn = found.withdraw(by=request.user)
+        except EconomicsRefused as refused:
+            return _trust_refused(refused)
+        return Response(withdrawn.as_dict())
+
+
 urlpatterns = [
     path(
         "deployments/<uuid:uuid>/economics/parameter-sets/<str:set_key>/",
@@ -254,5 +445,20 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/parameter-sets/<str:set_key>/versions/",
         ParameterSetVersionsView.as_view(),
         name="deployment-economics-parameter-set-versions",
+    ),
+    path(
+        "economics/sources/<uuid:uuid>/trust-raises/",
+        SourceTrustRaisesView.as_view(),
+        name="economics-source-trust-raises",
+    ),
+    path(
+        "economics/trust-raises/<uuid:uuid>/approve/",
+        TrustRaiseApproveView.as_view(),
+        name="economics-trust-raise-approve",
+    ),
+    path(
+        "economics/trust-raises/<uuid:uuid>/withdraw/",
+        TrustRaiseWithdrawView.as_view(),
+        name="economics-trust-raise-withdraw",
     ),
 ]

@@ -143,6 +143,10 @@ STOP_WORDS = re.compile(
 )
 NAMED_LIKE_A_STOP_BUT_NOT = {
     "claim-withdraw-latent-condition",
+    # Withdraws a PENDING request to raise a financial source's trust tier (the
+    # owner's decision of 12 Oct 2026): the request has not taken effect, and
+    # nothing running, no engine and no authority depends on it.
+    "economics-trust-raise-withdraw",
     "deployment-dispatch-attempts",
     "failsafe:audit",
     "finding-remediation-transition",

@@ -17,7 +17,8 @@ how an amount is held, converted and normalized and with what provenance, the
 observation data, how a loss component is computed and with what invariants, and
 what this version does not do. The scenario engine computes deterministic low, base
 and high ranges, and the routes it serves are the customer parameter set's (section
-19) and the scenario builder's (section 24). The distribution catalogue and the seeded
+19), the scenario builder's (section 24), and raising a source's trust tier (section
+6.1). The distribution catalogue and the seeded
 sampler (phase E2, section 23) are pure; MVP step 7b (section 25) wires them to the
 formulas and the loss model through a service that simulates a stored scenario version
 and records the result, and serves no route.
@@ -64,9 +65,9 @@ Phase E2, MVP step 7b, wiring step 7a to steps 4 and 5:
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py`, the scenario builder in `builder.py` and its routes in `scenario_api.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py` and `tests/test_economics_builder.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`), the scenario builder in `builder.py` and its routes in `scenario_api.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0065_financial_source_trust_raises.py` (trust raises, section 6.1) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
 
@@ -78,7 +79,7 @@ with Django and every other part of mythos-core poisoned.
 
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
-parameter set's and the scenario builder's; feeds and their adapters; source disagreement; building
+parameter set's, the scenario builder's and the trust raises'; feeds and their adapters; source disagreement; building
 or verifying the signed Financial Exposure Receipt (`mythos_core.exposure_receipt`,
 pinned since E1 but not yet called).
 
@@ -275,6 +276,11 @@ A production run never relies on a source still trusted as `unverified`
 the first customer run). A run for a deployment recorded as `dev` or `staging` is not
 a production run, and may.
 
+A tier is raised in the opposite order, weakest to strongest: `unverified` <
+`benchmark` < `licensed_vendor` < `customer` < `authoritative`
+(`governance.TRUST_ORDER`). Only an admin raises one, only upward, and
+`authoritative` only with a second admin's approval (section 6.1).
+
 ## 5. The currency table
 
 `mythos_core.currency` is the one currency table for Economic Exposure
@@ -363,7 +369,8 @@ Before the scenario step no route, command or signal wrote or read any of these.
 simulation step (section 25) adds no route: its service is the only writer of a
 simulation result.
 The scenario step adds one route module (section 19), the only writer of a
-customer parameter set and its parameters; the builder step adds another (section
+customer parameter set and its parameters, and since 12 Oct 2026 of a trust raise
+and the source version it records (section 6.1), with the operator's command; the builder step adds another (section
 24), the only writer of a built scenario, its parameters, events, components,
 effects, finding links and build record. The permitted writers below are the
 ones the later steps may add, and, for the observations, the snapshot loader an
@@ -371,7 +378,8 @@ operator runs; any other writer is a defect.
 
 | Model | Holds | Permitted writers |
 |---|---|---|
-| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review; an admin may record a reviewed license class as a new version |
+| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review; an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise; an admin may record a reviewed license class as a new version |
+| `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, who requested it and when, who approved it and when, when it was withdrawn, and its state (`pending`, `done` or `withdrawn`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint, causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
@@ -423,14 +431,107 @@ and trust tier. Which runs are production runs is decided by
 never the object handed in: a run for a deployment recorded as `dev` or `staging` is
 not one and keeps the gate as it was; a run for a deployment in `production` (the
 default) or `other`, for one that is not recorded, or for no deployment (`None`) is
-one. A version's tier never changes; a higher tier is a new version. No route, command
-or admin action records a source version yet: the only writer is the snapshot loader
-an operator runs, which takes the tier from the snapshot's own document. Who may
-raise a tier, and through what, is still to be decided.
+one. A version's tier never changes; a higher tier is a new version, recorded only by
+an admin's raise (section 6.1). The snapshot loader an operator runs still takes the
+tier from the snapshot's own document.
 
 `SensitiveOverride.check_in_force()` raises unless two
 different people, neither the requester, have approved it. Whatever would use a
 source or apply an override calls these first.
+
+### 6.1 Raising a source's trust tier
+
+The owner's decision of 12 Oct 2026, after the trust-tier gate: an admin-only action
+raises a tier, it records who raised it and when, and the top tier needs a second
+person. `FinancialSourceTrustRaise` (`models.py`) holds the rules on the record
+itself, and the routes and the command call its methods, so each refuses with the
+same code.
+
+- **A new version.** A version's tier never changes, so a raise records a NEW version
+  of the same source: the same tenant, key, provider, dataset, URL, licence, snapshot
+  hash, retrieval time, schema version and synthetic flag, at the new tier, with
+  `recorded_by` the admin who completed the raise. It is saved through
+  `FinancialSource`'s own checks, so a synthetic source stays `unverified`
+  (`synthetic_source`), `customer` needs a tenant (`customer_source_without_tenant`),
+  and the check constraints hold. The version raised from stays as it was, and a
+  production run still refuses it (`source_unverified`) while it accepts the new one.
+  The new version carries no FX or cost-index observations: they stay on the version
+  registered from the snapshot, under the same snapshot hash.
+- **Admin only** (`admin_required`): an active account whose role is admin, or a
+  superuser, as every write to the assurance record is. Anonymous is 401; any other
+  signed-in account is 403, before the body is read. A tenant's source is found as its
+  deployment is (the deployment scoping of section 19): 404 for anyone that scoping
+  does not show the tenant, whether or not it exists. A platform-wide source is every
+  signed-in account's to see. Reading the raises needs no more than seeing the source.
+- **Upward only** (`trust_not_raised`): the new tier is above the version's own in
+  the order of section 4.5; the same tier or a lower one is refused. A tier this
+  platform does not know is `code_unrecognised`.
+- **From the latest version only** (`source_superseded`): a raise starts from the
+  latest version of its source (its tenant and key), and an approval is refused if a
+  newer version was recorded since the request, by another raise or the snapshot
+  loader.
+- **A reason** (`required_field_blank`, `reason_too_long`): text, not blank, at most
+  2000 characters.
+- **One step below the top.** Below `authoritative`, one admin raises in one call:
+  the new version and the record, `done`, its requester its approver, are written in
+  one transaction.
+- **Two people for `authoritative`.** The request is recorded `pending` and no version
+  is written. An admin OTHER than the requester approves it (`second_person_required`,
+  matched on the account and on the recorded username, so a removed requester is still
+  the requester); that records the version and the record moves to `done`. The
+  requester may withdraw a pending request (`withdrawn_by_requester_only` for anyone
+  else), and the record moves to `withdrawn`. A request that is done or withdrawn is
+  never approved or withdrawn again (`trust_raise_not_pending`). No write through the
+  ORM records a raise to `authoritative` as done without that approval: the model
+  inserts it only pending.
+- **Atomic and single-use.** An approval locks the raise's row (`select_for_update`)
+  and reads under that lock that it is still pending, that the approver is not the
+  requester and that its version is still the latest; then it records the version and
+  moves the record with one conditional write (only while it is still pending), all in
+  one transaction. Two concurrent approvals give exactly one version: the second waits
+  for the lock and finds the raise done. On PostgreSQL the row lock does that; SQLite,
+  which the tests run on, ignores `select_for_update` and serialises the whole
+  transaction at BEGIN IMMEDIATE. The transaction is a few reads and three writes.
+- **The record.** One row per raise: the version raised from and (once done) the
+  version recorded, the tiers, the reason, `requested_by` and `requested_by_username`
+  with `requested_at`, `approved_by` and `approved_by_username` with `approved_at`,
+  `withdrawn_at`, and the state. It is append-only but for its one transition, and
+  the usernames outlive a removed account. Its check constraints hold the state's
+  fields (`done` has a version, an approval time and an approver's name; `pending` has
+  none; `withdrawn` has a withdrawal time) and an upward pair of tiers; none of them
+  names an account column, so removing an operator, a stop, is never held back by a
+  raise.
+
+The routes are mounted under `/api/assurance/` with the parameter set's, from
+`assurance/economics/api.py`, guarded as that module is, and none is a stop
+(`safety.stops.NOT_STOPS`):
+
+- `GET  economics/sources/<uuid>/trust-raises/` (`economics-source-trust-raises`):
+  every raise of the source the version `<uuid>` belongs to, newest first, at most
+  200 (`truncated` says if there are more);
+- `POST economics/sources/<uuid>/trust-raises/`: raise that version, from a strict
+  JSON body holding `to_tier` and `reason` and nothing else, at most 64 KiB (413):
+  201, `done` (below the top tier) or `pending` (`authoritative`);
+- `POST economics/trust-raises/<uuid>/approve/` (`economics-trust-raise-approve`):
+  200, `done`;
+- `POST economics/trust-raises/<uuid>/withdraw/` (`economics-trust-raise-withdraw`):
+  200, `withdrawn`.
+
+A refusal answers its code: 403 for `admin_required`, `second_person_required` and
+`withdrawn_by_requester_only`; 409 for `trust_raise_not_pending` and
+`source_superseded` (and for another version of the source recorded at the same
+moment); 400 for the rest. The operator's command is the same rules and the same
+record, recorded under the account `--as` names, which must be an admin:
+
+    manage.py raise_source_trust request <source version uuid> --to <tier> --reason <why> --as <username>
+    manage.py raise_source_trust approve <raise uuid> --as <username>
+    manage.py raise_source_trust withdraw <raise uuid> --as <username>
+
+Not decided here, for the owner: lowering a tier (a source found unreliable) has no
+path, as the decision was raise only; another admin cannot reject a pending request,
+which stays pending until approved or withdrawn; and the snapshot loader still
+records whatever tier its file states, `authoritative` included, with no second
+person (it is run by an operator on a committed file).
 
 ## 7. Governance rules and refusal codes
 
@@ -458,9 +559,16 @@ that code (`EconomicsRefused.code`).
 | `spine_reference_malformed` | a reference into SPINE is in SPINE's form (section 8) |
 | `cross_tenant_reference` | a record never points at another deployment's record, and a run never uses another deployment's source |
 | `customer_source_without_tenant` | a platform-wide source is never licensed or trusted as `customer` data |
-| `code_unrecognised` | a verdict, license class or trust tier is one of its codes |
-| `required_field_blank` | a source key, provider, dataset, schema version or scenario title is not blank |
+| `code_unrecognised` | a verdict, license class or trust tier (a raise's too) is one of its codes |
+| `required_field_blank` | a source key, provider, dataset, schema version, scenario title or a raise's reason is not blank |
 | `bulk_create_refused` | records are written one at a time, through the checks above |
+| `admin_required` | only an admin (role admin, or a superuser) requests, approves or withdraws a raise of a source's trust tier (section 6.1) |
+| `trust_not_raised` | a raise moves a source to a tier above its own, in the order of section 4.5; the same tier or a lower one is refused |
+| `source_superseded` | a raise starts from the latest version of its source, and is approved only while that version is still the latest |
+| `second_person_required` | a raise to `authoritative` is approved by an admin other than its requester, and is never recorded done without that approval |
+| `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending; below `authoritative` it is done in one step, never pending |
+| `withdrawn_by_requester_only` | a pending raise is withdrawn only by the admin who requested it |
+| `reason_too_long` | a raise's reason is at most 2000 characters |
 
 The rules read what is stored, never what a caller's in-memory object says: the
 authors of a scenario's versions, an override's requester and its approvals are

@@ -505,6 +505,23 @@ NOT_STOPS = {
         "records, append-only; it starts and stops nothing",
     },
     "deployment-economics-scenario-events": _get(),
+    # Raising a financial source's trust tier (assurance.economics.api; the owner's
+    # decision of 12 Oct 2026): economics records, admin only. Nothing a stop or the
+    # decision reads. Withdrawing a pending raise withdraws a request for more trust
+    # in a data source; it is not a revoke of any running work or authority.
+    "economics-source-trust-raises": {
+        "GET": _READ,
+        "POST": "records a raise of a financial source's trust tier, or requests one: economics records, "
+        "append-only; it starts and stops nothing",
+    },
+    "economics-trust-raise-approve": {
+        "POST": "approves a pending raise of a financial source's trust tier: economics records, append-only; "
+        "it starts and stops nothing",
+    },
+    "economics-trust-raise-withdraw": {
+        "POST": "withdraws a pending raise of a financial source's trust tier: economics records; it starts and "
+        "stops nothing",
+    },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

@@ -420,6 +420,29 @@ fails to import, its routes are logged and not served, and every stop and the
 system checks load without them. While economics cannot read mythos-core's
 currency table, the write answers 503; nothing at import reads the table.
 
+### Raising a source's trust tier
+
+A production run refuses a source still trusted as `unverified`. An admin raises a
+source's tier (spec, section 6.1), from the same module:
+
+- `GET /api/assurance/economics/sources/<uuid>/trust-raises/`: every raise of the
+  source that version belongs to, newest first;
+- `POST .../sources/<uuid>/trust-raises/` with `{"to_tier", "reason"}`: below
+  `authoritative`, a new version of the source at that tier, recorded at once (every
+  field as before but the tier, recorded by the admin); `authoritative` is recorded
+  pending, with no version;
+- `POST /api/assurance/economics/trust-raises/<uuid>/approve/`: a pending raise
+  approved by an admin OTHER than the one who asked; it records the version;
+- `POST .../trust-raises/<uuid>/withdraw/`: a pending raise withdrawn by the admin
+  who asked.
+
+Only upward, and only from the latest version of the source. Anyone but an admin is
+403 (anonymous 401); a tenant's source is 404 to whoever cannot see that deployment.
+Every raise is one append-only record of who asked, who approved, why and when, and
+the names outlive a removed account. `manage.py raise_source_trust request|approve|withdraw
+... --as <admin>` is the same rules and the same record for the operator. None of
+these is a stop.
+
 ### The scenario builder
 
 A second route module, imported guarded in a guard of its own, builds a scenario's

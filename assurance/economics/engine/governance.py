@@ -11,7 +11,11 @@ discipline of the specification (section 26) adds the inventory's:
 
 The owner added one on 12 Oct 2026, before the first customer run: a production
 run never relies on a source whose trust tier is still ``unverified`` (the
-default) -- :func:`production_trust_refusal`.
+default) -- :func:`production_trust_refusal`. And, the same day, how a tier is
+raised: only by an admin, only upward, only from the latest version of the source,
+and to ``authoritative`` only with a second admin's approval --
+:func:`trust_raise_refusal`, :func:`trust_raise_approval_refusal` and the rules
+beside them.
 
 Each function returns ``None`` when the rule holds and a code from
 :data:`REFUSALS` when it does not, so the Django half
@@ -31,6 +35,9 @@ from .provenance import LicenseClass, TrustTier
 
 #: How many different people approve a sensitive override before it is in force.
 REQUIRED_OVERRIDE_APPROVERS = 2
+
+#: The longest reason a raise of a source's trust tier records, in characters.
+TRUST_RAISE_REASON_MAX = 2000
 
 #: What each refusal code means, published beside it.
 REFUSALS: Mapping[str, str] = MappingProxyType(
@@ -89,8 +96,44 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "a customer's own data belongs to that customer's deployment: a platform-wide source is never licensed "
             "or trusted as customer data"
         ),
+        # Raising a source's trust tier (the owner's decision of 12 Oct 2026).
+        "admin_required": (
+            "only an admin (role admin, or a superuser) requests, approves or withdraws a raise of a source's trust "
+            "tier"
+        ),
+        "trust_not_raised": (
+            "a raise moves a source to a tier above the one it has (weakest to strongest: unverified, benchmark, "
+            "licensed_vendor, customer, authoritative); the same tier or a lower one is not a raise"
+        ),
+        "source_superseded": (
+            "a raise starts from the latest version of its source, and is approved only while that version is still "
+            "the latest: a newer version has been recorded since"
+        ),
+        "second_person_required": (
+            "a raise to authoritative is approved by an admin other than the one who requested it"
+        ),
+        "trust_raise_not_pending": (
+            "the raise is no longer pending: a request is approved or withdrawn once, and a raise that is done or "
+            "withdrawn stays as it is"
+        ),
+        "withdrawn_by_requester_only": "a pending raise is withdrawn only by the admin who requested it",
+        "reason_too_long": f"a raise's reason is at most {TRUST_RAISE_REASON_MAX} characters",
     }
 )
+
+#: The trust tiers, WEAKEST first: the order a tier is raised in. (The enum is
+#: written strongest first.)
+TRUST_ORDER: tuple[TrustTier, ...] = (
+    TrustTier.UNVERIFIED,
+    TrustTier.BENCHMARK,
+    TrustTier.LICENSED_VENDOR,
+    TrustTier.CUSTOMER,
+    TrustTier.AUTHORITATIVE,
+)
+
+#: The tiers a raise to needs a second person: requested by one admin, approved by
+#: another.
+TWO_PERSON_TIERS: frozenset[TrustTier] = frozenset({TrustTier.AUTHORITATIVE})
 
 #: How SPINE names each thing a financial record may point at. Financial records
 #: reference SPINE by these ids and never copy what they name (specification,
@@ -228,6 +271,74 @@ def production_trust_refusal(trust_tier: str) -> str | None:
     if recognised is TrustTier.UNVERIFIED:
         return "source_unverified"
     return None
+
+
+def trust_raise_admin_refusal(is_admin: bool) -> str | None:
+    """Whether a person may request, approve or withdraw a raise of a source's trust
+    tier: an admin only (role admin, or a superuser), as every write to the
+    assurance record is. The Django half says whether the signed-in account is one;
+    anything but ``True`` is not."""
+    if is_admin is True:
+        return None
+    return "admin_required"
+
+
+def trust_raise_refusal(from_tier, to_tier, *, synthetic: bool, has_tenant: bool) -> str | None:
+    """Whether a source version trusted as ``from_tier`` may be raised to
+    ``to_tier`` (the owner's decision of 12 Oct 2026). Both are tiers this platform
+    knows (``code_unrecognised``); a synthetic source is never trusted above
+    ``unverified`` (``synthetic_source``); the new tier is strictly above the old
+    one in :data:`TRUST_ORDER` (``trust_not_raised``); and a platform-wide source is
+    never trusted as ``customer`` data (``customer_source_without_tenant``).
+
+    Whether the version is still the latest of its source (``source_superseded``)
+    is read from the stored rows, by the caller."""
+    codes = [tier.value for tier in TrustTier]
+    if code_refusal(from_tier, codes) is not None or code_refusal(to_tier, codes) is not None:
+        return "code_unrecognised"
+    if synthetic is not False:
+        return "synthetic_source"
+    if TRUST_ORDER.index(TrustTier(to_tier)) <= TRUST_ORDER.index(TrustTier(from_tier)):
+        return "trust_not_raised"
+    if TrustTier(to_tier) is TrustTier.CUSTOMER and has_tenant is not True:
+        return "customer_source_without_tenant"
+    return None
+
+
+def needs_second_person(to_tier) -> bool:
+    """Whether a raise to ``to_tier`` is requested by one admin and approved by
+    another (:data:`TWO_PERSON_TIERS`), rather than recorded in one step."""
+    return isinstance(to_tier, str) and to_tier in {tier.value for tier in TWO_PERSON_TIERS}
+
+
+def trust_raise_reason_refusal(reason) -> str | None:
+    """Whether ``reason`` is a raise's reason: text, not blank, and at most
+    :data:`TRUST_RAISE_REASON_MAX` characters."""
+    if not (isinstance(reason, str) and reason.strip()):
+        return "required_field_blank"
+    if len(reason) > TRUST_RAISE_REASON_MAX:
+        return "reason_too_long"
+    return None
+
+
+def trust_raise_approval_refusal(requester: Person, approver: Person) -> str | None:
+    """Whether ``approver`` may approve a raise ``requester`` asked for: a named
+    person other than the requester (``second_person_required``), matched on the
+    account and on the username, so a requester whose account was removed is still
+    the requester."""
+    if not approver.named:
+        return "approver_not_named"
+    if same_person(requester, approver):
+        return "second_person_required"
+    return None
+
+
+def trust_raise_withdrawal_refusal(requester: Person, withdrawer: Person) -> str | None:
+    """Whether ``withdrawer`` may withdraw a pending raise ``requester`` asked for:
+    only the requester does."""
+    if withdrawer.named and same_person(requester, withdrawer):
+        return None
+    return "withdrawn_by_requester_only"
 
 
 _SNAPSHOT_HASH = re.compile(r"sha256:[0-9a-f]{64}")

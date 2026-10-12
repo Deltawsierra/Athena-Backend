@@ -795,8 +795,15 @@ def test_nothing_but_the_models_registration_imports_economics():
     route module that does not import is logged and not served, and the URLconf,
     every stop and the system checks load without it
     (``test_an_economics_fault_never_takes_down_a_stop``). A later step that serves
-    more adds its route module here -- never a stop-path module -- and says so."""
+    more adds its route module here -- never a stop-path module -- and says so.
+
+    Raising a source's trust tier (spec, section 6.1) adds the operator's command,
+    ``manage.py raise_source_trust``: a management command Django loads only when an
+    operator runs it by name, which no first-party module imports (checked below),
+    so it is on no stop path; its routes are in ``assurance.economics.api``."""
     importers = set()
+    command_importers = set()
+    command = "assurance.management.commands.raise_source_trust"
     skip = {".git", "node_modules", "tests", "__pycache__"}
     for directory, subdirectories, files in os.walk(REPO):
         here = Path(directory)
@@ -814,7 +821,14 @@ def test_nothing_but_the_models_registration_imports_economics():
             for module in _imports(path, package):
                 if module == "assurance.economics" or module.startswith("assurance.economics."):
                     importers.add(path.relative_to(REPO).as_posix())
-    assert importers == {"assurance/models.py", "assurance/urls.py"}
+                if module == command or module.startswith(command + "."):
+                    command_importers.add(path.relative_to(REPO).as_posix())
+    assert importers == {
+        "assurance/models.py",
+        "assurance/urls.py",
+        "assurance/management/commands/raise_source_trust.py",
+    }
+    assert command_importers == set()
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
     # The scenario step's route module, and (section 24) the scenario builder's.
     assert [m for m in mounted if m.startswith("assurance.economics")] == [
@@ -899,6 +913,10 @@ SPEC_PHRASES = (
     "Deterministic ranges, not distributions",
     "Decisions this version takes, which the owner may change",
     "A production run never relies on a source still trusted as `unverified`",
+    # Raising a source's trust tier (the owner's decision of 12 Oct 2026, section 6.1).
+    "`unverified` < `benchmark` < `licensed_vendor` < `customer` < `authoritative`",
+    "Two concurrent approvals give exactly one version",
+    "No write through the ORM records a raise to `authoritative` as done without that approval",
 )
 
 
@@ -908,6 +926,8 @@ def test_the_spec_states_the_policy(phrase):
 
 
 def test_the_spec_names_every_code():
+    from assurance.economics.models import TrustRaiseState
+
     text = SPEC.read_text(encoding="utf-8")
     codes = [
         *taxonomy.LossFamily,
@@ -944,6 +964,11 @@ def test_the_spec_names_every_code():
         "deployment-economics-parameter-set",
         "deployment-economics-parameter-set-versions",
         *loss.TERM_DIRECTIONS,
+        # Raising a source's trust tier (section 6.1).
+        "economics-source-trust-raises",
+        "economics-trust-raise-approve",
+        "economics-trust-raise-withdraw",
+        *(state.value for state in TrustRaiseState),
     ]
     missing = [str(code) for code in codes if f"`{code}`" not in text]
     assert not missing, missing
