@@ -21,7 +21,10 @@ and high ranges, and the routes it serves are the customer parameter set's (sect
 6.1). The distribution catalogue and the seeded
 sampler (phase E2, section 23) are pure; MVP step 7b (section 25) wires them to the
 formulas and the loss model through a service that simulates a stored scenario version
-and records the result, and serves no route.
+and records the result, and serves no route; and MVP step 8 (section 26) analyses a
+stored result's sensitivity on its own draws, grades it, writes its Financial
+Exposure Validity Card and signs its Financial Exposure Receipt, and serves no route
+either.
 
 ## Contents
 
@@ -60,14 +63,18 @@ Phase E2, MVP step 7b, wiring step 7a to steps 4 and 5:
 
 25. [Wiring the simulation (MVP step 7b)](#25-wiring-the-simulation-mvp-step-7b)
 
+MVP step 8, on step 7b's stored result:
+
+26. [Sensitivity, grade, Validity Card and receipt (MVP step 8)](#26-sensitivity-grade-validity-card-and-receipt-mvp-step-8)
+
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`), the scenario builder in `builder.py` and its routes in `scenario_api.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0065_financial_source_trust_raises.py` (trust raises, section 6.1) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_financial_source_trust_raises.py` (trust raises, section 6.1) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
 
@@ -79,9 +86,9 @@ with Django and every other part of mythos-core poisoned.
 
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
-parameter set's, the scenario builder's and the trust raises'; feeds and their adapters; source disagreement; building
-or verifying the signed Financial Exposure Receipt (`mythos_core.exposure_receipt`,
-pinned since E1 but not yet called).
+parameter set's, the scenario builder's and the trust raises'; feeds and their adapters; source disagreement.
+Building and verifying the signed Financial Exposure Receipt
+(`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
 ## 2. Safety
 
@@ -395,6 +402,8 @@ operator runs; any other writer is a defect.
 | `CausalEffect` (builder) | one effect of a built scenario version, in exactly one of its loss events (section 24.1) | the same |
 | `EffectFinding` (builder) | one finding enabling one effect, and its role | the same |
 | `SimulationResult` (simulation) | one Monte Carlo run of one scenario version: seed, draws, canonical inputs and their digest, every version, the record and its digest, or the refusal's code; the timing (section 25.6) | the simulation service only (section 25.7) |
+| `FinancialValidityCard` (step 8) | one simulation result's Validity Card: its grade and the grade's version digest, the card and its digest, the sensitivity analysis and its digest, when it was issued; one per result (section 26.4) | the validity service only (`validity_service.issue_card`, section 26) |
+| `FinancialExposureReceipt` (step 8) | one simulation result's signed receipt: the `mythos.financial-exposure-receipt/v1` document, its DSSE envelope, the key id, its card; one per result and per card (section 26.5) | the receipt service only (`receipt_service.issue_receipt`, section 26) |
 
 The two observation models are checked on save by the engine's own contracts
 (`fx.FXRate`, `cost_index.IndexPoint`), so a row is refused with the engine's code
@@ -609,7 +618,8 @@ the licensing and legal review The Open Group's terms require first.
   builds a scenario's events from SPINE effects and findings (section 24). Nothing
   yet assigns a confidence grade or samples a distribution for a scenario; the
   scenario engine's own limits are section 22, the probabilistic engine's section
-  23.11, and the builder's section 24.9.
+  23.11, and the builder's section 24.9. (Superseded: step 7b samples a stored
+  scenario, section 25, and step 8 grades the result, section 26.)
 - **Fixture data only.** Every source in the MVP is a committed snapshot, and the
   only one committed is SYNTHETIC TEST DATA (section 13). Nothing fetches a feed,
   and nothing is current beyond its retrieval time.
@@ -1469,8 +1479,9 @@ for Minotaur's economic-exposure tests.
   1,000,000 limit, the engine retains USD 250,000 where the usual policy reading
   retains USD 150,000. It never understates the retained loss, and overstates it
   by up to the deductible where a sublimit binds.
-- **Freshness is flagged, not graded.** A stale parameter is named on the
-  component that read it; no confidence grade is computed from it yet.
+- **Freshness is flagged, not graded** by the scenario engine. A stale parameter is
+  named on the component that read it; step 8 grades it (section 26.2: one step
+  down, `stale_inputs`).
 - **No regulatory penalty is predicted.** A regulatory component is a range its
   evidence must ground (section 3, rule 8); the engine adds nothing to it.
 - **Categorical inputs are not in the schema.** Data classes, jurisdictions, the
@@ -1838,10 +1849,10 @@ parameter or refuses it; a `SimulationResult` records each run, idempotently; th
 `scenario_id` is the scenario version's uuid; and the uncertainty shared by a year's
 events is separated from the variation between them (section 25.2). What remains:
 
-- **Nothing is served,** and no receipt is built or signed (step 6 serves; step 8
-  signs).
-- **No confidence grade is computed.** Expert parameters are listed, not yet
-  downgraded; nor is a sensitivity analysis or a Validity Card made (step 8).
+- **Nothing is served** (step 6 serves). Step 8 builds and signs the receipt
+  (section 26).
+- **Step 8 computes the confidence grade**, the sensitivity analysis and the
+  Validity Card (section 26); a material expert figure lowers the grade there.
 - **No dependency between parameters** beyond that sharing: no copula, no
   shared-cause event, no correlation between events, and the frequency's parameters
   are fixed for the run.
@@ -2875,10 +2886,10 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
 
 ### 25.9 What is still not done
 
-- **Step 8**: sensitivity analysis and the most sensitive variables;
-  the confidence grade (the expert parameters are listed, not yet downgraded);
-  the Validity Card (the owner's specification, section 8);
-  the signed receipt (the Financial Exposure Receipt).
+- **Step 8 is done** (section 26): the sensitivity analysis and the most sensitive
+  variables, the confidence grade (a material expert figure, fixed or ranged, now lowers it, section 26.2),
+  the Validity Card (the owner's specification, section 8) and the signed receipt
+  (the Financial Exposure Receipt). What step 8 leaves is section 26.9.
 - **No route.** Step 6 serves reports and scenario endpoints, and will call the
   service.
 - **No writer states a distribution or a frequency yet, and nothing names a parameter
@@ -2952,3 +2963,652 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
     the first's row is returned. Alternative: the save's own checks inside the
     transaction, as first drafted, which a test on one connection cannot race (the
     other row would be rolled back with the savepoint).
+
+## 26. Sensitivity, grade, Validity Card and receipt (MVP step 8)
+
+MVP step 8, on step 7b's stored result (section 25.6): which parameters drive the
+result's uncertainty (the owner's specification, section 20's tornado), the
+confidence grade with its reason (section 8's table, and spec-v1's downgrades), the
+Financial Exposure Validity Card (section 8's fields; section 15's
+`FinancialValidityCard`) and the signed Financial Exposure Receipt (section 15's
+`FinancialExposureReceipt`; section 28's receipt tampering), built with
+`mythos_core.exposure_receipt`, which E1 pinned and nothing called before. No route
+is added: step 6 serves reports and scenario endpoints, and will call these services.
+
+| | |
+|---|---|
+| Code | `assurance/economics/engine/sensitivity.py` and `engine/grade.py` (pure; the analysis imports numpy, the grade does not); `assurance/economics/validity_service.py` (the card) and `receipt_service.py` (the receipt), thin Django services; `FinancialValidityCard` and `FinancialExposureReceipt` in `models.py`; `CyberEngineClient.sign_exposure_receipt` |
+| Migration | `0065_financial_validity_cards_and_receipts.py`: two new tables, nothing else changed |
+| Tests | `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; the safety tests of sections 2 and 23.10 extended to the four new modules and `mythos_core.exposure_receipt`; `tests/test_firing_twice_makes_one_effect.py` (the engine's signing call) |
+| mythos-core | `b1f6e9d`: `mythos_core.exposure_receipt`, `mythos.financial-exposure-receipt/v1` (Mythos-Core#49) |
+
+### 26.1 Sensitivity
+
+`engine/sensitivity.py`, method `mythos.economics.sensitivity` version 1
+(`sensitivity.version_record()`, in every record). Made on the run's OWN draws:
+`sensitivity.analyse` reloads the scenario version as step 7b read it, and refuses
+unless its canonical inputs give the run's input digest (`inputs_changed`) and its
+draws, made again from the same seed and sub-streams, give the run's outcomes
+digest (`result_not_reproduced`: another numpy or platform, section 23.8). Each
+parameter's draws are made again from its own stream (section 25.2), so they are the
+very draws the run evaluated.
+
+- **The output** is the scenario's gross cash loss: per simulated year where the
+  run has a frequency (basis `annual_loss`), per occurrence otherwise
+  (`per_occurrence`). Insurance and market value are not in it.
+- **The ranking: contribution to variance by rank correlation.** For every
+  uncertain parameter a known cash component reads (and the frequency, in an annual
+  run), the Spearman rank correlation of its draws (its yearly draws, in an annual
+  run) with the output, ties at their mean rank. Its **importance** is its squared
+  correlation over the sum of every ranked parameter's, so the importances sum to
+  one; its **direction** is the correlation's sign (`increases`, `decreases`, or
+  `none` for exactly zero). The sums are taken over whole numbers -- twice each
+  centred rank, at most 2 x 10^6 in size over at most 10^6 draws, so no partial sum
+  leaves int64 -- so the correlation is exact for the draws and the same on every
+  platform; importance and correlation are written to 10 decimal places. For a sum
+  of independent parameters the importances are close to their shares of the
+  variance (Spearman's correlation is the rank form of Pearson's, whose square is
+  the share exactly); for a skewed or non-additive formula they rank by monotone
+  association, which is what a tornado is read for.
+- **The tornado: one at a time.** Every other uncertain parameter at its P50, the
+  one swung to its P10 and then its P90 (type 7 quantiles of its own draws, as the
+  run's summaries), and the gross cash evaluated by the formula twins (section 25.3)
+  per occurrence; in an annual run, times the frequency's mean count over the run's
+  years (every parameter is shared by a year's occurrences, section 25.2, so a year
+  at fixed parameters is N occurrences of one). The frequency's own swing is its P10
+  and P90 count. Each swing records the P10, P50 and P90 and the low and high
+  outcome, as decimal strings.
+- **Not ranked, and listed with the reason:** a point mass is `fixed` (it draws
+  nothing, and its value is recorded); a parameter only the policy or a market-value
+  line reads is `not_in_gross_cash`; a parameter drawn per occurrence (nothing names
+  one yet, section 25.9) has no one value a year.
+- **Bounded.** Every ranked parameter's importance is recorded: the run already
+  holds one vector of draws per parameter within 7a's values budget (section 23.9),
+  so their number is bounded by it, and the analysis holds one parameter's draws at
+  a time beside the run's own vectors. At most `MAX_SWINGS` (20) parameters are
+  swung, the most important first; the card names the top `TOP_DRIVERS` (5).
+
+- **The level** (review round 1, H1; review round 2, HIGH 1 and MEDIUM 2): each
+  figure's share of the result's LEVEL, which the grade weighs by (section 26.2), as
+  **an ADDITIVE decomposition at base** -- every parameter at its base, FIXED OR
+  RANGED alike, so the shares depend on the bases only:
+  - **The gross cash** is the sum of its known cash components. Each component
+    carries exactly its base over the total (step 4's Decimal figure at base), split
+    among its OWN inputs in proportion to their elasticity of the component at base
+    (by its formula twin, a central difference of `LEVEL_STEP`, 0.1%, either side).
+    Each factor of a product has elasticity one, so a product of k factors gives each
+    1/k of it; an input that lowers the loss (a recovery rate r, read as 1 - r) is
+    moved through that complement, one factor like any other -- never r / (1 - r),
+    which let a customer recovery of 0.99 swamp an expert lump three times its product
+    (the round-2 finding). A sum inside a formula (fixed + rate x hours) splits by
+    elasticity likewise; a cap (`capped_credit`) goes to the cap where it binds, to the
+    product where it does not, a third each at the kink. An input read twice adds both.
+  - **The frequency.** With a frequency the headline is frequency x severity: the
+    frequency carries one half, and the severity's decomposition the other, however
+    many factors the severity's formulas have.
+  - **The retained cash**, where a policy applies, is decomposed the same way, per
+    event as the insurance applies (section 25.4), into additive pieces that sum
+    exactly to step 4's retained cash at base: the cash the policy leaves uncovered (an
+    excluded or never-covered family, business interruption without a stated waiting
+    period), the business interruption a waiting period above zero leaves uncovered
+    (one half the waiting period's, one half the interruption's own inputs), each
+    covered family's excess over its sublimit (split amount : sublimit, their
+    elasticities at base), what the deductible keeps (the deductible where the covered
+    cash passes it, the covered cash where it does not, half each at the kink) and
+    what passes the limit (split covered : deductible : limit). The covered cash's part
+    splits down to its families, their components and their inputs by base.
+  - A line's shares sum to exactly one (checked as fractions before they are written
+    to 10 places; `invariant_broken` otherwise). A line that is zero at base, or a
+    frequency whose base is zero (a base-case year holds no occurrence; review round
+    2, LOW 3), has no level: `defined: false`, and why.
+  A derived value names its contributors and those whose base supplies its own
+  (`supplied_by`).
+
+The record (schema `mythos.economics.sensitivity/v1`) holds the method, the seed,
+draws, input and outcomes digests, the basis, the currency, every ranked parameter
+(`name`, `rank`, `importance`, `rank_correlation`, `direction`, `source_types` --
+its own, or a derived parameter's contributors' --, `rule`, `expert`,
+`derived_from`, `frequency`, `swing`), the swing baseline, the unranked lists and
+the level: `gross_cash` and `retained_cash` (null without a policy), each with its
+`basis`, `base`, `frequency_base`, `defined` and `undefined_because`, its `pieces`
+(each a component or a retained piece -- `uncovered`, `uncovered_by_waiting_period`,
+`sublimit_excess`, `deductible`, `beyond_limit` -- with its `base`, `share` and
+`split`, a component's `inputs` with each input's `elasticity`, `complement` and
+`weight`), and for every figure the line reads its `base`, `source_type`, `share`,
+`fixed`, `frequency`, `policy_term`, `derived_from` and `supplied_by`.
+Nothing in it is a float; its digest is the canonical JSON's SHA-256, and the card
+names it.
+
+Known answers (`tests/test_economics_sensitivity_and_grade.py`): one wide expert
+range beside a narrow one ranks first with importance above 0.999 and direction
+`increases`; X1 + X2, independent symmetric PERTs whose widths are 2:1 (variances
+4:1), give 0.8 and 0.2 within 0.03 at 100,000 draws (measured 0.815 and 0.185), and
+equal variances one half each; a recovery rate reads `decreases`, and its P90 swing
+gives the lower outcome; the same seed gives the same record, another seed another;
+the frequency of an annual run ranks first where the severity is narrow. The level:
+4M-6M (an expert range), a fixed 1M and a customer gamma of base 100,000 share it
+5 : 1 : 0.1 to 1E-9; the three factors of `repeat_loss` a third each at a recovery of
+0.5, 0.9 and 0.99; one expert factor of a product of k (2 to 5) carries 1/k of it; a
+frequency exactly one half, beside a four-factor product too; a frequency whose base
+is zero has no level. The reviewer's round-2 cases, each graded A before: (a) an
+expert lump of 3M beside a customer `repeat_loss` of 100 x 1M x (1 - 0.99) carries
+0.75 and grades D (likewise 85% and 95%: never A); (b) 19M beside 1000 x 1M x
+(1 - 0.999), 0.95, D; (c) 200,000 beside a customer `support_contacts` of 1M, 1/6,
+C; (d) an expert frequency beside a customer recovery of 0.95, one half, D; (e) an
+expert count range inside a customer product, a third at every recovery, D at 0.5,
+0.9 and 0.99 alike. Under a policy: an expert deductible that IS the retained cash
+carries the retained line's severity half (retained D, gross A, headline D); an
+expert limit of 950,000 under 1M, 0.5 x 95/195 (retained C); the retained pieces sum
+to step 4's Decimal retained cash to the last digit, with a sublimit (and at its
+kink), an exclusion, a waiting period above zero and at zero, and a deductible above
+the covered cash.
+
+Measured on the build machine (4 cores, numpy 2.3.3), on the largest template
+(section 25.8's: 16 ranked parameters): 100,000 draws in 0.25 s (median of three;
+15 MB traced peak); 1,000,000 draws in 3.2 s (145 MB); 100,000 simulated years of a
+Poisson(3) frequency in 0.44 s. The analysis samples once (the run sampled twice).
+
+### 26.2 The confidence grade
+
+`engine/grade.py`, `mythos.economics.confidence-grade/v2`. A grade is computed from
+a line's **evidence mix**: the share of the line's LEVEL that rests on each class of
+source, each figure the line reads -- and the frequency -- weighted by its share of
+the base-case level (section 26.1's additive decomposition),
+**never by a raw count**, and **a fixed
+figure exactly as a range at the same base** (review round 1, H1): an expert's
+$5,000,000 guess is the evidence it is whether it is stated as one figure or as a
+range around it. A derived value (the builder's larger loss, section 24.5) rests on
+the contributors whose base supplies its own: its share is split equally among their
+source types. The variance importance (section 26.1) ranks the most sensitive
+variables on the card and weighs nothing in the grade.
+
+**Two lines, and the headline grade is the lower of the two** (review round 2,
+MEDIUM 2; `grade.headline`, `grade.HEADLINE_RULE`, in the grade's version record).
+Without a policy the gross cash is graded, and that is the card's grade. Under a
+policy the headline figures -- the card's and the receipt's -- are the retained
+cash, so both lines are graded, each by its own level with the same thresholds and
+downgrades: the gross cash, and the retained cash, whose level reads the policy's
+terms too (deductible, limit, sublimits, waiting period). The card's grade is the
+LOWER of the two (`Unknown` lowest); equal, the retained cash's. The card shows both
+(`confidence_grade.lines`), which line the headline is (`line`), and the evidence-mix
+fields of that line. An expert's deductible that is the retained cash, which the
+gross never reads, lowers the card's grade.
+
+| Source type | Class | Counts as |
+|---|---|---|
+| `CUSTOMER_PROVIDED` | `customer` | evidence |
+| `MYTHOS_OBSERVED` | `observed` | evidence |
+| `OFFICIAL_PUBLIC`, `LICENSED_MARKET` | `authoritative` | evidence |
+| `CALCULATED` | `calculated` | neither |
+| `INDUSTRY_BENCHMARK` | `benchmark` | neither |
+| `EXPERT_ESTIMATE` | `expert` | assumption |
+| `UNKNOWN` | `unsourced` | assumption |
+
+The thresholds (`grade.THRESHOLDS`, the owner's to set), compared exactly as
+fractions; the first that holds is the base grade:
+
+| Grade | Evidence share at least | Assumption share at most | The owner's typical mix (section 8) |
+|---|---|---|---|
+| A | 0.80 | 0.05 | mostly customer-specific + observed + authoritative |
+| B | 0.50 | 0.25 | customer + Mythos evidence + moderate benchmarks |
+| C | -- | 0.50 | benchmark-heavy |
+| D | otherwise | | mostly assumptions / weak priors |
+
+Then spec-v1's downgrades (section 12.5's rule: one step each, A to B to C to D,
+never below D), **each firing at most once**. A figure is MATERIAL where its level
+share is at least `MATERIAL_SHARE` (0.05):
+
+| Downgrade | Fires when |
+|---|---|
+| `stale_inputs` | a figure the run reads -- a known cash component's, a term of the policy the run applies, the frequency, or a contributor of a derived value the gross reads -- is past its `fresh_until` at the run's as-of date (section 26.3) |
+| `expert_figures` | a material figure rests on an expert's estimate or on no named source (`EXPERT_ESTIMATE`, `UNKNOWN`; a derived value, on a supplying contributor's), fixed or ranged |
+| `derived_values` | a material figure is a derived larger-loss value |
+
+**Collapsing a range to one figure at its base never raises the grade**: the level
+shares, the source types and the dates are those of the base, which a collapse keeps,
+and nothing in the grade reads a range's width
+(`test_collapsing_a_range_to_its_base_never_raises_the_grade`: the reviewer's three
+cases -- a 4M-6M expert fine beside a customer gamma, the same with a frequency, and
+twenty customer figures of $1 beside an expert $5,000,000, which grades D and never
+A -- a product of expert ranges, and a wide expert range carrying the variance but
+3% of the level; and, under a policy, an expert's deductible and limit as ranges,
+graded by the headline; each range alone and all together). This is why materiality reads
+the level only (section 26.10, decision 6): a downgrade a range's variance fired
+would be removed by collapsing it.
+
+`Unknown` -- Mythos cannot responsibly quantify the scenario -- where the run was
+refused (its reason says "the inputs conflict" for `distribution_contradicts_range`,
+`derived_malformed`, `currency_mismatch`, `duplicate_id` and
+`spine_effect_inconsistent`); where a cash component is unknown (the cash figure
+would read only "at least"; the evidence mix is still shown); where the line has no
+level to weigh (there is no fallback to counting): the base-case gross is zero, the
+frequency's base is zero (review round 2, LOW 3), or under a policy the base-case
+retained cash is zero, which makes the headline Unknown; and where an
+annual run draws a parameter per occurrence (review round 1, L6: such a parameter is
+neither ranked nor weighed yet; nothing names one today, section 25.9). A range the
+distribution rule refuses (section 25.1) leaves the run refused, and so Unknown,
+where its point would be graded: Unknown is not a rung of the ladder.
+
+Every grade carries its reason in words (the shares, the base grade and each
+downgrade with the figures that fired it) and `version_digest`: the SHA-256 of
+`grade.version_record()` -- the weighting, the two-line rule, the classes, the
+thresholds, the materiality, the downgrades and the conflict codes -- so a changed threshold is a new
+digest on every card, and in the release the card records (section 26.5).
+
+### 26.3 The Validity Card
+
+`validity_service.build_card`, schema `mythos.economics.validity-card/v1`. A JSON
+document with every field of the owner's table (section 8), under `fields`, in the
+table's order. Each comes from the stored result, the scenario version's
+append-only rows or the stored sensitivity analysis, or from `issued` (what was read
+when the card was issued, kept as issued); where a field has no data, it says so.
+No value is made up.
+
+| Owner field | Card key | Source |
+|---|---|---|
+| Scenario ID / description | `scenario` | the scenario version's uuid and title; each loss event's trigger, business process, SPINE effect and template (`LossEvent`, `CausalEffect`); a plain-English description made from them ("Cross-customer exposure. 1 causal loss event(s): cross_customer_disclosure on customer_service, priced by cross_customer_data_exposure v1, enabled by 1 finding(s).") |
+| Model version | `model_version` | the release token and build digest (section 26.5) and the RELEASE RECORD they are taken over (`release`: the run's `versions`, every version and limit, section 25.6; the sensitivity method; the grade's version record; the card's schema), which verification reads (section 26.6); the inventory entry an admin registered for `economic-exposure` at that token (`issued`), or "no model inventory entry registers ..." |
+| System fingerprint | `system_fingerprint` | the scenario version's own `system_fingerprint` where it was recorded (`binding: scenario`); otherwise the deployment's SPINE fingerprint (`assurance.fingerprint.compute_system_fingerprint`) read when the card was issued (`binding: deployment_at_issue`, and the statement says it is not the build's); otherwise `value: null` and "unavailable", with the reason |
+| Technical evidence | `technical_evidence` | each observed effect (its SPINE row's uuid, observation digest, SPINE effect, time; status: in force when the scenario was built, which the builder requires), each hypothetical effect, and each enabling finding with its role and its status and severity when the card was issued (`issued`) |
+| Customer-specific share | `customer_specific_share` | the evidence mix's `customer` share of the line the headline grade is (`line`), its weighting (`level`), and every customer figure that line reads with its level share and, beside it, its importance |
+| Benchmark-derived share | `benchmark_derived_share` | the `benchmark` share, likewise |
+| Expert-estimated share | `expert_estimated_share` | the `expert` and `unsourced` shares, likewise |
+| Confidence grade | `confidence_grade` | section 26.2's headline grade, base grade, reason, evidence mix, downgrades and version digest; the line it is (`line`) and the rule (`rule`); and each line's own grade (`lines`: `gross_cash`, and `retained_cash` under a policy, else null) |
+| Last calibrated | `last_calibrated` | `{"date": null, "calibration_set": null, "statement": "never; no calibration set exists"}` |
+| Most sensitive variables | `most_sensitive_variables` | the analysis's top five: name, rank, importance, direction, source types, swing outcomes; the fixed parameters; or "unavailable" for a refused run |
+| Data freshness | `data_freshness` | EVERY figure, each evaluated at the run's as-of date (its build's, else its components'): every parameter of the run's inputs -- the components', the policy's terms, the frequency, every derived value's contributors --, every parameter of the scenario version nothing reads (the receipt binds them among its `scenario-parameters`; review round 2, LOW 4) and every variable of the parameter-set version no component reads, each read by "nothing" and said where it is; for each its source type, what reads it (`read_by`), effective date, `fresh_until`, whether it was evaluated, its age in days, stale or not, whether it counts toward the grade, critical or not (a top driver or material); the stale ones that count (`stale`) and those shown only (`stale_not_graded`). With no as-of date, every figure says it was not evaluated (`stale: null`), never fresh (review round 1, M3) |
+| P10/P50/P90/mean | `figures` | the headline line's (retained cash under a policy, else gross cash) P10, P50, P90, mean, expected annual exposure and severe-but-plausible, and the gross cash's, at full precision as stored; a null figure does not exist for the run (no frequency: no expected annual exposure) and is never estimated; "unavailable" for a refused run |
+| Unknown variables | `unknown_variables` | every unknown component with its reason and missing inputs, and a refused run's refusal |
+| Reproduction seed/hash | `reproduction` | the seed, draws, severe percentile, input digest, result digest, outcomes digest and the analysis's digest, and how to replay |
+
+Beside `fields`, the card carries section 15's `FinancialValidityCard` key fields:
+`scenario_id`, `evidence_mix`, `assumptions` (the expert ranges and the rules a run
+rests on), `unknowns`, `freshness`, `calibration_date` (null), `reviewer_status` (the
+scenario's review status when issued); and `confidence_grade` at its top, which
+`mythos_core.exposure_receipt` reads.
+
+**Reproducible from what is stored.** `build_card` given the stored result, the
+stored analysis and the card's own `issued` section gives the stored card, digest
+for digest (`validity_service.reproduces`). The analysis itself, made again from
+the stored result, is the stored one.
+
+### 26.4 The stored card
+
+`FinancialValidityCard`, append-only like every economics record, with no account
+column, going with its deployment: the deployment, the scenario, the simulation
+result (ONE-TO-ONE: one card per result), the schema, the grade and the grade's
+version digest, the card and its digest (`models.card_digest`, which is
+`exposure_receipt.card_digest_of` computed without importing it), the sensitivity
+analysis and its digest (both null for a refused run: `ck_econ_card_sensitivity_digest`),
+when it was issued. The grade is a check constraint (`ck_econ_card_grade`). Every
+check -- the tenant, the card's scenario and grade, no float, both digests, a card
+of the same result -- runs before the transaction, which only inserts; two issues
+racing past the lookup are stopped by the one-to-one key, and the later returns the
+first's card.
+
+`validity_service.issue_card(result)` returns the card recorded, or makes and
+records one: it **never raises**. A failure the stored rows do not decide
+(`engine_unavailable`, `inputs_changed`, `result_not_reproduced`, `time_over_budget`
+(the run's 120 s budget, checked between stages), `memory_exhausted`,
+`invariant_broken`, `card_failed`) is returned and never recorded, so a later issue
+is not refused by an accident.
+
+### 26.5 The receipt
+
+`receipt_service.issue_receipt(result)` builds the document with
+`exposure_receipt.build_receipt` (`mythos.financial-exposure-receipt/v1`) from the
+stored rows:
+
+| Receipt field | From |
+|---|---|
+| `scenario_id`, `tenant_id` | the scenario version's uuid; the deployment's uuid (a Deployment is the tenant boundary) |
+| `system_fingerprint` | the card's `system_fingerprint.value` |
+| `model.version`, `model.build_digest` | the release the CARD records (`validity_service.model_release` when it was issued): the token `mythos.economics:simulation-<engine>+sensitivity-<n>+card-<n>`, and the SHA-256 of its release record -- the run's versions and limits, the sensitivity method, the grade's version record and the card's schema |
+| `simulation.seed`, `simulation.draws` | the result's |
+| `simulation.parameter_set_digest` | the result's input digest: every parameter the run read, with its figures, source, stated distribution and variation, and every version |
+| `sources` | each source snapshot the run read, its content hash recomputed from its stored rows (`source_snapshot_mismatch` where a recorded digest no longer reproduces): `parameter-set:<key>:<version>` (its content digest, `intact()`), `scenario-build:<scenario>` (its build digest, recomputed from its inputs) and `scenario-parameters:<scenario>` (the SHA-256 of every parameter row of the scenario version) |
+| `evidence` | `nodes`: the effects' assets; `effects`: their SPINE effects; `claims`: none (no claim is linked to a scenario yet) |
+| `result` | the reporting currency, the valuation date (the build's as-of date), and the headline line's six figures rounded half-even to the currency's minor unit (`Money.display_amount`) |
+| `validity_card` | the card's digest and grade, read by core from the card itself |
+
+It is **signed on the path the backend's signed assurance receipts take**: the
+backend holds no signing key and asks the engine
+(`CyberEngineClient.sign_exposure_receipt`, `POST /api/economics/exposure-receipt/sign`,
+the operator credential, as `sign_assurance_receipt`). The envelope that comes back
+must be one signature over exactly the document's canonical bytes under the
+receipt's payload type (`envelope_not_over_receipt` otherwise), and it must VERIFY
+with core's verifier against the caller's `ReceiptKeyring` before anything is
+recorded (core's code otherwise): **no signature nobody has checked is ever recorded**
+(review round 1, M2). The keyring is required: it is built from the keyring the
+engine publishes at `GET /api/assurance/keyring` (athena-engine #88,
+`receipt_service.keyring_from_published`, or `engine_keyring` to fetch it): its
+`keys` are the artifact role's (evidence packs and assurance receipts) and its
+`roles` hold each other signing role's keyring in the same form (`keys` by key id,
+each a base64 `public_key` and a `status`), `economics-receipt` among them. That
+role's active and retired keys are the receipt keys; the artifact keys and every
+other role's are filed under their roles, so a receipt one of them signed is refused
+as `wrong_role`; a revoked key verifies nothing; a published keyring without the
+role is no keyring. Without one, `issue_receipt` records nothing and returns nothing
+(`keyring_unavailable`). A recorded receipt is returned only where it verifies
+against the keyring; one that does not is never returned as the result's receipt and
+never overwritten (`recorded_receipt_unverified`, with the verification's code). A
+signer can be handed in; the tests sign with `Ed25519PrivateKey.generate()` keys, as
+the existing receipt tests do.
+
+The engine validates the document with core before it signs (athena-engine #88). A
+document core refuses is a 400 whose `detail` is `{"code": <core's code>, "reason":
+...}`: the client raises it as `ExposureReceiptRefused`, and the service returns
+`receipt_refused_by_signer` with core's code (`ReceiptOutcome.signer_code`) and
+records nothing -- the document was refused, not the signer unavailable. Only a code
+of core's own (`exposure_receipt.MALFORMED_CODES`) is carried as core's: a 400 with
+any other code (`rate_limited`, `signer_not_configured` at 400) is still
+`receipt_refused_by_signer`, the code shown in the detail and `signer_code` null
+(review round 2, LOW 6). A 503 (a
+role not configured: `signer_not_configured`), a connection failure, a timeout, a
+400 that names no code, or an engine without the route is `signer_unavailable`
+(`test_a_document_the_engine_refuses_is_refused_by_the_signer_not_unavailable`).
+
+`FinancialExposureReceipt` is append-only, with no account column, going with its
+deployment: the deployment, the scenario, the result and the card (one-to-one each:
+**the same result gives the same receipt row**), the receipt id, the document, the
+envelope, the key id and when it was generated. On save its document must be core's
+schema and name the row's own scenario, tenant, id and card digest, and the envelope
+be one signature over exactly its canonical bytes, in core's signature form -- the
+88-character base64 of a 64-byte signature -- with the row's key id
+(`receipt_record_malformed`).
+
+A receipt that cannot be built or signed is returned with its code and **never
+recorded**: `result_not_completed`, `receipt_figure_unavailable` (a run without a
+frequency has no expected annual exposure, and core requires all six figures),
+`system_fingerprint_unavailable`, `source_snapshot_mismatch`, core's
+`bad_integer` (a seed past 2^53 - 1, which core refuses), `signer_unavailable`,
+`receipt_refused_by_signer`,
+`envelope_not_over_receipt`, core's verdict codes, `keyring_unavailable`,
+`recorded_receipt_unverified`, `card_unavailable` (or the card's own failure code),
+`receipt_failed`. The service never raises.
+
+### 26.6 Verification
+
+`receipt_service.verify_stored_receipt(receipt, keyring)` never raises. In order, and
+the first failure decides:
+
+1. `exposure_receipt.verify_receipt(envelope, keyring, card=<the stored card>)`: the
+   envelope's shape, the payload type, the key held and in the `economics-receipt`
+   role, the signature, the schema and canonical bytes, and the card -- its digest,
+   scenario and grade (core's verdicts and codes: `forged`, `unknown_key`,
+   `wrong_role`, `card_digest_mismatch`, ...);
+2. the row itself (review round 1, L5): its deployment and scenario are its result's
+   and its card's, its result is its card's, and its receipt id, key id and instant
+   are the document's, the envelope's and the verifier's (`receipt_row_mismatch`): a
+   row moved to another deployment, or relabelled, is refused before step 6 lists one;
+3. the stored document is the signed payload (`receipt_mismatch`);
+4. the stored result's inputs still give its input digest and its record its result
+   digest (`result_digest_mismatch`, whose reason names which was compared; the
+   inputs, review round 1, M4), and the card's
+   and the receipt's digests, seed, draws and six figures are the stored result's
+   (`result_mismatch`);
+5. the scenario and tenant (`receipt_mismatch`), the system fingerprint
+   (`fingerprint_mismatch`), the model build -- the receipt names the release the
+   card records, that release's digest is the build digest, and its run versions are
+   the stored result's (`model_build_mismatch`) --, every source snapshot recomputed
+   from its rows (`source_snapshot_mismatch`) and the evidence recomputed from the
+   effects (`evidence_mismatch`);
+6. the card: its stored analysis is the one it signs, under any release -- the
+   SHA-256 of the stored sensitivity record is the card's
+   `reproduction.sensitivity_digest` (`sensitivity_digest_mismatch`; review round 2,
+   LOW 5) --; and where today's release is the one the card records, the stored card is
+   rebuilt, digest for digest, from the stored result, analysis and rows
+   (`card_not_reproduced`). Where the release has changed since -- a constant of the
+   analysis, the grade or the card -- today's code cannot rebuild yesterday's card;
+   that is said as the notes `release_changed` and `card_not_rebuilt` beside an
+   otherwise authentic verdict (`ReceiptCheck.notes`, and its reason says the card was
+   not rebuilt), **never read as tampering** (review round 1, L7). What only a rebuild
+   checks -- the loss events' labels, the card's own fields -- is then not checked.
+
+Tested by tampering each past the append-only checks (the base manager, section 10):
+the card (`card_digest_mismatch`), the result's record (`result_digest_mismatch`) and
+its digest with it (`result_mismatch`), a parameter-set row and a scenario parameter
+(`source_snapshot_mismatch`), the signature (`forged`), the document
+(`receipt_mismatch`); a stranger's keyring (`unknown_key`), the signing key filed
+under another role (`wrong_role`), a plain mapping (`unknown_key`); the result's
+inputs (`result_digest_mismatch`); the row's deployment, key id, receipt id and
+instant (`receipt_row_mismatch`); the run's versions (`model_build_mismatch`); a
+grade constant changed since (verified, with `release_changed` and
+`card_not_rebuilt`); and the stored analysis under today's release and a changed one
+(`sensitivity_digest_mismatch`).
+
+What a verified receipt establishes is core's: the holder of an
+`economics-receipt` key signed exactly this document, and the card presented is the
+one it names; and, from this service, that the stored result, card and snapshots
+are still the ones signed. Not that the numbers are right.
+
+### 26.7 Codes
+
+The services' own codes (`receipt_service.REFUSALS`, `sensitivity.REFUSALS`, and the
+two row codes in `models.CARD_RECORD_REFUSALS`); a code core or step 7b publishes is
+returned as theirs, with their meaning, and none is published twice with another:
+
+| Code | Meaning |
+|---|---|
+| `inputs_changed` | the scenario's stored rows no longer give the run's canonical inputs |
+| `result_not_reproduced` | the draws made again are not the run's (another numpy or platform) |
+| `card_failed` | an unexpected fault while making a card: nothing recorded |
+| `card_record_malformed` | a card row that is not its own result's card: another scenario, another grade, a float, a digest that is not the card's or the analysis's |
+| `receipt_record_malformed` | a receipt row whose document is not core's schema, names another scenario, tenant, id or card, or whose envelope is not one signature, in core's form, over exactly it |
+| `result_not_completed` | a refused run has no figures to sign |
+| `receipt_figure_unavailable` | one of the six figures does not exist for the run |
+| `system_fingerprint_unavailable` | the card names no fingerprint to bind |
+| `source_snapshot_mismatch` | a source snapshot's rows no longer give its content hash |
+| `signer_unavailable` | nothing could sign: the engine was not reached or timed out, has no key in the role (503), or serves no signing route |
+| `receipt_refused_by_signer` | the signer read the receipt and refused it: core's code is carried beside (`signer_code`) where it is one of core's `MALFORMED_CODES`; any other code is shown in the detail, never carried as core's |
+| `envelope_not_over_receipt` | the signer returned something other than one signature over exactly the receipt |
+| `card_unavailable` | no card, and none could be issued |
+| `keyring_unavailable` | no `ReceiptKeyring` of the engine's published economics-receipt keys: nothing recorded or returned |
+| `recorded_receipt_unverified` | the receipt recorded for the result does not verify: not returned, never overwritten |
+| `receipt_row_mismatch` | the stored row's deployment, scenario, result, card, receipt id, key id or instant are not the ones its result, card, document and envelope name |
+| `receipt_failed` | an unexpected fault: nothing recorded |
+| `receipt_mismatch` | the stored document is not the signed payload, or names another scenario or tenant |
+| `result_digest_mismatch` | the stored inputs no longer give the input digest, or the record the result digest; the reason names which was compared |
+| `result_mismatch` | a digest, the seed, the draws or a figure is not the stored result's |
+| `model_build_mismatch` | the receipt does not name the release the card records, that release's digest is not the build digest, or its run versions are not the stored result's |
+| `evidence_mismatch` | the effects no longer give the SPINE evidence signed |
+| `fingerprint_mismatch` | the receipt binds another fingerprint than its card names |
+| `card_not_reproduced` | under the release the card records, the stored rows no longer rebuild the stored card |
+| `sensitivity_digest_mismatch` | the stored sensitivity analysis is not the one the card signs (`reproduction.sensitivity_digest`), under any release |
+| `verification_failed` | an unexpected fault while verifying: nothing vouched for |
+
+`engine_unavailable`, `time_over_budget`, `memory_exhausted` and `invariant_broken`
+are step 7b's (section 25.7), with its meanings.
+
+`mythos_core.exposure_receipt`'s codes, as it publishes them (`b1f6e9d`), returned
+unchanged:
+
+| Kind | Codes |
+|---|---|
+| Verdicts (`VERDICTS`) | `authentic`, `forged`, `unknown_key`, `wrong_role`, `wrong_type`, `malformed`, `wrong_card` |
+| A malformed envelope or document (`MALFORMED_CODES`) | `envelope_malformed`, `not_json`, `not_canonical`, `wrong_schema`, `unknown_field`, `missing_field`, `wrong_field_type`, `bad_identifier`, `bad_tenant`, `bad_digest`, `bad_instant`, `bad_date`, `bad_integer`, `bad_grade`, `list_not_canonical`, `amount_not_decimal_string`, `amount_malformed`, `amount_precision`, `currency_unknown`, `currency_retired`, `currency_mismatch`, `percentiles_out_of_order` |
+| The wrong card (`CARD_CODES`) | `card_malformed`, `card_digest_mismatch`, `card_scenario_mismatch`, `card_grade_mismatch` |
+| A keyring refused (`KEYRING_CODES`) | `key_refused`, `key_reused`, `role_invalid` |
+
+`currency_unknown`, `currency_retired` and `currency_mismatch` mean what money's
+codes of the same names mean (section 11.5); the tests pin these lists against core.
+
+### 26.8 Safety
+
+Nothing here is on a stop, pause, stand-down, terminate or revoke path, and nothing
+in it refuses or delays one. Neither new table has an account column, so removing
+an operator (a stop) never writes them; both go with their deployment
+(`test_the_records_go_with_their_deployment_and_never_hold_back_a_stop`).
+`models.py` imports none of the new modules: the receipt row's check imports
+`mythos_core.exposure_receipt` when a receipt is saved, never at load.
+`test_django_and_the_urlconf_never_import_the_probabilistic_engine` now also finds
+`engine.sensitivity`, `engine.grade`, `validity_service`, `receipt_service` and
+`mythos_core.exposure_receipt` unloaded after `django.setup()` and every URLconf, and
+`test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop` makes all of them
+unimportable before Django loads: the scan's Stop still resolves, answers 202 and is
+saved. `tests/test_economics_engine.py` imports both engine modules with Django
+poisoned. The engine's signing call is in the effect matrix
+(`tests/test_firing_twice_makes_one_effect.py`, `engine-governance`). A failure says
+why, as a code, and never raises out of a service.
+
+### 26.9 What is still not done
+
+- **No route and no report.** Step 6 serves the card and the receipt, and puts them
+  in the report JSON.
+- **The engine signs from athena-engine #88** (`POST /api/economics/exposure-receipt/sign`,
+  and `roles["economics-receipt"]` in its published keyring), where a deployment
+  provisions the role's key and keyring (`ENGINE_ECONOMICS_RECEIPT_KEY`,
+  `ENGINE_ECONOMICS_RECEIPT_KEYRING`); an engine without them answers 503 and the
+  receipt is `signer_unavailable`, recording nothing. Nothing calls `issue_receipt`
+  yet: step 6 does, with `engine_keyring()` or a keyring fetched out of band.
+- **No receipt for a run without a frequency**: core's schema requires an expected
+  annual exposure, which such a run does not have (section 25.5), and none is
+  estimated. No writer states a frequency yet (section 25.9), so in production only
+  a scenario with a stated frequency can be receipted.
+- **No system fingerprint at build.** The builder records none (section 24.9); a card
+  reads the deployment's at issue and says so, and a receipt binds that.
+- **No calibration**: "Last calibrated: never; no calibration set exists". Interval
+  coverage (the owner's section 26) needs realised outcomes, which no record holds.
+- **No source snapshot is a `FinancialSource`.** Parameters name their evidence as
+  text (section 22); the receipt's sources are the run's own input snapshots.
+- **The evidence names no claim**: claims are not linked to a scenario.
+- **The tornado is one at a time**: interactions between parameters are not shown,
+  and the swing is per occurrence (times the mean count in an annual run).
+- **A per-occurrence parameter of an annual run is neither ranked nor weighed**: such
+  a run is graded Unknown (section 26.2) until it is.
+- **A sparse-data range is not a downgrade.** A customer range stated as a PERT on
+  sparse data (section 23.1) counts as the customer figure it is: a penalty for its
+  width would be lifted by collapsing it to its base (section 26.2).
+
+### 26.10 Decisions this step takes, which the owner may change
+
+1. **The ranking is Spearman rank correlation, squared and normalised** (contribution
+   to variance, as commercial Monte Carlo tools report it), on the run's own draws.
+   Alternatives: Pearson correlation (exact variance shares for a sum, misleading for
+   skewed losses); variance-based Sobol indices (interactions shown, but several
+   times the draws); regression coefficients. Recommendation: keep it, and add a
+   Sobol first-order index for the top drivers if a buyer asks how much interaction
+   there is.
+2. **The tornado holds every other parameter at its P50, and an annual run's
+   frequency at its mean count** (a count's P50 is 0 for a rare event, which would
+   flatten every bar). Alternatives: every parameter at its mean; the frequency at
+   its P50. Recommendation: keep.
+3. **The thresholds** (section 26.2): A at evidence 0.80 and assumption 0.05, B at
+   0.50 and 0.25, C at assumption 0.50, D otherwise; material at a level share of 0.05. Alternatives:
+   stricter A (evidence 0.90, no assumption at all); grade C on any benchmark share
+   above 0.5 regardless of the evidence. Recommendation: keep until calibration data
+   exist, and move them with the grade's version.
+4. **The classes**: `LICENSED_MARKET` counts as authoritative evidence with
+   `OFFICIAL_PUBLIC`; `CALCULATED` (not derived) and `INDUSTRY_BENCHMARK` count as
+   neither evidence nor assumption; `UNKNOWN` counts as an assumption.
+   Alternatives: licensed market data as benchmark; calculated as evidence.
+   Recommendation: keep; revisit when the first licensed feed lands.
+5. **A derived value's level share rests on the contributors whose base supplies
+   its own** (the larger loss at base), split equally among them where several do,
+   and a material one also lowers the grade one step (review round 1). Alternatives:
+   count it as `calculated`; split it equally among every contributor; split it by
+   how often each gives the larger loss in the draws. Recommendation: keep: the base
+   is the figure the level is computed at.
+6. **Materiality reads the level share only** (at least 0.05), for the expert and
+   derived downgrades; staleness downgrades whatever the share (review round 1, the
+   lead's call on H1 was "material by level share OR by importance"). Taken
+   literally, the importance path contradicts the required invariant: a wide expert
+   range carrying 3% of the level and all of the variance would fire `expert_figures`
+   by importance, and collapsing it to its base removes the importance and the
+   downgrade, raising the grade one step (the case `a_small_wide_expert_range` of
+   `test_collapsing_a_range_to_its_base_never_raises_the_grade`). So the importance
+   path is left out, and recorded here for the owner. Alternatives: level OR
+   importance, accepting that a collapse can then raise the grade one step;
+   materiality by a range's level share at its high end (still removed by a
+   collapse). Recommendation: keep the level only.
+7. **An unknown MARKET-VALUE component does not make the grade Unknown**; an
+   unknown cash component does. Market value is reported apart and never in the cash
+   figure the grade is about, and the cross-customer template's share-price line is
+   unknown unless public-company data is given. Alternative: any unknown component
+   is Unknown. Recommendation: keep.
+8. **The grade weighs each figure by its share of the base-case LEVEL** (review
+   round 1, H1; the lead's call under the owner's "go with recommendations"), and the
+   level is **an additive decomposition at base** (review round 2, HIGH 1; the lead's
+   design): each known cash component carries its base over the gross, split among
+   its own inputs by their elasticity of it at base, a recovery through its complement
+   1 - r as one factor; a frequency carries one half. Fixed figures count exactly as
+   ranges; the variance importance only ranks the most sensitive variables. The first
+   draft weighed by variance importance and, with nothing uncertain, by count, so an
+   expert's fixed $5,000,000 graded A beside a customer range; round 1 weighed by the
+   absolute elasticity of the WHOLE gross, normalised, which let a product's factors
+   each count their component's whole share and a recovery r count r / (1 - r) of it,
+   so an expert lump of 75% to 95% of the level graded A beside a customer recovery of
+   0.99 (round 2). Both are removed. Within a formula that is a sum (`fixed_plus_hours`,
+   `per_affected_plus_fixed`) the split is by elasticity too, so a fixed amount beside a
+   two-factor product carries F / (F + 2P) of the component, between its base share and
+   half of it. Alternatives: weigh by importance; by the share of the mean; split a sum
+   inside a formula by its terms' bases first (Aumann-Shapley attribution, which also
+   moves smoothly across a cap's kink); give the frequency a share by its own
+   uncertainty. Recommendation: keep; take the attribution by terms if the owner wants
+   a sum inside a formula weighed exactly as a sum of components.
+9. **The receipt's `parameter_set_digest` is the run's input digest** (every
+   parameter the run read, and every version), not the customer parameter-set
+   version's content digest, which is among the receipt's `sources`. Alternative:
+   the parameter-set version's content digest. Recommendation: keep: the input
+   digest is the one that replays the run.
+10. **The system fingerprint** is the scenario's where recorded, else the
+    deployment's read when the card is issued, labelled so. Alternative: refuse the
+    receipt until the builder records a fingerprint at build. Recommendation: have
+    the builder record one (a builder change), then refuse a scenario without one.
+11. **The receipt is signed by the engine** on its route
+    `/api/economics/exposure-receipt/sign` (athena-engine #88), in the
+    `economics-receipt` role: the backend holds no key, as for assurance receipts. A
+    document the engine refuses by core's rule is `receipt_refused_by_signer`
+    carrying the code, distinct from `signer_unavailable` (the #88 review); a code
+    that is not one of core's `MALFORMED_CODES` is shown, never carried as core's
+    (review round 2, LOW 6).
+    Alternative: a backend-held `economics-receipt` key. Recommendation: keep.
+12. **One card and one receipt per simulation result**, made once and kept: the
+    review status, inventory entry, findings' status and the deployment's fingerprint
+    are as read at issue. Alternative: a new card per issue, superseding the last.
+    Recommendation: keep, and let step 6 show the live review status beside the card.
+13. **A receipt that cannot be built or signed is not recorded** (unlike step 7b's
+    recorded refusals): nothing was signed, and a later issue may succeed.
+14. **No signature is recorded unchecked** (review round 1, M2; the lead's call):
+    `issue_receipt` requires a `ReceiptKeyring` of the engine's published
+    economics-receipt keys and verifies the envelope with core's verifier before the
+    row; the row's own check holds core's signature form; a recorded receipt that
+    does not verify is not returned and never overwritten. Alternatives: record and
+    verify later (the first draft); record the unverified envelope beside a
+    `verified: false` mark. Recommendation: keep.
+15. **Every figure is evaluated for freshness at the run's as-of date** (review
+    round 1, M3; the lead's call): the components', the policy's terms, the
+    frequency, every derived value's contributors and the parameter-set variables no
+    component reads; a stale policy term lowers the grade where the run applies a
+    policy, and so does a stale contributor of a derived value the gross reads; an
+    unread variable is shown and does not; nothing is said fresh unevaluated.
+    Alternatives: grade staleness of the cash figures only (the first draft); grade
+    every stale figure, read or not. Recommendation: keep.
+16. **A stored receipt is verified against the release it was made under** (review
+    round 1, L7; the lead's call): the card records the release record, the receipt
+    names its digest, and a change of today's constants is the note `release_changed`
+    on an otherwise authentic receipt, never tampering; the card is rebuilt only
+    under its own release, and otherwise the verdict says it was not rebuilt
+    (`card_not_rebuilt`) while the stored analysis is still checked against the
+    digest the card signs (review round 2, LOW 5). Alternatives: re-verify under today's constants (the first
+    draft: every receipt fails on any constant change); keep every past release's
+    code to rebuild old cards. Recommendation: keep.
+17. **An annual run that draws a parameter per occurrence is Unknown** until such a
+    parameter is ranked and weighed (review round 1, L6; the lead's call).
+    Alternative: weigh it by its per-occurrence P50. Recommendation: keep; nothing
+    names one yet.
+18. **Under a policy both lines are graded, and the headline grade is the lower**
+    (review round 2, MEDIUM 2; the lead's call): the retained cash's level reads the
+    policy's terms (section 26.1), so an expert's deductible or limit that carries the
+    retained cash lowers the card's and the receipt's grade, which the gross alone never
+    showed. Equal grades give the retained cash's line; a retained cash of zero at base
+    (the policy recovers all of it) is Unknown, and so is the headline. The waiting
+    period carries one half of the business interruption it leaves uncovered, as one
+    factor of it (its elasticity is zero almost everywhere: weighing it by elasticity
+    alone would hide an expert's waiting period). Alternatives: one grade on the
+    retained cash only; the policy's terms added to the gross line's level; a retained
+    cash of zero graded by the gross. Recommendation: keep.
+19. **A frequency whose base is zero has no level** (review round 2, LOW 3): a
+    base-case year holds no occurrence, so the grade is Unknown, as for a zero gross;
+    the frequency is never given a zero share instead, which would hide an expert's
+    frequency. Recommendation: keep.

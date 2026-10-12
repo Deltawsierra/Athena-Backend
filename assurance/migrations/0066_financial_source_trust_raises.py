@@ -18,7 +18,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0064_parameter_distributions_and_simulation_results"),
+        ("assurance", "0065_financial_validity_cards_and_receipts"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

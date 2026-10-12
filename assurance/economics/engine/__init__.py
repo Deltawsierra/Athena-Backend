@@ -37,7 +37,10 @@ fixtures and the tests all read the same codes:
 - :mod:`.distributions`, :mod:`.simulation` (phase E2): the distribution catalogue
   and the seeded Monte Carlo sampler; :mod:`.twins` and :mod:`.scenario_simulation`
   (MVP step 7b): the formulas' vectorised twins and a scenario simulated through
-  them. These import numpy, and nothing on Django's load path imports them.
+  them. These import numpy, and nothing on Django's load path imports them;
+- :mod:`.sensitivity` and :mod:`.grade` (MVP step 8): which parameters drive a
+  simulated scenario's uncertainty, on the run's own draws (numpy too), and the
+  confidence grade its evidence mix gives, weighted by that importance.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of

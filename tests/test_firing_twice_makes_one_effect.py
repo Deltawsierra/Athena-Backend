@@ -219,15 +219,19 @@ MATRIX = {
     "engine-governance": Boundary(
         "The engine's governance calls: the preflight gate's /api/assurance/check and "
         "/api/attestation/check, approve_deployment's /api/assurance/approvals, the signed "
-        "receipt's /api/assurance/receipt/sign",
-        "the preflight report is cached CACHE_SECONDS; the others: none",
+        "receipt's /api/assurance/receipt/sign, and the Financial Exposure Receipt's "
+        "/api/economics/exposure-receipt/sign (economics step 8)",
+        "the preflight report is cached CACHE_SECONDS; an exposure receipt is one row per "
+        "simulation result (one-to-one), looked up before the engine is asked; the others: none",
         "unchanged",
         "the gate asks once per window; an approval is one call per run of the command a person "
-        "runs; a signature is a read that stores nothing",
+        "runs; a signature is a read that stores nothing; an exposure receipt is signed until one "
+        "is recorded, and issued again returns that row without asking",
         (
             "test_the_preflight_gate_asks_the_engine_once_per_window",
             "test_an_approval_run_once_makes_one_approval_call",
             "test_a_signed_receipt_read_twice_writes_nothing",
+            "test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature",
         ),
     ),
     "defender-gateway": Boundary(
@@ -326,6 +330,7 @@ SITES = {
     "pentest/management/commands/approve_deployment.py::Command.handle::assurance_approve": "engine-governance",
     "pentest/management/commands/approve_deployment.py::Command.handle::assurance_check": "engine-governance",
     "assurance/views.py::DeploymentViewSet.signed_assurance_receipt::sign_assurance_receipt": "engine-governance",
+    "assurance/economics/receipt_service.py::engine_signer::sign_exposure_receipt": "engine-governance",
     "assurance/connectors/base.py::Connector.comment_on::transport.post": "connector-push-dispatch",
     "assurance/connectors/base.py::Connector.push_finding::transport.post": "connector-push-dispatch",
     "assurance/dispatch.py::_closed_issue::comment_on": "connector-push-dispatch",
@@ -529,6 +534,10 @@ class FakeEngine:
         #: headers of every request, by method and path.
         self.runs = {}
         self.headers = []
+        #: The economics-receipt key, once a test gives the engine one: until then it
+        #: serves no exposure-receipt route, as today's engine does not.
+        self.receipt_key = None
+        self.last_body = None
 
     def count(self, method, path):
         return sum(1 for m, p, _ in self.calls if (m, p) == (method, path))
@@ -544,6 +553,7 @@ class FakeEngine:
             raise requests.ConnectionError(f"nothing is reachable from this test: {url}")
         path = url[len(self.base):].split("?")[0]
         self.calls.append((method, path, body))
+        self.last_body = body
         self.headers.append((method, path, dict(headers or {})))
         if path in self.during:
             self.during.pop(path)()
@@ -599,6 +609,10 @@ class FakeEngine:
             return _http(200, {"id": "approval-1", "tuple_digest": "sha256:ab12"})
         if (method, path) == ("POST", "/api/assurance/receipt/sign"):
             return _http(503, {"detail": "no signing key on this engine"})
+        if (method, path) == ("POST", "/api/economics/exposure-receipt/sign") and self.receipt_key is not None:
+            from mythos_core import exposure_receipt
+
+            return _http(200, exposure_receipt.sign_receipt(self.last_body["receipt"], self.receipt_key))
         return _http(404, {"detail": f"the engine has no {method} {path}"})
 
 
@@ -1393,6 +1407,34 @@ def test_a_signed_receipt_read_twice_writes_nothing(engine):
     written = [q["sql"] for q in queries.captured_queries
                if q["sql"].lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))]
     assert written == []
+
+
+def test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature(engine):
+    """Economics step 8: the receipt is signed on the engine's path, as the assurance
+    receipt is. An engine that serves no such route signs nothing and nothing is
+    recorded; once it signs, the receipt is one row per result, and issuing it
+    again returns that row without asking the engine."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from assurance.economics import receipt_service
+    from assurance.economics.models import FinancialExposureReceipt
+    from tests.test_economics_validity_card import simulated, stored
+
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from mythos_core import exposure_receipt
+
+    key = Ed25519PrivateKey.generate()
+    ring = exposure_receipt.receipt_keyring([key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)],
+                                            other_roles={})
+    result = simulated(stored(_deployment(_user(User.Roles.ADMIN)), _user(User.Roles.ANALYST)))
+    refused = receipt_service.issue_receipt(result, keyring=ring)
+    assert refused.receipt is None and refused.code == "signer_unavailable"
+    assert not FinancialExposureReceipt.objects.exists()
+    engine.receipt_key = key
+    first, again = receipt_service.issue_receipt(result, keyring=ring), receipt_service.issue_receipt(result, keyring=ring)
+    assert first.created and not again.created and again.receipt.pk == first.receipt.pk
+    assert engine.count("POST", "/api/economics/exposure-receipt/sign") == 2  # the 404, then the one signature
+    assert FinancialExposureReceipt.objects.count() == 1
 
 
 # ===========================================================================
