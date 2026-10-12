@@ -245,6 +245,26 @@ def test_a_set_refuses_what_its_schema_refuses_and_writes_nothing(deployment, pe
     assert not CustomerParameterSet.objects.exists() and not FinancialParameter.objects.exists()
 
 
+def test_a_set_refuses_an_observed_money_figure_and_writes_nothing(deployment, people):
+    """R2-3. The reviewer's case: ``average_transaction_value`` as ``MYTHOS_OBSERVED``
+    with "anything at all" for evidence was recorded, and a build then priced the
+    customer's transaction pool from it. It is refused when the set is recorded; a
+    quantity observed is recorded."""
+    bad = full_document()
+    bad["variables"]["average_transaction_value"].update(
+        source_type="MYTHOS_OBSERVED", evidence_ref="anything at all"
+    )
+    with pytest.raises(EconomicsRefused) as refused:
+        CustomerParameterSet.record(deployment, "q4", bad, author=people["analyst"])
+    assert refused.value.code == "observed_source_not_observable"
+    assert "average_transaction_value" in refused.value.detail
+    assert not CustomerParameterSet.objects.exists() and not FinancialParameter.objects.exists()
+    counted = full_document()
+    counted["variables"]["customer_count"].update(source_type="MYTHOS_OBSERVED")
+    version = CustomerParameterSet.record(deployment, "q4", counted, author=people["analyst"])
+    assert version.intact()
+
+
 def test_a_set_row_checks_its_own_fields(deployment):
     base = {"deployment": deployment, "set_key": "q4", "variable_count": 1, "content_digest": "sha256:" + "a" * 64}
     cases = [

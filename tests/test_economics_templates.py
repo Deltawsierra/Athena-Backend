@@ -572,12 +572,46 @@ def test_only_rates_counts_and_durations_an_assessment_sees_are_observable():
     with pytest.raises(tpl.BuildRefused) as refused:
         tpl.check_observed_evidence("redirect", read, spine)
     assert refused.value.code == "observed_source_unbound"
-    named = {**rate, "evidence_ref": f"7 of 20, observed as {spine}"}
+    named = {**rate, "evidence_ref": f"{spine} 7 of 20, observed by the assessment"}
     tpl.check_observed_evidence(
         "redirect",
         tpl.parse_attributes("redirect", {"success_rate": named}, "attributes", origin=tpl.Origin.OBSERVED),
         spine,
     )
+
+
+def test_an_observed_figures_evidence_is_the_effects_digest_exactly():
+    """R2-2. ``evidence_ref`` is the SPINE effect digest, alone or followed by a space
+    and a note -- never a substring: text that merely mentions the digest, a digest
+    behind other words, a longer token that starts with it, and a second digest after
+    the first do not bind (``observed_source_unbound``); two digests bind only the
+    first."""
+    first, second = "sha256:" + "8" * 64, "sha256:" + "9" * 64
+    rate = {"unit": "ratio", "low": "0.35", "base": "0.35", "high": "0.35", "source_type": "MYTHOS_OBSERVED",
+            "effective_date": "2026-10-01"}
+
+    def checked(evidence, spine):
+        read = tpl.parse_attributes(
+            "redirect", {"success_rate": {**rate, "evidence_ref": evidence}}, "attributes", origin=tpl.Origin.OBSERVED
+        )
+        tpl.check_observed_evidence("redirect", read, spine)
+
+    for evidence in (first, f"{first} 7 of 20", f"{first} {second}", f"{first} unrelated to {second}"):
+        checked(evidence, first)
+    for evidence, spine in (
+        (f"NOT observed; estimated by hand; unrelated to {first}", first),
+        (f"7 of 20, observed as {first}", first),
+        (f"{first}0", first),
+        (f"{first}:7 of 20", first),
+        (f"{first.upper()} 7 of 20", first),
+        (f"{first} {second}", second),
+        (f"{second} and {first}", first),
+        (first, second),
+        (first, ""),
+    ):
+        with pytest.raises(tpl.BuildRefused) as refused:
+            checked(evidence, spine)
+        assert refused.value.code == "observed_source_unbound", (evidence, spine)
 
 
 def test_every_template_reads_each_attribute_in_one_direction():
@@ -623,6 +657,34 @@ def test_the_larger_loss_is_taken_at_each_point_by_the_inputs_direction():
     for extra in (_x("c", "0", "0", "0"), _x("c", "0.3", "0.3", "0.3"), _x("c", "1", "1", "1")):
         more = tpl.larger_loss(increases, {"a": a, "b": b, "c": extra}, event_key="ev-1")
         assert all(more.parameter.at(pt) >= up.parameter.at(pt) for pt in POINTS)
+
+
+def test_a_merged_value_is_fresh_no_longer_than_the_stalest_figure_that_supplies_it():
+    """R2-4. The merged value takes its dates only from the effects that supply a
+    point of it. The reviewer's case: A (0.9, holds from 2026-01-01, fresh until
+    2026-02-01) supplies every point, B (0.1, holds from 2026-10-06) none; the merged
+    value is A's figure and is stale as of 2026-10-06, not fresh because B is."""
+    increases = tpl.Reading("x", formulas.Direction.INCREASES, None)
+    a = _x("a", "0.9", "0.9", "0.9", effective=date(2026, 1, 1), fresh=date(2026, 2, 1))
+    b = _x("b", "0.1", "0.1", "0.1", effective=date(2026, 10, 6))
+    merged = tpl.larger_loss(increases, {"a": a, "b": b}, event_key="ev-1")
+    assert merged.derived and set(merged.supplied.values()) == {"a"} and merged.contributors == ("a", "b")
+    assert (merged.parameter.effective_date, merged.parameter.fresh_until) == (date(2026, 1, 1), date(2026, 2, 1))
+    assert merged.parameter.check_as_of(date(2026, 10, 6)) is True and a.check_as_of(date(2026, 10, 6)) is True
+    # An effect supplying no point does not shorten freshness either: its own earlier
+    # fresh_until and later date are both set aside.
+    c = _x("c", "0.1", "0.1", "0.1", effective=date(2026, 1, 1), fresh=date(2026, 1, 15))
+    steady = _x("a", "0.9", "0.9", "0.9", effective=date(2026, 3, 1), fresh=date(2026, 12, 31))
+    kept = tpl.larger_loss(increases, {"a": steady, "b": b, "c": c}, event_key="ev-1")
+    assert (kept.parameter.effective_date, kept.parameter.fresh_until) == (date(2026, 3, 1), date(2026, 12, 31))
+    assert kept.parameter.check_as_of(date(2026, 10, 6)) is False
+    # Two effects each supplying a point: the latest date either holds from, and the
+    # stalest of their fresh_until (never later than the date it holds from).
+    low_high = _x("b", "0", "0", "0.95", effective=date(2026, 9, 1), fresh=date(2026, 11, 1))
+    early = _x("a", "0.1", "0.5", "0.5", effective=date(2026, 8, 1), fresh=date(2026, 8, 15))
+    both = tpl.larger_loss(increases, {"a": early, "b": low_high}, event_key="ev-1")
+    assert set(both.supplied.values()) == {"a", "b"}
+    assert (both.parameter.effective_date, both.parameter.fresh_until) == (date(2026, 9, 1), date(2026, 9, 1))
 
 
 def test_a_source_the_inputs_refuse_never_supplies_the_larger_loss():
