@@ -21,7 +21,7 @@ is 404; only an admin or an analyst builds (the roles that author a scenario), a
 the draft names the signed-in account as its author, so the review rule of section
 7 holds for it. The body is strict JSON, at most 64 KiB (413 on the declared length,
 and the parser never reads past the limit). An effect's attribute may state the
-distribution it draws from in a simulation, held to the same two-sided test of its
+distribution it draws from in a simulation, held to the same range test of its
 figures as a parameter set's (spec, section 25.1); a body that states one while the
 probabilistic engine will not import is 503, and nothing is written.
 

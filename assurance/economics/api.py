@@ -12,9 +12,10 @@ Mounted under ``/api/assurance/`` by :mod:`assurance.urls`
   (:mod:`assurance.economics.engine.parameter_set`). 201 with the version. Each
   entry may state the distribution it draws from in a simulation, and the document
   the scenario's frequency (spec, section 19.2): each is held to the simulation's
-  own two-sided test of its row's figures before anything is written, and refused
-  with that test's code (``distribution_contradicts_range``, naming the variable
-  and the test, or ``distribution_on_fixed_row``).
+  own range test of its row's figures before anything is written (a continuous
+  distribution from both sides, a count by its mean, its rate), and refused with
+  that test's code (``distribution_contradicts_range``, naming the variable and the
+  test, or ``distribution_on_fixed_row``).
 
 Access follows the assurance API's own rules (:mod:`assurance.views`): a signed-in
 account; a deployment the caller cannot see is 404, whether or not it exists

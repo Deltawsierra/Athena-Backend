@@ -28,7 +28,7 @@ version, :func:`build`:
    understate, and never depend on how their keys are spelled;
 5. makes the scenario version, its build record, each effect's attributes as the
    scenario's parameters (each with the distribution it states, if it states one,
-   held to the simulation's own two-sided test of its figures, as the parameter
+   held to the simulation's own range test of its figures, as the parameter
    set's are: spec, sections 19.2 and 25.1), each event's larger-loss values, the
    loss events, the
    effects and the findings they rest on, and each event's components through

@@ -10,12 +10,13 @@ of events or of a year), and the events are summed to the scenario. The rules:
 - **A distribution for every parameter, by a stated rule, never a guess**
   (:func:`resolve`, :data:`RULE_VERSION`). A parameter that states a distribution
   (an id, version and native parameters of step 7a's catalogue) draws from it,
-  when the distribution fits the parameter's unit and holds its own figures from
-  both sides (its base between the distribution's P5 and P95, its low and high
-  inside its support, its median between its low and high, and at least
-  :data:`RANGE_MASS_FLOOR` of its mass between them:
-  ``distribution_contradicts_range`` otherwise); a parameter whose low, base and
-  high are one figure states none (``distribution_on_fixed_row``). One that states none
+  when the distribution fits the parameter's unit and holds its own figures
+  (:func:`check_fits_range`, ``distribution_contradicts_range`` otherwise): a
+  continuous one from both sides (its base between its P5 and P95, its low and
+  high inside its support, its median between them, and at least
+  :data:`RANGE_MASS_FLOOR` of its mass between them), and only on a range
+  (``distribution_on_fixed_row``); a count, whose row's figures are values of its
+  RATE, by its mean between the low and the high, a fixed rate included. One that states none
   draws from a point mass where its low, base and high are one figure, and from
   PERT(low, base, high) where they are a range and its source is an
   ``EXPERT_ESTIMATE``: the only source step 7a's rule lets an expert range stand
@@ -91,22 +92,27 @@ ENGINE_VERSION = 2
 #: these percentiles of it, and the low and the high inside the closure of its
 #: support (spec, section 25.1). An owner decision (section 25.10).
 RANGE_FIT_PERCENTILES = (Decimal(5), Decimal(95))
-#: ...and from both sides: its median between the low and the high, and at least
-#: this share of its mass between them, both included (spec, section 25.1; the
-#: lead's call on decision 9 of section 25.10, which the owner may change). One
-#: constant: the owner's change is one line, and a new input digest (:func:`limits`).
+#: ...and a continuous one from both sides: its median between the low and the
+#: high, and at least this share of its mass between them, both included (spec,
+#: section 25.1; the lead's call on decision 9 of section 25.10, which the owner
+#: may change). One constant: the owner's change is one line, and a new input
+#: digest (:func:`limits`). A count is not held to it: its row's figures are
+#: values of its rate, not of its count (decision 12).
 RANGE_MASS_FLOOR = Decimal("0.5")
-#: The parameter-to-distribution rule (:func:`resolve`). v3 (step 6): the range
-#: test is two-sided, and a fixed row states no distribution.
+#: The parameter-to-distribution rule (:func:`resolve`). v3 (step 6): a continuous
+#: distribution is held to its row from both sides and only on a range; a count by
+#: its mean, its rate, a fixed rate included.
 RULE_VERSION = "mythos.economics.parameter-distribution/v3"
 RULE = (
-    "a stated distribution of step 7a's catalogue, where it fits the parameter's unit and holds its figures from "
-    "both sides (the base between its P5 and P95, the low and the high inside its support, its median between the "
-    f"low and the high, and at least {RANGE_MASS_FLOOR} of its mass between them) and the parameter is a range (low "
-    "below high); otherwise a point mass where low = base = high; otherwise PERT(low, base, high), weight 4, where "
-    "the source is EXPERT_ESTIMATE; otherwise refused (no_admissible_distribution). A parameter derived across "
-    "several parameters draws each by this rule and takes, per draw, the one giving the larger loss in the direction "
-    "of the inputs that read it"
+    "a stated distribution of step 7a's catalogue, where it fits the parameter's unit and holds its figures: a "
+    "continuous one from both sides (the base between its P5 and P95, the low and the high inside its support, its "
+    f"median between the low and the high, and at least {RANGE_MASS_FLOOR} of its mass between them), stated on a "
+    "range (low below high); a count, whose low, base and high are values of its rate, by its mean between the low "
+    "and the high (a fixed rate, low = base = high, its mean that figure), its low and high inside its support, and "
+    "its base below the count after its P95; otherwise a point mass where low = base = high; otherwise PERT(low, "
+    "base, high), weight 4, where the source is EXPERT_ESTIMATE; otherwise refused (no_admissible_distribution). A "
+    "parameter derived across several parameters draws each by this rule and takes, per draw, the one giving the "
+    "larger loss in the direction of the inputs that read it"
 )
 #: Which parameters are drawn once per simulated year and which per occurrence.
 VARIATION_VERSION = "mythos.economics.variation/v2"
@@ -166,14 +172,16 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "distribution_unknown": "a stated distribution's id is one of step 7a's catalogue",
         "distribution_version_unknown": "a stated distribution's version is the catalogue's version of it",
         "distribution_contradicts_range": (
-            "a stated distribution holds its parameter's own figures from both sides: the base between the "
-            "distribution's P5 and P95, the low and the high inside its support, its median between the low and the "
-            f"high, and at least {RANGE_MASS_FLOOR} of its mass between them; a distribution that does not is a "
-            "conflict, surfaced, and the refusal names the test it failed"
+            "a stated distribution holds its parameter's own figures: a continuous one from both sides, the base "
+            "between its P5 and P95, the low and the high inside its support, its median between the low and the "
+            f"high, and at least {RANGE_MASS_FLOOR} of its mass between them; a count, whose figures are values of its "
+            "rate, by its mean between the low and the high, the low and the high inside its support, and the base "
+            "below the count after its P95. A distribution that does not is a conflict, surfaced, and the refusal "
+            "names the test it failed"
         ),
         "distribution_on_fixed_row": (
-            "a parameter whose low, base and high are one figure is a point mass and states no distribution: a "
-            "distribution stated on it contradicts it"
+            "a parameter whose low, base and high are one figure is a point mass and states no continuous "
+            "distribution: one stated on it contradicts it (a count may state a fixed rate, its mean that figure)"
         ),
         "derived_malformed": (
             "a derived parameter is one a component reads, in one direction, taken across at least two parameters "
@@ -348,9 +356,13 @@ def support(distribution: dist.Distribution) -> tuple[float, float]:
     return 0.0, math.inf  # a count, a lognormal or a gamma
 
 
-#: The tests :func:`check_fits_range` holds a stated distribution to, in the order
-#: it applies them; a refusal names the first one failed.
+#: The tests :func:`check_fits_range` holds a continuous distribution to, in the
+#: order it applies them; a refusal names the first one failed.
 RANGE_TESTS = ("support", "base", "median", "mass")
+#: The tests it holds a count to, in order: a count's low, base and high are values
+#: of its rate (the annual rate a frequency's formulas multiply), not of the count a
+#: year draws, so its spread is not compared with them.
+COUNT_RANGE_TESTS = ("support", "rate", "base")
 
 
 def mass_between(distribution: dist.Distribution, low: float, high: float) -> float:
@@ -363,28 +375,53 @@ def mass_between(distribution: dist.Distribution, low: float, high: float) -> fl
     return max(0.0, distribution.cdf(high) - below)
 
 
+def _text(value: float | None) -> str:
+    if value is None or math.isnan(value):
+        return "undefined"
+    return "infinite" if math.isinf(value) else f"{value:.6g}"
+
+
 def check_fits_range(distribution: dist.Distribution, parameter: Parameter) -> None:
     """Refuse a stated distribution that does not hold ``parameter``'s own figures
-    from both sides (``distribution_contradicts_range``, naming the test it failed,
-    :data:`RANGE_TESTS`), each figure compared as the binary64 the run would draw:
+    (``distribution_contradicts_range``, naming the test it failed), each figure
+    compared as the binary64 the run would draw.
+
+    A continuous distribution (a severity, a rate or an expert range) is held to
+    them from both sides, :data:`RANGE_TESTS`:
 
     - ``support``: its low and high inside the closure of its support;
-    - ``base``: its base between the distribution's :data:`RANGE_FIT_PERCENTILES`.
-      A count's percentiles are whole numbers and its base a rate, so for a count
-      the base may lie anywhere below the count after its P95: a Poisson rarer than
-      once in twenty years has a P95 of 0 and holds a base of its own rate;
+    - ``base``: its base between the distribution's :data:`RANGE_FIT_PERCENTILES`;
     - ``median``: its P50 between its low and its high;
     - ``mass``: at least :data:`RANGE_MASS_FLOOR` of its mass between its low and
       its high, both included (:func:`mass_between`).
 
     The first two alone were one-sided: a gamma whose median lay far below the low
     held a base below its P95 and a low inside its support. A parameter whose low,
-    base and high are one figure is a point mass and states no distribution
-    (``distribution_on_fixed_row``). A conflict is surfaced, never resolved by
-    silently taking one side."""
+    base and high are one figure is a point mass and states no continuous
+    distribution (``distribution_on_fixed_row``).
+
+    A count (the catalogue's ``DISCRETE``: a frequency, or any count it marks) is
+    another matter: its row's low, base and high are values of its RATE, which the
+    formulas multiply, and the distribution says how the count varies from year to
+    year GIVEN the rate. Its spread is not compared with the rate's uncertainty, so
+    it is held to :data:`COUNT_RANGE_TESTS`:
+
+    - ``support``: as above;
+    - ``rate``: its mean, the catalogue's exact one, between the low and the high
+      (refused where the mean is infinite or undefined);
+    - ``base``: its base below the count after its P95 and at or above its P5 (round
+      2's rule; a Poisson rarer than once in twenty years has a P95 of 0 and holds a
+      base of its own rate). It refuses what the rate test does not: a base far from
+      the mean while the mean is still inside the range, as 0 / 1 / 2 stating
+      Poisson(0.02), whose rate is 0.02 and whose base claims 1.
+
+    A count may state a fixed rate: low = base = high = 2 with Poisson(2) is a known
+    rate whose count still varies; the rate test then asks that its mean be that
+    figure. A conflict is surfaced, never resolved by silently taking one side."""
     low, base, high = (_amount(parameter.at(point)) for point in POINTS)
     name = type(distribution).ID
-    if low == high:
+    count = bool(type(distribution).DISCRETE)
+    if low == high and not count:
         raise ScenarioSimulationRefused(
             "distribution_on_fixed_row",
             f"{parameter.name} is {low} / {base} / {high}, one figure: a point mass, and it states a {name}",
@@ -392,15 +429,27 @@ def check_fits_range(distribution: dist.Distribution, parameter: Parameter) -> N
     lowest, b, highest = float(low), float(base), float(high)
     lower, upper = support(distribution)
     p_low, p_high = (distribution.ppf(float(q / 100)) for q in RANGE_FIT_PERCENTILES)
+    inside_support = lower <= lowest and highest <= upper
+    if count:
+        mean = distribution.mean
+        held = {
+            "support": inside_support,
+            "rate": mean is not None and math.isfinite(mean) and lowest <= mean <= highest,
+            "base": p_low <= b < p_high + 1.0,
+        }
+        failed = next((test for test in COUNT_RANGE_TESTS if not held[test]), None)
+        if failed is None:
+            return
+        raise ScenarioSimulationRefused(
+            "distribution_contradicts_range",
+            f"{parameter.name} is {low} / {base} / {high}, values of its rate; its {name} fails the {failed} test: "
+            f"support [{lower:.6g}, {upper:.6g}], mean {_text(mean)}, P5 to P95 [{p_low:.6g}, {p_high:.6g}]",
+        )
     median = distribution.ppf(0.5)
     mass = mass_between(distribution, lowest, highest)
-    if type(distribution).KIND == dist.FREQUENCY:
-        holds_base = p_low <= b < p_high + 1.0
-    else:
-        holds_base = p_low <= b <= p_high
     held = {
-        "support": lower <= lowest and highest <= upper,
-        "base": holds_base,
+        "support": inside_support,
+        "base": p_low <= b <= p_high,
         "median": lowest <= median <= highest,
         "mass": mass >= float(RANGE_MASS_FLOOR),
     }
@@ -1570,6 +1619,7 @@ __all__ = [
     "PER_OCCURRENCE",
     "REFUSALS",
     "RANGE_FIT_PERCENTILES",
+    "COUNT_RANGE_TESTS",
     "RANGE_MASS_FLOOR",
     "RANGE_TESTS",
     "RULE_VERSION",
