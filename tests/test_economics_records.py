@@ -941,3 +941,43 @@ def test_a_non_production_deployments_run_keeps_the_gate_as_it_was(environment):
     with pytest.raises(SourceNotUsableForProduction) as refused:
         unverified.check_usable_for_production(staging)
     assert refused.value.code == "source_unverified"
+
+
+def test_the_gate_reads_the_stored_row_and_refuses_one_never_stored(deployment):
+    """The review of #154: the gate read the object handed in, so a trust tier, a
+    licence, the synthetic flag or the tenant edited in memory -- never saved, since a
+    row is never rewritten -- passed it, and so did a row never stored. It reads the
+    STORED ``(license_class, synthetic, deployment_id, trust_tier)`` by primary key,
+    as ``usable_for_production`` and ``snapshots._tenant_sources`` do, and refuses a
+    row that is not stored (``cross_tenant_reference``)."""
+    unverified = _source(license_class="open")
+    unverified.trust_tier = "authoritative"  # in memory only
+    with pytest.raises(SourceNotUsableForProduction) as refused:
+        unverified.check_usable_for_production(deployment)
+    assert refused.value.code == "source_unverified"
+    assert refused.value.detail == "source fed-h10-daily v1, trust tier unverified"
+    assert unverified.production_use_refusal(None) == "source_unverified"
+    unreviewed = _source(source_key="unreviewed-feed", trust_tier="authoritative")
+    unreviewed.license_class = "open"
+    assert unreviewed.production_use_refusal(deployment) == "unreviewed_license"
+    synthetic = snapshots.register_snapshot()
+    synthetic.synthetic = False
+    assert synthetic.production_use_refusal(deployment) == "synthetic_source"
+    other = Deployment.objects.create(name="other-tenant")
+    theirs = _source(deployment=other, license_class="customer", trust_tier="customer", source_key="revenue")
+    theirs.deployment_id = deployment.pk
+    assert theirs.production_use_refusal(deployment) == "cross_tenant_reference"
+    never_stored = FinancialSource(
+        source_key="never-stored", version=1, provider="p", dataset="d", retrieved_at=RETRIEVED,
+        snapshot_hash=SNAPSHOT, schema_version="1", license_class="open", trust_tier="authoritative",
+    )
+    for run in (deployment, None):
+        assert never_stored.production_use_refusal(run) == "cross_tenant_reference"
+        with pytest.raises(SourceNotUsableForProduction) as refused:
+            never_stored.check_usable_for_production(run)
+        assert (refused.value.code, refused.value.detail) == ("cross_tenant_reference", "a source that is not stored")
+    # The stored row decides both ways: a trusted version is usable, whatever the
+    # object in hand says.
+    trusted = _source(license_class="open", trust_tier="authoritative")
+    trusted.trust_tier = "unverified"
+    trusted.check_usable_for_production(deployment)

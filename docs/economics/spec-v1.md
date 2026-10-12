@@ -406,7 +406,12 @@ run for that deployment may use that version: a reviewed license class, not
 synthetic, and either platform-wide or the deployment's own. `FinancialSource.objects.usable_for_production(deployment)`
 returns exactly those: the reviewed platform-wide sources and the deployment's own,
 never an `unreviewed` one, never a synthetic one (`FinancialSource.synthetic`, set
-from a snapshot's own flag) and never another deployment's.
+from a snapshot's own flag) and never another deployment's. Both read the version
+as STORED: `check_usable_for_production` reads its licence class, synthetic flag,
+tenant and trust tier from its row by primary key, never from the object handed in
+(whose fields a caller may have changed in memory, though the row never changes), and
+refuses a row that is not stored (`cross_tenant_reference`), as `snapshots.fx_book`
+and `snapshots.index_book` refuse one (review of #154).
 
 **The trust tier, for a production run** (the owner's decision of 12 Oct 2026, before
 the first customer run). A production run also needs a version trusted above
@@ -1788,7 +1793,7 @@ scenario is a new version that supersedes the old, section 6):
 
 | Record | Holds |
 |---|---|
-| `CausalEffect` | one effect of one scenario version: its key, origin (`observed` or `hypothetical`), type, the asset it is bound to (a node, by uuid) and the business process; for an observed effect, the SPINE row's uuid (`observed_effect`), the digest its signature covers (`observation`), the effect as the receipt names it (`spine_effect`: workflow and tool) and when it was observed; the template it is assigned to and every template that covers it; and the ONE `LossEvent` it is in (a hypothetical effect's row is in its key's first event, and it takes part in every event of its key: section 24.5) |
+| `CausalEffect` | one effect of one scenario version: its key, origin (`observed` or `hypothetical`), type, the asset it is bound to (a node, by uuid) and the business process; for an observed effect, the SPINE row's uuid (`observed_effect`), the digest its signature covers (`observation`), the effect as the receipt names it (`spine_effect`: workflow and tool) and when it was observed; the template it is assigned to and every template that covers it; and the ONE `LossEvent` it is in (a hypothetical effect's row is in the one event of its key that prices it, and it takes part in every event of its key: section 24.5) |
 | `EffectFinding` | one finding enabling one effect, as a `prerequisite`, an `amplifier` or an `alternate_path` (Finding ENABLES Effect) |
 | `ScenarioBuild` | how one scenario version was built: the parameter-set version it read, the currency and as-of date, the builder, grouping and pack versions, the canonical inputs, and their content digest, unique per deployment |
 
@@ -2070,16 +2075,24 @@ own. Within one key:
 - an effect with no time (a hypothetical one) cannot be placed in a window and is
   never counted as an occurrence of its own: it takes part in EVERY event of its key,
   so which event is first never decides what it adds; where the key has no observed
-  effect, the hypothetical effects make one event together. It adds no event: its
-  one `CausalEffect` row, and its findings', is recorded in the key's first event
-  (the earliest), and every other event of the key reads its attributes in its larger
-  loss, cites them (in `derived_from`, or the attribute itself where it alone states
-  one) and lists it, with its findings, marked `joined` (section 24.8).
+  effect, the hypothetical effects make one event together. It adds no event, and
+  its loss is counted ONCE (`builder.price`): a key's hypothetical effects are PRICED
+  in the one event where they add the most gross cash loss at BASE -- the event's
+  loss with them less its loss without them -- ties going to the larger gain at
+  high, then at low, then to the earliest event. That event records them (their
+  `CausalEffect` rows and their findings') and reads their figures in its larger
+  loss, citing them (in `derived_from`, or the attribute itself where one alone
+  states it). Every other event of the key lists them, with their findings, marked
+  `joined` (section 24.8), and reads NONE of their figures: its components are its
+  own effects'. One pricing event serves all three points, since an event read with
+  them at one point and without them at another could state a low above its base,
+  which no parameter or component may (`range_inverted`).
 
 Grouping `v1` measured the window from an event's FIRST observation and joined a
 hypothetical effect to the key's first event only; adding an effect could then split
 an event or move a hypothetical one, and lower the scenario's gross (section 24.9). A
-build recorded under `v1` reads as it was built.
+build recorded under `v1` reads as it was built: the events route lists a
+hypothetical effect in every event of its key for a build of any grouping but `v1`.
 
 An event's key is `ev-` and 24 hex digits of the SHA-256 of the grouping version, the
 key and its earliest observation (`undated` for an event of hypothetical effects), so
@@ -2094,10 +2107,11 @@ inputs that read it: the highest where the input increases the loss, the lowest 
 it decreases it (`templates.larger_loss`, `mythos.economics.larger-loss/v1`). Joined
 effects never understate, and adding an effect to an event never lowers that event's
 loss (`test_adding_an_effect_never_lowers_the_events_loss`). Under grouping v2 adding
-an effect to a BUILD never splits an event, never lowers any event's loss, and never
-lowers the scenario's gross unless it merges events, which count their shared pool
-once (section 24.9;
-`test_adding_an_effect_never_splits_an_event_or_lowers_what_it_held`). The value does not depend on
+an effect to a BUILD never splits an event or moves an effect, and never lowers the
+scenario's gross at base unless it merges events, which count their shared pool once;
+at high or low it can, where the added effect moves the pricing of the key's
+hypothetical effects to another event (section 24.9;
+`test_adding_an_effect_never_splits_an_event_and_prices_a_hypothetical_once`). The value does not depend on
 how the effects' keys are spelled (`test_joined_effects_read_the_larger_loss_whatever_their_keys`);
 an exact tie is one value, and the effect cited for it is the lowest key. One effect
 stating the attribute is read as itself. Two or more make a parameter of the scenario,
@@ -2159,10 +2173,11 @@ Enforced in code and in the database, not by convention:
 | findings never multiply a loss | the grouping key names no finding; components are made once per event | `test_one_two_and_five_findings_on_one_effect_make_one_event_with_the_same_totals`, `test_findings_never_make_events_of_their_own` |
 | one effect is one event | the effect type is not in the key; every observation of one SPINE effect is one unit, whatever the window; one SPINE effect declared two ways is refused (`spine_effect_inconsistent`); a CausalEffect whose SPINE effect is in another event of its scenario, or declared there another way, is refused on save (`duplicate_id`) | `test_two_effect_types_one_template_takes_on_one_asset_are_one_event`, `test_every_observation_of_one_spine_effect_is_one_event_however_far_apart`, `test_every_observation_of_one_spine_effect_is_one_plan`, `test_the_model_holds_one_spine_effect_to_one_event` |
 | joined effects never understate | the larger loss at each point across all of an event's effects | `test_joined_effects_read_the_larger_loss_whatever_their_keys`, `test_an_observed_and_a_hypothetical_effect_take_part_alike`, `test_adding_an_effect_never_lowers_the_events_loss` |
-| one effect is in exactly one loss event of its scenario version | `CausalEffect.loss_event` is one foreign key, not null; an effect key, and a SPINE observation, are unique within a scenario (`uq_econ_effect_key`, `uq_econ_effect_observation`), checked on save (`duplicate_id`) and by the database. A hypothetical effect takes part in every event of its key (grouping v2), but its one row, and its findings', is in the key's first event: it is one effect, and never an occurrence | `test_the_database_holds_an_effect_to_one_event`, `test_a_hypothetical_effect_no_longer_moves_when_an_effect_is_added` |
-| merging events counts a shared pool once | under grouping v2 an effect within 24 hours of two events makes them one, which reads each attribute at the larger loss ONCE: never below either event it merged, and not their sum | `test_merging_two_events_counts_their_shared_pool_once`, `test_adding_an_effect_never_splits_an_event_or_lowers_what_it_held` |
+| one effect is in exactly one loss event of its scenario version | `CausalEffect.loss_event` is one foreign key, not null; an effect key, and a SPINE observation, are unique within a scenario (`uq_econ_effect_key`, `uq_econ_effect_observation`), checked on save (`duplicate_id`) and by the database. A hypothetical effect takes part in every event of its key (grouping v2), but its one row, and its findings', is in the one event that prices it: it is one effect, and never an occurrence | `test_the_database_holds_an_effect_to_one_event`, `test_a_hypothetical_effect_no_longer_moves_when_an_effect_is_added` |
+| a hypothetical effect's loss is counted once | `builder.price`: one event of its key reads its figures, at all three points, where it adds the most at base; every other event lists it, `joined`, and reads none of them | `test_a_hypothetical_effect_is_priced_once_however_many_events_its_key_has`, `test_the_route_prices_a_hypothetical_effect_once`, `test_adding_an_effect_never_splits_an_event_and_prices_a_hypothetical_once` |
+| merging events counts a shared pool once | under grouping v2 an effect within 24 hours of two events makes them one, which reads each attribute at the larger loss ONCE: never below either event it merged, and not their sum | `test_merging_two_events_counts_their_shared_pool_once`, `test_adding_an_effect_never_splits_an_event_and_prices_a_hypothetical_once` |
 | an effect two templates cover is assigned to one | `templates.select`, by precedence | `test_an_effect_two_templates_cover_is_in_one_event`, `test_an_effect_two_templates_cover_is_assigned_to_one_by_precedence` |
-| two distinct effects are two events | different keys, or no chain of observations, each within 24 hours of the next, between them | `test_two_distinct_effects_make_two_events`, `test_the_window_joins_any_member_within_24_hours_and_a_hypothetical_joins_every_event` |
+| two distinct effects are two events | different keys, or no chain of observations, each within 24 hours (inclusive) of the next, between them | `test_two_distinct_effects_make_two_events`, `test_the_window_joins_any_member_within_24_hours_and_a_hypothetical_joins_every_event`, `test_the_window_is_24_hours_inclusive_to_the_microsecond` |
 | a rebuild duplicates nothing | the digest, unique per deployment | `test_a_rebuild_returns_the_same_scenario_and_writes_nothing`, `test_a_build_raced_by_the_same_build_is_409_and_writes_nothing` |
 | market value stays apart | each event's market-value line is #146's (section 16); the scenario's totals sum gross cash and market value separately, and never one into the other | `test_market_value_is_reported_apart_and_never_summed_into_cash` |
 
@@ -2178,7 +2193,7 @@ GUARDED in a guard of its own (section 2):
 | Route | Name | Does |
 |---|---|---|
 | `POST deployments/<uuid>/economics/scenarios/build/` | `deployment-economics-scenario-build` | builds a scenario draft: 201 with the scenario, its build and its events; 200 with the scenario already built from the same inputs; 409 on a race |
-| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; under grouping v2 a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
 
 The body:
 
@@ -2302,24 +2317,57 @@ and the rest) is raised as that engine's:
   grouping v2 (`mythos.economics.grouping/v2`, builder
   `mythos.economics.scenario-builder/v2`) implements both.
 
-  Under v2 both cases keep their gross. In the first, H takes part in both events: O1's
-  still reads (0.9, 20 hours) and O2's (0.1, 20 hours), and the gross RISES to
-  18,754,000 / 65,629,000 / 112,504,000
-  (`test_a_hypothetical_effect_no_longer_moves_when_an_effect_is_added`). In the
-  second, U0 is within 24 hours of O1, and O1 of O2: one event, at the same 16,877,000
-  / 59,064,500 / 101,252,000 (`test_an_added_effect_no_longer_moves_the_window`).
+  **Priced once (review of #154).** As first built, v2 read a hypothetical effect's
+  figures in EVERY event of its key, so its loss was counted once per event: H (0.9,
+  20 hours; 59,064,500 at base alone) with two (0.1, 0.1 hour) observed events 48
+  hours apart stated 118,129,000, H twice, and with five events H five times. On the
+  lead's call (12 Oct 2026, under the owner's "go with recommendations"), a key's
+  hypothetical effects are now PRICED in ONE event, for all three points: the event
+  where they add the most at base (ties: high, then low, then the earliest). Every
+  other event lists them, `joined`, and reads none of their figures (section 24.5).
+  That case is now 16,888,375 / 59,099,312.50 / 101,310,250: H once, plus the other
+  event's own (0.1, 0.1 hour) loss
+  (`test_a_hypothetical_effect_is_priced_once_however_many_events_its_key_has`,
+  `test_the_route_prices_a_hypothetical_effect_once`).
+
+  Under v2 both cases keep their gross. In the first, H takes part in both events and
+  is priced in O1's, where its window adds the most: O1's still reads (0.9, 20 hours),
+  O2's its own (0.1, 0.1 hours), and the gross RISES to 16,888,375 / 59,099,312.50 /
+  101,310,250 (`test_a_hypothetical_effect_no_longer_moves_when_an_effect_is_added`).
+  In the second, U0 is within 24 hours of O1, and O1 of O2: one event, at the same
+  16,877,000 / 59,064,500 / 101,252,000
+  (`test_an_added_effect_no_longer_moves_the_window`).
+
   What v2 holds, property-style over 300 random sets of effects on one key, each with
   one effect added (a fixed seed; no database:
-  `test_adding_an_effect_never_splits_an_event_or_lowers_what_it_held`): adding an
-  effect never splits an event or moves an effect, never lowers any event's loss, and
-  never lowers the scenario's gross, at low, base or high, UNLESS it merges events.
-  A merge counts the merged events' shared pool once, by design (section 24.7): two
-  (0.9, 20 hour) effects 30 hours apart are two events of 59,064,500 at base each, and
-  a third between them makes one event of 59,064,500, not their sum
-  (`test_merging_two_events_counts_their_shared_pool_once`). So a scenario can still
-  state less after an effect is added, but only where that effect shows that two
-  events were one loss, and never less than the largest event it merged (in the
-  property test's 300 cases, 11 merge, and 8 of those state less).
+  `test_adding_an_effect_never_splits_an_event_and_prices_a_hypothetical_once`):
+  adding an effect never splits an event or moves an effect; a hypothetical effect
+  is priced once, before and after; and the scenario's gross never falls at BASE
+  unless the added effect merges events. **At high and low it can**: where the
+  added effect makes another event the one where the key's hypothetical effects add
+  the most at base, they leave the event where they added more at high (or low). In
+  the 300 cases the gross fell at high twice and at low never, and at base never,
+  outside a merge; the test pins those counts, so a fall at base fails it. A merge
+  counts the merged events' shared pool once, by design (section 24.7): two (0.9, 20
+  hour) effects 30 hours apart are two events of 59,064,500 at base each, and a third
+  between them makes one event of 59,064,500, not their sum
+  (`test_merging_two_events_counts_their_shared_pool_once`). So a scenario can state
+  less after an effect is added where that effect shows that two events were one
+  loss, never less than the largest event it merged (in the 300 cases, 11 merge, and
+  8 of those state less), or, at high or low only, where it moves the pricing.
+
+  **Alternative, a possible follow-up: price per point at the scenario level.** No
+  event reads a hypothetical effect's figures; the scenario's totals add, for each
+  key and each point separately, the most its hypothetical effects add to any one
+  event of the key (that event's loss with them less its loss without them). That
+  never falls at any point outside a merge (0 of the 300 cases), but the events
+  would no longer carry the hypothetical loss, and the step 7b simulation (section
+  25) would need the same rule per draw, a per-draw maximum over each event with and
+  without them. Pricing per point WITHIN the events is not possible: of the property
+  test's sets (before and after the added effect) with a hypothetical effect and two
+  or more events, 78, the event gaining most differs between points in 21, and in 11
+  of those an event read with the hypothetical effects at one point and without them
+  at another would state a low above its base (`range_inverted`).
 - **An attribute an effect does not state takes no part** in its event's larger
   loss: the others' value stands, and where none states it the component is unknown.
 - **One SPINE effect to one event is held by the builder and by `CausalEffect`'s
@@ -2348,10 +2396,11 @@ not taken):
 
 1. The six templates are the six families above; loan/underwriting error and model
    drift are left for a later pack version.
-2. The grouping window is 24 hours from ANY member of an event, and an effect with
-   no time takes part in every event of its key (grouping v2, decision 12; v1 measured
-   the window from an event's first observed effect, and joined an effect with no time
-   to its key's first event).
+2. The grouping window is 24 hours (inclusive) from ANY member of an event, and an
+   effect with no time takes part in every event of its key and is priced in the one
+   where it adds the most at base (grouping v2, decision 12; v1 measured the window
+   from an event's first observed effect, and joined an effect with no time to its
+   key's first event).
 3. The precedence is the order above, so an approval bypass on payments is a payment
    loss and on fraud/AML a workflow failure.
 4. An observed effect counts only while its signature verifies now; one that does not
@@ -2398,10 +2447,13 @@ not taken):
     hypothetical effect joins every event of its key; (b) join any effect within 24
     hours of ANY member of an event. They are a new grouping version,
     `mythos.economics.grouping/v2`, built by `mythos.economics.scenario-builder/v2`,
-    not a change to v1, whose builds read as they were built. Adding an effect now
-    never splits an event, moves an effect or lowers an event's loss, and lowers the
-    scenario's gross only by merging events, which count a shared pool once (the
-    limitation above). Alternative not taken: (c), as v1.
+    not a change to v1, whose builds read as they were built. A key's hypothetical
+    effects are priced in ONE event, where they add the most at base (the lead's
+    call on the review of #154). Adding an effect now never splits an event or moves
+    an effect, and lowers the scenario's gross at base only by merging events, which
+    count a shared pool once; at high or low it can also fall where the pricing
+    moves (the limitation above). Alternatives not taken: (c), as v1; pricing per
+    point at the scenario level, a possible follow-up (the limitation above).
 
 ## 25. Wiring the simulation (MVP step 7b)
 

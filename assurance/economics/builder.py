@@ -19,8 +19,9 @@ version, :func:`build`:
    event, however far apart; an observed effect within :data:`GROUPING_WINDOW` of
    ANY member of an event joins it, so a key's events are the connected components
    of "within the window"; a hypothetical effect takes part in EVERY event of its
-   key. Findings enabling one effect join that effect's events. The key never names
-   a finding, so a finding never makes an event of its own;
+   key, and is PRICED in one of them (:func:`price`): the others list it and read
+   none of its figures. Findings enabling one effect join that effect's events. The
+   key never names a finding, so a finding never makes an event of its own;
 4. reads, for each attribute an event's template reads, the value that gives the
    LARGER loss across the event's effects, at each point
    (:func:`assurance.economics.engine.templates.larger_loss`): joined effects never
@@ -49,7 +50,7 @@ import hashlib
 import json
 import uuid as _uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
 
@@ -60,6 +61,7 @@ from assurance import composition, consequential, observed_effects, observed_out
 from assurance.authority_chain_records import effect_digest
 from assurance.models import Asset, Finding, WorkflowChainOutcome
 
+from .engine import formulas
 from .engine import loss as engine_loss
 from .engine import money
 from .engine import parameter_set as pset
@@ -87,10 +89,13 @@ BUILDER_VERSION = "mythos.economics.scenario-builder/v2"
 #: new version, so a build recorded under this one reads as it was built. v2 (the
 #: owner's decision of 12 Oct 2026, options (a) and (b) of section 24.9): an
 #: effect within the window of ANY member of an event joins it, and a hypothetical
-#: effect takes part in every event of its key. v1 joined an effect within the
-#: window of an event's FIRST observation, and a hypothetical effect to the key's
-#: first event only, so adding an effect could split or move an event.
+#: effect takes part in every event of its key, priced in ONE (:func:`price`). v1
+#: joined an effect within the window of an event's FIRST observation, and a
+#: hypothetical effect to the key's first event only, so adding an effect could
+#: split or move an event.
 GROUPING_VERSION = "mythos.economics.grouping/v2"
+#: The first grouping, whose builds list a hypothetical effect in one event only.
+GROUPING_V1 = "mythos.economics.grouping/v1"
 GROUPING_WINDOW = timedelta(hours=24)
 
 #: The most effects and finding links one build declares. The body's size bounds
@@ -205,10 +210,14 @@ class EventPlan:
     read, for each attribute, the larger loss across ALL its effects: no effect
     leads.
 
-    ``joined`` names the effects that take part in this event but are RECORDED in
-    another: a hypothetical effect takes part in every event of its key, and its one
+    ``joined`` names the effects that take part in this event -- it lists them, with
+    their findings -- but are RECORDED and PRICED in another: a hypothetical effect
+    takes part in every event of its key, and its one
     :class:`~assurance.economics.models.CausalEffect` row (and its findings') is in
-    the key's first event, so it is never counted as an occurrence of its own."""
+    the ONE event that reads its figures (:func:`price`; :func:`group` puts it in the
+    key's first until then). An event reads no figure of an effect it joins: a
+    hypothetical effect is never an occurrence of its own, and its loss is never
+    counted once per event."""
 
     event_key: str
     template: tpl.Template
@@ -224,6 +233,12 @@ class EventPlan:
         """The SPINE effect of the event's earliest observation; blank for an event
         of hypothetical effects only."""
         return self.effects[0].spine_effect if self.anchor is not None else ""
+
+    @property
+    def read(self) -> tuple[EffectInput, ...]:
+        """The effects whose figures the event reads: every one taking part but those
+        it only joins."""
+        return tuple(e for e in self.effects if e.key not in self.joined)
 
     @property
     def trigger(self) -> str:
@@ -299,10 +314,10 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
     move an effect from one to another. An effect with no instant (a hypothetical
     one) cannot be placed in a window and is never counted as an occurrence of its
     own: it takes part in EVERY event of its bucket -- recorded in the first, and
-    ``joined`` to the rest -- so which event is first never decides what it adds;
-    in a bucket with no observed effect, the hypothetical effects make one event
-    together. One SPINE effect declared two ways is refused
-    (:func:`check_spine_declarations`)."""
+    ``joined`` to the rest, until :func:`price` moves it to the event where it adds
+    the most -- so which event is first never decides what it adds; in a bucket with
+    no observed effect, the hypothetical effects make one event together. One SPINE
+    effect declared two ways is refused (:func:`check_spine_declarations`)."""
     effects = tuple(effects)
     links = tuple(links)
     check_spine_declarations(effects)
@@ -332,7 +347,8 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
                 units.setdefault(effect.spine_effect or f"effect:{effect.key}", []).append(effect)
         windows = _connected(units)
         # Every hypothetical effect takes part in every event of the key; its row is
-        # recorded in the first (the earliest), and it is joined to the others.
+        # recorded in the first (the earliest), and it is joined to the others, until
+        # price() records it where it adds the most.
         recorded_elsewhere = tuple(sorted(e.key for e in undated)) if windows else ()
         for window in windows:
             window.extend(undated)
@@ -361,6 +377,76 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
                 )
             )
     return tuple(sorted(plans, key=lambda p: p.event_key))
+
+
+def gross_cash(plan: EventPlan, effects: Iterable[EffectInput], variables: Mapping[str, Parameter], *,
+               currency: str, as_of: date) -> tuple:
+    """The gross cash loss (low, base, high, as decimals) ``plan``'s template makes
+    of ``effects``: each attribute it reads at the larger loss across them
+    (:func:`~assurance.economics.engine.templates.larger_loss`), each component by
+    its formula from those and the parameter set's ``variables``, the components
+    summed, gross of insurance and apart from market value. An unknown component adds
+    nothing, as in the event's own total. Pure: what the build would write for an
+    event of exactly ``effects``."""
+    effects = tuple(effects)
+    attributes: dict[str, Parameter] = {}
+    for name, reading in sorted(tpl.readings(plan.template).items()):
+        stated = {e.key: e.attributes[name] for e in effects if name in e.attributes}
+        if stated:
+            attributes[name] = tpl.larger_loss(reading, stated, event_key=plan.event_key).parameter
+    components = tuple(
+        formulas.evaluate(
+            planned.spec.component_key,
+            planned.spec.family,
+            planned.spec.formula_id,
+            planned.spec.formula_version,
+            planned.bindings(),
+            as_of=as_of,
+        )
+        for planned in tpl.plan(plan.template, variables, attributes)
+    )
+    total = engine_loss.assess(engine_loss.LossEvent(plan.event_key, currency, components), None).gross.total
+    return tuple(total.at(point).amount for point in POINTS)
+
+
+def price(plans: Iterable[EventPlan], variables: Mapping[str, Parameter], *, currency: str,
+          as_of: date) -> tuple[EventPlan, ...]:
+    """``plans`` with each key's hypothetical effects PRICED in ONE event (grouping
+    v2; the lead's call of 12 Oct 2026 on the owner's decision 12, spec 24.9).
+
+    A hypothetical effect takes part in every event of its key, but its figures are
+    read by one: the event where the key's hypothetical effects add the most gross
+    cash loss at BASE -- the event's loss with them, less its loss without them --
+    ties going to the larger gain at high, then at low, then to the earliest event.
+    That event records them (their rows and their findings') and reads their
+    figures; every other event of the key lists them, ``joined``, and reads none.
+    So a hypothetical effect's loss is counted once, never once per event. A key with
+    one event, or with no hypothetical effect, is as :func:`group` made it."""
+    plans = tuple(plans)
+    by_key: dict[tuple[str, ...], list[EventPlan]] = {}
+    for plan in plans:
+        by_key.setdefault(plan.grouping_key, []).append(plan)
+    priced: dict[str, EventPlan] = {}
+    for events in by_key.values():
+        hypothetical = tuple(sorted(e.key for e in events[0].effects if e.occurred_at is None))
+        if not hypothetical or len(events) == 1:
+            priced.update((p.event_key, replace(p, joined=())) for p in events)
+            continue
+        events.sort(key=lambda p: p.anchor)
+
+        def gain(index: int, events=events) -> tuple:
+            plan = events[index]
+            observed = [e for e in plan.effects if e.occurred_at is not None]
+            alone = gross_cash(plan, observed, variables, currency=currency, as_of=as_of)
+            joined = gross_cash(plan, plan.effects, variables, currency=currency, as_of=as_of)
+            low, base, high = (j - a for j, a in zip(joined, alone, strict=True))
+            return (base, high, low, -index)
+
+        chosen = max(range(len(events)), key=gain)
+        priced.update(
+            (p.event_key, replace(p, joined=() if index == chosen else hypothetical)) for index, p in enumerate(events)
+        )
+    return tuple(priced[p.event_key] for p in plans)
 
 
 def build_document(
@@ -671,7 +757,9 @@ def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
     values, the events, the effects, the findings they rest on and the components.
     Pure but for the ids each row is given; nothing is read or written."""
     request = resolved.request
-    plans = group(resolved.effects, request.links)
+    plans = price(
+        group(resolved.effects, request.links), resolved.variables, currency=request.currency, as_of=request.as_of
+    )
     scenario = FinancialScenario(
         deployment=deployment, title=request.title, author=author, supersedes=resolved.supersedes
     )
@@ -711,8 +799,8 @@ def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
         events.append(event)
         for effect in plan.effects:
             if effect.key in plan.joined:
-                # Recorded, with its findings, in its key's first event: here it takes
-                # part through its attributes, cited below like any effect's.
+                # Recorded, with its findings, and priced in the one event of its key
+                # that reads its figures: here it is listed (describe), never read.
                 continue
             selection = plan.selections[effect.key]
             row = CausalEffect(
@@ -737,12 +825,12 @@ def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
                 for link in plan.links
                 if link.effect == effect.key
             )
-        # Each attribute the template reads, at the larger loss across ALL the event's
-        # effects, those joined to it included: one effect stating it is read as
+        # Each attribute the template reads, at the larger loss across ALL the effects
+        # the event reads -- never one it only joins: one effect stating it is read as
         # itself; more make a parameter of the scenario that cites each (derived_from).
         attributes: dict[str, Parameter] = {}
         for name, reading in sorted(tpl.readings(plan.template).items()):
-            stated = {e.key: stored[e.key][name] for e in plan.effects if name in stored[e.key]}
+            stated = {e.key: stored[e.key][name] for e in plan.read if name in stored[e.key]}
             if not stated:
                 continue
             merged = tpl.larger_loss(reading, {k: r.as_engine() for k, r in stated.items()}, event_key=plan.event_key)
@@ -889,12 +977,13 @@ def describe(scenario: FinancialScenario) -> dict:
     loss net of the parameter set's insurance where the set states a policy, and the
     market-value line apart; and the scenario's totals.
 
-    Under grouping v2 an event lists every effect taking part in it: a hypothetical
-    effect of its key recorded in the key's first event is listed in every event of
-    the key, with its findings, and marked ``joined`` where its row is in another. A
-    build recorded under v1 reads as it was built: there it took part in one."""
+    From grouping v2 on, an event lists every effect taking part in it: a
+    hypothetical effect of its key, recorded and priced in one event of the key, is
+    listed in every other, with its findings, and marked ``joined`` there (its figures
+    are read only where it is recorded). A build recorded under v1 reads as it was
+    built: there it took part in one event only."""
     build_row = ScenarioBuild.objects.filter(scenario=scenario).first()
-    joins = build_row is not None and build_row.grouping_version == GROUPING_VERSION
+    joins = build_row is not None and build_row.grouping_version != GROUPING_V1
     policy = None
     versions: dict[int, CustomerParameterSet] = {}
     if build_row is not None:
@@ -916,9 +1005,9 @@ def describe(scenario: FinancialScenario) -> dict:
         )
         first = effects[0] if effects else None
         if joins and first is not None:
-            # The hypothetical effects of the event's key recorded in the key's first
-            # event: each takes part in this one too (grouping v2), after its
-            # observed effects, by key, as the plan ordered them.
+            # The hypothetical effects of the event's key recorded (and priced) in
+            # another of its events: each takes part in this one too (grouping v2),
+            # after its observed effects, by key, as the plan ordered them.
             effects += list(
                 CausalEffect.objects.filter(
                     scenario=scenario,
@@ -1063,10 +1152,12 @@ __all__ = [
     "check_spine_declarations",
     "describe",
     "event_key",
+    "gross_cash",
     "group",
     "grouping_key",
     "observed_identity",
     "parse_request",
+    "price",
     "resolve",
     "review_status",
     "scenario_totals",

@@ -375,29 +375,54 @@ class FinancialSource(_AppendOnly):
             self.version = (earlier or 0) + 1
         self.recorded_by_username = _signed_in(self.recorded_by).username
 
+    def _stored_for_the_gate(self) -> tuple | None:
+        """What the gate reads of this version, from the STORED row and never from
+        this object: ``(license_class, synthetic, deployment_id, trust_tier,
+        source_key, version)``, or ``None`` for a row that is not stored. A row is
+        never rewritten, so a field changed on the object in hand is not the source's:
+        reading it would let an in-memory edit pass the gate."""
+        if self.pk is None:
+            return None
+        return (
+            FinancialSource._base_manager.filter(pk=self.pk)
+            .values_list("license_class", "synthetic", "deployment_id", "trust_tier", "source_key", "version")
+            .first()
+        )
+
     def production_use_refusal(self, deployment) -> str | None:
         """``None`` when a production run for ``deployment`` may use this version;
-        otherwise why not. A run that :func:`runs_in_production` also never relies
-        on a version still trusted as ``unverified`` (``source_unverified``): only a
-        new version at a tier above it is usable."""
-        refusal = governance.production_use_refusal(self.license_class, synthetic=self.synthetic)
+        otherwise why not, read from the STORED row. A row that is not stored is
+        refused (``cross_tenant_reference``), as :func:`snapshots._tenant_sources`
+        refuses one. A run that :func:`runs_in_production` also never relies on a
+        version still trusted as ``unverified`` (``source_unverified``): only a new
+        version at a tier above it is usable."""
+        return self._refusal(self._stored_for_the_gate(), deployment)
+
+    @staticmethod
+    def _refusal(stored: tuple | None, deployment) -> str | None:
+        if stored is None:
+            return "cross_tenant_reference"
+        license_class, synthetic, tenant, trust_tier, _key, _version = stored
+        refusal = governance.production_use_refusal(license_class, synthetic=synthetic)
         if refusal is not None:
             return refusal
-        if self.deployment_id is not None and self.deployment_id != getattr(deployment, "pk", deployment):
+        if tenant is not None and tenant != getattr(deployment, "pk", deployment):
             return "cross_tenant_reference"
         if runs_in_production(deployment):
-            return governance.production_trust_refusal(self.trust_tier)
+            return governance.production_trust_refusal(trust_tier)
         return None
 
     def check_usable_for_production(self, deployment) -> None:
         """Raise :class:`SourceNotUsableForProduction` unless a production run for
-        ``deployment`` may use this version. Called by the run before it reads it.
-        The refusal names the source: its key, version and trust tier."""
-        _refuse(
-            self.production_use_refusal(deployment),
-            SourceNotUsableForProduction,
-            f"source {self.source_key} v{self.version}, trust tier {self.trust_tier}",
-        )
+        ``deployment`` may use this version, as stored. Called by the run before it
+        reads it. The refusal names the source: its key, version and trust tier, as
+        stored."""
+        stored = self._stored_for_the_gate()
+        if stored is None:
+            detail = "a source that is not stored"
+        else:
+            detail = f"source {stored[4]} v{stored[5]}, trust tier {stored[3]}"
+        _refuse(self._refusal(stored, deployment), SourceNotUsableForProduction, detail)
 
     def __str__(self) -> str:
         return f"{self.source_key} v{self.version} ({self.license_class})"
