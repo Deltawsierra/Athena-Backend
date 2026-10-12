@@ -30,7 +30,10 @@ fixtures and the tests all read the same codes:
   direction, and a loss component with its provenance;
 - :mod:`.loss` (scenarios): loss events, their totals, insurance applied once,
   and the market-value line kept apart from cash;
-- :mod:`.parameter_set` (scenarios): the customer parameter set's typed schema.
+- :mod:`.parameter_set` (scenarios): the customer parameter set's typed schema;
+- :mod:`.templates` (the builder): the banking pack's six templates, the effect
+  attributes and vocabularies, scope and precedence. Imported by the builder only,
+  never on Django's load path.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of
