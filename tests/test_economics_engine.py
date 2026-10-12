@@ -113,9 +113,10 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its fourteen modules (E1's ten, and the scenario engine's four:
-    # parameters, formulas, loss and parameter_set).
-    assert result.stdout.strip() == "imported 15", result.stdout
+    # The package and its sixteen modules: E1's ten, the scenario engine's four
+    # (parameters, formulas, loss and parameter_set), and the probabilistic
+    # engine's two (distributions and simulation, which import numpy as well).
+    assert result.stdout.strip() == "imported 17", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -147,6 +148,7 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "confidence.py",
         "cost_index.py",
         "currency.py",
+        "distributions.py",
         "formulas.py",
         "fx.py",
         "governance.py",
@@ -156,6 +158,7 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "parameter_set.py",
         "parameters.py",
         "provenance.py",
+        "simulation.py",
         "snapshot.py",
         "taxonomy.py",
     }
