@@ -41,9 +41,11 @@ recorded. **Never raises.**
 ``ReceiptKeyring`` and refuses, with a code, a forged or wrongly keyed envelope
 (core's verdicts), a row moved or relabelled, a card that is not the one it names, a
 result whose inputs, record or figures changed, a source snapshot, model build or
-evidence that no longer reproduces, and a card that its stored rows no longer
-rebuild under the release it was made under. A change of today's release is the
-note ``release_changed`` on an otherwise authentic receipt, never tampering.
+evidence that no longer reproduces, a stored analysis that is not the one the card
+signs, and a card that its stored rows no longer rebuild under the release it was
+made under. A change of today's release is the note ``release_changed`` on an
+otherwise authentic receipt, never tampering, with ``card_not_rebuilt``: the card
+was then not rebuilt, though its analysis was still checked.
 
 Nothing here is on a stop path; nothing Django loads at start imports it, and it
 imports ``mythos_core.exposure_receipt`` and the engine only when called.
@@ -95,7 +97,8 @@ REFUSALS = {
     ),
     "receipt_refused_by_signer": (
         "the signer read the receipt and refused it: core's validator, run by the engine before it signs, refused the "
-        "document with the code carried beside this one"
+        "document with the code carried beside this one where it is one of core's (exposure_receipt.MALFORMED_CODES); "
+        "a code that is not core's is shown in the detail and carried as no code of core's"
     ),
     "envelope_not_over_receipt": (
         "what the signer returned is not one signature over exactly the receipt, under the receipt's payload type"
@@ -114,12 +117,19 @@ REFUSALS = {
     ),
     "receipt_failed": "an unexpected fault: nothing was recorded",
     "receipt_mismatch": "the stored document is not the payload the envelope signs, or names another scenario or tenant",
-    "result_digest_mismatch": "the stored result's record no longer gives its result digest",
+    "result_digest_mismatch": (
+        "the stored result's inputs no longer give its input digest, or its record its result digest (the reason "
+        "names which was compared)"
+    ),
     "result_mismatch": "the receipt's or the card's figures, seed, draws or digests are not the stored result's",
     "model_build_mismatch": "the stored result's versions no longer give the model release the receipt names",
     "evidence_mismatch": "the scenario's stored effects no longer give the SPINE evidence the receipt names",
     "fingerprint_mismatch": "the receipt binds another system fingerprint than its card names",
     "card_not_reproduced": "the stored result, analysis and rows no longer rebuild the stored card",
+    "sensitivity_digest_mismatch": (
+        "the stored sensitivity analysis is not the one the card signs (its reproduction.sensitivity_digest), "
+        "whatever the release"
+    ),
     "verification_failed": "an unexpected fault while verifying: nothing is vouched for",
 }
 
@@ -157,7 +167,9 @@ class ReceiptCheck:
     code: str
     reason: str
     #: What is true of an otherwise authentic receipt and is not tampering:
-    #: ``release_changed`` where today's release differs from the one it was made under.
+    #: ``release_changed`` where today's release differs from the one it was made
+    #: under, and with it ``card_not_rebuilt``: today's code did not rebuild the card
+    #: (its stored analysis was still checked against the digest the card signs).
     notes: tuple[str, ...] = ()
 
 
@@ -292,7 +304,13 @@ def _published_keys(document) -> list[bytes]:
         if not isinstance(entry, dict) or entry.get("status") not in VERIFYING_STATUSES | {"revoked"}:
             raise ValueError(f"key {key_id!r} has no status the keyring publishes")
         if entry["status"] in VERIFYING_STATUSES:
-            keys.append(base64.b64decode(entry["public_key"], validate=True))
+            public = entry.get("public_key")
+            if not isinstance(public, str):
+                raise ValueError(f"key {key_id!r} has no base64 public_key text")
+            try:
+                keys.append(base64.b64decode(public, validate=True))
+            except (binascii.Error, ValueError) as error:
+                raise ValueError(f"key {key_id!r}'s public_key is not base64: {error}") from None
     return keys
 
 
@@ -311,7 +329,8 @@ def keyring_from_published(published):
     role's are filed under their roles, so a receipt one of them signed is refused
     as ``wrong_role``. A revoked key verifies nothing and is left out. Raises
     ``ValueError`` (or core's ``ReceiptError``) for a document without the
-    economics-receipt role, or one it cannot read."""
+    economics-receipt role, or one it cannot read: an entry with no status it
+    publishes, or a verifying one with no base64 ``public_key`` text."""
     core, _ = _core()
     if not isinstance(published, dict) or not isinstance(published.get("roles"), dict):
         raise ValueError("the published keyring has no roles")
@@ -419,10 +438,16 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
     except Exception as error:  # noqa: BLE001 - a signer fault is a returned refusal: which one, below
         refused = _signer_refusal(error)
         if refused is not None:
-            # The signer read the document and refused it by core's rule: not that
-            # nothing could sign, and the rule is carried.
-            return ReceiptOutcome(None, False, "receipt_refused_by_signer", f"{refused[0]}: {refused[1]}",
-                                  signer_code=refused[0])
+            # The signer read the document and refused it: not that nothing could
+            # sign. Core's rule is carried only where the code is one of core's own;
+            # any other code is shown, never passed off as core's.
+            code, reason = refused
+            if code in core.MALFORMED_CODES:
+                return ReceiptOutcome(None, False, "receipt_refused_by_signer", f"{code}: {reason}", signer_code=code)
+            return ReceiptOutcome(
+                None, False, "receipt_refused_by_signer",
+                f"the signer refused the document with {code!r}, which is not one of core's codes: {reason}",
+            )
         status = getattr(error, "status", None)
         return ReceiptOutcome(None, False, "signer_unavailable",
                               type(error).__name__ + ("" if status is None else f" (status {status})"))
@@ -518,12 +543,20 @@ def _verify(receipt: FinancialExposureReceipt, keyring) -> ReceiptCheck:
         return _refused("receipt_mismatch", "the stored document is not the signed payload")
     # 3. The result: its inputs and its record still give their digests, and the
     # card and the receipt name its figures, seed, draws and digests.
-    if (
-        result.status != SIMULATION_COMPLETED
-        or canonical_digest(result.inputs) != result.input_digest
-        or canonical_digest(result.record) != result.result_digest
-    ):
-        return _refused("result_digest_mismatch")
+    if result.status != SIMULATION_COMPLETED:
+        return _refused("result_digest_mismatch", f"the stored result is {result.status}, not completed")
+    if canonical_digest(result.inputs) != result.input_digest:
+        return _refused(
+            "result_digest_mismatch",
+            "the stored result's inputs no longer give its input digest (compared: the canonical digest of "
+            "result.inputs with result.input_digest)",
+        )
+    if canonical_digest(result.record) != result.result_digest:
+        return _refused(
+            "result_digest_mismatch",
+            "the stored result's record no longer gives its result digest (compared: the canonical digest of "
+            "result.record with result.result_digest)",
+        )
     reproduction = card.card["fields"]["reproduction"]
     held = (
         reproduction["result_digest"],
@@ -570,16 +603,27 @@ def _verify(receipt: FinancialExposureReceipt, keyring) -> ReceiptCheck:
         return _refused("source_snapshot_mismatch", "a source snapshot's content hash is not the one signed")
     if document["evidence"] != fields["evidence"]:
         return _refused("evidence_mismatch")
-    # 5. The card: where the code is today's release, its stored rows rebuild it
-    # exactly. Where the release has changed since, the card cannot be rebuilt by
-    # today's code, and that is said beside the verdict, never read as tampering.
-    notes = ()
+    # 5. The card. Its stored analysis is the one it signs, whatever the release
+    # (its digest does not depend on the code). Where the code is today's release,
+    # its stored rows rebuild the card exactly. Where the release has changed since,
+    # today's code cannot rebuild it: that is said beside the verdict -- the card was
+    # not rebuilt -- and never read as tampering.
+    signed = card.card["fields"]["reproduction"].get("sensitivity_digest")
+    if (None if card.sensitivity is None else canonical_digest(card.sensitivity)) != signed:
+        return _refused("sensitivity_digest_mismatch")
     if validity_service.release_changed(card):
-        notes = ("release_changed",)
-    elif not validity_service.reproduces(card):
+        return ReceiptCheck(
+            True,
+            core.AUTHENTIC,
+            "verified: the signature, the row, the result, every snapshot and the stored analysis against the digest "
+            "the card signs; the card itself was NOT rebuilt: the release has changed since it was made, and today's "
+            "code cannot rebuild it",
+            ("release_changed", "card_not_rebuilt"),
+        )
+    if not validity_service.reproduces(card):
         return _refused("card_not_reproduced")
     return ReceiptCheck(
-        True, core.AUTHENTIC, "verified: the signature, the row, the card, the result and every snapshot", notes
+        True, core.AUTHENTIC, "verified: the signature, the row, the card, the result and every snapshot"
     )
 
 

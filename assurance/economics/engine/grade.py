@@ -2,15 +2,21 @@
 ``docs/economics/spec-v1.md``, section 26.2; the owner's specification, section 8).
 
 A grade says how much of an estimate rests on evidence and how much on
-assumption. It is computed from the run's EVIDENCE MIX: the share of the result's
-LEVEL that rests on each class of source. Each parameter the gross cash reads is
-weighted by its share of the base-case level (:func:`.sensitivity.level_shares`:
-its absolute elasticity, normalised), never by a raw count and never by its
-variance alone, so a FIXED figure counts exactly as a range at the same base does:
-an expert's $5,000,000 guess is the evidence it is whether it is stated as one
-figure or as a range around it. A parameter derived across several effects'
+assumption. It is computed from a line's EVIDENCE MIX: the share of the line's
+LEVEL that rests on each class of source. Each parameter the line reads is weighted
+by its share of the base-case level (:func:`.sensitivity.level_shares`: an additive
+decomposition at base -- each cash component's base over the total, split among its
+inputs by their elasticity of it; a frequency one half), never by a raw count and
+never by its variance alone, so a FIXED figure counts exactly as a range at the same
+base does: an expert's $5,000,000 guess is the evidence it is whether it is stated as
+one figure or as a range around it. A parameter derived across several effects'
 attributes (the builder's larger loss) rests on the contributors whose base supplies
 its own; its share is split equally among their source types.
+
+Under a policy both lines are graded, the gross cash and the retained cash (whose
+level reads the policy's terms too), and the HEADLINE grade is the lower of the two
+(:func:`headline`): a retained figure resting on an expert's deductible is not graded
+on the gross alone.
 
 Then the downgrades of spec-v1 (section 12.5's rule: each lowers the grade one
 step, A to B to C to D, never below D), each firing at most once:
@@ -28,9 +34,9 @@ shares, the sources and the dates are those of the base, which a collapse keeps.
 
 ``Unknown`` -- Mythos cannot responsibly quantify the scenario -- where the run
 was refused (a refusal for conflicting inputs says so), a cash component is
-unknown (the cash figure would read "at least"), the base-case gross is zero (no
-level to weigh), or a parameter of an annual run is drawn per occurrence (it is not
-ranked yet).
+unknown (the cash figure would read "at least"), the line has no level to weigh (it
+is zero at base, or the frequency's base is zero), or a parameter of an annual run is
+drawn per occurrence (it is not ranked yet).
 
 Every threshold is the owner's to set: they are constants here, and they and the
 classes are in :func:`version_record`, whose digest every grade carries.
@@ -111,6 +117,14 @@ CONFLICTS = frozenset(
 )
 
 LEVEL = "level"
+#: Which grade is the card's, where a policy applies.
+HEADLINE_RULE = (
+    "under a policy the gross cash and the retained cash are graded apart, each by its own level, and the headline "
+    "grade is the lower of the two (Unknown lowest); where they are equal, the retained cash's, the line the "
+    "headline figures are. Without a policy the gross cash's grade is the headline"
+)
+#: Strongest first: the order :func:`headline` compares on.
+ORDER = (ConfidenceGrade.A, ConfidenceGrade.B, ConfidenceGrade.C, ConfidenceGrade.D, ConfidenceGrade.UNKNOWN)
 _CONTEXT = Context(prec=60, rounding=ROUND_HALF_EVEN)
 _SHARE_QUANTUM = Decimal("0.000001")
 
@@ -121,7 +135,11 @@ def version_record() -> dict:
     version digest."""
     return {
         "version": VERSION,
-        "weighting": "each figure's share of the base-case level (its absolute elasticity, normalised)",
+        "weighting": (
+            "each figure's share of the base-case level: an additive decomposition at base, each cash component's "
+            "base over the total split among its inputs by their elasticity of it, a frequency one half"
+        ),
+        "lines": HEADLINE_RULE,
         "classes": {source.value: name for source, name in CLASSES.items()},
         "evidence": sorted(EVIDENCE),
         "assumption": sorted(ASSUMPTION),
@@ -226,13 +244,15 @@ def grade(
     weighted: Iterable[Weighted],
     stale: Iterable[str] = (),
     per_occurrence: Iterable[str] = (),
+    undefined: str | None = None,
 ) -> Grade:
-    """The grade of one run. ``refusal`` is the run's refusal code, or ``None``
-    for a completed run; ``unknown_cash_components`` names every cash component
-    the run could not compute; ``weighted`` is every figure the gross cash reads
+    """The grade of one line of one run. ``refusal`` is the run's refusal code, or
+    ``None`` for a completed run; ``unknown_cash_components`` names every cash
+    component the run could not compute; ``weighted`` is every figure the line reads
     (and the frequency), with its level share; ``stale`` names every figure the run
     reads that is past its ``fresh_until``; ``per_occurrence`` names the parameters
-    of an annual run drawn per occurrence. See the module's rules."""
+    of an annual run drawn per occurrence; ``undefined`` says why the line has no
+    level to weigh, where it has none. See the module's rules."""
     if refusal is not None:
         if refusal in CONFLICTS:
             return _unknown(f"the inputs conflict ({refusal}): the run was refused, and nothing is quantified")
@@ -244,6 +264,8 @@ def grade(
             "weighed yet"
         )
     unknown = sorted(unknown_cash_components)
+    if undefined is not None:
+        return _unknown(undefined + (f"; and {_incomplete(unknown)}" if unknown else ""))
     items = list(weighted)
     total = sum((Fraction(item.level) for item in items), Fraction(0))
     if not items or total == 0:
@@ -290,6 +312,17 @@ def grade(
     return Grade(final, base, reason, LEVEL, shares, fired, stale_names, expert_names, derived_names)
 
 
+def headline(gross: Grade, retained: Grade | None) -> tuple[str, Grade]:
+    """The headline grade (:data:`HEADLINE_RULE`) and the line it is: the lower of
+    the gross cash's and the retained cash's; equal, the retained cash's. Without a
+    retained grade (no policy), the gross cash's."""
+    if retained is None:
+        return "gross_cash", gross
+    if ORDER.index(gross.grade) > ORDER.index(retained.grade):
+        return "gross_cash", gross
+    return "retained_cash", retained
+
+
 __all__ = [
     "ASSUMPTION",
     "CLASSES",
@@ -298,7 +331,9 @@ __all__ = [
     "DOWNGRADES",
     "EVIDENCE",
     "EXPERT",
+    "HEADLINE_RULE",
     "MATERIAL_SHARE",
+    "ORDER",
     "STALE",
     "THRESHOLDS",
     "VERSION",
@@ -306,6 +341,7 @@ __all__ = [
     "Weighted",
     "base_grade",
     "grade",
+    "headline",
     "version_digest",
     "version_record",
 ]

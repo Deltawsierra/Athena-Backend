@@ -13,7 +13,8 @@ and:
 2. grades the run (:mod:`assurance.economics.engine.grade`) from the stored
    inputs and that analysis: each figure, fixed or ranged, weighted by its share
    of the base-case level, and every figure's freshness evaluated at the run's
-   as-of date;
+   as-of date; under a policy the gross cash and the retained cash are graded
+   apart, and the headline grade is the lower of the two;
 3. builds the card (:func:`build_card`): every owner field, from the stored result,
    the scenario version's append-only rows and the analysis, or saying it has no
    data -- never a made-up value -- and what was read when it was issued (the
@@ -196,23 +197,33 @@ def _as_of(inputs, build) -> str | None:
     return max(dates) if dates else None
 
 
-def _freshness(inputs, roles, set_rows, as_of: str | None, critical: set[str]) -> dict:
+#: What a figure nothing reads is, by where its row is.
+UNREAD = {
+    "scenario": "nothing: a parameter of the scenario version that no component, policy or frequency reads",
+    "parameter_set": "nothing: a parameter-set variable no component reads",
+}
+
+
+def _freshness(inputs, roles, rows_unread, as_of: str | None, critical: set[str]) -> dict:
     """The freshness of EVERY figure: each parameter of the run's inputs (the
-    components', the policy's, the frequency, every derived value's contributors)
-    and every variable of the parameter-set version no component reads, each
-    evaluated at the run's as-of date. A figure with no as-of to read it at says it
-    was not evaluated, never that it is fresh."""
-    figures = {name: (held.get("source_type"), held.get("effective_date"), held.get("fresh_until"))
+    components', the policy's, the frequency, every derived value's contributors),
+    every parameter of the scenario version nothing reads and every variable of the
+    parameter-set version no component reads (``rows_unread``: each row with where it
+    is, ``scenario`` or ``parameter_set``), each evaluated at the run's as-of date. A
+    figure with no as-of to read it at says it was not evaluated, never that it is
+    fresh."""
+    figures = {name: (held.get("source_type"), held.get("effective_date"), held.get("fresh_until"), None)
                for name, held in inputs.get("parameters", {}).items()}
-    for row in set_rows:
+    for where, row in rows_unread:
         figures.setdefault(
             row.name,
-            (row.source_type, row.effective_date.isoformat(), row.fresh_until.isoformat() if row.fresh_until else None),
+            (row.source_type, row.effective_date.isoformat(), row.fresh_until.isoformat() if row.fresh_until else None,
+             where),
         )
     rows, stale, stale_not_graded = [], [], []
     for name in sorted(figures):
-        source, effective, fresh_until = figures[name]
-        read_by = sorted(roles.get(name, set())) or ["nothing: a parameter-set variable no component reads"]
+        source, effective, fresh_until, where = figures[name]
+        read_by = sorted(roles.get(name, set())) or [UNREAD[where or "parameter_set"]]
         graded = bool(roles.get(name, set()) & GRADED_ROLES)
         evaluated = as_of is not None
         is_stale = None if not evaluated else bool(fresh_until and as_of > fresh_until)
@@ -244,7 +255,8 @@ def _freshness(inputs, roles, set_rows, as_of: str | None, critical: set[str]) -
             "every figure is evaluated at the run's as-of date: its age is from the date it holds from, and one past "
             "its fresh_until is stale. A stale figure the run reads (a cash component's, a term of the policy it "
             "applies, the frequency, a derived value's contributor) lowers the grade one step (stale_inputs); one "
-            "nothing in the cash figures reads is shown and does not. No parameter names a FinancialSource snapshot "
+            "nothing in the cash figures reads -- a scenario parameter or a parameter-set variable nothing reads "
+            "among them -- is shown and does not. No parameter names a FinancialSource snapshot "
             "yet (evidence_ref is text, spec section 22), so a source's own retrieval age is not shown"
             if as_of is not None
             else "not evaluated: the run has no as-of date to read its figures at"
@@ -252,15 +264,21 @@ def _freshness(inputs, roles, set_rows, as_of: str | None, critical: set[str]) -
     }
 
 
-def _weighted(inputs, sensitivity):
-    """Every figure the gross cash reads (and the frequency), with its share of the
+def _level(sensitivity, line: str) -> dict | None:
+    """The analysis's level record of ``line`` (``gross_cash`` or
+    ``retained_cash``), or None where it has none."""
+    return ((sensitivity or {}).get("level") or {}).get(line)
+
+
+def _weighted(inputs, sensitivity, line: str = "gross_cash"):
+    """Every figure ``line`` reads (and the frequency), with its share of the line's
     base-case level from the analysis (fixed figures and ranges alike), the source
     types it rests on (a derived value's: those of the contributors that supply its
     base) and its derived mark."""
     _, grade, _, _, _, _ = _engine()
     parameters = inputs.get("parameters", {})
     items = []
-    for entry in ((sensitivity or {}).get("level") or {}).get("parameters", []):
+    for entry in (_level(sensitivity, line) or {}).get("parameters", []):
         if entry["derived_from"]:
             supplied = entry["supplied_by"] or entry["derived_from"]
             sources = tuple(parameters[c]["source_type"] for c in supplied)
@@ -363,21 +381,40 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
 
     roles, unknown_cash, unknown = _reads(inputs)
     as_of = _as_of(inputs, build)
-    set_rows = [] if build is None else list(
-        FinancialParameter.objects.filter(parameter_set_id=build.parameter_set_id).order_by("name", "id")
-    )
+    rows_unread = [("scenario", row) for row in FinancialParameter.objects.filter(scenario=scenario).order_by("name", "id")]
+    if build is not None:
+        rows_unread += [
+            ("parameter_set", row)
+            for row in FinancialParameter.objects.filter(parameter_set_id=build.parameter_set_id).order_by("name", "id")
+        ]
     drivers = (sensitivity or {}).get("ranked", [])[:TOP_DRIVERS]
-    weighted = _weighted(inputs, sensitivity) if completed else []
-    level_total = sum((item.level for item in weighted), Decimal(0))
-    material = {item.name for item in weighted if level_total and item.level / level_total >= grade.MATERIAL_SHARE}
-    freshness = _freshness(inputs, roles, set_rows, as_of, material | {d["name"] for d in drivers})
-    graded = grade.grade(
-        refusal=None if completed else (result.refusal_code or "refused"),
-        unknown_cash_components=unknown_cash,
-        weighted=weighted,
-        stale=freshness["stale"],
-        per_occurrence=(sensitivity or {}).get("per_occurrence", []),
-    ).as_dict()
+    # Both lines are graded where a policy applies, each by its own level; the
+    # headline is the lower (grade.HEADLINE_RULE).
+    lines = ["gross_cash"] + (["retained_cash"] if completed and _level(sensitivity, "retained_cash") else [])
+    weighted = {line: _weighted(inputs, sensitivity, line) if completed else [] for line in lines}
+    material = set()
+    for items in weighted.values():
+        level_total = sum((item.level for item in items), Decimal(0))
+        material |= {item.name for item in items if level_total and item.level / level_total >= grade.MATERIAL_SHARE}
+    freshness = _freshness(inputs, roles, rows_unread, as_of, material | {d["name"] for d in drivers})
+    grades = {
+        line: grade.grade(
+            refusal=None if completed else (result.refusal_code or "refused"),
+            unknown_cash_components=unknown_cash,
+            weighted=weighted[line],
+            stale=freshness["stale"],
+            per_occurrence=(sensitivity or {}).get("per_occurrence", []),
+            undefined=(_level(sensitivity, line) or {}).get("undefined_because") if completed else None,
+        )
+        for line in lines
+    }
+    graded_line, headline = grade.headline(grades["gross_cash"], grades.get("retained_cash"))
+    graded = {
+        **headline.as_dict(),
+        "line": graded_line,
+        "rule": grade.HEADLINE_RULE,
+        "lines": {line: grades[line].as_dict() if line in grades else None for line in ("gross_cash", "retained_cash")},
+    }
     mix = graded["evidence_mix"]
     importance = {entry["name"]: entry["importance"] for entry in (sensitivity or {}).get("ranked", [])}
 
@@ -387,13 +424,14 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         names = [
             {"name": entry.name, "level_share": money.decimal_text(entry.level),
              "importance": importance.get(entry.name, "0")}
-            for entry in weighted
+            for entry in weighted[graded_line]
             if any(grade.CLASSES[s] in classes for s in entry.sources)
         ]
         total = sum(Decimal(mix[c]) for c in classes)
         return {
             "share": money.decimal_text(total),
             "classes": list(classes),
+            "line": graded_line,
             "weighting": graded["weighting"],
             "parameters": names,
             "meaning": meaning,

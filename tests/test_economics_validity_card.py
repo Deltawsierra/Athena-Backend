@@ -951,12 +951,13 @@ def test_a_receipt_row_moved_or_relabelled_is_refused(deployment, people, keys):
 
 def test_a_changed_release_is_a_note_not_tampering(deployment, people, keys, monkeypatch):
     """L7: a change to a grade constant since the receipt was made: still authentic,
-    with the note release_changed; a tampered result is still refused."""
+    with the note release_changed (and, round 2, card_not_rebuilt); a tampered result
+    is still refused."""
     result, card, receipt = receipted(deployment, people, keys)
     assert receipt_service.verify_stored_receipt(receipt, keys["ring"]).notes == ()
     monkeypatch.setattr(g, "MATERIAL_SHARE", Decimal("0.06"))
     check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
-    assert check.verified and check.notes == ("release_changed",)
+    assert check.verified and check.notes == ("release_changed", "card_not_rebuilt")
     # The release the card recorded, and its digest, are what the receipt names.
     recorded = card.card["fields"]["model_version"]
     assert receipt.document["model"] == {"version": recorded["version"], "build_digest": recorded["build_digest"]}
@@ -964,6 +965,253 @@ def test_a_changed_release_is_a_note_not_tampering(deployment, people, keys, mon
     versions["numpy"] = "0.0.0"
     SimulationResult._base_manager.filter(pk=result.pk).update(versions=versions)
     assert receipt_service.verify_stored_receipt(receipt, keys["ring"]).code == "model_build_mismatch"
+
+
+# ======================================================================
+# Review round 2
+# ======================================================================
+
+
+def _lump_beside_a_recovery(fine, count, rate, loss="1000000"):
+    """The reviewer's (a) and (b): an expert lump beside a customer repeat_loss."""
+
+    def components(scenario):
+        guess = _parameter(scenario, "probe.expert_fine", "money", fine, source="EXPERT_ESTIMATE")
+        repeat = _parameter(scenario, "probe.repeat_count", "count", count, source="CUSTOMER_PROVIDED")
+        each = _parameter(scenario, "probe.loss_per_event", "money_per_unit", loss, source="CUSTOMER_PROVIDED")
+        recovery = _parameter(scenario, "probe.recovery_rate", "ratio", rate, source="CUSTOMER_PROVIDED")
+        return [("fine", "regulatory_compliance", "lump_sum", {"amount": guess}),
+                ("repeat", "direct_financial", "repeat_loss",
+                 {"repeat_count": repeat, "loss_per_event": each, "recovery_rate": recovery})]
+
+    return components
+
+
+def _lump_beside_support_contacts(scenario):
+    """The reviewer's (c): an expert lump of 200,000 beside a customer four-factor product of 1,000,000."""
+    guess = _parameter(scenario, "probe.expert_fine", "money", "200000", source="EXPERT_ESTIMATE")
+    affected = _parameter(scenario, "probe.affected", "count", "10000", source="CUSTOMER_PROVIDED")
+    rate = _parameter(scenario, "probe.contact_rate", "ratio", "0.5", source="CUSTOMER_PROVIDED")
+    hours = _parameter(scenario, "probe.handling_hours", "hours", "1", source="CUSTOMER_PROVIDED")
+    loaded = _parameter(scenario, "probe.loaded_rate", "money_per_hour", "200", source="CUSTOMER_PROVIDED")
+    return [("fine", "regulatory_compliance", "lump_sum", {"amount": guess}),
+            ("support", "notification", "support_contacts",
+             {"affected": affected, "contact_rate": rate, "handling_hours": hours, "loaded_rate": loaded})]
+
+
+def _a_customer_recovery(scenario):
+    """The reviewer's (d), beside an expert frequency: a customer repeat_loss of 10 x 100,000 x (1 - 0.95)."""
+    count = _parameter(scenario, "probe.repeat_count", "count", "10", source="CUSTOMER_PROVIDED")
+    loss = _parameter(scenario, "probe.loss_per_event", "money_per_unit", "100000", source="CUSTOMER_PROVIDED")
+    recovery = _parameter(scenario, "probe.recovery_rate", "ratio", "0.95", source="CUSTOMER_PROVIDED")
+    return [("repeat", "direct_financial", "repeat_loss",
+             {"repeat_count": count, "loss_per_event": loss, "recovery_rate": recovery})]
+
+
+def _expert_count_times_a_recovery(rate):
+    """The reviewer's (e): an expert repeat_count (a range 2-200) x a customer loss x (1 - a customer recovery)."""
+
+    def components(scenario):
+        count = _parameter(scenario, "probe.repeat_count", "count", "2", "20", "200", source="EXPERT_ESTIMATE")
+        loss = _parameter(scenario, "probe.loss_per_event", "money_per_unit", "100000", source="CUSTOMER_PROVIDED")
+        recovery = _parameter(scenario, "probe.recovery_rate", "ratio", rate, source="CUSTOMER_PROVIDED")
+        return [("repeat", "direct_financial", "repeat_loss",
+                 {"repeat_count": count, "loss_per_event": loss, "recovery_rate": recovery})]
+
+    return components
+
+
+#: The reviewer's round-2 probes (test_rv153b_h1.py), each with the expert share of
+#: the level and the grade it must have: every one graded A at a8c0ecc.
+HIGH1_CASES = {
+    "a_expert_lump_75pct_beside_a_recovery_of_0_99": (_lump_beside_a_recovery("3000000", "100", "0.99"), None,
+                                                       "0.75", "D"),
+    "b_expert_lump_95pct_beside_a_recovery_of_0_999": (_lump_beside_a_recovery("19000000", "1000", "0.999"), None,
+                                                        "0.95", "D"),
+    "c_expert_lump_beside_a_four_factor_product": (_lump_beside_support_contacts, None, "0.166667", "C"),
+    "d_expert_frequency_beside_a_recovery_of_0_95": (_a_customer_recovery, "EXPERT_ESTIMATE", "0.5", "D"),
+    "e_expert_count_at_a_recovery_of_0_5": (_expert_count_times_a_recovery("0.5"), None, "0.333333", "D"),
+    "e_expert_count_at_a_recovery_of_0_9": (_expert_count_times_a_recovery("0.9"), None, "0.333333", "D"),
+    "e_expert_count_at_a_recovery_of_0_99": (_expert_count_times_a_recovery("0.99"), None, "0.333333", "D"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(HIGH1_CASES))
+def test_products_and_complements_no_longer_hide_an_expert_figure(people, case):
+    """Round 2, HIGH 1 (the reviewer's cases (a)-(e), each graded A before): the level
+    is an additive decomposition at base, so an expert figure carries its real share
+    -- a lump its base over the total, one factor of k its 1/k of the product, the
+    frequency one half -- whatever products and recoveries stand beside it."""
+    components, frequency_source, expert, grade_ = HIGH1_CASES[case]
+    deployment = Deployment.objects.create(name=f"dep-{case}"[:60], owner=people["owner"])
+    _, card = card_of(custom(deployment, people["analyst"], variables=VARIABLES, components=components,
+                             frequency_source=frequency_source))
+    assert card.card["evidence_mix"]["expert"] == expert, card.card["fields"]["confidence_grade"]["reason"]
+    assert card.confidence_grade == grade_, card.card["fields"]["confidence_grade"]["reason"]
+    assert card.card["fields"]["expert_estimated_share"]["share"] == expert
+
+
+@pytest.mark.parametrize("term, figures, gross_grade, retained_grade", [
+    ("deductible", {"insurance_deductible": ("50000", "EXPERT_ESTIMATE"), "insurance_limit": ("10000000", None)},
+     "A", "D"),
+    ("limit", {"insurance_deductible": ("0", None), "insurance_limit": ("950000", "EXPERT_ESTIMATE")}, "A", "C"),
+])
+def test_an_expert_policy_term_that_carries_the_retained_cash_lowers_the_headline_grade(
+        people, term, figures, gross_grade, retained_grade):
+    """Round 2, MEDIUM 2 (the reviewer's insurance probe): a customer gross of
+    1,000,000 and a customer frequency, under an expert's deductible of 50,000 (the
+    retained cash per occurrence is the deductible) or limit of 950,000. Both lines are
+    graded: the gross A, the retained cash lower, and the headline -- the card's grade,
+    the receipt's -- is the lower of the two. Before: A, 100% customer."""
+
+    def components(scenario):
+        cost = _parameter(scenario, "probe.response_cost", "money", "1000000", source="CUSTOMER_PROVIDED")
+        return [("response", "legal", "lump_sum", {"amount": cost})]
+
+    variables = {**VARIABLES}
+    for name, (figure, source) in figures.items():
+        variables[name] = _entry("money", figure, **({"source_type": source} if source else {}))
+    deployment = Deployment.objects.create(name=f"dep-ins-{term}", owner=people["owner"])
+    result, card = card_of(custom(deployment, people["analyst"], variables=variables, components=components,
+                                  frequency_source="CUSTOMER_PROVIDED"))
+    assert result.record["scenario"]["headline"] == "retained_cash"
+    graded_ = card.card["fields"]["confidence_grade"]
+    assert card.confidence_grade == retained_grade, graded_["reason"]
+    assert graded_["lines"]["gross_cash"]["grade"] == gross_grade
+    assert graded_["lines"]["retained_cash"]["grade"] == retained_grade, graded_["lines"]["retained_cash"]["reason"]
+    assert graded_["line"] == "retained_cash" and graded_["rule"] == g.HEADLINE_RULE
+    assert card.confidence_grade == graded_["grade"] == card.card["confidence_grade"] == retained_grade
+    assert f"insurance_{term}" in graded_["material_expert_figures"]
+    assert card.card["fields"]["expert_estimated_share"]["line"] == "retained_cash"
+
+
+def test_a_frequency_whose_base_is_zero_grades_unknown(deployment, people):
+    """Round 2, LOW 3 (the reviewer's h1-zero probe): a frequency of 0 / 0 / 1
+    (Poisson 0.01) and a customer lump of 100,000. A base-case year holds no
+    occurrence: no level to weigh, and the grade is Unknown. Before: A, defined."""
+
+    def components(scenario):
+        FinancialParameter.objects.create(
+            scenario=scenario, name=ss.FREQUENCY_PARAMETER, unit="count", source_type="CUSTOMER_PROVIDED",
+            currency="", low="0", base="0", high="1", evidence_ref=f"{LABEL}: made up", effective_date=date(2026, 9, 1),
+            distribution={"id": "poisson", "version": 1, "params": {"rate": "0.01"}},
+        )
+        cost = _parameter(scenario, "probe.cost", "money", "100000", source="CUSTOMER_PROVIDED")
+        return [("c", "legal", "lump_sum", {"amount": cost})]
+
+    _, card = card_of(custom(deployment, people["analyst"], variables=VARIABLES, components=components))
+    graded_ = card.card["fields"]["confidence_grade"]
+    assert card.confidence_grade == "Unknown" and "the frequency's base is zero" in graded_["reason"]
+    assert card.sensitivity["level"]["gross_cash"]["defined"] is False
+    assert card.card["fields"]["expert_estimated_share"]["share"] is None
+
+
+def test_a_scenario_parameter_nothing_reads_is_on_the_card(deployment, people):
+    """Round 2, LOW 4 (the reviewer's probe): a stale expert parameter of the scenario
+    version that nothing reads -- the receipt still binds it among the scenario's
+    parameters -- is evaluated and shown, read by "nothing", and does not grade."""
+
+    def components(scenario):
+        cost = _parameter(scenario, "probe.response_cost", "money", "100000", source="CUSTOMER_PROVIDED")
+        _parameter(scenario, "probe.orphan", "money", "5000", source="EXPERT_ESTIMATE", fresh_until=date(2026, 9, 2))
+        return [("response", "legal", "lump_sum", {"amount": cost})]
+
+    _, card = card_of(custom(deployment, people["analyst"], variables=VARIABLES, components=components))
+    freshness = card.card["fields"]["data_freshness"]
+    rows = {row["name"]: row for row in freshness["parameters"]}
+    orphan = rows["probe.orphan"]
+    assert orphan["read_by"] == [validity_service.UNREAD["scenario"]] and orphan["read_by"][0].startswith("nothing")
+    assert orphan["stale"] is True and orphan["counts_toward_grade"] is False and orphan["evaluated"] is True
+    assert orphan["source_type"] == "EXPERT_ESTIMATE"
+    assert "probe.orphan" in freshness["stale_not_graded"] and "probe.orphan" not in freshness["stale"]
+    assert rows["notification_unit_cost"]["read_by"] == [validity_service.UNREAD["parameter_set"]]
+    assert card.confidence_grade == "A"
+
+
+def test_under_a_changed_release_a_matching_analysis_verifies_and_says_the_card_was_not_rebuilt(
+        deployment, people, keys, monkeypatch):
+    """Round 2, LOW 5, the match: after a release change today's code cannot rebuild
+    the card; the stored analysis is the one the card signs, so the receipt is
+    authentic, and the verdict says the card was NOT rebuilt (before: it claimed "the
+    card" was verified)."""
+    _, _, receipt = receipted(deployment, people, keys)
+    monkeypatch.setattr(g, "MATERIAL_SHARE", Decimal("0.06"))
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert check.verified and check.notes == ("release_changed", "card_not_rebuilt")
+    assert "NOT rebuilt" in check.reason and "stored analysis" in check.reason
+
+
+def test_under_a_changed_release_a_tampered_analysis_is_refused(deployment, people, keys, monkeypatch):
+    """Round 2, LOW 5, the mismatch (the reviewer's probe): the stored analysis
+    tampered is refused under a changed release (verified before) and under today's,
+    by the digest the card signs, which does not depend on the release."""
+    _, card, receipt = receipted(deployment, people, keys)
+    monkeypatch.setattr(g, "MATERIAL_SHARE", Decimal("0.06"))
+    analysis = json.loads(json.dumps(card.sensitivity))
+    analysis["ranked"][0]["importance"] = "0.999"
+    FinancialValidityCard._base_manager.filter(pk=card.pk).update(sensitivity=analysis)
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert not check.verified and check.code == "sensitivity_digest_mismatch", check
+    monkeypatch.setattr(g, "MATERIAL_SHARE", Decimal("0.05"))
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert not check.verified and check.code == "sensitivity_digest_mismatch"
+    FinancialValidityCard._base_manager.filter(pk=card.pk).update(sensitivity=card.sensitivity)
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert check.verified and check.notes == ()
+
+
+def test_an_engine_400_with_a_code_that_is_not_cores_is_not_carried_as_cores(deployment, people, keys, monkeypatch):
+    """Round 2, LOW 6 (the reviewer's 400 probe): a 400 whose code is not one of
+    core's document codes (``rate_limited``, or ``signer_not_configured`` at 400) is
+    still the signer refusing the document, shown with that code, but never carried as
+    core's code; nothing is recorded. Core's own code is still carried."""
+    from ai_engine.services.cyberengine_client import CyberEngineClient
+    from safety import outbound
+
+    result, _ = carded(deployment, people)
+    answers = []
+    monkeypatch.setattr(outbound, "post", lambda url, **_kwargs: answers.pop(0))
+    monkeypatch.setattr(CyberEngineClient, "from_settings",
+                        classmethod(lambda cls: CyberEngineClient("https://engine.test", "operator-key")))
+    for code in ("rate_limited", "signer_not_configured"):
+        answers.append(_http(400, {"detail": {"code": code, "reason": "not now"}}))
+        outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
+        assert outcome.receipt is None and outcome.code == "receipt_refused_by_signer", code
+        assert outcome.signer_code is None and repr(code) in outcome.detail and "not one of core's" in outcome.detail
+    answers.append(_http(400, {"detail": {"code": "amount_precision", "reason": "x"}}))
+    assert receipt_service.issue_receipt(result, keyring=keys["ring"]).signer_code == "amount_precision"
+    assert not FinancialExposureReceipt.objects.exists()
+
+
+@pytest.mark.parametrize("entry", [{"status": "active"}, {"status": "active", "public_key": 5},
+                                   {"status": "retired", "public_key": None},
+                                   {"status": "active", "public_key": "not base64 at all!"}])
+def test_a_published_key_entry_without_base64_public_key_text_is_a_value_error(keys, entry):
+    """Round 2, nit (the reviewer's probe): a malformed entry is the documented
+    ValueError, never a KeyError or a TypeError, in the receipt role or the artifact's."""
+    good = _keyring_document((keys["receipt"], "active"))
+    with pytest.raises(ValueError):
+        receipt_service.keyring_from_published(
+            {"version": 1, "keys": {}, "roles": {"economics-receipt": {"version": 1, "keys": {"x": entry}}}})
+    with pytest.raises(ValueError):
+        receipt_service.keyring_from_published({"version": 1, "keys": {"a": entry}, "roles": {"economics-receipt": good}})
+
+
+def test_a_result_digest_mismatch_names_what_it_compared(deployment, people, keys):
+    """Round 2, nit: tampered inputs are said to be the inputs, a tampered record the record."""
+    result, _, receipt = receipted(deployment, people, keys)
+    inputs = json.loads(json.dumps(result.inputs))
+    inputs["parameters"]["exposure.affected_customers"]["base"] = "9999999"
+    SimulationResult._base_manager.filter(pk=result.pk).update(inputs=inputs)
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert check.code == "result_digest_mismatch" and "result.inputs" in check.reason
+    assert "input digest" in check.reason and "record" not in check.reason
+    record = json.loads(json.dumps(result.record))
+    record["tampered"] = True
+    SimulationResult._base_manager.filter(pk=result.pk).update(inputs=result.inputs, record=record)
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert check.code == "result_digest_mismatch" and "result.record" in check.reason
+
 
 
 # ======================================================================
@@ -1024,6 +1272,10 @@ SPEC_PHRASES = (
     "`MAX_SWINGS` (20)",
     "test_the_records_go_with_their_deployment_and_never_hold_back_a_stop",
     "- **Step 8 is done** (section 26)",
+    "**an ADDITIVE decomposition at base**",
+    "**Two lines, and the headline grade is the lower of the two**",
+    "18. **Under a policy both lines are graded, and the headline grade is the lower**",
+    "19. **A frequency whose base is zero has no level**",
 )
 
 

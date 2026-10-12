@@ -330,7 +330,9 @@ class ExposureReceiptRefused(EngineError):
     ``detail`` is ``{"code": <mythos_core.exposure_receipt's code>, "reason": ...}``
     (athena-engine #88, which validates the document with core before it signs).
     The document was refused, by the rule ``code`` names; the signer is not
-    unavailable, and a caller must not say it is."""
+    unavailable, and a caller must not say it is. ``code`` is as the engine sent it:
+    the receipt service carries it as core's only where it is one of core's own
+    (``exposure_receipt.MALFORMED_CODES``), and shows any other."""
 
     def __init__(self, message: str, *, code: str, reason: str, status: int) -> None:
         super().__init__(message, kind=ENGINE_REFUSED, status=status)

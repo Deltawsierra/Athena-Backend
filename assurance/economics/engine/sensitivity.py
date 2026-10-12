@@ -28,10 +28,13 @@ the same plan as step 7b's :func:`.scenario_simulation.run` -- and both stated
   :data:`MAX_SWINGS` parameters are swung, the most important first.
 
 - **The level** (:func:`level_shares`): each figure's share of the result's
-  LEVEL, which the grade weighs by -- the absolute elasticity of the base-case gross
-  cash (every parameter at its base, by the twins) to each parameter it reads, fixed
-  or ranged, normalised; with a frequency, a year is N occurrences, so the
-  frequency's elasticity is one.
+  LEVEL, which the grade weighs by, for the gross cash and, under a policy, the
+  retained cash -- an ADDITIVE decomposition at base (:data:`LEVEL`): each known cash
+  component carries its base over the total, split among its own inputs by their
+  elasticity of it at base (a product's factors equally, a recovery through its
+  complement ``1 - rate`` as one factor); a frequency carries one half; the retained
+  cash's pieces (uncovered, over a sublimit, kept by the deductible, past the limit)
+  read the policy's terms. Fixed or ranged alike, from bases only.
 
 What is not ranked is listed with the reason: a point mass is **fixed** (it draws
 nothing), a parameter only the policy or a market-value line reads does not enter
@@ -60,7 +63,11 @@ import numpy as np
 from . import distributions as dist
 from . import scenario_simulation as ss
 from . import simulation as sim
+from .formulas import Direction
+from .loss import NEVER_COVERED
 from .money import decimal_text
+from .parameters import Unit
+from .taxonomy import LossFamily
 
 SCHEMA = "mythos.economics.sensitivity/v1"
 METHOD_ID = "mythos.economics.sensitivity"
@@ -76,15 +83,22 @@ SWING = (
     "frequency's mean count in a run with a frequency; the frequency's own swing is its P10 and P90 count"
 )
 LEVEL = (
-    "each parameter's share of the result's LEVEL: the absolute elasticity of the base-case gross cash (every "
-    "parameter at its base, by the formula twins) to it, by a central difference of LEVEL_STEP either side of its "
-    "base (zero for a base of zero); with a frequency, a year at base is N occurrences, so the frequency's elasticity "
-    "is one; normalised to sum to one. A fixed figure counts exactly as a range does"
+    "an ADDITIVE decomposition of the base case (every parameter at its base). The base-case gross cash is the sum "
+    "of its known cash components; each carries its base over the total, split among its own inputs in proportion "
+    "to their elasticity of the component at base (a central difference of LEVEL_STEP either side: each factor of a "
+    "product one, the complement 1 - rate of a recovery one factor like any other). With a frequency, a year is "
+    "frequency x severity: the frequency carries one half and the severity's decomposition the other. Under a "
+    "policy the base-case retained cash is decomposed the same way, per event, into the cash the policy leaves "
+    "uncovered, each family's excess over its sublimit, what the deductible keeps and what passes the limit, each "
+    "split among what it reads in proportion to its elasticity at base, the policy's terms among them; the "
+    "business-interruption cash a waiting period above zero leaves uncovered is one half the waiting period's. A "
+    "fixed figure counts exactly as a range does; a line's shares sum to exactly one and are computed from bases "
+    "only. A line that is zero at base, or a frequency whose base is zero, has no level"
 )
-#: The relative step of the level's central difference. Every formula is affine in
-#: each input (a sum and product of inputs and 1 - ratio) or a min of such, so the
-#: difference is the derivative itself away from a cap's kink, and the slopes'
-#: mean at one.
+#: The relative step of the level's central difference inside a component. Every
+#: formula is affine in each input (a sum and product of inputs and 1 - ratio) or a
+#: min of such, so the difference is the derivative itself away from a cap's kink,
+#: and the slopes' mean at one.
 LEVEL_STEP = 0.001
 #: The output every parameter is ranked against.
 OUTPUT = ss.GROSS_CASH
@@ -243,54 +257,223 @@ def _gross_at(p: ss._Plan, values: Mapping[str, float]) -> float:
     return total
 
 
-def _gross_by_twins(p: ss._Plan, values: Mapping[str, float]) -> float:
-    """One occurrence's gross cash with every parameter at the value given, every
-    known cash component by its twin (never a stored constant, so a fixed figure
-    moves the level as a range does), summed in component and event order."""
-    total = 0.0
-    for c in p.components:
-        if c.estimated and c.cash:
-            total += float(np.asarray(c.twin({name: values[source] for name, source in c.reads.items()})).reshape(-1)[0])
-    return total
+def _base(value) -> Decimal:
+    return value.amount if hasattr(value, "amount") else Decimal(value)
 
 
-def _amount_of(value) -> float:
-    return float(value.amount if hasattr(value, "amount") else value)
+def _exact_text(value: Fraction) -> str:
+    """A base value (a sum or difference of decimal figures) in its one spelling."""
+    return decimal_text(_CONTEXT.divide(Decimal(value.numerator), Decimal(value.denominator)))
 
 
-def level_shares(p: ss._Plan) -> dict:
-    """Each parameter's share of the result's level (:data:`LEVEL`): every
-    parameter a known cash component reads, fixed or not, and the frequency. A
-    derived parameter names its contributors and those whose base supplies its
-    own (the larger loss at base). Refused where the base-case gross is zero."""
-    cash_reads = sorted({name for c in p.components if c.estimated and c.cash for name in c.reads.values()})
-    base = {name: _amount_of(p.resolved[name].parameter.base) for name in cash_reads}
-    gross = _gross_by_twins(p, base)
-    elasticities: dict[str, float] = {}
-    for name in cash_reads:
-        at = base[name]
-        if at == 0.0 or gross == 0.0:
-            elasticities[name] = 0.0
+class _NoLevel(Exception):
+    """A line with no level to weigh; the message says why."""
+
+
+def _alone(name: str) -> dict[str, Fraction]:
+    return {name: Fraction(1)}
+
+
+def _mix(*parts: tuple[Fraction, Mapping[str, Fraction]]) -> dict[str, Fraction]:
+    """The splits ``parts`` (each a weight and a split summing to one), weighted:
+    a split summing to the weights' sum."""
+    mixed: dict[str, Fraction] = {}
+    for weight, split in parts:
+        if weight == 0:
             continue
-        up = _gross_by_twins(p, {**base, name: at * (1.0 + LEVEL_STEP)})
-        down = _gross_by_twins(p, {**base, name: at * (1.0 - LEVEL_STEP)})
-        elasticities[name] = abs(up - down) / (2.0 * LEVEL_STEP * gross)
-    frequency = p.frequency.name if p.frequency is not None else None
-    if frequency is not None:
-        elasticities[frequency] = 1.0 if gross != 0.0 else 0.0
-    total = math.fsum(elasticities.values())
+        for name, share in split.items():
+            mixed[name] = mixed.get(name, Fraction(0)) + weight * share
+    return mixed
+
+
+def _component(p: ss._Plan, c) -> dict:
+    """One known cash component at base: its exact base value (step 4's Decimal
+    figure) and how it splits among its own inputs -- in proportion to each input's
+    elasticity of the component at base, by its twin, a central difference of
+    :data:`LEVEL_STEP` either side. An input that lowers the loss (a recovery rate,
+    read as ``1 - rate``) is moved through that complement: one factor like any
+    other, never ``r / (1 - r)`` of the product. An input read twice adds both."""
+    where = f"{p.si.events[c.event].loss_event_id}/{c.component.component_id}"
+    value = Fraction(c.component.base.amount)
+    if value < 0:
+        raise _NoLevel(f"the component {where} is below zero at base")
+    values = {name: float(_base(p.resolved[source].parameter.base)) for name, source in c.reads.items()}
+
+    def at(moved: Mapping[str, float]) -> float:
+        return float(np.asarray(c.twin(moved)).reshape(-1)[0])
+
+    level = at(values)
+    swings: dict[str, float] = {}
+    complements: dict[str, bool] = {}
+    for name in sorted(c.reads):
+        spec = c.component.formula.input(name)
+        complement = spec.direction is Direction.DECREASES and spec.unit is Unit.RATIO
+        moved = 1.0 - values[name] if complement else values[name]
+        if moved == 0.0:
+            swings[name] = 0.0
+        elif complement:
+            up, down = 1.0 - moved * (1.0 + LEVEL_STEP), 1.0 - moved * (1.0 - LEVEL_STEP)
+            swings[name] = abs(at({**values, name: up}) - at({**values, name: down}))
+        else:
+            up, down = moved * (1.0 + LEVEL_STEP), moved * (1.0 - LEVEL_STEP)
+            swings[name] = abs(at({**values, name: up}) - at({**values, name: down}))
+        complements[name] = complement
+    total = sum((Fraction(swing) for swing in swings.values()), Fraction(0))
+    split: dict[str, Fraction] = {}
+    if value != 0:
+        if total == 0:
+            raise _NoLevel(f"no input of the component {where} moves it at base")
+        for name, swing in swings.items():
+            source = c.reads[name]
+            split[source] = split.get(source, Fraction(0)) + Fraction(swing) / total
+    inputs = [
+        {
+            "input": name,
+            "parameter": c.reads[name],
+            "complement": complements[name],
+            "elasticity": dist.float_text(swings[name] / (2.0 * LEVEL_STEP * level)) if level else "0",
+            "weight": _text(Fraction(0) if total == 0 else Fraction(swings[name]) / total),
+        }
+        for name in sorted(c.reads)
+    ]
+    return {
+        "piece": where,
+        "kind": "component",
+        "event": c.event,
+        "family": c.component.family,
+        "value": value,
+        "split": split,
+        "inputs": inputs,
+    }
+
+
+def _retained_pieces(p: ss._Plan, components: list[dict]) -> tuple[list[dict], Fraction]:
+    """The base-case retained cash of every event under the policy, as additive
+    pieces (spec 26.1): the cash the policy leaves uncovered (an excluded or
+    never-covered family, business interruption without a stated waiting period, or
+    under one above zero, which is then one half the waiting period's), each covered
+    family's excess over its sublimit, what the deductible keeps and what passes the
+    limit. Each piece splits among what it reads in proportion to its elasticity at
+    base: a difference ``a - b`` as ``a : b``, a capped amount to the cap where the cap
+    binds, to the amount where it does not, half each at the kink. The pieces of an
+    event sum exactly to its retained cash, as step 7b's insurance gives it."""
+    policy = p.si.policy
+    terms = p.terms
+
+    def term(role: str) -> Fraction:
+        value = Fraction(_base(p.resolved[terms[role]].parameter.base))
+        if value < 0:
+            raise _NoLevel(f"the policy's {role} is below zero at base")
+        return value
+
+    uncovered = set(policy.exclusions) | NEVER_COVERED
+    interruption = LossFamily.BUSINESS_INTERRUPTION.value
+    waiting_name = terms.get("waiting_period_hours")
+    waiting = None if waiting_name is None else term("waiting_period_hours")
+    deductible, limit = term("deductible"), term("limit")
+    half = Fraction(1, 2)
+    pieces: list[dict] = []
+    retained_total = Fraction(0)
+    for index, event in enumerate(p.si.events):
+        mine = [c for c in components if c["event"] == index]
+        gross = sum((c["value"] for c in mine), Fraction(0))
+        held: list[dict] = []
+        families: dict[str, list[dict]] = {}
+        for c in mine:
+            if c["family"] in uncovered or (c["family"] == interruption and waiting is None):
+                held.append({"piece": c["piece"], "kind": "uncovered", "value": c["value"], "split": c["split"]})
+            elif c["family"] == interruption and waiting > 0:
+                held.append({"piece": c["piece"], "kind": "uncovered_by_waiting_period", "value": c["value"],
+                             "split": _mix((half, c["split"]), (half, _alone(waiting_name)))})
+            else:
+                families.setdefault(c["family"], []).append(c)
+        capped: list[tuple[Fraction, dict[str, Fraction]]] = []
+        for family, members in families.items():
+            amount = sum((c["value"] for c in members), Fraction(0))
+            split = _mix(*((c["value"] / amount, c["split"]) for c in members)) if amount else {}
+            role = f"sublimit:{family}"
+            if role not in terms:
+                capped.append((amount, split))
+                continue
+            cap, cap_split = term(role), _alone(terms[role])
+            if amount > cap:
+                whole = amount + cap
+                held.append({"piece": f"{event.loss_event_id}/{family}", "kind": "sublimit_excess",
+                             "value": amount - cap, "split": _mix((amount / whole, split), (cap / whole, cap_split))})
+                capped.append((cap, cap_split))
+            elif amount == cap:
+                capped.append((amount, _mix((half, split), (half, cap_split))))
+            else:
+                capped.append((amount, split))
+        covered = sum((value for value, _ in capped), Fraction(0))
+        covered_split = _mix(*((value / covered, split) for value, split in capped)) if covered else {}
+        kept_split = _alone(terms["deductible"])
+        if covered > deductible:
+            kept = deductible
+        elif covered < deductible:
+            kept, kept_split = covered, covered_split
+        else:
+            kept, kept_split = covered, _mix((half, covered_split), (half, kept_split))
+        if kept:
+            held.append({"piece": event.loss_event_id, "kind": "deductible", "value": kept, "split": kept_split})
+        beyond = covered - deductible - limit
+        if beyond > 0:
+            whole = covered + deductible + limit
+            held.append({"piece": event.loss_event_id, "kind": "beyond_limit", "value": beyond,
+                         "split": _mix((covered / whole, covered_split), (deductible / whole, _alone(terms["deductible"])),
+                                       (limit / whole, _alone(terms["limit"])))})
+        recovery = min(max(covered - deductible, Fraction(0)), limit, gross)
+        retained = gross - recovery
+        if sum((piece["value"] for piece in held), Fraction(0)) != retained:
+            raise sim.InvariantBroken(f"the retained cash of {event.loss_event_id} at base is not the sum of its pieces")
+        pieces.extend(held)
+        retained_total += retained
+    return pieces, retained_total
+
+
+def _line(p: ss._Plan, line: str, pieces: list[dict], total: Fraction, reads: list[str],
+          why_not: str | None) -> dict:
+    """One line's level record: each piece's share (its base over the line's,
+    times one half beside a frequency), each parameter's (the sum of its parts of
+    every piece, and the frequency's one half); the shares sum to exactly one."""
+    frequency = p.frequency
+    severity = Fraction(1, 2) if frequency is not None else Fraction(1)
+    shares: dict[str, Fraction] = dict.fromkeys(reads, Fraction(0))
+    rows = []
+    if why_not is None:
+        for piece in pieces:
+            share = severity * piece["value"] / total
+            for name, weight in piece["split"].items():
+                shares[name] = shares.get(name, Fraction(0)) + share * weight
+            row = {
+                "piece": piece["piece"],
+                "kind": piece["kind"],
+                "base": _exact_text(piece["value"]),
+                "share": _text(share),
+                "split": [{"parameter": name, "share": _text(share * weight)}
+                          for name, weight in sorted(piece["split"].items())],
+            }
+            if "inputs" in piece:
+                row["inputs"] = piece["inputs"]
+            rows.append(row)
+        if frequency is not None:
+            shares[frequency.name] = Fraction(1, 2)
+        if sum(shares.values(), Fraction(0)) != 1:
+            raise sim.InvariantBroken(f"the {line} level shares sum to {sum(shares.values(), Fraction(0))}, not one")
+    elif frequency is not None:
+        shares[frequency.name] = Fraction(0)
+    terms = {name: role for role, name in p.terms.items()}
     entries = []
-    for name in sorted(elasticities):
-        r = p.frequency if name == frequency else p.resolved[name]
-        share = Fraction(0) if total == 0.0 else Fraction(elasticities[name]) / Fraction(total)
+    for name in sorted(shares):
+        r = frequency if frequency is not None and name == frequency.name else p.resolved[name]
         entry = {
             "name": name,
-            "base": decimal_text(r.parameter.base.amount if hasattr(r.parameter.base, "amount") else r.parameter.base),
+            "base": decimal_text(_base(r.parameter.base)),
             "source_type": r.parameter.source_type.value,
-            "elasticity": dist.float_text(elasticities[name]),
-            "share": _text(share),
+            "share": _text(shares[name]),
             "fixed": not r.drawn,
-            "frequency": name == frequency,
+            "frequency": r is frequency,
+            "policy_term": terms.get(name),
             "derived_from": [],
             "supplied_by": [],
         }
@@ -299,11 +482,54 @@ def level_shares(p: ss._Plan) -> dict:
             entry["supplied_by"] = [c.name for c in r.contributors if c.parameter.base == r.parameter.base]
         entries.append(entry)
     return {
-        "basis": "base-case gross cash" + (", a year of N occurrences" if frequency is not None else ""),
-        "base_gross": dist.float_text(gross),
-        "defined": total != 0.0,
+        "line": line,
+        "basis": f"base-case {line.replace('_', ' ')}" + (", a year: frequency x severity" if frequency else ""),
+        "base": _exact_text(total),
+        "frequency_base": None if frequency is None else decimal_text(_base(frequency.parameter.base)),
+        "defined": why_not is None,
+        "undefined_because": why_not,
+        "pieces": rows,
         "parameters": entries,
     }
+
+
+def level_shares(p: ss._Plan) -> dict:
+    """Each figure's share of the level of the gross cash and, under a policy, of
+    the retained cash (:data:`LEVEL`): an additive decomposition at base. A line
+    whose base case is zero, or a run whose frequency's base is zero, has no level
+    (``defined`` false, and why)."""
+    frequency_zero = p.frequency is not None and _base(p.frequency.parameter.base) == 0
+    cash = [c for c in p.components if c.estimated and c.cash]
+    gross_reads = sorted({name for c in cash for name in c.reads.values()})
+    no_level = None
+    components: list[dict] = []
+    try:
+        components = [_component(p, c) for c in cash]
+    except _NoLevel as why:
+        no_level = str(why)
+    gross = sum((c["value"] for c in components), Fraction(0))
+    if no_level is None and frequency_zero:
+        no_level = "the frequency's base is zero: a base-case year holds no occurrence, so there is no level to weigh"
+    why_gross = no_level
+    if why_gross is None and gross == 0:
+        why_gross = "the base-case gross cash is zero, or reads no figure: there is no level to weigh"
+    lines = {ss.GROSS_CASH: _line(p, ss.GROSS_CASH, components, gross, gross_reads, why_gross),
+             ss.RETAINED_CASH: None}
+    if p.si.policy is not None:
+        pieces, retained, why_retained = [], Fraction(0), no_level
+        if why_retained is None:
+            try:
+                pieces, retained = _retained_pieces(p, components)
+            except _NoLevel as why:
+                why_retained = str(why)
+        if why_retained is None and retained == 0:
+            why_retained = (
+                "the base-case retained cash is zero (at base the policy recovers all of it, or the gross is zero): "
+                "there is no level to weigh"
+            )
+        reads = sorted(set(gross_reads) | set(p.terms.values()))
+        lines[ss.RETAINED_CASH] = _line(p, ss.RETAINED_CASH, pieces, retained, reads, why_retained)
+    return lines
 
 
 def _noop(stage: str) -> None:
