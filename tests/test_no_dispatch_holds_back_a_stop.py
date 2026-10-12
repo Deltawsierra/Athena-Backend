@@ -3485,6 +3485,11 @@ def test_what_is_still_queued_is_written_when_the_process_exits(monkeypatch, cap
     """No pump (it could not start): the exit writes the queue itself, bounded."""
     from assurance import oplog
 
+    # Drain first, against the real queue and condition a pump an earlier test left
+    # running still waits on: a pump mid-write then finishes before this test swaps the
+    # queue out from under it, rather than waking on these records and writing one out
+    # of order.
+    oplog.drain()
     monkeypatch.setattr(oplog, "start_pump", lambda: False)
     monkeypatch.setattr(oplog, "_PUMP", [])
     # A pump an earlier test started is still alive, waiting on the module's queue

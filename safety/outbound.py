@@ -36,8 +36,11 @@ Three things hold at every one of them.
   to the same host compared case-insensitively after IDNA, at any port, with the
   scheme kept or moved from http to https, and with no login of its own; the
   method, the body and the key are sent again, at most ``ENGINE_REDIRECT_HOPS``
-  times in one call. An engine moved behind a trailing slash or onto https answers
-  a scan's Stop that way, and refusing it left the Stop owed for ever. Anything
+  times in one call, and the whole chain shares ONE deadline -- the call's timeout
+  as a total, each hop given the time left -- so a Stop through several hops finishes,
+  or fails and is owed, within one call's budget rather than once per hop
+  (:func:`_chain_deadline`). An engine moved behind a trailing slash or onto https
+  answers a scan's Stop that way, and refusing it left the Stop owed for ever. Anything
   else -- another host, https to http, a 301, 302 or 303 answering a POST, a
   fourth hop -- is answered to the caller as the 3xx it is, and nothing is sent
   where it points.
@@ -48,11 +51,19 @@ Three things hold at every one of them.
   caller set). The engine's lane takes its proxy from the process environment
   explicitly -- ``urllib.request.getproxies()`` (``HTTP_PROXY``, ``HTTPS_PROXY``,
   ``ALL_PROXY``), bypassed for a host ``NO_PROXY`` names
-  (``urllib.request.proxy_bypass``) -- and passes it as ``proxies``: an engine a
+  (``requests.utils.should_bypass_proxies``, requests' own rule: a ``NO_PROXY`` entry
+  that is a CIDR block bypasses every IP inside it and a bare suffix every host that
+  ends with it) -- and passes it as ``proxies``: an engine a
   deployment reaches only through its proxy is reached, and its scans stopped,
   as before. A proxy's userinfo is withheld from every error and answer. No
   other lane reads a proxy; one that comes to need one names it in a setting of
-  its own and passes it as ``proxies``, never through the environment. The TLS
+  its own and passes it as ``proxies``, never through the environment. A failure to
+  PREPARE or SEND a request -- building a proxy from a userinfo that will not encode
+  (a non-latin-1 password raises ``UnicodeEncodeError``, not a ``RequestException``)
+  among them -- is a failed send like any other: it is quieted, withheld and raised
+  as a ``RequestException``, which the call sites read as the failed call it is (a
+  scan's Stop then owed, 202, and sent again), never as a 500 out of the stop route.
+  The TLS
   roots an operator named in ``REQUESTS_CA_BUNDLE`` or ``CURL_CA_BUNDLE`` are still
   used: they are trust, not a credential, and dropping them would only fail
   verification closed.
@@ -86,6 +97,7 @@ import base64
 import contextlib
 import os
 import re
+import time
 import urllib.request
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -314,14 +326,22 @@ def _environment_proxies() -> dict[str, str]:
 
 
 def _proxies_for(url: str, proxies: dict[str, str]) -> dict[str, str]:
-    """``proxies``, or none for a host ``NO_PROXY`` names (``urllib.request.proxy_bypass``)."""
+    """``proxies``, or none for a host ``NO_PROXY`` names
+    (``requests.utils.should_bypass_proxies``).
+
+    requests' own rule, which is the one it would apply to a ``proxies`` dict it read
+    from the environment itself: ``NO_PROXY`` (read from the environment here) is
+    matched as a comma list, an entry that is a CIDR block bypassing every IP inside
+    it and a bare suffix bypassing every host that ends with it. ``urllib``'s
+    ``proxy_bypass`` matched neither a CIDR nor a bare suffix, so an engine at an
+    address ``NO_PROXY`` named as a block was still dialled through the proxy, and a
+    Stop the proxy could not carry stayed owed. ``no_proxy=None`` reads ``NO_PROXY``
+    from the environment and no ``.netrc``."""
     if not proxies:
         return {}
     bypassed = False
     with contextlib.suppress(Exception):  # a bypass that cannot be read: the environment's proxy
-        parts = urlsplit(url)
-        hosts = [parts.hostname or "", parts.netloc.rsplit("@", 1)[-1]]
-        bypassed = any(host and urllib.request.proxy_bypass(host) for host in hosts)
+        bypassed = requests.utils.should_bypass_proxies(url, no_proxy=None)
     return {} if bypassed else dict(proxies)
 
 
@@ -401,6 +421,33 @@ def _same_host_hop(method: str, url: str, response: requests.Response) -> str | 
 # ---------------------------------------------------------------------------
 
 
+def _chain_deadline(timeout):
+    """The connect and read parts of a requests ``timeout``, and ONE wall-clock budget
+    for a whole redirect chain: a ``(connect, read)`` pair's sum, a scalar as both.
+
+    The engine's lane follows a redirect up to :data:`ENGINE_REDIRECT_HOPS` times, and
+    each hop used to get the full ``timeout`` of its own -- so a Stop through three
+    hops could take four times the connect-plus-read, ~252 s at the default
+    ``(3.05, 60)``. Now the whole chain shares this one budget: every hop gets the
+    time left (connect and read reduced to it), and when it runs out the call fails
+    and the Stop is owed. ``(None, None, None)`` when either part is unbounded: no
+    shared deadline is imposed, so no call is ever cut shorter than it was configured
+    for -- a single hop with the full budget still gets its full connect and read."""
+    if isinstance(timeout, (tuple, list)):
+        try:
+            connect, read = timeout
+        except (TypeError, ValueError):
+            return None, None, None
+    else:
+        connect = read = timeout
+    if connect is None or read is None:
+        return None, None, None
+    try:
+        return float(connect), float(read), float(connect) + float(read)
+    except (TypeError, ValueError):
+        return None, None, None
+
+
 def _send(method: str, url: str, *, engine: bool = False, also_withhold=(), **kwargs) -> requests.Response:
     kwargs["allow_redirects"] = False
     kwargs.setdefault("verify", _configured_ca_bundle())
@@ -421,15 +468,37 @@ def _send(method: str, url: str, *, engine: bool = False, also_withhold=(), **kw
     # As requests.get and requests.post do: one Session for the call, closed after
     # it (a streamed answer is still read to its end).
     with session() as sending:
+        # One deadline for the whole redirect chain on the engine's lane (connect and
+        # read reduced to the time left on each hop), so a Stop through several hops
+        # finishes, or fails and is owed, within one call's budget -- not once per hop.
+        connect, read, budget = _chain_deadline(kwargs.get("timeout"))
+        deadline = time.monotonic() + budget if (engine and budget is not None) else None
         hops = 0
         while True:
             if engine:
                 kwargs["proxies"] = _proxies_for(url, proxies)
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    # The chain's shared deadline is spent. The call fails like a read
+                    # that ran out of time -- the request may have reached the engine,
+                    # so a Stop is sent again (owed, never dropped), not marked failed.
+                    exc = requests.exceptions.ReadTimeout(
+                        f"the engine's lane spent its {budget:g}s deadline over {hops} redirect hop(s)"
+                    )
+                    quiet(exc, said)
+                    raise exc
+                kwargs["timeout"] = (min(connect, left), min(read, left))
             try:
                 response = sending.request(method, url, **kwargs)
             except requests.RequestException as exc:
                 quiet(exc, said)
                 raise
+            except Exception as exc:  # noqa: BLE001 - a failure to prepare or send a request (a proxy built from a password that will not encode) is a failed send, quieted and owed, never a 500 out of the stop route
+                quiet(exc, said)
+                raise requests.exceptions.RequestException(
+                    f"the request could not be prepared or sent ({type(exc).__name__})"
+                ) from exc
             following = _same_host_hop(method, url, response) if engine and hops < ENGINE_REDIRECT_HOPS else None
             if following is None:
                 break

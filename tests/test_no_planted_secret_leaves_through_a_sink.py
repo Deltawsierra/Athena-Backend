@@ -1256,16 +1256,48 @@ class World:
                 claim_seen_at=claim.last_seen,
             )
         signals["claims"] = AssuranceClaim.objects.count()
-        # The scenario builder's two routes (#149): a build carrying the tenant's text
-        # that the route refuses (it names no effect), and the events of a scenario the
-        # deployment does not have. Both answers are searched like every other.
+        # The scenario builder's two routes (#149). A build the route refuses because it
+        # names no effect (400); then a REAL build that is recorded (201), carrying the
+        # tenant's canaries in its title and an effect's evidence; then that scenario's
+        # events read back (200). builder.describe()'s output -- answered, stored on the
+        # scenario, and reread -- is searched like every other sink.
+        from tests.test_economics_builder import (
+            _asset,
+            _attr,
+            _body,
+            _effect,
+            _finding,
+            _link,
+            _pset,
+            _section_30_attributes,
+        )
+
         scenarios = f"/api/assurance/deployments/{self.deployment.uuid}/economics/scenarios/"
-        signals["scenario_build"] = self.call(
+        signals["scenario_build_refused"] = self.call(
             docs, "api.answers", admin, "post", scenarios + "build/", "deployment-economics-scenario-build",
             data={"title": f"exposure {CANARY['request.body']}", "effects": []}, format="json",
         ).status_code
+
+        asset = _asset(self.deployment, name=f"payments-{uuid.uuid4().hex[:8]}")
+        _pset(self.deployment, self.admin)
+        finding = _finding(self.deployment)
+        attributes = _section_30_attributes()
+        attributes["incident_response_cost"] = _attr(
+            "money", "80000", "165000", "250000", why=f"incident response {CANARY['tenant.evidence']}",
+        )
+        build_body = _body(
+            [_effect("redirect", asset, attributes=attributes)],
+            [_link(finding, "redirect")],
+            title=f"payment loss {CANARY['request.body']}",
+        )
+        built = self.call(
+            docs, "api.answers", admin, "post", scenarios + "build/", "deployment-economics-scenario-build",
+            data=build_body, format="json",
+        )
+        signals["scenario_build"] = built.status_code
+        scenario_uuid = built.json()["scenario"]["uuid"] if built.status_code == 201 else uuid.uuid4()
         signals["scenario_events"] = self.call(
-            docs, "api.answers", admin, "get", scenarios + f"{uuid.uuid4()}/events/",
+            docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/events/",
             "deployment-economics-scenario-events",
         ).status_code
 
@@ -1791,7 +1823,11 @@ def test_every_path_ran(observed):
     assert s["proxy"]["others_through_proxy"] == [], "a call off the engine's lane went through the environment's proxy"
     assert s["route_raises"]["raised"] == 500 and s["route_raises"]["missing"] == 404, s["route_raises"]
     assert s["records"]["claims"] > 0 and s["records"]["provider"] == 201, s["records"]
-    assert (s["records"]["scenario_build"], s["records"]["scenario_events"]) == (400, 404), s["records"]
+    assert (
+        s["records"]["scenario_build_refused"],
+        s["records"]["scenario_build"],
+        s["records"]["scenario_events"],
+    ) == (400, 201, 200), s["records"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 
 

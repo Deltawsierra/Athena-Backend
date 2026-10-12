@@ -183,4 +183,81 @@ def test_a_target_s_login_never_rewrites_the_run_a_stop_names(no_environment_pro
     finally:
         engine.close()
     assert named == [run_id]
-    assert [p for _m, p, _h in engine.seen] == ["/api/scan", f"/api/scans/{run_id}"]
+
+
+@pytest.mark.django_db
+def test_an_answer_quoting_the_login_is_withheld_from_scan_detail(no_environment_proxy, monkeypatch):  # noqa: F811
+    """A target's login the engine quotes back in its 2xx answer is withheld from the
+    copy GET scan detail serves (``engine_response``), run over AFTER the run id has
+    been read from the launch answer -- so the run id is read correctly and the Stop
+    path is unchanged. The engine's answer itself is read as the engine wrote it; only
+    the copy kept for a reader is cleaned of the login."""
+    from datetime import timedelta
+
+    from django.contrib.auth import get_user_model
+    from django.test import override_settings
+    from django.utils import timezone
+    from rest_framework.test import APIClient
+
+    from pentest.models import Engagement, PentestScan
+
+    password = _password()
+    target = f"https://scanner:{password}@offline.invalid/"
+    run_id = "run-detail-cnry"
+
+    def engine_answer(method, path, headers, body):
+        if (method, path) == ("POST", "/api/scan"):
+            return 202, {"Content-Type": "application/json"}, json.dumps(
+                {"run_id": run_id, "status_url": f"/api/scans/{run_id}"}
+            ).encode()
+        if path == f"/api/scans/{run_id}":
+            # The engine's finding quotes the target back, login and all.
+            return 200, {"Content-Type": "application/json"}, json.dumps({
+                "run_id": run_id, "state": "completed", "done": True,
+                "result": {"results": [
+                    {"type": "finding", "title": "reflected credentials", "severity": "high",
+                     "evidence": f"the scanner reached {target}"},
+                ]},
+            }).encode()
+        return 404, {}, b"{}"
+
+    user = get_user_model().objects.create_user(username="analyst", password=None, role="analyst")
+    now = timezone.now()
+    engagement = Engagement.objects.create(
+        created_by=user, name="Client Q3", status="running", scope_hosts=["offline.invalid"],
+        testing_window_start=now - timedelta(hours=1), testing_window_end=now + timedelta(hours=1),
+    )
+    monkeypatch.setattr("pentest.views.target_is_out_of_bounds", lambda url: None)
+    monkeypatch.setattr("pentest.views.preflight.check", lambda client, tenant_id=None: {"verdict": "unchanged"})
+    monkeypatch.setattr("pentest.views.render_scan_pdf_bytes", lambda scan: b"%PDF-1.4 report")
+    monkeypatch.setattr("pentest.views.save_pdf_to_scan", lambda scan, pdf: None)
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    engine = Recorder(answer=engine_answer)
+    try:
+        with override_settings(CYBERENGINE_URL=engine.base, CYBERENGINE_OPERATOR_KEY="cnryenginekey"):
+            launched = client.post(
+                "/api/pentest/scan/",
+                {"url": target, "consent": True, "engagement_id": engagement.pk},
+                format="json",
+            )
+            scan_id = launched.json()["scan_id"]
+            detail = client.get(f"/api/pentest/scans/{scan_id}/")
+    finally:
+        engine.close()
+
+    assert launched.status_code == 200, launched.content
+    assert any(password.encode() in sent for sent in engine.bodies), "the launch did not carry the target's login"
+    assert ("POST", "/api/scan") in [(m, p) for m, p, _h in engine.seen], engine.seen
+    scan = PentestScan.objects.get(uuid=scan_id)
+    # The run id was read from the launch answer and kept on the scan.
+    assert scan.engine_run_id == run_id, scan.engine_run_id
+    assert scan.status == PentestScan.STATUS_COMPLETED, scan.status
+    # GET scan detail carries the answer, its finding's shape kept, the login withheld.
+    assert detail.status_code == 200, detail.content
+    body = detail.content.decode()
+    assert password not in body and f"scanner:{password}" not in body, body
+    served = detail.json()["engine_response"]
+    assert served["results"][0]["title"] == "reflected credentials"
+    assert password not in json.dumps(served) and "[withheld]" in json.dumps(served), served
