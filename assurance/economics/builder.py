@@ -490,7 +490,8 @@ def observed_identity(deployment, row: WorkflowChainOutcome) -> tuple[str, str]:
     """``(observation, spine_effect)`` for a SPINE observed effect that stands -- the
     digest its signature covers, and the effect as a receipt names it (workflow and
     tool, ``sha256:`` + hex) -- or ``observed_effect_not_in_force``. A
-    ``MYTHOS_OBSERVED`` attribute's evidence names the second."""
+    ``MYTHOS_OBSERVED`` attribute's evidence is bound to the second
+    (:func:`~assurance.economics.engine.templates.names_observed_effect`)."""
     deployment_uuid = str(deployment.uuid)
     basis = observed_outcomes.basis_in_force(row, observed_outcomes.trusted_keyring(), deployment_uuid=deployment_uuid)
     document = observed_effects.evidence_in_force(row, deployment_uuid)

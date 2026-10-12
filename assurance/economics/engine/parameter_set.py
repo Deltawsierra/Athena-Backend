@@ -44,6 +44,7 @@ from .formulas import CASH_FAMILIES
 from .loss import InsurancePolicy
 from .money import Money, MoneyRefused, parse_decimal
 from .parameters import MONEY_UNITS, Parameter, ParameterRefused, Unit, check_source_type
+from .provenance import SourceType
 
 #: The document schema this module reads.
 SCHEMA_VERSION = "mythos.economics.parameter-set/v1"
@@ -208,6 +209,18 @@ def _parameter(name: str, unit: Unit, entry, path: str) -> Parameter:
     )
 
 
+def _money_is_not_observed(parameter: Parameter, path: str) -> Parameter:
+    """``parameter``, a figure of the parameter set, or ``observed_source_not_observable``
+    when it is money (a lump sum, or per unit, hour or year) resting on
+    ``MYTHOS_OBSERVED``: an assessment observes a rate, a count or a duration, never
+    what the customer's money figures are (the builder's rule for an effect's
+    attributes, spec section 24.2). Held here, on the set's own parsing: a quantity
+    may still be observed, and an effect's attribute keeps its own rule."""
+    if parameter.unit in MONEY_UNITS and parameter.source_type is SourceType.MYTHOS_OBSERVED:
+        raise ParameterRefused("observed_source_not_observable", path)
+    return parameter
+
+
 def _cash_family(value, path: str) -> str:
     if not isinstance(value, str) or value not in CASH_FAMILIES:
         raise ParameterRefused("loss_family_unrecognised", f"{path} {value!r} is not one of the fifteen families")
@@ -300,15 +313,18 @@ def parse_document(document) -> ParameterSetContent:
     for name in raw:
         if name not in VARIABLES:
             raise ParameterRefused("field_unrecognised", f"variables: [{str(name)!r}]")
-        variables[name] = _parameter(name, VARIABLES[name].unit, raw[name], f"variables.{name}")
+        variables[name] = _money_is_not_observed(
+            _parameter(name, VARIABLES[name].unit, raw[name], f"variables.{name}"), f"variables.{name}"
+        )
     sublimits: dict[str, Parameter] = {}
     raw = document.get("insurance_sublimits", {})
     if not isinstance(raw, dict):
         raise ParameterRefused("field_malformed", "insurance_sublimits is not an object")
     for family in raw:
         _cash_family(family, "insurance_sublimits")
-        sublimits[family] = _parameter(
-            SUBLIMIT_PREFIX + family, Unit.MONEY, raw[family], f"insurance_sublimits.{family}"
+        sublimits[family] = _money_is_not_observed(
+            _parameter(SUBLIMIT_PREFIX + family, Unit.MONEY, raw[family], f"insurance_sublimits.{family}"),
+            f"insurance_sublimits.{family}",
         )
     exclusions = document.get("insurance_exclusions", [])
     if not isinstance(exclusions, list):

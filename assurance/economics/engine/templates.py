@@ -77,8 +77,9 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "market figure is CUSTOMER_PROVIDED, EXPERT_ESTIMATE or another source that is not an observation"
         ),
         "observed_source_unbound": (
-            "a MYTHOS_OBSERVED attribute's evidence_ref names the observed effect it came from: its SPINE effect "
-            "digest"
+            "a MYTHOS_OBSERVED attribute's evidence_ref is the observed effect it came from: its SPINE effect "
+            "digest, alone or followed by a space and a note (a digest that is only mentioned, or that follows "
+            "other text, binds nothing)"
         ),
         "spine_effect_inconsistent": (
             "every observation of one SPINE effect is declared with one effect type, asset and business process: "
@@ -759,14 +760,25 @@ def parse_attributes(effect_key: str, raw, path: str, *, origin: Origin) -> dict
     return found
 
 
+def names_observed_effect(evidence_ref: str, spine_effect: str) -> bool:
+    """Whether ``evidence_ref`` is bound to the observed effect ``spine_effect`` (its
+    SPINE effect digest): it IS the digest, or it STARTS with the digest and a space
+    (the digest, then a note). A digest that is only somewhere in the text binds
+    nothing -- "NOT observed; estimated by hand; unrelated to <digest>" is not an
+    observation of that effect -- and an evidence_ref naming two digests binds only
+    the first."""
+    return bool(spine_effect) and (evidence_ref == spine_effect or evidence_ref.startswith(spine_effect + " "))
+
+
 def check_observed_evidence(effect_key: str, attributes: Mapping[str, Parameter], spine_effect: str) -> None:
-    """Every ``MYTHOS_OBSERVED`` attribute of an observed effect names, in its
-    ``evidence_ref``, the observed effect it came from: ``spine_effect``, the SPINE
-    effect digest the effect resolved to (``observed_source_unbound`` otherwise). An
-    observation of one effect is never evidence for a figure of another."""
+    """Every ``MYTHOS_OBSERVED`` attribute of an observed effect is bound, by its
+    ``evidence_ref``, to the observed effect it came from: ``spine_effect``, the SPINE
+    effect digest the effect resolved to (:func:`names_observed_effect`;
+    ``observed_source_unbound`` otherwise). An observation of one effect is never
+    evidence for a figure of another."""
     for name, parameter in sorted(attributes.items()):
-        if parameter.source_type is SourceType.MYTHOS_OBSERVED and (
-            not spine_effect or spine_effect not in parameter.evidence_ref
+        if parameter.source_type is SourceType.MYTHOS_OBSERVED and not names_observed_effect(
+            parameter.evidence_ref, spine_effect
         ):
             raise BuildRefused("observed_source_unbound", f"{effect_key}.{name}")
 
@@ -921,8 +933,12 @@ def larger_loss(reading: Reading, stated: Mapping[str, Parameter], *, event_key:
     make a parameter named ``<event key>:<attribute>``, ``CALCULATED`` (or, where
     the inputs accept one source and every effect taking part rests on it, that
     source: each point is one of those figures, unchanged), holding from the latest
-    date any of them holds and fresh no longer than the stalest; the caller records
-    which effects it was derived from."""
+    date any effect SUPPLYING a point holds from and fresh no longer than the stalest
+    of those (an effect supplying no point sets neither date; where the suppliers'
+    latest date is after their earliest ``fresh_until`` the value was never fresh
+    while it held, and a parameter cannot be fresh before it holds, so it is fresh
+    until the day it holds from); the caller records which effects it was derived
+    from."""
     if not stated:
         raise ValueError(f"no effect states {reading.attribute}")
     taking_part = dict(stated)
@@ -951,8 +967,13 @@ def larger_loss(reading: Reading, stated: Mapping[str, Parameter], *, event_key:
         (source_type,) = sources
     else:
         source_type = SourceType.CALCULATED
-    effective = [taking_part[k].effective_date for k in keys if taking_part[k].effective_date is not None]
-    fresh = [taking_part[k].fresh_until for k in keys if taking_part[k].fresh_until is not None]
+    # The dates are those of the effects that SUPPLY a point of the value, not of every
+    # effect that took part: an effect whose figure is nowhere in the value says nothing
+    # of when the value holds from or how long it is fresh (review round 2: a later,
+    # fresher effect supplying nothing made a stale figure read as fresh).
+    suppliers = sorted(set(supplied.values()))
+    effective = [taking_part[k].effective_date for k in suppliers if taking_part[k].effective_date is not None]
+    fresh = [taking_part[k].fresh_until for k in suppliers if taking_part[k].fresh_until is not None]
     effective_date = max(effective) if effective else None
     fresh_until = min(fresh) if fresh else None
     if fresh_until is not None and effective_date is not None and fresh_until < effective_date:

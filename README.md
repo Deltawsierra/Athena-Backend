@@ -440,7 +440,9 @@ Findings that enable one effect join that effect's one loss event, so five findi
 on one payment loss never multiply it; every observation of one SPINE effect joins
 one event too, and an event reads, for each input, the larger loss across all its
 effects, so joining never understates. An observed figure (`MYTHOS_OBSERVED`) is
-only a rate, a count or a duration, and names the SPINE effect it was seen as. Every
+only a rate, a count or a duration, and its evidence is exactly the SPINE effect
+digest it was seen as (then, if wanted, a space and a note), never a mention of it; a
+parameter set's money figure is never observed. Every
 check runs before the build's transaction, which only inserts. Every reference is
 looked up in the path's deployment only. A fault in the builder leaves these two routes unserved and nothing
 else; neither is a stop.
