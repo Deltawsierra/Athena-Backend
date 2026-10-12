@@ -639,8 +639,9 @@ _DJANGO_ENV = {"DJANGO_SETTINGS_MODULE": "tests.settings_test"}
 
 
 def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
-    """Nothing Django loads at start imports the distributions, the sampler or
-    numpy: ``django.setup()`` and every URLconf, the admin's included."""
+    """Nothing Django loads at start imports the distributions, the sampler, step
+    7b's twins, scenario simulation and service, or numpy: ``django.setup()`` and
+    every URLconf, the admin's included."""
     script = textwrap.dedent(
         """
         import json, sys
@@ -648,7 +649,9 @@ def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
         django.setup()
         from django.urls import get_resolver
         get_resolver().reverse_dict
-        names = ("numpy", "assurance.economics.engine.distributions", "assurance.economics.engine.simulation")
+        names = ("numpy", "assurance.economics.engine.distributions", "assurance.economics.engine.simulation",
+                 "assurance.economics.engine.scenario_simulation", "assurance.economics.engine.twins",
+                 "assurance.economics.simulation_service")
         print(json.dumps(sorted(m for m in sys.modules if any(m == n or m.startswith(n + ".") for n in names))))
         print(json.dumps("assurance.economics.engine.money" in sys.modules))
         """
@@ -668,8 +671,9 @@ def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
 def test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop():
     """The safety rule, against an import-time fault (the kind #146's review found
     in the economics chain): a fresh pytest under a plugin that makes numpy, the
-    distributions and the sampler unimportable before Django loads. The scan's
-    Stop route resolves, answers 202 and saves the Stop."""
+    distributions, the sampler and step 7b's twins, scenario simulation and service
+    unimportable before Django loads. The scan's Stop route resolves, answers 202
+    and saves the Stop."""
     env = dict(os.environ)
     env.setdefault("DJANGO_SECRET_KEY", "ci-secret-key-not-used-outside-ci")
     result = subprocess.run(

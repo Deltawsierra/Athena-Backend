@@ -34,6 +34,9 @@ ever read on a row whose account was removed after it was written.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import uuid
 from decimal import Context as DecimalContext
 from decimal import Decimal, DecimalException
@@ -56,6 +59,18 @@ _RATE_TYPE_CODES = [t.value for t in fx.RateType]
 #: FX and cost-index engine's (phase E1), and the scenario engine's (parameters,
 #: formulas, loss events and the parameter set). A code two publish means the same.
 _REFUSAL_TEXT = {**parameters.REFUSALS, **money.REFUSALS, **governance.REFUSALS}
+#: The codes a stored simulation result is refused with on save (spec, section 25.6).
+SIMULATION_RECORD_REFUSALS = {
+    "result_malformed": (
+        "a simulation result names its seed (a whole number from 0 to 2^64 - 1, as text), its draws, its "
+        "digests, and either a completed record or a refusal code, never both; no number in it is a float"
+    ),
+    "digest_mismatch": (
+        "a simulation result's input digest is the SHA-256 of its canonical inputs, and its result digest the "
+        "SHA-256 of its canonical record"
+    ),
+}
+_REFUSAL_TEXT.update(SIMULATION_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -76,6 +91,18 @@ class EconomicsRefused(ValueError):
         self.detail = detail
         suffix = f" ({detail})" if detail else ""
         super().__init__(f"{code}: {_REFUSAL_TEXT[code]}{suffix}")
+
+
+class EngineRefused(EconomicsRefused):
+    """A write the probabilistic engine refuses (a stated distribution): its code
+    and meaning are the engine's, which this module never imports at load time
+    (spec, section 23.10), so the meaning travels with the refusal."""
+
+    def __init__(self, code: str, meaning: str, detail: str = ""):
+        self.code = code
+        self.detail = detail
+        suffix = f" ({detail})" if detail else ""
+        ValueError.__init__(self, f"{code}: {meaning}{suffix}")
 
 
 class SeparationOfDutiesRefused(EconomicsRefused):
@@ -1031,6 +1058,11 @@ class FinancialParameter(_AppendOnly):
     evidence_ref = models.CharField(max_length=pset.EVIDENCE_REF_MAX)
     effective_date = models.DateField()
     fresh_until = models.DateField(null=True, blank=True)
+    # The distribution the parameter states, if any (spec, section 25.1): a step-7a
+    # catalogue id, its version and its native parameters as decimal strings
+    # ({"id": "lognormal", "version": 1, "params": {"mu": "9.2", "sigma": "0.8"}}).
+    # Null: the parameter states none, and the simulation's rule decides.
+    distribution = models.JSONField(null=True, blank=True)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1111,6 +1143,38 @@ class FinancialParameter(_AppendOnly):
             parameter_id=str(self.uuid),
         )
 
+    def stated_distribution(self):
+        """The distribution the row states, read by the simulation's catalogue, or
+        ``None``. Imports the probabilistic engine (and numpy) only when called."""
+        if self.distribution is None:
+            return None
+        from .engine import scenario_simulation
+
+        try:
+            return scenario_simulation.parse_stated(self.distribution, f"{self.name}.distribution")
+        except scenario_simulation.ScenarioSimulationRefused as refused:
+            raise EngineRefused(refused.code, scenario_simulation.REFUSALS[refused.code], refused.detail) from None
+
+    def checked_distribution(self, engine: parameters.Parameter) -> dict:
+        """The stated distribution, refused unless step 7a's catalogue builds it
+        for this parameter (its unit, and for an expert range its own source
+        type), in its stored form."""
+        from .engine import distributions, scenario_simulation
+
+        stated = self.stated_distribution()
+        try:
+            if self.name == scenario_simulation.FREQUENCY_PARAMETER and self.scenario_id is not None:
+                scenario_simulation.resolve_frequency(engine, stated)
+            else:
+                scenario_simulation.check_stated(stated, engine)
+        except scenario_simulation.ScenarioSimulationRefused as refused:
+            raise EngineRefused(refused.code, scenario_simulation.REFUSALS[refused.code], refused.detail) from None
+        except distributions.DistributionRefused as refused:
+            raise EngineRefused(refused.code, distributions.REFUSALS[refused.code], refused.detail) from None
+        except money.MoneyRefused as refused:
+            raise EconomicsRefused(refused.code, refused.detail) from None
+        return stated.as_json()
+
     def check_new(self) -> None:
         if (self.scenario_id is None) == (self.parameter_set_id is None):
             raise EconomicsRefused("parent_required")
@@ -1123,6 +1187,8 @@ class FinancialParameter(_AppendOnly):
         engine = _engine_refusal(self.as_engine)
         # Stored in the one spelling: "1.10" and "1.1" are one value, written once.
         self.low, self.base, self.high = (parameters.Parameter.text(engine.at(p)) for p in parameters.POINTS)
+        if self.distribution is not None:
+            self.distribution = self.checked_distribution(engine)
         if self.parameter_set_id is not None:
             expected = _engine_refusal(lambda: pset.variable_unit(self.name))
             if engine.unit is not expected:
@@ -1507,3 +1573,140 @@ class EffectFinding(_AppendOnly):
 
     def __str__(self) -> str:
         return f"finding {self.finding} {self.role} of effect {self.effect_id}"
+
+
+# ---------------------------------------------------------------------------
+# SimulationResult -- one Monte Carlo run of one scenario version (step 7b)
+# ---------------------------------------------------------------------------
+
+#: A simulation result's status.
+SIMULATION_COMPLETED = "completed"
+SIMULATION_REFUSED = "refused"
+SIMULATION_STATUSES = (SIMULATION_COMPLETED, SIMULATION_REFUSED)
+_SEED = re.compile(r"0|[1-9][0-9]{0,19}")
+_MAX_SEED = 2**64 - 1
+
+
+def canonical_digest(document) -> str:
+    """``sha256:`` and the SHA-256 of a document's canonical JSON: sorted keys, no
+    whitespace, ASCII, no NaN (the simulation engine's form, written here without
+    importing it)."""
+    text = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+    return "sha256:" + hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
+def _has_float(value) -> bool:
+    if isinstance(value, float):
+        return True
+    if isinstance(value, dict):
+        return any(_has_float(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_float(item) for item in value)
+    return False
+
+
+class SimulationResult(_AppendOnly):
+    """One Monte Carlo run of one scenario version (spec, section 25.6): the seed and
+    the draws; the canonical inputs and their digest; every version the figures rest
+    on (the formulas, the twins, the distributions, the sampler, numpy); the
+    summaries and the whole record as decimal strings, and the record's digest; or,
+    where the run was refused, the refusal's code. And when it ran, and for how long.
+
+    Append-only like every economics record, and IDEMPOTENT: one row per scenario
+    version, input digest, seed and draws (``uq_econ_simulation_inputs``). The
+    service returns the row already recorded for the same inputs and never runs or
+    writes a second; two runs racing past that read are refused by the constraint,
+    and the later returns the first's row. Nothing in it is a float: every figure is
+    a decimal string (``result_malformed``), and both digests are recomputed on save
+    (``digest_mismatch``). It has no account column, so removing an operator, a stop,
+    never writes it, and it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    # 0 to 2^64 - 1, as text: wider than a signed 64-bit column, and never a double.
+    seed = models.CharField(max_length=20)
+    draws = models.PositiveIntegerField()
+    severe_percentile = models.CharField(max_length=32)
+    input_digest = models.CharField(max_length=71)
+    result_digest = models.CharField(max_length=71, blank=True)
+    status = models.CharField(max_length=16, choices=[(s, s) for s in SIMULATION_STATUSES])
+    refusal_code = models.CharField(max_length=64, blank=True)
+    refusal_detail = models.TextField(blank=True)
+    # The canonical inputs the input digest is taken over, kept whole.
+    inputs = models.JSONField()
+    versions = models.JSONField()
+    # The scenario's, each event's and each component's figures, as the record holds them.
+    summaries = models.JSONField(null=True, blank=True)
+    # The whole record the result digest is taken over.
+    record = models.JSONField(null=True, blank=True)
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField()
+    duration_ms = models.PositiveIntegerField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["scenario", "input_digest", "seed", "draws"], name="uq_econ_simulation_inputs"
+            ),
+            models.CheckConstraint(condition=Q(status__in=SIMULATION_STATUSES), name="ck_econ_simulation_status"),
+            models.CheckConstraint(
+                condition=(Q(status=SIMULATION_COMPLETED) & ~Q(result_digest="") & Q(refusal_code=""))
+                | (Q(status=SIMULATION_REFUSED) & Q(result_digest="") & ~Q(refusal_code="")),
+                name="ck_econ_simulation_outcome",
+            ),
+        ]
+
+    @staticmethod
+    def summaries_of(record) -> dict:
+        """The figures a completed record holds: the scenario's and each event's,
+        with their components'."""
+        return {"scenario": record["scenario"], "events": record["events"]}
+
+    def check_new(self) -> None:
+        tenant = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("deployment_id", flat=True)
+        if list(tenant) != [self.deployment_id]:
+            raise EconomicsRefused("cross_tenant_reference", "scenario")
+        if not isinstance(self.seed, str) or not _SEED.fullmatch(self.seed) or int(self.seed) > _MAX_SEED:
+            raise EconomicsRefused("result_malformed", f"seed {self.seed!r}")
+        if type(self.draws) is not int or self.draws < 1:
+            raise EconomicsRefused("result_malformed", f"draws {self.draws!r}")
+        _require_text(severe_percentile=self.severe_percentile)
+        _refuse(governance.snapshot_hash_refusal(self.input_digest), detail="input_digest")
+        for name, document in (
+            ("inputs", self.inputs),
+            ("versions", self.versions),
+            ("summaries", self.summaries),
+            ("record", self.record),
+        ):
+            if _has_float(document):
+                raise EconomicsRefused("result_malformed", f"{name} holds a float")
+        if canonical_digest(self.inputs) != self.input_digest:
+            raise EconomicsRefused("digest_mismatch", "input_digest")
+        if self.status == SIMULATION_COMPLETED:
+            _refuse(governance.snapshot_hash_refusal(self.result_digest), detail="result_digest")
+            if self.refusal_code or not isinstance(self.record, dict):
+                raise EconomicsRefused("result_malformed", "a completed result holds a record and no refusal")
+            if canonical_digest(self.record) != self.result_digest:
+                raise EconomicsRefused("digest_mismatch", "result_digest")
+            held = (self.record.get("input_digest"), self.record.get("seed"), self.record.get("simulations"))
+            if held != (self.input_digest, self.seed, self.draws) or self.summaries != self.summaries_of(self.record):
+                raise EconomicsRefused("result_malformed", "the record is not this result's")
+        elif self.status == SIMULATION_REFUSED:
+            if not self.refusal_code or self.result_digest or self.record is not None or self.summaries is not None:
+                raise EconomicsRefused("result_malformed", "a refused result holds a refusal code and no figures")
+        else:
+            raise EconomicsRefused("result_malformed", f"status {self.status!r}")
+        if self.started_at is None or self.finished_at is None or self.finished_at < self.started_at:
+            raise EconomicsRefused("date_inversion", "a result finishes after it starts")
+        if SimulationResult._base_manager.filter(
+            scenario_id=self.scenario_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
+        ).exists():
+            raise EconomicsRefused("duplicate_id", "a result of the same inputs, seed and draws is recorded")
+
+    def __str__(self) -> str:
+        return f"simulation of scenario {self.scenario_id}, seed {self.seed}, {self.draws} draws: {self.status}"

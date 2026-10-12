@@ -15,11 +15,12 @@ loss events from SPINE effects and findings through six banking templates. It st
 and the currency table, the records and who may write them, the governance rules,
 how an amount is held, converted and normalized and with what provenance, the
 observation data, how a loss component is computed and with what invariants, and
-what this version does not do. Nothing in this version simulates a scenario; the
-scenario engine computes deterministic low, base and high ranges, and the routes it
-serves are the customer parameter set's (section 19) and the scenario builder's
-(section 24). The distribution catalogue and the seeded sampler (phase E2, section
-23) are pure, and nothing calls them yet.
+what this version does not do. The scenario engine computes deterministic low, base
+and high ranges, and the routes it serves are the customer parameter set's (section
+19) and the scenario builder's (section 24). The distribution catalogue and the seeded
+sampler (phase E2, section 23) are pure; MVP step 7b (section 25) wires them to the
+formulas and the loss model through a service that simulates a stored scenario version
+and records the result, and serves no route.
 
 ## Contents
 
@@ -53,6 +54,10 @@ Phase E2, MVP step 7a, after the scenario engine's sections 14 to 22 (MVP step 4
 The scenario builder, MVP step 5 (merged after step 7a):
 
 24. [The scenario builder (MVP step 5)](#24-the-scenario-builder-mvp-step-5)
+
+Phase E2, MVP step 7b, wiring step 7a to steps 4 and 5:
+
+25. [Wiring the simulation (MVP step 7b)](#25-wiring-the-simulation-mvp-step-7b)
 
 ## 1. Status and scope
 
@@ -349,7 +354,9 @@ schema version and scenario title are never blank. A platform-wide source is nev
 licensed or trusted as `customer` data (also a check constraint). None of these
 constraints touches a column a stop's write changes (section 2).
 
-Before the scenario step no route, command or signal wrote or read any of these.
+Before the scenario step no route, command or signal wrote or read any of these. The
+simulation step (section 25) adds no route: its service is the only writer of a
+simulation result.
 The scenario step adds one route module (section 19), the only writer of a
 customer parameter set and its parameters; the builder step adds another (section
 23), the only writer of a built scenario, its parameters, events, components,
@@ -368,12 +375,13 @@ operator runs; any other writer is a defect.
 | `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; later a feed adapter, after its licensing review |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
 | `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
-| `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`; linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 24) |
+| `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`, and the distribution it states, if any (section 25.1); linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 24) |
 | `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (section 24), through its build route |
 | `LossComponent` (scenarios) | one component of one event: family, formula id and version, as-of date, the parameters it cites by input; its status and amounts are computed on save | the same |
 | `ScenarioBuild` (builder) | how one scenario version was built: its parameter-set version, currency, as-of date, versions, canonical inputs and their digest, unique per deployment | the scenario builder only |
 | `CausalEffect` (builder) | one effect of a built scenario version, in exactly one of its loss events (section 24.1) | the same |
 | `EffectFinding` (builder) | one finding enabling one effect, and its role | the same |
+| `SimulationResult` (simulation) | one Monte Carlo run of one scenario version: seed, draws, canonical inputs and their digest, every version, the record and its digest, or the refusal's code; the timing (section 25.6) | the simulation service only (section 25.7) |
 
 The two observation models are checked on save by the engine's own contracts
 (`fx.FXRate`, `cost_index.IndexPoint`), so a row is refused with the engine's code
@@ -1357,9 +1365,9 @@ Decisions this version takes, which the owner may change:
 
 Phase E2, MVP step 7a: the distribution library and the seeded Monte Carlo
 sampler of the owner's specification, sections 7.1 to 7.3. It follows the
-scenario engine's sections 14 to 22 (MVP step 4). Both modules are pure, and
-nothing calls them yet: wiring them to the formulas and the records is step 7b
-(section 23.11).
+scenario engine's sections 14 to 22 (MVP step 4). Both modules are pure; step 7b
+wires them to the formulas and the records (section 25), and section 23.11 says what
+is still not wired.
 
 | | |
 |---|---|
@@ -1679,19 +1687,20 @@ registration.
 
 ### 23.11 What is not wired yet (step 7b)
 
-- **No formula is evaluated.** The scenario engine's formulas (MVP step 4) are not
-  called; a run evaluates whatever function it is given.
-- **Nothing is stored.** `FinancialParameter` has no distribution type, no model
-  holds a result, and no migration is added; `scenario_id` is a placeholder.
-- **Nothing is served,** and no receipt is built or signed.
+Step 7b (section 25) wires the sampler to the scenario engine: each formula has a
+vectorised twin and a run evaluates the scenario's components, events and insurance;
+a `FinancialParameter` may state a distribution, and a rule gives one to every other
+parameter or refuses it; a `SimulationResult` records each run, idempotently; the
+`scenario_id` is the scenario version's uuid; and the uncertainty shared by a year's
+events is separated from the variation between them (section 25.2). What remains:
+
+- **Nothing is served,** and no receipt is built or signed (step 6 serves; step 8
+  signs).
 - **No confidence grade is computed.** Expert parameters are listed, not yet
-  downgraded.
-- **No sensitivity analysis, and no dependency between parameters:** every
-  parameter is independent (no copula, no shared-cause event), and the frequency's
-  parameters are fixed for the run.
-- **Every event's parameters are redrawn per event.** Uncertainty shared by all of
-  a year's events (what the parameter is) is not yet separated from variation
-  between events (what each event costs).
+  downgraded; nor is a sensitivity analysis or a Validity Card made (step 8).
+- **No dependency between parameters** beyond that sharing: no copula, no
+  shared-cause event, no correlation between events, and the frequency's parameters
+  are fixed for the run.
 - **One currency.** A run is in its reporting currency; nothing converts inside
   it, and currency uncertainty stays separate (section 3, rule 6).
 
@@ -2165,3 +2174,289 @@ Decisions this version takes, which the owner may change:
    the effect; what the parameter set does not hold (a window, a lump-sum range, an
    affected population) comes from the effect's declared attributes, each with its
    source.
+
+## 25. Wiring the simulation (MVP step 7b)
+
+Phase E2, MVP step 7b: step 7a's seeded sampler (section 23) wired to step 4's
+formulas and loss model (sections 14 to 18), over a scenario version the builder
+(section 24) recorded. Per draw, every parameter a known component reads is sampled,
+every component is evaluated, the components are summed to their event with cash and
+market value kept apart exactly as step 4 keeps them, the event's insurance policy
+is applied to the event, and the events are summed to the scenario. No route is
+added: step 6 serves reports and scenario endpoints.
+
+| | |
+|---|---|
+| Code | `assurance/economics/engine/scenario_simulation.py` (the wiring, pure) and `assurance/economics/engine/twins.py` (the formula twins, pure); `assurance/economics/simulation_service.py` (the thin Django service); `FinancialParameter.distribution` and `SimulationResult` in `assurance/economics/models.py`; migration `0064_parameter_distributions_and_simulation_results.py` |
+| Tests | `tests/test_economics_scenario_simulation.py` (no database) and `tests/test_economics_simulation_service.py`; the safety tests of section 23.10, extended to the three new modules |
+
+### 25.1 The parameter-to-distribution rule
+
+`mythos.economics.parameter-distribution/v1` (`scenario_simulation.RULE_VERSION`),
+`scenario_simulation.resolve`. Every parameter a run reads draws from exactly one
+distribution, decided by this rule and recorded with the run (`parameters.<name>.rule`):
+
+1. **Stated.** A `FinancialParameter` may carry a distribution (`distribution`, a
+   nullable JSON column): a step-7a catalogue id, that distribution's version and its
+   native parameters as decimal strings in the one spelling, and, for an expert range,
+   whether the data are sparse:
+   `{"id": "lognormal", "version": 1, "params": {"mu": "9.2", "sigma": "0.8"}}`. It is
+   read exactly (`distribution_malformed`, `distribution_unknown`,
+   `distribution_version_unknown`), built by step 7a's catalogue with all of its checks
+   (an expert range takes the parameter's own `source_type`, never one it states), and
+   refused unless it draws only what the parameter's unit holds
+   (`distribution_not_for_unit`): a ratio from a rate (Beta) or an expert range inside
+   [0, 1]; a count from a count, severity or expert distribution; any other unit from a
+   severity distribution or an expert range at or above zero. The row is checked when
+   it is written, with the engine's code (`EngineRefused`), and stored in the one
+   spelling.
+2. **A point mass** where it states none and its low, base and high are one figure.
+   A point mass draws nothing.
+3. **PERT(low, base, high)**, weight 4, where it states none, its values are a range,
+   and its `source_type` is `EXPERT_ESTIMATE`: the only source step 7a's rule lets an
+   expert range stand for without a sparse mark (section 23.1). It is listed among the
+   run's expert parameters.
+4. **Otherwise refused**, `no_admissible_distribution`, naming the parameter, its range
+   and its source: a customer's, a benchmark's, an observed or a calculated range never
+   becomes a PERT silently. Its distribution must be stated.
+
+A scenario's frequency (section 25.5) is the exception: it must state a count
+distribution (`frequency_distribution_missing`, `frequency_not_a_count`); nothing
+defaults, since a PERT is not a count.
+
+### 25.2 What is shared and what varies
+
+`mythos.economics.variation/v1`. Section 23.11 left open how uncertainty about what a
+parameter IS is separated from variation between events; this step separates them:
+
+- **Shared**, drawn once per simulated year and the same for every occurrence of that
+  year: the customer parameter set's variables (transactions per day, rates, unit
+  costs), the insurance policy's terms, and the frequency. A wide range here moves
+  whole years together.
+- **Per occurrence**, drawn afresh for each occurrence: an effect's attributes (the
+  window, the affected population, a lump-sum range), what each occurrence costs or
+  reaches.
+
+Without a frequency a draw is one occurrence, and the two coincide. Each parameter's
+draws come from step 7a's sub-stream of its own stream name (`stream_name`: `p` and 40
+hex digits of the SHA-256 of `mythos.economics.parameter-stream/v1`, a zero byte and
+the parameter's name), so they depend on the seed and the name only: adding a
+parameter changes no other's draws, and a shared parameter's yearly draws are the very
+draws it makes without a frequency.
+
+### 25.3 The formula twins
+
+`engine/twins.py`, `TWINS_VERSION` 1. Every formula of the catalogue has a vectorised
+twin, keyed by the same id and version: the same expression in binary64 over arrays of
+draws. The Decimal formula stays the source of truth. A formula with no twin is
+refused by name (`twin_missing`); nothing is approximated. The tolerance is
+`RELATIVE_TOLERANCE`, **1E-13** relative: `|twin - formula| <= 1E-13 x |formula|`, the
+formula evaluated in Decimal at the very binary64 values the twin read, and exactly
+zero where the formula is zero. A twin makes at most six roundings (about 7E-16), so
+the margin is over a hundredfold. No twin calls `exp`, `log` or `pow`, so a twin's
+result is the same on every IEEE-754 platform.
+
+| Formula | Version | Tolerance | Known-answer points | Random points |
+|---|---|---|---|---|
+| `repeat_loss` | 1 | 1E-13 | 6 | 6,000 |
+| `repeat_in_window` | 1 | 1E-13 | 6 | 6,000 |
+| `interruption` | 1 | 1E-13 | 3 | 6,000 |
+| `fixed_plus_hours` | 1 | 1E-13 | 24 | 6,000 |
+| `per_affected_plus_fixed` | 1 | 1E-13 | 6 | 6,000 |
+| `per_affected` | 1 | 1E-13 | 3 | 6,000 |
+| `support_contacts` | 1 | 1E-13 | 9 | 6,000 |
+| `capped_credit` | 1 | 1E-13 | 3 | 6,000 |
+| `replacement_share` | 1 | 1E-13 | 0 | 6,000 |
+| `churned_margin` | 1 | 1E-13 | 0 | 6,000 |
+| `premium_increase` | 1 | 1E-13 | 0 | 6,000 |
+| `lump_sum` | 1 | 1E-13 | 30 | 6,000 |
+| `share_price_reaction` | 1 | 1E-13 | 0 | 6,000 |
+
+The known-answer points are every known component of step 4's two worked examples and
+the six templates' worked examples, at low, base and high, against the Decimal result
+at the Decimal inputs (90 in all). The random points are 2,000 at each of three fixed
+seeds, log-uniform from 0.001 to 1E9 for amounts, counts and durations, uniform on
+[0, 1] for ratios, with 0, 1, 0.5 and 0.95 always among them (the complement's ends
+and Sterbenz's range), and for `capped_credit` the cap a quarter of, equal to and four
+times the uncapped credit, so both sides of the clip are tested more than a thousand
+times. Every twin is also shown monotone in each input in the direction the formula
+declares (1,000 points per input), and the complement and the cap exact.
+
+**Exact where nothing is uncertain.** A component whose every input is a point mass is
+computed once, by its Decimal formula, and that value, as the nearest binary64, is the
+same in every draw (`evaluated_by: decimal_constant`). So a run whose parameters are
+all point masses reproduces step 4 exactly: for each of step 4's known-answer fixtures
+and the six templates, each parameter collapsed to the value step 4 reads at low, base
+or high (a decreasing input's high at the low), the run's P10, P50, P90, mean and
+severe-but-plausible are step 4's figure, to the last digit, with a standard error of
+zero (`test_degenerate_distributions_reproduce_step_4_exactly`, 24 cases).
+
+### 25.4 The aggregation order
+
+Per draw, in this order, all in binary64:
+
+1. each known component, by its twin (or its Decimal constant); an unknown component
+   has no amount and is excluded, never zero, so its event and the scenario are
+   `complete: false` and read "at least", as in step 4;
+2. each event's **gross cash**, the sum of its cash components in component order, and
+   apart from it its **market value**, the sum of its market-value components: never
+   one into the other (`never_added_to_cash`);
+3. **insurance per event**: step 4's policy (section 17), applied to each event's own
+   gross components, once per occurrence: each covered family summed and capped at its
+   sublimit, the deductible off their total, the recovery capped at the limit and never
+   above the gross. The retention and the sublimits apply to each event,
+   **never to a year's sum or to the scenario's sum**
+   (`test_the_retention_is_applied_per_event_never_to_the_years_sum`,
+   `test_the_sublimit_is_applied_per_event_never_to_the_years_sum`, exact per year);
+4. the scenario's lines: the events' gross cash, market value, recovery and retained
+   cash, each summed in event order;
+5. with a frequency, each line's years: step 7a's `compound_annual`.
+
+Components sum to their event and events to the scenario per draw, bit for bit, not
+only in summary (`test_components_sum_to_their_event_and_events_to_the_scenario_per_draw`).
+The simulation adds no event and counts none twice: its events are exactly the
+scenario version's, an event key twice is refused (`duplicate_id`), and an occurrence
+realises every event once.
+
+**The limit is read per event, as step 4 reads it.** A policy's limit is an aggregate
+limit; reading it per event lets a year's recoveries, summed over its events, exceed
+it, which can understate the retained loss. The run measures how often:
+`aggregate_limit_exceeded_share` is the share of draws (of years) whose summed
+recoveries exceed the limit. A yearly aggregate cap is a decision for the owner
+(section 25.10).
+
+Every line is summarised by step 7a's `summarize` (section 23.5): P10, P50, P90, the
+mean with its standard error and band, the percentile bands and the
+severe-but-plausible percentile (P95 unless the run states another), with the
+invariants checked, and written as decimal strings (section 23.6). A line whose inputs
+include an infinite mean or variance reports no mean or no standard error, naming them.
+The record gives the scenario's gross cash, retained cash (under a policy; the
+headline then) and market value; each event's; and each component's.
+
+### 25.5 Frequency
+
+A scenario has a frequency where it holds a parameter named `frequency` (unit `count`,
+events a year) stating a count distribution. Then a draw is a simulated year of N
+occurrences, N from the frequency's own stream (`@frequency`), each occurrence every
+event of the scenario once, and the year's loss the sum of its occurrences'
+(`compound_annual`); the basis is `annual_loss`, each line's **expected annual
+exposure** is its mean, and the scenario's per-occurrence distribution is summarised
+beside it (`per_occurrence`). Its mean is E[N] times the per-occurrence mean, within
+four standard errors (`test_the_expected_annual_exposure_is_the_frequency_times_the_severity`).
+
+Without one, a run is **one occurrence per draw**: every event once, each given it
+happens (section 24.7), basis `per_occurrence`, and there is no expected annual
+exposure; the record says so rather than guessing a year.
+
+### 25.6 The stored result
+
+`SimulationResult`, append-only like every economics record, with no account column,
+going with its deployment:
+
+| Field | Holds |
+|---|---|
+| `scenario`, `deployment` | the scenario version run, and its deployment (`cross_tenant_reference` otherwise) |
+| `seed`, `draws`, `severe_percentile` | the seed as text (0 to 2^64 - 1: wider than a signed 64-bit column, never a double), the draws, the percentile |
+| `inputs`, `input_digest` | the canonical inputs (below) and `sha256:` of their canonical JSON |
+| `versions` | every version the figures rest on: the wiring, the rule, the variation, the twins and their tolerance, each formula, each catalogue distribution, the sampler, the bit generator, the stream domains, numpy |
+| `record`, `summaries`, `result_digest` | the whole record (schema `mythos.economics.scenario-simulation/v1`) and its digest; its scenario and event figures as decimal strings |
+| `status`, `refusal_code`, `refusal_detail` | `completed`, or `refused` with the code; never both (a check constraint) |
+| `started_at`, `finished_at`, `duration_ms` | the timing, outside both digests |
+
+The canonical inputs are every event and component with its formula and the parameter
+each input reads; every parameter with its values, unit, currency, source, evidence,
+dates, **stated distribution** and variation; the policy's terms and exclusions; the
+frequency; the severe-but-plausible percentile; the rules; and every version. They hold
+neither the seed nor the draws, which are columns of their own. Nothing in a result is
+a float (`result_malformed`), and both digests are recomputed on save
+(`digest_mismatch`).
+
+**Idempotent.** One row per scenario version, input digest, seed and draws
+(`uq_econ_simulation_inputs`): the same inputs return the row already recorded and
+never run or write a second; two runs racing past that read are stopped by the check
+and by the constraint, and the later returns the first's row. A version change (numpy
+included) is a new input digest, so a new row, never an old one returned. The same
+seed gives the same digests, a different seed a different result digest, and two
+interpreters with different `PYTHONHASHSEED` the same.
+
+A refusal the inputs decide (no admissible distribution, no twin, a malformed stated
+distribution, the values budget) is recorded, and the same inputs return it. One they
+do not decide (the time budget, memory, a broken invariant, a fault, an engine that
+will not import) is returned and never recorded.
+
+### 25.7 The service
+
+`simulation_service.simulate_scenario(scenario, *, seed, draws=100_000,
+severe_percentile=95)` loads the scenario version as the scenario engine reads it: its
+events in key order, each component recomputed from the rows it cites; the policy of
+the parameter-set version its build names; each cited row's stated distribution; the
+set's variables and terms as shared and the effects' attributes per occurrence; and
+its frequency row. It looks up the result of the same identity, runs the pure engine if
+there is none, and records the result. It returns a `SimulationOutcome` (the result,
+whether this call recorded it, and the code and detail of a refusal), and **never
+raises**: every failure comes back with its code (`engine_unavailable`,
+`time_over_budget`, `memory_exhausted`, `invariant_broken`, `simulation_failed`, or the
+engine's). It imports the engine, and numpy, only when called, and nothing Django
+loads at start imports it (section 23.10).
+
+### 25.8 Limits and timing
+
+Step 7a's limits hold: 1,000 to 1,000,000 draws (`draws_out_of_range`), at most
+10,000,000 occurrences across a compound run's years (`events_over_limit`), and at most
+30,000,000 values held at once (`values_over_budget`), counted before anything is
+sampled (in a compound run, once the years' counts are drawn and before any parameter
+is) by `values_held`, stage by stage: drawing and evaluating (each drawn parameter
+until its last reader is evaluated, when its draws are let go, the components so far,
+and 7a's three temporaries), insurance (the components, the lines, the drawn policy
+terms and four temporaries) and the summaries (the components, the lines and two). A
+scenario of one event holds its event's lines as the scenario's, never copies. A run is
+bounded in time by `TIME_BUDGET_SECONDS` (120), checked between its stages through a
+callable the service passes, so the pure engine reads no clock.
+
+Measured on the build machine (4 cores, numpy 2.3.3), each run sampled twice as step
+7a does, on the largest template (cross-customer data exposure: seven components, 17
+drawn parameters, 11 of them stated and 6 expert PERTs, a policy with a sublimit and
+an exclusion): **100,000 draws in 0.32 s** (median of three; 15 MB traced peak);
+1,000,000 draws in 3.6 s (145 MB, inside its counted 168 MB); 100,000 simulated years
+of a Poisson(3) frequency (about 300,000 occurrences) in 0.65 s (44 MB). The test of
+a default run allows 60 s, so it catches a per-draw Python loop and never CI load.
+
+### 25.9 What is still not done
+
+- **Step 8**: sensitivity analysis and the most sensitive variables;
+  the confidence grade (the expert parameters are listed, not yet downgraded);
+  the Validity Card (the owner's specification, section 8);
+  the signed receipt (the Financial Exposure Receipt).
+- **No route.** Step 6 serves reports and scenario endpoints, and will call the
+  service.
+- **No writer states a distribution or a frequency yet.** The column and the
+  frequency parameter are read and checked, but neither the parameter-set API nor the
+  builder's request takes them, so a stored scenario's ranges resolve by the rule:
+  point masses, expert PERTs, and a refusal for every other range. A parameter-set
+  version's content digest does not cover a distribution, since none is written there.
+- **No dependency between parameters** beyond the sharing of section 25.2: no copula,
+  no shared-cause event, no correlation between events.
+- **One frequency per scenario**, not one per event; every occurrence realises every
+  event.
+- **The limit is read per event** (section 25.4), with no yearly aggregate cap.
+- **One currency per run**: the build's; nothing converts inside it, and currency
+  uncertainty stays separate (section 3, rule 6).
+
+### 25.10 Decisions this step takes, which the owner may change
+
+1. The parameter-to-distribution rule of section 25.1: a stated distribution, else a
+   point mass, else PERT (weight 4) for an `EXPERT_ESTIMATE` range only, else refused.
+   Every other range (a customer's, a benchmark's, an observed or calculated one) must
+   state its distribution before it is simulated.
+2. The parameter set's variables, the policy's terms and the frequency are shared
+   across a year's occurrences; an effect's attributes vary per occurrence.
+3. A scenario's frequency is one parameter named `frequency`, and each occurrence
+   realises every event of the scenario once.
+4. Insurance is applied per event occurrence, as step 4 applies it, the limit
+   included; the share of draws whose recoveries exceed the limit is reported.
+5. The twins' tolerance is 1E-13 relative, against the Decimal formula at the binary64
+   inputs; a component with no uncertain input is computed by its Decimal formula.
+6. A refusal the inputs decide is recorded; one they do not decide is not.
+7. The run's time budget is 120 s, checked between stages.
+8. Every version, numpy's included, is part of the canonical inputs, so a version
+   change is a new stored result, never an old one returned.

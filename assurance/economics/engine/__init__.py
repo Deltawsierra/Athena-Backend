@@ -33,7 +33,11 @@ fixtures and the tests all read the same codes:
 - :mod:`.parameter_set` (scenarios): the customer parameter set's typed schema;
 - :mod:`.templates` (the builder): the banking pack's six templates, the effect
   attributes and vocabularies, scope and precedence. Imported by the builder only,
-  never on Django's load path.
+  never on Django's load path;
+- :mod:`.distributions`, :mod:`.simulation` (phase E2): the distribution catalogue
+  and the seeded Monte Carlo sampler; :mod:`.twins` and :mod:`.scenario_simulation`
+  (MVP step 7b): the formulas' vectorised twins and a scenario simulated through
+  them. These import numpy, and nothing on Django's load path imports them.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of
