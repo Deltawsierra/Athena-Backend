@@ -176,14 +176,18 @@ class RequestsTransport:
     def post(self, url: str, *, headers: dict, json: dict) -> Response:
         # Imported lazily so merely importing this package pulls in no HTTP client
         # and, more to the point, so nothing here can be mistaken for a call site.
-        import requests
+        # safety.outbound follows no redirect (a push is a write to the URL the
+        # binding names; a redirect carried its token header to wherever Location
+        # pointed), reads no .netrc or proxy from the environment, and quotes no
+        # URL path -- a webhook's secret -- or token in an error.
+        from safety import outbound
 
-        return self.within_deadline(requests.post, url, headers=headers, json=json, timeout=self.timeout)
+        return self.within_deadline(outbound.post, url, headers=headers, json=json, timeout=self.timeout)
 
     def get(self, url: str, *, headers: dict, params: dict | None = None) -> Response:
-        import requests
+        from safety import outbound
 
-        return self.within_deadline(requests.get, url, headers=headers, params=params, timeout=self.timeout)
+        return self.within_deadline(outbound.get, url, headers=headers, params=params, timeout=self.timeout)
 
     def within_deadline(self, call, *args, **kwargs):
         """``call(*args, **kwargs)``, or :class:`DeadlineExceeded` once the deadline passes."""

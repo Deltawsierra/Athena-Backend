@@ -591,6 +591,67 @@ includes, `\` continuations and `--hash` options, setup.py through `ast` --
 probes both ranges' edges so an exact pin inside an affected range is seen, and
 fails on any declaration it cannot read rather than passing over it.
 
+## Where a secret cannot go
+
+A credential this service holds or is sent reaches no answer, record, export,
+e-mail, log, file, span or command output: a connector's or posture binding's
+token, the key they are encrypted under, the engine's `X-API-Key`, the closure
+forward's `MINOTAUR_OUTCOMES_KEY`, the gate's and the observed-effect service's
+tokens, the closure-evidence and failsafe tokens, a signing key, a proxy's
+userinfo, a password. And an error page says that something failed, never what it
+was given or what the exception said.
+
+`tests/test_no_planted_secret_leaves_through_a_sink.py` holds the service to that.
+It plants a distinct canary in every one of those origins, and in what a tenant
+sends (a request body, a scan target's userinfo, an uploaded file, a closure
+document); drives a scan that completes, fails, times out and is reconciled, and
+is stopped (its Stop delivered, and owed and delivered by `deliver_owed_stops`),
+connector pushes and posture reads that succeed, fail and run past their
+deadline, a closure forwarded and retried, the gate's read, an observed effect, a
+signed receipt, the failsafe's poll and a stop draft, uploads, every outbound call
+with a credentialed proxy in the environment, and a route that raises; and then
+searches every sink whole, in every encoding (the engines' search, Athena-Engine
+#76): every API answer, receipt and pack, the PDFs, e-mail, every record of every
+logger at every level with stdout and stderr, every row of every model, every file
+under `MEDIA_ROOT`, every span, and every management command's output. A route,
+model, management command, file writer, log configuration or span attribute it
+does not classify fails it, so a new sink cannot ship unchecked. What a tenant
+sends is the record itself in most of those places; where it is found is printed
+(`test_the_observed_matrix`), never claimed absent.
+
+Every request this service sends with `requests` itself -- to the engine, from the
+defender gateway, to a customer's connector or posture source, and the closure
+forward to Minotaur -- goes through `safety/outbound.py`: no `.netrc` login is
+read, an error is cut to the scheme, host and port of any URL in it with every
+header value withheld, and an answer is read with every credential the request
+carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
+
+- **The engine** (the engine client: a scan's launch, its status, its Stop, file
+  uploads and every other engine call; and the defender gateway's `/defend`, which
+  asks the same engine) follows a redirect only while it stays on
+  the engine's host: a 307 or 308, and a 301, 302 or 303 answering a GET, to the
+  same host (compared case-insensitively after IDNA) at any port, with the scheme
+  kept or moved from http to https, at most three hops, sending the method, body
+  and key again. Another host, https to http, a 301, 302 or 303 answering a POST,
+  and a fourth hop are refused and nothing is sent where they point. It is
+  reached through the proxy the process environment names (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY`, read by `urllib.request.getproxies()`), and directly
+  for a host `NO_PROXY` names; a proxy's userinfo is withheld from every error
+  and answer. An engine a deployment reaches only through its proxy, or that
+  moved its stop route or onto https, still hears a scan's Stop.
+- **Everything else** -- a connector, a posture source, the closure forward --
+  follows no redirect at all and reads no proxy: a deployment
+  that reached a connector or posture source through `HTTP_PROXY` or `HTTPS_PROXY`
+  must reach it directly, and a call site that comes to need a proxy names it in
+  a setting of its own.
+
+A scan target's login (`user:password@` in its URL) is kept on the scan, since a
+reconcile sends the launch again unchanged, and is withheld from every error the
+engine client raises for a call carrying it, and from every text the scan stores
+or answers: an engine's refusal may quote the launch back. It is never withheld
+from the engine's answer before it is read, so a login can never rewrite the run
+id a Stop names.
+
 ## Before deploying
 
 ```bash

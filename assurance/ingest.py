@@ -412,7 +412,7 @@ def deployment_for_scan(scan) -> Deployment:
         )
         return deployment
     deployment, _ = Deployment.objects.get_or_create(
-        name=f"target:{host or scan.target_url}",
+        name=f"target:{host or scan.target_shown}",
         engagement__isnull=True,
         defaults={"owner_id": owner_id},
     )

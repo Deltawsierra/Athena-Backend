@@ -63,7 +63,7 @@ NOT_A_RESULT = [
 @pytest.mark.parametrize(("body", "expected"), NOT_A_RESULT)
 def test_a_get_that_is_not_a_result_is_an_engine_error(client, body, expected):
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.get",
+        "ai_engine.services.cyberengine_client.outbound.get",
         return_value=_response(200, body),
     ), pytest.raises(EngineError) as raised:
         client._get("/api/scans/abc")
@@ -75,7 +75,7 @@ def test_a_get_that_is_not_a_result_is_an_engine_error(client, body, expected):
 @pytest.mark.parametrize(("body", "expected"), NOT_A_RESULT)
 def test_a_post_that_is_not_a_result_is_an_engine_error(client, body, expected):
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.post",
+        "ai_engine.services.cyberengine_client.outbound.post",
         return_value=_response(200, body),
     ), pytest.raises(EngineError) as raised:
         client.classify_cve("CVE-2024-0001")
@@ -91,7 +91,7 @@ def test_a_log_file_upload_that_is_not_a_result_is_an_engine_error(client, body,
     _post, which is exactly how a reader loses track of one.
     """
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.post",
+        "ai_engine.services.cyberengine_client.outbound.post",
         return_value=_response(200, body),
     ), pytest.raises(EngineError) as raised:
         client.defend_log_file(b"an auth log", "auth.log")
@@ -109,7 +109,7 @@ def test_a_scan_the_engine_answered_badly_is_an_engine_error_not_an_attribute_er
     past every handler, naming nothing about the engine.
     """
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.post",
+        "ai_engine.services.cyberengine_client.outbound.post",
         return_value=_response(200, "null"),
     ), pytest.raises(EngineError):
         client.run_scan("https://customer.example")
@@ -121,7 +121,7 @@ def test_an_engine_that_answers_properly_is_still_read(client):
     above and breaks the product.
     """
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.post",
+        "ai_engine.services.cyberengine_client.outbound.post",
         return_value=_response(200, '{"done": true, "result": {"findings": []}}'),
     ):
         assert client.run_scan("https://customer.example") == {"findings": []}
@@ -134,7 +134,7 @@ def test_a_long_bad_body_is_quoted_in_full_size_but_not_in_full(client):
     """
     body = "x" * 40000
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.get",
+        "ai_engine.services.cyberengine_client.outbound.get",
         return_value=_response(200, body),
     ), pytest.raises(EngineError) as raised:
         client._get("/api/scans/abc")
@@ -147,7 +147,7 @@ def test_a_long_bad_body_is_quoted_in_full_size_but_not_in_full(client):
 def test_a_long_error_body_is_quoted_in_full_size_but_not_in_full(client):
     """The same bound on the non-2xx path, which quotes the body as well."""
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.get",
+        "ai_engine.services.cyberengine_client.outbound.get",
         return_value=_response(500, "y" * 40000),
     ), pytest.raises(EngineError) as raised:
         client._get("/api/scans/abc")
@@ -167,7 +167,7 @@ def test_an_unreachable_engine_keeps_its_cause(client, method):
     """
     boom = requests.ConnectionError("connection refused")
     with mock.patch(
-        f"ai_engine.services.cyberengine_client.requests.{method}", side_effect=boom
+        f"ai_engine.services.cyberengine_client.outbound.{method}", side_effect=boom
     ), pytest.raises(EngineError) as raised:
         if method == "get":
             client._get("/api/scans/abc")
@@ -180,7 +180,7 @@ def test_an_unreachable_engine_keeps_its_cause(client, method):
 def test_an_unreachable_engine_keeps_its_cause_on_the_file_upload(client):
     boom = requests.ConnectionError("connection refused")
     with mock.patch(
-        "ai_engine.services.cyberengine_client.requests.post", side_effect=boom
+        "ai_engine.services.cyberengine_client.outbound.post", side_effect=boom
     ), pytest.raises(EngineError) as raised:
         client.defend_log_file(b"an auth log", "auth.log")
 

@@ -85,3 +85,52 @@ use = "Not reached: no client here builds a urllib3 PoolManager or relies on its
 tests = [
   "tests/test_no_client_here_meets_an_advisory_s_precondition.py::test_no_client_here_disables_redirects_through_a_pool_manager",
 ]
+
+[[advisory]]
+id = "GHSA-2xpw-w6gg-jr37"
+dependency = ["urllib3"]
+summary = "Streaming API improperly handles highly compressed data (CVE-2025-66471)"
+affected = [">=1.0,<2.6.0"]
+fixed = ["2.6.0"]
+installed = true
+use = "The defender gateway reads the engine's answer through urllib3's streaming API (read1 with decode_content) and stops at 64 KiB; below 2.6.0 a compressed answer was decoded whole in one operation first. requirements.txt pinned 2.5.0."
+tests = [
+  "tests/test_the_defender_reads_a_compressed_answer_in_bounded_memory.py::test_a_compressed_answer_past_the_limit_is_refused_in_bounded_memory",
+]
+
+[[advisory]]
+id = "GHSA-mf9v-mfxr-j63j"
+dependency = ["urllib3"]
+summary = "Decompression-bomb safeguards bypassed in parts of the streaming API (CVE-2026-44432)"
+affected = [">=2.6.0,<2.7.0"]
+fixed = ["2.7.0"]
+installed = true
+use = "The same read: the defender gateway's streamed read of the engine's answer."
+tests = [
+  "tests/test_the_defender_reads_a_compressed_answer_in_bounded_memory.py::test_a_compressed_answer_past_the_limit_is_refused_in_bounded_memory",
+]
+
+[[advisory]]
+id = "GHSA-gh4c-6fx4-qh6g"
+dependency = ["urllib3"]
+summary = "Chunked Deflate streaming can enter an infinite loop (CVE-2026-97688)"
+affected = [">=2.6.2,<2.8.0"]
+fixed = ["2.8.0"]
+installed = true
+use = "The same read, which a deflate-encoded answer from the engine reaches; it is bounded by the gateway's deadline, on a thread of its own."
+tests = [
+  "tests/test_the_defender_reads_a_compressed_answer_in_bounded_memory.py::test_a_compressed_answer_past_the_limit_is_refused_in_bounded_memory",
+]
+
+[[advisory]]
+id = "GHSA-qccp-gfcp-xxvc"
+dependency = ["urllib3"]
+summary = "Sensitive headers forwarded across origins in proxied low-level redirects (CVE-2026-44431)"
+affected = [">=1.23,<2.7.0"]
+fixed = ["2.7.0"]
+installed = true
+use = "Not reached: no client here builds a ProxyManager or follows a redirect at all (safety/outbound.py)."
+tests = [
+  "tests/test_no_client_here_meets_an_advisory_s_precondition.py::test_no_client_here_disables_redirects_through_a_pool_manager",
+  "tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py::test_a_redirect_to_another_origin_carries_none_of_its_headers",
+]
