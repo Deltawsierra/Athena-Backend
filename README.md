@@ -465,13 +465,15 @@ at start imports it or numpy.
 `assurance/economics/validity_service.py` takes a stored `SimulationResult` (section
 26): it ranks the parameters by their contribution to the variance of the gross cash
 loss, on the run's own draws, with a P10/P90 tornado; grades the run A, B, C, D or
-Unknown from its evidence mix, each parameter weighted by that importance, with
-spec-v1's downgrades; and records the Financial Exposure Validity Card, every field of
-the owner's table, once per result. `assurance/economics/receipt_service.py` builds the
-signed Financial Exposure Receipt with `mythos_core.exposure_receipt`, has the engine
-sign it as it signs assurance receipts, records it once per result, and verifies a
-stored one, refusing a tampered card, result, source snapshot or signature with its
-code. Neither serves a route yet or raises, and nothing Django loads at start imports
+Unknown from its evidence mix, each figure, fixed or ranged, weighted by its share of
+the base-case level, with spec-v1's downgrades and every figure's freshness; and
+records the Financial Exposure Validity Card, every field of the owner's table, once
+per result. `assurance/economics/receipt_service.py` builds the signed Financial
+Exposure Receipt with `mythos_core.exposure_receipt`, has the engine sign it as it
+signs assurance receipts, records it once per result only after it verifies against
+the engine's published economics-receipt keys, and verifies a stored one against the
+release it was made under, refusing a tampered card, result, source snapshot,
+signature or row with its code. Neither serves a route yet or raises, and nothing Django loads at start imports
 either.
 
 ## When a dependency fails

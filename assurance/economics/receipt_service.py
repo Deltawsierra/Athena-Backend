@@ -24,21 +24,26 @@ first where none is recorded), and binds them in one document:
 It is SIGNED on the path the backend's signed assurance receipts take: the
 backend holds no signing key, and asks the engine (``CyberEngineClient``) to
 sign. The envelope that comes back must be exactly one signature over exactly the
-document, under the receipt's own payload type, before it is stored. A signer can
-be handed in (the tests' keys); a keyring can be handed in to verify the
-signature before anything is recorded.
+document, under the receipt's own payload type, and it must VERIFY with core's
+verifier against the caller's ``ReceiptKeyring`` of the engine's published
+economics-receipt keys (:func:`keyring_from_published`) before it is stored: no
+signature nobody has checked is ever recorded, and without a keyring nothing is
+recorded or returned. A signer can be handed in (the tests' keys).
 
 The receipt is recorded append-only, one per result: the same result returns
-the same row. A receipt that cannot be built (no expected annual exposure without
+the same row, where it verifies; one that does not is never returned, and never
+overwritten. A receipt that cannot be built (no expected annual exposure without
 a frequency, no system fingerprint, a seed past 2^53 - 1, a stored snapshot whose
 digest no longer reproduces) or signed is returned with its code and never
 recorded. **Never raises.**
 
 :func:`verify_stored_receipt` verifies a stored receipt against a
 ``ReceiptKeyring`` and refuses, with a code, a forged or wrongly keyed envelope
-(core's verdicts), a card that is not the one it names, a result whose record or
-figures changed, a source snapshot, model build or evidence that no longer
-reproduces, and a card that its stored rows no longer rebuild.
+(core's verdicts), a row moved or relabelled, a card that is not the one it names, a
+result whose inputs, record or figures changed, a source snapshot, model build or
+evidence that no longer reproduces, and a card that its stored rows no longer
+rebuild under the release it was made under. A change of today's release is the
+note ``release_changed`` on an otherwise authentic receipt, never tampering.
 
 Nothing here is on a stop path; nothing Django loads at start imports it, and it
 imports ``mythos_core.exposure_receipt`` and the engine only when called.
@@ -89,6 +94,17 @@ REFUSALS = {
         "what the signer returned is not one signature over exactly the receipt, under the receipt's payload type"
     ),
     "card_unavailable": "the result has no Validity Card, and none could be issued",
+    "keyring_unavailable": (
+        "no receipt keyring to check the signature with: a receipt is recorded, or a recorded one returned, only "
+        "once its signature verifies against the engine's published economics-receipt keys"
+    ),
+    "recorded_receipt_unverified": (
+        "the receipt recorded for this result does not verify: it is not returned, and never overwritten"
+    ),
+    "receipt_row_mismatch": (
+        "the stored row's deployment, scenario, result, card, receipt id, key id or instant are not the ones its "
+        "result, card, document and envelope name"
+    ),
     "receipt_failed": "an unexpected fault: nothing was recorded",
     "receipt_mismatch": "the stored document is not the payload the envelope signs, or names another scenario or tenant",
     "result_digest_mismatch": "the stored result's record no longer gives its result digest",
@@ -130,6 +146,9 @@ class ReceiptCheck:
     verified: bool
     code: str
     reason: str
+    #: What is true of an otherwise authentic receipt and is not tampering:
+    #: ``release_changed`` where today's release differs from the one it was made under.
+    notes: tuple[str, ...] = ()
 
 
 def _core():
@@ -227,7 +246,8 @@ def _fields(result: SimulationResult, card: FinancialValidityCard) -> dict:
     fingerprint = card.card["fields"]["system_fingerprint"]["value"]
     if not fingerprint:
         raise ReceiptRefused("system_fingerprint_unavailable", card.card["fields"]["system_fingerprint"]["statement"])
-    release = validity_service.model_release(result.versions)
+    # The release the card records it was made under, never today's.
+    release = card.card["fields"]["model_version"]
     return {
         "scenario_id": str(scenario.uuid),
         "tenant_id": str(deployment.uuid),
@@ -247,6 +267,38 @@ def _fields(result: SimulationResult, card: FinancialValidityCard) -> dict:
 
 
 # ------------------------------------------------------------------ signing
+
+
+#: Published keys of these statuses verify; a revoked key verifies nothing (the
+#: engine's artifact keyring, ``engine.evidence.keyring``).
+VERIFYING_STATUSES = frozenset({"active", "retired"})
+
+
+def _published_keys(document) -> list[bytes]:
+    if not isinstance(document, dict) or not isinstance(document.get("keys"), dict):
+        raise ValueError("a published keyring is an object with a keys object")
+    keys = []
+    for key_id, entry in sorted(document["keys"].items()):
+        if not isinstance(entry, dict) or entry.get("status") not in VERIFYING_STATUSES | {"revoked"}:
+            raise ValueError(f"key {key_id!r} has no status the keyring publishes")
+        if entry["status"] in VERIFYING_STATUSES:
+            keys.append(base64.b64decode(entry["public_key"], validate=True))
+    return keys
+
+
+def keyring_from_published(receipt_keys, *, other_roles):
+    """The ``ReceiptKeyring`` a receipt is checked with, from the engine's
+    published keyrings (its artifact-keyring document form: ``keys`` by key id,
+    each a base64 ``public_key`` and a ``status``): ``receipt_keys`` is the
+    keyring of the ``economics-receipt`` role, and ``other_roles`` maps every other
+    role the engine publishes to its keyring, so a receipt signed by one of them
+    is refused as ``wrong_role``. A revoked key is left out: it verifies nothing.
+    Raises core's ``ReceiptError`` or ``ValueError`` for a keyring it cannot read."""
+    core, _ = _core()
+    return core.receipt_keyring(
+        _published_keys(receipt_keys),
+        other_roles={role: _published_keys(document) for role, document in other_roles.items()},
+    )
 
 
 def engine_signer(document: dict) -> dict:
@@ -287,10 +339,13 @@ def envelope_problem(document: dict, envelope) -> str | None:
 # -------------------------------------------------------------------- issue
 
 
-def issue_receipt(result: SimulationResult, *, signer=None, keyring=None) -> ReceiptOutcome:
-    """The signed receipt of ``result``: the one recorded, or one built, signed by
-    ``signer`` (the engine unless given), checked against ``keyring`` where one is
-    given, and recorded now. Never raises: see the module's rules."""
+def issue_receipt(result: SimulationResult, *, keyring=None, signer=None) -> ReceiptOutcome:
+    """The signed receipt of ``result``: the one recorded, where it verifies against
+    ``keyring``, or one built, signed by ``signer`` (the engine unless given),
+    verified against ``keyring`` and only then recorded. ``keyring`` is the
+    ``ReceiptKeyring`` of the engine's published economics-receipt keys
+    (:func:`keyring_from_published`); without one nothing is recorded or returned
+    (``keyring_unavailable``). Never raises: see the module's rules."""
     try:
         return _issue(result, signer or engine_signer, keyring)
     except Exception as error:  # noqa: BLE001 - the service never raises: a fault is returned with its code
@@ -298,8 +353,19 @@ def issue_receipt(result: SimulationResult, *, signer=None, keyring=None) -> Rec
 
 
 def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
+    try:
+        core, _ = _core()
+    except Exception as error:  # noqa: BLE001 - an import fault is a returned refusal
+        return ReceiptOutcome(None, False, "receipt_failed", f"{type(error).__name__}: {error}")
+    if type(keyring) is not core.ReceiptKeyring:
+        return ReceiptOutcome(None, False, "keyring_unavailable", f"a {type(keyring).__name__}, not a ReceiptKeyring")
     found = FinancialExposureReceipt.objects.filter(simulation=result).first()
     if found is not None:
+        # A recorded receipt is returned only where it verifies: one that does not
+        # is said so, never returned as the result's receipt, and never overwritten.
+        check = verify_stored_receipt(found, keyring)
+        if not check.verified:
+            return ReceiptOutcome(None, False, "recorded_receipt_unverified", f"{check.code}: {check.reason}")
         return ReceiptOutcome(found, False)
     if result.status != SIMULATION_COMPLETED:
         return ReceiptOutcome(None, False, "result_not_completed", f"refused: {result.refusal_code}")
@@ -307,10 +373,6 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
     if issued.card is None:
         return ReceiptOutcome(None, False, issued.code or "card_unavailable", issued.detail)
     card = issued.card
-    try:
-        core, _ = _core()
-    except Exception as error:  # noqa: BLE001 - an import fault is a returned refusal
-        return ReceiptOutcome(None, False, "receipt_failed", f"{type(error).__name__}: {error}")
     try:
         document = core.build_receipt(**_fields(result, card))
     except (ReceiptRefused, EconomicsRefused) as refused:
@@ -324,10 +386,11 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
     problem = envelope_problem(document, envelope)
     if problem is not None:
         return ReceiptOutcome(None, False, "envelope_not_over_receipt", problem)
-    if keyring is not None:
-        verdict = core.verify_receipt(envelope, keyring, card=card.card)
-        if not verdict.authentic:
-            return ReceiptOutcome(None, False, verdict.code, verdict.reason)
+    # Never record a signature nobody has checked: core's verifier, against the
+    # published keys, before the row is written.
+    verdict = core.verify_receipt(envelope, keyring, card=card.card)
+    if not verdict.authentic:
+        return ReceiptOutcome(None, False, verdict.code, verdict.reason)
     row = FinancialExposureReceipt(
         deployment_id=result.deployment_id,
         scenario_id=result.scenario_id,
@@ -336,7 +399,7 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
         receipt_id=document["receipt_id"],
         document=document,
         envelope=envelope,
-        key_id=envelope["signatures"][0]["keyid"][:128],
+        key_id=envelope["signatures"][0]["keyid"],
         generated_at=_instant(document["generated_at"]),
     )
     try:
@@ -349,6 +412,9 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
         found = FinancialExposureReceipt.objects.filter(simulation=result).first()
         if found is None:
             raise
+        check = verify_stored_receipt(found, keyring)
+        if not check.verified:
+            return ReceiptOutcome(None, False, "recorded_receipt_unverified", f"{check.code}: {check.reason}")
         return ReceiptOutcome(found, False)
     return ReceiptOutcome(row, True)
 
@@ -385,11 +451,23 @@ def _verify(receipt: FinancialExposureReceipt, keyring) -> ReceiptCheck:
     if not verdict.authentic:
         return _refused(verdict.code, verdict.reason)
     document = verdict.receipt
+    # 2. The row is the one its result, card, document and envelope name.
+    row = (receipt.deployment_id, receipt.scenario_id, receipt.simulation_id, receipt.receipt_id, receipt.key_id,
+           receipt.generated_at)
+    named = (result.deployment_id, result.scenario_id, card.simulation_id, document["receipt_id"],
+             receipt.envelope["signatures"][0]["keyid"], _instant(document["generated_at"]))
+    if row != named or (card.deployment_id, card.scenario_id) != (result.deployment_id, result.scenario_id) \
+            or verdict.key_id != receipt.key_id:
+        return _refused("receipt_row_mismatch")
     if document != receipt.document:
         return _refused("receipt_mismatch", "the stored document is not the signed payload")
-    # 2. The result: its record still gives its digest, and the card and the
-    # receipt name its figures, seed, draws and digests.
-    if result.status != SIMULATION_COMPLETED or canonical_digest(result.record) != result.result_digest:
+    # 3. The result: its inputs and its record still give their digests, and the
+    # card and the receipt name its figures, seed, draws and digests.
+    if (
+        result.status != SIMULATION_COMPLETED
+        or canonical_digest(result.inputs) != result.input_digest
+        or canonical_digest(result.record) != result.result_digest
+    ):
         return _refused("result_digest_mismatch")
     reproduction = card.card["fields"]["reproduction"]
     held = (
@@ -416,7 +494,8 @@ def _verify(receipt: FinancialExposureReceipt, keyring) -> ReceiptCheck:
         return _refused("result_mismatch", "the stored result has no figure the receipt names")
     if {name: document["result"][name]["amount"] for name in FIGURES} != figures:
         return _refused("result_mismatch", "the receipt's figures are not the stored result's")
-    # 3. The identity, the model build, the source snapshots and the evidence.
+    # 4. The identity, the model build (the release the card records), the source
+    # snapshots and the evidence.
     fields = _fields_or_refusal(result, card)
     if isinstance(fields, ReceiptCheck):
         return fields
@@ -424,16 +503,29 @@ def _verify(receipt: FinancialExposureReceipt, keyring) -> ReceiptCheck:
         return _refused("receipt_mismatch", "another scenario or tenant")
     if document["system_fingerprint"] != fields["system_fingerprint"]:
         return _refused("fingerprint_mismatch")
-    if document["model"] != {"version": fields["model_version"], "build_digest": fields["model_build_digest"]}:
+    recorded = card.card["fields"]["model_version"]
+    release = recorded.get("release") or {}
+    if (
+        document["model"] != {"version": recorded["version"], "build_digest": recorded["build_digest"]}
+        or canonical_digest(release) != recorded["build_digest"]
+        or release.get("engine") != result.versions
+    ):
         return _refused("model_build_mismatch")
     if document["sources"] != fields["sources"]:
         return _refused("source_snapshot_mismatch", "a source snapshot's content hash is not the one signed")
     if document["evidence"] != fields["evidence"]:
         return _refused("evidence_mismatch")
-    # 4. The card: its stored rows rebuild it exactly.
-    if not validity_service.reproduces(card):
+    # 5. The card: where the code is today's release, its stored rows rebuild it
+    # exactly. Where the release has changed since, the card cannot be rebuilt by
+    # today's code, and that is said beside the verdict, never read as tampering.
+    notes = ()
+    if validity_service.release_changed(card):
+        notes = ("release_changed",)
+    elif not validity_service.reproduces(card):
         return _refused("card_not_reproduced")
-    return ReceiptCheck(True, core.AUTHENTIC, "verified: the signature, the card, the result and every snapshot")
+    return ReceiptCheck(
+        True, core.AUTHENTIC, "verified: the signature, the row, the card, the result and every snapshot", notes
+    )
 
 
 def _fields_or_refusal(result, card):
@@ -452,6 +544,7 @@ __all__ = [
     "engine_signer",
     "envelope_problem",
     "issue_receipt",
+    "keyring_from_published",
     "source_snapshots",
     "spine_evidence",
     "verify_stored_receipt",

@@ -46,6 +46,7 @@ from assurance.economics.models import (
     LossEvent,
     ScenarioBuild,
     SimulationResult,
+    canonical_digest,
     card_digest,
 )
 from assurance.models import Asset, Deployment, Finding
@@ -261,24 +262,27 @@ def test_the_card_invents_no_value_and_says_what_has_no_data(deployment, people)
     assert fields["system_fingerprint"]["value"] == FINGERPRINT and fields["system_fingerprint"]["binding"] == "scenario"
     assert fields["model_version"]["inventory"]["entry"] is None
     assert "no model inventory entry" in fields["model_version"]["inventory"]["statement"]
-    assert fields["model_version"]["engine"] == result.versions
+    assert fields["model_version"]["release"]["engine"] == result.versions
+    assert fields["model_version"]["build_digest"] == canonical_digest(fields["model_version"]["release"])
     reproduction = fields["reproduction"]
     assert (reproduction["seed"], reproduction["draws"], reproduction["input_digest"], reproduction["result_digest"],
             reproduction["outcomes_sha256"]) == (result.seed, result.draws, result.input_digest, result.result_digest,
                                                  record["outcomes_sha256"])
     assert reproduction["sensitivity_digest"] == card.sensitivity_digest
-    # The shares are the grade's evidence mix, weighed by importance.
+    # The shares are the grade's evidence mix, weighed by each figure's share of the level.
     mix = card.card["evidence_mix"]
     assert fields["customer_specific_share"]["share"] == mix["customer"]
     assert fields["benchmark_derived_share"]["share"] == mix["benchmark"]
     assert Decimal(fields["expert_estimated_share"]["share"]) == Decimal(mix["expert"]) + Decimal(mix["unsourced"])
-    # Every customer figure the gross reads is listed with its weight: the parameter
-    # set's point masses carry none, the regulatory range carries its importance.
-    weights = {e["name"]: Decimal(e["importance"]) for e in fields["customer_specific_share"]["parameters"]}
-    assert set(weights) == {"exposure.regulatory_response_cost", "notification_fixed_cost", "notification_unit_cost"}
-    assert weights["notification_fixed_cost"] == weights["notification_unit_cost"] == 0
-    assert weights["exposure.regulatory_response_cost"] > 0
-    assert abs(weights["exposure.regulatory_response_cost"] - Decimal(mix["customer"])) < Decimal("0.000001")
+    # Every customer figure the gross reads is listed with its level share, the
+    # parameter set's fixed figures as much as the regulatory range (review round 1,
+    # H1), and its importance beside it: a fixed figure has none.
+    entries = {e["name"]: e for e in fields["customer_specific_share"]["parameters"]}
+    assert set(entries) == {"exposure.regulatory_response_cost", "notification_fixed_cost", "notification_unit_cost"}
+    assert all(Decimal(e["level_share"]) > 0 for e in entries.values())
+    assert Decimal(entries["notification_fixed_cost"]["importance"]) == 0
+    total = sum(Decimal(e["level_share"]) for e in entries.values())
+    assert abs(total - Decimal(mix["customer"])) < Decimal("0.000001")
     # The parameter set's point masses are fixed, and the analysis says so.
     assert {f["name"] for f in card.sensitivity["fixed"]} >= {"notification_fixed_cost", "notification_unit_cost"}
 
@@ -377,7 +381,9 @@ def test_a_refused_run_is_carded_unknown(deployment, people):
     assert fields["unknown_variables"]["refusal"]["code"] == "no_admissible_distribution"
     assert validity_service.reproduces(card)
     # And no receipt: a refused run has no figures to sign.
-    receipt = receipt_service.issue_receipt(outcome.result, signer=_signer(Ed25519PrivateKey.generate()))
+    key = Ed25519PrivateKey.generate()
+    receipt = receipt_service.issue_receipt(outcome.result, signer=_signer(key),
+                                            keyring=core.receipt_keyring([_raw(key)], other_roles={}))
     assert receipt.receipt is None and receipt.code == "result_not_completed"
 
 
@@ -537,7 +543,7 @@ def test_the_engine_signs_on_the_assurance_receipts_path(deployment, people, key
             raise EngineError("Engine refused (404)")
 
     monkeypatch.setattr(CyberEngineClient, "from_settings", classmethod(lambda cls: Down()))
-    outcome = receipt_service.issue_receipt(result)
+    outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "signer_unavailable"
     assert not FinancialExposureReceipt.objects.exists()
     monkeypatch.setattr(CyberEngineClient, "from_settings", classmethod(lambda cls: Engine()))
@@ -552,7 +558,7 @@ def test_an_envelope_over_another_document_is_never_recorded(deployment, people,
     def swapped(document):
         return core.sign_receipt(dict(document, receipt_id=uuid.uuid4().hex), keys["receipt"])
 
-    outcome = receipt_service.issue_receipt(result, signer=swapped)
+    outcome = receipt_service.issue_receipt(result, signer=swapped, keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "envelope_not_over_receipt"
 
 
@@ -560,7 +566,7 @@ def test_a_receipt_needs_every_figure_and_a_fingerprint(deployment, people, keys
     # No frequency: no expected annual exposure, which is never estimated.
     result, card = carded(deployment, people, frequency=False)
     assert card.card["fields"]["figures"]["expected_annual_exposure"] is None
-    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]))
+    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "receipt_figure_unavailable"
     assert "expected_annual_exposure" in outcome.detail
     # No fingerprint at all: nothing to bind.
@@ -572,7 +578,7 @@ def test_a_receipt_needs_every_figure_and_a_fingerprint(deployment, people, keys
     monkeypatch.setattr(fingerprint, "compute_system_fingerprint", unreadable)
     other = Deployment.objects.create(name="second", owner=people["owner"])
     result, _ = carded(other, people, fingerprint="")
-    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]))
+    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "system_fingerprint_unavailable"
     assert not FinancialExposureReceipt.objects.exists()
 
@@ -612,6 +618,292 @@ def test_the_records_go_with_their_deployment_and_never_hold_back_a_stop(deploym
     assert FinancialValidityCard.objects.count() == FinancialExposureReceipt.objects.count() == 1
     deployment.delete()
     assert not FinancialValidityCard.objects.exists() and not FinancialExposureReceipt.objects.exists()
+
+
+# ======================================================================
+# Review round 1
+# ======================================================================
+
+
+def custom(deployment, author, *, variables, components, frequency_source=None, set_key="probe_set"):
+    """A scenario version of one event whose components are given as (key, family,
+    formula, {input: a scenario parameter row, or a parameter-set variable's name}),
+    with one hypothetical effect, its finding and its build. SYNTHETIC / ILLUSTRATIVE."""
+    pset = CustomerParameterSet.record(deployment, set_key, {"variables": variables}, author=author)
+    scenario = FinancialScenario.objects.create(deployment=deployment, title="Probe", author=author,
+                                                system_fingerprint=FINGERPRINT)
+    rows = {row.name: row for row in pset.parameter_rows()}
+    if frequency_source:
+        _parameter(scenario, ss.FREQUENCY_PARAMETER, "count", "1", "2", "4", source=frequency_source,
+                   distribution=POISSON)
+    event = LossEvent.objects.create(scenario=scenario, event_key="ev-probe", currency="USD", trigger="probe",
+                                     business_process="payments")
+    for key, family, formula, cites in components(scenario):
+        cited = {name: str((rows[p] if isinstance(p, str) else p).uuid) for name, p in cites.items()}
+        LossComponent.objects.create(loss_event=event, component_key=key, family=family, formula_id=formula,
+                                     formula_version=1, as_of=AS_OF, cited_parameters=cited)
+    asset = Asset.objects.create(deployment=deployment, kind="agent", name="probe-agent",
+                                 identifier=f"agent://probe-{uuid.uuid4().hex[:6]}")
+    finding = Finding.objects.create(deployment=deployment, fingerprint=f"fp-{uuid.uuid4().hex[:8]}",
+                                     finding_type="tenant_isolation_missing", title="probe", severity="high")
+    effect = CausalEffect.objects.create(
+        scenario=scenario, loss_event=event, effect_key="probe", origin="hypothetical",
+        effect_type="cross_customer_disclosure", asset=str(asset.uuid), business_process="payments",
+        template_id="cross_customer_data_exposure", template_version=1, in_scope_of=[["cross_customer_data_exposure", 1]],
+    )
+    EffectFinding.objects.create(effect=effect, finding=str(finding.uuid), role="prerequisite")
+    inputs = {"fixture": str(scenario.uuid), "label": LABEL}
+    ScenarioBuild.objects.create(
+        scenario=scenario, deployment=deployment, parameter_set=pset, build_digest=builder.build_digest(inputs),
+        builder_version="test-fixture", grouping_version="test-fixture", pack="test-fixture", currency="USD",
+        as_of=AS_OF, inputs=inputs,
+    )
+    return scenario
+
+
+def card_of(scenario, draws=DRAWS):
+    result = simulated(scenario, draws=draws)
+    assert result.status == "completed", (result.refusal_code, result.refusal_detail)
+    issued = validity_service.issue_card(result)
+    assert issued.card is not None, (issued.code, issued.detail)
+    return result, issued.card
+
+
+def _fine_and_cost(low, base, high):
+    def components(scenario):
+        fine = _parameter(scenario, "probe.regulatory_fine", "money", low, base, high, source="EXPERT_ESTIMATE")
+        cost = _parameter(scenario, "probe.response_cost", "money", "0", "100000", "500000",
+                          source="CUSTOMER_PROVIDED", distribution=GAMMA)
+        return [("fine", "regulatory_compliance", "lump_sum", {"amount": fine}),
+                ("response", "legal", "lump_sum", {"amount": cost})]
+
+    return components
+
+
+VARIABLES = {"notification_unit_cost": _entry("money_per_unit", "2")}
+LADDER = ("A", "B", "C", "D")
+
+
+@pytest.mark.parametrize("frequency_source", [None, "CUSTOMER_PROVIDED"])
+def test_an_expert_fine_stated_as_one_figure_grades_no_higher_than_as_a_range(people, frequency_source):
+    """H1, the reviewer's cases: the fine as a range of 4M-6M and as the one figure
+    5M, everything else the same (with and without a customer frequency): the fixed
+    figure carries its share of the level, so the grade is D both ways, never A."""
+    grades = {}
+    for tag, figures in (("range", ("4000000", "5000000", "6000000")), ("point", ("5000000",) * 3)):
+        deployment = Deployment.objects.create(name=f"dep-{tag}", owner=people["owner"])
+        _, card = card_of(custom(deployment, people["analyst"], variables=VARIABLES,
+                                 components=_fine_and_cost(*figures), frequency_source=frequency_source))
+        grades[tag] = card.confidence_grade
+        mix = card.card["evidence_mix"]
+        assert Decimal(mix["expert"]) > Decimal("0.45"), mix
+        assert g.EXPERT in [d["rule"] for d in card.card["fields"]["confidence_grade"]["downgrades"]]
+    assert grades == {"range": "D", "point": "D"}
+    assert LADDER.index(grades["point"]) >= LADDER.index(grades["range"])
+
+
+def test_twenty_customer_dollars_and_an_expert_fine_never_grade_a(deployment, people):
+    """H1, the reviewer's third case: nothing uncertain, twenty customer figures of
+    $1 and one expert figure of $5,000,000. Weighed by level, not by count: D."""
+
+    def components(scenario):
+        out = [("fine", "regulatory_compliance", "lump_sum",
+                {"amount": _parameter(scenario, "probe.fine", "money", "5000000", source="EXPERT_ESTIMATE")})]
+        for i in range(20):
+            out.append((f"c{i:02d}", "legal", "lump_sum",
+                        {"amount": _parameter(scenario, f"probe.c{i:02d}", "money", "1", source="CUSTOMER_PROVIDED")}))
+        return out
+
+    _, card = card_of(custom(deployment, people["analyst"], variables=VARIABLES, components=components))
+    graded_ = card.card["fields"]["confidence_grade"]
+    assert card.confidence_grade == "D" and graded_["weighting"] == "level"
+    assert Decimal(card.card["evidence_mix"]["expert"]) > Decimal("0.9999")
+    assert graded_["material_expert_figures"] == ["probe.fine"]
+
+
+def test_every_figure_is_evaluated_for_freshness_and_a_stale_policy_term_lowers_the_grade(deployment, people):
+    """M3: the policy's limit is past its fresh_until at the run's as-of; a set
+    variable no component reads is stale too. Both are evaluated and said stale;
+    the policy term lowers the grade (the run applies the policy), the unread
+    variable is shown and does not. No figure reads stale: false unevaluated."""
+
+    def components(scenario):
+        cost = _parameter(scenario, "probe.response_cost", "money", "0", "100000", "500000",
+                          source="CUSTOMER_PROVIDED", distribution=GAMMA)
+        return [("response", "legal", "lump_sum", {"amount": cost})]
+
+    variables = {
+        "notification_unit_cost": _entry("money_per_unit", "2", fresh_until="2026-10-01"),
+        "insurance_deductible": _entry("money", "10000"),
+        "insurance_limit": _entry("money", "50000", fresh_until="2026-10-01"),
+    }
+    result, card = card_of(custom(deployment, people["analyst"], variables=variables, components=components,
+                                  frequency_source="CUSTOMER_PROVIDED"))
+    assert result.record["scenario"]["headline"] == "retained_cash"
+    freshness = card.card["fields"]["data_freshness"]
+    rows = {row["name"]: row for row in freshness["parameters"]}
+    assert rows["insurance_limit"]["stale"] is True and rows["insurance_limit"]["read_by"] == ["policy"]
+    assert rows["insurance_limit"]["counts_toward_grade"] is True
+    assert rows["notification_unit_cost"]["stale"] is True and rows["notification_unit_cost"]["counts_toward_grade"] is False
+    assert freshness["stale"] == ["insurance_limit"] and freshness["stale_not_graded"] == ["notification_unit_cost"]
+    assert all(row["evaluated"] is True and isinstance(row["stale"], bool) for row in rows.values())
+    assert set(rows) >= {"insurance_deductible", "insurance_limit", "notification_unit_cost", "probe.response_cost",
+                         ss.FREQUENCY_PARAMETER}
+    assert g.STALE in [d["rule"] for d in card.card["fields"]["confidence_grade"]["downgrades"]]
+
+
+def test_a_stale_derived_contributor_lowers_the_grade(deployment, people):
+    """M3: a contributor of a derived value is drawn in every year, though the
+    derived row's own dates are its suppliers'; a stale one counts."""
+
+    def components(scenario):
+        e1 = _parameter(scenario, "e1.amount", "money", "100000", "200000", "300000")
+        e2 = _parameter(scenario, "e2.amount", "money", "150000", fresh_until=date(2026, 9, 15))
+        merged = FinancialParameter.objects.create(
+            scenario=scenario, name="ev:amount", unit="money", source_type="CALCULATED", currency="USD",
+            low="150000", base="200000", high="300000", evidence_ref=f"{LABEL}: the larger loss",
+            effective_date=date(2026, 9, 1), derived_from=[str(e1.uuid), str(e2.uuid)],
+        )
+        return [("lump", "legal", "lump_sum", {"amount": merged})]
+
+    _, card = card_of(custom(deployment, people["analyst"], variables=VARIABLES, components=components,
+                             frequency_source="CUSTOMER_PROVIDED"))
+    rows = {row["name"]: row for row in card.card["fields"]["data_freshness"]["parameters"]}
+    assert rows["e2.amount"]["stale"] is True and rows["e2.amount"]["read_by"] == ["contributor"]
+    assert card.card["fields"]["data_freshness"]["stale"] == ["e2.amount"]
+
+
+def test_a_card_with_no_as_of_says_its_figures_were_not_evaluated(deployment, people):
+    """M3: a run with no event has no as-of; nothing is said fresh."""
+    scenario = FinancialScenario.objects.create(deployment=deployment, title="Empty", author=people["analyst"])
+    _parameter(scenario, "x.amount", "money", "1000")
+    outcome = simulation_service.simulate_scenario(scenario, seed=1, draws=1_000)
+    assert outcome.result.status == "refused"
+    card = validity_service.issue_card(outcome.result).card
+    freshness = card.card["fields"]["data_freshness"]
+    assert freshness["as_of"] is None and freshness["statement"].startswith("not evaluated")
+    assert all(row["evaluated"] is False and row["stale"] is None for row in freshness["parameters"])
+
+
+def test_no_keyring_records_nothing_and_returns_nothing(deployment, people, keys):
+    """M2: without the published economics-receipt keys nothing is recorded, and a
+    recorded receipt is not returned either."""
+    result, _ = carded(deployment, people)
+    for keyring in (None, {}, [_raw(keys["receipt"])]):
+        outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keyring)
+        assert outcome.receipt is None and outcome.code == "keyring_unavailable"
+    assert not FinancialExposureReceipt.objects.exists()
+    receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
+    again = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]))
+    assert again.receipt is None and again.code == "keyring_unavailable"
+
+
+def test_a_signature_that_does_not_verify_is_never_recorded(deployment, people, keys):
+    """M2: the reviewer's wrong-role signer and a signature that is the integer
+    12345: refused by core's verifier before the row, nothing recorded; the row's
+    own check refuses the malformed signature too."""
+    result, card = carded(deployment, people)
+    wrong = receipt_service.issue_receipt(result, signer=_signer(keys["other"]), keyring=keys["ring"])
+    assert wrong.receipt is None and wrong.code == core.WRONG_ROLE
+
+    def junk(document):
+        envelope = core.sign_receipt(document, keys["receipt"])
+        envelope["signatures"][0]["sig"] = 12345
+        return envelope
+
+    outcome = receipt_service.issue_receipt(result, signer=junk, keyring=keys["ring"])
+    assert outcome.receipt is None and outcome.code == core.ENVELOPE_MALFORMED
+    assert not FinancialExposureReceipt.objects.exists()
+    # The row's own check, past the service: core's signature form.
+    good = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"]).receipt
+    # 12345; 87 characters; 88 characters of base64 that decode to 66 bytes, not 64.
+    for sig in (12345, "A" * 87, base64.b64encode(b"x" * 66).decode("ascii")):
+        envelope = json.loads(json.dumps(good.envelope))
+        envelope["signatures"][0]["sig"] = sig
+        twin = FinancialExposureReceipt(
+            deployment=deployment, scenario_id=result.scenario_id, simulation=result, card=card,
+            receipt_id=good.receipt_id, document=good.document, envelope=envelope, key_id=good.key_id,
+            generated_at=good.generated_at,
+        )
+        with pytest.raises(EconomicsRefused) as refused:
+            twin.check_new()
+        assert refused.value.code == "receipt_record_malformed", sig
+
+
+def test_a_recorded_receipt_that_does_not_verify_is_not_returned_or_overwritten(deployment, people, keys):
+    """M2: a stored row that fails verification (here its signature, moved past the
+    append-only checks) is never returned as the result's receipt, and a valid
+    issue never overwrites it: the caller is told why."""
+    result, _, receipt = receipted(deployment, people, keys)
+    envelope = json.loads(json.dumps(receipt.envelope))
+    envelope["signatures"][0]["sig"] = base64.b64encode(keys["receipt"].sign(b"another")).decode("ascii")
+    FinancialExposureReceipt._base_manager.filter(pk=receipt.pk).update(envelope=envelope)
+    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
+    assert outcome.receipt is None and outcome.code == "recorded_receipt_unverified"
+    assert outcome.detail.startswith(core.FORGED)
+    assert FinancialExposureReceipt.objects.get().envelope == envelope
+
+
+def test_the_keyring_is_built_from_the_engines_published_keys(deployment, people, keys):
+    """M2: the engine's published artifact-keyring form, one document per role; a
+    revoked key verifies nothing."""
+
+    def published(*entries):
+        return {"version": 1, "keys": {
+            f"k{i}": {"public_key": base64.b64encode(_raw(key)).decode(), "status": status, "created_at": None,
+                      "retired_at": None, "reason": None}
+            for i, (key, status) in enumerate(entries)}}
+
+    result, _, receipt = receipted(deployment, people, keys)
+    ring = receipt_service.keyring_from_published(published((keys["receipt"], "retired")),
+                                                  other_roles={"engine-outcome": published((keys["other"], "active"))})
+    assert receipt_service.verify_stored_receipt(receipt, ring).verified
+    revoked = receipt_service.keyring_from_published(published((keys["receipt"], "revoked")), other_roles={})
+    assert receipt_service.verify_stored_receipt(receipt, revoked).code == core.UNKNOWN_KEY
+
+
+def test_tampered_result_inputs_are_refused(deployment, people, keys):
+    """M4: the run's stored inputs no longer give its input digest."""
+    result, _, receipt = receipted(deployment, people, keys)
+    inputs = json.loads(json.dumps(result.inputs))
+    inputs["parameters"]["exposure.affected_customers"]["base"] = "9999999"
+    SimulationResult._base_manager.filter(pk=result.pk).update(inputs=inputs)
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert not check.verified and check.code == "result_digest_mismatch"
+
+
+def test_a_receipt_row_moved_or_relabelled_is_refused(deployment, people, keys):
+    """L5: the row's own deployment, key id, receipt id and instant are checked
+    against its result, card, document and envelope."""
+    result, _, receipt = receipted(deployment, people, keys)
+    other = Deployment.objects.create(name="other-tenant", owner=people["owner"])
+    for change in ({"deployment": other}, {"key_id": "forged-key-id"}, {"receipt_id": uuid.uuid4().hex},
+                   {"generated_at": receipt.generated_at.replace(year=2020)}):
+        FinancialExposureReceipt._base_manager.filter(pk=receipt.pk).update(**change)
+        check = receipt_service.verify_stored_receipt(FinancialExposureReceipt.objects.get(pk=receipt.pk), keys["ring"])
+        assert not check.verified and check.code == "receipt_row_mismatch", change
+        FinancialExposureReceipt._base_manager.filter(pk=receipt.pk).update(
+            deployment=deployment, key_id=receipt.key_id, receipt_id=receipt.receipt_id,
+            generated_at=receipt.generated_at)
+    assert receipt_service.verify_stored_receipt(FinancialExposureReceipt.objects.get(pk=receipt.pk),
+                                                 keys["ring"]).verified
+
+
+def test_a_changed_release_is_a_note_not_tampering(deployment, people, keys, monkeypatch):
+    """L7: a change to a grade constant since the receipt was made: still authentic,
+    with the note release_changed; a tampered result is still refused."""
+    result, card, receipt = receipted(deployment, people, keys)
+    assert receipt_service.verify_stored_receipt(receipt, keys["ring"]).notes == ()
+    monkeypatch.setattr(g, "MATERIAL_SHARE", Decimal("0.06"))
+    check = receipt_service.verify_stored_receipt(receipt, keys["ring"])
+    assert check.verified and check.notes == ("release_changed",)
+    # The release the card recorded, and its digest, are what the receipt names.
+    recorded = card.card["fields"]["model_version"]
+    assert receipt.document["model"] == {"version": recorded["version"], "build_digest": recorded["build_digest"]}
+    versions = json.loads(json.dumps(result.versions))
+    versions["numpy"] = "0.0.0"
+    SimulationResult._base_manager.filter(pk=result.pk).update(versions=versions)
+    assert receipt_service.verify_stored_receipt(receipt, keys["ring"]).code == "model_build_mismatch"
 
 
 # ======================================================================
@@ -657,8 +949,15 @@ SPEC_PHRASES = (
     "### 26.6 Verification",
     "### 26.9 What is still not done",
     "### 26.10 Decisions this step takes, which the owner may change",
-    "**never by\na raw count**",
+    "**never by a raw count**",
     "**each firing at most once**",
+    "**Collapsing a range to one figure at its base never raises the grade**",
+    "**a fixed\nfigure exactly as a range at the same base**",
+    "**no signature nobody has checked is ever recorded**",
+    "**never read as tampering**",
+    "test_collapsing_a_range_to_its_base_never_raises_the_grade",
+    "`expert_figures`",
+    "15. **Every figure is evaluated for freshness at the run's as-of date**",
     "never; no calibration set exists",
     "**the same result gives the same receipt row**",
     "**signed on the path the backend's signed assurance receipts take**",
@@ -681,5 +980,5 @@ def test_the_spec_states_step_8():
     assert g.THRESHOLDS[g.ConfidenceGrade.A]["evidence_at_least"] == Decimal("0.80")
     assert g.THRESHOLDS[g.ConfidenceGrade.B]["assumption_at_most"] == Decimal("0.25")
     assert g.THRESHOLDS[g.ConfidenceGrade.C]["assumption_at_most"] == Decimal("0.50")
-    assert g.MATERIAL_IMPORTANCE == Decimal("0.05") and sens.MAX_SWINGS == 20
+    assert g.MATERIAL_SHARE == Decimal("0.05") and sens.MAX_SWINGS == 20
     assert validity_service.TOP_DRIVERS == 5

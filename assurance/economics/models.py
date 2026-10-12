@@ -1982,17 +1982,29 @@ class FinancialExposureReceipt(_AppendOnly):
         envelope = self.envelope
         try:
             signatures = envelope["signatures"]
+            (signature,) = signatures
+            sig = signature["sig"]
+            # Core's signature form: the 88-character base64 of a 64-byte Ed25519
+            # signature, as its verifier reads one, checked before anything is stored.
             ok = (
                 set(envelope) == {"payloadType", "payload", "signatures"}
                 and envelope["payloadType"] == core.RECEIPT_PAYLOAD_TYPE
                 and base64.b64decode(envelope["payload"], validate=True) == payload
-                and len(signatures) == 1
-                and signatures[0]["keyid"] == self.key_id
+                and isinstance(signatures, list)
+                and isinstance(signature, dict)
+                and set(signature) == {"keyid", "sig"}
+                and isinstance(signature["keyid"], str)
+                and signature["keyid"] == self.key_id
+                and isinstance(sig, str)
+                and len(sig) == core.SIGNATURE_B64_LENGTH
+                and len(base64.b64decode(sig, validate=True)) == 64
             )
         except (TypeError, KeyError, ValueError, binascii.Error):
             ok = False
         if not ok:
-            raise EconomicsRefused("receipt_record_malformed", "the envelope is not one signature over exactly the document")
+            raise EconomicsRefused(
+                "receipt_record_malformed", "the envelope is not one well-formed signature over exactly the document"
+            )
         if FinancialExposureReceipt._base_manager.filter(
             Q(simulation_id=self.simulation_id) | Q(card_id=self.card_id)
         ).exists():

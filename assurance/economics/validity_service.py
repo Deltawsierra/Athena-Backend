@@ -11,7 +11,9 @@ and:
    as step 7b read it, and refuses unless its canonical inputs give the run's input
    digest and its draws the run's outcomes digest;
 2. grades the run (:mod:`assurance.economics.engine.grade`) from the stored
-   inputs and that analysis;
+   inputs and that analysis: each figure, fixed or ranged, weighted by its share
+   of the base-case level, and every figure's freshness evaluated at the run's
+   as-of date;
 3. builds the card (:func:`build_card`): every owner field, from the stored result,
    the scenario version's append-only rows and the analysis, or saying it has no
    data -- never a made-up value -- and what was read when it was issued (the
@@ -23,7 +25,8 @@ and:
 
 The card is REPRODUCIBLE from what is stored: :func:`build_card` given the stored
 result, the stored analysis and the card's own ``issued`` section gives the
-stored card exactly (:func:`reproduces`).
+stored card exactly (:func:`reproduces`), under the release the card records
+(:func:`release_record`; :func:`release_changed` says when today's differs).
 
 A failure that the stored rows do not decide (the engine will not import, the
 draws are not reproduced on this platform, the time budget, memory, a fault) is
@@ -53,6 +56,7 @@ from .models import (
     FinancialScenario,
     FinancialValidityCard,
     LossEvent,
+    FinancialParameter,
     ModelInventoryEntry,
     ScenarioBuild,
     SimulationResult,
@@ -110,39 +114,49 @@ def _engine():
 # ------------------------------------------------------------- the release
 
 
-def model_release(versions) -> dict:
-    """The engine release a card and a receipt name: a token (what the receipt's
-    ``model.version`` holds, and what the inventory registers) and the digest of
-    everything the figures, the analysis, the grade and the card rest on (the
-    receipt's ``model.build_digest``): every version and limit of the run, the
-    sensitivity method, the grade's classes and thresholds, and the card's schema."""
+def release_record(versions) -> dict:
+    """Everything the figures, the analysis, the grade and the card rest on: every
+    version and limit of the run, the sensitivity method, the grade's classes,
+    thresholds and downgrades, and the card's schema. A card records it, and a
+    receipt names its digest, so a stored receipt is verified against the release
+    it was made under, never today's (spec, section 26.6)."""
     _, grade, _, _, sensitivity, _ = _engine()
-    token = (
-        f"mythos.economics:simulation-{versions.get('scenario_simulation')}+sensitivity-{sensitivity.VERSION}"
-        f"+card-{CARD_VERSION}"
-    )
-    build = {
+    return {
         "engine": versions,
         "sensitivity": sensitivity.version_record(),
         "grade": grade.version_record(),
         "card": {"schema": CARD_SCHEMA, "version": CARD_VERSION, "top_drivers": TOP_DRIVERS},
     }
-    return {"version": token, "build_digest": canonical_digest(build)}
+
+
+def model_release(versions) -> dict:
+    """The engine release a card and a receipt name: a token (what the receipt's
+    ``model.version`` holds, and what the inventory registers), the digest of
+    :func:`release_record` (the receipt's ``model.build_digest``), and the record."""
+    record = release_record(versions)
+    token = (
+        f"mythos.economics:simulation-{versions.get('scenario_simulation')}+sensitivity-"
+        f"{record['sensitivity']['version']}+card-{CARD_VERSION}"
+    )
+    return {"version": token, "build_digest": canonical_digest(record), "record": record}
 
 
 # ------------------------------------------------------------- what is read
 
 
-def _cash_reads(inputs) -> tuple[list[str], dict[str, str], list[str], list[dict]]:
-    """From a run's canonical inputs: every parameter a known cash component reads,
-    the latest as-of date it is read at, the unknown cash components, and every
-    unknown component (cash or market value) with its reason."""
-    reads: dict[str, str] = {}
+def _reads(inputs) -> tuple[dict[str, set[str]], list[str], list[dict]]:
+    """From a run's canonical inputs: what reads each parameter (``cash`` for a
+    known cash component, ``market_value``, ``unknown_component``, ``policy`` for a
+    term of the policy the run applies, ``frequency``, ``contributor`` for a derived
+    value's contributor); the unknown cash components; and every unknown component
+    (cash or market value) with its reason."""
+    roles: dict[str, set[str]] = {}
     unknown_cash, unknown = [], []
     for event in inputs.get("events", []):
         for component in event["components"]:
             where = f"{event['event_key']}/{component['component_id']}"
-            if component["status"] != ESTIMATED:
+            known = component["status"] == ESTIMATED
+            if not known:
                 unknown.append(
                     {
                         "component": where,
@@ -153,43 +167,71 @@ def _cash_reads(inputs) -> tuple[list[str], dict[str, str], list[str], list[dict
                 )
                 if component["family"] != MARKET_VALUE:
                     unknown_cash.append(where)
-                continue
-            if component["family"] == MARKET_VALUE:
-                continue
+            role = "unknown_component" if not known else "market_value" if component["family"] == MARKET_VALUE else "cash"
             for name in component["reads"].values():
-                reads[name] = max(reads.get(name, component["as_of"]), component["as_of"])
-    return sorted(reads), reads, unknown_cash, unknown
+                roles.setdefault(name, set()).add(role)
+    policy = inputs.get("policy")
+    if policy is not None:
+        for name in policy["terms"].values():
+            roles.setdefault(name, set()).add("policy")
+    if inputs.get("frequency"):
+        roles.setdefault(inputs["frequency"], set()).add("frequency")
+    for derived, contributors in inputs.get("derived", {}).items():
+        if "cash" in roles.get(derived, set()):
+            for name in contributors:
+                roles.setdefault(name, set()).add("contributor")
+    return roles, unknown_cash, unknown
 
 
-def _as_of(inputs) -> str | None:
+#: What reading a figure makes it count toward the grade's stale_inputs.
+GRADED_ROLES = frozenset({"cash", "policy", "frequency", "contributor"})
+
+
+def _as_of(inputs, build) -> str | None:
+    """The run's as-of date: its build's, else the latest its components were
+    computed at."""
+    if build is not None:
+        return build.as_of.isoformat()
     dates = [c["as_of"] for event in inputs.get("events", []) for c in event["components"]]
     return max(dates) if dates else None
 
 
-def _freshness(inputs, as_of_by_name: dict[str, str], as_of: str | None, critical: set[str]) -> dict:
-    rows = []
-    stale = []
-    parameters = inputs.get("parameters", {})
-    frequency = inputs.get("frequency")
-    for name in sorted(parameters):
-        held = parameters[name]
-        read_at = as_of_by_name.get(name) or (as_of if name == frequency else None)
-        fresh_until, effective = held.get("fresh_until"), held.get("effective_date")
-        is_stale = bool(read_at and fresh_until and read_at > fresh_until)
+def _freshness(inputs, roles, set_rows, as_of: str | None, critical: set[str]) -> dict:
+    """The freshness of EVERY figure: each parameter of the run's inputs (the
+    components', the policy's, the frequency, every derived value's contributors)
+    and every variable of the parameter-set version no component reads, each
+    evaluated at the run's as-of date. A figure with no as-of to read it at says it
+    was not evaluated, never that it is fresh."""
+    figures = {name: (held.get("source_type"), held.get("effective_date"), held.get("fresh_until"))
+               for name, held in inputs.get("parameters", {}).items()}
+    for row in set_rows:
+        figures.setdefault(
+            row.name,
+            (row.source_type, row.effective_date.isoformat(), row.fresh_until.isoformat() if row.fresh_until else None),
+        )
+    rows, stale, stale_not_graded = [], [], []
+    for name in sorted(figures):
+        source, effective, fresh_until = figures[name]
+        read_by = sorted(roles.get(name, set())) or ["nothing: a parameter-set variable no component reads"]
+        graded = bool(roles.get(name, set()) & GRADED_ROLES)
+        evaluated = as_of is not None
+        is_stale = None if not evaluated else bool(fresh_until and as_of > fresh_until)
         age = None
-        if read_at and effective:
-            age = (date.fromisoformat(read_at) - date.fromisoformat(effective)).days
-        if is_stale and (name in as_of_by_name or name == frequency):
-            stale.append(name)
+        if evaluated and effective:
+            age = (date.fromisoformat(as_of) - date.fromisoformat(effective)).days
+        if is_stale:
+            (stale if graded else stale_not_graded).append(name)
         rows.append(
             {
                 "name": name,
-                "source_type": held.get("source_type"),
+                "source_type": source,
+                "read_by": read_by,
                 "effective_date": effective,
                 "fresh_until": fresh_until,
-                "read_as_of": read_at,
+                "evaluated": evaluated,
                 "age_days": age,
                 "stale": is_stale,
+                "counts_toward_grade": graded,
                 "critical": name in critical,
             }
         )
@@ -197,38 +239,36 @@ def _freshness(inputs, as_of_by_name: dict[str, str], as_of: str | None, critica
         "as_of": as_of,
         "parameters": rows,
         "stale": stale,
+        "stale_not_graded": stale_not_graded,
         "statement": (
-            "each figure's age is from the date it holds from to the date the run read it; a figure past its "
-            "fresh_until is stale and lowers the grade one step (stale_inputs). No parameter names a FinancialSource "
-            "snapshot yet (evidence_ref is text, spec section 22), so a source's own retrieval age is not shown"
+            "every figure is evaluated at the run's as-of date: its age is from the date it holds from, and one past "
+            "its fresh_until is stale. A stale figure the run reads (a cash component's, a term of the policy it "
+            "applies, the frequency, a derived value's contributor) lowers the grade one step (stale_inputs); one "
+            "nothing in the cash figures reads is shown and does not. No parameter names a FinancialSource snapshot "
+            "yet (evidence_ref is text, spec section 22), so a source's own retrieval age is not shown"
+            if as_of is not None
+            else "not evaluated: the run has no as-of date to read its figures at"
         ),
     }
 
 
-def _weighted(inputs, sensitivity, reads: list[str]):
-    """Every parameter the gross cash reads (and the frequency), with its source
-    types (a derived one's contributors'), its importance from the analysis
-    (zero for a figure that is fixed or not ranked) and its expert and derived marks."""
+def _weighted(inputs, sensitivity):
+    """Every figure the gross cash reads (and the frequency), with its share of the
+    base-case level from the analysis (fixed figures and ranges alike), the source
+    types it rests on (a derived value's: those of the contributors that supply its
+    base) and its derived mark."""
     _, grade, _, _, _, _ = _engine()
-    ranked = {entry["name"]: entry for entry in (sensitivity or {}).get("ranked", [])}
     parameters = inputs.get("parameters", {})
-    derived = inputs.get("derived", {})
-    names = list(reads)
-    if inputs.get("frequency") and inputs["frequency"] not in names:
-        names.append(inputs["frequency"])
     items = []
-    for name in sorted(names):
-        contributors = derived.get(name, [])
-        sources = [parameters[c]["source_type"] for c in contributors] or [parameters[name]["source_type"]]
-        entry = ranked.get(name)
+    for entry in ((sensitivity or {}).get("level") or {}).get("parameters", []):
+        if entry["derived_from"]:
+            supplied = entry["supplied_by"] or entry["derived_from"]
+            sources = tuple(parameters[c]["source_type"] for c in supplied)
+        else:
+            sources = (entry["source_type"],)
         items.append(
-            grade.Weighted(
-                name=name,
-                sources=tuple(sources),
-                importance=Decimal(entry["importance"]) if entry else Decimal(0),
-                expert=bool(entry and entry["expert"]),
-                derived=bool(contributors),
-            )
+            grade.Weighted(name=entry["name"], sources=sources, level=Decimal(entry["share"]),
+                           derived=bool(entry["derived_from"]))
         )
     return items
 
@@ -321,29 +361,33 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
     build = ScenarioBuild.objects.filter(scenario=scenario).first()
     release = model_release(result.versions)
 
-    reads, as_of_by_name, unknown_cash, unknown = _cash_reads(inputs)
-    as_of = build.as_of.isoformat() if build is not None else _as_of(inputs)
+    roles, unknown_cash, unknown = _reads(inputs)
+    as_of = _as_of(inputs, build)
+    set_rows = [] if build is None else list(
+        FinancialParameter.objects.filter(parameter_set_id=build.parameter_set_id).order_by("name", "id")
+    )
     drivers = (sensitivity or {}).get("ranked", [])[:TOP_DRIVERS]
-    material = {
-        entry["name"]
-        for entry in (sensitivity or {}).get("ranked", [])
-        if Decimal(entry["importance"]) >= grade.MATERIAL_IMPORTANCE
-    }
-    freshness = _freshness(inputs, as_of_by_name, as_of, material | {d["name"] for d in drivers})
+    weighted = _weighted(inputs, sensitivity) if completed else []
+    level_total = sum((item.level for item in weighted), Decimal(0))
+    material = {item.name for item in weighted if level_total and item.level / level_total >= grade.MATERIAL_SHARE}
+    freshness = _freshness(inputs, roles, set_rows, as_of, material | {d["name"] for d in drivers})
     graded = grade.grade(
         refusal=None if completed else (result.refusal_code or "refused"),
         unknown_cash_components=unknown_cash,
-        weighted=_weighted(inputs, sensitivity, reads) if completed else [],
+        weighted=weighted,
         stale=freshness["stale"],
+        per_occurrence=(sensitivity or {}).get("per_occurrence", []),
     ).as_dict()
     mix = graded["evidence_mix"]
+    importance = {entry["name"]: entry["importance"] for entry in (sensitivity or {}).get("ranked", [])}
 
     def share(classes: tuple[str, ...], meaning: str) -> dict:
         if not mix:
-            return {"share": None, "unavailable": "the run was refused: nothing was weighed", "meaning": meaning}
+            return {"share": None, "unavailable": graded["reason"], "meaning": meaning}
         names = [
-            {"name": entry.name, "importance": money.decimal_text(entry.importance)}
-            for entry in (_weighted(inputs, sensitivity, reads) if completed else [])
+            {"name": entry.name, "level_share": money.decimal_text(entry.level),
+             "importance": importance.get(entry.name, "0")}
+            for entry in weighted
             if any(grade.CLASSES[s] in classes for s in entry.sources)
         ]
         total = sum(Decimal(mix[c]) for c in classes)
@@ -480,7 +524,9 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         "model_version": {
             "version": release["version"],
             "build_digest": release["build_digest"],
-            "engine": result.versions,
+            # The release the figures, the analysis, the grade and this card were made
+            # under: a receipt is verified against it, never today's (section 26.6).
+            "release": release["record"],
             "methods": {
                 "sensitivity": {"id": sens.METHOD_ID, "version": sens.VERSION},
                 "grade": {"version": grade.VERSION, "version_digest": grade.version_digest()},
@@ -556,6 +602,17 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
     # One JSON value with no object held twice (core refuses a card that shares
     # one), exactly as it reads back from its column.
     return json.loads(json.dumps(card, allow_nan=False))
+
+
+def release_changed(card: FinancialValidityCard) -> bool:
+    """Whether the release the card was made under (its recorded release record)
+    differs from today's for the same run versions: the code has changed since,
+    which is not tampering (spec, section 26.6)."""
+    recorded = card.card["fields"]["model_version"].get("release")
+    engine = (recorded or {}).get("engine")
+    if recorded is None or engine is None:
+        return True
+    return canonical_digest(recorded) != canonical_digest(release_record(engine))
 
 
 def reproduces(card: FinancialValidityCard) -> bool:
@@ -667,5 +724,7 @@ __all__ = [
     "issue_card",
     "issued_context",
     "model_release",
+    "release_changed",
+    "release_record",
     "reproduces",
 ]

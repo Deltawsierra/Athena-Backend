@@ -3,26 +3,34 @@
 
 A grade says how much of an estimate rests on evidence and how much on
 assumption. It is computed from the run's EVIDENCE MIX: the share of the result's
-uncertainty that rests on each class of source, each parameter weighted by its
-sensitivity importance (:mod:`.sensitivity`) and never by a raw count -- a
-negligible expert guess beside a dominant customer figure is not half the
-evidence. A parameter derived across several effects' attributes (the builder's
-larger loss) rests on its contributors: its importance is shared equally among
-their source types.
+LEVEL that rests on each class of source. Each parameter the gross cash reads is
+weighted by its share of the base-case level (:func:`.sensitivity.level_shares`:
+its absolute elasticity, normalised), never by a raw count and never by its
+variance alone, so a FIXED figure counts exactly as a range at the same base does:
+an expert's $5,000,000 guess is the evidence it is whether it is stated as one
+figure or as a range around it. A parameter derived across several effects'
+attributes (the builder's larger loss) rests on the contributors whose base supplies
+its own; its share is split equally among their source types.
 
 Then the downgrades of spec-v1 (section 12.5's rule: each lowers the grade one
 step, A to B to C to D, never below D), each firing at most once:
 
-- ``stale_inputs``: a figure the gross cash reads is past its ``fresh_until`` at
-  the run's as-of date;
-- ``expert_ranges``: a material parameter (importance at least
-  :data:`MATERIAL_IMPORTANCE`) draws from an expert range (a PERT or triangular:
-  section 23.1 says it should lower the grade);
-- ``derived_values``: a material parameter is a derived larger-loss value.
+- ``stale_inputs``: a figure the run reads -- a cash component's, a policy term
+  where a policy applies, the frequency, or a derived value's contributor -- is
+  past its ``fresh_until`` at the run's as-of date;
+- ``expert_figures``: a MATERIAL figure (a level share of at least
+  :data:`MATERIAL_SHARE`) rests on an expert's estimate or on no named source,
+  fixed or ranged;
+- ``derived_values``: a material figure is a derived larger-loss value.
+
+Collapsing a range to one figure at its base never raises the grade: the level
+shares, the sources and the dates are those of the base, which a collapse keeps.
 
 ``Unknown`` -- Mythos cannot responsibly quantify the scenario -- where the run
-was refused (a refusal for conflicting inputs says so), or a cash component is
-unknown (the cash figure would read "at least").
+was refused (a refusal for conflicting inputs says so), a cash component is
+unknown (the cash figure would read "at least"), the base-case gross is zero (no
+level to weigh), or a parameter of an annual run is drawn per occurrence (it is not
+ranked yet).
 
 Every threshold is the owner's to set: they are constants here, and they and the
 classes are in :func:`version_record`, whose digest every grade carries.
@@ -44,7 +52,7 @@ from .confidence import ConfidenceGrade, downgraded
 from .money import decimal_text
 from .provenance import SourceType
 
-VERSION = "mythos.economics.confidence-grade/v1"
+VERSION = "mythos.economics.confidence-grade/v2"
 
 #: The class each source type counts in.
 CLASSES: Mapping[SourceType, str] = MappingProxyType(
@@ -76,19 +84,24 @@ THRESHOLDS: Mapping[ConfidenceGrade, Mapping[str, Decimal | None]] = MappingProx
         ConfidenceGrade.C: MappingProxyType({"evidence_at_least": None, "assumption_at_most": Decimal("0.50")}),
     }
 )
-#: A parameter is material, for the expert and derived downgrades, where its
-#: importance is at least this. With :data:`.sensitivity.MAX_SWINGS` at 20, no
-#: parameter beyond the twentieth can reach it (twenty-one at 1/20 would sum past 1).
-MATERIAL_IMPORTANCE = Decimal("0.05")
+#: A figure is material, for the expert and derived downgrades, where its share of
+#: the base-case level is at least this.
+MATERIAL_SHARE = Decimal("0.05")
 
 STALE = "stale_inputs"
-EXPERT = "expert_ranges"
+EXPERT = "expert_figures"
 DERIVED = "derived_values"
 DOWNGRADES: Mapping[str, str] = MappingProxyType(
     {
-        STALE: "a figure the gross cash reads is past its fresh_until at the run's as-of date",
-        EXPERT: "a material parameter draws from an expert range (PERT or triangular)",
-        DERIVED: "a material parameter is a derived larger-loss value across several effects' attributes",
+        STALE: (
+            "a figure the run reads (a cash component's, a policy term where a policy applies, the frequency, or a "
+            "derived value's contributor) is past its fresh_until at the run's as-of date"
+        ),
+        EXPERT: (
+            "a material figure (a level share of at least the materiality) rests on an expert's estimate or on no "
+            "named source, fixed or ranged"
+        ),
+        DERIVED: "a material figure is a derived larger-loss value across several effects' attributes",
     }
 )
 #: Refusals that mean the inputs conflict (owner's specification, section 27:
@@ -97,8 +110,7 @@ CONFLICTS = frozenset(
     {"distribution_contradicts_range", "derived_malformed", "currency_mismatch", "duplicate_id", "spine_effect_inconsistent"}
 )
 
-IMPORTANCE = "importance"
-EQUAL = "equal"
+LEVEL = "level"
 _CONTEXT = Context(prec=60, rounding=ROUND_HALF_EVEN)
 _SHARE_QUANTUM = Decimal("0.000001")
 
@@ -109,6 +121,7 @@ def version_record() -> dict:
     version digest."""
     return {
         "version": VERSION,
+        "weighting": "each figure's share of the base-case level (its absolute elasticity, normalised)",
         "classes": {source.value: name for source, name in CLASSES.items()},
         "evidence": sorted(EVIDENCE),
         "assumption": sorted(ASSUMPTION),
@@ -117,7 +130,7 @@ def version_record() -> dict:
             for grade, rule in THRESHOLDS.items()
         },
         "below_c": ConfidenceGrade.D.value,
-        "material_importance": decimal_text(MATERIAL_IMPORTANCE),
+        "material_share": decimal_text(MATERIAL_SHARE),
         "downgrades": dict(DOWNGRADES),
         "downgrade_step": "each fires at most once and lowers the grade one step, never below D (spec-v1 12.5)",
         "conflicts": sorted(CONFLICTS),
@@ -131,14 +144,13 @@ def version_digest() -> str:
 
 @dataclass(frozen=True)
 class Weighted:
-    """One parameter as the grade reads it: the source types its draws rest on
-    (its own, or each contributor's), its importance, and whether it draws from an
-    expert range or is a derived value."""
+    """One figure as the grade reads it: the source types it rests on (its own,
+    or those of the contributors that supply a derived value's base), its share of
+    the base-case level, and whether it is a derived value."""
 
     name: str
     sources: tuple[SourceType, ...]
-    importance: Decimal
-    expert: bool = False
+    level: Decimal
     derived: bool = False
 
     def __post_init__(self):
@@ -146,8 +158,8 @@ class Weighted:
         if not sources:
             raise ValueError(f"{self.name} rests on no source")
         object.__setattr__(self, "sources", sources)
-        if not isinstance(self.importance, Decimal) or not self.importance.is_finite() or self.importance < 0:
-            raise ValueError(f"{self.name}'s importance is a finite Decimal at or above zero")
+        if not isinstance(self.level, Decimal) or not self.level.is_finite() or self.level < 0:
+            raise ValueError(f"{self.name}'s level share is a finite Decimal at or above zero")
 
 
 @dataclass(frozen=True)
@@ -172,8 +184,8 @@ class Grade:
             "evidence_mix": dict(self.shares),
             "downgrades": [{"rule": rule, "meaning": DOWNGRADES[rule]} for rule in self.downgrades],
             "stale_parameters": list(self.stale),
-            "material_expert_parameters": list(self.expert),
-            "material_derived_parameters": list(self.derived),
+            "material_expert_figures": list(self.expert),
+            "material_derived_figures": list(self.derived),
             "unknown_because": self.unknown_because,
             "version": VERSION,
             "version_digest": version_digest(),
@@ -213,69 +225,69 @@ def grade(
     unknown_cash_components: Iterable[str],
     weighted: Iterable[Weighted],
     stale: Iterable[str] = (),
+    per_occurrence: Iterable[str] = (),
 ) -> Grade:
     """The grade of one run. ``refusal`` is the run's refusal code, or ``None``
     for a completed run; ``unknown_cash_components`` names every cash component
-    the run could not compute; ``weighted`` is every parameter the gross cash
-    reads, with its importance; ``stale`` names every such figure past its
-    ``fresh_until``. See the module's rules."""
+    the run could not compute; ``weighted`` is every figure the gross cash reads
+    (and the frequency), with its level share; ``stale`` names every figure the run
+    reads that is past its ``fresh_until``; ``per_occurrence`` names the parameters
+    of an annual run drawn per occurrence. See the module's rules."""
     if refusal is not None:
         if refusal in CONFLICTS:
             return _unknown(f"the inputs conflict ({refusal}): the run was refused, and nothing is quantified")
         return _unknown(f"the run was refused ({refusal}), and nothing is quantified")
+    per_occurrence = sorted(per_occurrence)
+    if per_occurrence:
+        return _unknown(
+            f"{', '.join(per_occurrence)} drawn per occurrence in an annual run: such a parameter is not ranked or "
+            "weighed yet"
+        )
     unknown = sorted(unknown_cash_components)
     items = list(weighted)
-    if not items:
+    total = sum((Fraction(item.level) for item in items), Fraction(0))
+    if not items or total == 0:
         if unknown:
             return _unknown(_incomplete(unknown))
-        return _unknown("the gross cash reads no parameter")
-    total = sum((Fraction(item.importance) for item in items), Fraction(0))
-    weighting = IMPORTANCE
-    weights = {item.name: Fraction(item.importance) for item in items}
-    if total == 0:
-        # Nothing in the run is uncertain (or the output never moves): no
-        # parameter contributes to the variance, so each counts alike.
-        weighting = EQUAL
-        weights = {item.name: Fraction(1) for item in items}
-        total = Fraction(len(items))
+        return _unknown("the base-case gross cash is zero, or reads no figure: there is no level to weigh")
     by_class = dict.fromkeys(CLASS_ORDER, Fraction(0))
     for item in items:
-        share = weights[item.name] / total / len(item.sources)
+        share = Fraction(item.level) / total / len(item.sources)
         for source in item.sources:
             by_class[CLASSES[source]] += share
     evidence = sum((by_class[name] for name in EVIDENCE), Fraction(0))
     assumption = sum((by_class[name] for name in ASSUMPTION), Fraction(0))
-    base = base_grade(evidence, assumption)
-
-    def material(item: Weighted) -> bool:
-        if weighting == EQUAL:
-            return True
-        return weights[item.name] / total >= Fraction(MATERIAL_IMPORTANCE)
-
-    stale_names = tuple(sorted(set(stale)))
-    expert_names = tuple(sorted(item.name for item in items if item.expert and material(item)))
-    derived_names = tuple(sorted(item.name for item in items if item.derived and material(item)))
-    fired = tuple(
-        rule for rule, names in ((STALE, stale_names), (EXPERT, expert_names), (DERIVED, derived_names)) if names
-    )
-    final = downgraded(base, len(fired))
     shares = {
         name: decimal_text(_CONTEXT.divide(Decimal(value.numerator), Decimal(value.denominator)).quantize(_SHARE_QUANTUM))
         for name, value in by_class.items()
     }
     if unknown:
         # The evidence mix is shown; the grade is not given to an incomplete figure.
-        return _unknown(_incomplete(unknown), weighting, shares)
-    weighed = "by sensitivity importance" if weighting == IMPORTANCE else "equally: nothing in the run is uncertain"
+        return _unknown(_incomplete(unknown), LEVEL, shares)
+    base = base_grade(evidence, assumption)
+
+    def material(item: Weighted) -> bool:
+        return Fraction(item.level) / total >= Fraction(MATERIAL_SHARE)
+
+    stale_names = tuple(sorted(set(stale)))
+    expert_names = tuple(
+        sorted(item.name for item in items if material(item) and any(CLASSES[s] in ASSUMPTION for s in item.sources))
+    )
+    derived_names = tuple(sorted(item.name for item in items if item.derived and material(item)))
+    fired = tuple(
+        rule for rule, names in ((STALE, stale_names), (EXPERT, expert_names), (DERIVED, derived_names)) if names
+    )
+    final = downgraded(base, len(fired))
     reason = (
-        f"{final.value}: weighed {weighed}, {_percent(evidence)}% of the result rests on customer, observed or "
-        f"authoritative figures, {_percent(by_class['benchmark'] + by_class['calculated'])}% on benchmarks or "
-        f"calculated values and {_percent(assumption)}% on expert or unsourced estimates, which is {base.value}"
+        f"{final.value}: weighed by each figure's share of the base-case level, {_percent(evidence)}% of the result "
+        f"rests on customer, observed or authoritative figures, "
+        f"{_percent(by_class['benchmark'] + by_class['calculated'])}% on benchmarks or calculated values and "
+        f"{_percent(assumption)}% on expert or unsourced estimates, which is {base.value}"
     )
     if fired:
         details = {STALE: stale_names, EXPERT: expert_names, DERIVED: derived_names}
         reason += "; lowered " + ", ".join(f"one step for {rule} ({', '.join(details[rule])})" for rule in fired)
-    return Grade(final, base, reason, weighting, shares, fired, stale_names, expert_names, derived_names)
+    return Grade(final, base, reason, LEVEL, shares, fired, stale_names, expert_names, derived_names)
 
 
 __all__ = [
@@ -286,7 +298,7 @@ __all__ = [
     "DOWNGRADES",
     "EVIDENCE",
     "EXPERT",
-    "MATERIAL_IMPORTANCE",
+    "MATERIAL_SHARE",
     "STALE",
     "THRESHOLDS",
     "VERSION",

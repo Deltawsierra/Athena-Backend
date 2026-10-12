@@ -27,6 +27,12 @@ the same plan as step 7b's :func:`.scenario_simulation.run` -- and both stated
   occurrence). The frequency's own swing is its P10 and P90 counts. At most
   :data:`MAX_SWINGS` parameters are swung, the most important first.
 
+- **The level** (:func:`level_shares`): each figure's share of the result's
+  LEVEL, which the grade weighs by -- the absolute elasticity of the base-case gross
+  cash (every parameter at its base, by the twins) to each parameter it reads, fixed
+  or ranged, normalised; with a frequency, a year is N occurrences, so the
+  frequency's elasticity is one.
+
 What is not ranked is listed with the reason: a point mass is **fixed** (it draws
 nothing), a parameter only the policy or a market-value line reads does not enter
 the gross cash, and a parameter drawn per occurrence has no one value a year.
@@ -69,6 +75,17 @@ SWING = (
     "(type 7 quantiles of its own draws); the gross cash evaluated by the formula twins per occurrence, times the "
     "frequency's mean count in a run with a frequency; the frequency's own swing is its P10 and P90 count"
 )
+LEVEL = (
+    "each parameter's share of the result's LEVEL: the absolute elasticity of the base-case gross cash (every "
+    "parameter at its base, by the formula twins) to it, by a central difference of LEVEL_STEP either side of its "
+    "base (zero for a base of zero); with a frequency, a year at base is N occurrences, so the frequency's elasticity "
+    "is one; normalised to sum to one. A fixed figure counts exactly as a range does"
+)
+#: The relative step of the level's central difference. Every formula is affine in
+#: each input (a sum and product of inputs and 1 - ratio) or a min of such, so the
+#: difference is the derivative itself away from a cap's kink, and the slopes'
+#: mean at one.
+LEVEL_STEP = 0.001
 #: The output every parameter is ranked against.
 OUTPUT = ss.GROSS_CASH
 #: At most this many parameters are swung for the tornado, the most important
@@ -120,6 +137,8 @@ def version_record() -> dict:
         "ranking": RANKING,
         "swing": SWING,
         "output": OUTPUT,
+        "level": LEVEL,
+        "level_step": dist.float_text(LEVEL_STEP),
         "max_swings": MAX_SWINGS,
         "digits": DIGITS,
     }
@@ -222,6 +241,69 @@ def _gross_at(p: ss._Plan, values: Mapping[str, float]) -> float:
     for value in totals:
         total += value
     return total
+
+
+def _gross_by_twins(p: ss._Plan, values: Mapping[str, float]) -> float:
+    """One occurrence's gross cash with every parameter at the value given, every
+    known cash component by its twin (never a stored constant, so a fixed figure
+    moves the level as a range does), summed in component and event order."""
+    total = 0.0
+    for c in p.components:
+        if c.estimated and c.cash:
+            total += float(np.asarray(c.twin({name: values[source] for name, source in c.reads.items()})).reshape(-1)[0])
+    return total
+
+
+def _amount_of(value) -> float:
+    return float(value.amount if hasattr(value, "amount") else value)
+
+
+def level_shares(p: ss._Plan) -> dict:
+    """Each parameter's share of the result's level (:data:`LEVEL`): every
+    parameter a known cash component reads, fixed or not, and the frequency. A
+    derived parameter names its contributors and those whose base supplies its
+    own (the larger loss at base). Refused where the base-case gross is zero."""
+    cash_reads = sorted({name for c in p.components if c.estimated and c.cash for name in c.reads.values()})
+    base = {name: _amount_of(p.resolved[name].parameter.base) for name in cash_reads}
+    gross = _gross_by_twins(p, base)
+    elasticities: dict[str, float] = {}
+    for name in cash_reads:
+        at = base[name]
+        if at == 0.0 or gross == 0.0:
+            elasticities[name] = 0.0
+            continue
+        up = _gross_by_twins(p, {**base, name: at * (1.0 + LEVEL_STEP)})
+        down = _gross_by_twins(p, {**base, name: at * (1.0 - LEVEL_STEP)})
+        elasticities[name] = abs(up - down) / (2.0 * LEVEL_STEP * gross)
+    frequency = p.frequency.name if p.frequency is not None else None
+    if frequency is not None:
+        elasticities[frequency] = 1.0 if gross != 0.0 else 0.0
+    total = math.fsum(elasticities.values())
+    entries = []
+    for name in sorted(elasticities):
+        r = p.frequency if name == frequency else p.resolved[name]
+        share = Fraction(0) if total == 0.0 else Fraction(elasticities[name]) / Fraction(total)
+        entry = {
+            "name": name,
+            "base": decimal_text(r.parameter.base.amount if hasattr(r.parameter.base, "amount") else r.parameter.base),
+            "source_type": r.parameter.source_type.value,
+            "elasticity": dist.float_text(elasticities[name]),
+            "share": _text(share),
+            "fixed": not r.drawn,
+            "frequency": name == frequency,
+            "derived_from": [],
+            "supplied_by": [],
+        }
+        if r.contributors:
+            entry["derived_from"] = [c.name for c in r.contributors]
+            entry["supplied_by"] = [c.name for c in r.contributors if c.parameter.base == r.parameter.base]
+        entries.append(entry)
+    return {
+        "basis": "base-case gross cash" + (", a year of N occurrences" if frequency is not None else ""),
+        "base_gross": dist.float_text(gross),
+        "defined": total != 0.0,
+        "parameters": entries,
+    }
 
 
 def _noop(stage: str) -> None:
@@ -376,6 +458,7 @@ def analyse(
         "not_in_gross_cash": not_in_gross,
         "per_occurrence": per_occurrence,
         "statements": {"fixed": FIXED, "not_in_gross_cash": NOT_IN_GROSS, "per_occurrence": PER_OCCURRENCE},
+        "level": level_shares(p),
     }
 
 
@@ -398,5 +481,6 @@ __all__ = [
     "analyse",
     "centred_ranks",
     "digest_of",
+    "level_shares",
     "version_record",
 ]

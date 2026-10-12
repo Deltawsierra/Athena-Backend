@@ -206,19 +206,20 @@ def test_ties_take_their_mean_rank():
 # ======================================================================
 
 
-def w(name, source, importance, *, expert=False, derived=False, sources=None):
-    return g.Weighted(name, tuple(sources or (source,)), Decimal(importance), expert=expert, derived=derived)
+def w(name, source, level, *, derived=False, sources=None):
+    return g.Weighted(name, tuple(sources or (source,)), Decimal(level), derived=derived)
 
 
-def graded(weighted, *, stale=(), refusal=None, unknown=()):
-    return g.grade(refusal=refusal, unknown_cash_components=unknown, weighted=weighted, stale=stale)
+def graded(weighted, *, stale=(), refusal=None, unknown=(), per_occurrence=()):
+    return g.grade(refusal=refusal, unknown_cash_components=unknown, weighted=weighted, stale=stale,
+                   per_occurrence=per_occurrence)
 
 
 def test_customer_and_observed_figures_that_are_fresh_grade_a():
     result = graded([w("txn", "CUSTOMER_PROVIDED", "0.6"), w("window", "MYTHOS_OBSERVED", "0.4")])
     assert result.grade is ConfidenceGrade.A and result.base is ConfidenceGrade.A and result.downgrades == ()
     assert result.shares["customer"] == "0.6" and result.shares["observed"] == "0.4"
-    assert result.reason.startswith("A: weighed by sensitivity importance")
+    assert result.reason.startswith("A: weighed by each figure's share of the base-case level")
 
 
 def test_benchmark_heavy_grades_c():
@@ -244,58 +245,239 @@ def test_a_refused_run_conflicting_inputs_and_an_unknown_cash_component_are_unkn
 
 
 def test_each_downgrade_fires_once():
-    base = [w("txn", "CUSTOMER_PROVIDED", "0.97"), w("guess", "EXPERT_ESTIMATE", "0.03", expert=True)]
-    assert graded(base).grade is ConfidenceGrade.A
+    base = [w("txn", "CUSTOMER_PROVIDED", "0.97"), w("guess", "EXPERT_ESTIMATE", "0.03")]
+    assert graded(base).grade is ConfidenceGrade.A  # a 3% guess is not material
     # Two stale figures are one step, not two.
     stale = graded(base, stale=["txn", "guess"])
     assert stale.grade is ConfidenceGrade.B and stale.downgrades == (g.STALE,)
-    # A material expert range: one step, however many.
-    experts = [w("txn", "CUSTOMER_PROVIDED", "0.85"), w("e1", "CUSTOMER_PROVIDED", "0.10", expert=True),
-               w("e2", "CUSTOMER_PROVIDED", "0.05", expert=True)]
+    # A material expert figure: one step, however many.
+    experts = [w("txn", "CUSTOMER_PROVIDED", "0.95"), w("e1", "EXPERT_ESTIMATE", "0.05")]
+    assert graded(experts).base is ConfidenceGrade.A
     assert graded(experts).downgrades == (g.EXPERT,) and graded(experts).grade is ConfidenceGrade.B
+    two = [w("txn", "CUSTOMER_PROVIDED", "0.85"), w("e1", "EXPERT_ESTIMATE", "0.10"), w("e2", "UNKNOWN", "0.05")]
+    assert graded(two).downgrades == (g.EXPERT,) and graded(two).expert == ("e1", "e2")
     # A material derived value: one step.
     derived = [w("txn", "CUSTOMER_PROVIDED", "0.9"),
                w("ev:window", "CALCULATED", "0.1", derived=True, sources=("MYTHOS_OBSERVED", "CUSTOMER_PROVIDED"))]
     assert graded(derived).downgrades == (g.DERIVED,) and graded(derived).grade is ConfidenceGrade.B
     # All three: three steps, A to D; never below D.
-    everything = [w("txn", "CUSTOMER_PROVIDED", "0.85"), w("e1", "CUSTOMER_PROVIDED", "0.10", expert=True),
-                  w("ev:w", "CALCULATED", "0.05", derived=True, sources=("CUSTOMER_PROVIDED", "MYTHOS_OBSERVED"))]
+    everything = [w("txn", "CUSTOMER_PROVIDED", "0.90"), w("e1", "EXPERT_ESTIMATE", "0.05"),
+                  w("ev:w", "CALCULATED", "0.05", derived=True, sources=("CUSTOMER_PROVIDED",))]
     result = graded(everything, stale=["txn"])
+    assert result.base is ConfidenceGrade.A
     assert result.downgrades == (g.STALE, g.EXPERT, g.DERIVED) and result.grade is ConfidenceGrade.D
-    assert graded([w("x", "EXPERT_ESTIMATE", "1", expert=True)], stale=["x"]).grade is ConfidenceGrade.D
+    assert graded([w("x", "EXPERT_ESTIMATE", "1")], stale=["x"]).grade is ConfidenceGrade.D
 
 
-def test_the_grade_weighs_by_importance_not_by_count():
-    """One customer figure and one expert range, either way round: the grade
-    follows the one that carries the variance. By count both would be one half."""
-    customer_drives = graded([w("txn", "CUSTOMER_PROVIDED", "0.97"), w("guess", "EXPERT_ESTIMATE", "0.03", expert=True)])
-    expert_drives = graded([w("txn", "CUSTOMER_PROVIDED", "0.03"), w("guess", "EXPERT_ESTIMATE", "0.97", expert=True)])
+def test_the_grade_weighs_by_level_not_by_count():
+    """One customer figure and one expert figure, either way round: the grade
+    follows the one that carries the level. By count both would be one half."""
+    customer_drives = graded([w("txn", "CUSTOMER_PROVIDED", "0.97"), w("guess", "EXPERT_ESTIMATE", "0.03")])
+    expert_drives = graded([w("txn", "CUSTOMER_PROVIDED", "0.03"), w("guess", "EXPERT_ESTIMATE", "0.97")])
     assert customer_drives.grade is ConfidenceGrade.A
     assert expert_drives.grade is ConfidenceGrade.D
     assert customer_drives.expert == () and expert_drives.expert == ("guess",)
-    # Nothing uncertain: every parameter counts alike, and the card says so.
-    flat = graded([w("txn", "CUSTOMER_PROVIDED", "0"), w("rate", "CUSTOMER_PROVIDED", "0")])
-    assert flat.weighting == g.EQUAL and flat.grade is ConfidenceGrade.A
 
 
-def test_a_derived_value_rests_on_its_contributors():
+def test_no_level_to_weigh_is_unknown_never_a_count():
+    """Review round 1, H1: the equal-weight fallback is gone. A base-case gross of
+    zero has no level to weigh, and is Unknown."""
+    flat = graded([w("txn", "CUSTOMER_PROVIDED", "0"), w("guess", "EXPERT_ESTIMATE", "0")])
+    assert flat.grade is ConfidenceGrade.UNKNOWN and "no level to weigh" in flat.reason
+
+
+def test_fixed_figures_are_weighed_by_their_level():
+    """Review round 1, L8: figures that are all fixed are graded by their level,
+    exactly as ranges at the same base would be."""
+    p20 = [w(f"c{i}", "CUSTOMER_PROVIDED", "0.0000002") for i in range(20)] + [w("fine", "EXPERT_ESTIMATE", "0.999996")]
+    result = graded(p20)
+    assert result.grade is ConfidenceGrade.D and result.expert == ("fine",)
+    assert graded([w("a", "CUSTOMER_PROVIDED", "0.9"), w("b", "OFFICIAL_PUBLIC", "0.1")]).grade is ConfidenceGrade.A
+
+
+def test_a_derived_value_rests_on_the_contributors_that_supply_it():
     result = graded([w("ev:window", "CALCULATED", "1", derived=True, sources=("MYTHOS_OBSERVED", "EXPERT_ESTIMATE"))])
     assert result.shares["observed"] == "0.5" and result.shares["expert"] == "0.5" and result.shares["calculated"] == "0"
+
+
+def test_a_per_occurrence_parameter_of_an_annual_run_is_unknown():
+    """Review round 1, L6: such a parameter is neither ranked nor weighed yet."""
+    result = graded([w("txn", "CUSTOMER_PROVIDED", "1")], per_occurrence=["sev.amt"])
+    assert result.grade is ConfidenceGrade.UNKNOWN and "sev.amt drawn per occurrence" in result.reason
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "3", "6")
+    severity = p("sev.amt", "money", "0", "100000", "5000000", source="EXPERT_ESTIMATE")
+    si = ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (lump("a", severity),)),),
+                          stated={ss.FREQUENCY_PARAMETER: stated("poisson", rate="3")}, frequency=frequency,
+                          per_occurrence=frozenset({"sev.amt"}))
+    _, record = analysed(si)
+    assert record["per_occurrence"] == ["sev.amt"]
 
 
 def test_the_thresholds_are_constants_in_the_grades_version_digest(monkeypatch):
     record = g.version_record()
     assert record["thresholds"]["A"] == {"evidence_at_least": "0.8", "assumption_at_most": "0.05"}
-    assert record["material_importance"] == "0.05"
+    assert record["material_share"] == "0.05"
     digest = g.version_digest()
     assert graded([w("txn", "CUSTOMER_PROVIDED", "1")]).as_dict()["version_digest"] == digest
-    monkeypatch.setattr(g, "MATERIAL_IMPORTANCE", Decimal("0.10"))
+    monkeypatch.setattr(g, "MATERIAL_SHARE", Decimal("0.10"))
     assert g.version_digest() != digest
-    # No parameter past the tornado's limit can be material: twenty-one at the
-    # materiality would sum past one.
-    assert (sens.MAX_SWINGS + 1) * Decimal("0.05") > 1
 
 
 def test_every_source_type_has_a_class():
     assert set(g.CLASSES) == set(SourceType)
     assert set(g.CLASSES.values()) == set(g.CLASS_ORDER)
+
+
+# ======================================================================
+# The level: each figure's share of the base-case gross (review round 1, H1)
+# ======================================================================
+
+
+def level_of(record) -> dict:
+    return {entry["name"]: entry for entry in record["level"]["parameters"]}
+
+
+def test_a_sum_shares_its_level_by_each_figures_base_fixed_or_ranged():
+    """A lump of 4M-6M (an expert range, base 5M), a fixed $1M and a customer gamma
+    (base 100,000): shares 5/6.1, 1/6.1 and 0.1/6.1, the fixed figure counting as a
+    range would."""
+    ranged = p("fine.amt", "money", "4000000", "5000000", "6000000", source="EXPERT_ESTIMATE")
+    fixed = p("fixed.amt", "money", "1000000")
+    measured = p("cost.amt", "money", "0", "100000", "500000")
+    event = LossEvent("ev", "USD", (lump("a", ranged), lump("b", fixed, "legal"), lump("c", measured, "recovery")))
+    _, record = analysed(ss.ScenarioInput("s", "USD", (event,), stated={
+        "cost.amt": stated("gamma", shape="4", scale="25000")}))
+    level = level_of(record)
+    for name, base in (("fine.amt", "5000000"), ("fixed.amt", "1000000"), ("cost.amt", "100000")):
+        assert abs(Decimal(level[name]["share"]) - Decimal(base) / Decimal("6100000")) < Decimal("1E-9"), name
+    assert level["fixed.amt"]["fixed"] is True and level["fine.amt"]["fixed"] is False
+    assert Decimal(record["level"]["base_gross"]) == Decimal("6100000")
+
+
+def test_a_product_gives_each_factor_its_elasticity_and_a_recovery_its_own():
+    """repeat_loss = count x amount x (1 - recovery): count and amount each have
+    elasticity 1, the recovery r / (1 - r) = 1 at r = 0.5; normalised, a third each."""
+    count = p("r.repeat_count", "count", "10")
+    amount = p("r.loss_per_event", "money_per_unit", "10000", "12000", "15000", source="EXPERT_ESTIMATE")
+    recovery = p("r.recovery_rate", "ratio", "0.5")
+    component = evaluate("direct", "direct_financial", "repeat_loss", 1,
+                         {"repeat_count": count, "loss_per_event": amount, "recovery_rate": recovery}, as_of=AS_OF)
+    _, record = analysed(ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (component,)),)))
+    level = level_of(record)
+    for name in ("r.repeat_count", "r.loss_per_event", "r.recovery_rate"):
+        assert abs(Decimal(level[name]["share"]) - Decimal(1) / 3) < Decimal("1E-9"), name
+
+
+def test_a_frequency_has_an_elasticity_of_one():
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "3", "6", source="INDUSTRY_BENCHMARK")
+    a = p("a.amt", "money", "75000", "100000", "125000", source="EXPERT_ESTIMATE")
+    b = p("b.amt", "money", "300000")
+    si = ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (lump("a", a), lump("b", b, "legal"))),),
+                          stated={ss.FREQUENCY_PARAMETER: stated("poisson", rate="3")}, frequency=frequency)
+    _, record = analysed(si)
+    level = level_of(record)
+    assert Decimal(level[ss.FREQUENCY_PARAMETER]["share"]) == Decimal("0.5")
+    assert Decimal(level["a.amt"]["share"]) == Decimal("0.125") and Decimal(level["b.amt"]["share"]) == Decimal("0.375")
+
+
+def _grade_of(si, seed=7, draws=5_000):
+    """The run's grade as the card makes it, from the stored-form inputs and analysis."""
+    from assurance.economics import validity_service
+
+    run, record = analysed(si, seed=seed, draws=draws)
+    weighted = validity_service._weighted(dict(run.inputs), record)
+    return g.grade(refusal=None, unknown_cash_components=[], weighted=weighted,
+                   per_occurrence=record["per_occurrence"]), record
+
+
+LADDER = (ConfidenceGrade.A, ConfidenceGrade.B, ConfidenceGrade.C, ConfidenceGrade.D)
+
+
+def _collapse(parameter: Parameter) -> Parameter:
+    base = parameter.base
+    return Parameter(parameter.name, parameter.unit, parameter.source_type, base, base, base, parameter.evidence_ref,
+                     effective_date=parameter.effective_date, fresh_until=parameter.fresh_until)
+
+
+def _invariant_cases():
+    fine = p("fine.amt", "money", "4000000", "5000000", "6000000", source="EXPERT_ESTIMATE")
+    cost = p("cost.amt", "money", "0", "100000", "500000")
+    gamma = {"cost.amt": stated("gamma", shape="4", scale="25000")}
+    poisson = {ss.FREQUENCY_PARAMETER: stated("poisson", rate="2")}
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "2", "4")
+    ones = [p(f"c{i:02d}.amt", "money", "1") for i in range(20)]
+    count = p("r.repeat_count", "count", "5", "10", "20", source="EXPERT_ESTIMATE")
+    amount = p("r.loss_per_event", "money_per_unit", "10000", "12000", "15000", source="EXPERT_ESTIMATE")
+    recovery = p("r.recovery_rate", "ratio", "0.10", "0.50", "0.90", source="EXPERT_ESTIMATE")
+    small = p("small.amt", "money", "0", "30000", "200000", source="EXPERT_ESTIMATE")
+    big = p("big.amt", "money", "1000000")
+    return {
+        # The reviewer's three cases (round 1, H1).
+        "fine_range_and_customer_gamma": ([("fine", fine), ("cost", cost)], gamma, None),
+        "the_same_with_a_frequency": ([("fine", fine), ("cost", cost)], {**gamma, **poisson}, frequency),
+        "twenty_customer_dollars_and_an_expert_fine": ([("fine", fine)] + [(f"c{i:02d}", o) for i, o in enumerate(ones)],
+                                                        {}, None),
+        # A product, every factor an expert range.
+        "a_product_of_expert_ranges": ([("direct", (count, amount, recovery))], {}, None),
+        # A wide expert range carrying most of the variance and little of the level.
+        "a_small_wide_expert_range": ([("small", small), ("big", big)], {}, None),
+    }
+
+
+def _scenario(lines, stated_by_name, frequency, collapsed=frozenset()):
+    def take(parameter):
+        return _collapse(parameter) if parameter.name in collapsed else parameter
+
+    components = []
+    for key, value in lines:
+        if isinstance(value, tuple):
+            count, amount, recovery = (take(x) for x in value)
+            components.append(evaluate(key, "direct_financial", "repeat_loss", 1, {
+                "repeat_count": count, "loss_per_event": amount, "recovery_rate": recovery}, as_of=AS_OF))
+        else:
+            components.append(lump(key, take(value), "legal"))
+    stated_now = {name: d for name, d in stated_by_name.items() if name not in collapsed}
+    return ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", tuple(components)),), stated=stated_now,
+                            frequency=frequency)
+
+
+@pytest.mark.parametrize("case", sorted(_invariant_cases()))
+def test_collapsing_a_range_to_its_base_never_raises_the_grade(case):
+    """Review round 1, H1: the required invariant. Each range of the case, alone and
+    all together, collapsed to one figure at its base: the grade is never higher on
+    the ladder. The reviewer's 20 x $1 customer + $5M expert never grades A."""
+    lines, stated_by_name, frequency = _invariant_cases()[case]
+    names = sorted({x.name for _, v in lines for x in (v if isinstance(v, tuple) else (v,)) if x.low != x.high})
+    ranged, _ = _grade_of(_scenario(lines, stated_by_name, frequency))
+    assert ranged.grade in LADDER, ranged.reason
+    for collapsed in [frozenset({name}) for name in names] + [frozenset(names)]:
+        point, record = _grade_of(_scenario(lines, stated_by_name, frequency, collapsed))
+        assert point.grade in LADDER, point.reason
+        assert LADDER.index(point.grade) >= LADDER.index(ranged.grade), (case, sorted(collapsed), point.reason,
+                                                                         ranged.reason)
+    if case == "twenty_customer_dollars_and_an_expert_fine":
+        assert ranged.grade is not ConfidenceGrade.A and point.grade is not ConfidenceGrade.A
+        assert point.grade is ConfidenceGrade.D
+    if case in ("fine_range_and_customer_gamma", "the_same_with_a_frequency"):
+        assert point.grade is ConfidenceGrade.D, point.reason
+
+
+def test_a_derived_value_is_weighed_by_the_contributor_that_supplies_its_base():
+    """Review round 1, L8: the derived value's level share rests on the source of
+    the contributor whose base it takes (the larger loss), not on CALCULATED."""
+    from assurance.economics import validity_service
+
+    expert = p("e1.amt", "money", "100000", "200000", "300000", source="EXPERT_ESTIMATE")
+    customer = p("e2.amt", "money", "150000")
+    merged = p("ev:amt", "money", "150000", "200000", "300000", source="CALCULATED")
+    other = p("other.amt", "money", "200000")
+    si = ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (lump("a", merged), lump("b", other, "legal"))),),
+                          derived={"ev:amt": (expert, customer)})
+    run, record = analysed(si)
+    entry = level_of(record)["ev:amt"]
+    assert entry["derived_from"] == ["e1.amt", "e2.amt"] and entry["supplied_by"] == ["e1.amt"]
+    weighted = {item.name: item for item in validity_service._weighted(dict(run.inputs), record)}
+    assert weighted["ev:amt"].sources == (SourceType.EXPERT_ESTIMATE,) and weighted["ev:amt"].derived
+    result = g.grade(refusal=None, unknown_cash_components=[], weighted=list(weighted.values()))
+    assert result.shares["expert"] == "0.5" and result.shares["calculated"] == "0"
+    assert result.expert == ("ev:amt",) and result.derived == ("ev:amt",)

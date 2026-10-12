@@ -1415,12 +1415,18 @@ def test_an_exposure_receipt_issued_twice_is_one_row_and_one_signature(engine):
     from assurance.economics.models import FinancialExposureReceipt
     from tests.test_economics_validity_card import simulated, stored
 
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from mythos_core import exposure_receipt
+
+    key = Ed25519PrivateKey.generate()
+    ring = exposure_receipt.receipt_keyring([key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)],
+                                            other_roles={})
     result = simulated(stored(_deployment(_user(User.Roles.ADMIN)), _user(User.Roles.ANALYST)))
-    refused = receipt_service.issue_receipt(result)
+    refused = receipt_service.issue_receipt(result, keyring=ring)
     assert refused.receipt is None and refused.code == "signer_unavailable"
     assert not FinancialExposureReceipt.objects.exists()
-    engine.receipt_key = Ed25519PrivateKey.generate()
-    first, again = receipt_service.issue_receipt(result), receipt_service.issue_receipt(result)
+    engine.receipt_key = key
+    first, again = receipt_service.issue_receipt(result, keyring=ring), receipt_service.issue_receipt(result, keyring=ring)
     assert first.created and not again.created and again.receipt.pk == first.receipt.pk
     assert engine.count("POST", "/api/economics/exposure-receipt/sign") == 2  # the 404, then the one signature
     assert FinancialExposureReceipt.objects.count() == 1
