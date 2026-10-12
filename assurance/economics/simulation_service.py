@@ -10,10 +10,12 @@ runs it, and records the run as a :class:`~assurance.economics.models.Simulation
 
 - **Idempotent.** A run's identity is its scenario version, the digest of its
   canonical inputs (every parameter's figures, source and stated distribution,
-  every formula, the policy, the frequency, the rules and every version), its
-  seed and its draws. The same identity returns the row already recorded and
-  runs nothing; two runs racing past that read are stopped by the unique
-  constraint, and the later returns the first's row. Never a second.
+  every formula, the policy, the frequency, the rules and every version and
+  limit), its seed and its draws. The same identity returns the row already
+  recorded and runs nothing; every check of the row runs before its
+  transaction, which only inserts, so two runs racing past that read are
+  stopped by the unique constraint, and the later returns the first's row.
+  Never a second.
 - **A refusal is recorded too**, where the inputs decide it (a parameter with no
   admissible distribution, a formula without a twin, too many values to hold):
   the same inputs are refused the same way, and the row says why. A refusal the
@@ -84,9 +86,10 @@ def load_input(scenario: FinancialScenario):
     """The scenario version as one run reads it (a ``ScenarioInput``): its events
     in key order, each component recomputed from the rows it cites; the policy of
     the parameter-set version it was built from; every cited row's stated
-    distribution; the parameter set's variables and policy terms as shared (drawn
-    once per simulated year), the effects' attributes per occurrence; and the
-    scenario's frequency parameter, if it holds one."""
+    distribution; each derived row's contributors (``derived_from``), with
+    theirs; and the scenario's frequency parameter, if it holds one. Every
+    parameter is drawn once per simulated year: nothing here names one to be
+    drawn per occurrence."""
     _, _, ss, _ = _engine()
     build_row = ScenarioBuild.objects.filter(scenario=scenario).first()
     events = tuple(row.as_engine() for row in LossEvent.objects.filter(scenario=scenario).order_by("event_key"))
@@ -110,23 +113,31 @@ def load_input(scenario: FinancialScenario):
             terms.append(policy.waiting_period_hours)
         cited.update(term.parameter_id for term in terms if term.parameter_id)
     rows = list(FinancialParameter.objects.filter(uuid__in=sorted(cited)))
+    contributors = {
+        str(row.uuid): row
+        for row in FinancialParameter.objects.filter(
+            scenario=scenario, uuid__in=sorted({u for row in rows for u in row.derived_from})
+        )
+    }
+    derived = {}
+    for row in rows:
+        if row.derived_from:
+            missing = [u for u in row.derived_from if u not in contributors]
+            if missing:
+                raise EconomicsRefused("parameter_not_found", f"{row.name} is derived from {missing}")
+            derived[row.name] = tuple(contributors[u].as_engine() for u in row.derived_from)
+    rows.extend(contributors.values())
     if frequency_row is not None:
         rows.append(frequency_row)
-    stated = {}
-    shared = set()
-    for row in rows:
-        if row.distribution is not None:
-            stated[row.name] = row.stated_distribution()
-        if row.parameter_set_id is not None or row.pk == getattr(frequency_row, "pk", None):
-            shared.add(row.name)
+    stated = {row.name: row.stated_distribution() for row in rows if row.distribution is not None}
     return ss.ScenarioInput(
         scenario_id=str(scenario.uuid),
         currency=currency,
         events=events,
         policy=policy,
         stated=stated,
-        shared=frozenset(shared),
         frequency=frequency,
+        derived=derived,
     )
 
 
@@ -226,8 +237,12 @@ def _simulate(scenario, seed, draws, severe_percentile, time_budget) -> Simulati
         duration_ms=duration_ms,
     )
     try:
+        # Every check, the lookup of the same identity included, before the
+        # transaction, which only inserts: a run that raced past both is stopped
+        # by the unique constraint, and the first's row is returned.
+        row.check_new()
         with transaction.atomic():
-            row.save()
+            row.insert_checked()
     except (IntegrityError, EconomicsRefused) as raced:
         if isinstance(raced, EconomicsRefused) and raced.code != "duplicate_id":
             raise

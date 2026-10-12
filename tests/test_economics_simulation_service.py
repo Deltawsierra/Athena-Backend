@@ -159,7 +159,7 @@ def test_a_scenario_version_is_simulated_and_recorded_once(deployment, people):
     assert SimulationResult.objects.count() == 3
 
 
-def test_the_set_is_shared_the_effects_vary_and_the_policy_applies_per_event(deployment, people):
+def test_every_parameter_is_drawn_once_a_year_and_the_policy_applies_per_event(deployment, people):
     scenario = _stored(deployment, people["analyst"], policy=True, frequency=POISSON)
     outcome = simulation_service.simulate_scenario(scenario, seed=3, draws=10_000)
     assert outcome.completed, (outcome.code, outcome.detail)
@@ -167,7 +167,8 @@ def test_the_set_is_shared_the_effects_vary_and_the_policy_applies_per_event(dep
     parameters = record["parameters"]
     assert parameters["notification_unit_cost"]["variation"] == ss.SHARED
     assert parameters["insurance_deductible"]["variation"] == ss.SHARED
-    assert parameters["exposure.affected_customers"]["variation"] == ss.PER_OCCURRENCE
+    # An effect's attribute too: a range is uncertainty about the figure (section 25.2).
+    assert parameters["exposure.affected_customers"]["variation"] == ss.SHARED
     assert parameters["exposure.affected_customers"]["rule"] == ss.RULE_PERT_DEFAULT
     assert parameters["exposure.regulatory_response_cost"]["rule"] == ss.RULE_STATED
     assert record["basis"] == "annual_loss" and record["frequency"]["distribution"]["id"] == "poisson"
@@ -320,7 +321,7 @@ def test_a_stated_distribution_is_checked_when_its_row_is_written(deployment, pe
 
 def test_a_stated_distribution_is_stored_in_the_one_spelling(deployment, people):
     scenario = FinancialScenario.objects.create(deployment=deployment, title="t", author=people["analyst"])
-    row = _parameter(scenario, "x", "money", "1", "2", "9", source="CUSTOMER_PROVIDED",
+    row = _parameter(scenario, "x", "money", "3000", "10000", "36000", source="CUSTOMER_PROVIDED",
                      distribution={"id": "lognormal", "version": 1, "params": {"mu": "9.20", "sigma": "0.80"}})
     row.refresh_from_db()
     assert row.distribution == {"id": "lognormal", "version": 1, "params": {"mu": "9.2", "sigma": "0.8"}}
@@ -381,6 +382,150 @@ def test_a_recorded_result_is_never_rewritten(deployment, people):
         SimulationResult.objects.filter(pk=row.pk).delete()
     with pytest.raises(EconomicsRewriteRefused):
         row.delete()
+
+
+# ======================================================================
+# Review round 1
+# ======================================================================
+
+
+def test_a_stated_distribution_that_contradicts_its_row_is_refused_when_written(deployment, people):
+    """M1, at write time: the reviewer's lognormal(0, 1) on 100,000 / 200,000 /
+    400,000 is refused, and nothing is written."""
+    scenario = FinancialScenario.objects.create(deployment=deployment, title="t", author=people["analyst"])
+    with pytest.raises(EngineRefused) as refused:
+        _parameter(scenario, "c.amt", "money", "100000", "200000", "400000", source="CUSTOMER_PROVIDED",
+                   distribution={"id": "lognormal", "version": 1, "params": {"mu": "0", "sigma": "1"}})
+    assert refused.value.code == "distribution_contradicts_range" and "c.amt" in refused.value.detail
+    assert FinancialParameter.objects.count() == 0
+    _parameter(scenario, "c.amt", "money", "100000", "200000", "400000", source="CUSTOMER_PROVIDED",
+               distribution={"id": "lognormal", "version": 1, "params": {"mu": "12.2", "sigma": "0.4"}})
+
+
+def test_a_refusal_under_a_lower_limit_is_not_returned_under_the_default(deployment, people, monkeypatch):
+    """L3. Refused at a low values budget and recorded; at the default the same
+    scenario, seed and draws run and are recorded under another input digest."""
+    scenario = _stored(deployment, people["analyst"])
+    monkeypatch.setattr(sim, "MAX_VALUES", 1_000)
+    low = simulation_service.simulate_scenario(scenario, seed=1, draws=1_000)
+    assert low.created and low.code == "values_over_budget"
+    monkeypatch.undo()
+    default = simulation_service.simulate_scenario(scenario, seed=1, draws=1_000)
+    assert default.created and default.completed, (default.code, default.detail)
+    assert default.result.input_digest != low.result.input_digest
+    assert default.result.versions["limits"]["max_values"] == sim.MAX_VALUES
+    assert SimulationResult.objects.count() == 2
+
+
+def test_a_row_that_lands_between_the_check_and_the_insert_is_returned(deployment, people, monkeypatch):
+    """L5. The other run's row lands after this run's checks and before its
+    INSERT: the unique constraint stops the INSERT (IntegrityError), and the
+    other's row is returned, never a second."""
+    scenario = _stored(deployment, people["analyst"])
+    real = SimulationResult.check_new
+    landed = []
+
+    def check_then_race(row):
+        real(row)
+        if not landed:
+            fields = SimulationResult._meta.concrete_fields
+            other = SimulationResult(**{f.attname: getattr(row, f.attname) for f in fields if not f.primary_key})
+            other.uuid = uuid.uuid4()
+            models.Model.save(other, force_insert=True)  # the other run's row, committed meanwhile
+            landed.append(other)
+
+    monkeypatch.setattr(SimulationResult, "check_new", check_then_race)
+    outcome = simulation_service.simulate_scenario(scenario, seed=6, draws=1_000)
+    assert landed, "the race was not run"
+    assert (outcome.result.pk, outcome.created, outcome.code) == (landed[0].pk, False, None), outcome.detail
+    assert SimulationResult.objects.count() == 1
+
+
+def test_a_result_is_inserted_only_as_it_was_checked(deployment, people):
+    row = _completed(deployment, people)
+    copy = _copy(row, uuid=uuid.uuid4())
+    with pytest.raises(EconomicsRewriteRefused):
+        copy.insert_checked()  # never checked
+    with pytest.raises(EconomicsRefused):
+        copy.check_new()  # the record names another seed
+    with pytest.raises(EconomicsRewriteRefused):
+        row.insert_checked()  # recorded already
+    assert SimulationResult.objects.count() == 1
+
+
+def _two_effect_body(asset, finding, incident=("100000", "165000", "300000"), other=("120000", "150000", "400000"),
+                     other_source="EXPERT_ESTIMATE"):
+    def effect(key, figures, source):
+        return {
+            "key": key, "origin": "hypothetical", "effect_type": "funds_transfer_altered",
+            "asset": str(asset.uuid), "business_process": "payments",
+            "attributes": {
+                "success_rate": _attribute("ratio", "0.35"),
+                "exploitable_window_hours": _attribute("hours", "1.25"),
+                "incident_response_cost": _entry("money", *figures, source_type=source,
+                                                 evidence_ref=f"{LABEL}: made up"),
+                "legal_response_cost": _attribute("money", "825000"),
+            },
+        }
+
+    return {
+        "title": "Payment agent: two effects, one event",
+        "parameter_set": {"set_key": SET_KEY, "version": 1}, "currency": "USD", "as_of": "2026-10-06",
+        "effects": [effect("redirect", incident, "EXPERT_ESTIMATE"), effect("redirect-2", other, other_source)],
+        "findings": [{"finding": str(finding.uuid), "effect": key, "role": "prerequisite"}
+                     for key in ("redirect", "redirect-2")],
+    }
+
+
+def _payment_set(deployment, author):
+    variables = {
+        "transactions_per_day": _entry("count_per_day", "18000"),
+        "average_transaction_value": _entry("money_per_unit", "25000"),
+        "recovery_rate": _entry("ratio", "0.825"),
+    }
+    CustomerParameterSet.record(deployment, SET_KEY, {"variables": variables}, author=author)
+    asset = Asset.objects.create(deployment=deployment, kind="agent", name="payments-agent",
+                                 identifier="agent://payments-agent")
+    finding = Finding.objects.create(deployment=deployment, fingerprint="fp-0", finding_type="approval_check_missing",
+                                     title="finding 0", severity="high")
+    return asset, finding
+
+
+def test_two_effects_joined_in_one_event_are_simulated_by_their_contributors(deployment, people):
+    """L6, end to end: the builder joins two effects' expert ranges into one
+    CALCULATED parameter (derived_from); the simulation draws each by its own rule
+    and takes the larger loss per draw, where it refused the merge before."""
+    author = people["analyst"]
+    asset, finding = _payment_set(deployment, author)
+    scenario, created = builder.build(deployment, _two_effect_body(asset, finding), author=author)
+    assert created
+    merged = FinancialParameter.objects.get(scenario=scenario, name__endswith=":incident_response_cost")
+    assert merged.source_type == "CALCULATED" and len(merged.derived_from) == 2
+    outcome = simulation_service.simulate_scenario(scenario, seed=12, draws=2_000)
+    assert outcome.completed, (outcome.code, outcome.detail)
+    record = outcome.result.record["parameters"][merged.name]
+    assert record["rule"] == ss.RULE_DERIVED and record["direction"] == "increases"
+    assert sorted(record["contributors"]) == ["redirect-2.incident_response_cost", "redirect.incident_response_cost"]
+    assert all(c["rule"] == ss.RULE_PERT_DEFAULT for c in record["contributors"].values())
+    assert sorted(outcome.result.inputs["derived"][merged.name]) == sorted(record["contributors"])
+    # A contributor no rule admits refuses the merge, naming it.
+    refused_scenario, _ = builder.build(
+        deployment, {**_two_effect_body(asset, finding, other_source="CUSTOMER_PROVIDED"), "title": "refused"},
+        author=author)
+    refused = simulation_service.simulate_scenario(refused_scenario, seed=12, draws=2_000)
+    assert refused.code == "no_admissible_distribution" and "redirect-2.incident_response_cost" in refused.detail
+
+
+def test_a_derived_row_states_no_distribution(deployment, people):
+    scenario = FinancialScenario.objects.create(deployment=deployment, title="t", author=people["analyst"])
+    one = _parameter(scenario, "e1.amount", "money", "100", "200", "300")
+    two = _parameter(scenario, "e2.amount", "money", "150", "180", "400")
+    with pytest.raises(EngineRefused) as refused:
+        FinancialParameter.objects.create(
+            scenario=scenario, name="ev:amount", unit="money", source_type="CALCULATED", currency="USD", low="150",
+            base="200", high="400", evidence_ref=f"{LABEL}: made up", effective_date=date(2026, 9, 1),
+            derived_from=[str(one.uuid), str(two.uuid)], distribution=GAMMA)
+    assert refused.value.code == "derived_malformed"
 
 
 # ======================================================================

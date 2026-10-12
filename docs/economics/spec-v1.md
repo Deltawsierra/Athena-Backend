@@ -2288,7 +2288,7 @@ added: step 6 serves reports and scenario endpoints.
 
 ### 25.1 The parameter-to-distribution rule
 
-`mythos.economics.parameter-distribution/v1` (`scenario_simulation.RULE_VERSION`),
+`mythos.economics.parameter-distribution/v2` (`scenario_simulation.RULE_VERSION`),
 `scenario_simulation.resolve`. Every parameter a run reads draws from exactly one
 distribution, decided by this rule and recorded with the run (`parameters.<name>.rule`):
 
@@ -2303,9 +2303,20 @@ distribution, decided by this rule and recorded with the run (`parameters.<name>
    refused unless it draws only what the parameter's unit holds
    (`distribution_not_for_unit`): a ratio from a rate (Beta) or an expert range inside
    [0, 1]; a count from a count, severity or expert distribution; any other unit from a
-   severity distribution or an expert range at or above zero. The row is checked when
-   it is written, with the engine's code (`EngineRefused`), and stored in the one
-   spelling.
+   severity distribution or an expert range at or above zero. It must also **hold the
+   row's own figures** (`check_fits_range`, `distribution_contradicts_range`): the base
+   between the distribution's P5 and P95 (`RANGE_FIT_PERCENTILES`), and the low and the
+   high inside the closure of its support (a count, lognormal or gamma from 0 up; a
+   rate from 0 to 1; a PERT or triangular from its minimum to its maximum; a
+   generalized Pareto from its threshold, up to `threshold - scale/shape` where the
+   shape is negative; a splice from 0 to its tail's end), each compared as the binary64
+   the run draws. A lognormal(0, 1) stated on 100,000 / 200,000 / 400,000 would run with
+   a mean of 1.63: it is refused, naming the parameter, its figures and the
+   distribution's support and P5 to P95, so the conflict is surfaced, never resolved by
+   silently taking one (owner's specification, section 27). The frequency's stated
+   distribution is held to the same test. The row is checked when it is written, with
+   the engine's code (`EngineRefused`), and stored in the one spelling; it is checked
+   again when it is run.
 2. **A point mass** where it states none and its low, base and high are one figure.
    A point mass draws nothing.
 3. **PERT(low, base, high)**, weight 4, where it states none, its values are a range,
@@ -2314,7 +2325,20 @@ distribution, decided by this rule and recorded with the run (`parameters.<name>
    run's expert parameters.
 4. **Otherwise refused**, `no_admissible_distribution`, naming the parameter, its range
    and its source: a customer's, a benchmark's, an observed or a calculated range never
-   becomes a PERT silently. Its distribution must be stated.
+   becomes a PERT silently. Its distribution must be stated. Only low = base = high is a
+   point mass: low = base < high (or low < base = high) is a range.
+5. **A derived parameter** (`derived_from`, the scenario builder's larger loss of an
+   event's attribute across its effects, section 24.5) draws from its contributors
+   (`resolve_derived`, rule `derived_larger_loss`): each contributor by rules 1 to 4
+   (stated, point mass, PERT for an expert, or refused), each from its own stream, and
+   per draw the value giving the larger loss in the direction of the inputs that read
+   it (the highest where they increase the loss, the lowest where they decrease it), as
+   the builder takes it per point. Two point masses make a point mass at the larger,
+   exactly. A contributor that is refused refuses the merge, with its code and naming
+   it. A PERT of the merged range is not used: a PERT of pointwise maxima need not
+   bound the expected maximum. A derived parameter states no distribution of its own,
+   and its low, base and high must be the larger loss of its contributors' at each
+   point (`derived_malformed` otherwise, at write time as at run time).
 
 A scenario's frequency (section 25.5) is the exception: it must state a count
 distribution (`frequency_distribution_missing`, `frequency_not_a_count`); nothing
@@ -2322,16 +2346,27 @@ defaults, since a PERT is not a count.
 
 ### 25.2 What is shared and what varies
 
-`mythos.economics.variation/v1`. Section 23.11 left open how uncertainty about what a
+`mythos.economics.variation/v2`. Section 23.11 left open how uncertainty about what a
 parameter IS is separated from variation between events; this step separates them:
 
-- **Shared**, drawn once per simulated year and the same for every occurrence of that
-  year: the customer parameter set's variables (transactions per day, rates, unit
-  costs), the insurance policy's terms, and the frequency. A wide range here moves
-  whole years together.
-- **Per occurrence**, drawn afresh for each occurrence: an effect's attributes (the
-  window, the affected population, a lump-sum range), what each occurrence costs or
-  reaches.
+- **Shared** (the default), drawn once per simulated year and the same for every
+  occurrence of that year: every parameter, the customer parameter set's variables,
+  the policy's terms, the frequency and an effect's attributes (the window, the
+  affected population, a lump-sum range) alike. A range is uncertainty about what the
+  figure is, and a wide one moves whole years together.
+- **Per occurrence**, drawn afresh for each occurrence: only a parameter the run's
+  input names (`ScenarioInput.per_occurrence`; each parameter's `variation` in the
+  canonical inputs, so it enters the input digest), for a figure known to vary from
+  one occurrence to the next. A derived parameter's contributors are drawn as it is.
+  Nothing names one yet (section 25.9).
+
+The trade-off (section 25.10): drawn per occurrence, N occurrences of one range average
+out within a year and the annual tail narrows. For an expert lump sum of 10,000 /
+100,000 / 1,000,000 and Poisson(5) events a year, per occurrence gives an annual P95 of
+2.32M and a P90 of 2.02M; once a year gives 3.18M and 2.52M, with the same mean
+(`test_an_effects_range_is_drawn_once_a_year_unless_named_per_occurrence`). Where a
+range is uncertainty about the figure, per-occurrence drawing understates the tail by
+27%; where it is genuine variation between occurrences, once a year overstates it.
 
 Without a frequency a draw is one occurrence, and the two coincide. Each parameter's
 draws come from step 7a's sub-stream of its own stream name (`stream_name`: `p` and 40
@@ -2350,7 +2385,11 @@ refused by name (`twin_missing`); nothing is approximated. The tolerance is
 formula evaluated in Decimal at the very binary64 values the twin read, and exactly
 zero where the formula is zero. A twin makes at most six roundings (about 7E-16), so
 the margin is over a hundredfold. No twin calls `exp`, `log` or `pow`, so a twin's
-result is the same on every IEEE-754 platform.
+result is the same on every IEEE-754 platform. **The tolerance holds for normal
+binary64 results only**: below 2.2E-308 (the smallest normal) a product may underflow
+to a subnormal, which keeps fewer significant bits, so the relative error grows
+(`per_affected(1E-160, 1E-160)` is 1.1E-5 off). No real input reaches it: a money
+amount, a count or a duration that small is not a loss.
 
 | Formula | Version | Tolerance | Known-answer points | Random points |
 |---|---|---|---|---|
@@ -2379,13 +2418,23 @@ times. Every twin is also shown monotone in each input in the direction the form
 declares (1,000 points per input), and the complement and the cap exact.
 
 **Exact where nothing is uncertain.** A component whose every input is a point mass is
-computed once, by its Decimal formula, and that value, as the nearest binary64, is the
-same in every draw (`evaluated_by: decimal_constant`). So a run whose parameters are
-all point masses reproduces step 4 exactly: for each of step 4's known-answer fixtures
-and the six templates, each parameter collapsed to the value step 4 reads at low, base
-or high (a decreasing input's high at the low), the run's P10, P50, P90, mean and
-severe-but-plausible are step 4's figure, to the last digit, with a standard error of
-zero (`test_degenerate_distributions_reproduce_step_4_exactly`, 24 cases).
+computed once, by its Decimal formula (`evaluated_by: decimal_constant`). An event whose
+every known component is so, and whose policy's terms are point masses, has its gross
+cash, market value, recovery and retained cash from step 4's own Decimal `assess`; a
+scenario whose every event is so has their Decimal sums. Each such value, as the nearest
+binary64, is the same in every draw, and its summary (P10, P50, P90, mean,
+severe-but-plausible and every band) is the Decimal value itself, written in full, with
+a standard error of zero; the record says `evaluated_by: decimal_constant` for the
+event and the scenario. So a run whose parameters are all point masses reproduces step
+4 to the last digit: 100.10 + 200.20 is 300.30 (binary64 sums it to
+300.29999999999995), and `repeat_in_window` at 100 a day is step 4's 60-digit Decimal,
+which binary64 cannot hold
+(`test_a_run_with_nothing_uncertain_is_step_4_to_the_last_digit`); and for each of step
+4's known-answer fixtures and the six templates, each parameter collapsed to the value
+step 4 reads at low, base or high (a decreasing input's high at the low), the run's
+figures are step 4's (`test_degenerate_distributions_reproduce_step_4_exactly`, 24
+cases). A year's sum in a compound run is a binary64 sum of N such values, as any
+other.
 
 ### 25.4 The aggregation order
 
@@ -2409,7 +2458,9 @@ Per draw, in this order, all in binary64:
 5. with a frequency, each line's years: step 7a's `compound_annual`.
 
 Components sum to their event and events to the scenario per draw, bit for bit, not
-only in summary (`test_components_sum_to_their_event_and_events_to_the_scenario_per_draw`).
+only in summary (`test_components_sum_to_their_event_and_events_to_the_scenario_per_draw`),
+except where a line is exact (section 25.3): there the line is step 4's Decimal sum as
+the nearest binary64, which the binary64 sum of its parts may miss by its rounding.
 The simulation adds no event and counts none twice: its events are exactly the
 scenario version's, an event key twice is refused (`duplicate_id`), and an occurrence
 realises every event once.
@@ -2454,29 +2505,36 @@ going with its deployment:
 | `scenario`, `deployment` | the scenario version run, and its deployment (`cross_tenant_reference` otherwise) |
 | `seed`, `draws`, `severe_percentile` | the seed as text (0 to 2^64 - 1: wider than a signed 64-bit column, never a double), the draws, the percentile |
 | `inputs`, `input_digest` | the canonical inputs (below) and `sha256:` of their canonical JSON |
-| `versions` | every version the figures rest on: the wiring, the rule, the variation, the twins and their tolerance, each formula, each catalogue distribution, the sampler, the bit generator, the stream domains, numpy |
+| `versions` | every version the figures rest on: the wiring, the rule, the variation, the twins and their tolerance, each formula, each catalogue distribution, the sampler, the bit generator, the stream domains, numpy; and every limit that decides a recorded refusal (`limits`: the values and events budgets, the largest sample and count mean, the generalized Pareto's shapes, a splice's body share, the largest standard exponential, the range-fit percentiles) |
 | `record`, `summaries`, `result_digest` | the whole record (schema `mythos.economics.scenario-simulation/v1`) and its digest; its scenario and event figures as decimal strings |
 | `status`, `refusal_code`, `refusal_detail` | `completed`, or `refused` with the code; never both (a check constraint) |
 | `started_at`, `finished_at`, `duration_ms` | the timing, outside both digests |
 
 The canonical inputs are every event and component with its formula and the parameter
 each input reads; every parameter with its values, unit, currency, source, evidence,
-dates, **stated distribution** and variation; the policy's terms and exclusions; the
-frequency; the severe-but-plausible percentile; the rules; and every version. They hold
+dates, **stated distribution** and variation; each derived parameter's contributors;
+the policy's terms and exclusions; the frequency; the severe-but-plausible percentile;
+the rules; and every version and limit. They hold
 neither the seed nor the draws, which are columns of their own. Nothing in a result is
 a float (`result_malformed`), and both digests are recomputed on save
 (`digest_mismatch`).
 
 **Idempotent.** One row per scenario version, input digest, seed and draws
 (`uq_econ_simulation_inputs`): the same inputs return the row already recorded and
-never run or write a second; two runs racing past that read are stopped by the check
-and by the constraint, and the later returns the first's row. A version change (numpy
-included) is a new input digest, so a new row, never an old one returned. The same
+never run or write a second. Every check of the row, its lookup of the same identity
+included, runs before the transaction, which only inserts (`insert_checked`, refused for
+a row not checked or changed since): two runs racing past that lookup are stopped by the
+constraint (`IntegrityError`), and the later returns the first's row
+(`test_a_row_that_lands_between_the_check_and_the_insert_is_returned`). A version change
+(numpy included) or a limit change is a new input digest, so a new row, never an old one
+returned: a refusal recorded at a lower values budget is not returned at the default
+(`test_a_refusal_under_a_lower_limit_is_not_returned_under_the_default`). The same
 seed gives the same digests, a different seed a different result digest, and two
 interpreters with different `PYTHONHASHSEED` the same.
 
-A refusal the inputs decide (no admissible distribution, no twin, a malformed stated
-distribution, the values budget) is recorded, and the same inputs return it. One they
+A refusal the inputs decide (no admissible distribution, no twin, a malformed or
+contradicting stated distribution, the values or events budget) is recorded, and the
+same inputs return it. One they
 do not decide (the time budget, memory, a broken invariant, a fault, an engine that
 will not import) is returned and never recorded.
 
@@ -2485,9 +2543,9 @@ will not import) is returned and never recorded.
 `simulation_service.simulate_scenario(scenario, *, seed, draws=100_000,
 severe_percentile=95)` loads the scenario version as the scenario engine reads it: its
 events in key order, each component recomputed from the rows it cites; the policy of
-the parameter-set version its build names; each cited row's stated distribution; the
-set's variables and terms as shared and the effects' attributes per occurrence; and
-its frequency row. It looks up the result of the same identity, runs the pure engine if
+the parameter-set version its build names; each cited row's stated distribution; each
+derived row's contributors (`derived_from`) and theirs; and its frequency row. Every
+parameter is drawn once per simulated year: the service names none per occurrence. It looks up the result of the same identity, runs the pure engine if
 there is none, and records the result. It returns a `SimulationOutcome` (the result,
 whether this call recorded it, and the code and detail of a refusal), and **never
 raises**: every failure comes back with its code (`engine_unavailable`,
@@ -2525,10 +2583,11 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
   the signed receipt (the Financial Exposure Receipt).
 - **No route.** Step 6 serves reports and scenario endpoints, and will call the
   service.
-- **No writer states a distribution or a frequency yet.** The column and the
-  frequency parameter are read and checked, but neither the parameter-set API nor the
-  builder's request takes them, so a stored scenario's ranges resolve by the rule:
-  point masses, expert PERTs, and a refusal for every other range. A parameter-set
+- **No writer states a distribution or a frequency yet, and nothing names a parameter
+  per occurrence.** The column and the frequency parameter are read and checked, but
+  neither the parameter-set API nor the builder's request takes them, so a stored
+  scenario's ranges resolve by the rule: point masses, expert PERTs, derived
+  parameters from their contributors, and a refusal for every other range. A parameter-set
   version's content digest does not cover a distribution, since none is written there.
 - **No dependency between parameters** beyond the sharing of section 25.2: no copula,
   no shared-cause event, no correlation between events.
@@ -2544,15 +2603,49 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
    point mass, else PERT (weight 4) for an `EXPERT_ESTIMATE` range only, else refused.
    Every other range (a customer's, a benchmark's, an observed or calculated one) must
    state its distribution before it is simulated.
-2. The parameter set's variables, the policy's terms and the frequency are shared
-   across a year's occurrences; an effect's attributes vary per occurrence.
+2. **Every parameter is drawn once per simulated year** (review round 1, the lead's
+   call, reversing this step's first draft): an effect's attributes too, since a range
+   is uncertainty about the figure; per-occurrence drawing is an explicit option per
+   parameter (`variation: per_occurrence`), in the input digest, that nothing sets yet.
+   Trade-off: once a year can overstate the tail where a range is genuine variation
+   between occurrences; per occurrence understated the annual P95 by 27% in the
+   reviewer's probe (section 25.2). Alternative: the first draft's split (the set's
+   variables, the terms and the frequency once a year, an effect's attributes per
+   occurrence).
 3. A scenario's frequency is one parameter named `frequency`, and each occurrence
    realises every event of the scenario once.
 4. Insurance is applied per event occurrence, as step 4 applies it, the limit
    included; the share of draws whose recoveries exceed the limit is reported.
 5. The twins' tolerance is 1E-13 relative, against the Decimal formula at the binary64
-   inputs; a component with no uncertain input is computed by its Decimal formula.
+   inputs, for normal binary64 results (subnormals excepted, section 25.3). A
+   component with no uncertain input is computed by its Decimal formula, an event with
+   none (its policy's terms included) by step 4's `assess`, a scenario of such events
+   by their Decimal sums, and their summaries are those Decimal values, every digit
+   (review round 1). Alternative: summarise the binary64 vector, as the first draft
+   did, and state that a constant run is exact only to binary64 (300.29999999999995
+   for 300.30).
 6. A refusal the inputs decide is recorded; one they do not decide is not.
 7. The run's time budget is 120 s, checked between stages.
-8. Every version, numpy's included, is part of the canonical inputs, so a version
-   change is a new stored result, never an old one returned.
+8. Every version, numpy's included, and every limit that decides a recorded refusal
+   (review round 1) are part of the canonical inputs, so a version or limit change is a
+   new stored result, never an old one returned. Alternative: leave the limits out and
+   never record a budget refusal, returning it each time instead.
+9. **A stated distribution must hold its row's figures** (review round 1): the base
+   between its P5 and P95 and the low and the high inside the closure of its support,
+   refused otherwise (`distribution_contradicts_range`), at write and at run time. The
+   thresholds are the owner's: P5 and P95, and the closed support (so a low of 0 fits a
+   lognormal or a gamma). Alternatives: a narrower test (the base between P10 and P90,
+   or each of low, base and high near its own percentile), a wider one (the base
+   anywhere in the support), or a warning recorded with the run instead of a refusal.
+10. **A derived parameter draws from its contributors** (review round 1): each by its
+    own rule, per draw the larger loss in the inputs' direction, refused where any
+    contributor is, naming it (section 25.1, rule 5). Alternatives: refuse every
+    derived range (the first draft: safe, but a dead end, since no writer can state a
+    distribution and rows are append-only), or a PERT of the merged range (not sound:
+    a PERT of pointwise maxima need not bound the expected maximum).
+11. **The transaction only inserts** (review round 1, as section 24's decision 11): a
+    result's checks, its lookup of the same identity included, run before it, so a run
+    that lands between the check and the INSERT is stopped by the unique constraint and
+    the first's row is returned. Alternative: the save's own checks inside the
+    transaction, as first drafted, which a test on one connection cannot race (the
+    other row would be rolled back with the savepoint).

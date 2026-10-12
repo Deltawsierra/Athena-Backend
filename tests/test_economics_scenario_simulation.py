@@ -187,9 +187,11 @@ def collapse(event: LossEvent, policy: InsurancePolicy | None, point: Point):
     return LossEvent(event.loss_event_id, event.currency, components), collapsed_policy
 
 
-def scenario(*events, policy=None, stated=None, shared=frozenset(), frequency=None, currency="USD"):
-    return ss.ScenarioInput("scenario-test", currency, tuple(events), policy, dict(stated or {}), frozenset(shared),
-                            frequency)
+def scenario(*events, policy=None, stated=None, per_occurrence=frozenset(), frequency=None, currency="USD",
+             derived=None):
+    extra = {"derived": derived} if derived else {}
+    return ss.ScenarioInput("scenario-test", currency, tuple(events), policy, dict(stated or {}),
+                            frozenset(per_occurrence), frequency, **extra)
 
 
 def stated(distribution_id, sparse=None, **params):
@@ -396,7 +398,7 @@ def test_any_other_range_without_a_distribution_is_refused(source):
 
 def test_a_stated_distribution_is_drawn_from_where_it_fits_the_unit():
     lognormal = stated("lognormal", mu="9.2", sigma="0.8")
-    resolved = ss.resolve(p("x", "money", "1000", "2000", "9000"), lognormal)
+    resolved = ss.resolve(p("x", "money", "3000", "10000", "36000"), lognormal)
     assert resolved.rule == ss.RULE_STATED and isinstance(resolved.distribution, d.Lognormal)
     beta = stated("beta_binomial_rate", alpha="8", beta="13")
     assert isinstance(ss.resolve(p("r", "ratio", "0.2", "0.35", "0.5"), beta).distribution, d.BetaBinomialRate)
@@ -531,8 +533,7 @@ def test_the_expected_annual_exposure_is_the_frequency_times_the_severity():
     event, distributions = _gamma_event()
     frequency = p(ss.FREQUENCY_PARAMETER, "count", "2", "3", "4", source="INDUSTRY_BENCHMARK")
     distributions[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="3")
-    result = ss.run(scenario(event, stated=distributions, frequency=frequency, shared={ss.FREQUENCY_PARAMETER}),
-                    seed=11, draws=100_000)
+    result = ss.run(scenario(event, stated=distributions, frequency=frequency), seed=11, draws=100_000)
     gross = result.record["scenario"]["gross_cash"]
     assert result.record["basis"] == "annual_loss"
     assert gross["expected_annual_exposure"] == gross["mean"]
@@ -566,10 +567,7 @@ def _policy(deductible="100", limit="1000000", sublimits=None):
 
 def _yearly(policy):
     frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "3", "5", source="INDUSTRY_BENCHMARK")
-    shared = {ss.FREQUENCY_PARAMETER, "insurance_deductible", "insurance_limit"} | {
-        t.name for t in policy.sublimits.values()
-    }
-    si = scenario(_flat_event(), policy=policy, frequency=frequency, shared=shared,
+    si = scenario(_flat_event(), policy=policy, frequency=frequency,
                   stated={ss.FREQUENCY_PARAMETER: stated("poisson", rate="3")})
     return ss.run(si, seed=5, draws=20_000)
 
@@ -619,18 +617,16 @@ def _uncertain_exposure():
         "exposure.churn_rate": stated("beta_binomial_rate", alpha="4", beta="196"),
         "exposure.margin_per_customer_per_year": stated("gamma", shape="36", scale="4.2"),
     }
-    shared = {name for name in distributions if "." not in name} | {
-        "insurance_deductible", "insurance_limit", "insurance_sublimit:notification"}
-    return event, distributions, shared
+    return event, distributions
 
 
 def test_percentiles_are_ordered_everywhere():
-    event, distributions, shared = _uncertain_exposure()
+    event, distributions = _uncertain_exposure()
     frequency = p(ss.FREQUENCY_PARAMETER, "count", "0", "1", "2", source="INDUSTRY_BENCHMARK")
     distributions = {**distributions, ss.FREQUENCY_PARAMETER: stated("poisson", rate="1.5")}
     for freq in (None, frequency):
-        result = ss.run(scenario(event, policy=example_b_policy(), stated=distributions, shared=shared | {
-            ss.FREQUENCY_PARAMETER} if freq else shared, frequency=freq), seed=3, draws=20_000)
+        result = ss.run(scenario(event, policy=example_b_policy(), stated=distributions, frequency=freq), seed=3,
+                        draws=20_000)
         found = blocks(result.record)
         assert len(found) >= 10
         for path, block in found:
@@ -639,7 +635,7 @@ def test_percentiles_are_ordered_everywhere():
 
 
 def _two_event_run(frequency=None):
-    exposure, distributions, shared = _uncertain_exposure()
+    exposure, distributions = _uncertain_exposure()
     payment = payment_event()
     distributions.update({
         "recovery_rate": stated("pert", sparse=True, minimum="0.70", mode="0.825", maximum="0.95"),
@@ -647,10 +643,8 @@ def _two_event_run(frequency=None):
     stated_all = dict(distributions)
     if frequency is not None:
         stated_all[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="2")
-        shared = shared | {ss.FREQUENCY_PARAMETER}
-    shared = shared | {"recovery_rate", "transactions_per_day", "average_transaction_value"}
-    return ss.run(scenario(exposure, payment, policy=example_b_policy(), stated=stated_all, shared=shared,
-                           frequency=frequency), seed=8, draws=20_000)
+    return ss.run(scenario(exposure, payment, policy=example_b_policy(), stated=stated_all, frequency=frequency),
+                  seed=8, draws=20_000)
 
 
 @pytest.mark.parametrize("yearly", [False, True], ids=["occurrences", "years"])
@@ -734,7 +728,7 @@ def test_the_simulation_adds_no_event_and_counts_each_effect_once():
 def _payment_run(seed=2026, draws=20_000, extra_event=None):
     distributions = {"recovery_rate": stated("pert", sparse=True, minimum="0.70", mode="0.825", maximum="0.95")}
     events = (payment_event(),) + ((extra_event,) if extra_event is not None else ())
-    return ss.run(scenario(*events, stated=distributions, shared={"recovery_rate"}), seed=seed, draws=draws)
+    return ss.run(scenario(*events, stated=distributions), seed=seed, draws=draws)
 
 
 def test_the_same_seed_gives_the_same_digests_and_another_seed_another():
@@ -770,8 +764,7 @@ def test_an_unrelated_parameter_leaves_every_other_parameters_draws_unchanged():
     event, distributions = _gamma_event()
     alone = _payment_run()
     distributions["recovery_rate"] = stated("pert", sparse=True, minimum="0.70", mode="0.825", maximum="0.95")
-    together = ss.run(scenario(payment_event(), event, stated=distributions, shared={"recovery_rate"}),
-                      seed=2026, draws=20_000)
+    together = ss.run(scenario(payment_event(), event, stated=distributions), seed=2026, draws=20_000)
     for component in ("direct-loss", "incident-response", "legal-regulatory-response"):
         name = f"component/payment_agent_misuse-example/{component}"
         assert np.array_equal(alone.vectors[name], together.vectors[name]), name
@@ -779,14 +772,13 @@ def test_an_unrelated_parameter_leaves_every_other_parameters_draws_unchanged():
     assert "component/ev-gamma/loss" in together.vectors and "component/ev-gamma/loss" not in alone.vectors
 
 
-def test_a_shared_parameter_is_one_value_a_year():
+def test_a_parameter_is_one_value_a_year_unless_named_per_occurrence():
     event, distributions = _gamma_event()
     frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "2", "3", source="INDUSTRY_BENCHMARK")
     distributions[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="4")
-    shared = ss.run(scenario(event, stated=distributions, frequency=frequency,
-                             shared={ss.FREQUENCY_PARAMETER, "loss.amount"}), seed=9, draws=5_000)
-    varying = ss.run(scenario(event, stated=distributions, frequency=frequency,
-                              shared={ss.FREQUENCY_PARAMETER}), seed=9, draws=5_000)
+    shared = ss.run(scenario(event, stated=distributions, frequency=frequency), seed=9, draws=5_000)
+    varying = ss.run(scenario(event, stated=distributions, frequency=frequency, per_occurrence={"loss.amount"}),
+                     seed=9, draws=5_000)
     counts = shared.vectors["counts"]
     draws = shared.vectors["component/ev-gamma/loss"]  # a lump sum: its parameter's draws
     starts = np.cumsum(counts) - counts
@@ -812,8 +804,7 @@ def test_the_input_digest_covers_each_parameters_distribution():
         stated("pert", sparse=True, minimum="0.70", mode="0.80", maximum="0.95"),
         stated("beta_binomial_rate", alpha="33", beta="7"),
     ):
-        changed = ss.run(scenario(payment_event(), stated={"recovery_rate": other}, shared={"recovery_rate"}),
-                         seed=2026, draws=20_000)
+        changed = ss.run(scenario(payment_event(), stated={"recovery_rate": other}), seed=2026, draws=20_000)
         assert changed.input_digest != base.input_digest
         assert changed.inputs["parameters"]["recovery_rate"]["distribution"] == other.as_json()
     assert base.inputs["parameters"]["recovery_rate"]["distribution"]["id"] == "pert"
@@ -854,15 +845,15 @@ def test_two_currencies_in_one_run_are_refused():
 
 
 def test_a_run_past_the_values_budget_is_refused_before_a_parameter_is_drawn(monkeypatch):
-    event, distributions, shared = _uncertain_exposure()
+    event, distributions = _uncertain_exposure()
     frequency = p(ss.FREQUENCY_PARAMETER, "count", "4", "5", "6", source="INDUSTRY_BENCHMARK")
     distributions[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="5")
     sampled = []
     original = d.Gamma._draw
     monkeypatch.setattr(d.Gamma, "_draw", lambda self, rng, n: sampled.append(n) or original(self, rng, n))
     with pytest.raises(sim.SimulationRefused) as refused:
-        ss.run(scenario(event, policy=example_b_policy(), stated=distributions, frequency=frequency,
-                        shared=shared | {ss.FREQUENCY_PARAMETER}), seed=1, draws=1_000_000)
+        ss.run(scenario(event, policy=example_b_policy(), stated=distributions, frequency=frequency), seed=1,
+               draws=1_000_000)
     assert refused.value.code == "values_over_budget"
     assert sampled == []
 
@@ -902,13 +893,218 @@ def test_a_default_run_of_the_largest_template_is_quick():
     """100,000 draws of section 31 through the template (seven components, eleven
     stated distributions, a policy), sampled twice as 7a does: a per-draw Python
     loop would take minutes; CI's load never makes this 60 s."""
-    event, distributions, shared = _uncertain_exposure()
+    event, distributions = _uncertain_exposure()
     start = time.perf_counter()
-    result = ss.run(scenario(event, policy=example_b_policy(), stated=distributions, shared=shared), seed=1,
-                    draws=100_000)
+    result = ss.run(scenario(event, policy=example_b_policy(), stated=distributions), seed=1, draws=100_000)
     elapsed = time.perf_counter() - start
     assert result.record["simulations"] == 100_000
     assert elapsed < 60, elapsed
+
+
+# ======================================================================
+# Review round 1
+# ======================================================================
+
+AS_OF = example_a().components[0].as_of
+
+
+def _lump(component_id, parameter, family="notification"):
+    return evaluate(component_id, family, "lump_sum", 1, {"amount": parameter}, as_of=AS_OF)
+
+
+def test_a_stated_distribution_that_contradicts_its_figures_is_refused():
+    """M1. The reviewer's case: a lump sum of 100,000 / 200,000 / 400,000 stating
+    lognormal(0, 1) would run with a mean of 1.63. Refused, at run time as at write
+    time, naming the parameter; one that holds the figures is drawn from."""
+    row = p("c.amt", "money", "100000", "200000", "400000")
+    contradicting = stated("lognormal", mu="0", sigma="1")
+    with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+        ss.resolve(row, contradicting)
+    assert refused.value.code == "distribution_contradicts_range" and "c.amt" in refused.value.detail
+    with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+        ss.run(scenario(LossEvent("ev", "USD", (_lump("c", row),)), stated={"c.amt": contradicting}), seed=1,
+               draws=1_000)
+    assert refused.value.code == "distribution_contradicts_range"
+    # Median 198,789, P5 102,900, P95 384,000: it holds the base, and its support the ends.
+    assert ss.resolve(row, stated("lognormal", mu="12.2", sigma="0.4")).rule == ss.RULE_STATED
+    for outside in (
+        stated("gamma", shape="2", scale="10000"),  # P95 47,400: the base is above it
+        stated("pert", sparse=True, minimum="150000", mode="200000", maximum="400000"),  # the low is below it
+        stated("generalized_pareto", shape="-0.5", scale="100000", threshold="0"),  # it ends at 200,000
+    ):
+        with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+            ss.resolve(row, outside)
+        assert refused.value.code == "distribution_contradicts_range", outside
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "2", "4", source="INDUSTRY_BENCHMARK")
+    with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+        ss.resolve_frequency(frequency, stated("poisson", rate="40"))
+    assert refused.value.code == "distribution_contradicts_range"
+    assert ss.RANGE_FIT_PERCENTILES == (Decimal(5), Decimal(95))
+
+
+def test_a_run_with_nothing_uncertain_is_step_4_to_the_last_digit():
+    """L1. 100.10 + 200.20 is 300.29999999999995 in binary64 and 300.30 in step 4;
+    repeat_in_window at 100 a day is a 60-digit Decimal binary64 cannot hold. A run
+    with nothing uncertain reports step 4's figures, every digit."""
+    event = LossEvent("ev", "USD", (_lump("a", p("a.amt", "money", "100.10")),
+                                    _lump("b", p("b.amt", "money", "200.20"))))
+    assert 100.10 + 200.20 != 300.30
+    policy = _policy(deductible="100.05")
+    deterministic = assess(event, policy)
+    result = ss.run(scenario(event, policy=policy), seed=1, draws=1_000)
+    record = result.record
+    assert deterministic.gross.total.at(Point.BASE).amount == Decimal("300.30")
+    for block in (record["scenario"]["gross_cash"], record["events"][0]["gross_cash"]):
+        _exact(block, Decimal("300.30"))
+    _exact(record["scenario"]["retained_cash"], deterministic.insured.retained.at(Point.BASE).amount)
+    assert record["events"][0]["evaluated_by"] == record["scenario"]["evaluated_by"] == ss.BY_DECIMAL
+    # Two events, each exact: the scenario's line is their Decimal sum.
+    pair = ss.run(scenario(LossEvent("ev-1", "USD", (_lump("a", p("a.amt", "money", "0.1")),)),
+                           LossEvent("ev-2", "USD", (_lump("b", p("b.amt", "money", "0.2")),))), seed=1, draws=1_000)
+    _exact(pair.record["scenario"]["gross_cash"], Decimal("0.3"))
+    component = evaluate("w", "direct_financial", "repeat_in_window", 1, {
+        "transactions_per_day": p("tpd", "count_per_day", "100"), "window_hours": p("wh", "hours", "7"),
+        "success_rate": p("sr", "ratio", "0.3"), "value_per_transaction": p("vpt", "money_per_unit", "123.45"),
+        "recovery_rate": p("rr", "ratio", "0.1")}, as_of=AS_OF)
+    expected = component.at(Point.BASE).amount
+    assert Decimal(float(expected)) != expected and len(expected.as_tuple().digits) > 50
+    window = ss.run(scenario(LossEvent("ev-w", "USD", (component,))), seed=1, draws=1_000).record
+    for block in (window["events"][0]["components"][0]["summary"], window["events"][0]["gross_cash"],
+                  window["scenario"]["gross_cash"]):
+        _exact(block, expected)
+
+
+def test_every_limit_that_decides_a_recorded_refusal_is_in_the_input_digest(monkeypatch):
+    """L3. A refusal recorded under one values or events budget is never returned
+    under another: each limit is a version of the inputs."""
+    event, distributions = _gamma_event()
+    si = scenario(event, stated=distributions)
+    before = ss.digest_of(ss.canonical_inputs(si))
+    limits = ss.versions(si)["limits"]
+    assert (limits["max_values"], limits["max_events"]) == (sim.MAX_VALUES, sim.MAX_EVENTS)
+    assert limits["range_fit_percentiles"] == ["5", "95"]
+    for name in ("MAX_VALUES", "MAX_EVENTS"):
+        monkeypatch.setattr(sim, name, getattr(sim, name) - 1)
+        after = ss.digest_of(ss.canonical_inputs(si))
+        assert after != before, name
+        before = after
+
+
+def test_an_effects_range_is_drawn_once_a_year_unless_named_per_occurrence():
+    """L4. The reviewer's case: an expert lump sum of 10,000 / 100,000 / 1,000,000
+    and Poisson(5) events a year. Drawn once a year (the default: the range is
+    uncertainty about the figure), the annual P95 is at or above the per-occurrence
+    option's, with the same mean."""
+    amount = p("x.amt", "money", "10000", "100000", "1000000", source="EXPERT_ESTIMATE")
+    event = LossEvent("ev", "USD", (_lump("x", amount),))
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "5", "9", source="INDUSTRY_BENCHMARK")
+    distributions = {ss.FREQUENCY_PARAMETER: stated("poisson", rate="5")}
+    yearly = ss.run(scenario(event, stated=distributions, frequency=frequency), seed=3, draws=50_000)
+    each = ss.run(scenario(event, stated=distributions, frequency=frequency, per_occurrence={"x.amt"}), seed=3,
+                  draws=50_000)
+    assert yearly.record["parameters"]["x.amt"]["variation"] == ss.SHARED
+    assert each.record["parameters"]["x.amt"]["variation"] == ss.PER_OCCURRENCE
+    assert yearly.inputs["parameters"]["x.amt"]["variation"] == ss.SHARED
+    assert yearly.input_digest != each.input_digest
+    once, per = yearly.record["scenario"]["gross_cash"], each.record["scenario"]["gross_cash"]
+    assert Decimal(once["severe_plausible"]) >= Decimal(per["severe_plausible"])
+    assert Decimal(once["p90"]) >= Decimal(per["p90"])
+    # The reviewer measured P95 3.18M against 2.32M: well apart, not merely ordered.
+    assert Decimal(once["severe_plausible"]) > Decimal("1.2") * Decimal(per["severe_plausible"])
+    error = (Decimal(once["standard_error_of_mean"]) ** 2 + Decimal(per["standard_error_of_mean"]) ** 2).sqrt()
+    assert abs(Decimal(once["mean"]) - Decimal(per["mean"])) <= 4 * error
+    with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+        ss.run(scenario(event, stated=distributions, frequency=frequency, per_occurrence={"nothing.read"}), seed=3,
+               draws=1_000)
+    assert refused.value.code == "variation_unrecognised"
+
+
+@pytest.mark.parametrize("figures", [("10000", "10000", "25000"), ("10000", "25000", "25000")],
+                         ids=["low=base", "base=high"])
+def test_a_range_with_one_end_at_its_base_is_not_a_point_mass(figures):
+    """L5. Only low = base = high is a point mass: low = base < high is a range,
+    PERT for an expert and refused for any other source."""
+    resolved = ss.resolve(p("x", "money", *figures, source="EXPERT_ESTIMATE"), None)
+    assert resolved.rule == ss.RULE_PERT_DEFAULT and resolved.drawn
+    assert (resolved.distribution.minimum, resolved.distribution.maximum) == (10000.0, 25000.0)
+    for source in NON_EXPERT:
+        with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+            ss.resolve(p("x", "money", *figures, source=source.value), None)
+        assert refused.value.code == "no_admissible_distribution"
+
+
+def _derived(name, unit, contributors, direction=INC, source="CALCULATED"):
+    """The builder's larger loss of ``contributors``, point by point."""
+    larger = max if direction is INC else min
+    figures = [str(larger(c.at(point).amount if isinstance(c.at(point), Money) else c.at(point)
+                          for c in contributors)) for point in POINTS]
+    return p(name, unit, *figures, source=source)
+
+
+def test_a_derived_parameter_of_two_point_masses_is_the_larger_exactly():
+    """L6. A CALCULATED merge of two effects' point figures is the larger loss,
+    exactly: the highest where the input increases the loss, the lowest where it
+    decreases it."""
+    contributors = (p("e1.amount", "money", "150000"), p("e2.amount", "money", "165000.10"))
+    merged = _derived("ev:amount", "money", contributors)
+    result = ss.run(scenario(LossEvent("ev", "USD", (_lump("x", merged),)), derived={"ev:amount": contributors}),
+                    seed=1, draws=1_000)
+    record = result.record["parameters"]["ev:amount"]
+    assert record["rule"] == ss.RULE_DERIVED and record["direction"] == "increases"
+    assert record["distribution"] == {"id": "point_mass", "version": 1, "value": "165000.1"}
+    assert sorted(record["contributors"]) == ["e1.amount", "e2.amount"]
+    _exact(result.record["scenario"]["gross_cash"], Decimal("165000.10"))
+    assert result.inputs["derived"] == {"ev:amount": ["e1.amount", "e2.amount"]}
+    rates = (p("e1.recovery", "ratio", "0.8"), p("e2.recovery", "ratio", "0.7"))
+    lower = ss.resolve_derived(_derived("ev:recovery", "ratio", rates, DEC), rates, {}, direction=DEC)
+    assert lower.point == Decimal("0.7") and not lower.drawn
+
+
+def test_a_derived_parameter_of_two_expert_ranges_is_the_drawwise_larger():
+    """L6. Each contributor is drawn by its own rule from its own stream, and the
+    merge takes the larger per draw: its mean is at least each contributor's."""
+    e1 = p("e1.amount", "money", "10000", "40000", "90000", source="EXPERT_ESTIMATE")
+    e2 = p("e2.amount", "money", "20000", "30000", "120000", source="EXPERT_ESTIMATE")
+    merged = _derived("ev:amount", "money", (e1, e2))
+    run = ss.run(scenario(LossEvent("ev", "USD", (_lump("x", merged),)), derived={"ev:amount": (e1, e2)}),
+                 seed=4, draws=20_000)
+    alone = [ss.run(scenario(LossEvent("ev", "USD", (_lump("x", c),))), seed=4, draws=20_000) for c in (e1, e2)]
+    drawn = [r.vectors["component/ev/x"] for r in alone]
+    assert np.array_equal(run.vectors["component/ev/x"], np.maximum(*drawn))
+    mean = Decimal(run.record["scenario"]["gross_cash"]["mean"])
+    for r in alone:
+        assert mean >= Decimal(r.record["scenario"]["gross_cash"]["mean"])
+    record = run.record["parameters"]["ev:amount"]
+    assert record["rule"] == ss.RULE_DERIVED and record["distribution"] is None
+    assert {k: v["rule"] for k, v in record["contributors"].items()} == {
+        "e1.amount": ss.RULE_PERT_DEFAULT, "e2.amount": ss.RULE_PERT_DEFAULT}
+    assert run.record["expert_parameters"] == ["e1.amount", "e2.amount"]
+
+
+def test_a_derived_parameter_with_a_refused_contributor_is_refused_naming_it():
+    """L6. A contributor no rule admits (a customer's range with no distribution)
+    refuses the merge, and the refusal names it; a merge is never a PERT of its
+    own range, and states no distribution of its own."""
+    e1 = p("e1.amount", "money", "10000", "40000", "90000", source="EXPERT_ESTIMATE")
+    e2 = p("e2.amount", "money", "20000", "30000", "120000", source="CUSTOMER_PROVIDED")
+    merged = _derived("ev:amount", "money", (e1, e2))
+    event = LossEvent("ev", "USD", (_lump("x", merged),))
+    with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+        ss.run(scenario(event, derived={"ev:amount": (e1, e2)}), seed=1, draws=1_000)
+    assert refused.value.code == "no_admissible_distribution"
+    assert "e2.amount" in refused.value.detail and "ev:amount" in refused.value.detail
+    fits = stated("lognormal", mu="10.3", sigma="0.5")  # P5 13,000, P95 67,500
+    assert ss.run(scenario(event, derived={"ev:amount": (e1, e2)}, stated={"e2.amount": fits}), seed=1,
+                  draws=1_000).record["parameters"]["ev:amount"]["contributors"]["e2.amount"]["rule"] == ss.RULE_STATED
+    for bad in (
+        {"stated": {"e2.amount": fits, "ev:amount": fits}},  # the merge states its own
+        {"derived_parameter": p("ev:amount", "money", "10000", "40000", "120000", source="CALCULATED")},  # not the larger
+    ):
+        parameter = bad.get("derived_parameter", merged)
+        with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+            ss.run(scenario(LossEvent("ev", "USD", (_lump("x", parameter),)), derived={"ev:amount": (e1, e2)},
+                            stated=bad.get("stated", {"e2.amount": fits})), seed=1, draws=1_000)
+        assert refused.value.code == "derived_malformed"
 
 
 # ======================================================================
@@ -935,6 +1131,11 @@ SPEC_PHRASES = (
     "the Validity Card",
     "the signed receipt",
     "Decisions this step takes",
+    "`distribution_contradicts_range`",
+    "`derived_larger_loss`",
+    "normal\nbinary64 results only",
+    "**Every parameter is drawn once per simulated year**",
+    "**The transaction only inserts**",
 )
 
 

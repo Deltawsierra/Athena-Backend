@@ -1170,10 +1170,15 @@ class FinancialParameter(_AppendOnly):
     def checked_distribution(self, engine: parameters.Parameter) -> dict:
         """The stated distribution, refused unless step 7a's catalogue builds it
         for this parameter (its unit, and for an expert range its own source
-        type), in its stored form."""
+        type) and it holds the parameter's own figures (spec, section 25.1), in
+        its stored form. A derived parameter states none: it draws from what it
+        was derived from."""
         from .engine import distributions, scenario_simulation
 
         stated = self.stated_distribution()
+        if self.derived_from:
+            code = "derived_malformed"
+            raise EngineRefused(code, scenario_simulation.REFUSALS[code], f"{self.name} states a distribution")
         try:
             if self.name == scenario_simulation.FREQUENCY_PARAMETER and self.parameter_set_id is None:
                 scenario_simulation.resolve_frequency(engine, stated)
@@ -1661,6 +1666,12 @@ def _has_float(value) -> bool:
     return False
 
 
+def _checked_state(row) -> tuple:
+    """Every column value of ``row``, as checked: an insert after the check must
+    write exactly these."""
+    return tuple(json.dumps(field.value_from_object(row), sort_keys=True, default=str) for field in row._meta.concrete_fields)
+
+
 class SimulationResult(_AppendOnly):
     """One Monte Carlo run of one scenario version (spec, section 25.6): the seed and
     the draws; the canonical inputs and their digest; every version the figures rest
@@ -1763,6 +1774,17 @@ class SimulationResult(_AppendOnly):
             scenario_id=self.scenario_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
         ).exists():
             raise EconomicsRefused("duplicate_id", "a result of the same inputs, seed and draws is recorded")
+        self._result_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this result, whose :meth:`check_new` ran on exactly these values
+        just before, inside the caller's transaction: an INSERT, never an UPDATE,
+        and nothing read, so the transaction holds only the write (spec, section
+        25.6). A run that raced past the check is stopped by the unique
+        constraint. Any other row, or one changed since its check, is refused."""
+        if not self._state.adding or getattr(self, "_result_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A simulation result is checked whole, then inserted unchanged.")
+        models.Model.save(self, force_insert=True)
 
     def __str__(self) -> str:
         return f"simulation of scenario {self.scenario_id}, seed {self.seed}, {self.draws} draws: {self.status}"

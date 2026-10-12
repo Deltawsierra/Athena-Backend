@@ -10,12 +10,16 @@ of events or of a year), and the events are summed to the scenario. The rules:
 - **A distribution for every parameter, by a stated rule, never a guess**
   (:func:`resolve`, :data:`RULE_VERSION`). A parameter that states a distribution
   (an id, version and native parameters of step 7a's catalogue) draws from it,
-  when the distribution fits the parameter's unit. One that states none draws
-  from a point mass where its low, base and high are one figure, and from
+  when the distribution fits the parameter's unit and holds its own figures (its
+  base between the distribution's P5 and P95, its low and high inside its
+  support: ``distribution_contradicts_range`` otherwise). One that states none
+  draws from a point mass where its low, base and high are one figure, and from
   PERT(low, base, high) where they are a range and its source is an
   ``EXPERT_ESTIMATE``: the only source step 7a's rule lets an expert range stand
   for. Any other range with no distribution is refused
-  (``no_admissible_distribution``), with the reason.
+  (``no_admissible_distribution``), with the reason. A parameter derived across
+  several effects' attributes (the scenario builder's larger loss) draws each of
+  them by this rule and takes, per draw, the one giving the larger loss.
 - **One seed, a stream per parameter.** Each parameter draws from step 7a's
   sub-stream of its own stream name (:func:`stream_name`, the SHA-256 of
   :data:`STREAM_DOMAIN` and its name), so a parameter's draws depend on the seed
@@ -26,16 +30,19 @@ of events or of a year), and the events are summed to the scenario. The rules:
   expected annual exposure, and the result says so. With a frequency parameter
   (a count distribution of events a year), a draw is a simulated year of N
   occurrences, summed by 7a's :func:`.simulation.compound_annual`.
-- **What is shared and what varies** (:data:`VARIATION_VERSION`). A parameter in
-  ``shared`` (the service names the customer parameter set's variables and the
-  policy's terms) is drawn once per simulated year and is the same for every
-  occurrence of that year: what the figure IS, uncertain. Every other parameter
-  (an effect's attribute) is drawn afresh for each occurrence: what each
-  occurrence costs or reaches. Without a frequency the two coincide.
+- **What is shared and what varies** (:data:`VARIATION_VERSION`). Every
+  parameter is drawn once per simulated year and is the same for every
+  occurrence of that year: a range is uncertainty about what the figure IS. A
+  parameter named in ``per_occurrence`` is drawn afresh for each occurrence
+  instead, an explicit option that enters the input digest. Without a frequency
+  the two coincide.
 - **Exact where nothing is uncertain.** A component whose every input is a point
-  mass has no uncertainty: it is computed once, by its Decimal formula (the
-  source of truth), and that value, as the nearest binary64, is the same in
-  every draw. So a run whose parameters are all point masses reproduces step 4.
+  mass is computed once, by its Decimal formula (the source of truth); an event
+  whose every component is so (and its policy's terms point masses) has its lines
+  from step 4's Decimal ``assess``, and a scenario of such events their Decimal
+  sums. Each value, as the nearest binary64, is the same in every draw, and its
+  summary is the Decimal value itself, so such a run reproduces step 4 to the last
+  digit.
 - **Floats inside, Decimal outside**, as step 7a: every summary is 7a's
   (:func:`.simulation.summarize`: percentiles, mean, standard error and bands,
   invariants checked) written as decimal strings, and the record holds no float.
@@ -52,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -62,10 +70,10 @@ import numpy as np
 from . import distributions as dist
 from . import simulation as sim
 from . import twins as tw
-from .formulas import ESTIMATED, MARKET_VALUE, LossComponent
-from .loss import NEVER_COVERED, InsurancePolicy, LossEvent
+from .formulas import ESTIMATED, MARKET_VALUE, Direction, LossComponent
+from .loss import NEVER_COVERED, InsurancePolicy, LossEvent, assess
 from .money import Money, MoneyRefused, check_reporting_currency, decimal_text, parse_decimal
-from .parameters import POINTS, Parameter, ParameterRefused, Unit
+from .parameters import POINTS, Parameter, ParameterRefused, Point, Unit
 from .provenance import SourceType
 from .taxonomy import LossFamily
 
@@ -75,16 +83,22 @@ SCHEMA = "mythos.economics.scenario-simulation/v1"
 INPUTS_SCHEMA = "mythos.economics.scenario-simulation-inputs/v1"
 #: The version of this wiring: the aggregation order, the insurance step, the
 #: constant components, the record. A change that alters a figure is a new one.
-ENGINE_VERSION = 1
+ENGINE_VERSION = 2
 #: The parameter-to-distribution rule (:func:`resolve`).
-RULE_VERSION = "mythos.economics.parameter-distribution/v1"
+RULE_VERSION = "mythos.economics.parameter-distribution/v2"
 RULE = (
-    "a stated distribution of step 7a's catalogue, where it fits the parameter's unit; otherwise a point mass "
-    "where low = base = high; otherwise PERT(low, base, high), weight 4, where the source is EXPERT_ESTIMATE; "
-    "otherwise refused (no_admissible_distribution)"
+    "a stated distribution of step 7a's catalogue, where it fits the parameter's unit and holds its figures (the "
+    "base between its P5 and P95, the low and the high inside its support); otherwise a point mass where low = "
+    "base = high; otherwise PERT(low, base, high), weight 4, where the source is EXPERT_ESTIMATE; otherwise refused "
+    "(no_admissible_distribution). A parameter derived across several parameters draws each by this rule and takes, "
+    "per draw, the one giving the larger loss in the direction of the inputs that read it"
 )
+#: A stated distribution holds its parameter's own figures: the base between
+#: these percentiles of it, and the low and the high inside the closure of its
+#: support (spec, section 25.1). An owner decision (section 25.10).
+RANGE_FIT_PERCENTILES = (Decimal(5), Decimal(95))
 #: Which parameters are drawn once per simulated year and which per occurrence.
-VARIATION_VERSION = "mythos.economics.variation/v1"
+VARIATION_VERSION = "mythos.economics.variation/v2"
 #: Hashed before a parameter's name to give its stream's name.
 STREAM_DOMAIN = "mythos.economics.parameter-stream/v1"
 #: The name of a scenario's frequency parameter: events a year.
@@ -98,6 +112,7 @@ VARIATIONS = (SHARED, PER_OCCURRENCE)
 RULE_STATED = "stated"
 RULE_POINT_MASS = "point_mass"
 RULE_PERT_DEFAULT = "pert_default"
+RULE_DERIVED = "derived_larger_loss"
 
 #: A point mass's record id. Not one of step 7a's catalogue: it draws nothing.
 POINT_MASS = "point_mass"
@@ -139,6 +154,15 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         ),
         "distribution_unknown": "a stated distribution's id is one of step 7a's catalogue",
         "distribution_version_unknown": "a stated distribution's version is the catalogue's version of it",
+        "distribution_contradicts_range": (
+            "a stated distribution holds its parameter's own figures: the base between the distribution's P5 and "
+            "P95, the low and the high inside its support; a distribution that does not is a conflict, surfaced"
+        ),
+        "derived_malformed": (
+            "a derived parameter is one a component reads, in one direction, taken across at least two parameters "
+            "of its unit (none derived, none read by anything else), its low, base and high each the larger loss of "
+            "theirs; it states no distribution of its own"
+        ),
         "distribution_not_for_unit": (
             "a distribution draws only what its parameter's unit holds: a ratio from 0 to 1 (a rate, or an "
             "expert range inside [0, 1]); a count from a count, severity or expert distribution; anything else "
@@ -148,7 +172,7 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "frequency_not_a_count": "a frequency is a count distribution (Poisson, negative binomial, zero-inflated Poisson)",
         "twin_missing": "a formula a simulation evaluates has a vectorised twin: none is approximated",
         "events_missing": "a scenario holds at least one loss event",
-        "variation_unrecognised": "a shared parameter is one the scenario reads",
+        "variation_unrecognised": "a parameter drawn per occurrence is one a component or the policy reads",
         "out_of_range": "a component's, event's or year's loss too large to hold as a binary64 float",
         "time_over_budget": "the run took longer than its time budget, and was stopped between two stages",
     }
@@ -291,14 +315,50 @@ def _support_fits(distribution: dist.Distribution, unit: Unit) -> bool:
     return kind == dist.SEVERITY or expert_at_or_above_zero
 
 
+def support(distribution: dist.Distribution) -> tuple[float, float]:
+    """The closure of ``distribution``'s support: the least and the greatest value
+    its draws can come near (an upper end of infinity where it has none)."""
+    if isinstance(distribution, dist.Spliced):
+        return 0.0, support(distribution.tail)[1]
+    if isinstance(distribution, dist.GeneralizedPareto):
+        upper = distribution.threshold + distribution.scale / -distribution.shape if distribution.shape < 0.0 else math.inf
+        return distribution.threshold, upper
+    kind = type(distribution).KIND
+    if kind == dist.EXPERT:
+        return distribution.minimum, distribution.maximum
+    if kind == dist.RATE:
+        return 0.0, 1.0
+    return 0.0, math.inf  # a count, a lognormal or a gamma
+
+
+def check_fits_range(distribution: dist.Distribution, parameter: Parameter) -> None:
+    """Refuse a stated distribution that does not hold ``parameter``'s own figures
+    (``distribution_contradicts_range``): its base must lie between the
+    distribution's :data:`RANGE_FIT_PERCENTILES` and its low and high inside the
+    closure of its support, each compared as the binary64 the run would draw. A
+    conflict between the two is surfaced, never resolved by silently taking one."""
+    low, base, high = (_amount(parameter.at(point)) for point in POINTS)
+    lower, upper = support(distribution)
+    p_low, p_high = (distribution.ppf(float(q / 100)) for q in RANGE_FIT_PERCENTILES)
+    if lower <= float(low) and float(high) <= upper and p_low <= float(base) <= p_high:
+        return
+    raise ScenarioSimulationRefused(
+        "distribution_contradicts_range",
+        f"{parameter.name} is {low} / {base} / {high}; its {type(distribution).ID} has support "
+        f"[{lower:.6g}, {upper:.6g}] and P5 to P95 [{p_low:.6g}, {p_high:.6g}]",
+    )
+
+
 def check_stated(stated: StatedDistribution, parameter: Parameter) -> dist.Distribution:
     """The distribution ``stated`` builds for ``parameter``, refused unless it fits
-    the parameter's unit. A frequency parameter's is checked by :func:`resolve_frequency`."""
+    the parameter's unit and holds its figures (:func:`check_fits_range`). A
+    frequency parameter's is checked by :func:`resolve_frequency`."""
     distribution = build(stated, parameter.source_type)
     if parameter.name != FREQUENCY_PARAMETER and not _support_fits(distribution, parameter.unit):
         raise ScenarioSimulationRefused(
             "distribution_not_for_unit", f"{parameter.name} is {parameter.unit.value}; {stated.distribution_id} does not fit it"
         )
+    check_fits_range(distribution, parameter)
     return distribution
 
 
@@ -320,14 +380,18 @@ def _amount(value: Money | Decimal) -> Decimal:
 
 @dataclass(frozen=True)
 class Resolved:
-    """A parameter and the distribution the rule gave it: ``distribution`` is
-    ``None`` for a point mass, whose exact value is ``point``."""
+    """A parameter and the distribution the rule gave it. A point mass draws
+    nothing: its exact value is ``point``. A derived parameter (``contributors``)
+    draws each contributor by its own rule and takes, per draw, the larger loss in
+    its ``direction``; it is a point mass where every contributor is."""
 
     parameter: Parameter
     rule: str
     variation: str
     distribution: dist.Distribution | None = None
     point: Decimal | None = None
+    contributors: tuple[Resolved, ...] = ()
+    direction: str | None = None
 
     @property
     def name(self) -> str:
@@ -338,32 +402,47 @@ class Resolved:
         return stream_name(self.parameter.name)
 
     @property
+    def drawn(self) -> bool:
+        """True unless a point mass: the run draws it."""
+        return self.point is None
+
+    @property
     def expert(self) -> bool:
         return self.distribution is not None and bool(type(self.distribution).EXPERT)
 
     @property
     def mean_finite(self) -> bool:
+        if self.contributors:
+            return all(c.mean_finite for c in self.contributors)
         return self.distribution is None or self.distribution.mean is not None
 
     @property
     def variance_finite(self) -> bool:
+        if self.contributors:
+            return all(c.variance_finite for c in self.contributors)
         return self.distribution is None or self.distribution.variance is not None
 
-    def distribution_record(self) -> dict:
-        if self.distribution is None:
+    def distribution_record(self) -> dict | None:
+        if self.point is not None:
             return {"id": POINT_MASS, "version": POINT_MASS_VERSION, "value": decimal_text(self.point)}
+        if self.distribution is None:
+            return None  # derived: its contributors' draws, each recorded
         return self.distribution.record()
 
     def record(self) -> dict:
-        return {
+        record = {
             "rule": self.rule,
             "variation": self.variation,
-            "stream": None if self.distribution is None else self.stream,
+            "stream": self.stream if self.distribution is not None else None,
             "distribution": self.distribution_record(),
         }
+        if self.contributors:
+            record["direction"] = self.direction
+            record["contributors"] = {c.name: c.record() for c in self.contributors}
+        return record
 
 
-def resolve(parameter: Parameter, stated: StatedDistribution | None, *, variation: str = PER_OCCURRENCE) -> Resolved:
+def resolve(parameter: Parameter, stated: StatedDistribution | None, *, variation: str = SHARED) -> Resolved:
     """The distribution ``parameter`` draws from, by :data:`RULE_VERSION`. See the
     module's rules."""
     if not isinstance(parameter, Parameter):
@@ -387,6 +466,51 @@ def resolve(parameter: Parameter, stated: StatedDistribution | None, *, variatio
     return Resolved(parameter, RULE_PERT_DEFAULT, variation, distribution=pert)
 
 
+def _larger(direction: Direction) -> Callable:
+    return max if direction is Direction.INCREASES else min
+
+
+def resolve_derived(
+    parameter: Parameter,
+    contributors: Iterable[Parameter],
+    stated: Mapping[str, StatedDistribution],
+    *,
+    direction: Direction,
+    variation: str = SHARED,
+) -> Resolved:
+    """A parameter derived across ``contributors`` (the scenario builder's larger
+    loss of an event's attribute across its effects, spec section 24.5): each
+    contributor resolved by its own rule (stated, point mass, PERT for an expert,
+    or refused), and per draw the value giving the larger loss in ``direction``,
+    as the builder takes it per point. A refused contributor refuses the merge,
+    naming it. Where every contributor is a point mass, so is the merge."""
+    contributors = tuple(contributors)
+    name = parameter.name
+    if name in stated:
+        raise ScenarioSimulationRefused("derived_malformed", f"{name} states a distribution of its own")
+    if len(contributors) < 2 or len({c.name for c in contributors}) != len(contributors):
+        raise ScenarioSimulationRefused("derived_malformed", f"{name} is taken across {len(contributors)} parameters")
+    larger = _larger(direction)
+    for point in POINTS:
+        figures = [_amount(c.at(point)) for c in contributors]
+        if any(c.unit is not parameter.unit for c in contributors) or _amount(parameter.at(point)) != larger(figures):
+            raise ScenarioSimulationRefused(
+                "derived_malformed", f"{name} at {point.value} is not the larger loss of {[c.name for c in contributors]}"
+            )
+    resolved = []
+    for contributor in contributors:
+        try:
+            resolved.append(resolve(contributor, stated.get(contributor.name), variation=variation))
+        except (ScenarioSimulationRefused, dist.DistributionRefused) as refused:
+            raise type(refused)(refused.code, f"{name} is derived from {contributor.name}: {refused.detail}") from None
+    point = None
+    if not any(r.drawn for r in resolved):
+        point = larger(r.point for r in resolved)
+    return Resolved(
+        parameter, RULE_DERIVED, variation, point=point, contributors=tuple(resolved), direction=direction.value
+    )
+
+
 def resolve_frequency(parameter: Parameter, stated: StatedDistribution | None) -> Resolved:
     """A scenario's frequency: a ``count`` parameter that states a count
     distribution of events a year. Nothing defaults: a PERT is not a count."""
@@ -397,6 +521,7 @@ def resolve_frequency(parameter: Parameter, stated: StatedDistribution | None) -
     distribution = build(stated, parameter.source_type)
     if not (type(distribution).DISCRETE and type(distribution).KIND == dist.FREQUENCY):
         raise ScenarioSimulationRefused("frequency_not_a_count", stated.distribution_id)
+    check_fits_range(distribution, parameter)
     return Resolved(parameter, RULE_STATED, SHARED, distribution=distribution)
 
 
@@ -407,16 +532,19 @@ def resolve_frequency(parameter: Parameter, stated: StatedDistribution | None) -
 class ScenarioInput:
     """What one run reads: the scenario's events (step 4's, each component
     computed from the parameters it cites), the policy their insurance applies,
-    each parameter's stated distribution by name, the names drawn once per
-    simulated year, and the frequency parameter, if any."""
+    each parameter's stated distribution by name, the names drawn afresh for each
+    occurrence (every other parameter is drawn once per simulated year), the
+    frequency parameter, if any, and each derived parameter's contributors, by
+    the derived parameter's name."""
 
     scenario_id: str | None
     currency: str
     events: tuple[LossEvent, ...]
     policy: InsurancePolicy | None = None
     stated: Mapping[str, StatedDistribution] = field(default_factory=dict)
-    shared: frozenset[str] = frozenset()
+    per_occurrence: frozenset[str] = frozenset()
     frequency: Parameter | None = None
+    derived: Mapping[str, tuple[Parameter, ...]] = field(default_factory=dict)
 
 
 def _policy_terms(policy: InsurancePolicy | None) -> list[tuple[str, Parameter]]:
@@ -430,8 +558,9 @@ def _policy_terms(policy: InsurancePolicy | None) -> list[tuple[str, Parameter]]
 
 
 def _named(si: ScenarioInput) -> dict[str, Parameter]:
-    """Every parameter the scenario cites, its policy's terms and its frequency, by
-    name: one name is one parameter (``duplicate_id``)."""
+    """Every parameter the scenario cites, its policy's terms, its frequency and
+    each derived parameter's contributors, by name: one name is one parameter
+    (``duplicate_id``)."""
     named: dict[str, Parameter] = {}
 
     def add(parameter: Parameter) -> None:
@@ -453,14 +582,61 @@ def _named(si: ScenarioInput) -> dict[str, Parameter]:
         if si.frequency.name in named:
             raise ParameterRefused("duplicate_id", f"the frequency {si.frequency.name!r} is also a component's input")
         add(si.frequency)
+    read = set(named)
+    for name, contributors in sorted(dict(si.derived).items()):
+        if name not in read or not isinstance(contributors, tuple):
+            raise ScenarioSimulationRefused("derived_malformed", f"{name!r} is not a parameter the scenario reads")
+        for contributor in contributors:
+            if not isinstance(contributor, Parameter):
+                raise ScenarioSimulationRefused("derived_malformed", f"{name} is taken across a {type(contributor).__name__}")
+            if contributor.name in read:
+                raise ScenarioSimulationRefused("derived_malformed", f"{contributor.name} is read beside {name}")
+            add(contributor)
     return named
+
+
+def _variation(si: ScenarioInput, name: str) -> str:
+    """How ``name`` is drawn: per occurrence where the input names it (a derived
+    parameter's contributors as it is), otherwise once per simulated year."""
+    if name in si.per_occurrence:
+        return PER_OCCURRENCE
+    for derived, contributors in dict(si.derived).items():
+        if derived in si.per_occurrence and any(c.name == name for c in contributors):
+            return PER_OCCURRENCE
+    return SHARED
+
+
+def _reads(si: ScenarioInput) -> set[str]:
+    """The names a component or the policy reads."""
+    names = {cited.parameter.name for event in si.events for c in event.components for cited in c.inputs}
+    return names | {term.name for _, term in _policy_terms(si.policy)}
+
+
+def limits() -> dict:
+    """Every limit that decides a refusal a run records: the values and events
+    budgets, the largest sample and count mean, the generalized Pareto's shapes,
+    a splice's body share, the largest standard exponential, and the range a
+    stated distribution must hold. Part of the versions, so a changed limit is a
+    new input digest: a refusal recorded under the old limit is never returned
+    under the new."""
+    return {
+        "max_values": sim.MAX_VALUES,
+        "max_events": sim.MAX_EVENTS,
+        "max_sample": dist.MAX_SAMPLE,
+        "max_count_mean": dist.float_text(dist.MAX_COUNT_MEAN),
+        "gpd_shape": [dist.float_text(dist.GPD_SHAPE_MIN), dist.float_text(dist.GPD_SHAPE_MAX)],
+        "splice_min_body_share": dist.float_text(dist.SPLICE_MIN_BODY_SHARE),
+        "largest_exponential": dist.float_text(dist.LARGEST_EXPONENTIAL),
+        "range_fit_percentiles": [decimal_text(q) for q in RANGE_FIT_PERCENTILES],
+    }
 
 
 def versions(si: ScenarioInput) -> dict:
     """Every version a run's figures depend on: this wiring's, the rule's, the
     twins', each formula's and each catalogue distribution's, the sampler's and
-    numpy's. They are part of the canonical inputs, so a change to any is a new
-    input digest and a new stored result, never an old one returned."""
+    numpy's, and every limit that decides a recorded refusal (:func:`limits`).
+    They are part of the canonical inputs, so a change to any is a new input
+    digest and a new stored result, never an old one returned."""
     formulas = sorted(
         {f"{c.formula.formula_id}/{c.formula.version}" for event in si.events for c in event.components}
     )
@@ -478,6 +654,7 @@ def versions(si: ScenarioInput) -> dict:
         "substream_domain": sim.SUBSTREAM_DOMAIN,
         "stream_domain": STREAM_DOMAIN,
         "numpy": np.__version__,
+        "limits": limits(),
     }
 
 
@@ -485,16 +662,17 @@ def canonical_inputs(si: ScenarioInput, *, severe_percentile=sim.DEFAULT_SEVERE_
     """The inputs a run reads, in canonical form, without the seed and the draws
     (they are stored beside the digest): every event and component with its
     formula and the parameter each input reads, every parameter with its values,
-    source, evidence and STATED distribution, which are shared, the policy, the
-    frequency, the severe-but-plausible percentile, the rules and every version.
-    It is computed before anything is resolved, so a refused run has a digest."""
+    source, evidence, STATED distribution and variation, each derived parameter's
+    contributors, the policy, the frequency, the severe-but-plausible percentile,
+    the rules and every version. It is computed before anything is resolved, so
+    a refused run has a digest."""
     if not isinstance(si, ScenarioInput):
         raise TypeError(f"a ScenarioInput, not a {type(si).__name__}")
     percentile = sim.check_severe_percentile(severe_percentile)
     named = _named(si)
-    unknown_shared = sorted(si.shared - set(named))
-    if unknown_shared:
-        raise ScenarioSimulationRefused("variation_unrecognised", f"{unknown_shared}")
+    unknown = sorted(set(si.per_occurrence) - _reads(si))
+    if unknown:
+        raise ScenarioSimulationRefused("variation_unrecognised", f"{unknown}")
     stated = dict(si.stated)
     for name, value in stated.items():
         if not isinstance(value, StatedDistribution):
@@ -529,10 +707,11 @@ def canonical_inputs(si: ScenarioInput, *, severe_percentile=sim.DEFAULT_SEVERE_
             name: {
                 **parameter.as_dict(),
                 "distribution": stated[name].as_json() if name in stated else None,
-                "variation": SHARED if name in si.shared else PER_OCCURRENCE,
+                "variation": _variation(si, name),
             }
             for name, parameter in sorted(named.items())
         },
+        "derived": {name: [c.name for c in contributors] for name, contributors in sorted(dict(si.derived).items())},
         "policy": None
         if policy is None
         else {
@@ -561,7 +740,12 @@ class _Component:
     component: LossComponent
     reads: Mapping[str, str]
     twin: tw.Twin | None
-    constant: float | None
+    exact: Decimal | None
+
+    @property
+    def constant(self) -> float | None:
+        """The exact value as the nearest binary64, the same in every draw."""
+        return None if self.exact is None else float(self.exact)
 
     @property
     def estimated(self) -> bool:
@@ -575,7 +759,11 @@ class _Component:
     def evaluated_by(self) -> str | None:
         if not self.estimated:
             return None
-        return BY_DECIMAL if self.constant is not None else BY_TWIN
+        return BY_DECIMAL if self.exact is not None else BY_TWIN
+
+
+#: The lines of an event or a scenario, each a vector of the sampled length.
+LINES = (GROSS_CASH, MARKET_VALUE_LINE, "recovery", RETAINED_CASH)
 
 
 @dataclass(frozen=True)
@@ -585,19 +773,65 @@ class _Plan:
     resolved: Mapping[str, Resolved]
     terms: Mapping[str, str]
     frequency: Resolved | None
+    #: Each event's lines as step 4's Decimal ``assess`` gives them, where nothing
+    #: the event reads is uncertain; ``None`` otherwise. The scenario's likewise.
+    exact_events: tuple[Mapping[str, Decimal | None] | None, ...] = ()
+    exact_scenario: Mapping[str, Decimal | None] | None = None
 
 
-def _constant(component: LossComponent, resolved: Mapping[str, Resolved]) -> float | None:
+def _exact(component: LossComponent, resolved: Mapping[str, Resolved]) -> Decimal | None:
     """A component whose every input is a point mass, computed once by its Decimal
-    formula, as the nearest binary64; ``None`` if any input is uncertain."""
+    formula; ``None`` if any input is uncertain."""
     points = {}
     for cited in component.inputs:
-        held = resolved[cited.parameter.name]
-        if held.distribution is not None:
+        if resolved[cited.parameter.name].drawn:
             return None
         points[cited.input.name] = cited.parameter.base
-    result = component.formula.calculate(points)
-    return float(result.amount)
+    return component.formula.calculate(points).amount
+
+
+def _exact_lines(event: LossEvent, policy, components: list[_Component], p_resolved, terms) -> dict | None:
+    """The event's lines by step 4's Decimal ``assess``, where every input of its
+    known components and every term of its policy is a point mass: what the
+    deterministic engine gives, to the last digit."""
+    known = [c for c in components if c.estimated]
+    if any(c.exact is None for c in known) or any(p_resolved[name].drawn for name in terms.values()):
+        return None
+    assessment = assess(event, policy)
+    lines: dict[str, Decimal | None] = {
+        GROSS_CASH: assessment.gross.total.at(Point.BASE).amount,
+        MARKET_VALUE_LINE: assessment.market_value.at(Point.BASE).amount if any(not c.cash for c in known) else None,
+        "recovery": None,
+        RETAINED_CASH: None,
+    }
+    if policy is not None:
+        insured = assessment.insured.points[Point.BASE]
+        lines["recovery"], lines[RETAINED_CASH] = insured.recovery.amount, insured.retained.amount
+    return lines
+
+
+def _exact_sum(events: list[Mapping[str, Decimal | None]]) -> dict:
+    """The scenario's lines as the Decimal sums of its exact events' lines."""
+    lines: dict[str, Decimal | None] = {}
+    for key in LINES:
+        held = [line[key] for line in events if line[key] is not None]
+        lines[key] = sum(held, Decimal(0)) if held else None
+    return lines
+
+
+def _direction(si: ScenarioInput, name: str) -> Direction:
+    """The one direction in which the components' inputs that read ``name`` move
+    the loss: a derived parameter is the larger loss in it."""
+    directions = {
+        cited.input.direction
+        for event in si.events
+        for component in event.components
+        for cited in component.inputs
+        if cited.parameter.name == name
+    }
+    if len(directions) != 1:
+        raise ScenarioSimulationRefused("derived_malformed", f"{name} is read in {len(directions)} directions")
+    return directions.pop()
 
 
 def plan(si: ScenarioInput) -> _Plan:
@@ -623,10 +857,16 @@ def plan(si: ScenarioInput) -> _Plan:
                 needed.update(cited.parameter.name for cited in component.inputs)
     terms = {role: term.name for role, term in _policy_terms(si.policy)}
     needed.update(terms.values())
-    resolved = {
-        name: resolve(named[name], si.stated.get(name), variation=SHARED if name in si.shared else PER_OCCURRENCE)
-        for name in sorted(needed)
-    }
+    derived = dict(si.derived)
+    resolved = {}
+    for name in sorted(needed):
+        variation = _variation(si, name)
+        if name in derived:
+            resolved[name] = resolve_derived(
+                named[name], derived[name], si.stated, direction=_direction(si, name), variation=variation
+            )
+        else:
+            resolved[name] = resolve(named[name], si.stated.get(name), variation=variation)
     frequency = None
     if si.frequency is not None:
         frequency = resolve_frequency(si.frequency, si.stated.get(si.frequency.name))
@@ -643,8 +883,23 @@ def plan(si: ScenarioInput) -> _Plan:
                 raise ScenarioSimulationRefused(
                     "twin_missing", f"{missing.formula_id} version {missing.version} ({component.component_id})"
                 ) from None
-            components.append(_Component(index, component, reads, twin, _constant(component, resolved)))
-    return _Plan(si, tuple(components), MappingProxyType(resolved), MappingProxyType(terms), frequency)
+            components.append(_Component(index, component, reads, twin, _exact(component, resolved)))
+    exact_events = tuple(
+        _exact_lines(event, si.policy, [c for c in components if c.event == index], resolved, terms)
+        for index, event in enumerate(si.events)
+    )
+    exact_scenario = None
+    if all(lines is not None for lines in exact_events):
+        exact_scenario = exact_events[0] if len(exact_events) == 1 else _exact_sum(list(exact_events))
+    return _Plan(
+        si,
+        tuple(components),
+        MappingProxyType(resolved),
+        MappingProxyType(terms),
+        frequency,
+        exact_events,
+        exact_scenario,
+    )
 
 
 # ---------------------------------------------------------------- the draws
@@ -690,14 +945,18 @@ def _line_vectors(p: _Plan) -> int:
 def values_held(p: _Plan, length: int, years: int | None = None) -> int:
     """The values a run holds at its peak, by its own count, stage by stage.
     Drawing and evaluating: every drawn parameter's vector until its last reader
-    is evaluated, the components evaluated so far, and 7a's RUN_VECTORS of
+    is evaluated (and a derived one's drawn contributors), the components
+    evaluated so far, and 7a's RUN_VECTORS of
     temporaries. Insurance: the components, the lines (:func:`_line_vectors`), the
     drawn policy terms and :data:`INSURANCE_TEMPORARIES`. Summaries: the
     components, the lines and :data:`SUMMARY_TEMPORARIES`. Each of the sampled
     length (the draws, or a compound run's occurrences); and, in a compound run,
     beside them, one value per simulated year of each shared drawn parameter, of
     the :data:`ANNUAL_LINES` and of 7a's YEAR_VECTORS."""
-    drawn = {name for name, r in p.resolved.items() if r.distribution is not None}
+    drawn = {name for name, r in p.resolved.items() if r.drawn}
+    # A derived parameter's drawn contributors, each held while it is drawn and
+    # taken into the merge: counted as if all were held at once.
+    merging = {name: sum(1 for c in p.resolved[name].contributors if c.drawn) for name in drawn}
     last = _last_reads(p)
     live, done, drawing = len(drawn), 0, 0
     for index, c in enumerate(p.components):
@@ -706,14 +965,14 @@ def values_held(p: _Plan, length: int, years: int | None = None) -> int:
         drawing = max(drawing, live + done + 1 + sim.RUN_VECTORS)
         done += 1
         live -= sum(1 for name in drawn if last.get(name) == index)
-    drawing = max(drawing, len(drawn) + sim.RUN_VECTORS)
+    drawing = max(drawing, len(drawn) + sum(merging.values()) + sim.RUN_VECTORS)
     lines = _line_vectors(p)
     terms = sum(1 for name in set(p.terms.values()) if name in drawn)
     insuring = done + lines + terms + INSURANCE_TEMPORARIES
     summarising = done + lines + SUMMARY_TEMPORARIES
     held = max(drawing, insuring, summarising) * length
     if years is not None:
-        shared = sum(1 for name in drawn if p.resolved[name].variation == SHARED)
+        shared = sum(1 + merging[name] for name in drawn if p.resolved[name].variation == SHARED)
         held += (shared + ANNUAL_LINES + sim.YEAR_VECTORS) * years
     return held
 
@@ -731,6 +990,27 @@ def _checked_draws(r: Resolved, drawn: np.ndarray) -> np.ndarray:
         raise sim.InvariantBroken(f"{r.name} drew a value its unit does not hold: the admissibility check failed")
     drawn.flags.writeable = False
     return drawn
+
+
+def _draw(r: Resolved, random: sim.RunRandom, length: int) -> np.ndarray | float:
+    """``length`` draws of ``r``: from its own stream, or, for a derived parameter,
+    each contributor's from its own stream and, per draw, the larger loss in its
+    direction (the highest where its inputs increase the loss, the lowest where
+    they decrease it). A point mass is its value."""
+    if not r.drawn:
+        return float(r.point)
+    if not r.contributors:
+        return _checked_draws(r, r.distribution.sample(random.stream(r.stream), length))
+    larger = np.maximum if r.direction == Direction.INCREASES.value else np.minimum
+    merged = None
+    for contributor in r.contributors:
+        drawn = _draw(contributor, random, length)
+        if merged is None:
+            merged = np.array(np.broadcast_to(drawn, (length,)), dtype=np.float64)
+        else:
+            larger(merged, drawn, out=merged)
+        del drawn
+    return _checked_draws(r, merged)
 
 
 def _finite(vector: np.ndarray, what: str) -> np.ndarray:
@@ -754,6 +1034,10 @@ class _Sample:
 
 def _zeros(n: int) -> np.ndarray:
     return np.zeros(n, dtype=np.float64)
+
+
+def _full(n: int, value: Decimal) -> np.ndarray:
+    return _finite(np.full(n, float(value), dtype=np.float64), f"the exact figure {value}")
 
 
 def _insure(terms: Mapping[str, np.ndarray | float], policy: InsurancePolicy, cash, gross: np.ndarray):
@@ -815,18 +1099,17 @@ def _sample(p: _Plan, seed: int, draws: int, check_time: Callable[[str], None]) 
     yearly_terms: dict[str, np.ndarray | float] = {}
     for name in sorted(p.resolved):
         r = p.resolved[name]
-        if r.distribution is None:
+        if not r.drawn:
             values[name] = yearly_terms[name] = float(r.point)
             continue
-        stream = random.stream(r.stream)
         if counts is not None and r.variation == SHARED:
-            yearly = _checked_draws(r, r.distribution.sample(stream, draws))
+            yearly = _draw(r, random, draws)
             if name in term_names:
                 yearly_terms[name] = yearly
             values[name] = _checked_draws(r, np.repeat(yearly, counts))
             del yearly
         else:
-            values[name] = _checked_draws(r, r.distribution.sample(stream, occurrences))
+            values[name] = _draw(r, random, occurrences)
         check_time(f"parameter {name}")
 
     n = occurrences
@@ -851,6 +1134,11 @@ def _sample(p: _Plan, seed: int, draws: int, check_time: Callable[[str], None]) 
     del values
     events: list[dict[str, np.ndarray | None]] = []
     for event_index in range(len(p.si.events)):
+        exact = p.exact_events[event_index]
+        if exact is not None:
+            # Nothing the event reads is uncertain: step 4's Decimal lines, the same in every draw.
+            events.append({key: None if exact[key] is None else _full(n, exact[key]) for key in LINES})
+            continue
         known = [(c, components[i]) for i, c in enumerate(p.components) if c.event == event_index and c.estimated]
         # Cash and market value are summed apart, each in component order, and never
         # one into the other (spec, section 16).
@@ -875,9 +1163,11 @@ def _sample(p: _Plan, seed: int, draws: int, check_time: Callable[[str], None]) 
         events.append(line)
     if len(events) == 1:
         scenario = dict(events[0])  # one event: its lines are the scenario's
+    elif p.exact_scenario is not None:
+        scenario = {key: None if value is None else _full(n, value) for key, value in p.exact_scenario.items()}
     else:
         scenario = {}
-        for key in (GROSS_CASH, MARKET_VALUE_LINE, "recovery", RETAINED_CASH):
+        for key in LINES:
             held = [line[key] for line in events if line[key] is not None]
             if not held:
                 scenario[key] = None
@@ -912,7 +1202,7 @@ def _ordered_vectors(p: _Plan, s: _Sample) -> list[tuple[str, np.ndarray]]:
         for key in (GROSS_CASH, MARKET_VALUE_LINE, "recovery", RETAINED_CASH):
             if line[key] is not None:
                 ordered.append((f"event/{event.loss_event_id}/{key}", line[key]))
-    for key in (GROSS_CASH, MARKET_VALUE_LINE, "recovery", RETAINED_CASH):
+    for key in LINES:
         if s.scenario[key] is not None:
             ordered.append((f"scenario/{key}", s.scenario[key]))
         if s.annual.get(key) is not None:
@@ -942,14 +1232,26 @@ def _defined(resolved: Iterable[Resolved]) -> tuple[list[str], list[str]]:
     )
 
 
-def _block(vector: np.ndarray, *, currency: str, severe, annual: bool, inputs: Iterable[Resolved]) -> dict:
+def _block(
+    vector: np.ndarray, *, currency: str, severe, annual: bool, inputs: Iterable[Resolved], exact: Decimal | None = None
+) -> dict:
     """7a's summary of one line, as decimal strings, and its expected annual
-    exposure where the line is annual."""
+    exposure where the line is annual. A line with an ``exact`` value (nothing it
+    reads is uncertain, and it is not a year's sum) is that Decimal value in every
+    figure, with a standard error of zero: the vector holds its nearest binary64."""
     infinite_mean, infinite_variance = _defined(inputs)
     summary = sim.summarize(
         vector, severe_percentile=severe, mean_defined=not infinite_mean, error_defined=not infinite_variance
     )
     block = sim.summary_block(summary, currency)
+    if exact is not None and not annual:
+        if not (vector == float(exact)).all() or summary.standard_error not in (None, 0.0):
+            raise sim.InvariantBroken(f"an exact line {exact} drew another value")
+        text = decimal_text(exact)
+        block.update({key: text for key in ("p10", "p50", "p90", "severe_plausible")})
+        block["mean"] = None if summary.mean is None else text
+        block["standard_error_of_mean"] = None if summary.standard_error is None else "0"
+        block["bands"] = {key: None if band is None else [text, text] for key, band in summary.bands.items()}
     block["expected_annual_exposure"] = block["mean"] if annual else None
     block["mean_undefined"] = infinite_mean or None
     block["standard_error_undefined"] = infinite_variance or None
@@ -1014,8 +1316,8 @@ def run(
     def reads(cs: Iterable[_Component]) -> list[Resolved]:
         return [resolved[name] for c in cs if c.estimated for name in c.reads.values()]
 
-    def summarise(vector, inputs, *, per_year: bool = annual) -> dict:
-        return _block(vector, currency=currency, severe=severe, annual=per_year, inputs=inputs)
+    def summarise(vector, inputs, *, per_year: bool = annual, exact: Decimal | None = None) -> dict:
+        return _block(vector, currency=currency, severe=severe, annual=per_year, inputs=inputs, exact=exact)
 
     def yearly(vector: np.ndarray) -> np.ndarray:
         return sim.compound_annual(s.counts, vector) if annual else vector
@@ -1040,7 +1342,7 @@ def run(
                     "status": c.component.status,
                     "evaluated_by": c.evaluated_by,
                     "reads": dict(sorted(c.reads.items())),
-                    "summary": summarise(yearly(s.components[index]), reads([c]) + freq_inputs)
+                    "summary": summarise(yearly(s.components[index]), reads([c]) + freq_inputs, exact=c.exact)
                     if c.estimated
                     else None,
                     "unknown": None
@@ -1048,17 +1350,21 @@ def run(
                     else {"reason": c.component.unknown_reason, "inputs": list(c.component.missing)},
                 }
             )
+        exact = p.exact_events[event_index] or dict.fromkeys(LINES)
         events_record.append(
             {
                 "event_key": event.loss_event_id,
-                GROSS_CASH: summarise(yearly(line[GROSS_CASH]), cash_inputs),
+                "evaluated_by": BY_DECIMAL if p.exact_events[event_index] is not None else BY_TWIN,
+                GROSS_CASH: summarise(yearly(line[GROSS_CASH]), cash_inputs, exact=exact[GROSS_CASH]),
                 RETAINED_CASH: None
                 if line[RETAINED_CASH] is None
-                else summarise(yearly(line[RETAINED_CASH]), cash_inputs + term_inputs),
+                else summarise(yearly(line[RETAINED_CASH]), cash_inputs + term_inputs, exact=exact[RETAINED_CASH]),
                 MARKET_VALUE_LINE: None
                 if not market
                 else {
-                    **summarise(yearly(line[MARKET_VALUE_LINE]), reads(market) + freq_inputs),
+                    **summarise(
+                        yearly(line[MARKET_VALUE_LINE]), reads(market) + freq_inputs, exact=exact[MARKET_VALUE_LINE]
+                    ),
                     "never_added_to_cash": True,
                 },
                 "complete": not [c for c in cash if not c.estimated],
@@ -1071,13 +1377,20 @@ def run(
 
     all_cash = reads([c for c in p.components if c.cash]) + freq_inputs
     all_market = [c for c in p.components if not c.cash and c.estimated]
+    exact = p.exact_scenario or dict.fromkeys(LINES)
     scenario_record = {
         "headline": RETAINED_CASH if si.policy is not None else GROSS_CASH,
-        GROSS_CASH: summarise(lines[GROSS_CASH], all_cash),
-        RETAINED_CASH: None if si.policy is None else summarise(lines[RETAINED_CASH], all_cash + term_inputs),
+        "evaluated_by": BY_DECIMAL if p.exact_scenario is not None else BY_TWIN,
+        GROSS_CASH: summarise(lines[GROSS_CASH], all_cash, exact=exact[GROSS_CASH]),
+        RETAINED_CASH: None
+        if si.policy is None
+        else summarise(lines[RETAINED_CASH], all_cash + term_inputs, exact=exact[RETAINED_CASH]),
         MARKET_VALUE_LINE: None
         if not all_market
-        else {**summarise(lines[MARKET_VALUE_LINE], reads(all_market) + freq_inputs), "never_added_to_cash": True},
+        else {
+            **summarise(lines[MARKET_VALUE_LINE], reads(all_market) + freq_inputs, exact=exact[MARKET_VALUE_LINE]),
+            "never_added_to_cash": True,
+        },
         "complete": all(not (c.cash and not c.estimated) for c in p.components),
         "unknown_components": [
             f"{si.events[c.event].loss_event_id}/{c.component.component_id}" for c in p.components if not c.estimated
@@ -1087,11 +1400,15 @@ def run(
     }
     if annual and s.occurrences >= sim.MIN_DRAWS:
         scenario_record["per_occurrence"] = {
-            GROSS_CASH: summarise(s.scenario[GROSS_CASH], reads([c for c in p.components if c.cash]), per_year=False),
+            GROSS_CASH: summarise(
+                s.scenario[GROSS_CASH], reads([c for c in p.components if c.cash]), per_year=False,
+                exact=exact[GROSS_CASH],
+            ),
             RETAINED_CASH: None
             if si.policy is None
             else summarise(
-                s.scenario[RETAINED_CASH], reads([c for c in p.components if c.cash]) + term_inputs, per_year=False
+                s.scenario[RETAINED_CASH], reads([c for c in p.components if c.cash]) + term_inputs, per_year=False,
+                exact=exact[RETAINED_CASH],
             ),
         }
     check_time("summary")
@@ -1116,7 +1433,10 @@ def run(
         "scenario": scenario_record,
         "events": events_record,
         "parameters": {name: resolved[name].record() for name in sorted(resolved)},
-        "expert_parameters": sorted(name for name, r in resolved.items() if r.expert),
+        "expert_parameters": sorted(
+            {r.name for r in resolved.values() if r.expert}
+            | {c.name for r in resolved.values() for c in r.contributors if c.expert}
+        ),
         "versions": inputs["versions"],
         "input_digest": input_digest,
         "outcomes_sha256": digest_of_outcomes,
@@ -1171,6 +1491,7 @@ __all__ = [
     "NATIVE_PARAMETERS",
     "PER_OCCURRENCE",
     "REFUSALS",
+    "RANGE_FIT_PERCENTILES",
     "RULE_VERSION",
     "SCHEMA",
     "SHARED",
@@ -1183,14 +1504,18 @@ __all__ = [
     "StatedDistribution",
     "build",
     "canonical_inputs",
+    "check_fits_range",
     "check_stated",
     "digest_of",
     "no_float",
     "parse_stated",
     "plan",
+    "limits",
     "resolve",
+    "resolve_derived",
     "resolve_frequency",
     "run",
     "stream_name",
+    "support",
     "versions",
 ]

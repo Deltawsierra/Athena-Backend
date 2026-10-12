@@ -448,11 +448,14 @@ else; neither is a stop.
 ### The simulation
 
 `assurance/economics/simulation_service.py` simulates a stored scenario version
-(section 25): every parameter draws from the distribution it states, or a point mass,
-or an expert's PERT, or is refused; every formula runs as a vectorised twin proven
-equal to it; insurance applies per event; and the run is recorded once per scenario
-version, input digest, seed and draws as a `SimulationResult`, with every version it
-rests on and no float. It serves no route yet, never raises, and nothing Django loads
+(section 25): every parameter draws from the distribution it states (one that holds
+its own low, base and high), or a point mass, or an expert's PERT, or, where the
+builder joined several effects' figures, from each of theirs taking the larger loss,
+or is refused; every parameter is drawn once per simulated year; every formula runs as
+a vectorised twin proven equal to it, and what nothing uncertain reaches is step 4's
+Decimal figure; insurance applies per event; and the run is recorded once per scenario
+version, input digest, seed and draws as a `SimulationResult`, with every version and
+limit it rests on and no float. It serves no route yet, never raises, and nothing Django loads
 at start imports it or numpy.
 
 ## When a dependency fails
