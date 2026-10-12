@@ -586,7 +586,8 @@ header value withheld, and an answer is read with every credential the request
 carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
 
 - **The engine** (the engine client: a scan's launch, its status, its Stop, file
-  uploads and every other engine call) follows a redirect only while it stays on
+  uploads and every other engine call; and the defender gateway's `/defend`, which
+  asks the same engine) follows a redirect only while it stays on
   the engine's host: a 307 or 308, and a 301, 302 or 303 answering a GET, to the
   same host (compared case-insensitively after IDNA) at any port, with the scheme
   kept or moved from http to https, at most three hops, sending the method, body
@@ -597,8 +598,8 @@ carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_
   for a host `NO_PROXY` names; a proxy's userinfo is withheld from every error
   and answer. An engine a deployment reaches only through its proxy, or that
   moved its stop route or onto https, still hears a scan's Stop.
-- **Everything else** -- the defender gateway, a connector, a posture source, the
-  closure forward -- follows no redirect at all and reads no proxy: a deployment
+- **Everything else** -- a connector, a posture source, the closure forward --
+  follows no redirect at all and reads no proxy: a deployment
   that reached a connector or posture source through `HTTP_PROXY` or `HTTPS_PROXY`
   must reach it directly, and a call site that comes to need a proxy names it in
   a setting of its own.

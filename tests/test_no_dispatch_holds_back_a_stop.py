@@ -3487,6 +3487,13 @@ def test_what_is_still_queued_is_written_when_the_process_exits(monkeypatch, cap
 
     monkeypatch.setattr(oplog, "start_pump", lambda: False)
     monkeypatch.setattr(oplog, "_PUMP", [])
+    # A pump an earlier test started is still alive, waiting on the module's queue
+    # and condition. Hiding it from ``_PUMP`` alone left it able to wake on these
+    # records and write one while the exit wrote the others, out of order. A queue
+    # and a condition of this test's own are ones no such pump waits on.
+    monkeypatch.setattr(oplog, "_BUF", type(oplog._BUF)())
+    monkeypatch.setattr(oplog, "_COND", threading.Condition(threading.Lock()))
+    monkeypatch.setattr(oplog, "_BUSY", [False])
     with caplog.at_level(logging.WARNING):
         for n in range(3):
             oplog.log_later(logging.WARNING, "left at exit %d", n)

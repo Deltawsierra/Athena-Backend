@@ -1146,9 +1146,15 @@ class World:
         # it refuses.
         engine_base = _closed_base()
 
+        def on_the_engine_s_lane(path):
+            # The defender gateway's /defend asks the engine too, on the engine's lane.
+            return path.startswith(engine_base + "/") or path.endswith("/defend")
+
         def through(method, path, headers, body):
             if path.startswith(engine_base + "/"):
                 return self.engine.answer(method, path[len(engine_base):], headers, body)
+            if path.endswith("/defend"):
+                return self.engine.answer(method, "/defend", headers, body)
             return 502, {"detail": "proxy"}
 
         proxy = Fake("proxy", through)
@@ -1189,7 +1195,8 @@ class World:
         finally:
             proxy.close()
         signals["engine_through_proxy"] = sum(1 for _m, p, _h in proxy.seen if p.startswith(engine_base + "/"))
-        signals["others_through_proxy"] = [p for _m, p, _h in proxy.seen if not p.startswith(engine_base + "/")]
+        signals["defender_through_proxy"] = sum(1 for _m, p, _h in proxy.seen if p.endswith("/defend"))
+        signals["others_through_proxy"] = [p for _m, p, _h in proxy.seen if not on_the_engine_s_lane(p)]
         login = base64.b64encode(f"egress:{CANARY['proxy.userinfo']}".encode()).decode()
         signals["proxy_got_login"] = any(h.get("Proxy-Authorization") == f"Basic {login}" for _m, _p, h in proxy.seen)
 
@@ -1756,6 +1763,7 @@ def test_every_path_ran(observed):
     assert s["failsafe"]["poll"] == 200 and s["failsafe"]["draft"] in (200, 201), s["failsafe"]
     assert s["proxy"]["engine"] == {"stop": (200, "delivered"), "owed": "owed", "delivered": "delivered"}, s["proxy"]
     assert s["proxy"]["engine_through_proxy"] > 0 and s["proxy"]["proxy_got_login"] is True, s["proxy"]
+    assert s["proxy"]["defender_through_proxy"] > 0, s["proxy"]
     assert s["proxy"]["others_through_proxy"] == [], "a call off the engine's lane went through the environment's proxy"
     assert s["route_raises"]["raised"] == 500 and s["route_raises"]["missing"] == 404, s["route_raises"]
     assert s["records"]["claims"] > 0 and s["records"]["provider"] == 201, s["records"]

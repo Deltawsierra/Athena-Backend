@@ -233,8 +233,8 @@ SITES: dict[str, Site] = {
     ),
     "defender": Site(
         "audit/middleware.py::DefenderMiddleware._call_engine",
-        f"the engine's /defend: {_MACHINE_API}; a 3xx is a failed call, and the gateway "
-        "fails open as it does on every failed call",
+        f"the engine's /defend, {_ENGINE_LANE}; any other 3xx is a failed call, and the "
+        "gateway fails open as it does on every failed call",
         _defender,
     ),
     "transport.post": Site(
@@ -258,7 +258,7 @@ SITES: dict[str, Site] = {
 
 
 #: The engine's lane: these follow a same-host redirect and use the environment's proxy.
-ENGINE_SITES = frozenset({"engine.get", "engine.post", "engine.file"})
+ENGINE_SITES = frozenset({"engine.get", "engine.post", "engine.file", "defender"})
 #: Every other site follows no redirect and reads no proxy.
 CLOSED_SITES = sorted(set(SITES) - ENGINE_SITES)
 
@@ -322,8 +322,8 @@ def test_a_redirect_to_another_host_carries_none_of_its_headers(name, status, no
 
 @pytest.mark.parametrize("name", CLOSED_SITES)
 def test_off_the_engine_s_lane_a_same_origin_redirect_is_not_followed_either(name, no_environment_proxy):
-    """The connector transport, the posture fetcher and the defender gateway keep
-    refusing every redirect, to their own origin too."""
+    """The connector transport and the posture fetcher keep refusing every redirect,
+    to their own origin too."""
     target = Recorder(answer=lambda method, path, headers, body: (
         (308, {"Location": "/moved"}, b"") if path != "/moved" else (200, {}, b"{}")
     ))
@@ -354,6 +354,23 @@ def test_a_netrc_entry_for_the_target_is_not_sent(name, no_environment_proxy, tm
             if value.startswith("Basic "):
                 decoded = base64.b64decode(value[6:]).decode("utf-8", "replace")
             assert password not in decoded, f"{name} sent the .netrc login for its target: {headers}"
+
+
+def test_the_defender_gateway_follows_its_engine_s_same_host_redirect(no_environment_proxy):
+    """The gateway asks the engine a Stop goes to, so it reaches it the same way: an
+    engine that moved /defend on its own origin still answers the gateway's question,
+    rather than every request failing open."""
+    target = Recorder(answer=lambda method, path, headers, body: (
+        (308, {"Location": "/moved/defend"}, b"")
+        if path == "/defend"
+        else (200, {"Content-Type": "application/json"}, b'{"allow": false, "action": "block"}')
+    ))
+    try:
+        said = _call(SITES["defender"], target.base, _canary("cred"))
+    finally:
+        target.close()
+    assert [path for _m, path, _h in target.seen] == ["/defend", "/moved/defend"], said
+    assert said == repr(({"allow": False, "action": "block"}, None)), said
 
 
 @pytest.mark.parametrize("name", CLOSED_SITES)
@@ -791,7 +808,9 @@ def test_the_engine_s_lane_uses_a_credentialed_proxy_and_quotes_none_of_its_logi
     assert proxy.seen and proxy.seen[0][1].startswith("http://engine.invalid:8000/"), proxy.seen
     login = base64.b64encode(f"egress:{password}".encode()).decode()
     assert any(h.get("Proxy-Authorization") == f"Basic {login}" for _m, _p, h in proxy.seen), proxy.seen
-    assert "bad gateway" in said, said
+    # The proxy's page was the answer: the engine client says it back, withheld; the
+    # defender gateway says only its status, and quotes no answer at all.
+    assert ("HTTP 502" in said) if name == "defender" else ("bad gateway" in said), said
     for form in (password, login):
         quoted = [where for where, text in (("its answer or error", said), ("the log", caplog.text)) if form in text]
         assert quoted == [], f"{name} quoted the proxy's login in {quoted}"

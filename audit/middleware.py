@@ -1311,9 +1311,13 @@ class DefenderMiddleware:
         It logs nothing and records nothing; the request thread does, so a call
         that outlives its request cannot report a failure twice."""
         try:
-            # safety.outbound: no redirect followed, nothing read from the environment.
+            # safety.outbound, on the engine's lane: a redirect followed only while it
+            # stays on the engine's host, the environment's proxy used, no .netrc read.
+            # The gateway asks the same engine a Stop goes to, so it reaches it the
+            # same way: behind a proxy it would otherwise fail every call, and open.
             response = outbound.post(
                 f"{self.engine_url}/defend",
+                engine=True,
                 json=ctx,
                 headers={
                     # The engine authenticates every privileged route on
