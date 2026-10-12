@@ -539,3 +539,103 @@ def test_a_policy_is_never_a_template_input():
             for source in spec.sources.values():
                 assert not source.name.startswith("insurance_"), (t.template_id, source.name)
     assert InsurancePolicy  # the policy type the assessment reads
+
+
+# ============================== review round 1: observed, and the larger loss
+
+
+def test_only_rates_counts_and_durations_an_assessment_sees_are_observable():
+    """M3. MYTHOS_OBSERVED rests only on what an assessment sees when the effect
+    happens: a rate, a count or a duration, each marked so. No money, no market
+    figure, nothing a customer's records or an estimate holds."""
+    observable = {name for name, a in tpl.ATTRIBUTES.items() if a.observable}
+    assert observable == {
+        "success_rate", "exploitable_window_hours", "affected_customers", "missed_cases", "repeat_count",
+        "outage_hours",
+    }
+    assert all(tpl.ATTRIBUTES[n].unit in (Unit.RATIO, Unit.COUNT, Unit.HOURS, Unit.YEARS) for n in observable)
+    assert not any(a.observable for a in tpl.ATTRIBUTES.values() if a.unit in MONEY_UNITS)
+    assert not tpl.ATTRIBUTES["share_price_decline"].observable and not tpl.ATTRIBUTES["churn_rate"].observable
+    observed = {"source_type": "MYTHOS_OBSERVED", "evidence_ref": "anything at all", "effective_date": "2026-10-01"}
+    for name, entry in (
+        ("legal_response_cost", {"unit": "money", "currency": "USD", "low": "9000000", "base": "9000000",
+                                 "high": "9000000"}),
+        ("share_price_decline", {"unit": "ratio", "low": "0.5", "base": "0.5", "high": "0.5"}),
+        ("loss_per_event", {"unit": "money_per_unit", "currency": "USD", "low": "1", "base": "1", "high": "1"}),
+    ):
+        with pytest.raises(tpl.BuildRefused) as refused:
+            tpl.parse_attributes("redirect", {name: {**entry, **observed}}, "attributes", origin=tpl.Origin.OBSERVED)
+        assert refused.value.code == "observed_source_not_observable", name
+    spine = "sha256:" + "8" * 64
+    rate = {"unit": "ratio", "low": "0.35", "base": "0.35", "high": "0.35", **observed}
+    read = tpl.parse_attributes("redirect", {"success_rate": rate}, "attributes", origin=tpl.Origin.OBSERVED)
+    with pytest.raises(tpl.BuildRefused) as refused:
+        tpl.check_observed_evidence("redirect", read, spine)
+    assert refused.value.code == "observed_source_unbound"
+    named = {**rate, "evidence_ref": f"7 of 20, observed as {spine}"}
+    tpl.check_observed_evidence(
+        "redirect",
+        tpl.parse_attributes("redirect", {"success_rate": named}, "attributes", origin=tpl.Origin.OBSERVED),
+        spine,
+    )
+
+
+def test_every_template_reads_each_attribute_in_one_direction():
+    """An attribute two inputs of one template read in opposite directions would have
+    no larger loss; none does, and every attribute a template reads has a reading."""
+    for chosen in tpl.TEMPLATES:
+        readings = tpl.readings(chosen)
+        read = {s.name for c in chosen.components for s in c.sources.values() if s.kind is tpl.SourceKind.EFFECT_ATTRIBUTE}
+        assert set(readings) == read, chosen.template_id
+    churn = tpl.readings(tpl.CATALOGUE[("cross_customer_data_exposure", 1)])["churn_rate"]
+    assert churn.accepted_sources == {tpl.SourceType.CUSTOMER_PROVIDED}
+
+
+def _x(key, low, base, high, source="EXPERT_ESTIMATE", effective=date(2026, 9, 1), fresh=None):
+    return Parameter(f"{key}.x", "ratio", source, Decimal(low), Decimal(base), Decimal(high), "e", effective, fresh)
+
+
+def test_the_larger_loss_is_taken_at_each_point_by_the_inputs_direction():
+    """M2. For each point separately, the value that gives the larger loss: the
+    highest where the input increases the loss, the lowest where it decreases it. It
+    never depends on how the keys are spelled; an exact tie cites the lowest key."""
+    increases = tpl.Reading("x", formulas.Direction.INCREASES, None)
+    decreases = tpl.Reading("x", formulas.Direction.DECREASES, None)
+    a = _x("a", "0.1", "0.5", "0.9")
+    b = _x("b", "0.2", "0.4", "0.8", effective=date(2026, 9, 15), fresh=date(2026, 12, 1))
+    up = tpl.larger_loss(increases, {"a": a, "b": b}, event_key="ev-1")
+    assert up.derived and up.contributors == ("a", "b")
+    assert (up.parameter.low, up.parameter.base, up.parameter.high) == (Decimal("0.2"), Decimal("0.5"), Decimal("0.9"))
+    assert dict(up.supplied) == {"low": "b", "base": "a", "high": "a"}
+    assert up.parameter.source_type is tpl.SourceType.CALCULATED and up.parameter.name == "ev-1:x"
+    assert (up.parameter.effective_date, up.parameter.fresh_until) == (date(2026, 9, 15), date(2026, 12, 1))
+    down = tpl.larger_loss(decreases, {"a": a, "b": b}, event_key="ev-1")
+    assert (down.parameter.low, down.parameter.base, down.parameter.high) == (
+        Decimal("0.1"), Decimal("0.4"), Decimal("0.8")
+    )
+    renamed = tpl.larger_loss(increases, {"z": a, "b": b}, event_key="ev-1")
+    assert renamed.parameter == up.parameter
+    tie = tpl.larger_loss(increases, {"m": a, "c": _x("c", "0.1", "0.5", "0.9")}, event_key="ev-1")
+    assert dict(tie.supplied) == {"low": "c", "base": "c", "high": "c"}
+    alone = tpl.larger_loss(increases, {"a": a}, event_key="ev-1")
+    assert alone.parameter is a and not alone.derived
+    # Adding an effect never lowers any point.
+    for extra in (_x("c", "0", "0", "0"), _x("c", "0.3", "0.3", "0.3"), _x("c", "1", "1", "1")):
+        more = tpl.larger_loss(increases, {"a": a, "b": b, "c": extra}, event_key="ev-1")
+        assert all(more.parameter.at(pt) >= up.parameter.at(pt) for pt in POINTS)
+
+
+def test_a_source_the_inputs_refuse_never_supplies_the_larger_loss():
+    """The churn rate is read only from the customer's own figure (section 31): an
+    effect stating a benchmark takes no part where one states the customer's; two
+    customer figures make a value that is still the customer's; benchmarks alone
+    take part all, and the component stays unknown as it is for any one."""
+    churn = tpl.readings(tpl.CATALOGUE[("cross_customer_data_exposure", 1)])["churn_rate"]
+    own = _x("own", "0.01", "0.02", "0.04", source="CUSTOMER_PROVIDED")
+    bench = _x("bench", "0.1", "0.2", "0.4", source="INDUSTRY_BENCHMARK")
+    assert tpl.larger_loss(churn, {"own": own, "bench": bench}, event_key="ev-1").parameter is own
+    other = _x("other", "0.02", "0.02", "0.02", source="CUSTOMER_PROVIDED")
+    both = tpl.larger_loss(churn, {"own": own, "other": other, "bench": bench}, event_key="ev-1")
+    assert both.contributors == ("other", "own") and both.parameter.source_type is tpl.SourceType.CUSTOMER_PROVIDED
+    benchmarks = tpl.larger_loss(churn, {"bench": bench, "b2": _x("b2", "0", "0", "0")}, event_key="ev-1")
+    assert benchmarks.parameter.source_type is tpl.SourceType.CALCULATED

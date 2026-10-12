@@ -19,10 +19,12 @@ specification's own illustrative ones).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import types
 import uuid
 from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -31,7 +33,8 @@ from pathlib import Path
 
 import pytest
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models, transaction
+from django.test.utils import CaptureQueriesContext
 from django.urls import URLResolver, get_resolver
 from rest_framework.test import APIClient
 
@@ -115,9 +118,12 @@ SECTION_30_SET = {
 }
 
 
-def _section_30_attributes(success_source="EXPERT_ESTIMATE"):
+def _section_30_attributes(success_source="EXPERT_ESTIMATE", spine=""):
+    """Section 30's effect. An observed success rate's evidence names the SPINE
+    effect it was observed as (``spine``)."""
+    why = "7 unauthorized effects in 20 attempts" + (f", observed as {spine}" if spine else "")
     return {
-        "success_rate": _attr("ratio", "0.35", source=success_source, why="7 unauthorized effects in 20 attempts"),
+        "success_rate": _attr("ratio", "0.35", source=success_source, why=why),
         "exploitable_window_hours": _attr("hours", "0.5", "1.25", "2.0", why="repeatable window"),
         "incident_response_cost": _attr("money", "80000", "165000", "250000", why="incident response"),
         "legal_response_cost": _attr("money", "150000", "825000", "1500000", why="legal/regulatory response"),
@@ -197,6 +203,20 @@ def _payment_world(deployment, people, n_findings=1):
     return asset, findings
 
 
+def _spine(deployment, row):
+    """The SPINE effect an observed effect's row records (its workflow and tool), as
+    a receipt names it: worked out here from the row, apart from the builder."""
+    from assurance import consequential
+    from assurance.authority_chain_records import effect_digest
+
+    document = row.effect_evidence
+    effect = consequential.Effect(
+        workflow=document["workflow"], kind=document["tool"]["kind"], identifier=document["tool"]["identifier"],
+        effect_class=None, klass=consequential.UNKNOWN, status=consequential.UNKNOWN, reasons=(),
+    )
+    return effect_digest(effect, str(deployment.uuid))
+
+
 def _now(minutes=1):
     return datetime.now(dt_timezone.utc) - timedelta(minutes=minutes)
 
@@ -218,8 +238,10 @@ def test_section_30_built_from_an_observed_effect_is_146s_known_answer(deploymen
     and gross cash loss 394,062.50 / 2,425,546.875 / 5,687,500."""
     asset, findings = _payment_world(deployment, people, 3)
     row = _observed(deployment)
+    spine = _spine(deployment, row)
+    assert builder.observed_identity(deployment, row) == (row.evidence_digest, spine)
     effect = _effect("redirect", asset, origin="observed", observed=row,
-                     attributes=_section_30_attributes(success_source="MYTHOS_OBSERVED"))
+                     attributes=_section_30_attributes(success_source="MYTHOS_OBSERVED", spine=spine))
     links = [_link(findings[0], "redirect"), _link(findings[1], "redirect", "amplifier"),
              _link(findings[2], "redirect", "alternate_path")]
     response = _build(_client(people["analyst"]), deployment, _body([effect], links))
@@ -450,11 +472,241 @@ def test_a_finding_enables_an_effect_once(deployment, people):
     assert response.status_code == 400 and response.json()["code"] == "duplicate_id"
 
 
+# ================================== one effect is one event (review round 1)
+
+
+def _window(low, base=None, high=None):
+    """Section 30's effect with another exploitable window."""
+    attributes = _section_30_attributes()
+    attributes["exploitable_window_hours"] = _attr("hours", low, base, high, why="window")
+    return attributes
+
+
+def test_two_effect_types_one_template_takes_on_one_asset_are_one_event(deployment, people):
+    """M1. A transfer altered and an approval bypassed on one payments agent are
+    both a payment loss (precedence sends both to ``payment_agent_misuse``): ONE
+    event, pricing the customer's transaction pool once. Before, the effect type in
+    the key made two events and doubled the gross exactly."""
+    asset, (first, second) = _payment_world(deployment, people, 2)
+    effects = [_effect("transfer", asset), _effect("bypass", asset, effect_type="approval_bypassed")]
+    response = _build(_client(people["analyst"]), deployment,
+                      _body(effects, [_link(first, "transfer"), _link(second, "bypass")]))
+    assert response.status_code == 201, response.content
+    body = response.json()
+    (event,) = body["events"]
+    assert sorted(e["key"] for e in event["effects"]) == ["bypass", "transfer"]
+    assert event["trigger"] == "approval_bypassed+funds_transfer_altered"
+    assert event["grouping"]["key"] == {"template": ["payment_agent_misuse", 1], "asset": str(asset.uuid),
+                                        "business_process": "payments"}
+    assert _figures(event["gross_cash"]) == SECTION_30_GROSS
+    assert _figures(body["totals"]["gross_cash"]) == SECTION_30_GROSS
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_every_observation_of_one_spine_effect_is_one_event_however_far_apart(deployment, people):
+    """M1 and L1. Two signed observations of ONE SPINE effect (one workflow, one
+    tool) are one effect observed twice: one event, whether 30 hours or 30 seconds
+    apart -- the 24 hour window joins distinct effects, never splits one. Declared on
+    another asset, or as another effect type, it would be two events: refused."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    early = _observed(deployment, minutes=30 * 60)
+    late = _observed(deployment, minutes=1)
+    spine = _spine(deployment, early)
+    assert _spine(deployment, late) == spine
+    effects = [_effect("first", asset, origin="observed", observed=early),
+               _effect("again", asset, origin="observed", observed=late)]
+    client = _client(people["analyst"])
+    response = _build(client, deployment, _body(effects, [_link(finding, "first")]))
+    assert response.status_code == 201, response.content
+    body = response.json()
+    (event,) = body["events"]
+    assert [e["key"] for e in event["effects"]] == ["first", "again"]
+    assert event["effect"] == spine
+    assert _figures(body["totals"]["gross_cash"]) == SECTION_30_GROSS
+    other = _asset(deployment, "treasury-agent")
+    for again in (_effect("again", other, origin="observed", observed=late),
+                  _effect("again", asset, origin="observed", observed=late, effect_type="approval_bypassed")):
+        response = _build(client, deployment, _body([effects[0], again], [_link(finding, "first")]))
+        assert response.status_code == 400, response.content
+        assert response.json()["code"] == "spine_effect_inconsistent"
+    assert FinancialScenario.objects.count() == 1
+
+
+def test_the_model_holds_one_spine_effect_to_one_event(deployment, people):
+    """M1, past the builder: a CausalEffect whose SPINE effect is already in another
+    event of its scenario, or declared there another way, is refused on save
+    (``duplicate_id``) -- whoever writes it."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    body = _build(_client(people["analyst"]), deployment,
+                  _body([_effect("redirect", asset)], [_link(finding, "redirect")])).json()
+    scenario = FinancialScenario.objects.get(uuid=body["scenario"]["uuid"])
+    (effect,) = CausalEffect.objects.all()
+    other_event = LossEvent.objects.create(scenario=scenario, event_key="ev-second", currency="USD")
+    fields = {f.name: getattr(effect, f.name) for f in CausalEffect._meta.concrete_fields if f.name not in ("id", "uuid")}
+    observed = {**fields, "effect_key": "seen", "origin": "observed", "observed_effect": str(uuid.uuid4()),
+                "observation": "sha256:" + "ab" * 32, "spine_effect": "sha256:" + "cd" * 32}
+    CausalEffect.objects.create(**observed)
+    for change in ({"loss_event": other_event}, {"asset": str(uuid.uuid4())}, {"effect_type": "approval_bypassed"}):
+        with pytest.raises(EconomicsRefused) as refused:
+            CausalEffect.objects.create(**{**observed, "effect_key": "seen-again",
+                                           "observation": "sha256:" + "ef" * 32, **change})
+        assert refused.value.code == "duplicate_id", change
+    assert CausalEffect.objects.count() == 2
+
+
+def test_joined_effects_read_the_larger_loss_whatever_their_keys(deployment, people):
+    """M2. Two effects of one event, windows of 0.5 and 20 hours: the event reads the
+    window that gives the larger loss, so its gross is the 20-hour effect's alone --
+    and renaming the smaller one (``a-small`` to ``z-small``, which flipped the lead)
+    changes nothing. The value is a CALCULATED parameter that cites both."""
+    asset, findings = _payment_world(deployment, people, 2)
+    client = _client(people["analyst"])
+    alone = _build(client, deployment, _body([_effect("b-big", asset, attributes=_window("20"))],
+                                             [_link(findings[1], "b-big")])).json()
+    events = {}
+    for small in ("a-small", "z-small"):
+        effects = [_effect(small, asset, attributes=_window("0.5")), _effect("b-big", asset, attributes=_window("20"))]
+        response = _build(client, deployment, _body(effects, [_link(findings[0], small), _link(findings[1], "b-big")]))
+        assert response.status_code == 201, response.content
+        (events[small],) = response.json()["events"]
+    assert Decimal(events["a-small"]["gross_cash"]["base"]) == Decimal("23958750")
+    assert events["a-small"]["gross_cash"] == events["z-small"]["gross_cash"] == alone["events"][0]["gross_cash"]
+    for small, event in events.items():
+        window = {c["component_id"]: c for c in event["components"]}["direct-loss"]["sources"]["window_hours"]
+        read = window["read"]
+        assert read["event"] == event["event_key"] and read["name"] == "exploitable_window_hours"
+        assert sorted(d["effect"] for d in read["derived_from"]) == sorted([small, "b-big"])
+        row = FinancialParameter.objects.get(uuid=window["parameter"])
+        assert row.source_type == "CALCULATED" and len(row.derived_from) == 2
+        assert (row.low, row.base, row.high) == ("20", "20", "20")
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_an_observed_and_a_hypothetical_effect_take_part_alike(deployment, people):
+    """M2. An observed 0.5-hour effect and a hypothetical 20-hour one on its key make
+    one event that reads the 20-hour window: the observation does not lead, and the
+    parameter cites both."""
+    asset, findings = _payment_world(deployment, people, 2)
+    row = _observed(deployment)
+    effects = [_effect("seen", asset, origin="observed", observed=row, attributes=_window("0.5")),
+               _effect("feared", asset, attributes=_window("20"))]
+    response = _build(_client(people["analyst"]), deployment, _body(effects, [_link(findings[0], "feared")]))
+    assert response.status_code == 201, response.content
+    (event,) = response.json()["events"]
+    assert [e["key"] for e in event["effects"]] == ["seen", "feared"]
+    assert Decimal(event["gross_cash"]["base"]) == Decimal("23958750")
+    read = {c["component_id"]: c for c in event["components"]}["direct-loss"]["sources"]["window_hours"]["read"]
+    assert sorted(d["effect"] for d in read["derived_from"]) == ["feared", "seen"]
+
+
+def test_adding_an_effect_never_lowers_the_events_loss(deployment, people):
+    """M2, monotonicity (spec 27): each effect added to one event -- one whose every
+    figure is lower, one higher in one input and lower in others, one stating a
+    single attribute -- leaves every point of the event's loss where it was or
+    higher."""
+    asset, findings = _payment_world(deployment, people, 4)
+    lower = {
+        "success_rate": _attr("ratio", "0.10"),
+        "exploitable_window_hours": _attr("hours", "0.1", "0.2", "0.3"),
+        "incident_response_cost": _attr("money", "1000", "2000", "3000"),
+        "legal_response_cost": _attr("money", "1000", "2000", "3000"),
+    }
+    mixed = {**lower, "exploitable_window_hours": _attr("hours", "3", "4", "5")}
+    partial = {"incident_response_cost": _attr("money", "90000", "170000", "900000")}
+    variants = [("m-base", _section_30_attributes()), ("a-lower", lower), ("b-mixed", mixed), ("c-partial", partial)]
+    client = _client(people["analyst"])
+    before = None
+    for n in range(1, len(variants) + 1):
+        effects = [_effect(key, asset, attributes=attributes) for key, attributes in variants[:n]]
+        links = [_link(findings[i], key) for i, (key, _) in enumerate(variants[:n])]
+        response = _build(client, deployment, _body(effects, links))
+        assert response.status_code == 201, response.content
+        (event,) = response.json()["events"]
+        now = _figures(event["gross_cash"])
+        if before is not None:
+            assert all(a >= b for a, b in zip(now, before, strict=True)), (variants[n - 1][0], before, now)
+        before = now
+    assert before != SECTION_30_GROSS and all(a >= b for a, b in zip(before, SECTION_30_GROSS, strict=True))
+
+
+# ================================ MYTHOS_OBSERVED provenance (review round 1)
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_mythos_observed_is_only_an_observed_rate_count_or_duration_naming_its_effect(deployment, people):
+    """M3. On an observed effect, MYTHOS_OBSERVED is refused on a money lump sum (the
+    reviewer's nine-million legal cost with "anything at all" for evidence) and on a
+    rate whose evidence does not name the SPINE effect it came from; a rate that
+    names it is built."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    row = _observed(deployment)
+    spine = _spine(deployment, row)
+    client = _client(people["analyst"])
+
+    def build_with(**changed):
+        attributes = {**_section_30_attributes(), **changed}
+        effect = _effect("redirect", asset, origin="observed", observed=row, attributes=attributes)
+        return _build(client, deployment, _body([effect], [_link(finding, "redirect")]))
+
+    for changed, code in (
+        ({"legal_response_cost": _attr("money", "9000000", source="MYTHOS_OBSERVED", why="anything at all")},
+         "observed_source_not_observable"),
+        ({"incident_response_cost": _attr("money", "1", source="MYTHOS_OBSERVED", why=spine)},
+         "observed_source_not_observable"),
+        ({"success_rate": _attr("ratio", "0.35", source="MYTHOS_OBSERVED", why="anything at all")},
+         "observed_source_unbound"),
+    ):
+        response = build_with(**changed)
+        assert response.status_code == 400, (code, response.content)
+        assert response.json()["code"] == code
+    assert not FinancialScenario.objects.exists()
+    named = build_with(success_rate=_attr("ratio", "0.35", source="MYTHOS_OBSERVED", why=f"7 of 20, {spine}"))
+    assert named.status_code == 201, named.content
+
+
+# =========================================== the transaction (review round 1)
+
+
+def test_a_builds_transaction_only_writes(deployment, people, monkeypatch):
+    """L2. Every row is made and every check run before the build's transaction: the
+    transaction holds one INSERT per row written and nothing else -- no read, so a
+    stop's write on SQLite waits for the inserts alone."""
+    asset, findings = _payment_world(deployment, people, 3)
+    second = _asset(deployment, "treasury-agent")
+    effects = [_effect(f"e{n}", asset if n % 2 else second, attributes=_window(str(n + 1))) for n in range(6)]
+    links = [_link(findings[n % 3], f"e{n}") for n in range(6)]
+    captured: list[list[str]] = []
+    real = transaction.atomic
+
+    @contextlib.contextmanager
+    def watched(*args, **kwargs):
+        with CaptureQueriesContext(connection) as queries, real(*args, **kwargs):
+            yield
+        captured.append([q["sql"] for q in queries.captured_queries])
+
+    before = _counts()
+    monkeypatch.setattr(builder, "transaction", types.SimpleNamespace(atomic=watched))
+    response = _build(_client(people["analyst"]), deployment, _body(effects, links))
+    assert response.status_code == 201, response.content
+    assert len(response.json()["events"]) == 2
+    (inside,) = captured
+    statements = [q for q in inside if not q.lstrip().upper().startswith(("SAVEPOINT", "RELEASE", "BEGIN", "COMMIT"))]
+    reads = [q[:120] for q in statements if not q.lstrip().upper().startswith("INSERT")]
+    assert not reads, reads
+    written = sum(after - before[name] for name, after in _counts().items())
+    assert len(statements) == written
+    # The insert-only path takes nothing its checks did not pass first.
+    unchecked = FinancialScenario(deployment=deployment, title="unchecked", author=people["analyst"])
+    with pytest.raises(EconomicsRewriteRefused):
+        unchecked._insert_checked()
+    assert FinancialScenario.objects.count() == 1
+
+
 # =============================================================== grouping
 
 
 def _input(key, *, asset="a" * 8 + "-0000-4000-8000-" + "0" * 12, effect_type=tpl.EffectType.FUNDS_TRANSFER_ALTERED,
-           process=tpl.BusinessProcess.PAYMENTS, at=None, origin=None):
+           process=tpl.BusinessProcess.PAYMENTS, at=None, origin=None, spine=None):
     observed = at is not None
     return builder.EffectInput(
         key=key,
@@ -464,6 +716,8 @@ def _input(key, *, asset="a" * 8 + "-0000-4000-8000-" + "0" * 12, effect_type=tp
         business_process=process,
         observed_effect=str(uuid.uuid4()) if observed else "",
         observation=("sha256:" + uuid.uuid4().hex * 2) if observed else "",
+        # Each observed effect its own SPINE effect, unless the test says otherwise.
+        spine_effect=(spine or "sha256:" + uuid.uuid4().hex * 2) if observed else "",
         occurred_at=at,
     )
 
@@ -492,16 +746,18 @@ def test_the_window_joins_observed_effects_and_a_hypothetical_joins_the_first():
         _input("other-type", at=T0, effect_type=tpl.EffectType.APPROVAL_BYPASSED),
     ]
     plans = builder.group(effects, [])
-    events = sorted([e.key for e in plan.effects] for plan in plans)
-    assert events == sorted([
-        ["first", "an-hour-later", "at-the-edge", "hypothetical"],
-        ["next-day"],
-        ["other-asset"],
-        ["other-type"],
-    ])
-    # The lead is the window's first: its attributes are what the components read.
-    lead = next(plan for plan in plans if "first" in [e.key for e in plan.effects])
-    assert lead.lead.key == "first"
+    events = {frozenset(e.key for e in plan.effects) for plan in plans}
+    # Another effect type the same template takes, on the same asset and process, is
+    # the same loss: the effect type is not in the key (the template encodes it).
+    assert events == {
+        frozenset({"first", "other-type", "an-hour-later", "at-the-edge", "hypothetical"}),
+        frozenset({"next-day"}),
+        frozenset({"other-asset"}),
+    }
+    # An event's effects are ordered by when they occurred, the hypothetical last.
+    joined = next(plan for plan in plans if len(plan.effects) == 5)
+    assert [e.key for e in joined.effects][2:] == ["an-hour-later", "at-the-edge", "hypothetical"]
+    assert joined.anchor == T0 and joined.trigger == "approval_bypassed+funds_transfer_altered"
     # Hypothetical effects alone, one bucket: one event.
     (alone,) = builder.group([_input("x"), _input("y")], _links("x", 1) + _links("y", 1))
     assert [e.key for e in alone.effects] == ["x", "y"] and alone.anchor is None
@@ -536,7 +792,30 @@ def test_the_grouping_key_names_no_finding():
     assert builder.grouping_key(one) == builder.grouping_key(two) == builder.grouping_key(
         builder.Member(effect, selection)
     )
-    assert builder.grouping_key(one) == ("payment_agent_misuse", "1", "funds_transfer_altered", effect.asset, "payments")
+    assert builder.grouping_key(one) == ("payment_agent_misuse", "1", effect.asset, "payments")
+
+
+
+def test_every_observation_of_one_spine_effect_is_one_plan():
+    """One SPINE effect observed twice, 48 hours apart, is ONE unit and one event;
+    a distinct effect 25 hours after the first opens another, as before."""
+    spine = "sha256:" + "5" * 64
+    effects = [
+        _input("first", at=T0, spine=spine),
+        _input("two-days-later", at=T0 + timedelta(hours=48), spine=spine),
+        _input("distinct", at=T0 + timedelta(hours=25)),
+    ]
+    plans = builder.group(effects, [])
+    assert {frozenset(e.key for e in plan.effects) for plan in plans} == {
+        frozenset({"first", "two-days-later"}), frozenset({"distinct"})
+    }
+    for moved in ({"asset": "b" * 8 + "-0000-4000-8000-" + "0" * 12},
+                  {"business_process": tpl.BusinessProcess.LENDING},
+                  {"effect_type": tpl.EffectType.APPROVAL_BYPASSED}):
+        split = builder.EffectInput(**{**effects[1].__dict__, **moved})
+        with pytest.raises(tpl.BuildRefused) as refused:
+            builder.group([effects[0], split], [])
+        assert refused.value.code == "spine_effect_inconsistent"
 
 
 # ============================================================ idempotency
@@ -777,6 +1056,15 @@ def test_an_observed_effect_that_does_not_stand_is_refused(deployment, people, m
     response = _build(client, deployment, _body([_effect("redirect", asset, origin="observed", observed=typed)],
                                                 [_link(finding, "redirect")]))
     assert response.status_code == 400 and response.json()["code"] == "observed_effect_not_in_force"
+    # A signed one whose evidence was rewritten after it was signed: the signature
+    # still verifies, and the document is not the one it names (L5).
+    rewritten = _observed(deployment)
+    document = {**rewritten.effect_evidence}
+    document["tool"] = {**document["tool"], "identifier": "another-api"}
+    WorkflowChainOutcome.objects.filter(pk=rewritten.pk).update(effect_evidence=document)
+    response = _build(client, deployment, _body([_effect("redirect", asset, origin="observed", observed=rewritten)],
+                                                [_link(finding, "redirect")]))
+    assert response.status_code == 400 and response.json()["code"] == "observed_effect_not_in_force"
     # A signed one, read with no keyring to verify it now.
     monkeypatch.delenv(observed_outcomes.KEYRING_ENV)
     response = _build(client, deployment, _body([_effect("redirect", asset, origin="observed", observed=row)],
@@ -812,6 +1100,24 @@ def test_the_author_never_reviews_their_draft(deployment, people):
         ScenarioReview.objects.create(scenario=scenario, reviewer=people["analyst"], verdict="approved")
     assert refused.value.code == "author_reviews_own_scenario"
     ScenarioReview.objects.create(scenario=scenario, reviewer=people["reviewer"], verdict="approved")
+
+
+def test_the_events_route_reads_the_scenarios_review_status(deployment, people):
+    """L3. The events route reads the version's review state from its reviews:
+    ``draft`` until one is recorded, then the latest verdict."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    body = _build(_client(people["analyst"]), deployment,
+                  _body([_effect("redirect", asset)], [_link(finding, "redirect")])).json()
+    assert body["scenario"]["status"] == "draft"
+    scenario = FinancialScenario.objects.get(uuid=body["scenario"]["uuid"])
+    url = _url(deployment, scenario.uuid)
+    ScenarioReview.objects.create(scenario=scenario, reviewer=people["reviewer"], verdict="returned")
+    assert _client(people["viewer"]).get(url).json()["scenario"]["status"] == "returned"
+    assert body["scenario"]["reviews"] == []
+    ScenarioReview.objects.create(scenario=scenario, reviewer=people["admin"], verdict="approved")
+    read = _client(people["viewer"]).get(url).json()["scenario"]
+    assert read["status"] == "approved"
+    assert [(r["reviewer"], r["verdict"]) for r in read["reviews"]] == [("bea", "returned"), ("ada", "approved")]
 
 
 # ============================================================ strict JSON
@@ -980,12 +1286,23 @@ SPEC_PHRASES = (
     "test_a_builder_fault_never_takes_down_a_stop",
     "Market value is never cash",
     "SYNTHETIC / ILLUSTRATIVE",
+    "every observation of one SPINE effect joins ONE event",
+    "the value that gives the LARGER loss",
+    "the atomic block only inserts",
 )
 
 
 @pytest.mark.parametrize("phrase", SPEC_PHRASES)
 def test_the_spec_states_the_builder(phrase):
     assert phrase in " ".join(SPEC.read_text(encoding="utf-8").split())
+
+
+def test_the_builders_routes_and_writer_cite_section_24():
+    """L4. The builder's section is 24: the URLconf's guard and the spec's writer
+    table say so."""
+    urls = " ".join((REPO / "assurance" / "urls.py").read_text(encoding="utf-8").replace("#", " ").split())
+    assert "sections 2, 19 and 24" in urls
+    assert "the builder step adds another (section 24)" in " ".join(SPEC.read_text(encoding="utf-8").split())
 
 
 def test_the_spec_names_every_builder_code():

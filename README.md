@@ -431,12 +431,17 @@ templates (section 24):
   admin or analyst only, the draft authored by the caller. The same inputs return
   the scenario already built (200), never a second; a build raced by the same build
   is 409 and writes nothing;
-- `GET .../economics/scenarios/<scenario uuid>/events/`: its events, each with its
-  effects, findings, components and where every input came from.
+- `GET .../economics/scenarios/<scenario uuid>/events/`: its review status and its
+  events, each with its effects, findings, components and where every input came
+  from.
 
 Findings that enable one effect join that effect's one loss event, so five findings
-on one payment loss never multiply it. Every reference is looked up in the path's
-deployment only. A fault in the builder leaves these two routes unserved and nothing
+on one payment loss never multiply it; every observation of one SPINE effect joins
+one event too, and an event reads, for each input, the larger loss across all its
+effects, so joining never understates. An observed figure (`MYTHOS_OBSERVED`) is
+only a rate, a count or a duration, and names the SPINE effect it was seen as. Every
+check runs before the build's transaction, which only inserts. Every reference is
+looked up in the path's deployment only. A fault in the builder leaves these two routes unserved and nothing
 else; neither is a stop.
 
 ## When a dependency fails
