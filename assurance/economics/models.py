@@ -34,6 +34,8 @@ ever read on a row whose account was removed after it was written.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -71,6 +73,20 @@ SIMULATION_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(SIMULATION_RECORD_REFUSALS)
+#: The codes a Validity Card or a Financial Exposure Receipt row is refused with on
+#: save (spec, section 26.6).
+CARD_RECORD_REFUSALS = {
+    "card_record_malformed": (
+        "a Validity Card row holds the card of its own simulation result: an object naming that result's scenario "
+        "and the grade the row names, with no float in it, its digest the card's, and its sensitivity analysis the "
+        "one its digest names"
+    ),
+    "receipt_record_malformed": (
+        "a receipt row holds a schema-valid mythos.financial-exposure-receipt/v1 document naming its own card, "
+        "scenario and tenant, and the DSSE envelope signed over exactly that document"
+    ),
+}
+_REFUSAL_TEXT.update(CARD_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -1869,6 +1885,216 @@ class SimulationResult(_AppendOnly):
 
     def __str__(self) -> str:
         return f"simulation of scenario {self.scenario_id}, seed {self.seed}, {self.draws} draws: {self.status}"
+
+
+# ---------------------------------------------------------------------------
+# FinancialValidityCard, FinancialExposureReceipt -- one simulation result graded,
+# carded and receipted (step 8)
+# ---------------------------------------------------------------------------
+
+#: The confidence grades a card names (the owner's specification, section 8).
+CARD_GRADES = ("A", "B", "C", "D", "Unknown")
+
+
+def card_digest(card) -> str:
+    """The digest a receipt names for a Validity Card: ``sha256:`` over the card's
+    canonical JSON as ``mythos_core.exposure_receipt.card_digest_of`` writes it
+    (sorted keys, no whitespace, UTF-8, no NaN), computed here without importing
+    it, so loading the models loads no part of the receipt module."""
+    text = json.dumps(card, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class FinancialValidityCard(_AppendOnly):
+    """The Financial Exposure Validity Card of ONE simulation result (spec, section
+    26.4; the owner's specification, sections 8 and 15): every field of the owner's
+    table, each from the stored result, the scenario version's rows and the
+    sensitivity analysis made on the run's own draws, or saying it has no data;
+    the confidence grade with its reason; and what was read when the card was
+    issued (the review status, the inventory entry, the findings' status, the
+    deployment's system fingerprint), kept as issued.
+
+    Append-only like every economics record, and IDEMPOTENT: one card per
+    simulation result (a one-to-one key). The sensitivity analysis is stored with
+    it, and the card names its digest. Nothing in it is a float; the card's digest
+    is recomputed on save (``card_record_malformed``). No account column, so removing an
+    operator never writes it; it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    simulation = models.OneToOneField(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    schema = models.CharField(max_length=100)
+    confidence_grade = models.CharField(max_length=16, choices=[(g, g) for g in CARD_GRADES])
+    grade_version_digest = models.CharField(max_length=71)
+    card = models.JSONField()
+    card_digest = models.CharField(max_length=71)
+    # The sensitivity analysis the card's most sensitive variables and evidence mix
+    # are read from; null where the run was refused and nothing was analysed.
+    sensitivity = models.JSONField(null=True, blank=True)
+    sensitivity_digest = models.CharField(max_length=71, blank=True)
+    issued_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+        constraints = [
+            models.CheckConstraint(condition=Q(confidence_grade__in=CARD_GRADES), name="ck_econ_card_grade"),
+            models.CheckConstraint(
+                condition=(Q(sensitivity__isnull=True) & Q(sensitivity_digest=""))
+                | (Q(sensitivity__isnull=False) & ~Q(sensitivity_digest="")),
+                name="ck_econ_card_sensitivity_digest",
+            ),
+        ]
+
+    def check_new(self) -> None:
+        simulation = SimulationResult._base_manager.filter(pk=self.simulation_id).values_list(
+            "scenario_id", "deployment_id"
+        )
+        if list(simulation) != [(self.scenario_id, self.deployment_id)]:
+            raise EconomicsRefused("cross_tenant_reference", "the card's simulation is another scenario's")
+        scenario = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("uuid", flat=True)
+        if not isinstance(self.card, dict) or [str(u) for u in scenario] != [self.card.get("scenario_id")]:
+            raise EconomicsRefused("card_record_malformed", "the card names another scenario")
+        if self.card.get("confidence_grade") != self.confidence_grade or self.confidence_grade not in CARD_GRADES:
+            raise EconomicsRefused("card_record_malformed", "the card's grade is not the row's")
+        _require_text(schema=self.schema)
+        _refuse(governance.snapshot_hash_refusal(self.grade_version_digest), detail="grade_version_digest")
+        for name, document in (("card", self.card), ("sensitivity", self.sensitivity)):
+            if _has_float(document):
+                raise EconomicsRefused("card_record_malformed", f"the {name} holds a float")
+        if card_digest(self.card) != self.card_digest:
+            raise EconomicsRefused("card_record_malformed", "card_digest is not the card's")
+        if self.sensitivity is None:
+            if self.sensitivity_digest:
+                raise EconomicsRefused("card_record_malformed", "a digest of no sensitivity analysis")
+        elif canonical_digest(self.sensitivity) != self.sensitivity_digest:
+            raise EconomicsRefused("card_record_malformed", "sensitivity_digest is not the analysis's")
+        if self.issued_at is None:
+            raise EconomicsRefused("card_record_malformed", "the card says when it was issued")
+        if FinancialValidityCard._base_manager.filter(simulation_id=self.simulation_id).exists():
+            raise EconomicsRefused("duplicate_id", "a card of this simulation result is recorded")
+        self._card_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this card, whose :meth:`check_new` ran on exactly these values just
+        before, inside the caller's transaction: an INSERT and nothing read (as
+        :meth:`SimulationResult.insert_checked`)."""
+        if not self._state.adding or getattr(self, "_card_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A Validity Card is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"validity card of simulation {self.simulation_id}: grade {self.confidence_grade}"
+
+
+class FinancialExposureReceipt(_AppendOnly):
+    """The signed Financial Exposure Receipt of ONE simulation result and its card
+    (spec, section 26.5): the ``mythos.financial-exposure-receipt/v1`` document
+    ``mythos_core.exposure_receipt`` built, and the DSSE envelope signed over it.
+
+    Append-only like every economics record, and IDEMPOTENT: one receipt per
+    simulation result, and per card (one-to-one keys), so the same result returns
+    the same row. On save, the envelope's payload must be exactly the document's
+    canonical bytes, and the document must name this row's card, scenario and
+    tenant (``receipt_record_malformed``). No account column; it goes with its
+    deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    simulation = models.OneToOneField(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    card = models.OneToOneField(FinancialValidityCard, on_delete=models.CASCADE, related_name="+")
+    receipt_id = models.CharField(max_length=32)
+    document = models.JSONField()
+    envelope = models.JSONField()
+    key_id = models.CharField(max_length=128)
+    generated_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+
+    def check_new(self) -> None:
+        card = FinancialValidityCard._base_manager.filter(pk=self.card_id).values_list(
+            "simulation_id", "scenario_id", "deployment_id", "card_digest"
+        )
+        card = list(card)
+        if not card or card[0][:3] != (self.simulation_id, self.scenario_id, self.deployment_id):
+            raise EconomicsRefused("cross_tenant_reference", "the receipt's card is another result's")
+        try:
+            # Imported on use, never at load: the models' import loads no part of
+            # the receipt module (spec, section 26.7).
+            from mythos_core import exposure_receipt as core
+            from mythos_core.outcome import canonical_bytes
+
+            document = core.validate_receipt(dict(self.document))
+            payload = canonical_bytes(document)
+        except Exception as error:  # noqa: BLE001 - every fault of the document is this row's refusal
+            raise EconomicsRefused("receipt_record_malformed", f"{type(error).__name__}: {error}") from None
+        scenario = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("uuid", flat=True)
+        # The tenant is the deployment (a Deployment IS the tenant boundary).
+        deployments = self._meta.get_field("deployment").related_model._base_manager
+        deployment = deployments.filter(pk=self.deployment_id).values_list("uuid", flat=True)
+        named = (
+            document["scenario_id"],
+            document["tenant_id"],
+            document["receipt_id"],
+            document["validity_card"]["digest"],
+        )
+        expected = (
+            str(next(iter(scenario), "")),
+            str(next(iter(deployment), "")),
+            self.receipt_id,
+            card[0][3],
+        )
+        if named != expected:
+            raise EconomicsRefused("receipt_record_malformed", "the document names another scenario, tenant, id or card")
+        envelope = self.envelope
+        try:
+            signatures = envelope["signatures"]
+            (signature,) = signatures
+            sig = signature["sig"]
+            # Core's signature form: the 88-character base64 of a 64-byte Ed25519
+            # signature, as its verifier reads one, checked before anything is stored.
+            ok = (
+                set(envelope) == {"payloadType", "payload", "signatures"}
+                and envelope["payloadType"] == core.RECEIPT_PAYLOAD_TYPE
+                and base64.b64decode(envelope["payload"], validate=True) == payload
+                and isinstance(signatures, list)
+                and isinstance(signature, dict)
+                and set(signature) == {"keyid", "sig"}
+                and isinstance(signature["keyid"], str)
+                and signature["keyid"] == self.key_id
+                and isinstance(sig, str)
+                and len(sig) == core.SIGNATURE_B64_LENGTH
+                and len(base64.b64decode(sig, validate=True)) == 64
+            )
+        except (TypeError, KeyError, ValueError, binascii.Error):
+            ok = False
+        if not ok:
+            raise EconomicsRefused(
+                "receipt_record_malformed", "the envelope is not one well-formed signature over exactly the document"
+            )
+        if FinancialExposureReceipt._base_manager.filter(
+            Q(simulation_id=self.simulation_id) | Q(card_id=self.card_id)
+        ).exists():
+            raise EconomicsRefused("duplicate_id", "a receipt of this simulation result is recorded")
+        self._receipt_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this receipt, checked just before on exactly these values: an
+        INSERT and nothing read."""
+        if not self._state.adding or getattr(self, "_receipt_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A receipt is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"exposure receipt {self.receipt_id} of simulation {self.simulation_id}"
 
 
 # ---------------------------------------------------------------------------
