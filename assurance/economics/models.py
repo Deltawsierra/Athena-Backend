@@ -171,6 +171,12 @@ class _AppendOnly(models.Model):
             raise EconomicsRewriteRefused("A build's rows are checked whole before any is written.")
         super().save(force_insert=True)
 
+    def _insert_as_checked(self) -> None:
+        """An INSERT of a row its own class checked whole just before (a
+        :class:`SimulationResult`, by :meth:`SimulationResult.insert_checked`):
+        never an UPDATE, and nothing read."""
+        super().save(force_insert=True)
+
 
 def _signed_in(account) -> governance.Person:
     """The person a row is written by: the account and the account's OWN username,
@@ -1784,7 +1790,7 @@ class SimulationResult(_AppendOnly):
         constraint. Any other row, or one changed since its check, is refused."""
         if not self._state.adding or getattr(self, "_result_checked", None) != _checked_state(self):
             raise EconomicsRewriteRefused("A simulation result is checked whole, then inserted unchanged.")
-        models.Model.save(self, force_insert=True)
+        self._insert_as_checked()
 
     def __str__(self) -> str:
         return f"simulation of scenario {self.scenario_id}, seed {self.seed}, {self.draws} draws: {self.status}"
