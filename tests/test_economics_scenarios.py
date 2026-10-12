@@ -991,6 +991,15 @@ SCHEMA_REFUSALS = [
     ("an unknown currency", lambda d: d["variables"]["legal_retainer"].update(currency="usd"), "currency_unknown"),
     ("a code with no minor unit", lambda d: d["variables"]["legal_retainer"].update(currency="XAU"), "currency_retired"),
     ("a bad source type", lambda d: d["variables"]["recovery_rate"].update(source_type="GUESS"), "source_type_unrecognised"),
+    ("a money-per-unit figure observed",
+     lambda d: d["variables"]["average_transaction_value"].update(source_type="MYTHOS_OBSERVED"),
+     "observed_source_not_observable"),
+    ("a money lump sum observed",
+     lambda d: d["variables"]["legal_retainer"].update(source_type="MYTHOS_OBSERVED"),
+     "observed_source_not_observable"),
+    ("a sublimit observed",
+     lambda d: d["insurance_sublimits"]["notification"].update(source_type="MYTHOS_OBSERVED"),
+     "observed_source_not_observable"),
     ("blank evidence", lambda d: d["variables"]["recovery_rate"].update(evidence_ref=" "), "evidence_ref_missing"),
     ("overlong evidence", lambda d: d["variables"]["recovery_rate"].update(evidence_ref="x" * 501), "field_malformed"),
     ("a malformed date", lambda d: d["variables"]["recovery_rate"].update(effective_date="2026-9-30"), "date_malformed"),
@@ -1014,6 +1023,33 @@ def test_the_schema_refuses(what, edit, code):
     with pytest.raises(MoneyRefused) as refused:
         parameter_set.parse_document(_variant(edit))
     assert refused.value.code == code, refused.value
+
+
+def test_no_money_variable_of_a_set_rests_on_an_observation_but_a_quantity_may():
+    """R2-3. A set holds the customer's own figures: a money amount (a lump sum, or
+    per unit, hour or year) is never ``MYTHOS_OBSERVED`` (``observed_source_not_observable``,
+    the builder's code), whichever variable it is. A quantity still may, and the
+    refusal is the set's own: an effect's attribute keeps the rule it had."""
+    money = [name for name, v in parameter_set.VARIABLES.items() if v.unit in MONEY_UNITS]
+    quantities = [name for name, v in parameter_set.VARIABLES.items() if v.unit not in MONEY_UNITS]
+    assert "average_transaction_value" in money and "customer_count" in quantities
+    assert len(money) + len(quantities) == len(parameter_set.VARIABLES) == 30
+    for name in money:
+        document = full_document()
+        document["variables"][name]["source_type"] = "MYTHOS_OBSERVED"
+        with pytest.raises(MoneyRefused) as refused:
+            parameter_set.parse_document(document)
+        assert refused.value.code == "observed_source_not_observable", name
+        assert name in refused.value.detail
+    for name in quantities:
+        document = full_document()
+        document["variables"][name]["source_type"] = "MYTHOS_OBSERVED"
+        read = parameter_set.parse_document(document).variables[name]
+        assert read.source_type.value == "MYTHOS_OBSERVED", name
+    # The code is one published meaning, the builder's.
+    from assurance.economics.engine import templates as tpl
+
+    assert parameters.REFUSALS["observed_source_not_observable"] == tpl.REFUSALS["observed_source_not_observable"]
 
 
 def test_a_document_that_is_not_an_object_is_refused():

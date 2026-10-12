@@ -107,8 +107,11 @@ def _finding(deployment, n=1):
     )
 
 
-def _attr(unit, low, base=None, high=None, *, source="EXPERT_ESTIMATE", why="made up"):
-    return _entry(unit, low, base, high, source_type=source, evidence_ref=f"{LABEL}: {why}")
+def _attr(unit, low, base=None, high=None, *, source="EXPERT_ESTIMATE", why="made up", bound=""):
+    """An attribute entry. An observed figure's evidence leads with the SPINE effect
+    digest it is ``bound`` to, then a note (review round 2: the binding is exact)."""
+    evidence = f"{bound} {LABEL}: {why}" if bound else f"{LABEL}: {why}"
+    return _entry(unit, low, base, high, source_type=source, evidence_ref=evidence)
 
 
 SECTION_30_SET = {
@@ -120,10 +123,10 @@ SECTION_30_SET = {
 
 def _section_30_attributes(success_source="EXPERT_ESTIMATE", spine=""):
     """Section 30's effect. An observed success rate's evidence names the SPINE
-    effect it was observed as (``spine``)."""
-    why = "7 unauthorized effects in 20 attempts" + (f", observed as {spine}" if spine else "")
+    effect it was observed as (``spine``), which its evidence leads with."""
+    why = "7 unauthorized effects in 20 attempts"
     return {
-        "success_rate": _attr("ratio", "0.35", source=success_source, why=why),
+        "success_rate": _attr("ratio", "0.35", source=success_source, why=why, bound=spine),
         "exploitable_window_hours": _attr("hours", "0.5", "1.25", "2.0", why="repeatable window"),
         "incident_response_cost": _attr("money", "80000", "165000", "250000", why="incident response"),
         "legal_response_cost": _attr("money", "150000", "825000", "1500000", why="legal/regulatory response"),
@@ -660,8 +663,43 @@ def test_mythos_observed_is_only_an_observed_rate_count_or_duration_naming_its_e
         assert response.status_code == 400, (code, response.content)
         assert response.json()["code"] == code
     assert not FinancialScenario.objects.exists()
-    named = build_with(success_rate=_attr("ratio", "0.35", source="MYTHOS_OBSERVED", why=f"7 of 20, {spine}"))
+    named = build_with(success_rate=_attr("ratio", "0.35", source="MYTHOS_OBSERVED", why="7 of 20", bound=spine))
     assert named.status_code == 201, named.content
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_an_observed_figure_is_bound_to_its_effect_exactly_not_by_substring(deployment, people):
+    """R2-2. The evidence is the SPINE effect digest, alone or followed by a space and
+    a note: the reviewer's "NOT observed; estimated by hand; unrelated to <digest>" is
+    refused (``observed_source_unbound``), and one evidence_ref naming two digests
+    binds only the first."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    row = _observed(deployment)
+    other = _observed(deployment, tool=("tool", "treasury-api"))
+    spine, other_spine = _spine(deployment, row), _spine(deployment, other)
+    assert spine != other_spine
+    client = _client(people["analyst"])
+
+    def build_with(evidence):
+        rate = _entry("ratio", "0.35", source_type="MYTHOS_OBSERVED", evidence_ref=evidence)
+        attributes = {**_section_30_attributes(), "success_rate": rate}
+        effect = _effect("redirect", asset, origin="observed", observed=row, attributes=attributes)
+        return _build(client, deployment, _body([effect], [_link(finding, "redirect")]))
+
+    for evidence in (
+        f"NOT observed; estimated by hand; unrelated to {spine}",
+        f"{other_spine} and also {spine}",
+        f"7 of 20, observed as {spine}",
+        f"{spine}0",
+        f"{spine};7 of 20",
+    ):
+        response = build_with(evidence)
+        assert response.status_code == 400, (evidence, response.content)
+        assert response.json()["code"] == "observed_source_unbound", evidence
+    assert not FinancialScenario.objects.exists()
+    for evidence in (spine, f"{spine} 7 of 20, observed by the assessment", f"{spine} and also {other_spine}"):
+        built = build_with(evidence)
+        assert built.status_code == 201, (evidence, built.content)
 
 
 # =========================================== the transaction (review round 1)
@@ -1277,6 +1315,11 @@ def test_a_builder_fault_never_takes_down_a_stop():
 
 
 SPEC_PHRASES = (
+    "Monotonicity holds per event, not per scenario",
+    "from 59,064,500 to 6,861,812.50",
+    "a hypothetical effect joins every event of its key",
+    "within 24 hours of ANY member of an event",
+    "accept it and disclose it",
     "Findings that enable the same effect join ONE loss event",
     "A template never invents a number",
     "one effect is in exactly one loss event of its scenario version",
