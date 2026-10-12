@@ -49,8 +49,8 @@ The rules:
   inputs named: a band from the sample's standard error would not cover at its
   stated level.
 
-Pure: no Django, no database, no I/O. Not wired to the formulas, the records or
-any route yet (step 7b).
+Pure: no Django, no database, no I/O. Step 7b wires it to the formulas and the
+records (:mod:`.scenario_simulation`, spec section 25); no route serves it yet.
 """
 
 from __future__ import annotations
@@ -489,6 +489,11 @@ def _summary_block(summary: Summary, currency: str) -> dict:
             for key, band in summary.bands.items()
         },
     }
+
+
+#: One summary as decimal strings, as a record writes it: public for step 7b's
+#: wiring (``scenario_simulation``), which writes every line of a scenario so.
+summary_block = _summary_block
 
 
 def canonical_json(record: Mapping) -> bytes:

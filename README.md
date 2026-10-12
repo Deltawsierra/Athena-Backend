@@ -401,7 +401,8 @@ Economic Exposure estimates what a finding could cost, as a range with its sourc
 (`assurance/economics/`, specified in `docs/economics/spec-v1.md`). The scenario
 engine computes a deterministic low, base and high per loss component from
 parameters that each carry their unit, `source_type` and evidence (sections 14 to
-18); it simulates nothing yet. One route module serves the customer's own figures,
+18), and a service simulates a stored scenario (below). One route module serves the
+customer's own figures,
 a deployment-scoped, versioned parameter set (section 19):
 
 - `GET /api/assurance/deployments/<uuid>/economics/parameter-sets/<set_key>/`: the
@@ -445,6 +446,19 @@ parameter set's money figure is never observed. Every
 check runs before the build's transaction, which only inserts. Every reference is
 looked up in the path's deployment only. A fault in the builder leaves these two routes unserved and nothing
 else; neither is a stop.
+
+### The simulation
+
+`assurance/economics/simulation_service.py` simulates a stored scenario version
+(section 25): every parameter draws from the distribution it states (one that holds
+its own low, base and high), or a point mass, or an expert's PERT, or, where the
+builder joined several effects' figures, from each of theirs taking the larger loss,
+or is refused; every parameter is drawn once per simulated year; every formula runs as
+a vectorised twin proven equal to it, and what nothing uncertain reaches is step 4's
+Decimal figure; insurance applies per event; and the run is recorded once per scenario
+version, input digest, seed and draws as a `SimulationResult`, with every version and
+limit it rests on and no float. It serves no route yet, never raises, and nothing Django loads
+at start imports it or numpy.
 
 ## When a dependency fails
 
