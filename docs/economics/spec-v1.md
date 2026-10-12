@@ -2986,17 +2986,30 @@ must be one signature over exactly the document's canonical bytes under the
 receipt's payload type (`envelope_not_over_receipt` otherwise), and it must VERIFY
 with core's verifier against the caller's `ReceiptKeyring` before anything is
 recorded (core's code otherwise): **no signature nobody has checked is ever recorded**
-(review round 1, M2). The keyring is required: it is built from the engine's
-published economics-receipt keys (`receipt_service.keyring_from_published`: the
-engine's artifact-keyring form, `keys` by key id, each a base64 `public_key` and a
-`status`, one document for the `economics-receipt` role and one for each other role
-the engine publishes, so a key of another role is refused as `wrong_role`; a revoked
-key verifies nothing). Without one, `issue_receipt` records nothing and returns
-nothing (`keyring_unavailable`). A recorded receipt is returned only where it verifies
+(review round 1, M2). The keyring is required: it is built from the keyring the
+engine publishes at `GET /api/assurance/keyring` (athena-engine #88,
+`receipt_service.keyring_from_published`, or `engine_keyring` to fetch it): its
+`keys` are the artifact role's (evidence packs and assurance receipts) and its
+`roles` hold each other signing role's keyring in the same form (`keys` by key id,
+each a base64 `public_key` and a `status`), `economics-receipt` among them. That
+role's active and retired keys are the receipt keys; the artifact keys and every
+other role's are filed under their roles, so a receipt one of them signed is refused
+as `wrong_role`; a revoked key verifies nothing; a published keyring without the
+role is no keyring. Without one, `issue_receipt` records nothing and returns nothing
+(`keyring_unavailable`). A recorded receipt is returned only where it verifies
 against the keyring; one that does not is never returned as the result's receipt and
 never overwritten (`recorded_receipt_unverified`, with the verification's code). A
 signer can be handed in; the tests sign with `Ed25519PrivateKey.generate()` keys, as
 the existing receipt tests do.
+
+The engine validates the document with core before it signs (athena-engine #88). A
+document core refuses is a 400 whose `detail` is `{"code": <core's code>, "reason":
+...}`: the client raises it as `ExposureReceiptRefused`, and the service returns
+`receipt_refused_by_signer` with core's code (`ReceiptOutcome.signer_code`) and
+records nothing -- the document was refused, not the signer unavailable. A 503 (a
+role not configured: `signer_not_configured`), a connection failure, a timeout, a
+400 that names no code, or an engine without the route is `signer_unavailable`
+(`test_a_document_the_engine_refuses_is_refused_by_the_signer_not_unavailable`).
 
 `FinancialExposureReceipt` is append-only, with no account column, going with its
 deployment: the deployment, the scenario, the result and the card (one-to-one each:
@@ -3012,6 +3025,7 @@ recorded**: `result_not_completed`, `receipt_figure_unavailable` (a run without 
 frequency has no expected annual exposure, and core requires all six figures),
 `system_fingerprint_unavailable`, `source_snapshot_mismatch`, core's
 `bad_integer` (a seed past 2^53 - 1, which core refuses), `signer_unavailable`,
+`receipt_refused_by_signer`,
 `envelope_not_over_receipt`, core's verdict codes, `keyring_unavailable`,
 `recorded_receipt_unverified`, `card_unavailable` (or the card's own failure code),
 `receipt_failed`. The service never raises.
@@ -3080,7 +3094,8 @@ returned as theirs, with their meaning, and none is published twice with another
 | `receipt_figure_unavailable` | one of the six figures does not exist for the run |
 | `system_fingerprint_unavailable` | the card names no fingerprint to bind |
 | `source_snapshot_mismatch` | a source snapshot's rows no longer give its content hash |
-| `signer_unavailable` | nothing could sign: the engine was not reached, has no key or no route, or refused |
+| `signer_unavailable` | nothing could sign: the engine was not reached or timed out, has no key in the role (503), or serves no signing route |
+| `receipt_refused_by_signer` | the signer read the receipt and refused it: core's code is carried beside (`signer_code`) |
 | `envelope_not_over_receipt` | the signer returned something other than one signature over exactly the receipt |
 | `card_unavailable` | no card, and none could be issued |
 | `keyring_unavailable` | no `ReceiptKeyring` of the engine's published economics-receipt keys: nothing recorded or returned |
@@ -3134,14 +3149,12 @@ why, as a code, and never raises out of a service.
 
 - **No route and no report.** Step 6 serves the card and the receipt, and puts them
   in the report JSON.
-- **The engine does not sign yet.** `POST /api/economics/exposure-receipt/sign` is
-  not an engine route today: until the engine serves it (signing in the
-  `economics-receipt` role, as `/api/assurance/receipt/sign` signs assurance
-  receipts), every `issue_receipt` without a signer of its own returns
-  `signer_unavailable` and records nothing. Nor does the engine publish an
-  economics-receipt keyring yet: `keyring_from_published` reads its artifact-keyring
-  form, and the caller (step 6) hands the documents in; nothing here fetches one, so
-  without them `issue_receipt` returns `keyring_unavailable`.
+- **The engine signs from athena-engine #88** (`POST /api/economics/exposure-receipt/sign`,
+  and `roles["economics-receipt"]` in its published keyring), where a deployment
+  provisions the role's key and keyring (`ENGINE_ECONOMICS_RECEIPT_KEY`,
+  `ENGINE_ECONOMICS_RECEIPT_KEYRING`); an engine without them answers 503 and the
+  receipt is `signer_unavailable`, recording nothing. Nothing calls `issue_receipt`
+  yet: step 6 does, with `engine_keyring()` or a keyring fetched out of band.
 - **No receipt for a run without a frequency**: core's schema requires an expected
   annual exposure, which such a run does not have (section 25.5), and none is
   estimated. No writer states a frequency yet (section 25.9), so in production only
@@ -3227,10 +3240,12 @@ why, as a code, and never raises out of a service.
     deployment's read when the card is issued, labelled so. Alternative: refuse the
     receipt until the builder records a fingerprint at build. Recommendation: have
     the builder record one (a builder change), then refuse a scenario without one.
-11. **The receipt is signed by the engine** on a new route,
-    `/api/economics/exposure-receipt/sign`, in the `economics-receipt` role: the
-    backend holds no key, as for assurance receipts. Alternative: a backend-held
-    `economics-receipt` key. Recommendation: the engine route (an engine change).
+11. **The receipt is signed by the engine** on its route
+    `/api/economics/exposure-receipt/sign` (athena-engine #88), in the
+    `economics-receipt` role: the backend holds no key, as for assurance receipts. A
+    document the engine refuses by core's rule is `receipt_refused_by_signer`
+    carrying the code, distinct from `signer_unavailable` (the #88 review).
+    Alternative: a backend-held `economics-receipt` key. Recommendation: keep.
 12. **One card and one receipt per simulation result**, made once and kept: the
     review status, inventory entry, findings' status and the deployment's fingerprint
     are as read at issue. Alternative: a new card per issue, superseding the last.

@@ -89,7 +89,14 @@ REFUSALS = {
     ),
     "system_fingerprint_unavailable": "the card names no SPINE system fingerprint for the receipt to bind",
     "source_snapshot_mismatch": "a source snapshot's stored rows no longer give the content hash it was recorded with",
-    "signer_unavailable": "nothing could sign the receipt: the engine was not reached, has no key, or refused",
+    "signer_unavailable": (
+        "nothing could sign the receipt: the engine was not reached or timed out, has no key in the role, or "
+        "serves no signing route"
+    ),
+    "receipt_refused_by_signer": (
+        "the signer read the receipt and refused it: core's validator, run by the engine before it signs, refused the "
+        "document with the code carried beside this one"
+    ),
     "envelope_not_over_receipt": (
         "what the signer returned is not one signature over exactly the receipt, under the receipt's payload type"
     ),
@@ -136,6 +143,9 @@ class ReceiptOutcome:
     created: bool
     code: str | None = None
     detail: str = ""
+    #: Where the signer refused the document (``receipt_refused_by_signer``): the
+    #: code of the rule it refused it by, core's (``mythos_core.exposure_receipt``).
+    signer_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -286,19 +296,44 @@ def _published_keys(document) -> list[bytes]:
     return keys
 
 
-def keyring_from_published(receipt_keys, *, other_roles):
-    """The ``ReceiptKeyring`` a receipt is checked with, from the engine's
-    published keyrings (its artifact-keyring document form: ``keys`` by key id,
-    each a base64 ``public_key`` and a ``status``): ``receipt_keys`` is the
-    keyring of the ``economics-receipt`` role, and ``other_roles`` maps every other
-    role the engine publishes to its keyring, so a receipt signed by one of them
-    is refused as ``wrong_role``. A revoked key is left out: it verifies nothing.
-    Raises core's ``ReceiptError`` or ``ValueError`` for a keyring it cannot read."""
+#: The role of the engine's own ``keys`` in its published keyring: the key that
+#: signs evidence packs and assurance receipts, never a Financial Exposure Receipt.
+ARTIFACT_ROLE = "artifact"
+
+
+def keyring_from_published(published):
+    """The ``ReceiptKeyring`` a receipt is checked with, from the document the engine
+    publishes at ``GET /api/assurance/keyring`` (athena-engine #88): its ``keys``
+    are the artifact role's, and ``roles`` holds each other signing role's keyring
+    in the same form (``keys`` by key id, each a base64 ``public_key`` and a
+    ``status``) -- ``economics-receipt`` among them. The economics-receipt role's
+    active and retired keys are the receipt keys; the artifact keys and every other
+    role's are filed under their roles, so a receipt one of them signed is refused
+    as ``wrong_role``. A revoked key verifies nothing and is left out. Raises
+    ``ValueError`` (or core's ``ReceiptError``) for a document without the
+    economics-receipt role, or one it cannot read."""
     core, _ = _core()
-    return core.receipt_keyring(
-        _published_keys(receipt_keys),
-        other_roles={role: _published_keys(document) for role, document in other_roles.items()},
-    )
+    if not isinstance(published, dict) or not isinstance(published.get("roles"), dict):
+        raise ValueError("the published keyring has no roles")
+    roles = published["roles"]
+    if core.ECONOMICS_RECEIPT_ROLE not in roles:
+        raise ValueError(f"the published keyring has no {core.ECONOMICS_RECEIPT_ROLE} role")
+    others = {ARTIFACT_ROLE: _published_keys(published)}
+    for role, document in sorted(roles.items()):
+        if role != core.ECONOMICS_RECEIPT_ROLE:
+            others[role] = _published_keys(document)
+    return core.receipt_keyring(_published_keys(roles[core.ECONOMICS_RECEIPT_ROLE]), other_roles=others)
+
+
+def engine_keyring():
+    """:func:`keyring_from_published` over the keyring the engine publishes now
+    (``CyberEngineClient.assurance_keyring``). A keyring fetched from the engine that
+    signs establishes that the engine signed in the receipt role, not more: an
+    auditor verifies against one fetched out of band, as the engine's own caveat
+    says."""
+    from ai_engine.services.cyberengine_client import CyberEngineClient
+
+    return keyring_from_published(CyberEngineClient.from_settings().assurance_keyring())
 
 
 def engine_signer(document: dict) -> dict:
@@ -381,8 +416,16 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
         return ReceiptOutcome(None, False, refused.code, str(refused))
     try:
         envelope = signer(document)
-    except Exception as error:  # noqa: BLE001 - any signer fault (unreachable, no key, refused) is one refusal
-        return ReceiptOutcome(None, False, "signer_unavailable", type(error).__name__)
+    except Exception as error:  # noqa: BLE001 - a signer fault is a returned refusal: which one, below
+        refused = _signer_refusal(error)
+        if refused is not None:
+            # The signer read the document and refused it by core's rule: not that
+            # nothing could sign, and the rule is carried.
+            return ReceiptOutcome(None, False, "receipt_refused_by_signer", f"{refused[0]}: {refused[1]}",
+                                  signer_code=refused[0])
+        status = getattr(error, "status", None)
+        return ReceiptOutcome(None, False, "signer_unavailable",
+                              type(error).__name__ + ("" if status is None else f" (status {status})"))
     problem = envelope_problem(document, envelope)
     if problem is not None:
         return ReceiptOutcome(None, False, "envelope_not_over_receipt", problem)
@@ -417,6 +460,18 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
             return ReceiptOutcome(None, False, "recorded_receipt_unverified", f"{check.code}: {check.reason}")
         return ReceiptOutcome(found, False)
     return ReceiptOutcome(row, True)
+
+
+def _signer_refusal(error) -> tuple[str, str] | None:
+    """Core's code and reason where the signer refused the document itself (the
+    engine client's ``ExposureReceiptRefused``), or None for any other failure."""
+    try:
+        from ai_engine.services.cyberengine_client import ExposureReceiptRefused
+    except ImportError:
+        return None
+    if isinstance(error, ExposureReceiptRefused):
+        return error.code, error.reason
+    return None
 
 
 def _instant(text: str):
@@ -544,6 +599,7 @@ __all__ = [
     "engine_signer",
     "envelope_problem",
     "issue_receipt",
+    "engine_keyring",
     "keyring_from_published",
     "source_snapshots",
     "spine_evidence",

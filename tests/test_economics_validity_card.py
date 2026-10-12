@@ -844,22 +844,82 @@ def test_a_recorded_receipt_that_does_not_verify_is_not_returned_or_overwritten(
     assert FinancialExposureReceipt.objects.get().envelope == envelope
 
 
+def _keyring_document(*entries):
+    """A keyring in the engine's published form (``engine.evidence.keyring``)."""
+    return {"version": 1, "keys": {
+        f"k{i}": {"public_key": base64.b64encode(_raw(key)).decode(), "status": status, "created_at": None,
+                  "retired_at": None, "reason": None}
+        for i, (key, status) in enumerate(entries)}}
+
+
 def test_the_keyring_is_built_from_the_engines_published_keys(deployment, people, keys):
-    """M2: the engine's published artifact-keyring form, one document per role; a
-    revoked key verifies nothing."""
-
-    def published(*entries):
-        return {"version": 1, "keys": {
-            f"k{i}": {"public_key": base64.b64encode(_raw(key)).decode(), "status": status, "created_at": None,
-                      "retired_at": None, "reason": None}
-            for i, (key, status) in enumerate(entries)}}
-
-    result, _, receipt = receipted(deployment, people, keys)
-    ring = receipt_service.keyring_from_published(published((keys["receipt"], "retired")),
-                                                  other_roles={"engine-outcome": published((keys["other"], "active"))})
+    """M2, and athena-engine #88's published keyring: ``keys`` are the artifact
+    role's, ``roles["economics-receipt"]`` the receipt role's. A retired receipt key
+    still verifies; a revoked one verifies nothing; a receipt the artifact key signed
+    is refused as wrong_role; a keyring with no economics-receipt role is no keyring."""
+    result, card, receipt = receipted(deployment, people, keys)
+    published = {**_keyring_document((keys["other"], "active")),
+                 "roles": {"economics-receipt": _keyring_document((keys["receipt"], "retired"))},
+                 "caveat": "a retired key still verifies receipts it signed"}
+    ring = receipt_service.keyring_from_published(published)
+    assert sorted(ring.roles().values()) == ["artifact", "economics-receipt"]
     assert receipt_service.verify_stored_receipt(receipt, ring).verified
-    revoked = receipt_service.keyring_from_published(published((keys["receipt"], "revoked")), other_roles={})
+    revoked = receipt_service.keyring_from_published(
+        {**published, "roles": {"economics-receipt": _keyring_document((keys["receipt"], "revoked"))}})
     assert receipt_service.verify_stored_receipt(receipt, revoked).code == core.UNKNOWN_KEY
+    artifact_signed = core.sign_receipt(receipt.document, keys["other"])
+    assert core.verify_receipt(artifact_signed, ring, card=card.card).verdict == core.WRONG_ROLE
+    with pytest.raises(ValueError):
+        receipt_service.keyring_from_published(_keyring_document((keys["receipt"], "active")))
+
+
+def _http(status, body):
+    import requests
+
+    response = requests.Response()
+    response.status_code = status
+    response._content = json.dumps(body).encode()
+    response.headers["Content-Type"] = "application/json"
+    return response
+
+
+def test_a_document_the_engine_refuses_is_refused_by_the_signer_not_unavailable(deployment, people, keys, monkeypatch):
+    """The #88 reviewer: an engine 400 whose detail is core's code is the signer
+    refusing the DOCUMENT -- `receipt_refused_by_signer`, carrying core's code --
+    never `signer_unavailable`, and nothing is recorded. A 503, a connection failure,
+    and a 400 that names no code stay `signer_unavailable`."""
+    import requests
+
+    from ai_engine.services.cyberengine_client import CyberEngineClient
+    from safety import outbound
+
+    result, _ = carded(deployment, people)
+    answers = []
+
+    def engine(url, **_kwargs):
+        assert url == "https://engine.test/api/economics/exposure-receipt/sign"
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(outbound, "post", engine)
+    monkeypatch.setattr(CyberEngineClient, "from_settings",
+                        classmethod(lambda cls: CyberEngineClient("https://engine.test", "operator-key")))
+    answers.append(_http(400, {"detail": {"code": "amount_precision", "reason": "result.p50.amount has 3 digits"}}))
+    outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
+    assert outcome.receipt is None and outcome.code == "receipt_refused_by_signer"
+    assert outcome.signer_code == "amount_precision" and outcome.detail.startswith("amount_precision: result.p50")
+    for answer in (
+        _http(503, {"detail": {"code": "signer_not_configured", "reason": "set ENGINE_ECONOMICS_RECEIPT_KEY"}}),
+        requests.ConnectionError("the engine is not reachable"),
+        requests.Timeout("the engine did not answer in time"),
+        _http(400, {"detail": "something else"}),
+    ):
+        answers.append(answer)
+        outcome = receipt_service.issue_receipt(result, keyring=keys["ring"])
+        assert outcome.receipt is None and outcome.code == "signer_unavailable" and outcome.signer_code is None, answer
+    assert not FinancialExposureReceipt.objects.exists()
 
 
 def test_tampered_result_inputs_are_refused(deployment, people, keys):
