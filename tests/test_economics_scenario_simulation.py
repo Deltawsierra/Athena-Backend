@@ -774,7 +774,9 @@ def test_an_unrelated_parameter_leaves_every_other_parameters_draws_unchanged():
 
 def test_a_parameter_is_one_value_a_year_unless_named_per_occurrence():
     event, distributions = _gamma_event()
-    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "2", "3", source="INDUSTRY_BENCHMARK")
+    # 2 / 4 / 6, not 1 / 2 / 3: Poisson(4)'s median is 4, above a high of 3, which
+    # the two-sided range test (step 6) refuses.
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "2", "4", "6", source="INDUSTRY_BENCHMARK")
     distributions[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="4")
     shared = ss.run(scenario(event, stated=distributions, frequency=frequency), seed=9, draws=5_000)
     varying = ss.run(scenario(event, stated=distributions, frequency=frequency, per_occurrence={"loss.amount"}),
@@ -846,7 +848,9 @@ def test_two_currencies_in_one_run_are_refused():
 
 def test_a_run_past_the_values_budget_is_refused_before_a_parameter_is_drawn(monkeypatch):
     event, distributions = _uncertain_exposure()
-    frequency = p(ss.FREQUENCY_PARAMETER, "count", "4", "5", "6", source="INDUSTRY_BENCHMARK")
+    # 3 / 5 / 7, not 4 / 5 / 6: Poisson(5) holds only 49.7% of its mass in 4 to 6,
+    # which the two-sided range test (step 6) refuses before the budget is reached.
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "3", "5", "7", source="INDUSTRY_BENCHMARK")
     distributions[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="5")
     sampled = []
     original = d.Gamma._draw

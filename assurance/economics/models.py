@@ -178,6 +178,19 @@ class _AppendOnly(models.Model):
         never an UPDATE, and nothing read."""
         super().save(force_insert=True)
 
+    def _mark_checked(self) -> None:
+        """Record that every check of this new row ran on exactly its present values
+        (:meth:`CustomerParameterSet.check_rows`)."""
+        self._checked_as = _checked_state(self)
+
+    def _insert_as_marked(self) -> None:
+        """An INSERT of a row marked checked (:meth:`_mark_checked`), unchanged since:
+        never an UPDATE, and nothing read or computed. A row not checked, or changed
+        since its check, is refused."""
+        if not self._state.adding or getattr(self, "_checked_as", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A parameter-set version is checked whole, then inserted unchanged.")
+        super().save(force_insert=True)
+
 
 def _signed_in(account) -> governance.Person:
     """The person a row is written by: the account and the account's OWN username,
@@ -784,9 +797,12 @@ def _fits(value: Decimal, digits: int, places: int) -> bool:
 
 def _engine_refusal(build):
     """Build the engine's object for a row, and refuse the row with the engine's
-    code if the engine refuses it."""
+    code if the engine refuses it (a stated distribution's with the probabilistic
+    engine's code and meaning, which travel with the refusal)."""
     try:
         return build()
+    except pset.StatedDistributionRefused as refused:
+        raise EngineRefused(refused.code, refused.meaning, refused.detail) from None
     except money.MoneyRefused as refused:
         raise EconomicsRefused(refused.code, refused.detail) from None
 
@@ -973,7 +989,11 @@ class CustomerParameterSet(_AppendOnly):
     in one transaction by :meth:`record`. ``variable_count`` and ``content_digest``
     are taken from the validated document before any row is written; nothing may
     add a parameter to a recorded version (``parameter_set_sealed``), and
-    :meth:`intact` re-reads the rows and compares their digest.
+    :meth:`intact` re-reads the rows and compares their digest. A row may state the
+    distribution it draws from in a simulation, and the version may hold the
+    scenario's ``frequency`` (spec, section 19.2); each stated distribution is
+    checked against its row's figures by the simulation's own test before anything
+    is written.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -1017,22 +1037,64 @@ class CustomerParameterSet(_AppendOnly):
         """Record the next version of ``deployment``'s set ``set_key`` from
         ``document`` (:func:`~assurance.economics.engine.pset.parse_document`),
         with every parameter it holds, in one transaction. Refused whole, with the
-        engine's code, or written whole."""
+        engine's code, or written whole.
+
+        Every check of the version and of each row -- the ones a save runs, a
+        stated distribution's test against its row's figures included -- runs
+        BEFORE the transaction (:meth:`check_rows`), which then only inserts: on
+        SQLite, a stop's write waits for the inserts alone, never for a check. A
+        version raced to the same number is stopped by the unique constraint
+        (``IntegrityError``), and nothing is written."""
         _engine_refusal(lambda: pset.check_set_key(set_key))
         content = _engine_refusal(lambda: pset.parse_document(document))
-        rows = content.parameters()
-        with transaction.atomic():
-            version = cls.objects.create(
-                deployment=deployment,
-                set_key=set_key,
-                insurance_exclusions=list(content.exclusions),
-                variable_count=len(rows),
-                content_digest=content.digest(),
-                author=author,
+        parameters_ = content.parameters()
+        version = cls(
+            deployment=deployment,
+            set_key=set_key,
+            insurance_exclusions=list(content.exclusions),
+            variable_count=len(parameters_),
+            content_digest=content.digest(),
+            author=author,
+        )
+        rows = [
+            FinancialParameter.from_engine(
+                parameter, parameter_set=version, distribution=content.distributions.get(parameter.name)
             )
-            for parameter in rows:
-                FinancialParameter.from_engine(parameter, parameter_set=version).save()
+            for parameter in parameters_
+        ]
+        cls.check_rows(version, rows)
+        with transaction.atomic():
+            version._insert_as_marked()
+            for row in rows:
+                row._insert_as_marked()
         return version
+
+    @classmethod
+    def check_rows(cls, version: CustomerParameterSet, rows: list[FinancialParameter]) -> None:
+        """Run every check a save of the new ``version`` and of each of its ``rows``
+        runs, against the version itself where a save reads the stored rows, and
+        mark each as checked: :meth:`_AppendOnly._insert_as_marked` then inserts it
+        only as it was checked. Reads only the latest version number recorded."""
+        if not version._state.adding or any(not row._state.adding for row in rows):
+            raise EconomicsRewriteRefused("A parameter-set version writes new rows only.")
+        version.check_new()
+        if len(rows) != version.variable_count:
+            raise EconomicsRefused("parameter_set_sealed", f"{len(rows)} rows for {version.variable_count}")
+        names: set[str] = set()
+        for row in rows:
+            if row.parameter_set is not version or row.scenario_id is not None:
+                raise EconomicsRefused("parent_required")
+            engine = row._check_form()
+            expected = _engine_refusal(lambda row=row: pset.variable_unit(row.name))
+            if engine.unit is not expected:
+                raise EconomicsRefused("unit_mismatch", f"the parameter set's {row.name} is {expected}")
+            if row.name in names:
+                raise EconomicsRefused("duplicate_id", f"parameter {row.name!r} twice in one parent")
+            if row.derived_from:
+                raise EconomicsRefused("parameter_not_found", f"{row.name} is derived from a parameter of another parent")
+            names.add(row.name)
+        for row in (version, *rows):
+            row._mark_checked()
 
     @classmethod
     def current(cls, deployment, set_key: str) -> CustomerParameterSet | None:
@@ -1067,10 +1129,15 @@ class CustomerParameterSet(_AppendOnly):
         return list(FinancialParameter._base_manager.filter(parameter_set_id=self.pk).order_by("name", "id"))
 
     def content(self, rows: list[FinancialParameter] | None = None) -> pset.ParameterSetContent:
-        """The version's content, read back from its rows."""
+        """The version's content, read back from its rows, with the distributions
+        they state as stored."""
         rows = self.parameter_rows() if rows is None else rows
         return _engine_refusal(
-            lambda: pset.content_of([row.as_engine() for row in rows], self.insurance_exclusions)
+            lambda: pset.content_of(
+                [row.as_engine() for row in rows],
+                self.insurance_exclusions,
+                {row.name: row.distribution for row in rows if row.distribution is not None},
+            )
         )
 
     def intact(self, rows: list[FinancialParameter] | None = None) -> bool:
@@ -1087,7 +1154,7 @@ class CustomerParameterSet(_AppendOnly):
         def entry(parameter: parameters.Parameter, schema: dict) -> dict:
             row = parameter.as_dict()
             del row["name"]
-            return {**schema, **row}
+            return {**schema, **row, "distribution": content.distributions.get(parameter.name)}
 
         return {
             "set_key": self.set_key,
@@ -1105,6 +1172,9 @@ class CustomerParameterSet(_AppendOnly):
                 family: entry(p, {"unit": parameters.Unit.MONEY.value}) for family, p in content.sublimits.items()
             },
             "insurance_exclusions": list(content.exclusions),
+            pset.FREQUENCY: None
+            if content.frequency is None
+            else entry(content.frequency, {"unit": parameters.Unit.COUNT.value, "meaning": "events a year"}),
         }
 
     def __str__(self) -> str:
@@ -1179,8 +1249,11 @@ class FinancialParameter(_AppendOnly):
         ]
 
     @classmethod
-    def from_engine(cls, parameter: parameters.Parameter, *, scenario=None, parameter_set=None) -> FinancialParameter:
-        """An unsaved row holding ``parameter``, for ``scenario`` or ``parameter_set``."""
+    def from_engine(
+        cls, parameter: parameters.Parameter, *, scenario=None, parameter_set=None, distribution=None
+    ) -> FinancialParameter:
+        """An unsaved row holding ``parameter``, for ``scenario`` or ``parameter_set``,
+        stating ``distribution`` (a stated distribution's stored form) or none."""
         return cls(
             scenario=scenario,
             parameter_set=parameter_set,
@@ -1194,6 +1267,7 @@ class FinancialParameter(_AppendOnly):
             evidence_ref=parameter.evidence_ref,
             effective_date=parameter.effective_date,
             fresh_until=parameter.fresh_until,
+            distribution=distribution,
         )
 
     @classmethod
@@ -1261,7 +1335,9 @@ class FinancialParameter(_AppendOnly):
             code = "derived_malformed"
             raise EngineRefused(code, scenario_simulation.REFUSALS[code], f"{self.name} states a distribution")
         try:
-            if self.name == scenario_simulation.FREQUENCY_PARAMETER and self.parameter_set_id is None:
+            # A scenario's frequency, or the one a parameter set states for the
+            # scenarios built from it: a count distribution, by the frequency's rule.
+            if self.name == scenario_simulation.FREQUENCY_PARAMETER:
                 scenario_simulation.resolve_frequency(engine, stated)
             else:
                 scenario_simulation.check_stated(stated, engine)

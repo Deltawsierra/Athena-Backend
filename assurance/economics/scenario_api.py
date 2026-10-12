@@ -20,7 +20,10 @@ account; a deployment the caller cannot see, or a scenario of another deployment
 is 404; only an admin or an analyst builds (the roles that author a scenario), and
 the draft names the signed-in account as its author, so the review rule of section
 7 holds for it. The body is strict JSON, at most 64 KiB (413 on the declared length,
-and the parser never reads past the limit).
+and the parser never reads past the limit). An effect's attribute may state the
+distribution it draws from in a simulation, held to the same two-sided test of its
+figures as a parameter set's (spec, section 25.1); a body that states one while the
+probabilistic engine will not import is 503, and nothing is written.
 
 Neither route is a stop, and neither reads or writes anything a stop or the decision
 reads: both are in ``safety.stops.NOT_STOPS``.
@@ -38,9 +41,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import builder
-from .api import MAX_BODY_BYTES, BodyTooLarge, StrictJSONParser, _deployment, _may_write, _table_unavailable
+from .api import (
+    MAX_BODY_BYTES,
+    BodyTooLarge,
+    StrictJSONParser,
+    _deployment,
+    _engine_unavailable,
+    _may_write,
+    _table_unavailable,
+)
 from .engine import currency as _currency
 from .engine.money import MoneyRefused
+from .engine.parameter_set import ProbabilisticEngineUnavailable
 from .models import EconomicsRefused, FinancialScenario
 
 
@@ -81,6 +93,8 @@ class ScenarioBuildView(APIView):
             )
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
+        except ProbabilisticEngineUnavailable:
+            return _engine_unavailable()
         return Response(
             {"deployment": str(deployment.uuid), "created": created, **served},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
