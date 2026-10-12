@@ -1256,6 +1256,18 @@ class World:
                 claim_seen_at=claim.last_seen,
             )
         signals["claims"] = AssuranceClaim.objects.count()
+        # The scenario builder's two routes (#149): a build carrying the tenant's text
+        # that the route refuses (it names no effect), and the events of a scenario the
+        # deployment does not have. Both answers are searched like every other.
+        scenarios = f"/api/assurance/deployments/{self.deployment.uuid}/economics/scenarios/"
+        signals["scenario_build"] = self.call(
+            docs, "api.answers", admin, "post", scenarios + "build/", "deployment-economics-scenario-build",
+            data={"title": f"exposure {CANARY['request.body']}", "effects": []}, format="json",
+        ).status_code
+        signals["scenario_events"] = self.call(
+            docs, "api.answers", admin, "get", scenarios + f"{uuid.uuid4()}/events/",
+            "deployment-economics-scenario-events",
+        ).status_code
 
     def read_everything(self, docs, signals):
         admin = self.client(self.admin)
@@ -1389,6 +1401,10 @@ ROUTES.update(
         "deployment-record-bom-drift": _DOCS + "records the BOM's drift; read as bom-drift",
         "deployment-economics-parameter-set": _READ,
         "deployment-economics-parameter-set-versions": _READ,
+        # The scenario builder's two routes (#149): a build answers the scenario it
+        # built, and the events route reads one scenario's causal loss events.
+        "deployment-economics-scenario-build": _READ,
+        "deployment-economics-scenario-events": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1427,6 +1443,14 @@ def _readable_urls(world):
                 from tests.test_spine_authority_chain import WF
 
                 options = [{**o, "workflow": WF} for o in options]
+            if name == "deployment-economics-scenario-events":
+                from assurance.economics.models import FinancialScenario
+
+                options = [
+                    {**o, "scenario": str(sc.uuid)}
+                    for o in options
+                    for sc in FinancialScenario.objects.filter(deployment__uuid=o["uuid"])[:2]
+                ]
             if name.startswith("deployment-economics-parameter-set"):
                 from assurance.economics.models import CustomerParameterSet
 
@@ -1767,6 +1791,7 @@ def test_every_path_ran(observed):
     assert s["proxy"]["others_through_proxy"] == [], "a call off the engine's lane went through the environment's proxy"
     assert s["route_raises"]["raised"] == 500 and s["route_raises"]["missing"] == 404, s["route_raises"]
     assert s["records"]["claims"] > 0 and s["records"]["provider"] == 201, s["records"]
+    assert (s["records"]["scenario_build"], s["records"]["scenario_events"]) == (400, 404), s["records"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 
 
