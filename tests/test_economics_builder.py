@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import random
 import subprocess
 import sys
 import types
@@ -40,7 +41,8 @@ from rest_framework.test import APIClient
 
 from assurance.economics import builder
 from assurance.economics.engine import templates as tpl
-from assurance.economics.engine.parameters import Parameter
+from assurance.economics.engine.money import Money
+from assurance.economics.engine.parameters import MONEY_UNITS, Parameter, Unit
 from assurance.economics.models import (
     CausalEffect,
     CustomerParameterSet,
@@ -632,6 +634,374 @@ def test_adding_an_effect_never_lowers_the_events_loss(deployment, people):
     assert before != SECTION_30_GROSS and all(a >= b for a, b in zip(before, SECTION_30_GROSS, strict=True))
 
 
+# ================== monotonicity per scenario (grouping v2, section 24.9, decision 12)
+
+
+def _case(success, window):
+    """Section 24.9's cases: a success rate and an exploitable window, every other
+    attribute the same in each (incident and legal response, 1,000 each)."""
+    return {
+        "success_rate": _attr("ratio", success, why="section 24.9"),
+        "exploitable_window_hours": _attr("hours", window, why="section 24.9"),
+        "incident_response_cost": _attr("money", "1000", why="section 24.9"),
+        "legal_response_cost": _attr("money", "1000", why="section 24.9"),
+    }
+
+
+#: One payments event at (0.9, 20 hours), section 24.9's gross before an effect is added.
+ONE_EVENT = [Decimal("16877000"), Decimal("59064500"), Decimal("101252000")]
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_a_hypothetical_effect_no_longer_moves_when_an_effect_is_added(deployment, people):
+    """Section 24.9's first case, which grouping v1 got wrong. O1 observed (0.9, 0.1
+    hours) and H hypothetical (0.1, 20 hours) make one event at (0.9, 20 hours):
+    16,877,000 / 59,064,500 / 101,252,000. Add O2, observed 29 hours BEFORE O1 with
+    another tool (0.1, 0.1 hours): two events. v1 moved H to O2's event, and the base
+    fell to 6,861,812.50. Now H takes part in both and is PRICED in one: O1's, where
+    its window adds the most (58,767,187.50 at base, against 6,529,687.50 in O2's).
+    O1's still reads (0.9, 20 hours); O2's reads its own (0.1, 0.1 hours) and lists H,
+    joined, without reading it. The gross rises, to 16,888,375 / 59,099,312.50 /
+    101,310,250 -- not 65,629,000 at base, which priced H in both (review of #154)."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    # Recorded oldest first, as a workflow's outcomes arrive.
+    o2 = _observed(deployment, minutes=60 + 29 * 60, tool=("tool", "treasury-api"))
+    o1 = _observed(deployment, minutes=60, tool=("tool", "payments-api"))
+    effects = [_effect("o1", asset, origin="observed", observed=o1, attributes=_case("0.9", "0.1")),
+               _effect("h", asset, attributes=_case("0.1", "20"))]
+    client = _client(people["analyst"])
+    before = _build(client, deployment, _body(effects, [_link(finding, "h")]))
+    assert before.status_code == 201, before.content
+    assert _figures(before.json()["totals"]["gross_cash"]) == ONE_EVENT
+    added = _effect("o2", asset, origin="observed", observed=o2, attributes=_case("0.1", "0.1"))
+    after = _build(client, deployment, _body([*effects, added], [_link(finding, "h")]))
+    assert after.status_code == 201, after.content
+    body = after.json()
+    gross = _figures(body["totals"]["gross_cash"])
+    assert gross[1] >= Decimal("59064500")
+    assert all(a >= b for a, b in zip(gross, ONE_EVENT, strict=True)), gross
+    assert gross == [Decimal("16888375"), Decimal("59099312.50"), Decimal("101310250")]
+    events = {event["effects"][0]["key"]: event for event in body["events"]}
+    assert [e["key"] for e in events["o1"]["effects"]] == ["o1", "h"]
+    assert [e["key"] for e in events["o2"]["effects"]] == ["o2", "h"]
+    assert _figures(events["o1"]["gross_cash"]) == ONE_EVENT
+    assert _figures(events["o2"]["gross_cash"]) == [Decimal("11375"), Decimal("34812.50"), Decimal("58250")]
+    # Never an occurrence of its own: ONE row, in the event that prices it (O1's),
+    # listed in O2's as joined, with its finding in both.
+    scenario = FinancialScenario.objects.get(uuid=body["scenario"]["uuid"])
+    (row,) = CausalEffect.objects.filter(scenario=scenario, effect_key="h")
+    assert LossEvent.objects.get(pk=row.loss_event_id).event_key == events["o1"]["event_key"]
+    assert [(e["key"], e["joined"]) for e in events["o1"]["effects"]] == [("o1", False), ("h", False)]
+    assert [(e["key"], e["joined"]) for e in events["o2"]["effects"]] == [("o2", False), ("h", True)]
+    for event in events.values():
+        assert event["findings"] == [str(finding.uuid)]
+    assert EffectFinding.objects.filter(effect=row).count() == 1
+    # O1's event reads H's window (derived from both); O2's reads its own alone.
+    windows = {
+        first: {c["component_id"]: c for c in event["components"]}["direct-loss"]["sources"]["window_hours"]["read"]
+        for first, event in events.items()
+    }
+    assert sorted(d["effect"] for d in windows["o1"]["derived_from"]) == ["h", "o1"]
+    assert windows["o2"] == {"from": "effect_attribute", "name": "exploitable_window_hours", "effect": "o2"}
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_an_added_effect_no_longer_moves_the_window(deployment, people):
+    """Section 24.9's second case. O1 (0.9, 0.1 hours) and O2 (0.1, 20 hours),
+    observed 20 hours apart with different tools, are one event at (0.9, 20 hours).
+    Add U0 (0.1, 0.1 hours, a third tool) 10 hours BEFORE O1: v1 re-anchored the
+    window at U0, split O2 off, and the base fell to 6,861,812.50. Now U0 is within 24
+    hours of O1 and O1 of O2: still one event, at 16,877,000 / 59,064,500 /
+    101,252,000."""
+    asset, _ = _payment_world(deployment, people, 0)
+    u0 = _observed(deployment, minutes=31 * 60, tool=("tool", "ledger-api"))
+    o1 = _observed(deployment, minutes=21 * 60, tool=("tool", "payments-api"))
+    o2 = _observed(deployment, minutes=60, tool=("tool", "treasury-api"))
+    effects = [_effect("o1", asset, origin="observed", observed=o1, attributes=_case("0.9", "0.1")),
+               _effect("o2", asset, origin="observed", observed=o2, attributes=_case("0.1", "20"))]
+    client = _client(people["analyst"])
+    before = _build(client, deployment, _body(effects))
+    assert before.status_code == 201, before.content
+    assert _figures(before.json()["totals"]["gross_cash"]) == ONE_EVENT
+    added = _effect("u0", asset, origin="observed", observed=u0, attributes=_case("0.1", "0.1"))
+    after = _build(client, deployment, _body([added, *effects]))
+    assert after.status_code == 201, after.content
+    body = after.json()
+    gross = _figures(body["totals"]["gross_cash"])
+    assert gross[1] >= Decimal("59064500")
+    assert gross == ONE_EVENT
+    (event,) = body["events"]
+    assert [e["key"] for e in event["effects"]] == ["u0", "o1", "o2"]
+    assert event["effect"] == _spine(deployment, u0)
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_a_build_recorded_under_grouping_v1_reads_as_it_was_built(deployment, people):
+    """``describe`` lists a hypothetical effect in every event of its key only for a
+    build recorded under a grouping after v1: a build labelled
+    ``mythos.economics.grouping/v1`` lists it in its own event alone, as v1 built it,
+    and a later version than v2 lists it in each, as v2 does."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    o2 = _observed(deployment, minutes=60 + 29 * 60, tool=("tool", "treasury-api"))
+    o1 = _observed(deployment, minutes=60, tool=("tool", "payments-api"))
+    effects = [_effect("o1", asset, origin="observed", observed=o1, attributes=_case("0.9", "0.1")),
+               _effect("h", asset, attributes=_case("0.1", "20")),
+               _effect("o2", asset, origin="observed", observed=o2, attributes=_case("0.1", "0.1"))]
+    built = _build(_client(people["analyst"]), deployment, _body(effects, [_link(finding, "h")]))
+    assert built.status_code == 201, built.content
+    scenario = FinancialScenario.objects.get(uuid=built.json()["scenario"]["uuid"])
+
+    def listed():
+        return sorted([e["key"] for e in event["effects"]] for event in builder.describe(scenario)["events"])
+
+    assert listed() == [["o1", "h"], ["o2", "h"]]
+    # Written past the append-only checks, as only a test does, to stand for a row
+    # an earlier grouping recorded.
+    for version, expected in (("mythos.economics.grouping/v1", [["o1", "h"], ["o2"]]),
+                              ("mythos.economics.grouping/v3", [["o1", "h"], ["o2", "h"]])):
+        ScenarioBuild._base_manager.filter(scenario=scenario).update(grouping_version=version)
+        assert listed() == expected, version
+
+
+def _gross(effects) -> tuple[list[Decimal], dict[frozenset, list[Decimal]]]:
+    """The scenario's gross cash loss (low, base, high) and each event's, by the keys
+    of the effects taking part, as the builder computes them -- :func:`builder.group`'s
+    events, each key's hypothetical effects priced in one (:func:`builder.price`),
+    each event over the effects it reads (:func:`builder.gross_cash`) -- without the
+    database."""
+    events = {}
+    for plan in builder.price(builder.group(effects, []), PURE_SET, currency="USD", as_of=AS_OF):
+        loss = builder.gross_cash(plan, plan.read, PURE_SET, currency="USD", as_of=AS_OF)
+        events[frozenset(e.key for e in plan.effects)] = list(loss)
+    total = [sum((loss[i] for loss in events.values()), Decimal(0)) for i in range(3)]
+    return total, events
+
+
+AS_OF = date(2026, 10, 6)
+
+
+def _pure(name, unit, *figures):
+    """A parameter, as an effect or the parameter set states it: one figure, or low,
+    base and high."""
+    low, base, high = (figures * 3)[:3] if len(figures) == 1 else figures
+    unit = Unit(unit)
+    value = (lambda f: Money(Decimal(f), "USD")) if unit in MONEY_UNITS else Decimal
+    return Parameter(name, unit, "EXPERT_ESTIMATE", value(low), value(base), value(high), f"{LABEL}: property test")
+
+
+#: Section 30's customer figures, as the parameter set states them.
+PURE_SET = {
+    "transactions_per_day": _pure("transactions_per_day", "count_per_day", "18000"),
+    "average_transaction_value": _pure("average_transaction_value", "money_per_unit", "25000"),
+    "recovery_rate": _pure("recovery_rate", "ratio", "0.70", "0.825", "0.95"),
+}
+
+#: What a random effect may state of each attribute the payment template reads.
+PURE_FIGURES = {
+    "success_rate": ("ratio", [("0.1",), ("0.35",), ("0.9",), ("0.2", "0.35", "0.6")]),
+    "exploitable_window_hours": ("hours", [("0.1",), ("0.5", "1.25", "2.0"), ("20",), ("4", "8", "30")]),
+    "incident_response_cost": ("money", [("1000",), ("80000", "165000", "250000"), ("0", "500", "900000")]),
+    "legal_response_cost": ("money", [("1000",), ("150000", "825000", "1500000")]),
+}
+PROPERTY_SEED = 20261012
+PROPERTY_CASES = 300
+
+
+def _random_effect(rng, key):
+    """One effect on the one payments key: observed (at a whole hour of a four-day
+    span, with one of four tools, so one SPINE effect is sometimes observed twice,
+    far apart) or hypothetical, stating each attribute or not."""
+    observed = rng.random() < 0.7
+    attributes = {}
+    for name, (unit, choices) in PURE_FIGURES.items():
+        if rng.random() < 0.85:
+            attributes[name] = _pure(f"{key}.{name}", unit, *rng.choice(choices))
+    tool = rng.randrange(4)
+    return builder.EffectInput(
+        key=key,
+        origin=tpl.Origin.OBSERVED if observed else tpl.Origin.HYPOTHETICAL,
+        effect_type=tpl.EffectType.FUNDS_TRANSFER_ALTERED,
+        asset="a" * 8 + "-0000-4000-8000-" + "0" * 12,
+        business_process=tpl.BusinessProcess.PAYMENTS,
+        attributes=attributes,
+        observed_effect=str(uuid.UUID(int=rng.getrandbits(128))) if observed else "",
+        observation=("sha256:" + f"{rng.getrandbits(256):064x}") if observed else "",
+        spine_effect=("sha256:" + f"{tool:x}" * 64) if observed else "",
+        occurred_at=T0 + timedelta(hours=rng.randrange(97)) if observed else None,
+    )
+
+
+def _priced_once(effects, gross):
+    """Check that ``effects`` price their hypothetical effects ONCE: one event reads
+    them and every other joins them, and the scenario's gross is each event's own loss
+    plus, once, what they add where they add the most at base (ties: high, low, the
+    earliest) -- worked out here from single events, apart from :func:`builder.price`."""
+    plans = sorted(builder.group(effects, []), key=lambda p: (p.anchor is None, p.anchor))
+    hypothetical = [e for e in effects if e.occurred_at is None]
+    priced = builder.price(plans, PURE_SET, currency="USD", as_of=AS_OF)
+    if hypothetical:
+        readers = [p for p in priced if not p.joined]
+        assert len(readers) == 1, [p.joined for p in priced]
+        assert all(p.joined == tuple(sorted(e.key for e in hypothetical)) for p in priced if p.joined)
+    observed = [[e for e in p.effects if e.occurred_at is not None] for p in plans]
+    alone = [_gross(own)[0] if own else [Decimal(0)] * 3 for own in observed]
+    expected = [sum((a[i] for a in alone), Decimal(0)) for i in range(3)]
+    if hypothetical:
+        gains = [[j - a for j, a in zip(_gross([*own, *hypothetical])[0], lone, strict=True)]
+                 for own, lone in zip(observed, alone, strict=True)]
+        best = max(range(len(gains)), key=lambda k: (gains[k][1], gains[k][2], gains[k][0], -k))
+        expected = [x + g for x, g in zip(expected, gains[best], strict=True)]
+    assert gross == expected, (gross, expected)
+
+
+def test_adding_an_effect_never_splits_an_event_and_prices_a_hypothetical_once():
+    """Grouping v2's monotonicity, property-style (a fixed seed, 300 cases, no
+    database): for a random set of up to four effects on one key and one more
+    effect added to it,
+
+    - a hypothetical effect is priced ONCE, before and after: one event reads its
+      figures and every other lists it, joined, reading none; the gross is each
+      event's own loss plus, once, what the hypothetical effects add where they add
+      the most at base (the review of #154 found them priced once per event);
+    - no event is split, and no effect moves: every event before is inside one event
+      after;
+    - unless the added effect MERGES events, the scenario's gross never falls at
+      BASE. It can fall at high or low where the added effect moves the pricing to
+      another event, which gains more at base and less there: in these 300 cases,
+      twice at high and never at low (section 24.9). A merge counts the merged events'
+      shared pool once, by design (section 24.7;
+      ``test_merging_two_events_counts_their_shared_pool_once``).
+
+    Under v1 the second failed: section 24.9's two cases are among these."""
+    rng = random.Random(PROPERTY_SEED)
+    merged = unmerged = fell_on_merge = 0
+    fell = [0, 0, 0]
+    for case in range(PROPERTY_CASES):
+        effects = [_random_effect(rng, f"e{n}") for n in range(rng.randint(0, 4))]
+        added = _random_effect(rng, "added")
+        gross_before, before = _gross(effects)
+        gross_after, after = _gross([*effects, added])
+        _priced_once(effects, gross_before)
+        _priced_once([*effects, added], gross_after)
+        held = {}
+        for keys in before:
+            homes = [later for later in after if keys <= later]
+            assert homes, (case, "split", sorted(keys), [sorted(k) for k in after])
+            held.setdefault(homes[0], []).append(keys)
+        if any(len(absorbed) > 1 for absorbed in held.values()):
+            merged += 1
+            fell_on_merge += any(a < b for a, b in zip(gross_after, gross_before, strict=True))
+            continue
+        unmerged += 1
+        assert gross_after[1] >= gross_before[1], (case, added, gross_before, gross_after)
+        for point in range(3):
+            fell[point] += gross_after[point] < gross_before[point]
+    # The seed is fixed, so the cases are too: section 24.9 cites these counts. Base
+    # never falls outside a merge; high fell twice, low never.
+    assert fell == [0, 0, 2]
+    assert (unmerged, merged, fell_on_merge) == (289, 11, 8)
+
+
+def _payment(key, success, window, hours=None):
+    """A payments effect stating section 24.9's figures, observed ``hours`` after T0
+    (each its own SPINE effect), or hypothetical."""
+    attributes = {
+        "success_rate": _pure(f"{key}.success_rate", "ratio", success),
+        "exploitable_window_hours": _pure(f"{key}.exploitable_window_hours", "hours", window),
+        "incident_response_cost": _pure(f"{key}.incident_response_cost", "money", "1000"),
+        "legal_response_cost": _pure(f"{key}.legal_response_cost", "money", "1000"),
+    }
+    at = None if hours is None else T0 + timedelta(hours=hours)
+    return builder.EffectInput(**{**_input(key, at=at).__dict__, "attributes": attributes})
+
+
+#: One (0.1, 0.1 hour) payments event alone, low / base / high.
+SMALL_EVENT = [Decimal("11375"), Decimal("34812.50"), Decimal("58250")]
+
+
+def test_a_hypothetical_effect_is_priced_once_however_many_events_its_key_has():
+    """The review of #154 (HIGH): v2 as first built read a hypothetical effect's
+    figures in every event of its key, so H (0.9, 20 hours; 59,064,500 at base alone)
+    with two (0.1, 0.1 hour) events 48 hours apart stated 118,129,000 -- H twice --
+    and with five, H five times. H is now PRICED in one event, where it adds the most
+    at base (here they tie, so the earliest), and every other lists it, joined, and
+    reads none of its figures: H once, plus each other event's own loss."""
+    h = _payment("h", "0.9", "20")
+    assert _gross([h])[0] == ONE_EVENT
+    for n in (2, 5):
+        observed = [_payment(f"o{k}", "0.1", "0.1", hours=48 * k) for k in range(n)]
+        gross, events = _gross([*observed, h])
+        assert gross == [x + (n - 1) * y for x, y in zip(ONE_EVENT, SMALL_EVENT, strict=True)], (n, gross)
+        assert sorted(events.values()) == sorted([ONE_EVENT] + [SMALL_EVENT] * (n - 1))
+        priced = builder.price(builder.group([*observed, h], []), PURE_SET, currency="USD", as_of=AS_OF)
+        (reader,) = [p for p in priced if not p.joined]
+        assert reader.anchor == T0 and all(p.joined == ("h",) for p in priced if p is not reader)
+        assert all("h" in {e.key for e in p.effects} for p in priced)
+    assert gross[1] == Decimal("59203750")
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_the_route_prices_a_hypothetical_effect_once(deployment, people):
+    """The review's repro through the build route: H (0.9, 20 hours) with two (0.1,
+    0.1 hour) observed effects 48 hours apart is 59,099,312.50 at base -- H once, in
+    the earliest event (a tie), plus the other's own 34,812.50 -- not 118,129,000."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    o2 = _observed(deployment, minutes=60 + 48 * 60, tool=("tool", "treasury-api"))
+    o1 = _observed(deployment, minutes=60, tool=("tool", "payments-api"))
+    effects = [_effect("o1", asset, origin="observed", observed=o1, attributes=_case("0.1", "0.1")),
+               _effect("o2", asset, origin="observed", observed=o2, attributes=_case("0.1", "0.1")),
+               _effect("h", asset, attributes=_case("0.9", "20"))]
+    built = _build(_client(people["analyst"]), deployment, _body(effects, [_link(finding, "h")]))
+    assert built.status_code == 201, built.content
+    body = built.json()
+    assert _figures(body["totals"]["gross_cash"]) == [
+        x + y for x, y in zip(ONE_EVENT, SMALL_EVENT, strict=True)
+    ] == [Decimal("16888375"), Decimal("59099312.50"), Decimal("101310250")]
+    events = {event["effects"][0]["key"]: event for event in body["events"]}
+    assert _figures(events["o2"]["gross_cash"]) == ONE_EVENT and _figures(events["o1"]["gross_cash"]) == SMALL_EVENT
+    assert [(e["key"], e["joined"]) for e in events["o2"]["effects"]] == [("o2", False), ("h", False)]
+    assert [(e["key"], e["joined"]) for e in events["o1"]["effects"]] == [("o1", False), ("h", True)]
+    scenario = FinancialScenario.objects.get(uuid=body["scenario"]["uuid"])
+    (row,) = CausalEffect.objects.filter(scenario=scenario, effect_key="h")
+    assert LossEvent.objects.get(pk=row.loss_event_id).event_key == events["o2"]["event_key"]
+
+
+def test_the_window_is_24_hours_inclusive_to_the_microsecond():
+    """Within 24 hours means at most 24 hours: two effects exactly 24 hours apart,
+    with nothing between them, are one event, and a chain of them is one; 24 hours
+    and one microsecond apart are two."""
+    for gap, count in ((timedelta(hours=24), 1), (timedelta(hours=24, microseconds=1), 2)):
+        plans = builder.group([_input("a", at=T0), _input("b", at=T0 + gap)], [])
+        assert len(plans) == count, gap
+    chain = [_input("a", at=T0), _input("b", at=T0 + timedelta(hours=24)), _input("c", at=T0 + timedelta(hours=48)),
+             _input("d", at=T0 + timedelta(hours=72, microseconds=1))]
+    plans = builder.group(list(reversed(chain)), [])
+    assert sorted(sorted(e.key for e in p.effects) for p in plans) == [["a", "b", "c"], ["d"]]
+
+
+def test_merging_two_events_counts_their_shared_pool_once():
+    """Grouping v2 can merge events and never splits one; a merge still prices the
+    customer's transaction pool ONCE (section 24.7). Two (0.9, 20 hour) effects 30
+    hours apart are two events of 59,064,500 at base each; a third effect 15 hours
+    after the first is within 24 hours of both, and the three are one event at the
+    larger loss, 59,064,500 -- never below either event it merged, and not their sum."""
+    def effect(key, hours, success, window):
+        attributes = {
+            "success_rate": _pure(f"{key}.success_rate", "ratio", success),
+            "exploitable_window_hours": _pure(f"{key}.exploitable_window_hours", "hours", window),
+            "incident_response_cost": _pure(f"{key}.incident_response_cost", "money", "1000"),
+            "legal_response_cost": _pure(f"{key}.legal_response_cost", "money", "1000"),
+        }
+        return builder.EffectInput(**{**_input(key, at=T0 + timedelta(hours=hours)).__dict__, "attributes": attributes})
+
+    apart = [effect("first", 0, "0.9", "20"), effect("second", 30, "0.9", "20")]
+    gross, events = _gross(apart)
+    assert list(events.values()) == [ONE_EVENT, ONE_EVENT] and gross == [2 * x for x in ONE_EVENT]
+    gross, events = _gross([*apart, effect("bridge", 15, "0.1", "0.1")])
+    assert list(events) == [frozenset({"first", "bridge", "second"})]
+    assert gross == ONE_EVENT
+
+
 # ================================ MYTHOS_OBSERVED provenance (review round 1)
 
 
@@ -773,32 +1143,46 @@ def test_findings_never_make_events_of_their_own():
         assert len(plan.links) == n and [e.key for e in plan.effects] == ["redirect"]
 
 
-def test_the_window_joins_observed_effects_and_a_hypothetical_joins_the_first():
+def test_the_window_joins_any_member_within_24_hours_and_a_hypothetical_joins_every_event():
+    """Grouping v2 (section 24.5; the owner's decision of 12 Oct 2026, options (a) and
+    (b) of section 24.9). An observed effect within 24 hours of ANY member of an event
+    joins it: ``chained``, 47 hours after the first but 23 after ``at-the-edge``, joins
+    (v1 measured from the first observation and opened another). One more than 24
+    hours from every member opens another. The hypothetical effect takes part in
+    EVERY event of its key, with its findings: :func:`builder.group` records it in
+    the first and joins it to the rest, until :func:`builder.price` records it where
+    it adds the most."""
     effects = [
         _input("first", at=T0),
         _input("an-hour-later", at=T0 + timedelta(hours=1)),
         _input("at-the-edge", at=T0 + timedelta(hours=24)),
-        _input("next-day", at=T0 + timedelta(hours=25)),
+        _input("chained", at=T0 + timedelta(hours=47)),
+        _input("apart", at=T0 + timedelta(hours=72)),
         _input("hypothetical"),
         _input("other-asset", at=T0, asset="b" * 8 + "-0000-4000-8000-" + "0" * 12),
         _input("other-type", at=T0, effect_type=tpl.EffectType.APPROVAL_BYPASSED),
     ]
-    plans = builder.group(effects, [])
+    plans = builder.group(effects, _links("hypothetical", 2))
     events = {frozenset(e.key for e in plan.effects) for plan in plans}
     # Another effect type the same template takes, on the same asset and process, is
     # the same loss: the effect type is not in the key (the template encodes it).
     assert events == {
-        frozenset({"first", "other-type", "an-hour-later", "at-the-edge", "hypothetical"}),
-        frozenset({"next-day"}),
+        frozenset({"first", "other-type", "an-hour-later", "at-the-edge", "chained", "hypothetical"}),
+        frozenset({"apart", "hypothetical"}),
         frozenset({"other-asset"}),
     }
+    mine = {plan.anchor: plan for plan in plans if plan.grouping_key[2] == effects[0].asset}
+    first, later = mine[T0], mine[T0 + timedelta(hours=72)]
     # An event's effects are ordered by when they occurred, the hypothetical last.
-    joined = next(plan for plan in plans if len(plan.effects) == 5)
-    assert [e.key for e in joined.effects][2:] == ["an-hour-later", "at-the-edge", "hypothetical"]
-    assert joined.anchor == T0 and joined.trigger == "approval_bypassed+funds_transfer_altered"
-    # Hypothetical effects alone, one bucket: one event.
+    assert [e.key for e in first.effects][2:] == ["an-hour-later", "at-the-edge", "chained", "hypothetical"]
+    assert first.trigger == "approval_bypassed+funds_transfer_altered"
+    assert [e.key for e in later.effects] == ["apart", "hypothetical"] and later.trigger == "funds_transfer_altered"
+    # Recorded once, in the key's first event; joined, with its findings, to the other.
+    assert first.joined == () and later.joined == ("hypothetical",)
+    assert [link.effect for link in first.links] == [link.effect for link in later.links] == ["hypothetical"] * 2
+    # Hypothetical effects alone, one bucket: one event, recorded there.
     (alone,) = builder.group([_input("x"), _input("y")], _links("x", 1) + _links("y", 1))
-    assert [e.key for e in alone.effects] == ["x", "y"] and alone.anchor is None
+    assert [e.key for e in alone.effects] == ["x", "y"] and alone.anchor is None and alone.joined == ()
 
 
 def test_grouping_is_deterministic_and_order_free():
@@ -835,17 +1219,20 @@ def test_the_grouping_key_names_no_finding():
 
 
 def test_every_observation_of_one_spine_effect_is_one_plan():
-    """One SPINE effect observed twice, 48 hours apart, is ONE unit and one event;
-    a distinct effect 25 hours after the first opens another, as before."""
+    """One SPINE effect observed twice, 48 hours apart, is ONE unit and one event. A
+    distinct effect 25 hours after its first observation is 23 hours before its
+    second, so under grouping v2 (within 24 hours of ANY member) it joins that event
+    too; one more than 24 hours from every observation opens another."""
     spine = "sha256:" + "5" * 64
     effects = [
         _input("first", at=T0, spine=spine),
         _input("two-days-later", at=T0 + timedelta(hours=48), spine=spine),
         _input("distinct", at=T0 + timedelta(hours=25)),
+        _input("far", at=T0 + timedelta(hours=73)),
     ]
     plans = builder.group(effects, [])
     assert {frozenset(e.key for e in plan.effects) for plan in plans} == {
-        frozenset({"first", "two-days-later"}), frozenset({"distinct"})
+        frozenset({"first", "two-days-later", "distinct"}), frozenset({"far"})
     }
     for moved in ({"asset": "b" * 8 + "-0000-4000-8000-" + "0" * 12},
                   {"business_process": tpl.BusinessProcess.LENDING},
@@ -1332,6 +1719,12 @@ SPEC_PHRASES = (
     "every observation of one SPINE effect joins ONE event",
     "the value that gives the LARGER loss",
     "the atomic block only inserts",
+    # Grouping v2, the owner's decision of 12 Oct 2026.
+    "a key's events are the connected components of \"within 24 hours\"",
+    "it takes part in EVERY event of its key",
+    "RESOLVED in grouping v2 by the owner's decision of 12 Oct 2026",
+    "lowers the scenario's gross at base only by merging events",
+    "a key's hypothetical effects are PRICED in the one event where they add the most gross cash loss at BASE",
 )
 
 

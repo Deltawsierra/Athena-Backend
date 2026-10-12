@@ -603,6 +603,22 @@ def test_an_unreviewed_source_is_never_used_by_a_production_run():
     assert governance.production_use_refusal("unreviewed", synthetic=True) == "synthetic_source"
 
 
+def test_a_production_run_never_relies_on_an_unverified_source():
+    """The owner's decision of 12 Oct 2026, before the first customer run: a source
+    whose trust tier is still ``unverified`` (the default) is refused with a code of
+    its own; every tier above it is not, and a tier this platform does not know
+    establishes nothing either. Which runs are production runs is the model's to say
+    (tests/test_economics_records.py)."""
+    assert governance.production_trust_refusal("unverified") == "source_unverified"
+    for tier in ("authoritative", "customer", "licensed_vendor", "benchmark"):
+        assert governance.production_trust_refusal(tier) is None
+    for unknown in ("UNVERIFIED", "trusted", "", None):
+        assert governance.production_trust_refusal(unknown) == "source_unverified"
+    assert set(provenance.TrustTier) - {provenance.TrustTier.UNVERIFIED} == {
+        t for t in provenance.TrustTier if governance.production_trust_refusal(t) is None
+    }
+
+
 def test_snapshot_hashes_spine_references_and_inventory_entries():
     good = "sha256:" + "ab" * 32
     assert governance.snapshot_hash_refusal(good) is None
@@ -882,6 +898,7 @@ SPEC_PHRASES = (
     "this repository does not use hypothesis",
     "Deterministic ranges, not distributions",
     "Decisions this version takes, which the owner may change",
+    "A production run never relies on a source still trusted as `unverified`",
 )
 
 

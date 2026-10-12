@@ -9,6 +9,10 @@ discipline of the specification (section 26) adds the inventory's:
 - a source whose license nobody has reviewed is never used by a production run;
 - a model inventory entry names its owner, its intended use and its limitations.
 
+The owner added one on 12 Oct 2026, before the first customer run: a production
+run never relies on a source whose trust tier is still ``unverified`` (the
+default) -- :func:`production_trust_refusal`.
+
 Each function returns ``None`` when the rule holds and a code from
 :data:`REFUSALS` when it does not, so the Django half
 (:mod:`assurance.economics.models`) refuses a write with the same code a test, a
@@ -23,7 +27,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from .provenance import LicenseClass
+from .provenance import LicenseClass, TrustTier
 
 #: How many different people approve a sensitive override before it is in force.
 REQUIRED_OVERRIDE_APPROVERS = 2
@@ -61,6 +65,10 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         ),
         "license_class_unrecognised": "the source's license class is not one this platform knows, so no production "
         "run may use it",
+        "source_unverified": (
+            "the source's trust tier is still unverified (the default): nothing yet establishes how reliable it is, "
+            "so no production run relies on it until a person records a version of it at a tier above unverified"
+        ),
         "snapshot_hash_malformed": "a snapshot hash is 'sha256:' followed by 64 lowercase hexadecimal digits",
         "inventory_entry_incomplete": (
             "a model inventory entry names its model, version, owner, intended use and limitations"
@@ -200,6 +208,25 @@ def production_use_refusal(license_class: str, *, synthetic: bool = False) -> st
         return "license_class_unrecognised"
     if recognised is LicenseClass.UNREVIEWED:
         return "unreviewed_license"
+    return None
+
+
+def production_trust_refusal(trust_tier: str) -> str | None:
+    """Whether a production run may rely on a source trusted as ``trust_tier`` (the
+    owner's decision of 12 Oct 2026). ``unverified`` -- the default: nothing yet
+    establishes how reliable the source is -- is refused (``source_unverified``), and
+    so is a tier this platform does not know, which establishes nothing either. Every
+    tier above it may: a person has said why the source is trusted that far.
+
+    Which runs are production runs is the caller's to say
+    (:meth:`assurance.economics.models.FinancialSource.production_use_refusal`); a
+    test, a fixture or a non-production deployment's run keeps the gate without it."""
+    try:
+        recognised = TrustTier(trust_tier)
+    except ValueError:
+        return "source_unverified"
+    if recognised is TrustTier.UNVERIFIED:
+        return "source_unverified"
     return None
 
 
