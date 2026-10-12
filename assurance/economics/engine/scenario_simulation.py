@@ -336,11 +336,18 @@ def check_fits_range(distribution: dist.Distribution, parameter: Parameter) -> N
     (``distribution_contradicts_range``): its base must lie between the
     distribution's :data:`RANGE_FIT_PERCENTILES` and its low and high inside the
     closure of its support, each compared as the binary64 the run would draw. A
-    conflict between the two is surfaced, never resolved by silently taking one."""
+    count's percentiles are whole numbers and its base a rate, so for a count the
+    base may lie anywhere below the count after its P95: a Poisson rarer than once
+    in twenty years has a P95 of 0 and holds a base of its own rate. A conflict
+    between the two is surfaced, never resolved by silently taking one."""
     low, base, high = (_amount(parameter.at(point)) for point in POINTS)
     lower, upper = support(distribution)
     p_low, p_high = (distribution.ppf(float(q / 100)) for q in RANGE_FIT_PERCENTILES)
-    if lower <= float(low) and float(high) <= upper and p_low <= float(base) <= p_high:
+    if type(distribution).KIND == dist.FREQUENCY:
+        holds_base = p_low <= float(base) < p_high + 1.0
+    else:
+        holds_base = p_low <= float(base) <= p_high
+    if lower <= float(low) and float(high) <= upper and holds_base:
         return
     raise ScenarioSimulationRefused(
         "distribution_contradicts_range",
@@ -628,6 +635,14 @@ def limits() -> dict:
         "splice_min_body_share": dist.float_text(dist.SPLICE_MIN_BODY_SHARE),
         "largest_exponential": dist.float_text(dist.LARGEST_EXPONENTIAL),
         "range_fit_percentiles": [decimal_text(q) for q in RANGE_FIT_PERCENTILES],
+        # The values budget counts these with MAX_VALUES (``values_over_budget``),
+        # and a splice's rounds decide its ``out_of_range``.
+        "run_vectors": sim.RUN_VECTORS,
+        "year_vectors": sim.YEAR_VECTORS,
+        "insurance_temporaries": INSURANCE_TEMPORARIES,
+        "summary_temporaries": SUMMARY_TEMPORARIES,
+        "annual_lines": ANNUAL_LINES,
+        "splice_max_rounds": dist.SPLICE_MAX_ROUNDS,
     }
 
 
@@ -1245,7 +1260,10 @@ def _block(
     )
     block = sim.summary_block(summary, currency)
     if exact is not None and not annual:
-        if not (vector == float(exact)).all() or summary.standard_error not in (None, 0.0):
+        # Every draw is the value: that is the invariant. 7a's mean of the vector
+        # (fsum / n) may round one ulp off it, and its standard error then is not
+        # zero; neither is a draw of another value, and the line reports the value.
+        if not (vector == float(exact)).all():
             raise sim.InvariantBroken(f"an exact line {exact} drew another value")
         text = decimal_text(exact)
         block.update({key: text for key in ("p10", "p50", "p90", "severe_plausible")})

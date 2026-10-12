@@ -1146,3 +1146,55 @@ def test_the_spec_states_the_wiring():
     section = text.split("### 23.11", 1)[1].split("### 23.12", 1)[0]
     assert "No formula is evaluated" not in section
     assert "Nothing is stored" not in section
+
+
+# ======================================================================
+# Review round 2
+# ======================================================================
+
+
+def test_an_exact_line_completes_whatever_the_draws_or_the_seed():
+    """N1. An exact line was refused as ``invariant_broken`` when 7a's mean of a
+    constant vector (fsum / n) came out one ulp off and its standard error not zero:
+    100.05 at 1,312 draws, 0.1 likewise. The line is exact when every draw is the
+    value; a binary64 mean that rounds is not a draw of another value."""
+    for amount in ("100.05", "0.1", "1234.56"):
+        event = LossEvent("ev", "USD", (_lump("a", p("a.amt", "money", amount)),))
+        for draws in (1_000, 1_312, 5_861):
+            record = ss.run(ss.ScenarioInput("s", "USD", (event,)), seed=1, draws=draws).record
+            _exact(record["events"][0]["gross_cash"], Decimal(amount))
+    # A fixed severity with an uncertain frequency: n is each year's count, so the
+    # seed decides it. Seeds 3, 8, 19 and 20 were refused.
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "3", "5", source="INDUSTRY_BENCHMARK")
+    event = LossEvent("ev", "USD", (_lump("a", p("a.amt", "money", "1234.56")),))
+    for seed in (3, 8, 19, 20):
+        ss.run(ss.ScenarioInput("s", "USD", (event,), stated={ss.FREQUENCY_PARAMETER: stated("poisson", rate="3")},
+                                frequency=frequency), seed=seed, draws=10_000)
+
+
+def test_a_rare_count_holds_its_own_rate():
+    """Low 2. A Poisson rarer than once in twenty years has a P95 of 0, so a base of
+    its own rate fell outside P5 to P95 and the frequency was refused. A count's
+    upper bound is P95 + 1, exclusive: the base may lie anywhere below the next count."""
+    rare = p(ss.FREQUENCY_PARAMETER, "count", "0", "0.05", "0.2", source="INDUSTRY_BENCHMARK")
+    assert ss.resolve_frequency(rare, stated("poisson", rate="0.05")) is not None
+    assert ss.resolve_frequency(
+        p(ss.FREQUENCY_PARAMETER, "count", "0", "0.02", "0.1", source="INDUSTRY_BENCHMARK"),
+        stated("poisson", rate="0.02"),
+    ) is not None
+    # Still refused: a base at or past the count after P95.
+    with pytest.raises(ss.ScenarioSimulationRefused) as refused:
+        ss.resolve_frequency(p(ss.FREQUENCY_PARAMETER, "count", "0", "1", "2", source="INDUSTRY_BENCHMARK"),
+                             stated("poisson", rate="0.02"))
+    assert refused.value.code == "distribution_contradicts_range"
+
+
+def test_every_constant_the_values_budget_counts_is_in_the_digest():
+    """Low 3. MAX_VALUES was in the versions, but the counts the budget adds to it
+    were not: raising one refused, under the same input digest, a run that had run."""
+    held = ss.limits()
+    assert held["run_vectors"] == sim.RUN_VECTORS and held["year_vectors"] == sim.YEAR_VECTORS
+    assert held["insurance_temporaries"] == ss.INSURANCE_TEMPORARIES
+    assert held["summary_temporaries"] == ss.SUMMARY_TEMPORARIES
+    assert held["annual_lines"] == ss.ANNUAL_LINES
+    assert held["splice_max_rounds"] == d.SPLICE_MAX_ROUNDS

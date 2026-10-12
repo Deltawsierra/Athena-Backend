@@ -2314,7 +2314,10 @@ distribution, decided by this rule and recorded with the run (`parameters.<name>
    a mean of 1.63: it is refused, naming the parameter, its figures and the
    distribution's support and P5 to P95, so the conflict is surfaced, never resolved by
    silently taking one (owner's specification, section 27). The frequency's stated
-   distribution is held to the same test. The row is checked when it is written, with
+   distribution is held to the same test, with one difference: a count's percentiles
+   are whole numbers and its base a rate, so the base may lie anywhere below the count
+   after its P95 (a Poisson rarer than once in twenty years has a P95 of 0 and holds a
+   base of its own rate; `test_a_rare_count_holds_its_own_rate`). The row is checked when it is written, with
    the engine's code (`EngineRefused`), and stored in the one spelling; it is checked
    again when it is run.
 2. **A point mass** where it states none and its low, base and high are one figure.
@@ -2425,7 +2428,10 @@ scenario whose every event is so has their Decimal sums. Each such value, as the
 binary64, is the same in every draw, and its summary (P10, P50, P90, mean,
 severe-but-plausible and every band) is the Decimal value itself, written in full, with
 a standard error of zero; the record says `evaluated_by: decimal_constant` for the
-event and the scenario. So a run whose parameters are all point masses reproduces step
+event and the scenario. The invariant checked is that every draw is that value: 7a's
+mean of a constant vector (`fsum / n`) can round one ulp off it, which is neither a
+draw of another value nor a reason to refuse the run
+(`test_an_exact_line_completes_whatever_the_draws_or_the_seed`). So a run whose parameters are all point masses reproduces step
 4 to the last digit: 100.10 + 200.20 is 300.30 (binary64 sums it to
 300.29999999999995), and `repeat_in_window` at 100 a day is step 4's 60-digit Decimal,
 which binary64 cannot hold
@@ -2634,7 +2640,12 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
    between its P5 and P95 and the low and the high inside the closure of its support,
    refused otherwise (`distribution_contradicts_range`), at write and at run time. The
    thresholds are the owner's: P5 and P95, and the closed support (so a low of 0 fits a
-   lognormal or a gamma). Alternatives: a narrower test (the base between P10 and P90,
+   lognormal or a gamma); a count's base may lie below the count after its P95 (review
+   round 2). Still open, to close before any writer states a distribution: the test is
+   one-sided, holding the low and the high only to the support, so a gamma whose median
+   lies far below the row's low still fits; a two-sided test (low <= P50 <= high and a
+   floor on P(low <= X <= high)) and refusing a stated distribution on a fixed row are
+   the proposed fix. Alternatives: a narrower test (the base between P10 and P90,
    or each of low, base and high near its own percentile), a wider one (the base
    anywhere in the support), or a warning recorded with the run instead of a refusal.
 10. **A derived parameter draws from its contributors** (review round 1): each by its
