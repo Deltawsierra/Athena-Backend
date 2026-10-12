@@ -1,3 +1,5 @@
+import contextlib
+import functools
 import re
 import time
 from urllib.parse import quote
@@ -7,6 +9,8 @@ from django.conf import settings as django_settings
 from django.conf import settings
 from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.exceptions import ProxyError as _ProxyConnectError
+
+from safety import outbound
 
 
 # (connect, read). Overridable so a long scan can be given more room without
@@ -34,6 +38,31 @@ SCAN_INLINE_WAIT_SECONDS = 20.0
 # it answers with its own error page, which can be large -- and an exception
 # message becomes a log line, a traceback, and an API error field.
 MAX_BODY_EXCERPT = 500
+
+
+@contextlib.contextmanager
+def _saying_none_of(logins):
+    """An EngineError raised inside says none of ``logins`` -- the login a target the
+    call carries was given (``outbound.logins_in``) -- nor does any exception it was
+    raised from: an engine's refusal may quote the request back, target and all,
+    and its text becomes a scan's error, its answer and its report. Only the
+    exception's text changes; it is the same exception, raised the same way."""
+    try:
+        yield
+    except EngineError as exc:
+        if logins:
+            outbound.quiet(exc, logins, urls=False)
+        raise
+
+
+def _saying_no_login_of_its_target(method):
+    """``method`` -- ``self``, then the target URL it sends -- whose EngineError says none
+    of the login that target carries (:func:`_saying_none_of`)."""
+    @functools.wraps(method)
+    def call(self, target, *args, **kwargs):
+        with _saying_none_of(outbound.logins_in(target)):
+            return method(self, target, *args, **kwargs)
+    return call
 
 
 def _excerpt(text: str) -> str:
@@ -408,17 +437,22 @@ class CyberEngineClient:
     def _send_get(self, path: str) -> requests.Response:
         """The engine's answer to a GET, whatever its status; raises only when there was none."""
         try:
-            return requests.get(
-                f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT
+            # The engine's lane (safety.outbound): a redirect followed only while it
+            # stays on the engine's host, the environment's proxy and nothing else
+            # from the environment (no .netrc), and no credential quoted if it fails.
+            return outbound.get(
+                f"{self.base_url}{path}", headers=self.headers, timeout=ENGINE_TIMEOUT, engine=True
             )
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
 
-    def _send_post(self, path: str, payload: dict, headers: dict | None = None) -> requests.Response:
+    def _send_post(self, path: str, payload: dict, headers: dict | None = None, *,
+                   logins=()) -> requests.Response:
         """The engine's answer to a POST, whatever its status; raises only when there was
-        none. ``headers`` are sent beside the client's own."""
+        none. ``headers`` are sent beside the client's own; ``logins`` (a target's, which
+        the payload carries) are quoted by no error."""
         try:
-            return requests.post(
+            return outbound.post(
                 f"{self.base_url}{path}",
                 json=payload,
                 headers={**self.headers, **headers} if headers else self.headers,
@@ -426,6 +460,8 @@ class CyberEngineClient:
                 # commented as preventing worker starvation, which is what it
                 # caused: one hung engine call pinned a worker for 17 minutes.
                 timeout=ENGINE_TIMEOUT,
+                engine=True,
+                also_withhold=logins,
             )
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
@@ -444,11 +480,12 @@ class CyberEngineClient:
             raise self._refused(resp)
         return self._read_json(resp, path, max_body=max_body)
 
-    def _post(self, path: str, payload: dict) -> dict:
-        resp = self._send_post(path, payload)
-        if not (200 <= resp.status_code < 300):
-            raise self._refused(resp)
-        return self._read_json(resp, path)
+    def _post(self, path: str, payload: dict, *, logins=()) -> dict:
+        with _saying_none_of(logins):
+            resp = self._send_post(path, payload, logins=logins)
+            if not (200 <= resp.status_code < 300):
+                raise self._refused(resp)
+            return self._read_json(resp, path)
 
     @staticmethod
     def _status_answer(resp: requests.Response) -> dict | None:
@@ -568,6 +605,7 @@ class CyberEngineClient:
         """
         return self._get("/api/assurance/keyring")
 
+    @_saying_no_login_of_its_target
     def run_scan(self, target: str, engagement_ref: str | None = None, *,
                  idempotency_key: str | None = None, resend: bool = False,
                  on_run=None) -> dict:
@@ -628,6 +666,9 @@ class CyberEngineClient:
         ``on_run(run_id)`` is called as soon as the engine names a run that may still
         be going, before it is collected, so the caller can keep the id where a Stop
         finds it.
+
+        No error this raises says the login ``target`` carries
+        (``_saying_no_login_of_its_target``).
         """
         payload = {"target": target, "wait_seconds": SCAN_INLINE_WAIT_SECONDS}
         if engagement_ref:
@@ -637,6 +678,7 @@ class CyberEngineClient:
             resp = self._send_post(
                 "/api/scan", payload,
                 headers={IDEMPOTENCY_HEADER: idempotency_key} if idempotency_key else None,
+                logins=outbound.logins_in(target),
             )
         except EngineError as exc:
             cause = exc.__cause__
@@ -656,6 +698,15 @@ class CyberEngineClient:
         held = self._key_held(resp)
         if held is not None:
             raise LaunchOutcomeUnknown(held, status=resp.status_code)
+        if 300 <= resp.status_code < 400:
+            # A redirect that stays on the engine's host was followed (safety.outbound);
+            # this one was not -- another host, a downgrade, a POST turned into a GET,
+            # one hop too many -- and whatever answered may have passed the launch on.
+            raise LaunchOutcomeUnknown(
+                f"The launch was answered {resp.status_code}, a redirect, which is not "
+                f"followed: it may have reached the engine, which may have started a run.",
+                status=resp.status_code,
+            )
         if resp.status_code >= 500 and _header_run_id(resp) is None and not self._engine_wrote(resp):
             raise LaunchOutcomeUnknown(
                 f"The launch was answered {resp.status_code} with nothing the engine wrote: it "
@@ -945,7 +996,8 @@ class CyberEngineClient:
             "max_turns": 8
           }
         """
-        return self._post("/api/llm-scan", payload)
+        base_url = payload.get("base_url") if isinstance(payload, dict) else None
+        return self._post("/api/llm-scan", payload, logins=outbound.logins_in(base_url))
 
     def classify_cve(self, text: str) -> dict:
         return self._post("/api/classify-cve", {"text": text})
@@ -965,11 +1017,12 @@ class CyberEngineClient:
         }
 
         try:
-            resp = requests.post(
+            resp = outbound.post(
                 f"{self.base_url}/api/defend-log/file",
                 headers={"X-API-Key": self.headers["X-API-Key"]},
                 files=files,
                 timeout=30,
+                engine=True,
             )
         except requests.RequestException as e:
             raise EngineError(f"Engine unreachable: {e}", kind=ENGINE_UNREACHABLE) from e
@@ -1058,7 +1111,7 @@ class CyberEngineClient:
         payload = {"name": name, "url": url}
         if tenant_id:
             payload["tenant_id"] = tenant_id
-        return self._post("/api/attestation/check", payload)
+        return self._post("/api/attestation/check", payload, logins=outbound.logins_in(url))
 
     def retest_finding(self, twin_id: int, engagement_ref: str,
                        scope: list | None = None, tenant_id: str | None = None) -> dict:
@@ -1117,7 +1170,7 @@ class CyberEngineClient:
                            ("tenant_id", tenant_id), ("only_run", only_run)):
             if value:
                 payload[key] = value
-        return self._post("/api/evidence/pack", payload)
+        return self._post("/api/evidence/pack", payload, logins=outbound.logins_in(target))
 
 
 # --------------------------------------------------

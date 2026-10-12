@@ -56,6 +56,7 @@ from rest_framework.test import APIClient
 from ai_engine.services import preflight
 from ai_engine.services.cyberengine_client import CyberEngineClient, EngineError
 from assurance import dispatch
+from safety import outbound
 from assurance.claims import derive_claims
 from assurance.connectors import RequestsTransport
 from assurance.evidence_audit import EvidenceRefused, invalidate_claim_evidence, record_claim_evidence
@@ -319,9 +320,9 @@ MATRIX = {
 #: Every effect call site the code holds, as :func:`effect_sites` names it, and the
 #: boundary it belongs to.
 SITES = {
-    "ai_engine/services/cyberengine_client.py::CyberEngineClient._send_post::requests.post": "engine-transport",
-    "ai_engine/services/cyberengine_client.py::CyberEngineClient.defend_log_file::requests.post": "engine-transport",
-    "assurance/connectors/base.py::RequestsTransport.post::requests.post": "engine-transport",
+    "ai_engine/services/cyberengine_client.py::CyberEngineClient._send_post::outbound.post": "engine-transport",
+    "ai_engine/services/cyberengine_client.py::CyberEngineClient.defend_log_file::outbound.post": "engine-transport",
+    "assurance/connectors/base.py::RequestsTransport.post::outbound.post": "engine-transport",
     "assurance/closure_forward.py::_send::transport.post": "closure-evidence-forward",
     "assurance/closure_forward.py::queue::ClosureEvidenceForward.objects.create": "closure-evidence-forward",
     "ai_engine/services/preflight.py::_attest_routes::attestation_check": "engine-governance",
@@ -341,7 +342,7 @@ SITES = {
     "assurance/dispatch.py::run_blocking_decision_dispatch::DecisionDispatchDue.objects.get_or_create": "decision-dispatch-owed",
     "assurance/invalidation.py::_open_requirement::RetestRequirement.objects.create": "retest-requirement",
     "assurance/views.py::DeploymentViewSet.connector_push::push_finding": "connector-push-manual",
-    "audit/middleware.py::DefenderMiddleware._call_engine::requests.post": "defender-gateway",
+    "audit/middleware.py::DefenderMiddleware._call_engine::outbound.post": "defender-gateway",
     "detection/views.py::CVEClassifyAPIView.post::classify_cve": "engine-analysis",
     "detection/views.py::DefenderFileScanAPIView.post::defend_log_text": "engine-analysis",
     "detection/views.py::DefenderTextScanAPIView.post::defend_log_text": "engine-analysis",
@@ -366,7 +367,8 @@ SITES = {
 
 _NOT_FIRST_PARTY = frozenset({"tests", "node_modules", "site-packages", "__pycache__", "migrations"})
 _CLIENT = "ai_engine/services/cyberengine_client.py"
-#: ``requests`` and ``httpx`` calls that write.
+#: ``requests``, ``httpx`` and ``safety.outbound`` (this service's own sends through
+#: ``requests``) calls that write.
 _WRITE_VERBS = frozenset({"post", "put", "patch", "delete", "request"})
 #: What sends e-mail, and what opens a connection some other way.
 _MAIL = frozenset({"EmailMessage", "EmailMultiAlternatives", "send_mail", "send_mass_mail", "mail_admins", "mail_managers"})
@@ -406,7 +408,7 @@ def _engine_writes(client_tree) -> set[str]:
         for node in ast.walk(method):
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and (
                 (node.value.id == "self" and node.attr in {"_post", "_send_post"})
-                or (node.value.id == "requests" and node.attr == "post")
+                or (node.value.id in {"requests", "outbound"} and node.attr == "post")
             ):
                 found.add(method.name)
     return found
@@ -429,7 +431,7 @@ class _Sites(ast.NodeVisitor):
 
     def visit_Attribute(self, node):
         # A reference, called or not: `within_deadline(requests.post, ...)` sends too.
-        if isinstance(node.value, ast.Name) and node.value.id in {"requests", "httpx"} and node.attr in _WRITE_VERBS:
+        if isinstance(node.value, ast.Name) and node.value.id in {"requests", "httpx", "outbound"} and node.attr in _WRITE_VERBS:
             self._site(f"{node.value.id}.{node.attr}")
         self.generic_visit(node)
 
@@ -620,6 +622,9 @@ def engine(monkeypatch):
     fake = FakeEngine(django_settings.CYBERENGINE_URL)
     monkeypatch.setattr(requests, "post", fake.post)
     monkeypatch.setattr(requests, "get", fake.get)
+    # This service's own sends go through safety.outbound, not requests.post.
+    monkeypatch.setattr(outbound, "post", fake.post)
+    monkeypatch.setattr(outbound, "get", fake.get)
     return fake
 
 

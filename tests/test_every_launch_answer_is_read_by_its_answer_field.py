@@ -142,8 +142,8 @@ def engine(monkeypatch):
 
     def install(exchanges):
         replay = Replay(exchanges)
-        monkeypatch.setattr(cec.requests, "post", replay.post)
-        monkeypatch.setattr(cec.requests, "get", replay.get)
+        monkeypatch.setattr(cec.outbound, "post", replay.post)
+        monkeypatch.setattr(cec.outbound, "get", replay.get)
         return replay
     return install
 
@@ -457,7 +457,7 @@ def test_a_500_naming_a_run_that_cannot_be_collected_is_still_running_with_its_i
         replay.sent.append(("GET", url[len(BASE):], None))
         raise requests.ConnectionError("connection refused")
 
-    monkeypatch.setattr(cec.requests, "get", unreachable)
+    monkeypatch.setattr(cec.outbound, "get", unreachable)
 
     with pytest.raises(ScanStillRunning) as raised:
         client().run_scan(TARGET, engagement_ref=ENGAGEMENT)

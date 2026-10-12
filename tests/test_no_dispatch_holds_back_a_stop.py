@@ -2526,11 +2526,10 @@ def test_absent_is_trusted_only_once_the_attempt_is_older_than_the_claim():
 
 
 def test_the_look_has_a_total_deadline_too(monkeypatch):
-    import requests
-
     from assurance.connectors.base import DeadlineExceeded, RequestsTransport
+    from safety import outbound
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: time.sleep(3))
+    monkeypatch.setattr(outbound, "get", lambda *a, **k: time.sleep(3))
     began = time.monotonic()
     with pytest.raises(DeadlineExceeded):
         RequestsTransport(deadline=0.2).get("https://jira.example/x", headers={}, params={})
@@ -3486,8 +3485,20 @@ def test_what_is_still_queued_is_written_when_the_process_exits(monkeypatch, cap
     """No pump (it could not start): the exit writes the queue itself, bounded."""
     from assurance import oplog
 
+    # Drain first, against the real queue and condition a pump an earlier test left
+    # running still waits on: a pump mid-write then finishes before this test swaps the
+    # queue out from under it, rather than waking on these records and writing one out
+    # of order.
+    oplog.drain()
     monkeypatch.setattr(oplog, "start_pump", lambda: False)
     monkeypatch.setattr(oplog, "_PUMP", [])
+    # A pump an earlier test started is still alive, waiting on the module's queue
+    # and condition. Hiding it from ``_PUMP`` alone left it able to wake on these
+    # records and write one while the exit wrote the others, out of order. A queue
+    # and a condition of this test's own are ones no such pump waits on.
+    monkeypatch.setattr(oplog, "_BUF", type(oplog._BUF)())
+    monkeypatch.setattr(oplog, "_COND", threading.Condition(threading.Lock()))
+    monkeypatch.setattr(oplog, "_BUSY", [False])
     with caplog.at_level(logging.WARNING):
         for n in range(3):
             oplog.log_later(logging.WARNING, "left at exit %d", n)
