@@ -1356,6 +1356,85 @@ def test_a_build_raced_by_the_same_build_is_409_and_writes_nothing(deployment, p
     assert _build(client, deployment, body).status_code == 200
 
 
+# ================================================ the system fingerprint
+
+
+def _system_fingerprint(deployment) -> str:
+    from assurance.fingerprint import compute_system_fingerprint
+
+    return compute_system_fingerprint(Deployment.objects.get(pk=deployment.pk))
+
+
+def test_a_build_records_the_deployments_system_fingerprint(deployment, people):
+    """The follow-up to #153 (spec, sections 24.6 and 26.3): the version records the
+    deployment's SPINE system fingerprint as it is when it is built, and both routes
+    show it. It is not in the build's digest: a rebuild of the same inputs after the
+    deployment changed returns the version with the fingerprint it recorded, and
+    writes nothing."""
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    at_build = _system_fingerprint(deployment)
+    body = _body([_effect("redirect", asset)], [_link(finding, "redirect")])
+    first = _build(_client(people["analyst"]), deployment, body)
+    assert first.status_code == 201, first.content
+    scenario = first.json()["scenario"]
+    assert scenario["system_fingerprint"] == at_build and scenario["system_fingerprint_unavailable"] is None
+    stored = FinancialScenario.objects.get(uuid=scenario["uuid"])
+    assert (stored.system_fingerprint, stored.system_fingerprint_unavailable) == (at_build, "")
+    _asset(deployment, "wire-api", kind="tool")
+    assert _system_fingerprint(deployment) != at_build
+    before = _counts()
+    again = _build(_client(people["analyst"]), deployment, body)
+    assert again.status_code == 200 and again.json()["scenario"]["uuid"] == scenario["uuid"]
+    assert again.json()["scenario"]["system_fingerprint"] == at_build
+    assert _counts() == before
+    events = _client(people["viewer"]).get(_url(deployment, scenario["uuid"]))
+    assert events.status_code == 200 and events.json()["scenario"]["system_fingerprint"] == at_build
+
+
+def _raises(_deployment):
+    raise RuntimeError("the asset graph could not be read")
+
+
+def _raises_at_length(_deployment):
+    raise RuntimeError("x" * 2000)
+
+
+@pytest.mark.parametrize("computed, reason", [
+    (_raises, "RuntimeError: the asset graph could not be read"),
+    (lambda _deployment: "not-a-fingerprint", "not a SPINE system fingerprint (64 lowercase hex): 'not-a-fingerprint'"),
+    (lambda _deployment: "AB" * 32, f"not a SPINE system fingerprint (64 lowercase hex): '{'AB' * 32}'"),
+    (lambda _deployment: None, "not a SPINE system fingerprint (64 lowercase hex): None"),
+    (_raises_at_length, "RuntimeError: " + "x" * (500 - 14 - 3) + "..."),
+], ids=["raises", "malformed", "uppercase", "none", "a long reason"])
+def test_a_fingerprint_that_cannot_be_had_is_recorded_as_none_with_the_reason(deployment, people, monkeypatch,
+                                                                              computed, reason):
+    """One that cannot be computed, or is not in SPINE's form (64 lowercase hex), is
+    recorded as none, with the reason (at most 500 characters): never one made up,
+    and the build stands."""
+    import assurance.fingerprint as fingerprint
+
+    asset, (finding,) = _payment_world(deployment, people, 1)
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", computed)
+    response = _build(_client(people["analyst"]), deployment, _body([_effect("redirect", asset)],
+                                                                     [_link(finding, "redirect")]))
+    assert response.status_code == 201, response.content
+    scenario = response.json()["scenario"]
+    assert scenario["system_fingerprint"] is None and scenario["system_fingerprint_unavailable"] == reason
+    stored = FinancialScenario.objects.get(uuid=scenario["uuid"])
+    assert (stored.system_fingerprint, stored.system_fingerprint_unavailable) == ("", reason)
+    assert _figures(response.json()["totals"]["gross_cash"]) == SECTION_30_GROSS
+    assert len(reason) <= builder.FINGERPRINT_REASON_MAX == 500
+
+
+def test_a_version_records_its_fingerprint_or_why_it_has_none_never_both(deployment, people):
+    both = FinancialScenario(deployment=deployment, title="both", author=people["analyst"],
+                             system_fingerprint="ab" * 32, system_fingerprint_unavailable="RuntimeError: x")
+    with pytest.raises(EconomicsRefused) as refused:
+        both.save()
+    assert refused.value.code == "field_malformed" and "never both" in str(refused.value)
+    assert not FinancialScenario.objects.exists()
+
+
 # ================================================= unknown, and its source
 
 
@@ -1725,6 +1804,9 @@ SPEC_PHRASES = (
     "RESOLVED in grouping v2 by the owner's decision of 12 Oct 2026",
     "lowers the scenario's gross at base only by merging events",
     "a key's hypothetical effects are PRICED in the one event where they add the most gross cash loss at BASE",
+    # Step 8's follow-up: the version records the fingerprint it was built in.
+    "the version records the deployment's SPINE system fingerprint as it is when it is built",
+    "The fingerprint is NOT in the digest",
 )
 
 

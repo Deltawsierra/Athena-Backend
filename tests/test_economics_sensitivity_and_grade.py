@@ -15,13 +15,20 @@
   base share split among its own inputs (a product's factors equally, a recovery
   through its complement), a frequency one half -- for the gross cash and, under a
   policy, the retained cash; the headline grade is the lower of the two lines'; a
-  frequency whose base is zero has no level; the reviewer's cases (a)-(e).
+  frequency whose base is zero has no level; the reviewer's cases (a)-(e);
+- additive terms inside one formula (the follow-up to #153): a component whose
+  formula is a sum is split by its terms' bases first, then each term among its
+  factors; every formula of the catalogue declares its terms, proven against the
+  formula; every formula of one term gives the level #153 gave, byte for byte.
 """
 
 from __future__ import annotations
 
+import random
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,7 +36,7 @@ from assurance.economics.engine import grade as g
 from assurance.economics.engine import scenario_simulation as ss
 from assurance.economics.engine import sensitivity as sens
 from assurance.economics.engine.confidence import ConfidenceGrade
-from assurance.economics.engine.formulas import evaluate
+from assurance.economics.engine.formulas import CATALOGUE, MARKET_VALUE, Direction, Formula, evaluate
 from assurance.economics.engine.loss import InsurancePolicy, LossEvent
 from assurance.economics.engine.money import Money
 from assurance.economics.engine.parameters import MONEY_UNITS, Parameter, Unit
@@ -811,3 +818,216 @@ def test_a_derived_value_is_weighed_by_the_contributor_that_supplies_its_base():
     result = g.grade(refusal=None, unknown_cash_components=[], weighted=list(weighted.values()))
     assert result.shares["expert"] == "0.5" and result.shares["calculated"] == "0"
     assert result.expert == ("ev:amt",) and result.derived == ("ev:amt",)
+
+
+# ======================================================================
+# Additive terms inside one formula (the follow-up to #153)
+# ======================================================================
+
+#: The catalogue's sums: every other formula is one term.
+SUMS = {"fixed_plus_hours", "per_affected_plus_fixed"}
+
+
+def _factor(spec, value) -> Fraction:
+    """An input's factor in its term: its value, a recovery rate's complement."""
+    amount = Fraction(value.amount if isinstance(value, Money) else value)
+    return 1 - amount if spec.direction is Direction.DECREASES and spec.unit is Unit.RATIO else amount
+
+
+def _random_value(rng, spec):
+    if spec.unit is Unit.RATIO:
+        return Decimal(rng.randint(1, 999)) / 1000
+    figure = Decimal(rng.randint(1, 10**8)) / 100
+    return Money(figure, "USD") if spec.unit in MONEY_UNITS else figure
+
+
+def _zero(spec):
+    """The value that makes an input's factor zero: a recovery of all, else nothing."""
+    if spec.direction is Direction.DECREASES and spec.unit is Unit.RATIO:
+        return Decimal(1)
+    return Money(Decimal(0), "USD") if spec.unit in MONEY_UNITS else Decimal(0)
+
+
+@pytest.mark.parametrize("key", sorted(CATALOGUE), ids=lambda key: f"{key[0]}_v{key[1]}")
+def test_every_formula_declares_its_additive_terms_and_they_are_its_own(key):
+    """Every formula of the catalogue, checked: its terms name its own inputs, each
+    once in a term and every input in some term. A SUM is exactly the sum of its
+    declared terms' products (a recovery through 1 - rate) at random points, and
+    zeroing one factor removes exactly its term; a formula of ONE term is not a sum:
+    zeroing any one of its factors zeroes the whole. The sums are the two the
+    follow-up names, and only they."""
+    formula = CATALOGUE[key]
+    names = [spec.name for spec in formula.inputs]
+    assert formula.terms and all(formula.terms), key
+    for term in formula.terms:
+        assert len(set(term)) == len(term) and set(term) <= set(names), (key, term)
+    assert {name for term in formula.terms for name in term} == set(names), key
+    assert (len(formula.terms) > 1) == (formula.formula_id in SUMS), key
+    rng = random.Random(f"terms:{key}")
+    for _ in range(25):
+        values = {spec.name: _random_value(rng, spec) for spec in formula.inputs}
+        whole = Fraction(formula.calculate(values).amount)
+        assert whole > 0, key
+        products = []
+        for term in formula.terms:
+            product = Fraction(1)
+            for name in term:
+                product *= _factor(formula.input(name), values[name])
+            products.append(product)
+        if len(formula.terms) > 1:
+            assert whole == sum(products), (key, values)
+        for spec in formula.inputs:
+            zeroed = Fraction(formula.calculate({**values, spec.name: _zero(spec)}).amount)
+            others = [t for term, t in zip(formula.terms, products, strict=True) if spec.name not in term]
+            kept = sum(others, Fraction(0))
+            assert zeroed == kept, (key, spec.name)
+
+
+def _fixed_plus_hours(fixed, rate, hours, *, fixed_source="EXPERT_ESTIMATE", key="response"):
+    return evaluate(key, "incident_response", "fixed_plus_hours", 1, {
+        "fixed_cost": p("e.fixed_cost", "money", fixed, source=fixed_source),
+        "hourly_rate": p("c.hourly_rate", "money_per_hour", rate),
+        "hours": p("c.hours", "hours", hours)}, as_of=AS_OF)
+
+
+def _per_affected_plus_fixed(affected, unit_cost, fixed, *, fixed_source="EXPERT_ESTIMATE", key="notify"):
+    return evaluate(key, "notification", "per_affected_plus_fixed", 1, {
+        "affected": p("c.affected", "count", affected), "unit_cost": p("c.unit_cost", "money_per_unit", unit_cost),
+        "fixed_cost": p("e.fixed_cost", "money", fixed, source=fixed_source)}, as_of=AS_OF)
+
+
+@pytest.mark.parametrize("component", [
+    _fixed_plus_hours("50000", "250", "200"),
+    _per_affected_plus_fixed("10000", "5", "50000"),
+], ids=["fixed_plus_hours", "per_affected_plus_fixed"])
+def test_a_fixed_amount_equal_to_the_product_beside_it_carries_half_the_component(component):
+    """F = P: the fixed amount is its base over the component's, exactly one half (by
+    elasticity across the whole sum it read F / (F + 2P), one third), and the product's
+    half is shared by its two factors, a quarter each. The piece lists its terms."""
+    record = sens.level_shares(ss.plan(ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (component,)),))))
+    level = level_of({"level": record})
+    assert Decimal(level["e.fixed_cost"]["share"]) == Decimal("0.5")
+    others = [name for name in level if name != "e.fixed_cost"]
+    assert len(others) == 2 and all(Decimal(level[name]["share"]) == Decimal("0.25") for name in others), level
+    (piece,) = record[ss.GROSS_CASH]["pieces"]
+    assert [(t["base"], t["weight"]) for t in piece["terms"]] == [("50000", "0.5"), ("50000", "0.5")]
+    assert {tuple(t["inputs"]) for t in piece["terms"]} == set(component.formula.terms)
+    inputs = {row["input"]: row for row in piece["inputs"]}
+    assert Decimal(inputs["fixed_cost"]["weight"]) == Decimal("0.5")
+
+
+@pytest.mark.parametrize("component", [
+    _fixed_plus_hours("75000", "250", "100"),
+    _per_affected_plus_fixed("1000", "25", "75000"),
+], ids=["fixed_plus_hours", "per_affected_plus_fixed"])
+def test_an_expert_fixed_amount_of_three_quarters_of_its_component_can_no_longer_grade_a(component):
+    """An expert's fixed amount F of 75,000, three quarters of a component of 100,000
+    whose product (the customer's) is 25,000, beside a customer lump of 1,150,000: the
+    component is 0.08 of the level and F carries exactly 0.75 of it, 0.06. That is past
+    A's assumption share (0.05) and material: B, less one step for the expert figure,
+    C. Split by elasticity across the whole sum F read 75 / (75 + 50) of it, 0.048,
+    under both bounds: A."""
+    lump_ = lump("c", p("c.lump", "money", "1150000"), "legal")
+    grade_, record = _grade_of(ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (component, lump_)),)))
+    assert share_of(record, "e.fixed_cost") == Decimal("0.06")
+    assert grade_.grade is not ConfidenceGrade.A and grade_.grade is ConfidenceGrade.C, grade_.reason
+    assert grade_.expert == ("e.fixed_cost",), grade_.reason
+
+
+def test_an_input_that_is_a_factor_of_two_terms_adds_both_parts():
+    """No formula of the catalogue reads one input in two terms; the rule is the
+    general one all the same: a + a x b at a = 2, b = 3 is 2 + 6, so a carries 2/8 of
+    the component for its own term and half of 6/8 for the other, 5/8; b the other 3/8."""
+    two_inputs = tuple(CATALOGUE[("fixed_plus_hours", 1)].inputs[:2])
+    formula = Formula("probe", 1, "a + a x b", frozenset({"legal"}), two_inputs, lambda v: v["fixed_cost"],
+                      (("fixed_cost",), ("fixed_cost", "hourly_rate")))
+    bases = {"pa": Money(Decimal(2), "USD"), "pb": Decimal(3)}
+    plan = SimpleNamespace(resolved={name: SimpleNamespace(parameter=SimpleNamespace(base=base))
+                                     for name, base in bases.items()})
+    component = SimpleNamespace(component=SimpleNamespace(formula=formula),
+                                reads={"fixed_cost": "pa", "hourly_rate": "pb"})
+    parts, terms = sens._by_terms(plan, component, {"fixed_cost": False, "hourly_rate": False})
+    assert parts == {"fixed_cost": Fraction(5, 8), "hourly_rate": Fraction(3, 8)}
+    assert [(t["inputs"], t["base"], t["weight"]) for t in terms] == [
+        (["fixed_cost"], "2", "0.25"), (["fixed_cost", "hourly_rate"], "6", "0.75")]
+
+
+def _one_term_case(formula_id, family, inputs) -> ss.ScenarioInput:
+    figures = {name: p(f"x.{name}", unit, *values, source=source) for name, (unit, values, source) in inputs.items()}
+    component = evaluate("component", family, formula_id, 1, figures, as_of=AS_OF)
+    beside = lump("beside", p("c.beside", "money", "100000"), "recovery")
+    policy = InsurancePolicy(p("ins.deductible", "money", "10000"), p("ins.limit", "money", "50000"))
+    return ss.ScenarioInput("s", "USD", (LossEvent("ev", "USD", (component, beside)),), policy=policy,
+                            stated={ss.FREQUENCY_PARAMETER: stated("poisson", rate="2")},
+                            frequency=p(ss.FREQUENCY_PARAMETER, "count", "1", "2", "4"))
+
+
+E, C = "EXPERT_ESTIMATE", "CUSTOMER_PROVIDED"
+#: Every cash formula of ONE term, each beside a customer lump, under a frequency and
+#: a policy whose limit the gross passes (so both lines read the component's split),
+#: and the SHA-256 of its level record (both lines) as #153's head (b89624f) made it.
+ONE_TERM_LEVELS = {
+    "repeat_loss": (("repeat_loss", "direct_financial", {
+        "repeat_count": ("count", ("5", "10", "20"), E), "loss_per_event": ("money_per_unit", ("12000",), C),
+        "recovery_rate": ("ratio", ("0.825",), C)}),
+        "sha256:d1454293d087e9919c04669a2133228a9bf42e62f8cea83075d7505fdf280887"),
+    "repeat_in_window": (("repeat_in_window", "direct_financial", {
+        "transactions_per_day": ("count_per_day", ("18000",), C), "window_hours": ("hours", ("0.5", "1.25", "2"), E),
+        "success_rate": ("ratio", ("0.35",), E), "value_per_transaction": ("money_per_unit", ("25000",), C),
+        "recovery_rate": ("ratio", ("0.825",), C)}),
+        "sha256:71afd0d59fdde7e943e645c99963ac42034995865346fc73fcdadd405031b674"),
+    "interruption": (("interruption", "business_interruption", {
+        "interruption_hours": ("hours", ("4", "10", "24"), E), "value_per_hour": ("money_per_hour", ("5000",), C)}),
+        "sha256:6311908401316a1aba44536d3baa2689061474b7abd57d945a22491dd121083a"),
+    "per_affected": (("per_affected", "customer_restitution", {
+        "affected": ("count", ("20000", "50000", "120000"), E), "amount_per_affected": ("money_per_unit", ("2",), C)}),
+        "sha256:4b0d79149016445b99310dfe047c0aedc918bff4898e0b71008cad620e0de7f1"),
+    "support_contacts": (("support_contacts", "notification", {
+        "affected": ("count", ("10000",), C), "contact_rate": ("ratio", ("0.5",), C),
+        "handling_hours": ("hours", ("0.5", "1", "2"), E), "loaded_rate": ("money_per_hour", ("200",), C)}),
+        "sha256:7def8f5cd5f81a7965a538250f5e6e7c796f4e8fbcffbf56afd18d4d22d89961"),
+    "capped_credit:binds": (("capped_credit", "contractual", {
+        "credit_per_hour": ("money_per_hour", ("1000",), C), "breach_hours": ("hours", ("24", "48", "96"), E),
+        "contract_cap": ("money", ("30000",), C)}),
+        "sha256:f891f4158a2c2bec2bb9606aac6dd8910e79021741acc34cb33d60eeb6fe094f"),
+    "capped_credit:does_not_bind": (("capped_credit", "contractual", {
+        "credit_per_hour": ("money_per_hour", ("1000",), C), "breach_hours": ("hours", ("24", "48", "96"), E),
+        "contract_cap": ("money", ("100000",), C)}),
+        "sha256:2df5fc308fb2ecf590146d8f8c1d56d0881f2e063425b1d6c915b8a3d08f6aa8"),
+    "capped_credit:at_the_kink": (("capped_credit", "contractual", {
+        "credit_per_hour": ("money_per_hour", ("1000",), C), "breach_hours": ("hours", ("24", "48", "96"), E),
+        "contract_cap": ("money", ("48000",), C)}),
+        "sha256:63c446127499e9484c651917cc54da40c83ae85b3fbe1253a357aac1acc6c76c"),
+    "replacement_share": (("replacement_share", "data_and_ip", {
+        "replacement_cost": ("money", ("2000000",), C), "share_compromised": ("ratio", ("0.05", "0.15", "0.3"), E)}),
+        "sha256:414b3fe8a938703da28d1113c9faae37c9f83a2f85e76eafcb0e62af1dbfd816"),
+    "churned_margin": (("churned_margin", "customer_loss", {
+        "customers": ("count", ("100000",), C), "churn_rate": ("ratio", ("0.02",), C),
+        "margin_per_customer_per_year": ("money_per_unit", ("300",), C),
+        "recovery_years": ("years", ("1", "2", "3"), E)}),
+        "sha256:4eeeecedb645df3941493d75a74d9443db8807e9408df6c589b1b48dcc294e9f"),
+    "premium_increase": (("premium_increase", "insurance", {
+        "premium_increase_per_year": ("money_per_year", ("20000", "50000", "80000"), E),
+        "years": ("years", ("3",), C)}),
+        "sha256:541d90864581238615dcfe6f691530ccfd0b9651c05fbb854962c01b3734e4ff"),
+    "lump_sum": (("lump_sum", "legal", {"amount": ("money", ("100000", "250000", "600000"), E)}),
+        "sha256:a584670005b034ee7d80258f11c5b24e557117a2fa5106bc5d1c3111935b803a"),
+}
+
+
+def test_every_cash_formula_of_one_term_has_its_level_pinned():
+    covered = {spec[0] for spec, _ in ONE_TERM_LEVELS.values()}
+    assert covered == {f.formula_id for f in CATALOGUE.values() if len(f.terms) == 1 and MARKET_VALUE not in f.families}
+
+
+@pytest.mark.parametrize("case", sorted(ONE_TERM_LEVELS))
+def test_every_formula_of_one_term_gives_the_level_153_gave_byte_for_byte(case):
+    """Every cash formula of ONE term (a product, a cap, a lump sum) is split as at
+    #153's head: its level record, both lines, every piece, input and share, is the one
+    b89624f made, byte for byte (its digest). Only a formula that is a sum moved. Every
+    such formula of the catalogue is here (the test above)."""
+    spec, digest = ONE_TERM_LEVELS[case]
+    level = sens.level_shares(ss.plan(_one_term_case(*spec)))
+    assert level[ss.GROSS_CASH]["defined"] and level[ss.RETAINED_CASH]["defined"], case
+    assert all("terms" not in piece for line in level.values() for piece in line["pieces"]), case
+    assert sens.digest_of(level) == digest, case

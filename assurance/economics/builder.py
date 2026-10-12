@@ -30,7 +30,11 @@ version, :func:`build`:
    scenario's parameters, each event's larger-loss values, the loss events, the
    effects and the findings they rest on, and each event's components through
    #146's models, CHECKS every row before its transaction, then writes them in one
-   that only inserts (:func:`assurance.economics.models.check_build_rows`).
+   that only inserts (:func:`assurance.economics.models.check_build_rows`). The
+   version records the deployment's SPINE system fingerprint as it is when it is
+   built (:func:`current_system_fingerprint`), read before the transaction; one
+   that cannot be computed is recorded as none, with the reason, and never fails
+   the build.
 
 IDEMPOTENT. A build's identity is the content digest of everything it is built from
 (:func:`build_document`, :func:`build_digest`): the builder, grouping and pack
@@ -38,7 +42,9 @@ versions, the deployment, the parameter-set version and its digest, the currency
 the as-of date, every effect as resolved and every finding link. Building the same
 inputs again returns the scenario already built, and never a second one; two builds
 of the same inputs racing are refused by the database (the digest is unique per
-deployment), and the later writes nothing.
+deployment), and the later writes nothing. The system fingerprint is not in the
+digest: it is the state the version was built in, observed, not something it is
+built from, so a rebuild returns the version with the fingerprint it recorded.
 
 Not on any stop path: only :mod:`assurance.economics.scenario_api` imports this
 module, and :mod:`assurance.urls` imports that GUARDED (spec, section 2).
@@ -61,7 +67,7 @@ from assurance import composition, consequential, observed_effects, observed_out
 from assurance.authority_chain_records import effect_digest
 from assurance.models import Asset, Finding, WorkflowChainOutcome
 
-from .engine import formulas
+from .engine import formulas, governance
 from .engine import loss as engine_loss
 from .engine import money
 from .engine import parameter_set as pset
@@ -102,6 +108,8 @@ GROUPING_WINDOW = timedelta(hours=24)
 #: them too; these keep a build's writes small.
 MAX_EFFECTS = 50
 MAX_LINKS = 500
+#: The longest reason recorded for a system fingerprint that could not be had.
+FINGERPRINT_REASON_MAX = 500
 
 _REQUEST_REQUIRED = frozenset({"title", "parameter_set", "currency", "as_of", "effects"})
 _REQUEST_OPTIONAL = frozenset({"findings", "supersedes"})
@@ -751,17 +759,55 @@ def existing(deployment, digest: str) -> FinancialScenario | None:
     return None if row is None else FinancialScenario.objects.get(pk=row.scenario_id)
 
 
-def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
+def _reason(text: str) -> str:
+    return text if len(text) <= FINGERPRINT_REASON_MAX else text[: FINGERPRINT_REASON_MAX - 3] + "..."
+
+
+def current_system_fingerprint(deployment_id) -> tuple[str, str]:
+    """The deployment's SPINE system fingerprint as it stands now
+    (:func:`assurance.fingerprint.compute_system_fingerprint`), in the form a scenario
+    version holds it -- 64 lowercase hex, the ``system_fingerprint`` form of
+    :data:`~assurance.economics.engine.governance.REFERENCE_FORMS` -- and ``""``; or
+    ``""`` and why there is none: it could not be computed (the error's type and
+    message), or what was computed is not in that form. Never one made up, and never
+    raises: a build never fails over its fingerprint. Reads only; the card reads the
+    deployment's at issue through it too, where a version records none."""
+    try:
+        from assurance.fingerprint import compute_system_fingerprint
+        from assurance.models import Deployment
+
+        deployment = (
+            Deployment.objects.prefetch_related("assets__provider__assertions")
+            .select_related("data_boundary")
+            .get(pk=deployment_id)
+        )
+        value = compute_system_fingerprint(deployment)
+    except Exception as error:  # noqa: BLE001 - none, with the reason: never a failed build
+        return "", _reason(f"{type(error).__name__}: {error}")
+    if governance.spine_reference_refusal("system_fingerprint", value) is not None:
+        return "", _reason(f"not a SPINE system fingerprint (64 lowercase hex): {value!r}")
+    return value, ""
+
+
+def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str, str]) -> BuildRows:
     """Every row the build of ``resolved`` writes, made (not saved): the scenario
     version, its build record, each effect's attributes, each event's larger-loss
     values, the events, the effects, the findings they rest on and the components.
-    Pure but for the ids each row is given; nothing is read or written."""
+    The version records ``fingerprint``, :func:`current_system_fingerprint`'s pair:
+    the deployment's system fingerprint when it was built, or none and why. Pure but
+    for the ids each row is given; nothing is read or written."""
     request = resolved.request
     plans = price(
         group(resolved.effects, request.links), resolved.variables, currency=request.currency, as_of=request.as_of
     )
+    value, unavailable = fingerprint
     scenario = FinancialScenario(
-        deployment=deployment, title=request.title, author=author, supersedes=resolved.supersedes
+        deployment=deployment,
+        title=request.title,
+        author=author,
+        supersedes=resolved.supersedes,
+        system_fingerprint=value,
+        system_fingerprint_unavailable=unavailable,
     )
     build_row = ScenarioBuild(
         scenario=scenario,
@@ -875,12 +921,13 @@ def build(deployment, body, *, author) -> tuple[FinancialScenario, bool]:
     Every row is made, and every check of every row run, BEFORE the transaction
     (:func:`assurance.economics.models.check_build_rows`): the transaction only
     inserts, so the write lock it holds on SQLite, which a stop's write waits for,
-    is held for the inserts alone (spec, section 24.6)."""
+    is held for the inserts alone (spec, section 24.6). The deployment's system
+    fingerprint is read before it too, and the version records it, or none and why."""
     resolved = resolve(deployment, parse_request(body))
     already = existing(deployment, resolved.digest)
     if already is not None:
         return already, False
-    rows = build_rows(deployment, resolved, author=author)
+    rows = build_rows(deployment, resolved, author=author, fingerprint=current_system_fingerprint(deployment.pk))
     check_build_rows(rows)
     with transaction.atomic():
         insert_checked_rows(rows)
@@ -1118,6 +1165,8 @@ def describe(scenario: FinancialScenario) -> dict:
             "supersedes": str(FinancialScenario.objects.get(pk=scenario.supersedes_id).uuid)
             if scenario.supersedes_id
             else None,
+            "system_fingerprint": scenario.system_fingerprint or None,
+            "system_fingerprint_unavailable": scenario.system_fingerprint_unavailable or None,
             **review_status(scenario),
         },
         "build": None
@@ -1150,6 +1199,7 @@ __all__ = [
     "build_document",
     "build_rows",
     "check_spine_declarations",
+    "current_system_fingerprint",
     "describe",
     "event_key",
     "gross_cash",

@@ -18,8 +18,9 @@ and:
 3. builds the card (:func:`build_card`): every owner field, from the stored result,
    the scenario version's append-only rows and the analysis, or saying it has no
    data -- never a made-up value -- and what was read when it was issued (the
-   review status, the inventory entry, the findings' status, the deployment's
-   system fingerprint), kept as issued;
+   review status, the inventory entry, the findings' status, and the deployment's
+   system fingerprint only where the scenario version records none: the builder
+   records the deployment's when it builds one), kept as issued;
 4. records it, append-only, one card per result: the same result returns the card
    already recorded, and two issues racing past that read are stopped by the
    one-to-one key, the later returning the first's.
@@ -297,11 +298,13 @@ def _weighted(inputs, sensitivity, line: str = "gross_cash"):
 def issued_context(result: SimulationResult, scenario: FinancialScenario) -> dict:
     """What the card reads as it is issued, and keeps as issued: the scenario's
     review status, the inventory entry of the engine release (if an admin
-    registered one), each enabling finding's status, and the deployment's system
-    fingerprint now (used only where the scenario version recorded none)."""
-    from assurance.models import Deployment, Finding
+    registered one), each enabling finding's status, and, only where the scenario
+    version recorded no system fingerprint, the deployment's now. Where the version
+    recorded one, the deployment's is not read (``None``): the card binds the
+    build's and says nothing of the deployment's today."""
+    from assurance.models import Finding
 
-    from .builder import review_status
+    from .builder import current_system_fingerprint, review_status
 
     release = model_release(result.versions)
     entry = (
@@ -315,18 +318,11 @@ def issued_context(result: SimulationResult, scenario: FinancialScenario) -> dic
         str(f.uuid): {"status": f.status, "severity": f.severity}
         for f in Finding.objects.filter(deployment_id=scenario.deployment_id, uuid__in=sorted({x.finding for x in links}))
     }
-    fingerprint = {"value": None, "unavailable": None}
-    try:
-        from assurance.fingerprint import compute_system_fingerprint
-
-        deployment = (
-            Deployment.objects.prefetch_related("assets__provider__assertions")
-            .select_related("data_boundary")
-            .get(pk=scenario.deployment_id)
-        )
-        fingerprint["value"] = compute_system_fingerprint(deployment)
-    except Exception as error:  # noqa: BLE001 - an unreadable fingerprint is stated as unavailable, never guessed
-        fingerprint["unavailable"] = f"{type(error).__name__}: {error}"
+    fingerprint = None
+    if not scenario.system_fingerprint:
+        # Never raises: one that cannot be read is stated as unavailable, never guessed.
+        value, unavailable = current_system_fingerprint(scenario.deployment_id)
+        fingerprint = {"value": value or None, "unavailable": unavailable or None}
     return {
         "at": timezone.now().isoformat(),
         "reviewer_status": review_status(scenario),
@@ -447,7 +443,25 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
             "binding": "scenario",
             "statement": "the SPINE system fingerprint the scenario version was bound to when it was recorded",
         }
+    elif scenario.system_fingerprint_unavailable:
+        # Built after the builder recorded fingerprints, and it could not compute one.
+        at_issue = issued.get("deployment_system_fingerprint") or {}
+        at_build = (
+            "the builder could not compute the system fingerprint when it built the scenario version "
+            f"({scenario.system_fingerprint_unavailable}), and recorded none"
+        )
+        fingerprint = {
+            "value": at_issue.get("value"),
+            "binding": "deployment_at_issue" if at_issue.get("value") else None,
+            "statement": (
+                f"{at_build}; this is the deployment's SPINE fingerprint when the card was issued, not when the "
+                "scenario was built"
+                if at_issue.get("value")
+                else f"unavailable: {at_build}, and the deployment's could not be read ({at_issue.get('unavailable')})"
+            ),
+        }
     else:
+        # A version recorded before the builder recorded fingerprints: as it always read.
         at_issue = issued.get("deployment_system_fingerprint") or {}
         fingerprint = {
             "value": at_issue.get("value"),
