@@ -1,5 +1,5 @@
 """The scenario builder: SPINE effects and the findings that enable them, built into
-causal loss events (``docs/economics/spec-v1.md``, section 23).
+causal loss events (``docs/economics/spec-v1.md``, section 24).
 
 Given a deployment, the effects a build declares -- each a SPINE observed effect or
 a hypothetical effect, bound to an asset and a business process, with the

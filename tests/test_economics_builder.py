@@ -1,5 +1,5 @@
 """The scenario builder, its records and its routes, against the database
-(``docs/economics/spec-v1.md``, section 23).
+(``docs/economics/spec-v1.md``, section 24).
 
 - section 30's bank payment agent, BUILT FROM A SPINE OBSERVED EFFECT, comes out
   exactly as #146's known answer; section 31's from hypothetical effects too;

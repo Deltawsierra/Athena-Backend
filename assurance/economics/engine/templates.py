@@ -3,7 +3,7 @@
 A template is a versioned, named mapping from an EFFECT -- its type, the business
 process it touches, and the attributes it states -- to the components of the loss
 event it causes (owner's specification, sections 6 and 22;
-``docs/economics/spec-v1.md``, section 23). For each component it says which of the
+``docs/economics/spec-v1.md``, section 24). For each component it says which of the
 fifteen loss families it is (or ``market_value``), which formula of the catalogue
 computes it (:mod:`.formulas`), and where each of the formula's inputs comes from:
 

@@ -1,5 +1,5 @@
 """The banking pack's six templates, with no database (``docs/economics/spec-v1.md``,
-section 23).
+section 24).
 
 - each template is well formed: every component's formula exists and computes its
   family, every formula input has exactly one source, a parameter-set variable or an

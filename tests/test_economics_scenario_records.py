@@ -640,7 +640,7 @@ def test_no_economics_route_is_a_stop():
     assert set(found) == {
         "deployment-economics-parameter-set",
         "deployment-economics-parameter-set-versions",
-        # The scenario builder's (spec, section 23).
+        # The scenario builder's (spec, section 24).
         "deployment-economics-scenario-build",
         "deployment-economics-scenario-events",
     }

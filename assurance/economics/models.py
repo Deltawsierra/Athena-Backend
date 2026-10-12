@@ -1305,7 +1305,7 @@ class LossComponent(_AppendOnly):
 
 # ---------------------------------------------------------------------------
 # ScenarioBuild, CausalEffect, EffectFinding: the causal graph a built scenario
-# rests on (spec, section 23). Written by the scenario builder only.
+# rests on (spec, section 24). Written by the scenario builder only.
 # ---------------------------------------------------------------------------
 
 #: An effect's origin and a finding's role, spelled here and not imported: this
@@ -1330,7 +1330,7 @@ class ScenarioBuild(_AppendOnly):
     """How one scenario version was built: the deployment, the customer
     parameter-set version it read, its currency and as-of date, the builder, the
     grouping key and the template pack, and the CONTENT DIGEST of everything it was
-    built from (spec, section 23). The digest is unique per deployment, so the same
+    built from (spec, section 24). The digest is unique per deployment, so the same
     inputs never build a second scenario: a rebuild returns this one, and two builds
     racing are refused by the constraint (409), not duplicated."""
 
@@ -1383,7 +1383,7 @@ class ScenarioBuild(_AppendOnly):
 
 class CausalEffect(_AppendOnly):
     """One effect of a built scenario version, the node its loss follows from (spec,
-    section 23; specification, section 6): a SPINE observed effect, named by its
+    section 24; specification, section 6): a SPINE observed effect, named by its
     row's uuid with the digest its signature covers, or a hypothetical effect an
     analyst declared. It is bound to an asset of the deployment (a node, by uuid) and
     to a business process, has a type, the time it occurred when it was observed,

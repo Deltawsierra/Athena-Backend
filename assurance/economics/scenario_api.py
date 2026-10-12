@@ -1,4 +1,4 @@
-"""The scenario builder's routes (``docs/economics/spec-v1.md``, section 23.8).
+"""The scenario builder's routes (``docs/economics/spec-v1.md``, section 24.8).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
 its own: a fault here, or in the builder or the template module it imports, leaves

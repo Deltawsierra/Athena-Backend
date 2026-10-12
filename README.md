@@ -424,7 +424,7 @@ currency table, the write answers 503; nothing at import reads the table.
 A second route module, imported guarded in a guard of its own, builds a scenario's
 causal loss events from SPINE effects (signed observed effects, or hypothetical
 ones an analyst declares) and the findings that enable them, through six banking
-templates (section 23):
+templates (section 24):
 
 - `POST /api/assurance/deployments/<uuid>/economics/scenarios/build/`: a scenario
   draft from the effects, findings and parameter-set version the body names; an
