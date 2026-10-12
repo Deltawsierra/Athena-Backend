@@ -20,7 +20,7 @@ from .views import (
 logger = logging.getLogger(__name__)
 
 # Economic Exposure's route modules (docs/economics/spec-v1.md, sections 2, 19 and
-# 23): the customer parameter-set routes, and the scenario builder's, none of them a
+# 24): the customer parameter-set routes, and the scenario builder's, none of them a
 # stop. Each is imported GUARDED, in a guard of its own. This module is the root
 # URLconf's, and an import that raised here would take the URLconf down, and every
 # route with it: the scan's Stop, every other stop, and the URL check

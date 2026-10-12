@@ -163,6 +163,14 @@ class _AppendOnly(models.Model):
     def delete(self, *args, **kwargs):
         raise EconomicsRewriteRefused(f"A recorded {self._meta.verbose_name} is history and is never deleted.")
 
+    def _insert_checked(self) -> None:
+        """Insert a new row of a scenario build whose checks :func:`check_build_rows`
+        already ran, whole, before the build's transaction: an INSERT, never an
+        UPDATE, and nothing read. Any other row is refused."""
+        if not self._state.adding or getattr(self, "_build_checked", None) is not _CHECKED:
+            raise EconomicsRewriteRefused("A build's rows are checked whole before any is written.")
+        super().save(force_insert=True)
+
 
 def _signed_in(account) -> governance.Person:
     """The person a row is written by: the account and the account's OWN username,
@@ -1063,6 +1071,10 @@ class FinancialParameter(_AppendOnly):
     # ({"id": "lognormal", "version": 1, "params": {"mu": "9.2", "sigma": "0.8"}}).
     # Null: the parameter states none, and the simulation's rule decides.
     distribution = models.JSONField(null=True, blank=True)
+    # The parameters a derived one was taken across, by uuid, each of the same parent:
+    # the scenario builder's larger-loss value of an event's attribute cites every
+    # effect attribute it was taken across (spec, section 24.5). Empty otherwise.
+    derived_from = models.JSONField(default=list, blank=True)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1163,7 +1175,7 @@ class FinancialParameter(_AppendOnly):
 
         stated = self.stated_distribution()
         try:
-            if self.name == scenario_simulation.FREQUENCY_PARAMETER and self.scenario_id is not None:
+            if self.name == scenario_simulation.FREQUENCY_PARAMETER and self.parameter_set_id is None:
                 scenario_simulation.resolve_frequency(engine, stated)
             else:
                 scenario_simulation.check_stated(stated, engine)
@@ -1175,20 +1187,31 @@ class FinancialParameter(_AppendOnly):
             raise EconomicsRefused(refused.code, refused.detail) from None
         return stated.as_json()
 
-    def check_new(self) -> None:
-        if (self.scenario_id is None) == (self.parameter_set_id is None):
-            raise EconomicsRefused("parent_required")
+    def _check_form(self) -> parameters.Parameter:
+        """The checks that read nothing stored: the row as its own values make it,
+        which it returns, as the engine reads it."""
         if self.effective_date is None:
             raise EconomicsRefused("date_malformed", f"{self.name} has no effective_date")
         if isinstance(self.evidence_ref, str) and len(self.evidence_ref) > pset.EVIDENCE_REF_MAX:
             raise EconomicsRefused("field_malformed", f"{self.name} evidence_ref is longer than its column")
         if isinstance(self.name, str) and len(self.name) > _KEY_MAX:
             raise EconomicsRefused("field_malformed", f"a parameter name is longer than {_KEY_MAX}")
+        derived = self.derived_from
+        if not isinstance(derived, list) or not all(isinstance(x, str) for x in derived):
+            raise EconomicsRefused("field_malformed", f"{self.name} derived_from is a list of parameters' uuids")
+        if len(set(derived)) != len(derived) or str(self.uuid) in derived:
+            raise EconomicsRefused("duplicate_id", f"{self.name} derived_from names a parameter twice, or itself")
         engine = _engine_refusal(self.as_engine)
         # Stored in the one spelling: "1.10" and "1.1" are one value, written once.
         self.low, self.base, self.high = (parameters.Parameter.text(engine.at(p)) for p in parameters.POINTS)
         if self.distribution is not None:
             self.distribution = self.checked_distribution(engine)
+        return engine
+
+    def check_new(self) -> None:
+        if (self.scenario_id is None) == (self.parameter_set_id is None):
+            raise EconomicsRefused("parent_required")
+        engine = self._check_form()
         if self.parameter_set_id is not None:
             expected = _engine_refusal(lambda: pset.variable_unit(self.name))
             if engine.unit is not expected:
@@ -1206,6 +1229,8 @@ class FinancialParameter(_AppendOnly):
         )
         if parent.filter(name=self.name).exists():
             raise EconomicsRefused("duplicate_id", f"parameter {self.name!r} twice in one parent")
+        if self.derived_from and parent.filter(uuid__in=self.derived_from).count() != len(self.derived_from):
+            raise EconomicsRefused("parameter_not_found", f"{self.name} is derived from a parameter of another parent")
 
     def __str__(self) -> str:
         return f"parameter {self.name} ({self.unit})"
@@ -1234,11 +1259,14 @@ class LossEvent(_AppendOnly):
         ordering = ["scenario", "id"]
         constraints = [models.UniqueConstraint(fields=["scenario", "event_key"], name="uq_econ_loss_event_key")]
 
-    def check_new(self) -> None:
+    def _check_form(self) -> None:
         _key(self.event_key, "event_key")
         _engine_refusal(lambda: money.check_reporting_currency(self.currency, "event currency"))
         if self.effect:
             _refuse(governance.spine_reference_refusal("effect", self.effect), detail="effect")
+
+    def check_new(self) -> None:
+        self._check_form()
         if LossEvent._base_manager.filter(scenario_id=self.scenario_id, event_key=self.event_key).exists():
             raise EconomicsRefused("duplicate_id", f"event {self.event_key!r} twice in one scenario")
 
@@ -1303,7 +1331,8 @@ class LossComponent(_AppendOnly):
             models.CheckConstraint(condition=Q(insurance_treatment=formulas.GROSS), name="ck_econ_component_gross"),
         ]
 
-    def _bindings(self, deployment_id) -> dict[str, parameters.Parameter]:
+    def _cited(self) -> dict[str, uuid.UUID]:
+        """``cited_parameters`` read: formula input to the cited parameter's uuid."""
         cited = self.cited_parameters
         if not isinstance(cited, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in cited.items()):
             raise EconomicsRefused("field_malformed", "cited_parameters maps a formula input to a parameter's uuid")
@@ -1313,6 +1342,10 @@ class LossComponent(_AppendOnly):
                 wanted[name] = uuid.UUID(value)
             except ValueError:
                 raise EconomicsRefused("parameter_not_found", f"{name}: {value!r}") from None
+        return wanted
+
+    def _bindings(self, deployment_id) -> dict[str, parameters.Parameter]:
+        wanted = self._cited()
         rows = {row.uuid: row for row in FinancialParameter._base_manager.filter(uuid__in=list(wanted.values()))}
         bindings = {}
         for name, key in wanted.items():
@@ -1332,7 +1365,10 @@ class LossComponent(_AppendOnly):
         deployment_id = FinancialScenario._base_manager.filter(pk=scenario_id).values_list(
             "deployment_id", flat=True
         ).first()
-        bindings = self._bindings(deployment_id)
+        return self._compute(self._bindings(deployment_id), currency)
+
+    def _compute(self, bindings, currency):
+        """The component the row's formula makes of ``bindings``, in ``currency``."""
         component = _engine_refusal(
             lambda: formulas.evaluate(
                 self.component_key, self.family, self.formula_id, self.formula_version, bindings, as_of=self.as_of
@@ -1354,12 +1390,15 @@ class LossComponent(_AppendOnly):
             loss_event_id=self.loss_event_id, component_key=self.component_key
         ).exists():
             raise EconomicsRefused("duplicate_id", f"component {self.component_key!r} twice in one event")
-        component = self._evaluate()
+        self._record(self._evaluate())
+
+    def _record(self, component) -> None:
+        """Write what the formula made into the row: never the caller's amounts."""
         estimated = component.status == formulas.ESTIMATED
         self.status = component.status
         self.currency = component.currency or ""
         self.low, self.base, self.high = (
-            (parameters.Parameter.text(component.at(p)) for p in parameters.POINTS) if estimated else ("", "", "")
+            tuple(parameters.Parameter.text(component.at(p)) for p in parameters.POINTS) if estimated else ("", "", "")
         )
         self.unknown_reason = component.unknown_reason or ""
         self.missing_inputs = list(component.missing)
@@ -1423,7 +1462,7 @@ class ScenarioBuild(_AppendOnly):
             models.UniqueConstraint(fields=["deployment", "build_digest"], name="uq_econ_build_digest"),
         ]
 
-    def check_new(self) -> None:
+    def _check_form(self) -> None:
         _refuse(governance.snapshot_hash_refusal(self.build_digest), detail="build_digest")
         _require_text(
             builder_version=self.builder_version, grouping_version=self.grouping_version, pack=self.pack
@@ -1431,6 +1470,9 @@ class ScenarioBuild(_AppendOnly):
         _engine_refusal(lambda: money.check_reporting_currency(self.currency, "build currency"))
         if self.as_of is None:
             raise EconomicsRefused("date_malformed", "the build has no as_of date")
+
+    def check_new(self) -> None:
+        self._check_form()
         scenario = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("deployment_id", flat=True)
         if list(scenario) != [self.deployment_id]:
             raise EconomicsRefused("cross_tenant_reference", "scenario")
@@ -1459,7 +1501,9 @@ class CausalEffect(_AppendOnly):
     event of its scenario version. ``loss_event`` is one foreign key, not null; an
     effect key is unique within the scenario, and so is a SPINE observation (a
     unique constraint each), so neither one effect nor one observation can be put
-    in two events. Its attributes are the scenario's financial parameters named
+    in two events; and every row of one SPINE effect (``spine_effect``) in a
+    scenario is in one event and declared one way, checked on save
+    (``duplicate_id``). Its attributes are the scenario's financial parameters named
     ``<effect_key>.<attribute>``."""
 
     id = models.BigAutoField(primary_key=True)
@@ -1484,8 +1528,6 @@ class CausalEffect(_AppendOnly):
     template_version = models.PositiveIntegerField()
     # Every template that covers the effect, [[id, version], ...], in precedence order.
     in_scope_of = models.JSONField(default=list)
-    # Whether the event's components read this effect's attributes.
-    lead = models.BooleanField(default=False)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1503,7 +1545,7 @@ class CausalEffect(_AppendOnly):
             ),
         ]
 
-    def check_new(self) -> None:
+    def _check_form(self) -> None:
         _refuse(governance.required_text_refusal(self.effect_key), detail="effect_key")
         if len(self.effect_key) > EFFECT_KEY_MAX:
             raise EconomicsRefused("field_malformed", f"effect_key is longer than {EFFECT_KEY_MAX}")
@@ -1517,6 +1559,9 @@ class CausalEffect(_AppendOnly):
             raise EconomicsRefused("field_malformed", "a hypothetical effect names no observed effect")
         if self.spine_effect:
             _refuse(governance.spine_reference_refusal("effect", self.spine_effect), detail="spine_effect")
+
+    def check_new(self) -> None:
+        self._check_form()
         event = LossEvent._base_manager.filter(pk=self.loss_event_id).values_list("scenario_id", flat=True)
         if list(event) != [self.scenario_id]:
             raise EconomicsRefused("cross_tenant_reference", "the effect's loss event is another scenario's")
@@ -1525,6 +1570,14 @@ class CausalEffect(_AppendOnly):
             raise EconomicsRefused("duplicate_id", f"effect {self.effect_key!r} twice in one scenario")
         if self.observation and mine.filter(observation=self.observation).exists():
             raise EconomicsRefused("duplicate_id", f"observation {self.observation} in two effects of one scenario")
+        if self.spine_effect:
+            same = mine.filter(spine_effect=self.spine_effect)
+            if same.exclude(loss_event_id=self.loss_event_id).exists():
+                raise EconomicsRefused("duplicate_id", f"SPINE effect {self.spine_effect} in two loss events")
+            if same.exclude(
+                effect_type=self.effect_type, asset=self.asset, business_process=self.business_process
+            ).exists():
+                raise EconomicsRefused("duplicate_id", f"SPINE effect {self.spine_effect} declared two ways")
 
     def attribute_rows(self) -> list[FinancialParameter]:
         """The effect's attributes, as stored: the scenario's parameters named
@@ -1565,9 +1618,12 @@ class EffectFinding(_AppendOnly):
             models.CheckConstraint(condition=Q(role__in=FINDING_ROLES), name="ck_econ_effect_finding_role"),
         ]
 
-    def check_new(self) -> None:
+    def _check_form(self) -> None:
         _uuid_text(self.finding, "finding")
         _refuse(governance.code_refusal(self.role, FINDING_ROLES), detail="role")
+
+    def check_new(self) -> None:
+        self._check_form()
         if EffectFinding._base_manager.filter(effect_id=self.effect_id, finding=self.finding).exists():
             raise EconomicsRefused("duplicate_id", f"finding {self.finding} enables one effect twice")
 
@@ -1710,3 +1766,160 @@ class SimulationResult(_AppendOnly):
 
     def __str__(self) -> str:
         return f"simulation of scenario {self.scenario_id}, seed {self.seed}, {self.draws} draws: {self.status}"
+
+
+# ---------------------------------------------------------------------------
+# A scenario build's rows: every check before its transaction, then only writes
+# ---------------------------------------------------------------------------
+
+_CHECKED = object()
+
+
+class BuildRows:
+    """Every row one scenario build writes (spec, section 24.6), made BEFORE its
+    transaction: the scenario version, its build record, its parameters (each
+    effect's attributes, then each event's larger-loss values), its loss events,
+    effects, finding links and components, and the parameter-set rows those
+    components cite, as read before.
+
+    :func:`check_build_rows` runs every row's checks -- the ones :meth:`check_new`
+    runs on a save -- against the build itself and what was recorded before it, and
+    computes each component from the parameters it cites; :func:`insert_checked_rows`
+    then only writes. So the build's transaction holds no read and computes nothing:
+    on SQLite, a stop's write waits for the lock no longer than the inserts take
+    (``test_a_builds_transaction_only_writes``). The database's constraints hold
+    inside it as on any write."""
+
+    def __init__(self, *, scenario, build, parameters, events, effects, links, components, set_parameters):
+        self.scenario = scenario
+        self.build = build
+        self.parameters = list(parameters)
+        self.events = list(events)
+        self.effects = list(effects)
+        self.links = list(links)
+        self.components = list(components)
+        # The parameter-set version's rows, by uuid: what a component may cite of it.
+        self.set_parameters = dict(set_parameters)
+        self._checked = None
+
+    def in_order(self) -> list:
+        """Every row, each after every row it refers to."""
+        return [
+            self.scenario, self.build, *self.parameters, *self.events, *self.effects, *self.links, *self.components
+        ]
+
+
+#: The only records a scenario build writes.
+_BUILD_ROW_MODELS = (
+    FinancialScenario, ScenarioBuild, FinancialParameter, LossEvent, CausalEffect, EffectFinding, LossComponent
+)
+
+
+def check_build_rows(rows: BuildRows) -> None:
+    """Run every check of every row of ``rows`` -- the checks a save runs, each
+    reading the build's own rows where a save reads the stored ones -- and compute
+    every component. Refused with the same codes; reads only what was recorded
+    before the build (the scenario it supersedes)."""
+    scenario = rows.scenario
+    for row in rows.in_order():
+        if not row._state.adding:
+            raise EconomicsRewriteRefused("A build writes new rows only.")
+    scenario.check_new()  # its one read: the version it supersedes, recorded before
+    build = rows.build
+    build._check_form()
+    if build.scenario is not scenario or build.deployment_id != scenario.deployment_id:
+        raise EconomicsRefused("cross_tenant_reference", "scenario")
+    if build.parameter_set.deployment_id != scenario.deployment_id:
+        raise EconomicsRefused("cross_tenant_reference", "parameter_set")
+
+    held: dict[str, FinancialParameter] = {}
+    names: set[str] = set()
+    for row in rows.parameters:
+        if row.scenario is not scenario or row.parameter_set_id is not None:
+            raise EconomicsRefused("parent_required")
+        row._check_form()
+        if row.name in names:
+            raise EconomicsRefused("duplicate_id", f"parameter {row.name!r} twice in one parent")
+        names.add(row.name)
+        missing = [cited for cited in row.derived_from if cited not in held]
+        if missing:
+            raise EconomicsRefused("parameter_not_found", f"{row.name} is derived from a parameter of another parent")
+        held[str(row.uuid)] = row
+    for row in rows.set_parameters.values():
+        if row.parameter_set_id != build.parameter_set.pk:
+            raise EconomicsRefused("cross_tenant_reference", f"{row.name} is not the build's parameter set's")
+
+    event_keys: set[str] = set()
+    events = {id(event): event for event in rows.events}
+    for event in rows.events:
+        if event.scenario is not scenario:
+            raise EconomicsRefused("cross_tenant_reference", "the event is another scenario's")
+        event._check_form()
+        if event.event_key in event_keys:
+            raise EconomicsRefused("duplicate_id", f"event {event.event_key!r} twice in one scenario")
+        event_keys.add(event.event_key)
+
+    effect_keys: set[str] = set()
+    observations: set[str] = set()
+    spines: dict[str, tuple] = {}
+    for effect in rows.effects:
+        if effect.scenario is not scenario or id(effect.loss_event) not in events:
+            raise EconomicsRefused("cross_tenant_reference", "the effect's loss event is another scenario's")
+        effect._check_form()
+        if effect.effect_key in effect_keys:
+            raise EconomicsRefused("duplicate_id", f"effect {effect.effect_key!r} twice in one scenario")
+        effect_keys.add(effect.effect_key)
+        if effect.observation:
+            if effect.observation in observations:
+                raise EconomicsRefused("duplicate_id", f"observation {effect.observation} in two effects of one scenario")
+            observations.add(effect.observation)
+        if effect.spine_effect:
+            declared = (effect.effect_type, effect.asset, effect.business_process)
+            event_id, first = spines.setdefault(effect.spine_effect, (id(effect.loss_event), declared))
+            if event_id != id(effect.loss_event):
+                raise EconomicsRefused("duplicate_id", f"SPINE effect {effect.spine_effect} in two loss events")
+            if first != declared:
+                raise EconomicsRefused("duplicate_id", f"SPINE effect {effect.spine_effect} declared two ways")
+
+    effects = {id(effect) for effect in rows.effects}
+    pairs: set[tuple] = set()
+    for link in rows.links:
+        if id(link.effect) not in effects:
+            raise EconomicsRefused("cross_tenant_reference", "the finding's effect is another scenario's")
+        link._check_form()
+        if (id(link.effect), link.finding) in pairs:
+            raise EconomicsRefused("duplicate_id", f"finding {link.finding} enables one effect twice")
+        pairs.add((id(link.effect), link.finding))
+
+    citable = {**held, **rows.set_parameters}
+    components: set[tuple] = set()
+    for component in rows.components:
+        event = component.loss_event
+        if id(event) not in events:
+            raise EconomicsRefused("cross_tenant_reference", "the component's event is another scenario's")
+        _key(component.component_key, "component_key")
+        if (id(event), component.component_key) in components:
+            raise EconomicsRefused("duplicate_id", f"component {component.component_key!r} twice in one event")
+        components.add((id(event), component.component_key))
+        bindings = {}
+        for name, key in component._cited().items():
+            row = citable.get(str(key))
+            if row is None:
+                raise EconomicsRefused("parameter_not_found", f"{name}: {key}")
+            bindings[name] = _engine_refusal(row.as_engine)
+        component._record(component._compute(bindings, event.currency))
+    for row in rows.in_order():
+        row._build_checked = _CHECKED
+    rows._checked = _CHECKED
+
+
+def insert_checked_rows(rows: BuildRows) -> None:
+    """Write ``rows``, which :func:`check_build_rows` checked whole: inserts only,
+    each row after the rows it refers to, and nothing read or computed. Rows not
+    checked so are refused, and nothing is written."""
+    if rows._checked is not _CHECKED:
+        raise EconomicsRewriteRefused("A build's rows are checked whole before any is written.")
+    for row in rows.in_order():
+        if not isinstance(row, _BUILD_ROW_MODELS):
+            raise EconomicsRewriteRefused(f"A build writes no {type(row).__name__}.")
+        row._insert_checked()
