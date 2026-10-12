@@ -595,6 +595,62 @@ def _economics_scenario_build():
     return dep, lambda c: c.post(_base(dep) + "economics/scenarios/build/", body, format="json")
 
 
+def _economics_tenant_source(dep):
+    from assurance.economics.models import FinancialSource
+
+    return FinancialSource.objects.create(
+        deployment=dep, source_key="revenue", provider="the customer's ledger", dataset="revenue",
+        license_class="customer", retrieved_at=timezone.now(), snapshot_hash="sha256:" + "7b" * 32,
+        schema_version="1",
+    )
+
+
+def _economics_trust_raise():
+    """An admin raises a tenant's source one step, to customer: a new source version."""
+    dep = _scanned()
+    source = _economics_tenant_source(dep)
+    return dep, lambda c: c.post(
+        f"/api/assurance/economics/sources/{source.uuid}/trust-raises/",
+        {"to_tier": "customer", "reason": "the customer's own books"},
+        format="json",
+    )
+
+
+def _economics_trust_raise_approval():
+    """Another admin's request to authoritative, approved by the caller's admin."""
+    from assurance.economics.models import FinancialSourceTrustRaise
+
+    dep = _scanned()
+    pending = FinancialSourceTrustRaise.request(
+        _economics_tenant_source(dep), "authoritative", "the official publisher", by=_admin()
+    )
+    return dep, lambda c: c.post(f"/api/assurance/economics/trust-raises/{pending.uuid}/approve/", {}, format="json")
+
+
+def _economics_trust_raise_withdrawal():
+    """A pending request withdrawn by the admin who asked: only they may."""
+    from assurance.economics.models import FinancialSourceTrustRaise
+
+    dep = _scanned()
+    requester = _admin()
+    pending = FinancialSourceTrustRaise.request(
+        _economics_tenant_source(dep), "authoritative", "the official publisher", by=requester
+    )
+
+    def withdraw(_another_admin):
+        client = APIClient()
+        client.force_authenticate(user=requester)
+        return client.post(f"/api/assurance/economics/trust-raises/{pending.uuid}/withdraw/", {}, format="json")
+
+    return dep, withdraw
+
+
+_TRUST_RAISE = (
+    "records a raise of a financial source's trust tier (Economic Exposure), and for a raise that is done the "
+    "source version it raises to; the decision reads no economics record"
+)
+
+
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
         "reads every stream across the portfolio; it writes nothing but the reconcile "
@@ -656,6 +712,13 @@ CANNOT_MOVE = {
         "builds an Economic Exposure scenario draft from effects and findings it only reads; the decision "
         "reads no economics record",
         _economics_scenario_build,
+    ),
+    ("SourceTrustRaisesView", "post", "post"): (_TRUST_RAISE, _economics_trust_raise),
+    ("TrustRaiseApproveView", "post", "post"): (_TRUST_RAISE, _economics_trust_raise_approval),
+    ("TrustRaiseWithdrawView", "post", "post"): (
+        "withdraws a pending raise of a financial source's trust tier (Economic Exposure); the decision reads "
+        "no economics record",
+        _economics_trust_raise_withdrawal,
     ),
 }
 
