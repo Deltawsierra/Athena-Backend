@@ -595,6 +595,21 @@ def _economics_scenario_build():
     return dep, lambda c: c.post(_base(dep) + "economics/scenarios/build/", body, format="json")
 
 
+def _economics_scenario_simulate():
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    scenario = stored(dep, _admin())
+    # The set-up's own writes (an asset and a finding the scenario rests on) are
+    # decision inputs: the decision is brought up to date before the simulation,
+    # which must leave it where it is.
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/simulate/", {"seed": 7, "policy": "quick_10k"},
+        format="json",
+    )
+
+
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
         "reads every stream across the portfolio; it writes nothing but the reconcile "
@@ -656,6 +671,11 @@ CANNOT_MOVE = {
         "builds an Economic Exposure scenario draft from effects and findings it only reads; the decision "
         "reads no economics record",
         _economics_scenario_build,
+    ),
+    ("ScenarioSimulateView", "post", "post"): (
+        "simulates an Economic Exposure scenario version and issues its Validity Card and chart series, all "
+        "economics records; the decision reads no economics record",
+        _economics_scenario_simulate,
     ),
 }
 

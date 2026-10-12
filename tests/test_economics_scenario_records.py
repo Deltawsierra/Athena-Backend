@@ -663,6 +663,10 @@ def test_no_economics_route_is_a_stop():
         # The scenario builder's (spec, section 24).
         "deployment-economics-scenario-build",
         "deployment-economics-scenario-events",
+        # The scenario endpoints and the report (spec, section 27).
+        "deployment-economics-scenario",
+        "deployment-economics-scenario-simulate",
+        "deployment-economics-scenario-results",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES

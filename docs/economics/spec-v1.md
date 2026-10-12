@@ -23,7 +23,9 @@ formulas and the loss model through a service that simulates a stored scenario v
 and records the result, and serves no route; and MVP step 8 (section 26) analyses a
 stored result's sensitivity on its own draws, grades it, writes its Financial
 Exposure Validity Card and signs its Financial Exposure Receipt, and serves no route
-either.
+either. MVP step 6 (section 27) serves them: a scenario version with its parameters'
+provenance, a simulation of it under a named policy, and the deterministic report
+JSON of a stored result, with the banner a result graded Unknown carries.
 
 ## Contents
 
@@ -66,14 +68,18 @@ MVP step 8, on step 7b's stored result:
 
 26. [Sensitivity, grade, Validity Card and receipt (MVP step 8)](#26-sensitivity-grade-validity-card-and-receipt-mvp-step-8)
 
+MVP step 6, serving steps 5, 7b and 8:
+
+27. [The scenario endpoints and the report (MVP step 6)](#27-the-scenario-endpoints-and-the-report-mvp-step-6)
+
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py`, the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py` and `tests/test_economics_builder.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py`, the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0067_simulation_charts.py` (step 6) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py` and `tests/test_economics_builder.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
 
@@ -85,7 +91,8 @@ with Django and every other part of mythos-core poisoned.
 
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
-parameter set's and the scenario builder's; feeds and their adapters; source disagreement.
+parameter set's, the scenario builder's and step 6's (section 27); feeds and their
+adapters; source disagreement.
 Building and verifying the signed Financial Exposure Receipt
 (`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
@@ -368,7 +375,8 @@ constraints touches a column a stop's write changes (section 2).
 
 Before the scenario step no route, command or signal wrote or read any of these. The
 simulation step (section 25) adds no route: its service is the only writer of a
-simulation result.
+simulation result, which step 6's simulate route calls (section 27); step 6's chart
+service is the only writer of a result's chart series.
 The scenario step adds one route module (section 19), the only writer of a
 customer parameter set and its parameters; the builder step adds another (section
 24), the only writer of a built scenario, its parameters, events, components,
@@ -396,6 +404,7 @@ operator runs; any other writer is a defect.
 | `SimulationResult` (simulation) | one Monte Carlo run of one scenario version: seed, draws, canonical inputs and their digest, every version, the record and its digest, or the refusal's code; the timing (section 25.6) | the simulation service only (section 25.7) |
 | `FinancialValidityCard` (step 8) | one simulation result's Validity Card: its grade and the grade's version digest, the card and its digest, the sensitivity analysis and its digest, when it was issued; one per result (section 26.4) | the validity service only (`validity_service.issue_card`, section 26) |
 | `FinancialExposureReceipt` (step 8) | one simulation result's signed receipt: the `mythos.financial-exposure-receipt/v1` document, its DSSE envelope, the key id, its card; one per result and per card (section 26.5) | the receipt service only (`receipt_service.issue_receipt`, section 26) |
+| `SimulationCharts` (step 6) | one completed simulation result's chart-ready series: the exceedance curve and histogram of each line, made on the run's own draws, and their digest; one per result (section 27.4) | the chart service only (`charts_service.issue_charts`, section 27), which the simulate route calls |
 
 The two observation models are checked on save by the engine's own contracts
 (`fx.FXRate`, `cost_index.IndexPoint`), so a row is refused with the engine's code
@@ -1741,7 +1750,7 @@ parameter or refuses it; a `SimulationResult` records each run, idempotently; th
 `scenario_id` is the scenario version's uuid; and the uncertainty shared by a year's
 events is separated from the variation between them (section 25.2). What remains:
 
-- **Nothing is served** (step 6 serves). Step 8 builds and signs the receipt
+- **Served by step 6** (section 27). Step 8 builds and signs the receipt
   (section 26).
 - **Step 8 computes the confidence grade**, the sensitivity analysis and the
   Validity Card (section 26); a material expert figure lowers the grade there.
@@ -2782,8 +2791,7 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
   variables, the confidence grade (a material expert figure, fixed or ranged, now lowers it, section 26.2),
   the Validity Card (the owner's specification, section 8) and the signed receipt
   (the Financial Exposure Receipt). What step 8 leaves is section 26.9.
-- **No route.** Step 6 serves reports and scenario endpoints, and will call the
-  service.
+- **Served by step 6** (section 27): its simulate route calls the service.
 - **No writer states a distribution or a frequency yet, and nothing names a parameter
   per occurrence.** The column and the frequency parameter are read and checked, but
   neither the parameter-set API nor the builder's request takes them, so a stored
@@ -2865,7 +2873,8 @@ Financial Exposure Validity Card (section 8's fields; section 15's
 `FinancialValidityCard`) and the signed Financial Exposure Receipt (section 15's
 `FinancialExposureReceipt`; section 28's receipt tampering), built with
 `mythos_core.exposure_receipt`, which E1 pinned and nothing called before. No route
-is added: step 6 serves reports and scenario endpoints, and will call these services.
+is added here: step 6 (section 27) serves the scenario endpoints and the report, and
+calls these services.
 
 | | |
 |---|---|
@@ -3345,14 +3354,14 @@ why, as a code, and never raises out of a service.
 
 ### 26.9 What is still not done
 
-- **No route and no report.** Step 6 serves the card and the receipt, and puts them
-  in the report JSON.
+- **Served by step 6** (section 27): the simulate route issues the card and, when
+  asked, the receipt; the report JSON carries the card and the receipt's reference.
 - **The engine signs from athena-engine #88** (`POST /api/economics/exposure-receipt/sign`,
   and `roles["economics-receipt"]` in its published keyring), where a deployment
   provisions the role's key and keyring (`ENGINE_ECONOMICS_RECEIPT_KEY`,
   `ENGINE_ECONOMICS_RECEIPT_KEYRING`); an engine without them answers 503 and the
-  receipt is `signer_unavailable`, recording nothing. Nothing calls `issue_receipt`
-  yet: step 6 does, with `engine_keyring()` or a keyring fetched out of band.
+  receipt is `signer_unavailable`, recording nothing. Step 6's simulate route calls
+  `issue_receipt` with `engine_keyring()` when the request asks for a receipt.
 - **No receipt for a run without a frequency**: core's schema requires an expected
   annual exposure, which such a run does not have (section 25.5), and none is
   estimated. No writer states a frequency yet (section 25.9), so in production only
@@ -3504,3 +3513,287 @@ why, as a code, and never raises out of a service.
     base-case year holds no occurrence, so the grade is Unknown, as for a zero gross;
     the frequency is never given a zero share instead, which would hide an expert's
     frequency. Recommendation: keep.
+
+## 27. The scenario endpoints and the report (MVP step 6)
+
+MVP step 6 serves what steps 5, 7b and 8 record: a scenario version with every
+parameter's provenance, its validity and its evidence; a simulation of it, run
+through step 7b's service with a named simulation policy; and the report JSON of a
+stored result, with its loss events, its summary, chart-ready series, the
+sensitivity tornado, the grade, the Validity Card and the receipt's reference. A
+result graded Unknown is still shown, with the banner the owner adopted, and is
+excluded from every total.
+
+| | |
+|---|---|
+| Code | `assurance/economics/report_api.py` (the three routes), `report.py` (the report and the scenario document; imports nothing probabilistic), `charts_service.py` (the series, a thin Django service) and `engine/charts.py` (pure; imports numpy); `SimulationCharts` in `models.py` |
+| Migration | `0067_simulation_charts.py`: one new table, nothing else changed (0066 is the trust tier's, #155, in review; whichever merges second renumbers its own and re-points its dependency) |
+| Tests | `tests/test_economics_report.py`; the safety tests of sections 2, 23.10 and 26.8 extended to the new modules; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_report.py`) |
+
+### 27.1 The routes
+
+Under `/api/assurance/`, mounted in a guard of their own (section 2): a fault in
+`report_api` or `report` leaves these three routes unserved and nothing else.
+
+| Method and path | Name | Does |
+|---|---|---|
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/` | `deployment-economics-scenario` | the scenario document (section 27.7) |
+| `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/simulate/` | `deployment-economics-scenario-simulate` | runs, or returns, a simulation (section 27.2) |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3) |
+
+Access is the parameter-set routes' (section 19.3): a signed-in account (401
+otherwise); a deployment the caller cannot see, a scenario of another deployment,
+and a result of another scenario are 404; only an admin or an analyst simulates
+(403 for a viewer), and every role reads. The simulate body is strict JSON of at
+most 64 KiB: a declared length above it is 413 and the parser never reads past it,
+a duplicated key is 400, a form is 415. While economics cannot read its currency
+table every route answers 503 and records nothing. The report is served as its
+canonical bytes (`application/json`), never re-encoded. A route answers no other
+method (405).
+
+**The simulate request.** `{"seed": <0 to 2^64 - 1>, "policy": <name>, "receipt":
+<bool>}`; only `seed` is required. The seed is a JSON integer or its decimal digits
+without a leading zero (`seed_malformed`); the policy is one of section 27.2's
+(`policy_unrecognised`, default `standard_100k`); `receipt` is true or false
+(`field_malformed`, default false); any other key is `field_unrecognised` and a
+missing seed `field_missing`. A refused body records nothing.
+
+**The simulate response.** The request runs `simulation_service.simulate_scenario`
+(section 25.7) with the policy's draws and severe percentile over the scenario
+version's stored rows -- its source snapshot set is fixed by the version: the
+parameter-set version its build names, the build and its own parameters, each with
+its content hash (`source_snapshots`) -- and then, once per result, issues its
+Validity Card (`validity_service.issue_card`, section 26.4), its chart series
+(section 27.4) and, where the body says `"receipt": true`, its receipt
+(`receipt_service.issue_receipt` with `engine_keyring()`, section 26.5). It is
+IDEMPOTENT: the same inputs, seed and draws return the stored result (200) and never
+run a second; a new result is 201. A run the engine refuses is recorded as its
+refusal and served so (201, then 200), with no card figures, no series and no
+receipt. A run step 7b does not record (`engine_unavailable`, `time_over_budget`,
+`memory_exhausted`, `invariant_broken`, `simulation_failed`) is 503, and a request
+whose inputs have no identity (a scenario its rows cannot load, a seed or draws step
+7a refuses) is 400 with step 7b's code; neither records anything. The response names
+the policy, the result (uuid, status, seed, draws, digests, refusal), the source
+snapshots, what each issue gave (`issued`, or its code and detail: a card, series or
+receipt that cannot be made now is said so and never fails the request) and the
+report's URL.
+
+### 27.2 The simulation policies
+
+A run is made under a named policy, as the owner's specification's scenario request
+names one (`simulation_policy: standard_100k`):
+
+| Policy | Draws | Severe-but-plausible percentile |
+|---|---|---|
+| `standard_100k` (the default) | 100,000 | 95 |
+| `quick_10k` | 10,000 | 95 |
+| `detailed_1m` | 1,000,000 | 95 |
+
+A policy is a name for step 7b's draws and severe percentile, which the result
+records; step 7b's limits and time budget (section 25.8) apply unchanged, so a
+`detailed_1m` run of a large scenario may be refused for its budget (503, nothing
+recorded).
+
+### 27.3 The report
+
+`report.build_report(result)`, schema `mythos.economics.report/v1`, composes ONE
+stored result's report from what is stored and only that: the scenario version's
+rows, its build, the result, its card and sensitivity analysis, its series and its
+receipt. It runs no simulation, reads no clock and asks no engine. Its keys:
+
+| Key | Holds |
+|---|---|
+| `schema` | `mythos.economics.report/v1` |
+| `scenario` | uuid, title, deployment, author, when recorded, the version it supersedes, and the scenario's review status as recorded now (`builder.review_status`) |
+| `build` | the build's digest, builder and grouping versions, pack, currency, as-of date and parameter-set version |
+| `simulation` | the result's uuid, status, seed, draws, severe percentile, basis, input digest, result digest, outcomes digest, and when it started, finished and was recorded |
+| `versions` | every version the run recorded (section 25.6): the engine's, the formulas', the rules', numpy's |
+| `model` | the model release the card records: version token and build digest (section 26.5); null where no card is recorded |
+| `source_snapshots` | the version's source snapshots with their content hashes recomputed, or why not (`source_snapshot_mismatch`) |
+| `currency` | the reporting currency, its minor unit and the rounding (section 27.5) |
+| `status`, `refusal` | the run's status, and a refused run's code and detail |
+| `grade`, `banner`, `excluded_from_totals`, `banner_reason` | section 27.6 |
+| `loss_events` | each event (key, currency, effect, business process, trigger) with its components -- family, formula and version, status, low, base and high, the reason an unknown one is unknown and what it misses, and `reads`: the parameter each input reads -- and its gross cash, retained cash under a policy and market value at low, base and high, each saying whether it is complete; market value is `never_added_to_cash` |
+| `parameters` | every parameter the run read, as its canonical inputs hold it, with `read_by`: each component input, policy term, frequency or derived value that reads it |
+| `summary` | the basis and its statement; for each line (gross cash, retained cash, market value) P10, P50, P90, mean, expected annual loss and severe-but-plausible, the standard error of the mean and each figure's band at the run's confidence level; for an annual run the per-occurrence lines beside; `not_reported` on every figure, band or line that does not exist, with the reason (no frequency: no expected annual loss; an infinite mean or variance: no mean, standard error or band; no policy: no retained cash; no market-value component) |
+| `charts` | the stored series (section 27.4) with their digest, or why there are none |
+| `sensitivity` | the stored analysis (section 26.1): its digest, method, basis, baseline, and the tornado, every ranked parameter with its rank, importance, direction, P10, P50 and P90, and its low and high outcomes; the fixed parameters and statements |
+| `validity_card` | the card's digest, schema, issue time, grade, model version, reviewer status at issue, and its non-money fields as stored (`confidence_grade`, the three shares, `last_calibrated`, `data_freshness`, `system_fingerprint`, `technical_evidence`, `unknown_variables`, `reproduction`); the card's figures and most sensitive variables are the report's `summary` and `sensitivity` at the minor unit, and the whole card is the stored record its digest names |
+| `receipt` | a reference: the receipt id, key id, generation time, the document's digest and the card digest it signs; the signature is verified by `receipt_service.verify_stored_receipt` (section 26.6), not by the report |
+| `limitations` | the eight statements of `report.LIMITATIONS`, in every report |
+| `unknowns` | every unknown component with its reason and missing inputs, and a refused run's refusal |
+| `digest` | section 27.5 |
+
+**A refusal is served as the refusal**, never as figures: a refused run's report has
+its refusal, its events and components with every amount null, and `summary`,
+`charts` and `sensitivity` each `not_reported` with the reason.
+
+### 27.4 The chart series
+
+`engine/charts.py`, schema `mythos.economics.charts/v1` version 1
+(`charts.version_record()`, in every record), made on the run's OWN draws as the
+sensitivity analysis is (section 26.1): the scenario version's canonical inputs must
+give the run's input digest (`inputs_changed`) and the draws, made again from the
+same seed and sub-streams, the run's outcomes digest (`result_not_reproduced`). For
+each line the run summarised -- gross cash, retained cash under a policy, market
+value where known -- per simulated year where the run has a frequency
+(`annual_loss`), per occurrence otherwise:
+
+- **The exceedance curve** at the probabilities 0.5, 0.2, 0.1, 0.05, 0.02, 0.01,
+  0.005, 0.002 and 0.001: the loss exceeded with probability p is the line's type 7
+  quantile at 1 - p (step 7a's, of the run's sorted draws), with the draws beyond
+  it. A point is reported only where the run has at least 10 draws beyond it (n p >=
+  10); otherwise its loss is null and `not_reported` says why: a tail the draws do
+  not reach is never extrapolated.
+- **The histogram**: 40 equal bins from zero to the line's P99, each bin's width
+  rounded UP to the currency's minor unit (one minor unit at least), so every edge
+  is a whole number of minor units; one open bin above the last edge holds the
+  tail. A bin holds the draws `lower <= x < upper`; the counts sum to the draws.
+
+`charts_service.issue_charts(result)` records the series once per result as a
+`SimulationCharts` row: append-only, with no account column, going with its
+deployment: the deployment, the scenario, the result (ONE-TO-ONE), the schema, the
+series and their digest. Every check -- the tenant, the result's scenario,
+completed, the series' schema and identity (scenario, seed, draws, input and
+outcomes digests) the result's, no float, the digest -- runs before the
+transaction, which only inserts; a row that fails is `charts_record_malformed`, and
+two issues racing past the lookup are stopped by the one-to-one key. The service
+**never raises**: a failure the stored rows do not decide (`result_not_completed`,
+`engine_unavailable`, `inputs_changed`, `result_not_reproduced`,
+`time_over_budget`, `memory_exhausted`, `invariant_broken`, `charts_failed`) is
+returned and never recorded. The report reads the stored series and never draws
+them: a result recorded before step 6 has none until it is simulated again (the
+same request returns the stored result and issues what is missing).
+
+### 27.5 Determinism, money and the digest
+
+**The same stored rows give byte-identical reports.** The report is canonical JSON
+(`report.canonical_bytes`: sorted keys, no whitespace, ASCII, no float, no NaN),
+every list is in an order the rows fix (events by key, parameters by name, results
+by record order), and the only times in it are stored ones: when the scenario was
+recorded, when the run started, finished and was recorded, when the card was issued
+and when the receipt was generated. A key order the stored JSON happens to hold
+changes nothing. `digest` is `sha256:` and the SHA-256 of the canonical bytes of the
+report without it (`report.digest_of`, `report.verifies`), so a reader recomputes it
+from the bytes served.
+
+**Money at the currency's minor unit.** Every amount of loss the report states -- a
+component's and an event's low, base and high, the summary's figures, standard
+errors and bands, the series' losses, edges and widths, the tornado's baseline and
+outcomes -- is the stored amount rounded half-even to the reporting currency's minor
+unit (`Money.display_amount`, section 11.3), as a decimal string: 0 places for JPY,
+2 for USD, 3 for KWD. A parameter's own figures are shown as recorded, since a cost
+per unit may lie below the minor unit (USD 0.375 a record). The stored result, card
+and analysis keep full precision; the report never feeds a rounded figure back.
+
+### 27.6 Unknown: not for capital decisions
+
+A result graded Unknown is shown with whatever figures it has, and carries the
+banner `Unknown: not for capital decisions` (its `banner` key) and
+`excluded_from_totals: true`.
+The same holds for a refused run and for a result with no Validity Card, which is
+not graded; `banner_reason` says which. A graded result (A to D) has `banner: null`
+and `excluded_from_totals: false`.
+
+Nothing may sum an excluded result into a total. `report.may_be_totalled(report)` is
+the one test a total applies -- true only for a completed result whose
+`excluded_from_totals` is false -- and a total of several reports leaves out every
+one it refuses. No route serves a total yet (section 27.10).
+
+### 27.7 The scenario document
+
+`report.scenario_document(scenario)`, schema `mythos.economics.scenario/v1`: the
+scenario (as section 27.3), its build, and:
+
+- `parameters`: every parameter of the scenario version and of the parameter-set
+  version its build names, each with its provenance: its parent (the scenario, or
+  the set key and version), unit, currency, low, base and high as recorded, source
+  type, evidence reference, effective date, `fresh_until`, the distribution it
+  states, the parameters it was derived from, and `read_by` (each component input,
+  policy term or frequency that reads it; a parameter nothing reads has none);
+- `frequency`: the scenario's frequency parameter's name, or null;
+- `validity`: each simulation result of the version (uuid, seed, draws, status,
+  refusal code, when recorded) with its card's grade and digest (null where none),
+  whether its series are recorded, and its receipt id;
+- `evidence`: the SPINE evidence as ids, never copies (`spine_evidence`, the
+  receipt's), each effect's key, origin, observed effect, observation, SPINE effect,
+  asset and loss event, and each enabling finding's id, effect and role.
+
+### 27.8 Codes
+
+New codes: `seed_malformed` (a seed that is not a whole number from 0 to 2^64 - 1, as
+a JSON integer or its digits), `policy_unrecognised` (a policy section 27.2 does not
+name), `charts_record_malformed` (a series row that is not its own completed
+result's series: another scenario or tenant, a refused result, another schema or
+identity, a float, a digest that is not the series'), and `charts_failed` (an
+unexpected fault while making a series: nothing recorded). `field_missing`,
+`field_unrecognised` and `field_malformed` are the parameter-set API's (section
+19.3); `inputs_changed`, `result_not_reproduced` and `result_not_completed` are
+step 8's (section 26.7), and the run's codes step 7b's (section 25.7), each with its
+meaning.
+
+### 27.9 Safety
+
+None of the three routes is a stop, and none reads or writes anything a stop or the
+decision reads: each is in `safety.stops.NOT_STOPS` (the simulate route: "economics
+records, append-only; it starts and stops nothing"). The simulate route is in the
+write-route table of `tests/test_every_write_route_keeps_the_decision_current.py`
+as one that cannot move the decision, and every route is a classified sink of the
+canary harness. `SimulationCharts` has no account column, so removing an operator
+(a stop) never writes it. `report_api` imports the simulation, card, series and
+receipt services only inside a view, and `report` only inside a function:
+`test_django_and_the_urlconf_never_import_the_probabilistic_engine` finds
+`engine.charts` and `charts_service` unloaded after `django.setup()` and every
+URLconf, and `test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop`
+makes them unimportable before Django loads. A broken `report` module
+(`tests/economics_broken_report.py`) leaves the three routes unserved while the
+parameter-set and builder routes resolve and the scan's Stop answers 202 and is
+saved (`test_a_report_fault_never_takes_down_a_stop`).
+
+### 27.10 What is still not done
+
+- **No total across scenarios or deployments.** `may_be_totalled` is the rule any
+  later total must apply; nothing sums reports yet.
+- **No writer states a distribution or a frequency on master** (section 25.9): the
+  writer is in review (MVP step 6, part A). Until it merges, a stored scenario's
+  ranges resolve by section 25.1's rule, and many are refused; the report serves
+  such a refusal as a refusal.
+- **A receipt is signed only when asked** (`"receipt": true`) and only where the
+  engine publishes an `economics-receipt` key (section 26.9); otherwise the report
+  says no receipt is recorded.
+- **The report is JSON only**: no PDF, no rendered page, no frontend chart.
+- **The scenario document lists every result** of a version, unpaginated.
+- **The live review status** is read when the report is built: a review recorded
+  later changes the report's bytes and digest, as it should (the card keeps the
+  status at issue).
+
+### 27.11 Decisions this step takes, which the owner may change
+
+1. **The chart series are stored** (`SimulationCharts`, one per result), made once
+   when a simulation is requested, never when a report is read. Alternatives: draw
+   them on every GET (numpy and the run's whole cost on a read path); add them to
+   step 7b's record (changes its result digest for every stored run).
+   Recommendation: keep.
+2. **The banner is shown, and the result excluded from totals, when the grade is
+   Unknown, the run was refused, or no card is recorded.** Alternative: only when
+   graded Unknown. Recommendation: keep: an ungraded figure is no better evidence
+   than an Unknown one.
+3. **A receipt is signed only when the request asks.** Alternative: always sign on
+   simulate. Recommendation: keep until every engine publishes the
+   `economics-receipt` role, then make it the default.
+4. **Three named simulation policies, each at the 95th percentile.** Alternatives:
+   free draws and percentile in the request; a policy per deployment.
+   Recommendation: keep; add a policy when a buyer asks for another percentile.
+5. **Loss amounts are shown at the minor unit; a parameter's figures as recorded.**
+   Alternative: every figure at the minor unit (a unit cost of USD 0.375 would show
+   as 0.38 and no longer reproduce the components). Recommendation: keep.
+6. **The report carries the card by digest and its non-money fields**; the card's
+   figures and drivers are the report's summary and tornado at the minor unit.
+   Alternative: embed the whole card at full precision. Recommendation: keep: one
+   figure per quantity in a report.
+7. **`results/` without `?simulation=` serves the version's latest result**, by
+   record order. Alternative: require the result's uuid. Recommendation: keep.
+8. **The exceedance curve is read at nine fixed probabilities and needs ten draws
+   beyond a point; the histogram has 40 bins to P99.** Alternatives: return periods
+   chosen by the request; more bins. Recommendation: keep, and move them with the
+   series' version.
