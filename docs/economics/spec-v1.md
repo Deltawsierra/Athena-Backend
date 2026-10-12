@@ -941,6 +941,7 @@ is raised as that engine's, with its meaning, and is never published twice.
 | `parent_required` | a financial parameter without exactly one parent |
 | `parameter_set_sealed` | a parameter added to a recorded parameter-set version |
 | `parameter_not_found` | a component citing a parameter that is not recorded |
+| `observed_source_not_observable` | a parameter-set money entry (a variable in a money unit, or an insurance sublimit) stated as `MYTHOS_OBSERVED`: an assessment observes a rate, a count or a duration, never a money amount (also the builder's code for an effect's attribute, section 24.2) |
 
 ## 15. The formula catalogue
 
@@ -1187,7 +1188,13 @@ quantity never does. **Money follows section 13's strict decimal-string rule**: 
 value is a decimal string in the one spelling `-?[0-9]+(\.[0-9]+)?`, and a JSON
 number, an exponent, a sign, whitespace, an underscore or `NaN` is `not_decimal`.
 Dates are `YYYY-MM-DD` (`date_malformed`). Every rule of a parameter (section 14)
-holds for every entry.
+holds for every entry. **A money entry is never `MYTHOS_OBSERVED`**: a variable whose
+unit is money, or money per unit, hour or year, and an insurance sublimit, are the
+customer's own figures (`CUSTOMER_PROVIDED`, `EXPERT_ESTIMATE` or another source that
+is not an observation), and a version that states one as observed is refused whole
+(`observed_source_not_observable`, the builder's code and meaning: an assessment
+observes a rate, a count or a duration, never what the customer's money is). A
+quantity entry may be observed.
 
 A version's identity is its `content_digest`: `sha256:` and the SHA-256 of its
 canonical JSON (sorted keys, the one decimal spelling, `schema` included), the
@@ -1782,8 +1789,10 @@ An effect is a SPINE observed effect or a declared hypothetical effect:
   happens (the table's last column; `observed_source_not_observable` otherwise: a
   money amount or a market figure is `CUSTOMER_PROVIDED`, `EXPERT_ESTIMATE` or
   another source that is not an observation) -- and only where its `evidence_ref`
-  names the observed effect it came from, its SPINE effect digest
-  (`observed_source_unbound` otherwise). The signed document carries no figure:
+  is the observed effect it came from, its SPINE effect digest, alone or followed by
+  a space and a note (`observed_source_unbound` otherwise: a digest that is only
+  mentioned in the text, or that follows other words, binds nothing, and one
+  `evidence_ref` naming two digests binds only the first). The signed document carries no figure:
   what it proves is which effect was seen, and the figure must say it is that
   effect's.
 - `hypothetical`: declared by an analyst, it rests on at least one finding that
@@ -2036,14 +2045,19 @@ that gives the LARGER loss across ALL its effects, observed and hypothetical ali
 for each point separately -- low, base and high -- by the direction of the formula
 inputs that read it: the highest where the input increases the loss, the lowest where
 it decreases it (`templates.larger_loss`, `mythos.economics.larger-loss/v1`). Joined
-effects never understate, and adding an effect never lowers the event's loss
-(`test_adding_an_effect_never_lowers_the_events_loss`). The value does not depend on
+effects never understate, and adding an effect to an event never lowers that event's
+loss (`test_adding_an_effect_never_lowers_the_events_loss`; per event, not per
+scenario: section 24.9). The value does not depend on
 how the effects' keys are spelled (`test_joined_effects_read_the_larger_loss_whatever_their_keys`);
 an exact tie is one value, and the effect cited for it is the lowest key. One effect
 stating the attribute is read as itself. Two or more make a parameter of the scenario,
-`<event key>:<attribute>`, `CALCULATED`, holding from the latest date any of them holds
-and fresh no longer than the stalest, whose `derived_from` cites every effect
-attribute it was taken across; the events route lists them. Where the inputs accept
+`<event key>:<attribute>`, `CALCULATED`, whose `derived_from` cites every effect
+attribute it was taken across; the events route lists them. Its dates are those of the
+effects that SUPPLY a point of it, never of an effect whose figure is nowhere in the
+value: it holds from the latest date any of those holds from and is fresh no longer
+than the stalest of them (`test_a_merged_value_is_fresh_no_longer_than_the_stalest_figure_that_supplies_it`);
+where that latest date is after the stalest `fresh_until`, no parameter can be fresh
+before it holds, so the value is fresh until the day it holds from. Where the inputs accept
 only some sources -- the churn rate only the customer's own (section 31) -- an effect
 whose source they refuse takes no part while one they accept does, and two of the
 customer's own figures make a value that keeps that source type, since each point is
@@ -2175,7 +2189,7 @@ and the rest) is raised as that engine's:
 | `effect_without_finding` | a hypothetical effect rests on at least one finding that enables it; an observed effect rests on its signed observation |
 | `observed_source_on_hypothetical` | an attribute of a hypothetical effect is never MYTHOS_OBSERVED: nothing was observed; declare the effect observed, naming the SPINE observed effect, or give the attribute's real source |
 | `observed_source_not_observable` | MYTHOS_OBSERVED is only a rate, a count or a duration an assessment observes; a money amount or a market figure is CUSTOMER_PROVIDED, EXPERT_ESTIMATE or another source that is not an observation |
-| `observed_source_unbound` | a MYTHOS_OBSERVED attribute's evidence_ref names the observed effect it came from: its SPINE effect digest |
+| `observed_source_unbound` | a MYTHOS_OBSERVED attribute's evidence_ref is the observed effect it came from: its SPINE effect digest, alone or followed by a space and a note (a digest that is only mentioned, or that follows other text, binds nothing) |
 | `spine_effect_inconsistent` | every observation of one SPINE effect is declared with one effect type, asset and business process: one effect is one loss event |
 | `observed_effect_not_found` | the observed effect is not one of this deployment's SPINE observed effects |
 | `observed_effect_not_in_force` | the SPINE observed effect does not stand: its signature does not verify now, it is not signed by an observed-effect key, or its evidence is not the document its signature names |
@@ -2194,6 +2208,41 @@ and the rest) is raised as that engine's:
   effects of one key.
 - **Hypothetical effects have no time**: within one key they make one event, or join
   the key's first observed event.
+- **Monotonicity holds per event, not per scenario.** Adding an effect to an event
+  never lowers that event's loss (section 24.5), but adding an effect to a build can
+  regroup a scenario's events -- an event's members, the window's anchor and the event
+  a hypothetical effect joins all depend on the whole set of effects -- and a regrouped
+  scenario can state a LOWER gross than before. Two cases (every other attribute the
+  same in each; figures are success rate and exploitable window; the gross cash loss
+  at low / base / high):
+  - **A hypothetical effect moves.** One payments key. O1 is observed (0.9, 0.1 hours)
+    and H is hypothetical (0.1, 20 hours). H has no time, so it joins the key's first
+    event, O1's: one event at the larger loss across the two (0.9, 20 hours), and the
+    scenario's gross is 16,877,000 / 59,064,500 / 101,252,000. Add O2, observed 29
+    hours BEFORE O1 with a different tool (0.1, 0.1 hours). O2 now opens the first
+    window and O1, 29 hours later, falls outside it; H joins the key's first event,
+    now O2's. Two events: O2 with H (0.1, 20 hours: 6,564,500 at base) and O1 alone
+    (0.9, 0.1 hours: 297,312.50 at base). The gross falls to 1,963,375 / 6,861,812.50 /
+    11,760,250: the base falls from 59,064,500 to 6,861,812.50 by adding an effect.
+  - **The window moves.** One payments key. O1 (0.9, 0.1 hours) and O2 (0.1, 20 hours)
+    are observed 20 hours apart, with different tools: one event at the larger loss
+    (0.9, 20 hours), the same 16,877,000 / 59,064,500 / 101,252,000. Add U0 (0.1, 0.1
+    hours, a third tool) observed 10 hours BEFORE O1. The window now opens at U0; O1,
+    10 hours in, joins it; O2, 30 hours in, opens another. Two events -- U0 with O1
+    (297,312.50 at base) and O2 alone (6,564,500) -- and the same fall, from 59,064,500
+    to 6,861,812.50 at base.
+
+  Each event is still the larger loss of its effects, and a build is still
+  deterministic and repeatable; what is not held is that a build stating more effects
+  states at least the gross of one stating fewer. Options for the owner: **(a)** a
+  hypothetical effect joins every event of its key, not only the first, so which
+  event is first no longer decides where it lands; **(b)** re-anchor the window --
+  join any effect within 24 hours of ANY member of an event, not of its first --
+  so adding an effect can merge events but never split one; **(c)** accept it and
+  disclose it, as this section does. Merging two events still counts their shared
+  pool once (section 24.5), so even with (b) a scenario can state less than the sum of
+  the events it merged, by design, but not less because an event was split. The
+  recommendation is (a) and (b) together. None is implemented in this version.
 - **An attribute an effect does not state takes no part** in its event's larger
   loss: the others' value stands, and where none states it the component is unknown.
 - **One SPINE effect to one event is held by the builder and by `CausalEffect`'s
@@ -2254,11 +2303,17 @@ not taken):
    component would turn unknown as soon as a second effect stated a churn rate.
 10. **MYTHOS_OBSERVED is only observable attributes** -- the success rate, the
     exploitable window, the affected customers, the missed cases, the repeat count and
-    the outage's length -- and names its SPINE effect digest in its evidence. A money
-    amount (even one effect's size, `loss_per_event`) and a market figure are never
-    observed. Alternative: let an amount the signed document carries be observed,
+    the outage's length -- and its evidence is its SPINE effect digest, exactly (alone, or then a space and a
+    note), not a substring. A money amount (even one effect's size,
+    `loss_per_event`) and a market figure are never observed. Alternative: let an amount the signed document carries be observed,
     once the observed-effect document carries amounts; today it carries none.
 11. **The transaction only inserts**: every check runs before it, against the build's
     own rows. Alternative: keep each save's own checks inside the transaction (as
     the first draft did), holding SQLite's write lock while they read.
+12. **Monotonicity is per event, not per scenario** (review round 2; an owner
+    decision). This version takes (c), accept and disclose (the limitation above).
+    Alternatives: (a) a hypothetical effect joins every event of its key; (b) join
+    any effect within 24 hours of ANY member of an event; the recommendation is (a)
+    and (b) together, which would be a new grouping version
+    (`mythos.economics.grouping/v2`), not a change to this one.
 

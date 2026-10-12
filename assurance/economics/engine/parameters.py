@@ -97,6 +97,10 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "recorded version, and a change is a new version"
         ),
         "parameter_not_found": "a cited parameter is not a recorded financial parameter",
+        "observed_source_not_observable": (
+            "MYTHOS_OBSERVED is only a rate, a count or a duration an assessment observes; a money amount or a "
+            "market figure is CUSTOMER_PROVIDED, EXPERT_ESTIMATE or another source that is not an observation"
+        ),
     }
 )
 
