@@ -439,7 +439,11 @@ templates (section 24):
 Findings that enable one effect join that effect's one loss event, so five findings
 on one payment loss never multiply it; every observation of one SPINE effect joins
 one event too, and an event reads, for each input, the larger loss across all its
-effects, so joining never understates. An observed figure (`MYTHOS_OBSERVED`) is
+effects, so joining never understates. Under grouping v2 (the owner's decision of 12
+Oct 2026) an effect within 24 hours of any member of an event joins it, and a
+hypothetical effect takes part in every event of its key, so adding an effect never
+splits an event or moves one; it lowers the scenario's gross only by merging two
+events into one loss, which counts their shared pool once. An observed figure (`MYTHOS_OBSERVED`) is
 only a rate, a count or a duration, and its evidence is exactly the SPINE effect
 digest it was seen as (then, if wanted, a space and a note), never a mention of it; a
 parameter set's money figure is never observed. Every

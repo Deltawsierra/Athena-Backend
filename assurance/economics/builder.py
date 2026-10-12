@@ -16,10 +16,11 @@ version, :func:`build`:
 3. groups them into causal loss events by the GROUPING KEY (:func:`grouping_key`,
    :data:`GROUPING_VERSION`): the template (which encodes the effect type), the
    asset and the business process. Every observation of one SPINE effect joins ONE
-   event, however far apart; distinct observed effects of one key join one event
-   within a window of :data:`GROUPING_WINDOW` from its first. Findings enabling one
-   effect join that effect's event. The key never names a finding, so a finding
-   never makes an event of its own;
+   event, however far apart; an observed effect within :data:`GROUPING_WINDOW` of
+   ANY member of an event joins it, so a key's events are the connected components
+   of "within the window"; a hypothetical effect takes part in EVERY event of its
+   key. Findings enabling one effect join that effect's events. The key never names
+   a finding, so a finding never makes an event of its own;
 4. reads, for each attribute an event's template reads, the value that gives the
    LARGER loss across the event's effects, at each point
    (:func:`assurance.economics.engine.templates.larger_loss`): joined effects never
@@ -80,10 +81,16 @@ from .models import (
 )
 
 #: The builder. A change to what a build writes from its inputs is a new version.
-BUILDER_VERSION = "mythos.economics.scenario-builder/v1"
+#: v2 writes grouping v2's events (spec, section 24.9, decision 12).
+BUILDER_VERSION = "mythos.economics.scenario-builder/v2"
 #: The grouping key (:func:`grouping_key`) and its window. A change to either is a
-#: new version, so a build recorded under this one reads as it was built.
-GROUPING_VERSION = "mythos.economics.grouping/v1"
+#: new version, so a build recorded under this one reads as it was built. v2 (the
+#: owner's decision of 12 Oct 2026, options (a) and (b) of section 24.9): an
+#: effect within the window of ANY member of an event joins it, and a hypothetical
+#: effect takes part in every event of its key. v1 joined an effect within the
+#: window of an event's FIRST observation, and a hypothetical effect to the key's
+#: first event only, so adding an effect could split or move an event.
+GROUPING_VERSION = "mythos.economics.grouping/v2"
 GROUPING_WINDOW = timedelta(hours=24)
 
 #: The most effects and finding links one build declares. The body's size bounds
@@ -184,7 +191,7 @@ def _instant_text(instant: datetime | None) -> str | None:
 
 
 def event_key(key: tuple[str, ...], anchor: datetime | None) -> str:
-    """An event's key: stable for its grouping key and the instant its window opens
+    """An event's key: stable for its grouping key and its earliest observation
     (``undated`` for one of hypothetical effects only), whatever findings it has."""
     material = json.dumps([GROUPING_VERSION, *key, _instant_text(anchor) or "undated"], separators=(",", ":"))
     return "ev-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
@@ -192,10 +199,16 @@ def event_key(key: tuple[str, ...], anchor: datetime | None) -> str:
 
 @dataclass(frozen=True)
 class EventPlan:
-    """One loss event to write: its key, template, grouping key, the instant its
-    window opens, its effects (by when they occurred, the hypothetical ones last)
-    and the findings that enable them. Its components read, for each attribute, the
-    larger loss across ALL its effects: no effect leads."""
+    """One loss event to write: its key, template, grouping key, its earliest
+    observation (``anchor``), every effect taking part in it (by when they occurred,
+    the hypothetical ones last) and the findings that enable them. Its components
+    read, for each attribute, the larger loss across ALL its effects: no effect
+    leads.
+
+    ``joined`` names the effects that take part in this event but are RECORDED in
+    another: a hypothetical effect takes part in every event of its key, and its one
+    :class:`~assurance.economics.models.CausalEffect` row (and its findings') is in
+    the key's first event, so it is never counted as an occurrence of its own."""
 
     event_key: str
     template: tpl.Template
@@ -204,11 +217,12 @@ class EventPlan:
     effects: tuple[EffectInput, ...]
     selections: Mapping[str, tpl.Selection]
     links: tuple[LinkInput, ...]
+    joined: tuple[str, ...] = ()
 
     @property
     def spine_effect(self) -> str:
-        """The SPINE effect whose first observation opened the event's window; blank
-        for an event of hypothetical effects only."""
+        """The SPINE effect of the event's earliest observation; blank for an event
+        of hypothetical effects only."""
         return self.effects[0].spine_effect if self.anchor is not None else ""
 
     @property
@@ -238,6 +252,37 @@ def check_spine_declarations(effects: Iterable[EffectInput]) -> None:
             raise tpl.BuildRefused("spine_effect_inconsistent", f"{first.key} and {effect.key}: {effect.spine_effect}")
 
 
+def _connected(units: Mapping[str, list[EffectInput]]) -> list[list[EffectInput]]:
+    """The events one key's units make (grouping v2): the connected components of
+    "within :data:`GROUPING_WINDOW` of each other" over every observation of every
+    unit, a unit (every observation of one SPINE effect) held together whatever the
+    window. Ordered by their earliest observation.
+
+    On a line, two observations within the window are joined through every
+    observation between them, each within the window of the next: so it is enough
+    to join each observation, in time order, to the one before it when they are
+    within the window."""
+    names = sorted(units)
+    parent = {name: name for name in names}
+
+    def root(name: str) -> str:
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    observations = sorted((e.occurred_at, name, e.key) for name in names for e in units[name])
+    for (before, earlier, _), (after, later, _) in zip(observations, observations[1:]):
+        if after - before <= GROUPING_WINDOW:
+            a, b = root(earlier), root(later)
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+    events: dict[str, list[EffectInput]] = {}
+    for name in names:
+        events.setdefault(root(name), []).extend(units[name])
+    return sorted(events.values(), key=lambda members: min(e.occurred_at for e in members))
+
+
 def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[EventPlan, ...]:
     """The causal loss events ``effects`` and the findings enabling them (``links``)
     make. Pure and deterministic: the same inputs give the same events in the same
@@ -247,13 +292,16 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
     finding link, and every effect no finding enables -- are bucketed by
     :func:`grouping_key`. Within a bucket, the observed effects are first gathered by
     their SPINE effect: every observation of one effect is ONE unit, however far
-    apart they are (one effect is one event). The units are ordered by their first
-    observation, and an event's window opens at the first and runs
-    :data:`GROUPING_WINDOW`: a unit first observed within it joins that event, the
-    next one after it opens another. An effect with no instant (a hypothetical one)
-    cannot be placed in a window and is never counted as an occurrence of its own:
-    it joins the bucket's first event, or, in a bucket with no observed effect, they
-    make one event together. One SPINE effect declared two ways is refused
+    apart they are (one effect is one event). A unit with an observation within
+    :data:`GROUPING_WINDOW` of an observation of ANY member of an event joins that
+    event: a bucket's events are the connected components of "within the window"
+    (:func:`_connected`), so adding an effect can merge events but never split one or
+    move an effect from one to another. An effect with no instant (a hypothetical
+    one) cannot be placed in a window and is never counted as an occurrence of its
+    own: it takes part in EVERY event of its bucket -- recorded in the first, and
+    ``joined`` to the rest -- so which event is first never decides what it adds;
+    in a bucket with no observed effect, the hypothetical effects make one event
+    together. One SPINE effect declared two ways is refused
     (:func:`check_spine_declarations`)."""
     effects = tuple(effects)
     links = tuple(links)
@@ -282,21 +330,15 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
                 undated.append(effect)
             else:
                 units.setdefault(effect.spine_effect or f"effect:{effect.key}", []).append(effect)
-        windows: list[list[EffectInput]] = []
-        opened: list[datetime] = []
-        for _spine, unit in sorted(units.items(), key=lambda item: (item[1][0].occurred_at, item[0])):
-            first = unit[0].occurred_at
-            if windows and first - opened[-1] <= GROUPING_WINDOW:
-                windows[-1].extend(unit)
-            else:
-                windows.append(list(unit))
-                opened.append(first)
-        if undated:
-            if windows:
-                windows[0].extend(undated)
-            else:
-                windows.append(undated)
+        windows = _connected(units)
+        # Every hypothetical effect takes part in every event of the key; its row is
+        # recorded in the first (the earliest), and it is joined to the others.
+        recorded_elsewhere = tuple(sorted(e.key for e in undated)) if windows else ()
         for window in windows:
+            window.extend(undated)
+        if not windows and undated:
+            windows.append(list(undated))
+        for index, window in enumerate(windows):
             window.sort(key=_order)
             keys = {e.key for e in window}
             window_links = tuple(
@@ -315,6 +357,7 @@ def group(effects: Iterable[EffectInput], links: Iterable[LinkInput]) -> tuple[E
                     effects=tuple(window),
                     selections={e.key: selections[e.key] for e in window},
                     links=window_links,
+                    joined=recorded_elsewhere if index else (),
                 )
             )
     return tuple(sorted(plans, key=lambda p: p.event_key))
@@ -667,6 +710,10 @@ def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
         )
         events.append(event)
         for effect in plan.effects:
+            if effect.key in plan.joined:
+                # Recorded, with its findings, in its key's first event: here it takes
+                # part through its attributes, cited below like any effect's.
+                continue
             selection = plan.selections[effect.key]
             row = CausalEffect(
                 scenario=scenario,
@@ -691,8 +738,8 @@ def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
                 if link.effect == effect.key
             )
         # Each attribute the template reads, at the larger loss across ALL the event's
-        # effects: one effect stating it is read as itself; more make a parameter of
-        # the scenario that cites each (derived_from).
+        # effects, those joined to it included: one effect stating it is read as
+        # itself; more make a parameter of the scenario that cites each (derived_from).
         attributes: dict[str, Parameter] = {}
         for name, reading in sorted(tpl.readings(plan.template).items()):
             stated = {e.key: stored[e.key][name] for e in plan.effects if name in stored[e.key]}
@@ -840,8 +887,14 @@ def describe(scenario: FinancialScenario) -> dict:
     parameter set's variable, the effect's attribute, or the larger loss across the
     event's effects, citing each), its gross cash loss, its
     loss net of the parameter set's insurance where the set states a policy, and the
-    market-value line apart; and the scenario's totals."""
+    market-value line apart; and the scenario's totals.
+
+    Under grouping v2 an event lists every effect taking part in it: a hypothetical
+    effect of its key recorded in the key's first event is listed in every event of
+    the key, with its findings, and marked ``joined`` where its row is in another. A
+    build recorded under v1 reads as it was built: there it took part in one."""
     build_row = ScenarioBuild.objects.filter(scenario=scenario).first()
+    joins = build_row is not None and build_row.grouping_version == GROUPING_VERSION
     policy = None
     versions: dict[int, CustomerParameterSet] = {}
     if build_row is not None:
@@ -861,12 +914,28 @@ def describe(scenario: FinancialScenario) -> dict:
                 F("occurred_at").asc(nulls_last=True), "spine_effect", "effect_key"
             )
         )
+        first = effects[0] if effects else None
+        if joins and first is not None:
+            # The hypothetical effects of the event's key recorded in the key's first
+            # event: each takes part in this one too (grouping v2), after its
+            # observed effects, by key, as the plan ordered them.
+            effects += list(
+                CausalEffect.objects.filter(
+                    scenario=scenario,
+                    origin=tpl.Origin.HYPOTHETICAL.value,
+                    template_id=first.template_id,
+                    template_version=first.template_version,
+                    asset=first.asset,
+                    business_process=first.business_process,
+                )
+                .exclude(loss_event=event)
+                .order_by("effect_key")
+            )
         links = list(EffectFinding.objects.filter(effect__in=effects).order_by("finding", "id"))
         findings = {
             str(f.uuid): f
             for f in Finding.objects.filter(deployment_id=scenario.deployment_id, uuid__in={x.finding for x in links})
         }
-        first = effects[0] if effects else None
         chosen = tpl.CATALOGUE.get((first.template_id, first.template_version)) if first else None
         specs = {c.component_key: c for c in chosen.components} if chosen else {}
         component_rows = list(LossComponent.objects.filter(loss_event=event).order_by("id"))
@@ -930,6 +999,7 @@ def describe(scenario: FinancialScenario) -> dict:
                         "occurred_at": e.occurred_at.isoformat() if e.occurred_at else None,
                         "template": [e.template_id, e.template_version],
                         "in_scope_of": e.in_scope_of,
+                        "joined": e.loss_event_id != event.pk,
                         "attributes": {
                             row.name.partition(".")[2]: row.as_engine().as_dict() for row in e.attribute_rows()
                         },

@@ -546,9 +546,12 @@ def test_l2_the_database_refuses_a_code_written_past_save(deployment, people):
 def test_l3_a_run_uses_the_platform_sources_and_its_own_deployments_only(deployment):
     """The reviewer's P5: every tenant's sources were usable by any run."""
     other = Deployment.objects.create(name="other-tenant")
-    platform = _source(license_class="open")
+    # Every source here is trusted above unverified, so tenancy alone decides: a
+    # production run refuses an unverified one besides (the owner's decision of 12
+    # Oct 2026, tested below).
+    platform = _source(license_class="open", trust_tier="authoritative")
     mine = _source(deployment=deployment, license_class="customer", trust_tier="customer", source_key="revenue")
-    theirs = _source(deployment=other, license_class="customer", source_key="revenue")
+    theirs = _source(deployment=other, license_class="customer", trust_tier="customer", source_key="revenue")
     _source(deployment=deployment, source_key="unreviewed-feed")
     assert set(FinancialSource.objects.usable_for_production(deployment)) == {platform, mine}
     assert set(FinancialSource.objects.usable_for_production(other)) == {platform, theirs}
@@ -852,3 +855,89 @@ def test_r1_l5_a_book_reads_only_platform_and_the_runs_own_sources(deployment):
     book = snapshots.fx_book([mine], deployment=deployment)
     assert len(book.dates("SYNTHETIC-REF", "reference", "EUR", "USD")) == 9
 
+
+
+# ============================== the owner's decision of 12 Oct 2026: trust tiers
+
+
+def test_a_production_run_refuses_a_source_still_unverified(deployment):
+    """Before the first customer run, the owner decided that a production run never
+    relies on a source whose trust tier is still ``unverified`` (the default), even
+    under a reviewed licence. It is refused with a code of its own,
+    ``source_unverified``, naming the source, and left out of
+    ``usable_for_production``. A production run is one for a deployment in
+    ``production`` (the default) or ``other``, one that is not recorded, or no
+    deployment at all. A version recorded at a tier above unverified is used."""
+    assert deployment.environment == Deployment.Environment.PRODUCTION
+    other_env = Deployment.objects.create(name="payments-agent-other", environment=Deployment.Environment.OTHER)
+    unverified = _source(license_class="open")
+    assert unverified.trust_tier == "unverified"  # the default
+    runs = (deployment, deployment.pk, other_env, None)
+    for run in (*runs, 10**9):
+        assert unverified.production_use_refusal(run) == "source_unverified", run
+        with pytest.raises(SourceNotUsableForProduction) as refused:
+            unverified.check_usable_for_production(run)
+        assert refused.value.code == "source_unverified"
+        assert refused.value.detail == "source fed-h10-daily v1, trust tier unverified"
+    for run in runs:
+        assert not FinancialSource.objects.usable_for_production(run).exists()
+    # A tenant's own data, licensed as the customer's, is refused too until trusted.
+    own = _source(deployment=deployment, license_class="customer", source_key="revenue")
+    assert own.production_use_refusal(deployment) == "source_unverified"
+    # A version at a higher tier is usable; the unverified version stays refused.
+    raised = _source(license_class="open", trust_tier="authoritative")
+    trusted_own = _source(deployment=deployment, license_class="customer", trust_tier="customer", source_key="revenue")
+    assert (raised.version, trusted_own.version) == (2, 2)
+    for run in runs:
+        raised.check_usable_for_production(run)
+        assert unverified.production_use_refusal(run) == "source_unverified"
+    assert set(FinancialSource.objects.usable_for_production(deployment)) == {raised, trusted_own}
+    assert set(FinancialSource.objects.usable_for_production(None)) == {raised}
+    for tier in ("licensed_vendor", "benchmark"):
+        source = _source(source_key=f"feed-{tier.replace('_', '-')}", license_class="licensed", trust_tier=tier)
+        assert source.production_use_refusal(deployment) is None
+    # The refusals before it are unchanged, and come first.
+    assert _source(source_key="unreviewed-feed").production_use_refusal(deployment) == "unreviewed_license"
+    synthetic = snapshots.register_snapshot()
+    assert synthetic.production_use_refusal(deployment) == "synthetic_source"
+    other = Deployment.objects.create(name="other-tenant")
+    theirs = _source(deployment=other, license_class="customer", source_key="revenue")
+    assert theirs.production_use_refusal(deployment) == "cross_tenant_reference"
+
+
+@pytest.mark.parametrize("environment", [Deployment.Environment.DEV, Deployment.Environment.STAGING])
+def test_a_non_production_deployments_run_keeps_the_gate_as_it_was(environment):
+    """A run for a deployment RECORDED as ``dev`` or ``staging`` is not a production
+    run, and the gate is as it was before the decision: an unverified source under a
+    reviewed licence is usable, and the licence, synthetic-data and tenancy refusals
+    are unchanged. The stored environment decides, never the object handed in: once
+    the row says ``production``, the same run is refused."""
+    staging = Deployment.objects.create(name="payments-agent-test", environment=environment)
+    unverified = _source(license_class="open")
+    own = _source(deployment=staging, license_class="customer", source_key="revenue")
+    unreviewed = _source(source_key="unreviewed-feed")
+    other = Deployment.objects.create(name="other-tenant", environment=environment)
+    theirs = _source(deployment=other, license_class="customer", source_key="revenue")
+    synthetic = snapshots.register_snapshot()
+    assert {unverified.trust_tier, own.trust_tier} == {"unverified"}
+    assert set(FinancialSource.objects.usable_for_production(staging)) == {unverified, own}
+    for source in (unverified, own):
+        assert source.production_use_refusal(staging) is None
+        source.check_usable_for_production(staging)
+        source.check_usable_for_production(staging.pk)
+    for source, code in (
+        (unreviewed, "unreviewed_license"),
+        (synthetic, "synthetic_source"),
+        (theirs, "cross_tenant_reference"),
+    ):
+        with pytest.raises(SourceNotUsableForProduction) as refused:
+            source.check_usable_for_production(staging)
+        assert refused.value.code == code
+    stored = Deployment.objects.get(pk=staging.pk)
+    stored.environment = Deployment.Environment.PRODUCTION
+    stored.save()
+    assert staging.environment == environment  # the object handed in is stale
+    assert not FinancialSource.objects.usable_for_production(staging).exists()
+    with pytest.raises(SourceNotUsableForProduction) as refused:
+        unverified.check_usable_for_production(staging)
+    assert refused.value.code == "source_unverified"

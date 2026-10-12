@@ -113,8 +113,9 @@ class SeparationOfDutiesRefused(EconomicsRefused):
 
 
 class SourceNotUsableForProduction(EconomicsRefused):
-    """A production run asked to use a source whose license nobody has reviewed, or
-    another deployment's source."""
+    """A production run asked to use a source whose license nobody has reviewed, a
+    synthetic source, another deployment's source, or (a run that
+    :func:`runs_in_production`) a source still trusted as ``unverified``."""
 
 
 class AppendOnlyQuerySet(models.QuerySet):
@@ -201,6 +202,33 @@ def _require_text(**fields) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The deployment environments (``assurance.models.Deployment.Environment``, spelled
+#: here: that module imports this one) whose runs are not production runs. Every
+#: other -- ``production``, the default, and ``other``, which says nothing of whether
+#: the system serves customers -- is held as production.
+NON_PRODUCTION_ENVIRONMENTS = ("dev", "staging")
+
+
+def runs_in_production(deployment) -> bool:
+    """Whether a run for ``deployment`` (a deployment, its primary key, or ``None``)
+    is a production run, which never relies on a source still at trust tier
+    ``unverified`` (``source_unverified``; the owner's decision of 12 Oct 2026).
+
+    The deployment's STORED environment decides, never the caller's object: a run
+    for a deployment recorded as ``dev`` or ``staging`` is not a production run and
+    keeps the gate as it was (licence, synthetic data, tenancy). Anything else is:
+    a deployment in ``production`` (the default) or ``other``, one that is not
+    recorded, and a run for no deployment (``None``, platform-wide sources only). So
+    the rule is off only where a deployment is recorded as non-production."""
+    if deployment is None:
+        return True
+    model = FinancialSource._meta.get_field("deployment").related_model
+    environment = (
+        model._base_manager.filter(pk=getattr(deployment, "pk", deployment)).values_list("environment", flat=True).first()
+    )
+    return environment not in NON_PRODUCTION_ENVIRONMENTS
+
+
 class FinancialSourceQuerySet(AppendOnlyQuerySet):
     def usable_for_production(self, deployment):
         """The versions a production run for ``deployment`` may use: the
@@ -208,12 +236,18 @@ class FinancialSourceQuerySet(AppendOnlyQuerySet):
         license class someone has reviewed. ``unreviewed`` (the default) is never
         among them, and another deployment's source never is. ``deployment=None``
         is a run for no deployment: platform-wide sources only. A synthetic source
-        is never among them, whatever its licence."""
+        is never among them, whatever its licence. Where the run is a production
+        one (:func:`runs_in_production`), a source still trusted as ``unverified``
+        (the default) is not among them either."""
         reviewed = [c for c in _LICENSE_CODES if governance.production_use_refusal(c) is None]
         tenant = Q(deployment__isnull=True)
         if deployment is not None:
             tenant |= Q(deployment=deployment)
-        return self.filter(tenant, license_class__in=reviewed, synthetic=False)
+        usable = self.filter(tenant, license_class__in=reviewed, synthetic=False)
+        if runs_in_production(deployment):
+            trusted = [t for t in _TRUST_CODES if governance.production_trust_refusal(t) is None]
+            usable = usable.filter(trust_tier__in=trusted)
+        return usable
 
 
 class FinancialSource(_AppendOnly):
@@ -237,6 +271,13 @@ class FinancialSource(_AppendOnly):
     ``license_class`` defaults to ``unreviewed``, and an unreviewed source is never
     used by a production run: :meth:`check_usable_for_production` refuses it, and
     :meth:`FinancialSourceQuerySet.usable_for_production` leaves it out.
+
+    ``trust_tier`` defaults to ``unverified``, and a production run -- one for a
+    deployment not recorded as ``dev`` or ``staging`` (:func:`runs_in_production`)
+    -- never relies on an unverified source either (``source_unverified``; the
+    owner's decision of 12 Oct 2026). A version's tier never changes: a higher tier
+    is a new version, and no route, command or admin action records one yet (spec,
+    section 6), so who may raise a tier, and how, is still to be decided.
 
     ``synthetic`` marks made-up test data, such as the committed fixture snapshot
     (set by :func:`assurance.economics.snapshots.register_snapshot` from the
@@ -336,18 +377,27 @@ class FinancialSource(_AppendOnly):
 
     def production_use_refusal(self, deployment) -> str | None:
         """``None`` when a production run for ``deployment`` may use this version;
-        otherwise why not."""
+        otherwise why not. A run that :func:`runs_in_production` also never relies
+        on a version still trusted as ``unverified`` (``source_unverified``): only a
+        new version at a tier above it is usable."""
         refusal = governance.production_use_refusal(self.license_class, synthetic=self.synthetic)
         if refusal is not None:
             return refusal
         if self.deployment_id is not None and self.deployment_id != getattr(deployment, "pk", deployment):
             return "cross_tenant_reference"
+        if runs_in_production(deployment):
+            return governance.production_trust_refusal(self.trust_tier)
         return None
 
     def check_usable_for_production(self, deployment) -> None:
         """Raise :class:`SourceNotUsableForProduction` unless a production run for
-        ``deployment`` may use this version. Called by the run before it reads it."""
-        _refuse(self.production_use_refusal(deployment), SourceNotUsableForProduction)
+        ``deployment`` may use this version. Called by the run before it reads it.
+        The refusal names the source: its key, version and trust tier."""
+        _refuse(
+            self.production_use_refusal(deployment),
+            SourceNotUsableForProduction,
+            f"source {self.source_key} v{self.version}, trust tier {self.trust_tier}",
+        )
 
     def __str__(self) -> str:
         return f"{self.source_key} v{self.version} ({self.license_class})"
