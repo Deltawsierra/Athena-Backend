@@ -9,15 +9,18 @@ token, the closure-evidence, failsafe poll and failsafe service tokens, the
 signing key behind every signature this service verifies (a test keyring), a
 proxy's userinfo in the environment, a password in a sign-in body, and what a
 tenant sends in a request body or an upload. The service is driven down every
-PATH -- a scan that completes; one the engine refuses with a page that quotes the
-request back; one whose launch times out and is reconciled; a scan's Stop, and a
-Stop owed and delivered by ``manage.py deliver_owed_stops``; connector pushes and
+PATH -- a scan that completes; one, launched at a target with a login, the engine
+refuses with a page that quotes the request back; one whose launch times out and
+is reconciled; a scan's Stop, and a Stop owed and delivered by ``manage.py
+deliver_owed_stops``, each also through a same-host redirect; connector pushes and
 posture reads that succeed, fail with a page quoting the request, and run past
 their deadline; a closure recorded and forwarded, refused, and retried by
 ``manage.py retry_closure_forwards``; the gate's read and an observed effect; the
 failsafe's poll, a stop draft and the state read; a defender text and file scan;
-everything outbound with a credentialed proxy named in the environment; a route
-that raises -- and then every route that reads is read. After each path every
+everything outbound with a credentialed proxy named in the environment, the
+engine reached through it (a scan's Stop delivered, and owed and delivered, by
+it) and nothing else; a route that raises -- and then every route that reads is
+read. After each path every
 SINK is serialised whole and searched for every canary, however encoded
 (tests/canary_search.py, #76's search unchanged; a PDF's compressed streams are
 inflated first).
@@ -37,7 +40,8 @@ span attribute, is classified here -- so a new sink fails until this harness
 covers it.
 
 The SAFETY RULE: the scan's Stop and ``deliver_owed_stops`` are driven with every
-canary planted, and timed against their existing bounds
+canary planted -- directly, through a same-host redirect and through the
+environment's credentialed proxy -- and timed against their existing bounds
 (``test_a_stop_is_delivered_with_every_canary_planted_and_inside_its_bound``).
 Nothing this harness checks sits on a stop path; the withholding added on the
 outbound path never raises (``safety.outbound.quiet``) and costs microseconds.
@@ -230,7 +234,7 @@ DECLARATIONS: tuple[Declaration, ...] = (
         frozenset({"proxy.userinfo"}),
         _ALL,
         "safety/outbound.py",
-        "no proxy -- with or without credentials in it -- is read from ``HTTP_PROXY``, ``HTTPS_PROXY`` or ``ALL_PROXY``.",
+        "A proxy's userinfo is withheld from every error and answer.",
     ),
     Declaration(
         frozenset({"credential.key", "gate.token", "effect.token", "closure.token", "failsafe.poll_token",
@@ -269,11 +273,11 @@ MATRIX: dict[tuple[str, str], str] = {(o, s): _status(o, s) for o in ORIGINS for
 PATHS: dict[str, str] = {
     "boot": "health, a sign-in with a password, a token refresh",
     "scan_success": "an engagement, a scan that completes, its report downloaded and e-mailed",
-    "scan_failure": "a scan, a CVE classification and a defender text scan the engine refuses with a "
-    "page that quotes the request back, X-API-Key included",
+    "scan_failure": "a scan of a target with a login, a CVE classification and a defender text scan the "
+    "engine refuses with a page that quotes the request back, X-API-Key and the target included",
     "scan_timeout_and_retry": "a scan whose launch answer never comes, then its reconcile",
     "scan_stop": "a scan's Stop delivered; a Stop owed while the engine is down, and delivered by "
-    "manage.py deliver_owed_stops",
+    "manage.py deliver_owed_stops; both again with the engine's stop route answering 308 to its new path",
     "connectors": "a webhook and a posture binding written; pushes and reads that succeed, fail with "
     "a page quoting the request, and run past their deadline",
     "closure_forward": "a closure recorded by the engine service and forwarded; refused; retried by "
@@ -282,7 +286,9 @@ PATHS: dict[str, str] = {
     "and a signed assurance receipt",
     "failsafe": "the engines' poll, a stop draft on the service token, the state read",
     "uploads": "a defender text scan and a log file uploaded",
-    "proxy": "every outbound call with a credentialed proxy in the environment",
+    "proxy": "every outbound call with a credentialed proxy in the environment: the engine reached through "
+    "it (a scan launched and stopped; a Stop refused by the proxy's page quoting the request back, owed, "
+    "and delivered by manage.py deliver_owed_stops), every other call not",
     "route_raises": "a route that raises with a message, and a route that does not exist",
     "records": "claims derived, a provider and its assertion written, a retest opened",
     "read_everything": "every route that reads, over every object the paths made",
@@ -303,7 +309,7 @@ class Fake:
     """A loopback HTTP service. ``mode`` is ``"ok"``, ``"echo"`` (500 with a page that
     quotes the request back: its headers and its body, as a debugging proxy's error
     page does) or ``"stall"`` (no answer for STALL_SECONDS). ``routes`` answers
-    ``(method, path, headers, body) -> (status, json)``."""
+    ``(method, path, headers, body) -> (status, json)``, or ``(status, json, headers)``."""
 
     def __init__(self, name, routes):
         self.name = name
@@ -324,16 +330,20 @@ class Fake:
                     mode = fake.mode
                 if mode == "stall":
                     time.sleep(STALL_SECONDS)
+                headers = {}
                 if mode == "echo":
                     status, answer = 500, {
                         "detail": "upstream error",
                         "request": {"headers": dict(self.headers), "body": body.decode("utf-8", "replace")},
                     }
                 else:
-                    status, answer = fake.routes(self.command, self.path, dict(self.headers), body)
+                    status, answer, *more = fake.routes(self.command, self.path, dict(self.headers), body)
+                    headers = more[0] if more else {}
                 payload = json.dumps(answer).encode()
                 try:
                     self.send_response(status)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(payload)))
                     self.end_headers()
@@ -360,7 +370,9 @@ class Fake:
 class Engine:
     """The engine, as this backend reaches it: launches, a run's record, a stop, the
     defender, CVE classification, the failsafe's state, a receipt to sign, and the
-    governance reads. A run completes when it is read unless ``hold`` is set."""
+    governance reads. A run completes when it is read unless ``hold`` is set. With
+    ``moved_stop`` set, its stop route answers 308 to the same path with a trailing
+    slash, where the stop is taken."""
 
     def __init__(self, signing_key):
         from tests.test_a_lost_launch_answer_reads_unknown import ACCEPTED, COMPLETED
@@ -369,6 +381,7 @@ class Engine:
         self.signing_key = signing_key
         self.runs: dict[str, dict] = {}
         self.hold = False
+        self.moved_stop = False
         self.fake = Fake("engine", self.answer)
 
     def answer(self, method, path, headers, body):
@@ -387,8 +400,10 @@ class Engine:
                 "done": False, "reason": None, "result": None, "key_hash": "operator-key-hash",
             }
             return 202, dict(self.accepted, run_id=run_id, status_url=f"/api/scans/{run_id}")
-        if method == "POST" and path.startswith("/api/scans/") and path.endswith("/abort"):
-            run_id = path.removeprefix("/api/scans/").removesuffix("/abort")
+        if method == "POST" and path.startswith("/api/scans/") and path.endswith("/abort") and self.moved_stop:
+            return 308, {}, {"Location": path + "/"}
+        if method == "POST" and path.startswith("/api/scans/") and path.endswith(("/abort", "/abort/")):
+            run_id = path.removeprefix("/api/scans/").removesuffix("/").removesuffix("/abort")
             run = self.runs.get(run_id)
             if run is None:
                 return 404, {"detail": "No such scan run"}
@@ -421,6 +436,15 @@ def _service(method, path, headers, body):
     if method == "GET":
         return 200, {"items": [], "public_access_block": True, "encryption": "aws:kms"}
     return 201, {"id": "EXT-1", "key": "EXT-1"}
+
+
+@contextlib.contextmanager
+def _in_mode(fake, mode):
+    fake.mode = mode
+    try:
+        yield
+    finally:
+        fake.mode = "ok"
 
 
 def _closed_base() -> str:
@@ -839,10 +863,13 @@ class World:
         ).status_code
 
     def scan_failure(self, docs, signals):
+        from pentest.models import PentestScan
+
         admin = self.client(self.admin)
         self.engine.fake.mode = "echo"
         try:
-            launched = self._launch(docs, admin, self.engagement_id)
+            target = f"https://scanner:{CANARY['request.target_userinfo']}@offline.invalid/"
+            launched = self._launch(docs, admin, self.engagement_id, target)
             signals["launch"] = launched.status_code
             self.scan_ids.append(launched.json().get("scan_id"))
             signals["classify"] = self.call(
@@ -857,6 +884,8 @@ class World:
             self.engine.fake.mode = "ok"
         echoed = [h for _m, _p, h in self.engine.fake.seen if h.get("X-Api-Key") or h.get("X-API-Key")]
         signals["engine_got_key"] = bool(echoed)
+        # The scan the engine refused was launched with the login, and keeps it.
+        signals["failed_scan_has_a_login"] = PentestScan.objects.get(uuid=launched.json().get("scan_id")).target_url == target
         # The page quoting the request came back, and what this service kept of it
         # says the key was withheld: the leak was driven, not missed.
         failed = launched.json()
@@ -914,8 +943,51 @@ class World:
             signals["delivered"] = self.call(
                 docs, "api.answers", admin, "get", f"/api/pentest/scans/{owed_id}/", "pentest:detail_pentest_scan"
             ).json().get("stop", {}).get("state")
+
+            # The engine's stop route moved: it answers 308 to the same path with a
+            # trailing slash. The Stop, and an owed one deliver_owed_stops sends, land.
+            self.engine.moved_stop = True
+            signals["moved"] = self._stop_twice(
+                docs, admin, "through a same-host redirect", lambda: override_settings(CYBERENGINE_URL=_closed_base())
+            )
+            signals["moved_followed"] = any(
+                p.endswith("/abort/") for _m, p, _h in self.engine.fake.seen
+            )
         finally:
             self.engine.hold = False
+            self.engine.moved_stop = False
+
+    def _stop_twice(self, docs, admin, how, unanswered):
+        """A scan's Stop, delivered; and one owed while ``unanswered()`` holds (the
+        engine down, or refusing), then delivered by deliver_owed_stops -- each timed
+        against its bound. Their states, as the scan's answer says them."""
+        launched = self._launch(docs, admin, self.engagement_id)
+        scan_id = launched.json().get("scan_id")
+        self.scan_ids.append(scan_id)
+        began = time.monotonic()
+        stopped = self.call(
+            docs, "api.answers", admin, "post", f"/api/pentest/scans/{scan_id}/stop/",
+            "pentest:stop_pentest_scan", data={}, format="json",
+        )
+        self.timed.append(Timed(f"a scan's Stop, {how}", time.monotonic() - began, STOP_BOUND_SECONDS))
+        launched = self._launch(docs, admin, self.engagement_id)
+        owed_id = launched.json().get("scan_id")
+        self.scan_ids.append(owed_id)
+        with unanswered():
+            owed = self.call(
+                docs, "api.answers", admin, "post", f"/api/pentest/scans/{owed_id}/stop/",
+                "pentest:stop_pentest_scan", data={}, format="json",
+            )
+        _failed, elapsed = self.command(docs, "deliver_owed_stops")
+        self.timed.append(Timed(f"deliver_owed_stops, {how}", elapsed, DELIVER_BOUND_SECONDS))
+        delivered = self.call(
+            docs, "api.answers", admin, "get", f"/api/pentest/scans/{owed_id}/", "pentest:detail_pentest_scan"
+        ).json().get("stop", {}).get("state")
+        return {
+            "stop": (stopped.status_code, (stopped.json().get("stop") or {}).get("state")),
+            "owed": (owed.json().get("stop") or {}).get("state"),
+            "delivered": delivered,
+        }
 
     def connectors(self, docs, signals):
         from django.test.utils import override_settings
@@ -1069,7 +1141,17 @@ class World:
     def proxy(self, docs, signals):
         from django.test.utils import override_settings
 
-        proxy = Fake("proxy", lambda *a: (502, {"detail": "proxy"}))
+        # The engine is reached only through the proxy: its own address is closed, and
+        # the proxy answers for it as the engine. Anything else the proxy is asked for
+        # it refuses.
+        engine_base = _closed_base()
+
+        def through(method, path, headers, body):
+            if path.startswith(engine_base + "/"):
+                return self.engine.answer(method, path[len(engine_base):], headers, body)
+            return 502, {"detail": "proxy"}
+
+        proxy = Fake("proxy", through)
         url = proxy.base.replace("http://", f"http://egress:{CANARY['proxy.userinfo']}@")
         try:
             with pytest.MonkeyPatch.context() as mp:
@@ -1078,11 +1160,20 @@ class World:
                 for name in ("NO_PROXY", "no_proxy"):
                     mp.setenv(name, "")
                 admin = self.client(self.admin)
-                with override_settings(CYBERENGINE_URL=_closed_base()):
-                    signals["classify"] = self.call(
-                        docs, "api.answers", admin, "post", "/api/detection/cve/classify/", "detection:cve-classify",
-                        data={"text": "a CVE"}, format="json",
-                    ).status_code
+                with override_settings(CYBERENGINE_URL=engine_base):
+                    # The proxy's page quoting the request back, Proxy-Authorization and all.
+                    with _in_mode(proxy, "echo"):
+                        signals["classify"] = self.call(
+                            docs, "api.answers", admin, "post", "/api/detection/cve/classify/",
+                            "detection:cve-classify", data={"text": "a CVE"}, format="json",
+                        ).status_code
+                    self.engine.hold = True
+                    try:
+                        signals["engine"] = self._stop_twice(
+                            docs, admin, "through the environment's proxy", lambda: _in_mode(proxy, "echo")
+                        )
+                    finally:
+                        self.engine.hold = False
                 dep, finding = self._deployment()
                 base = f"/api/assurance/deployments/{dep.uuid}/"
                 signals["push"] = self.call(
@@ -1097,7 +1188,10 @@ class World:
                     self.command(docs, "retry_closure_forwards", "--unknown", raises=True)
         finally:
             proxy.close()
-        signals["proxy_used"] = len(proxy.seen)
+        signals["engine_through_proxy"] = sum(1 for _m, p, _h in proxy.seen if p.startswith(engine_base + "/"))
+        signals["others_through_proxy"] = [p for _m, p, _h in proxy.seen if not p.startswith(engine_base + "/")]
+        login = base64.b64encode(f"egress:{CANARY['proxy.userinfo']}".encode()).decode()
+        signals["proxy_got_login"] = any(h.get("Proxy-Authorization") == f"Basic {login}" for _m, _p, h in proxy.seen)
 
     def route_raises(self, docs, signals):
         from assurance import views
@@ -1469,6 +1563,19 @@ def test_every_route_is_a_sink_or_says_why_not(observed):
     assert never == [], f"a route that is a sink was never called: {never}"
 
 
+#: Every model the admin site renders rows of: each is searched as db, whole, on
+#: every path (``test_every_model_is_searched``). A model registered with the admin
+#: and not named here fails ``test_every_admin_route_renders_rows_the_db_search_covers``.
+ADMIN_MODELS = frozenset({
+    "accounts.CustomUser", "assurance.Asset", "assurance.ConnectorBinding", "assurance.DataBoundary",
+    "assurance.DecisionDispatchDue", "assurance.Deployment", "assurance.DispatchAttempt",
+    "assurance.DispatchPolicy", "assurance.Finding", "assurance.PostureBinding", "assurance.Provider",
+    "assurance.ProviderAssertion", "assurance.RemediationEvent", "assurance.RepairContract",
+    "assurance.Unknown", "audit.AuditLog", "auth.Group", "pentest.Engagement", "pentest.PentestScan",
+    "token_blacklist.BlacklistedToken", "token_blacklist.OutstandingToken",
+})
+
+
 def test_every_admin_route_renders_rows_the_db_search_covers():
     from django.contrib import admin
 
@@ -1477,9 +1584,10 @@ def test_every_admin_route_renders_rows_the_db_search_covers():
     served = {name for name in walk() if _is_admin(name)}
     assert served, "no admin route found"
     registered = {m._meta.label for m in admin.site._registry}
-    from django.apps import apps
-
-    assert registered <= {m._meta.label for m in apps.get_models()}, registered
+    assert registered == ADMIN_MODELS, {
+        "registered, not named here": sorted(registered - ADMIN_MODELS),
+        "named here, not registered": sorted(ADMIN_MODELS - registered),
+    }
 
 
 #: Every model, and what its rows hold. Every row of every one is searched as db.
@@ -1629,10 +1737,13 @@ def test_every_path_ran(observed):
     assert s["scan_success"]["pdf"] == 200
     assert s["scan_failure"]["engine_got_key"] is True
     assert s["scan_failure"]["echo_answered"] is True, s["scan_failure"]
+    assert s["scan_failure"]["failed_scan_has_a_login"] is True, s["scan_failure"]
     assert s["scan_timeout_and_retry"]["status"] == "unknown", s["scan_timeout_and_retry"]
     assert s["scan_stop"]["stop"][1] == "delivered", s["scan_stop"]
     assert s["scan_stop"]["owed"][1] == "owed" and s["scan_stop"]["owed"][2], s["scan_stop"]
     assert s["scan_stop"]["delivered"] == "delivered", s["scan_stop"]
+    assert s["scan_stop"]["moved"] == {"stop": (200, "delivered"), "owed": "owed", "delivered": "delivered"}, s["scan_stop"]
+    assert s["scan_stop"]["moved_followed"] is True, s["scan_stop"]
     assert s["connectors"]["bind_webhook"] == 201 and s["connectors"]["bind_posture"] == 201, s["connectors"]
     assert s["connectors"]["pushes"]["ok"] == (200, True), s["connectors"]
     assert s["connectors"]["pushes"]["echo"][1] is False, s["connectors"]
@@ -1643,7 +1754,9 @@ def test_every_path_ran(observed):
     assert s["gate_and_effects"]["gate_read"] == 200, s["gate_and_effects"]
     assert s["gate_and_effects"]["effect"] == "recorded", s["gate_and_effects"]
     assert s["failsafe"]["poll"] == 200 and s["failsafe"]["draft"] in (200, 201), s["failsafe"]
-    assert s["proxy"]["proxy_used"] == 0, "an outbound call went through the environment's proxy"
+    assert s["proxy"]["engine"] == {"stop": (200, "delivered"), "owed": "owed", "delivered": "delivered"}, s["proxy"]
+    assert s["proxy"]["engine_through_proxy"] > 0 and s["proxy"]["proxy_got_login"] is True, s["proxy"]
+    assert s["proxy"]["others_through_proxy"] == [], "a call off the engine's lane went through the environment's proxy"
     assert s["route_raises"]["raised"] == 500 and s["route_raises"]["missing"] == 404, s["route_raises"]
     assert s["records"]["claims"] > 0 and s["records"]["provider"] == 201, s["records"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
@@ -1675,6 +1788,8 @@ def test_a_stop_is_delivered_with_every_canary_planted_and_inside_its_bound(obse
     assert {t.what for t in observed.timed} >= {
         "a scan's Stop, delivered", "a scan's Stop, owed", "deliver_owed_stops, engine down",
         "deliver_owed_stops, delivered", "a pause drafted on the service token",
+        "a scan's Stop, through a same-host redirect", "deliver_owed_stops, through a same-host redirect",
+        "a scan's Stop, through the environment's proxy", "deliver_owed_stops, through the environment's proxy",
     }
     late = [(t.what, round(t.seconds, 3), t.bound) for t in observed.timed if t.seconds > t.bound]
     assert late == [], late

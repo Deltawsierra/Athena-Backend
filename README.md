@@ -580,14 +580,35 @@ sends is the record itself in most of those places; where it is found is printed
 
 Every request this service sends with `requests` itself -- to the engine, from the
 defender gateway, to a customer's connector or posture source, and the closure
-forward to Minotaur -- goes through `safety/outbound.py`: no redirect is followed,
-nothing is read from the environment (no `.netrc` login, no proxy), an error is
-cut to the scheme, host and port of any URL in it with every header value
-withheld, and an answer is read with every credential the request carried
-withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
-A deployment that reached the engine or a connector through `HTTP_PROXY` or
-`HTTPS_PROXY` must reach it directly: no call site here needs a proxy, and one
-that comes to need one names it in a setting of its own.
+forward to Minotaur -- goes through `safety/outbound.py`: no `.netrc` login is
+read, an error is cut to the scheme, host and port of any URL in it with every
+header value withheld, and an answer is read with every credential the request
+carried withheld from its body (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`).
+
+- **The engine** (the engine client: a scan's launch, its status, its Stop, file
+  uploads and every other engine call) follows a redirect only while it stays on
+  the engine's host: a 307 or 308, and a 301, 302 or 303 answering a GET, to the
+  same host (compared case-insensitively after IDNA) at any port, with the scheme
+  kept or moved from http to https, at most three hops, sending the method, body
+  and key again. Another host, https to http, a 301, 302 or 303 answering a POST,
+  and a fourth hop are refused and nothing is sent where they point. It is
+  reached through the proxy the process environment names (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY`, read by `urllib.request.getproxies()`), and directly
+  for a host `NO_PROXY` names; a proxy's userinfo is withheld from every error
+  and answer. An engine a deployment reaches only through its proxy, or that
+  moved its stop route or onto https, still hears a scan's Stop.
+- **Everything else** -- the defender gateway, a connector, a posture source, the
+  closure forward -- follows no redirect at all and reads no proxy: a deployment
+  that reached a connector or posture source through `HTTP_PROXY` or `HTTPS_PROXY`
+  must reach it directly, and a call site that comes to need a proxy names it in
+  a setting of its own.
+
+A scan target's login (`user:password@` in its URL) is kept on the scan, since a
+reconcile sends the launch again unchanged, and is withheld from every error the
+engine client raises for a call carrying it, and from every text the scan stores
+or answers: an engine's refusal may quote the launch back. It is never withheld
+from the engine's answer before it is read, so a login can never rewrite the run
+id a Stop names.
 
 ## Before deploying
 
