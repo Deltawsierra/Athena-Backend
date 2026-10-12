@@ -679,6 +679,22 @@ class Resolved:
     digest: str
 
 
+def check_set_distributions(rows: Iterable[FinancialParameter]) -> None:
+    """Each distribution the named parameter-set version states, held again to the
+    rule a run applies NOW (spec, sections 19.4 and 25.1; review round 1, LOW-3): a
+    version recorded under an earlier rule or floor is refused here, with the run's
+    code and detail word for word, never built and then refused by its run. A version
+    that states none never imports the probabilistic engine; one that does while the
+    engine will not import is :class:`~.engine.parameter_set.ProbabilisticEngineUnavailable`
+    (503), and nothing is built."""
+    stated = sorted((row for row in rows if row.distribution is not None), key=lambda row: (row.name, row.id))
+    if not stated:
+        return
+    pset.probabilistic_engine("the parameter set's distributions")
+    for row in stated:
+        row.checked_distribution(row.as_engine())
+
+
 def resolve(deployment, request: BuildRequest) -> Resolved:
     """Resolve every reference of ``request`` in ``deployment``, and only there."""
     version = CustomerParameterSet.objects.filter(
@@ -689,6 +705,7 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     rows = version.parameter_rows()
     if not version.intact(rows):
         raise tpl.BuildRefused("parameter_set_not_found", f"{request.set_key} version {request.set_version} is not intact")
+    check_set_distributions(rows)
     variables = version.content(rows).variables
 
     wanted = {e.asset for e in request.effects}

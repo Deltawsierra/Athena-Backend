@@ -413,9 +413,11 @@ a deployment-scoped, versioned parameter set (section 19):
   or analyst only, attributed to the caller. Each entry may state the distribution
   it draws from in a simulation, and the document the scenario's frequency (events
   a year, with its count distribution): each is held to its own low, base and high
-  before anything is written (a continuous one from both sides, a count by its mean,
-  since its figures are values of its rate), and a contradiction is refused naming
-  the variable and the test it failed (section 19.4).
+  before anything is written (from both sides, a count on any other row included;
+  the frequency, whose figures are values of its rate, by the rate its count
+  implies, a fixed rate only as a Poisson of it), and a contradiction is refused
+  naming the variable and the test it failed (section 19.4). A build re-checks the
+  distributions of the version it names, under the rule then in force.
 
 A deployment the caller cannot see is 404. The body is strict JSON of at most 64
 KiB (413 otherwise): an unknown field, a JSON number where a decimal string
@@ -470,8 +472,10 @@ else; neither is a stop.
 (section 25): every parameter draws from the distribution it states (one that holds
 its own low, base and high: a continuous one from both sides, its base between its P5
 and P95, its median between the low and the high, and at least half its mass between
-them, never on a fixed row; a count, whose figures are values of its rate, by its mean
-between the low and the high, a fixed rate included), or a point mass, or an expert's
+them, never on a fixed row, a count on any row but the frequency included; the
+frequency, whose figures are values of its rate, by the rate its count implies: its
+exact mean, and the implied rate's median and half its mass between the low and the
+high, a fixed rate only as a Poisson of it), or a point mass, or an expert's
 PERT, or, where the
 builder joined several effects' figures, from each of theirs taking the larger loss,
 or is refused; the frequency is the one the parameter-set version states; every

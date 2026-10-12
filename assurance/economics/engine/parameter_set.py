@@ -252,6 +252,19 @@ def _parameter(name: str, unit: Unit, entry, path: str) -> Parameter:
     )
 
 
+def probabilistic_engine(path: str):
+    """The probabilistic engine (``scenario_simulation``, and numpy with it), imported
+    now, or :class:`ProbabilisticEngineUnavailable`: ANY fault importing it, as a run
+    maps any to ``engine_unavailable`` (review round 1, NIT-2). Only the fault's type is
+    kept: its message may name a path or a library."""
+    try:
+        return importlib.import_module(_PROBABILISTIC_ENGINE)
+    except Exception as error:  # noqa: BLE001 - any import fault of numpy or the engine is a returned 503
+        raise ProbabilisticEngineUnavailable(
+            f"{path}: the probabilistic engine will not import ({type(error).__name__})"
+        ) from None
+
+
 def stated_distribution(entry, path: str) -> dict | None:
     """The distribution ``entry`` states, in its one stored spelling (read exactly by
     ``scenario_simulation.parse_stated``: a catalogue id and version, native
@@ -260,10 +273,7 @@ def stated_distribution(entry, path: str) -> dict | None:
     Whether it holds the entry's own figures is the record's check, the run's test."""
     if not isinstance(entry, dict) or "distribution" not in entry:
         return None
-    try:
-        engine = importlib.import_module(_PROBABILISTIC_ENGINE)
-    except ImportError as error:
-        raise ProbabilisticEngineUnavailable(f"{path}.distribution: {type(error).__name__}: {error}") from None
+    engine = probabilistic_engine(f"{path}.distribution")
     try:
         stated = engine.parse_stated(entry["distribution"], f"{path}.distribution")
     except engine.ScenarioSimulationRefused as refused:

@@ -25,8 +25,8 @@ stored result's sensitivity on its own draws, grades it, writes its Financial
 Exposure Validity Card and signs its Financial Exposure Receipt, and serves no route
 either. MVP step 6 gives a stated distribution and the scenario's frequency their
 writers, the parameter set and the builder, and holds every stated distribution to
-its row's figures: a continuous one from both sides, a count by its rate (sections
-19.4 and 25.1).
+its row's figures from both sides, and the frequency by the rate its count implies
+(sections 19.4 and 25.1).
 
 ## Contents
 
@@ -1339,14 +1339,22 @@ row is checked, it is held to its row by the simulation's own test, the one a ru
 applies (section 25.1): built by step 7a's catalogue with all its checks
 (`expert_not_allowed` for an expert range a customer's figure states), fitting its unit
 (`distribution_not_for_unit`), and holding its figures (`distribution_contradicts_range`,
-naming the variable and the test it failed): a continuous distribution from both sides
-and never on a fixed row (`distribution_on_fixed_row`); a count, whose figures are
-values of its rate, by its mean, a fixed rate included. A frequency must state a count
-distribution (`field_missing` without one, `frequency_not_a_count`).
+naming the variable and the test it failed): every stated distribution from both sides
+and never on a fixed row (`distribution_on_fixed_row`), a count on any row but the
+frequency included; the frequency, whose figures are values of its rate, by the rate
+its count implies, a fixed rate only as a Poisson of that rate. A frequency must state
+a count distribution (`field_missing` without one, `frequency_not_a_count`). Only the
+fault's type is kept when the probabilistic engine will not import, for any fault
+(503, nothing recorded; review round 1, NIT-2).
 
-**Write time and run time agree.** Both call one function, `check_fits_range`, on the
-row as stored: the refusal a POST gives is, code and detail word for word, the refusal
-a run gives a row recorded before the rule (`test_write_time_and_run_time_refusals_agree`).
+**Write time, build time and run time agree.** All three call one function,
+`check_fits_range`, on the row as stored: the refusal a POST gives is, code and detail
+word for word, the refusal a build gives a version recorded before the rule or under
+an earlier floor (`builder.check_set_distributions` re-checks every distribution the
+named version states, review round 1, LOW-3), and the refusal a run gives a scenario
+built from it (`test_write_time_and_run_time_refusals_agree`). A build of a version
+that states a distribution needs the probabilistic engine: 503 while it will not
+import, and nothing built.
 
 **The transaction only inserts.** Every check of the version and of each of its rows,
 each stated distribution's test included, runs before the version's transaction
@@ -2584,61 +2592,96 @@ distribution, decided by this rule and recorded with the run (`parameters.<name>
    [0, 1]; a count from a count, severity or expert distribution; any other unit from a
    severity distribution or an expert range at or above zero. It must also **hold the
    row's own figures** (`check_fits_range`, `distribution_contradicts_range`, naming the
-   test it failed), each figure compared as the binary64 the run draws. How depends on
-   what the distribution is a distribution of.
+   test it failed), each figure compared as the binary64 the run draws (the
+   frequency's mean exactly). How depends on what the figure is.
 
-   **A continuous distribution** (a severity, a rate or an expert range) describes the
-   figure itself, so it holds the row **from both sides**, four tests in this order
-   (`RANGE_TESTS`):
+   **Every stated distribution but the frequency's** -- a severity, a rate, an expert
+   range, and a count stated on any other count row (an observed repeat count, a
+   number of affected customers: the count itself) -- describes the figure itself, so
+   it holds the row **from both sides**, four tests in this order (`RANGE_TESTS`):
    - `support`: the low and the high inside the closure of its support (a lognormal or
      gamma from 0 up; a rate from 0 to 1; a PERT or triangular from its minimum to its
      maximum; a generalized Pareto from its threshold, up to `threshold - scale/shape`
-     where the shape is negative; a splice from 0 to its tail's end);
+     where the shape is negative; a splice from 0 to its tail's end; a count from 0 up);
    - `base`: the base between the distribution's P5 and P95 (`RANGE_FIT_PERCENTILES`);
-   - `median`: its median between the low and the high, low <= P50 <= high;
+   - `median`: its median between the low and the high, low <= P50 <= high, both
+     included;
    - `mass`: at least `RANGE_MASS_FLOOR` (0.5, one constant) of its mass between the
-     low and the high, both included: P(low <= X <= high) >= 0.5 (`mass_between`).
+     low and the high, both included: P(low <= X <= high) >= 0.5 (`mass_between`; a
+     count's mass is that of the whole numbers in the range).
 
    And it is stated only on a range: a row whose low, base and high are one figure is a
-   point mass (rule 2), and a continuous distribution stated on it is refused
-   (`distribution_on_fixed_row`). The first two tests alone were one-sided: a gamma
-   whose median lies far below the row's low held a base below its P95 and a low
-   inside its support, and fitted. A lognormal(0, 1) stated on 100,000 / 200,000 /
-   400,000 would run with a mean of 1.63; a gamma of shape 0.2 and mean 25,000 on
-   20,000 / 25,000 / 32,000 has its median at 2,593. Each is refused, and the refusal
-   names the test it failed, the parameter and its figures, and the distribution's
-   support, P5 to P95, P50 and mass in range, so the conflict is surfaced, never
-   resolved by silently taking one (owner's specification, section 27).
+   point mass (rule 2), and a distribution stated on it is refused
+   (`distribution_on_fixed_row`), a count on a fixed count row included (review round
+   1, MEDIUM-1: the reviewer's ZIP(0.5, 6) on an observed repeat count of 3 / 3 / 3,
+   half of whose draws said the effect never repeated, was built and drawn from). The
+   first two tests alone were one-sided: a gamma whose median lies far below the row's
+   low held a base below its P95 and a low inside its support, and fitted. A
+   lognormal(0, 1) stated on 100,000 / 200,000 / 400,000 would run with a mean of
+   1.63; a gamma of shape 0.2 and mean 25,000 on 20,000 / 25,000 / 32,000 has its
+   median at 2,593. Each is refused, and the refusal names the test it failed, the
+   parameter and its figures, and the distribution's support, P5 to P95, P50 and mass
+   in range, each in its shortest round-trip spelling (review round 1, NIT-1: a mass of
+   0.49995 is printed so, never as 0.5), so the conflict is surfaced, never resolved by
+   silently taking one (owner's specification, section 27). The bounds are inclusive:
+   Triangular(0, 1, 2) on 1 / 1.5 / 2 has its median at the low and exactly half its
+   mass in range, and holds; on 1 / 1.5 / 1.99 it is refused
+   (`test_the_floor_and_the_median_are_inclusive`).
 
-   **A count** (a distribution the catalogue marks `DISCRETE`: a Poisson, negative
-   binomial or zero-inflated Poisson, the frequency's or any count parameter's) is
-   another matter. Its row's low, base and high are **values of its rate**, which the
-   formulas multiply (the frequency: events a year), and the distribution says how the
-   count varies from year to year GIVEN the rate. Its yearly spread is not compared with
-   the rate's uncertainty, so it is held to three tests in this order
-   (`COUNT_RANGE_TESTS`), never to its median or its mass in range:
+   **The frequency** (the parameter named `frequency`, which `resolve_frequency`
+   checks; it states a Poisson, negative binomial or zero-inflated Poisson) is another
+   matter. Its row's low, base and high are **values of its rate**, which the formulas
+   multiply (events a year), and its count distribution says how the count varies from
+   year to year GIVEN the rate, and how uncertain the rate is. The count's yearly
+   spread is not compared with the row; **the rate its count implies** is
+   (`implied_rate`):
+   - a Poisson(lambda): the rate lambda, a point;
+   - a negative binomial (numpy's size r and probability p, failures before the r-th
+     success): a Poisson whose rate is **Gamma(size, (1 - p) / p)** -- shape r, scale
+     (1 - p) / p -- the Gamma-Poisson mixture, whose mean r (1 - p) / p and variance
+     r (1 - p) / p^2 are the negative binomial's;
+   - a zero-inflated Poisson(pi, lambda): a rate of 0 with probability pi, and lambda
+     otherwise (a point where pi is 0).
+
+   It is held to five tests in this order (`FREQUENCY_RANGE_TESTS`):
    - `support`: as above (from 0 up);
-   - `rate`: its mean, the catalogue's exact one, between the low and the high; a count
-     whose mean is infinite or undefined is refused;
-   - `base`: its base at or above its P5 and below the count after its P95 (round 2: a
-     count's percentiles are whole numbers and its base a rate; a Poisson rarer than
-     once in twenty years has a P95 of 0 and holds a base of its own rate,
+   - `rate`: the count's mean between the low and the high, compared EXACTLY, the mean
+     computed from the stated decimal parameters by its closed form (`exact_count_mean`:
+     lambda; r (1 - p) / p; (1 - pi) lambda; review round 1, LOW-2: ZIP(0.7, 1)'s mean is
+     0.3, which binary64 makes 0.30000000000000004, above a high of 0.3);
+   - `base`: its base at or above the count's P5 and below the count after its P95
+     (round 2: a count's percentiles are whole numbers and its base a rate; a Poisson
+     rarer than once in twenty years has a P95 of 0 and holds a base of its own rate,
      `test_a_rare_count_holds_its_own_rate`). Kept because it refuses what the rate
      test does not: a base far from the mean while the mean is still in range, as
      0 / 1 / 2 stating Poisson(0.02) (rate 0.02, P95 count 0, a base of 1) or 0 / 10 /
      20 stating Poisson(1) (P95 count 3, a base of 10)
-     (`test_round_2s_base_rule_refuses_what_the_rate_test_does_not`).
+     (`test_round_2s_base_rule_refuses_what_the_rate_test_does_not`);
+   - `rate_median`: the implied rate's median between the low and the high (a
+     Gamma's P50; a zero-inflated Poisson's is 0 where pi is at least one half);
+   - `rate_mass`: at least `RANGE_MASS_FLOOR` of the implied rate between the low and
+     the high, both included (exact for a point, and for a zero and a point).
 
+   The last two are review round 1's MEDIUM-2: bounding the mean alone reopened the
+   one-sided hole for an over-dispersed count. A negative binomial of mean 1,200 on
+   1,000 / 1,200 / 1,400 holds the mean test at every size, but at size 0.1 its rate's
+   median is 7 a year and only 2.5% of its rate lies in range; sizes 0.1, 0.3 and 1 are
+   refused by the rate's median (7, 293, 832), size 10 by its mass (40%), and sizes 50
+   and 100 hold (76% and 91%) (`test_the_frequencys_figures_bound_the_rate_its_count_implies`).
    So Poisson(5) on 4 / 5 / 6 holds (its rate is 5, though only 49.7% of a year's count
    falls in 4 to 6), and so does Poisson(0.05) on 0.01 / 0.05 / 0.2 (no whole number
    lies in that range, which says nothing about the rate); Poisson(4) on 1 / 2 / 3 is
    refused (its rate, 4, is above the high), as is a negative binomial whose mean lies
-   above the high. **A count may state a fixed rate**: 2 / 2 / 2 with Poisson(2) is a
-   rate known exactly whose count still varies, and the rate test asks that its mean
-   be that figure, so Poisson(3) on 2 / 2 / 2 is refused. The row is checked when it is
-   written, with the engine's code (`EngineRefused`), and stored in the one spelling; it
-   is checked again when it is run, by the same function, and the two refusals agree
-   word for word (section 19.4).
+   above the high, and a zero-inflated Poisson(0.5, 4) on 1 / 2 / 4 (its rate is 0 in
+   half its years). **A fixed rate is a Poisson of that rate**: 2 / 2 / 2 with
+   Poisson(2) is a rate known exactly whose count still varies, and the rate test asks
+   that its mean be exactly that figure, so Poisson(3) on 2 / 2 / 2 is refused; a count
+   whose implied rate is not that point (a negative binomial, or a zero-inflated
+   Poisson with pi above 0: ZIP(0.7, 1) on 0.3 / 0.3 / 0.3, whose mean is 0.3) states
+   the rate uncertain, which a fixed row denies (`distribution_on_fixed_row`). The row
+   is checked when it is written, with the engine's code (`EngineRefused`), and stored
+   in the one spelling; it is checked again when a build names its version and when it
+   is run, by the same function, and the refusals agree word for word (section 19.4).
 2. **A point mass** where it states none and its low, base and high are one figure.
    A point mass draws nothing.
 3. **PERT(low, base, high)**, weight 4, where it states none, its values are a range,
@@ -2962,10 +3005,17 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
    between its P5 and P95 and the low and the high inside the closure of its support, as
    before; its median between the low and the high; and at least `RANGE_MASS_FLOOR`,
    0.5, of its mass between them, both included; and never on a fixed row (low = base =
-   high: `distribution_on_fixed_row`, the row is a point mass). A count is held to its
-   rate instead (decision 12): its mean between the low and the high, its support, and
-   round 2's base rule. Refused otherwise (`distribution_contradicts_range`, naming the
-   parameter and the test it failed), at write and at run time, by one function. The
+   high: `distribution_on_fixed_row`, the row is a point mass). A count stated on any
+   row but the frequency is held so too: its figures are the count itself (review
+   round 1, MEDIUM-1, the lead's call; an observed repeat count stating ZIP(0.5, 6) on
+   3 / 3 / 3 is refused). The frequency is held to the rate its count implies instead
+   (decision 12). Refused otherwise (`distribution_contradicts_range`, naming the
+   parameter and the test it failed, each compared figure in full), at write, build and
+   run time, by one function (a build re-checks its set version's distributions under
+   the rule then in force: review round 1, LOW-3). Alternative for observed counts,
+   not taken: refuse any stated distribution on a `MYTHOS_OBSERVED` attribute (the
+   observation is the figure); the fixed-row refusal already refuses one on a fixed
+   observed figure, and an observed range may state one that holds it. The
    thresholds are the owner's: P5 and P95, the closed support (so a low of 0 fits a
    lognormal or a gamma), and the floor of 0.5. With the floor at 0.5, a median outside
    the range leaves at most half the mass inside it, so the mass test alone refuses
@@ -2990,27 +3040,38 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
     the first's row is returned. Alternative: the save's own checks inside the
     transaction, as first drafted, which a test on one connection cannot race (the
     other row would be rolled back with the savepoint).
-12. **A frequency's figures are its rate, not its count; one frequency per parameter-set
-    version** (step 6, the lead's call; section 25.1). A frequency row's low, base and
-    high are values of its annual RATE, which step 4's formulas multiply into annual
-    loss; a stated count distribution, Poisson(rate) say, describes how the count varies
-    from year to year given the rate. The first draft of step 6 held a count to its
-    median and its mass in range, which compares the count's yearly spread with the
-    rate's uncertainty: it refused Poisson(5) on 4 / 5 / 6 (49.7% of its count in range),
-    refused 0.01 / 0.05 / 0.2 (no whole number in range), and left no way to write a rate
-    known exactly. A count (any distribution the catalogue marks `DISCRETE`) is held by
-    its mean between the low and the high instead (the `rate` test, the catalogue's exact
-    mean, refused where it is infinite or undefined), its support, and round 2's base
-    rule, kept because it refuses a base far from the mean while the mean is in range
-    (0 / 1 / 2 with Poisson(0.02)). It is exempt from the fixed-row refusal: a fixed rate,
-    2 / 2 / 2 with Poisson(2), is known and its count still varies, and its mean must be
-    that figure. The frequency is stated in the set's document, applies to every
-    scenario built from that version, and is read through the build, as the policy's
-    terms are; a scenario's own `frequency` row beside it is refused. Alternatives:
-    for the test, a count's mean within a tolerance of its base (the rate test bounds it
-    only by the low and the high), or the base rule dropped; for the frequency, one per
-    scenario, in the build's request, or one per template in the set (one per set
-    version stays for the MVP).
+12. **A frequency's figures are its rate, not its count, and the rate its count implies
+    is held to them; one frequency per parameter-set version** (step 6, the lead's call;
+    review round 1, MEDIUM-1 and MEDIUM-2, the lead's calls; section 25.1). A frequency
+    row's low, base and high are values of its annual RATE, which step 4's formulas
+    multiply into annual loss; a stated count distribution says how the count varies
+    from year to year given the rate, and how uncertain the rate is. The first draft of
+    step 6 held a count to its median and its mass in range, which compares the count's
+    yearly spread with the rate's uncertainty: it refused Poisson(5) on 4 / 5 / 6 (49.7%
+    of its count in range), refused 0.01 / 0.05 / 0.2 (no whole number in range), and
+    left no way to write a rate known exactly. The second held a count by its mean
+    alone, which let an over-dispersed count state a rate that contradicts the row (a
+    negative binomial of mean 1,200 and size 0.1 on 1,000 / 1,200 / 1,400: its rate's
+    median 7 a year) and reached every count row, an observed repeat count's included.
+    Now the reading is the FREQUENCY's alone: every other count row holds the count
+    itself and is held from both sides (decision 9). The frequency is held by its mean
+    between the low and the high, exactly from its stated parameters (`rate`); its
+    support; round 2's base rule, kept because it refuses a base far from the mean while
+    the mean is in range (0 / 1 / 2 with Poisson(0.02)); and the rate its count implies
+    from both sides (`rate_median`, `rate_mass`, the floor of decision 9): a Poisson's
+    rate is its lambda, a negative binomial's is Gamma(size, (1 - p) / p), a
+    zero-inflated Poisson's is 0 with probability pi and lambda otherwise. A fixed rate
+    (2 / 2 / 2) is a known rate, and may state only a count whose implied rate is that
+    point, a Poisson of the figure; a negative binomial, or a zero-inflated Poisson with
+    pi above 0, states the rate uncertain and is refused (`distribution_on_fixed_row`).
+    The frequency is stated in the set's document, applies to every scenario built from
+    that version, and is read through the build, as the policy's terms are; a
+    scenario's own `frequency` row beside it is refused. Alternatives: for the rate, the
+    mean alone (the second draft: an over-dispersed count passes whatever its rate's
+    spread), or a narrower band for the implied rate (its P10 and P90 inside the range);
+    for the base rule, dropped, or a count's mean within a tolerance of its base; for
+    the frequency, one per scenario, in the build's request, or one per template in the
+    set (one per set version stays for the MVP).
 
 ## 26. Sensitivity, grade, Validity Card and receipt (MVP step 8)
 

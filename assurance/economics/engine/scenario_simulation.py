@@ -15,8 +15,11 @@ of events or of a year), and the events are summed to the scenario. The rules:
   continuous one from both sides (its base between its P5 and P95, its low and
   high inside its support, its median between them, and at least
   :data:`RANGE_MASS_FLOOR` of its mass between them), and only on a range
-  (``distribution_on_fixed_row``); a count, whose row's figures are values of its
-  RATE, by its mean between the low and the high, a fixed rate included. One that states none
+  (``distribution_on_fixed_row``), a count on any row but the frequency included;
+  the frequency, whose row's figures are values of its RATE, by the rate its count
+  implies (its mean between the low and the high, exactly; the implied rate's median
+  between them and at least :data:`RANGE_MASS_FLOOR` of it between them), a fixed
+  rate only as a Poisson of that rate. One that states none
   draws from a point mass where its low, base and high are one figure, and from
   PERT(low, base, high) where they are a range and its source is an
   ``EXPERT_ESTIMATE``: the only source step 7a's rule lets an expert range stand
@@ -67,6 +70,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from fractions import Fraction
 from types import MappingProxyType
 
 import numpy as np
@@ -96,23 +100,26 @@ RANGE_FIT_PERCENTILES = (Decimal(5), Decimal(95))
 #: high, and at least this share of its mass between them, both included (spec,
 #: section 25.1; the lead's call on decision 9 of section 25.10, which the owner
 #: may change). One constant: the owner's change is one line, and a new input
-#: digest (:func:`limits`). A count is not held to it: its row's figures are
-#: values of its rate, not of its count (decision 12).
+#: digest (:func:`limits`). The frequency's count is not held to it, but the rate
+#: its count implies is: its row's figures are values of its rate (decision 12).
 RANGE_MASS_FLOOR = Decimal("0.5")
-#: The parameter-to-distribution rule (:func:`resolve`). v3 (step 6): a continuous
-#: distribution is held to its row from both sides and only on a range; a count by
-#: its mean, its rate, a fixed rate included.
+#: The parameter-to-distribution rule (:func:`resolve`). v3 (step 6): a stated
+#: distribution is held to its row from both sides and only on a range, a count on
+#: any row but the frequency included; the frequency by the rate its count implies.
 RULE_VERSION = "mythos.economics.parameter-distribution/v3"
 RULE = (
-    "a stated distribution of step 7a's catalogue, where it fits the parameter's unit and holds its figures: a "
-    "continuous one from both sides (the base between its P5 and P95, the low and the high inside its support, its "
-    f"median between the low and the high, and at least {RANGE_MASS_FLOOR} of its mass between them), stated on a "
-    "range (low below high); a count, whose low, base and high are values of its rate, by its mean between the low "
-    "and the high (a fixed rate, low = base = high, its mean that figure), its low and high inside its support, and "
-    "its base below the count after its P95; otherwise a point mass where low = base = high; otherwise PERT(low, "
-    "base, high), weight 4, where the source is EXPERT_ESTIMATE; otherwise refused (no_admissible_distribution). A "
-    "parameter derived across several parameters draws each by this rule and takes, per draw, the one giving the "
-    "larger loss in the direction of the inputs that read it"
+    "a stated distribution of step 7a's catalogue, where it fits the parameter's unit and holds its figures: from "
+    "both sides (the base between its P5 and P95, the low and the high inside its support, its median between the "
+    f"low and the high, and at least {RANGE_MASS_FLOOR} of its mass between them), stated on a range (low below "
+    "high), a count on any row but the frequency included; the frequency, whose low, base and high are values of its "
+    "rate, by the rate its count implies (a Poisson's rate; a negative binomial's Gamma(size, (1 - p) / p); a "
+    "zero-inflated Poisson's 0 with probability pi, else its rate): its exact mean between the low and the high, its "
+    "low and high inside its support, its base below the count after its P95 and at or above its P5, the implied "
+    f"rate's median between the low and the high and at least {RANGE_MASS_FLOOR} of it between them, and on a fixed "
+    "rate (low = base = high) only a count whose implied rate is that point; otherwise a point mass where low = base "
+    "= high; otherwise PERT(low, base, high), weight 4, where the source is EXPERT_ESTIMATE; otherwise refused "
+    "(no_admissible_distribution). A parameter derived across several parameters draws each by this rule and takes, "
+    "per draw, the one giving the larger loss in the direction of the inputs that read it"
 )
 #: Which parameters are drawn once per simulated year and which per occurrence.
 VARIATION_VERSION = "mythos.economics.variation/v2"
@@ -172,16 +179,18 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "distribution_unknown": "a stated distribution's id is one of step 7a's catalogue",
         "distribution_version_unknown": "a stated distribution's version is the catalogue's version of it",
         "distribution_contradicts_range": (
-            "a stated distribution holds its parameter's own figures: a continuous one from both sides, the base "
-            "between its P5 and P95, the low and the high inside its support, its median between the low and the "
-            f"high, and at least {RANGE_MASS_FLOOR} of its mass between them; a count, whose figures are values of its "
-            "rate, by its mean between the low and the high, the low and the high inside its support, and the base "
-            "below the count after its P95. A distribution that does not is a conflict, surfaced, and the refusal "
-            "names the test it failed"
+            "a stated distribution holds its parameter's own figures from both sides: the base between its P5 and "
+            "P95, the low and the high inside its support, its median between the low and the high, and at least "
+            f"{RANGE_MASS_FLOOR} of its mass between them; the frequency, whose figures are values of its rate, by the "
+            "rate its count implies: its exact mean between the low and the high, the low and the high inside its "
+            "support, the base at or above the count's P5 and below the count after its P95, and the implied rate's "
+            f"median between the low and the high and at least {RANGE_MASS_FLOOR} of it between them. A distribution "
+            "that does not is a conflict, surfaced, and the refusal names the test it failed"
         ),
         "distribution_on_fixed_row": (
-            "a parameter whose low, base and high are one figure is a point mass and states no continuous "
-            "distribution: one stated on it contradicts it (a count may state a fixed rate, its mean that figure)"
+            "a parameter whose low, base and high are one figure is a point mass and states no distribution: one "
+            "stated on it contradicts it (a fixed frequency is a known rate, and may state only a Poisson of that "
+            "rate, a count whose implied rate is that point)"
         ),
         "derived_malformed": (
             "a derived parameter is one a component reads, in one direction, taken across at least two parameters "
@@ -356,13 +365,16 @@ def support(distribution: dist.Distribution) -> tuple[float, float]:
     return 0.0, math.inf  # a count, a lognormal or a gamma
 
 
-#: The tests :func:`check_fits_range` holds a continuous distribution to, in the
-#: order it applies them; a refusal names the first one failed.
+#: The tests :func:`check_fits_range` holds a stated distribution to, in the order it
+#: applies them, a count on any row but the frequency included; a refusal names the
+#: first one failed.
 RANGE_TESTS = ("support", "base", "median", "mass")
-#: The tests it holds a count to, in order: a count's low, base and high are values
-#: of its rate (the annual rate a frequency's formulas multiply), not of the count a
-#: year draws, so its spread is not compared with them.
-COUNT_RANGE_TESTS = ("support", "rate", "base")
+#: The tests it holds the frequency to, in order. The frequency's low, base and high
+#: are values of its RATE (the annual rate its formulas multiply), not of the count a
+#: year draws, so the count's spread is not compared with them: the RATE its count
+#: implies is (:func:`implied_rate`), with the count's exact mean and round 2's base
+#: rule beside.
+FREQUENCY_RANGE_TESTS = ("support", "rate", "base", "rate_median", "rate_mass")
 
 
 def mass_between(distribution: dist.Distribution, low: float, high: float) -> float:
@@ -375,75 +387,213 @@ def mass_between(distribution: dist.Distribution, low: float, high: float) -> fl
     return max(0.0, distribution.cdf(high) - below)
 
 
-def _text(value: float | None) -> str:
-    if value is None or math.isnan(value):
+def _text(value) -> str:
+    """A figure a refusal compares, in full: its shortest round-trip spelling
+    (``dist.float_text``), so 0.49995 is never printed as 0.5."""
+    if value is None:
         return "undefined"
-    return "infinite" if math.isinf(value) else f"{value:.6g}"
+    if isinstance(value, Fraction):
+        value = float(value)
+    if math.isnan(value):
+        return "undefined"
+    if math.isinf(value):
+        return "infinite" if value > 0 else "-infinite"
+    return dist.float_text(value)
 
 
-def check_fits_range(distribution: dist.Distribution, parameter: Parameter) -> None:
+def _count_params(distribution: dist.Distribution, stated: StatedDistribution | None) -> dict[str, Fraction]:
+    """A count's native parameters, exactly: as stated (decimal strings, read exactly),
+    or, where none is given, each binary64 one's shortest decimal spelling."""
+    if stated is not None:
+        return {name: Fraction(value) for name, value in stated.params.items()}
+    return {name: Fraction(dist.float_decimal(value)) for name, value in distribution.params().items()}
+
+
+def exact_count_mean(distribution: dist.Distribution, stated: StatedDistribution | None = None) -> Fraction | None:
+    """A count's mean, exactly, from its stated parameters where the catalogue has a
+    closed form: a Poisson's rate; a negative binomial's size (1 - p) / p; a
+    zero-inflated Poisson's (1 - pi) rate. ``None`` for any other distribution."""
+    params = _count_params(distribution, stated)
+    kind = type(distribution)
+    if kind is dist.Poisson:
+        return params["rate"]
+    if kind is dist.NegativeBinomial:
+        return params["size"] * (1 - params["probability"]) / params["probability"]
+    if kind is dist.ZeroInflatedPoisson:
+        return (1 - params["zero_inflation"]) * params["rate"]
+    return None
+
+
+@dataclass(frozen=True)
+class ImpliedRate:
+    """The annual RATE a frequency's count distribution implies, which its row's low,
+    base and high are values of: a count is a Poisson GIVEN its rate, and what the
+    catalogue's counts add to a Poisson is uncertainty about that rate.
+
+    - a Poisson(lambda): the rate is lambda, a point (``point``);
+    - a negative binomial(size r, probability p), numpy's failures before the r-th
+      success: a Poisson whose rate is Gamma(shape r, scale (1 - p) / p) (``gamma``),
+      the Gamma-Poisson mixture: its mean r (1 - p) / p and variance r (1 - p) / p^2
+      are the negative binomial's;
+    - a zero-inflated Poisson(pi, lambda): the rate is 0 with probability pi and
+      lambda otherwise (``zero`` and ``point``), a point where pi is 0.
+
+    The point and the zero's weight are exact (from the stated parameters); a Gamma is
+    the run's binary64."""
+
+    point: Fraction | None = None
+    zero: Fraction = Fraction(0)
+    gamma: dist.Distribution | None = None
+
+    @property
+    def is_point(self) -> bool:
+        """True where the rate is known exactly: a Poisson, or no zero inflation."""
+        return self.gamma is None and self.zero == 0
+
+    def describe(self) -> str:
+        if self.gamma is not None:
+            return f"Gamma(shape {_text(self.gamma.shape)}, scale {_text(self.gamma.scale)})"
+        if self.zero == 0:
+            return f"the point {_text(self.point)}"
+        return f"0 with probability {_text(self.zero)}, else {_text(self.point)}"
+
+    def median(self) -> Fraction | float:
+        """The smallest rate r with P(R <= r) >= 1/2."""
+        if self.gamma is not None:
+            return self.gamma.ppf(0.5)
+        return Fraction(0) if self.zero >= Fraction(1, 2) else self.point
+
+    def median_between(self, low: Decimal, high: Decimal) -> bool:
+        median = self.median()
+        if isinstance(median, Fraction):
+            return Fraction(low) <= median <= Fraction(high)
+        return float(low) <= median <= float(high)
+
+    def mass_between(self, low: Decimal, high: Decimal) -> Fraction | float:
+        """P(low <= R <= high), both ends included: exact for a point or a zero and a
+        point, the Gamma's binary64 otherwise."""
+        if self.gamma is not None:
+            return mass_between(self.gamma, float(low), float(high))
+        lowest, highest = Fraction(low), Fraction(high)
+        inside = Fraction(0)
+        if self.zero and lowest <= 0 <= highest:
+            inside += self.zero
+        if lowest <= self.point <= highest:
+            inside += 1 - self.zero
+        return inside
+
+    def holds_floor(self, mass: Fraction | float) -> bool:
+        if isinstance(mass, Fraction):
+            return mass >= Fraction(RANGE_MASS_FLOOR)
+        return mass >= float(RANGE_MASS_FLOOR)
+
+
+def implied_rate(distribution: dist.Distribution, stated: StatedDistribution | None = None) -> ImpliedRate:
+    """The rate ``distribution``, a count of the catalogue, implies: see
+    :class:`ImpliedRate`. Refused (``frequency_not_a_count``) for any other."""
+    params = _count_params(distribution, stated)
+    kind = type(distribution)
+    if kind is dist.Poisson:
+        return ImpliedRate(point=params["rate"])
+    if kind is dist.ZeroInflatedPoisson:
+        return ImpliedRate(point=params["rate"], zero=params["zero_inflation"])
+    if kind is dist.NegativeBinomial:
+        p = params["probability"]
+        return ImpliedRate(gamma=dist.Gamma(float(params["size"]), float((1 - p) / p)))
+    raise ScenarioSimulationRefused("frequency_not_a_count", type(distribution).ID)
+
+
+def check_fits_range(
+    distribution: dist.Distribution,
+    parameter: Parameter,
+    *,
+    frequency: bool = False,
+    stated: StatedDistribution | None = None,
+) -> None:
     """Refuse a stated distribution that does not hold ``parameter``'s own figures
-    (``distribution_contradicts_range``, naming the test it failed), each figure
-    compared as the binary64 the run would draw.
+    (``distribution_contradicts_range``, naming the test it failed, and printing each
+    figure it compared in full).
 
-    A continuous distribution (a severity, a rate or an expert range) is held to
-    them from both sides, :data:`RANGE_TESTS`:
+    Any stated distribution -- a severity, a rate, an expert range, or a count on any
+    row but the frequency (an observed repeat count, a number of affected customers:
+    the count itself) -- is held to them from both sides, :data:`RANGE_TESTS`, each
+    figure compared as the binary64 the run would draw:
 
     - ``support``: its low and high inside the closure of its support;
     - ``base``: its base between the distribution's :data:`RANGE_FIT_PERCENTILES`;
-    - ``median``: its P50 between its low and its high;
+    - ``median``: its P50 between its low and its high, both included;
     - ``mass``: at least :data:`RANGE_MASS_FLOOR` of its mass between its low and
       its high, both included (:func:`mass_between`).
 
     The first two alone were one-sided: a gamma whose median lay far below the low
     held a base below its P95 and a low inside its support. A parameter whose low,
-    base and high are one figure is a point mass and states no continuous
-    distribution (``distribution_on_fixed_row``).
+    base and high are one figure is a point mass and states no distribution
+    (``distribution_on_fixed_row``).
 
-    A count (the catalogue's ``DISCRETE``: a frequency, or any count it marks) is
-    another matter: its row's low, base and high are values of its RATE, which the
-    formulas multiply, and the distribution says how the count varies from year to
-    year GIVEN the rate. Its spread is not compared with the rate's uncertainty, so
-    it is held to :data:`COUNT_RANGE_TESTS`:
+    The ``frequency`` (:func:`resolve_frequency`'s, the parameter named
+    :data:`FREQUENCY_PARAMETER`) is another matter: its row's low, base and high are
+    values of its RATE, which the formulas multiply, and its count distribution says
+    how the count varies from year to year GIVEN the rate, and how uncertain the rate
+    is (:class:`ImpliedRate`). The count's yearly spread is not compared with the row;
+    the rate is. It is held to :data:`FREQUENCY_RANGE_TESTS`:
 
     - ``support``: as above;
-    - ``rate``: its mean, the catalogue's exact one, between the low and the high
-      (refused where the mean is infinite or undefined);
-    - ``base``: its base below the count after its P95 and at or above its P5 (round
-      2's rule; a Poisson rarer than once in twenty years has a P95 of 0 and holds a
-      base of its own rate). It refuses what the rate test does not: a base far from
-      the mean while the mean is still inside the range, as 0 / 1 / 2 stating
-      Poisson(0.02), whose rate is 0.02 and whose base claims 1.
+    - ``rate``: the count's mean between the low and the high, compared exactly, the
+      mean from the stated parameters (:func:`exact_count_mean`);
+    - ``base``: its base at or above the count's P5 and below the count after its P95
+      (round 2's rule: it refuses a base far from the mean while the mean is in
+      range, as 0 / 1 / 2 stating Poisson(0.02));
+    - ``rate_median``: the implied rate's median between the low and the high;
+    - ``rate_mass``: at least :data:`RANGE_MASS_FLOOR` of the implied rate between
+      them.
 
-    A count may state a fixed rate: low = base = high = 2 with Poisson(2) is a known
-    rate whose count still varies; the rate test then asks that its mean be that
-    figure. A conflict is surfaced, never resolved by silently taking one side."""
+    A fixed frequency (low = base = high) is a known rate: it may state only a count
+    whose implied rate is that point, a Poisson of that rate, and the rate test asks
+    that its mean be exactly that figure; a count whose rate is uncertain contradicts
+    it (``distribution_on_fixed_row``). A conflict is surfaced, never resolved by
+    silently taking one side."""
     low, base, high = (_amount(parameter.at(point)) for point in POINTS)
     name = type(distribution).ID
-    count = bool(type(distribution).DISCRETE)
-    if low == high and not count:
-        raise ScenarioSimulationRefused(
-            "distribution_on_fixed_row",
-            f"{parameter.name} is {low} / {base} / {high}, one figure: a point mass, and it states a {name}",
-        )
+    as_rate = frequency and bool(type(distribution).DISCRETE)
+    implied = implied_rate(distribution, stated) if as_rate else None
+    if low == high and (implied is None or not implied.is_point):
+        if implied is None:
+            detail = f"{parameter.name} is {low} / {base} / {high}, one figure: a point mass, and it states a {name}"
+        else:
+            detail = (
+                f"{parameter.name} is {low} / {base} / {high}, one rate: a known rate, and its {name} states the rate "
+                f"uncertain ({implied.describe()}); a fixed rate states a poisson of that rate"
+            )
+        raise ScenarioSimulationRefused("distribution_on_fixed_row", detail)
     lowest, b, highest = float(low), float(base), float(high)
     lower, upper = support(distribution)
     p_low, p_high = (distribution.ppf(float(q / 100)) for q in RANGE_FIT_PERCENTILES)
     inside_support = lower <= lowest and highest <= upper
-    if count:
-        mean = distribution.mean
+    if implied is not None:
+        mean = exact_count_mean(distribution, stated)
+        if mean is None:  # no closed form: the catalogue's binary64 mean, finite or refused
+            mean = distribution.mean
+            rate_held = mean is not None and math.isfinite(mean) and lowest <= mean <= highest
+        else:
+            rate_held = Fraction(low) <= mean <= Fraction(high)
+        rate_median = implied.median()
+        rate_mass = implied.mass_between(low, high)
         held = {
             "support": inside_support,
-            "rate": mean is not None and math.isfinite(mean) and lowest <= mean <= highest,
+            "rate": rate_held,
             "base": p_low <= b < p_high + 1.0,
+            "rate_median": implied.median_between(low, high),
+            "rate_mass": implied.holds_floor(rate_mass),
         }
-        failed = next((test for test in COUNT_RANGE_TESTS if not held[test]), None)
+        failed = next((test for test in FREQUENCY_RANGE_TESTS if not held[test]), None)
         if failed is None:
             return
         raise ScenarioSimulationRefused(
             "distribution_contradicts_range",
             f"{parameter.name} is {low} / {base} / {high}, values of its rate; its {name} fails the {failed} test: "
-            f"support [{lower:.6g}, {upper:.6g}], mean {_text(mean)}, P5 to P95 [{p_low:.6g}, {p_high:.6g}]",
+            f"support [{_text(lower)}, {_text(upper)}], mean {_text(mean)}, P5 to P95 [{_text(p_low)}, "
+            f"{_text(p_high)}], its rate {implied.describe()}: P50 {_text(rate_median)}, P(low <= rate <= high) "
+            f"{_text(rate_mass)} (at least {RANGE_MASS_FLOOR})",
         )
     median = distribution.ppf(0.5)
     mass = mass_between(distribution, lowest, highest)
@@ -459,15 +609,16 @@ def check_fits_range(distribution: dist.Distribution, parameter: Parameter) -> N
     raise ScenarioSimulationRefused(
         "distribution_contradicts_range",
         f"{parameter.name} is {low} / {base} / {high}; its {name} fails the {failed} test: support "
-        f"[{lower:.6g}, {upper:.6g}], P5 to P95 [{p_low:.6g}, {p_high:.6g}], P50 {median:.6g}, "
-        f"P(low <= X <= high) {mass:.4g} (at least {RANGE_MASS_FLOOR})",
+        f"[{_text(lower)}, {_text(upper)}], P5 to P95 [{_text(p_low)}, {_text(p_high)}], P50 {_text(median)}, "
+        f"P(low <= X <= high) {_text(mass)} (at least {RANGE_MASS_FLOOR})",
     )
 
 
 def check_stated(stated: StatedDistribution, parameter: Parameter) -> dist.Distribution:
     """The distribution ``stated`` builds for ``parameter``, refused unless it fits
-    the parameter's unit and holds its figures (:func:`check_fits_range`). A
-    frequency parameter's is checked by :func:`resolve_frequency`."""
+    the parameter's unit and holds its figures from both sides
+    (:func:`check_fits_range`). The frequency's is checked by
+    :func:`resolve_frequency`, by the rate its count implies."""
     distribution = build(stated, parameter.source_type)
     if parameter.name != FREQUENCY_PARAMETER and not _support_fits(distribution, parameter.unit):
         raise ScenarioSimulationRefused(
@@ -636,7 +787,7 @@ def resolve_frequency(parameter: Parameter, stated: StatedDistribution | None) -
     distribution = build(stated, parameter.source_type)
     if not (type(distribution).DISCRETE and type(distribution).KIND == dist.FREQUENCY):
         raise ScenarioSimulationRefused("frequency_not_a_count", stated.distribution_id)
-    check_fits_range(distribution, parameter)
+    check_fits_range(distribution, parameter, frequency=True, stated=stated)
     return Resolved(parameter, RULE_STATED, SHARED, distribution=distribution)
 
 
@@ -1615,11 +1766,11 @@ def canonical_json(document: Mapping) -> str:
 __all__ = [
     "ENGINE_VERSION",
     "FREQUENCY_PARAMETER",
+    "FREQUENCY_RANGE_TESTS",
     "NATIVE_PARAMETERS",
     "PER_OCCURRENCE",
     "REFUSALS",
     "RANGE_FIT_PERCENTILES",
-    "COUNT_RANGE_TESTS",
     "RANGE_MASS_FLOOR",
     "RANGE_TESTS",
     "RULE_VERSION",
@@ -1627,6 +1778,7 @@ __all__ = [
     "SHARED",
     "STREAM_DOMAIN",
     "VARIATION_VERSION",
+    "ImpliedRate",
     "Resolved",
     "ScenarioInput",
     "ScenarioSimulation",
@@ -1637,6 +1789,8 @@ __all__ = [
     "check_fits_range",
     "check_stated",
     "digest_of",
+    "exact_count_mean",
+    "implied_rate",
     "no_float",
     "parse_stated",
     "plan",

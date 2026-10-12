@@ -12,8 +12,8 @@ Mounted under ``/api/assurance/`` by :mod:`assurance.urls`
   (:mod:`assurance.economics.engine.parameter_set`). 201 with the version. Each
   entry may state the distribution it draws from in a simulation, and the document
   the scenario's frequency (spec, section 19.2): each is held to the simulation's
-  own range test of its row's figures before anything is written (a continuous
-  distribution from both sides, a count by its mean, its rate), and refused with
+  own range test of its row's figures before anything is written (from both sides;
+  the frequency by the rate its count implies), and refused with
   that test's code (``distribution_contradicts_range``, naming the variable and the
   test, or ``distribution_on_fixed_row``).
 

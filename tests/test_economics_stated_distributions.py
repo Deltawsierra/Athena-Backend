@@ -1,7 +1,7 @@
 """Economic Exposure step 6, PR A: the writer of stated distributions and of the
-scenario's frequency, and the range test, two-sided for a continuous distribution and
-by its rate for a count (``docs/economics/spec-v1.md``,
-sections 19.2, 24.8 and 25.1, decision 9 of section 25.10).
+scenario's frequency, and the range test, two-sided for every stated distribution and,
+for the frequency, by the rate its count implies (``docs/economics/spec-v1.md``,
+sections 19.2, 24.8 and 25.1, decisions 9 and 12 of section 25.10).
 
 - The range test is two-sided. Before, a stated distribution held its row's figures
   from one side only (the base between its P5 and P95, the low and the high inside
@@ -11,11 +11,14 @@ sections 19.2, 24.8 and 25.1, decision 9 of section 25.10).
   variable and the test it failed; and a fixed row (low = base = high) states no
   continuous distribution (``distribution_on_fixed_row``). The same test at write
   time and at run time.
-- A count is held to its rate. A frequency's low, base and high are values of its
-  annual RATE; a count distribution says how the count varies from year to year given
-  the rate. So a count is held by its mean between the low and the high (the rate
-  test), its support, and round 2's base rule, never by its median or its mass in
-  range; and it may state a fixed rate whose mean is that figure.
+- The frequency is held to its rate. Its low, base and high are values of its annual
+  RATE; a count distribution says how the count varies from year to year given the
+  rate, and how uncertain the rate is. So the frequency is held by its exact mean
+  between the low and the high (the rate test), its support, round 2's base rule, and
+  the rate its count implies from both sides (a negative binomial's Gamma, a
+  zero-inflated Poisson's zero or rate); and it may state a fixed rate only as a
+  Poisson of that rate. Every other count row holds the count itself, and is held
+  from both sides like any figure (review round 1).
 - The writer. A parameter-set version (the existing POST) may state each entry's
   distribution and the scenario's frequency; a build may state an effect attribute's,
   the other writer of an event's parameters. Each is recorded on the new version,
@@ -33,6 +36,7 @@ import sys
 import types
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -269,7 +273,8 @@ def test_one_with_less_than_the_floor_of_its_mass_in_range_is_refused():
     refused = _refusal(row, ATV_LITTLE_MASS)
     assert refused.code == "distribution_contradicts_range"
     assert "its lognormal fails the mass test" in refused.detail
-    assert "P(low <= X <= high) 0.1858 (at least 0.5)" in refused.detail
+    mass = ss.mass_between(built, 20000.0, 32000.0)
+    assert f"P(low <= X <= high) {ss.dist.float_text(mass)} (at least 0.5)" in refused.detail
 
 
 def test_a_fixed_row_states_no_continuous_distribution():
@@ -291,19 +296,29 @@ def _frequency(low, base, high):
     return _row(ss.FREQUENCY_PARAMETER, "count", (low, base, high), source="INDUSTRY_BENCHMARK")
 
 
+def _nb_with_mean(size: str, mean: str) -> dict:
+    """A negative binomial of ``size`` whose mean is ``mean``: p = size / (size + mean),
+    to 20 places, as a customer's mean and dispersion state it."""
+    s, m = Decimal(size), Decimal(mean)
+    p = (s / (s + m)).quantize(Decimal("1e-20"))
+    return stated("negative_binomial", size=size, probability=format(p, "f"))
+
+
 def test_a_count_may_state_a_fixed_rate_whose_mean_it_is():
     """A fixed rate, 2 / 2 / 2 events a year, with Poisson(2): the rate is known and
     the count still varies from year to year. Its mean must be that figure: Poisson(3)
-    on 2 / 2 / 2 is refused by the rate test, and so is Poisson(0.01) on 0 / 0 / 0."""
+    on 2 / 2 / 2 is refused by the rate test, and so is Poisson(0.01) on 0 / 0 / 0. A
+    negative binomial of mean 2 is not a known rate (its rate is a Gamma): refused on
+    a fixed row (review round 1, MEDIUM-2)."""
     resolved = ss.resolve_frequency(_frequency("2", "2", "2"), ss.parse_stated(stated("poisson", rate="2")))
     assert resolved.rule == ss.RULE_STATED and resolved.drawn
     for figures, rate in ((("2", "2", "2"), "3"), (("0", "0", "0"), "0.01")):
         refused = _refusal(_frequency(*figures), stated("poisson", rate=rate), frequency=True)
         assert refused.code == "distribution_contradicts_range", figures
         assert "values of its rate; its poisson fails the rate test" in refused.detail, refused.detail
-    # A negative binomial too: size 2, p 0.5, mean 2.
-    assert ss.resolve_frequency(_frequency("2", "2", "2"),
-                                ss.parse_stated(stated("negative_binomial", size="2", probability="0.5")))
+    refused = _refusal(_frequency("2", "2", "2"), stated("negative_binomial", size="2", probability="0.5"),
+                       frequency=True)
+    assert refused.code == "distribution_on_fixed_row"
 
 
 def test_a_distribution_that_holds_its_row_from_both_sides_is_drawn_from():
@@ -333,11 +348,10 @@ def test_the_step_7b_frequency_fixtures():
 
 
 def test_a_counts_figures_are_its_rate():
-    """A count is held by its mean between the low and the high, never by its spread:
-    a rate of 0.01 / 0.05 / 0.2 a year with Poisson(0.05) holds (no whole number lies
-    in that range, and the median and mass tests refused it); a negative binomial
-    whose mean lies above the high is refused by the rate test."""
-    assert ss.COUNT_RANGE_TESTS == ("support", "rate", "base")
+    """The frequency is held by its rate, never by its count's spread: a rate of 0.01 /
+    0.05 / 0.2 a year with Poisson(0.05) holds (no whole number lies in that range, and
+    the median and mass tests refused it); a negative binomial whose mean lies above
+    the high is refused by the rate test."""
     rare = ss.resolve_frequency(_frequency("0.01", "0.05", "0.2"), ss.parse_stated(stated("poisson", rate="0.05")))
     assert rare.rule == ss.RULE_STATED
     assert ss.resolve_frequency(_frequency("0", "0.05", "0.2"), ss.parse_stated(stated("poisson", rate="0.05")))
@@ -346,10 +360,12 @@ def test_a_counts_figures_are_its_rate():
                        frequency=True)
     assert refused.code == "distribution_contradicts_range"
     assert "its negative_binomial fails the rate test" in refused.detail and "mean 6," in refused.detail
-    # Any parameter the catalogue counts is held the same way, not only the frequency.
+    # Any other count row holds the count itself, from both sides (review round 1,
+    # MEDIUM-1): Poisson(40) on 20 / 40 / 60 customers holds every test.
     customers = ss.resolve(_row("e.affected_customers", "count", ("20", "40", "60")),
                            ss.parse_stated(stated("poisson", rate="40")))
     assert customers.rule == ss.RULE_STATED
+    assert ss.FREQUENCY_RANGE_TESTS == ("support", "rate", "base", "rate_median", "rate_mass")
 
 
 def test_round_2s_base_rule_refuses_what_the_rate_test_does_not():
@@ -365,9 +381,11 @@ def test_round_2s_base_rule_refuses_what_the_rate_test_does_not():
 
 
 def test_a_count_whose_mean_is_undefined_is_refused(monkeypatch):
-    """The rate test reads the catalogue's exact mean. Every count of the catalogue has
-    a finite one; a count whose mean were infinite or undefined is refused, never
-    passed."""
+    """The rate test reads the count's exact mean from its stated parameters, where the
+    catalogue has a closed form, and every count of it has one; a count without one
+    reads the catalogue's mean, and one whose mean were infinite or undefined is
+    refused, never passed."""
+    monkeypatch.setattr(ss, "exact_count_mean", lambda distribution, stated=None: None)
     for mean, said in ((None, "undefined"), (float("nan"), "undefined"), (float("inf"), "infinite")):
         monkeypatch.setattr(ss.dist.Poisson, "mean", property(lambda self, mean=mean: mean))
         refused = _refusal(_frequency("1", "2", "4"), FREQUENCY_GOOD, frequency=True)
@@ -549,14 +567,17 @@ AGREEING = [
         low="25000", base="25000", high="25000", distribution=ATV_GOOD), None),
     ("the frequency's", lambda d: d["frequency"].update(low="1", base="2", high="3",
                                                         distribution=stated("poisson", rate="4")), "rate"),
+    ("the frequency's implied rate", lambda d: d["frequency"].update(
+        low="1000", base="1200", high="1400", distribution=_nb_with_mean("0.1", "1200")), "rate_median"),
 ]
 
 
 @pytest.mark.parametrize("what, edit, test", AGREEING, ids=[c[0] for c in AGREEING])
 def test_write_time_and_run_time_refusals_agree(deployment, people, monkeypatch, what, edit, test):
     """The POST refuses the version; a version recorded with the test switched off,
-    as one recorded before this step, is refused by the run with the same code and
-    the same detail, word for word: one test, at write time and at run time."""
+    as one recorded before this step or under an earlier floor, is refused by a build
+    of it and by the run of a scenario built from it with the same code and the same
+    detail, word for word: one test, at write, build and run time."""
     document = _point_document()
     document["frequency"] = _entry("count", "1", "2", "4", source_type="INDUSTRY_BENCHMARK",
                                    evidence_ref=f"{LABEL}: industry loss data", distribution=FREQUENCY_GOOD)
@@ -570,10 +591,19 @@ def test_write_time_and_run_time_refusals_agree(deployment, people, monkeypatch,
     _nothing_recorded()
 
     with monkeypatch.context() as switched_off:
-        switched_off.setattr(ss, "check_fits_range", lambda distribution, parameter: None)
+        switched_off.setattr(ss, "check_fits_range", lambda distribution, parameter, **_: None)
         CustomerParameterSet.record(deployment, SET_KEY, document, author=people["analyst"])
     asset, finding = _payment_world(deployment)
-    scenario, _ = builder.build(deployment, _build_body(asset, finding), author=people["analyst"])
+    # A build re-checks the version's distributions under the rule now (review round
+    # 1, LOW-3): refused with the same code and detail, and nothing built.
+    with pytest.raises(EngineRefused) as built:
+        builder.build(deployment, _build_body(asset, finding), author=people["analyst"])
+    assert (built.value.code, built.value.detail) == (code, detail)
+    assert not FinancialScenario.objects.exists()
+    # A scenario built before that check (switched off here) is refused by its run alike.
+    with monkeypatch.context() as unchecked:
+        unchecked.setattr(builder, "check_set_distributions", lambda rows: None)
+        scenario, _ = builder.build(deployment, _build_body(asset, finding), author=people["analyst"])
     run = simulation_service.simulate_scenario(scenario, seed=1, draws=1_000)
     assert (run.code, run.detail) == (code, detail)
     assert run.result is not None and run.result.status == "refused"  # the inputs decide it: recorded
@@ -759,6 +789,206 @@ def test_a_scenario_rows_distribution_is_refused_at_write_and_at_run_alike(deplo
 
 
 # ======================================================================
+# Review round 1 (#156): the reviewer's repros, each a test
+# ======================================================================
+
+
+#: The reviewer's frequency: 1,000 / 1,200 / 1,400 events a year.
+BIG = ("1000", "1200", "1400")
+ZIP_HALF_6 = stated("zero_inflated_poisson", zero_inflation="0.5", rate="6")
+
+
+def test_only_the_frequency_reads_its_figures_as_a_rate():
+    """MEDIUM-1. The rate reading, and the fixed row it allows, are the frequency's
+    alone. Any other count row -- an observed repeat count, a number of affected
+    customers -- holds the count itself, so a count distribution on it is held from
+    both sides like any figure and never stated on a fixed row: the reviewer's
+    ZIP(0.5, 6) on an observed repeat count of 3 / 3 / 3 (half its draws say the effect
+    never repeated) and ZIP(0.5, 2400) on 1,200 / 1,200 / 1,200 affected customers are
+    refused, and so is ZIP(0.5, 6) on a range of 2 / 3 / 5 (its median count is 0).
+    Poisson(40) on 20 / 40 / 60 customers holds every test and is drawn from."""
+    for name, figures, distribution in (
+        ("bypass.repeat_count", ("3", "3", "3"), ZIP_HALF_6),
+        ("e.affected_customers", ("1200", "1200", "1200"),
+         stated("zero_inflated_poisson", zero_inflation="0.5", rate="2400")),
+    ):
+        refused = _refusal(_row(name, "count", figures, source="MYTHOS_OBSERVED"), distribution)
+        assert refused.code == "distribution_on_fixed_row", (name, refused.detail)
+        assert refused.detail.endswith("one figure: a point mass, and it states a zero_inflated_poisson")
+    ranged = _refusal(_row("bypass.repeat_count", "count", ("2", "3", "5"), source="MYTHOS_OBSERVED"), ZIP_HALF_6)
+    assert ranged.code == "distribution_contradicts_range"
+    assert ranged.detail.startswith(
+        "bypass.repeat_count is 2 / 3 / 5; its zero_inflated_poisson fails the median test"), ranged.detail
+    assert "P50 0," in ranged.detail
+    customers = ss.resolve(_row("e.affected_customers", "count", ("20", "40", "60")),
+                           ss.parse_stated(stated("poisson", rate="40")))
+    assert customers.rule == ss.RULE_STATED
+
+
+@pytest.mark.usefixtures("engine_keyring")
+def test_an_observed_count_states_no_distribution_on_its_fixed_figure(deployment, people):
+    """MEDIUM-1, the reviewer's repro through the builder's POST: an observed approval
+    bypass whose repeat count is 3 / 3 / 3, MYTHOS_OBSERVED and bound to its SPINE
+    effect, stating ZIP(0.5, 6), was built (201) and drawn from. Refused now, as the
+    same row stating a gamma always was, and nothing is built; the row stating none
+    is built."""
+    from tests.test_economics_builder import _attr, _body, _effect, _link, _observed, _spine
+    from tests.test_economics_builder import _payment_world as builder_world
+
+    asset, (finding,) = builder_world(deployment, people, 1)
+    row = _observed(deployment)
+    spine = _spine(deployment, row)
+    analyst = _client(people["analyst"])
+
+    def build_with(distribution):
+        repeat = _attr("count", "3", source="MYTHOS_OBSERVED", why="3 repeats", bound=spine)
+        if distribution is not None:
+            repeat["distribution"] = distribution
+        effect = _effect("bypass", asset, origin="observed", observed=row, effect_type="approval_bypassed",
+                         process="lending", attributes={"repeat_count": repeat})
+        return _post_build(analyst, deployment, _body([effect], [_link(finding, "bypass")]))
+
+    for distribution in (ZIP_HALF_6, stated("gamma", shape="30", scale="0.1")):
+        response = build_with(distribution)
+        assert response.status_code == 400, response.content
+        assert response.json()["code"] == "distribution_on_fixed_row"
+        assert response.json()["detail"].startswith("bypass.repeat_count is 3 / 3 / 3, one figure: a point mass")
+    assert not FinancialScenario.objects.exists()
+    assert build_with(None).status_code == 201
+
+
+def test_the_frequencys_figures_bound_the_rate_its_count_implies():
+    """MEDIUM-2. A negative binomial is a Poisson whose rate is Gamma(size, (1 - p) /
+    p), and a zero-inflated Poisson one whose rate is 0 with probability pi and its rate
+    otherwise: what they add to a Poisson is uncertainty about the rate, which the
+    row's low and high state. So the implied rate is held from both sides: its median
+    between the low and the high, and at least RANGE_MASS_FLOOR of it between them.
+    The reviewer's negative binomials of mean 1,200 on 1,000 / 1,200 / 1,400, sizes 0.1,
+    0.3 and 1, each holding the mean test, are refused by the median of their rate
+    (7, 293 and 832 a year); size 10 by its mass (40% of its rate in range); sizes 50
+    and 100 hold (76% and 91%). A zero-inflated Poisson whose rate is 0 in half its
+    years has a median rate of 0: refused on 1 / 2 / 4. A Poisson's rate is a point,
+    as before."""
+    for size, failed in (("0.1", "rate_median"), ("0.3", "rate_median"), ("1", "rate_median"), ("10", "rate_mass")):
+        refused = _refusal(_frequency(*BIG), _nb_with_mean(size, "1200"), frequency=True)
+        assert refused.code == "distribution_contradicts_range", size
+        assert f"values of its rate; its negative_binomial fails the {failed} test" in refused.detail, refused.detail
+        assert "its rate Gamma(shape " in refused.detail
+    for size in ("50", "100"):
+        resolved = ss.resolve_frequency(_frequency(*BIG), ss.parse_stated(_nb_with_mean(size, "1200")))
+        assert resolved.rule == ss.RULE_STATED, size
+
+    refused = _refusal(_frequency("1", "2", "4"), stated("zero_inflated_poisson", zero_inflation="0.5", rate="4"),
+                       frequency=True)
+    assert refused.code == "distribution_contradicts_range" and "fails the rate_median test" in refused.detail
+    assert "its rate 0 with probability 0.5, else 4: P50 0," in refused.detail
+    held = ss.resolve_frequency(_frequency("1", "2", "4"),
+                                ss.parse_stated(stated("zero_inflated_poisson", zero_inflation="0.3", rate="2")))
+    assert held.rule == ss.RULE_STATED
+    for figures, rate in ((("4", "5", "6"), "5"), (("0.01", "0.05", "0.2"), "0.05")):
+        assert ss.resolve_frequency(_frequency(*figures), ss.parse_stated(stated("poisson", rate=rate))).drawn
+    assert ss.FREQUENCY_RANGE_TESTS == ("support", "rate", "base", "rate_median", "rate_mass")
+    gamma = ss.implied_rate(ss.build(ss.parse_stated(_nb_with_mean("100", "1200")), ss.SourceType.INDUSTRY_BENCHMARK))
+    assert gamma.gamma.shape == 100.0 and abs(gamma.gamma.shape * gamma.gamma.scale - 1200) < 1e-9
+
+
+def test_a_fixed_rate_states_only_a_poisson_of_that_rate():
+    """MEDIUM-2. A fixed frequency says its rate is known: only a count whose implied
+    rate is that exact point may state it, a Poisson of the figure (or a zero-inflated
+    one with no zero inflation, which is that Poisson). The reviewer's ZIP(0.7, 1) on
+    0.3 / 0.3 / 0.3, whose mean is exactly 0.3, says the rate is 0 in seven years in ten
+    and 1 otherwise: refused, as a negative binomial is (its rate is a Gamma)."""
+    for figures, distribution in (
+        (("0.3", "0.3", "0.3"), stated("zero_inflated_poisson", zero_inflation="0.7", rate="1")),
+        (("9", "9", "9"), stated("negative_binomial", size="1", probability="0.1")),
+    ):
+        refused = _refusal(_frequency(*figures), distribution, frequency=True)
+        assert refused.code == "distribution_on_fixed_row", refused.detail
+        assert "one rate: a known rate" in refused.detail and "a fixed rate states a poisson" in refused.detail
+    for distribution in (stated("poisson", rate="2"), stated("zero_inflated_poisson", zero_inflation="0", rate="2")):
+        assert ss.resolve_frequency(_frequency("2", "2", "2"), ss.parse_stated(distribution)).rule == ss.RULE_STATED
+
+
+def test_a_counts_mean_is_exact():
+    """LOW-2. The rate test compares the mean the stated parameters give, exactly, never
+    its binary64: ZIP(0.7, 1)'s is 0.3, which binary64 makes 0.30000000000000004, above a
+    high of 0.3. On 0 / 0.2 / 0.3 it holds every test (its rate is 0 in 70% of years,
+    inside the range); on 0 / 0.1 / 0.2 it fails the rate test, and the mean is
+    printed in its shortest spelling."""
+    zip_ = stated("zero_inflated_poisson", zero_inflation="0.7", rate="1")
+    parsed = ss.parse_stated(zip_)
+    assert ss.resolve_frequency(_frequency("0", "0.2", "0.3"), parsed).rule == ss.RULE_STATED
+    refused = _refusal(_frequency("0", "0.1", "0.2"), zip_, frequency=True)
+    assert "fails the rate test" in refused.detail and "mean 0.3," in refused.detail
+    built = ss.build(parsed, ss.SourceType.INDUSTRY_BENCHMARK)
+    assert built.mean == 0.30000000000000004 and ss.exact_count_mean(built, parsed) == Fraction(3, 10)
+    nb = ss.parse_stated(stated("negative_binomial", size="3", probability="0.1"))
+    assert ss.exact_count_mean(ss.build(nb, ss.SourceType.INDUSTRY_BENCHMARK), nb) == 27
+
+
+TRIANGLE = stated("triangular", minimum="0", mode="1", maximum="2")
+
+
+def _hours(low, base, high):
+    return _row("e.investigation_hours", "hours", (low, base, high), source="EXPERT_ESTIMATE")
+
+
+def test_the_floor_and_the_median_are_inclusive():
+    """LOW-1 and NIT-1, the reviewer's boundary cases. Triangular(0, 1, 2) has exactly
+    half its mass in [1, 2] and its P50 at exactly 1: on 1 / 1.5 / 2 its median is the
+    low and its mass the floor, and it holds; on 0 / 0.5 / 1 its median is the high,
+    and it holds. On 1 / 1.5 / 1.99 its mass is 0.49995, refused and printed so, never
+    as 0.5; on 1.0000000000000002 / 1.5 / 2 its median lies one ulp below the low."""
+    built = ss.build(ss.parse_stated(TRIANGLE), ss.SourceType.EXPERT_ESTIMATE)
+    assert ss.mass_between(built, 1.0, 2.0) == float(ss.RANGE_MASS_FLOOR) and built.ppf(0.5) == 1.0
+    assert ss.resolve(_hours("1", "1.5", "2"), ss.parse_stated(TRIANGLE)).rule == ss.RULE_STATED
+    assert ss.resolve(_hours("0", "0.5", "1"), ss.parse_stated(TRIANGLE)).rule == ss.RULE_STATED
+    refused = _refusal(_hours("1", "1.5", "1.99"), TRIANGLE)
+    assert "its triangular fails the mass test" in refused.detail
+    assert "P(low <= X <= high) 0.49995 (at least 0.5)" in refused.detail, refused.detail
+    refused = _refusal(_hours("1.0000000000000002", "1.5", "2"), TRIANGLE)
+    assert "its triangular fails the median test" in refused.detail and "P50 1," in refused.detail
+
+
+def _broken_import(name):
+    raise RuntimeError("numpy: the BLAS library at /opt/vendor/lib/libblas.so is broken")
+
+
+def test_any_fault_importing_the_engine_is_503_and_keeps_only_its_type(deployment, people, monkeypatch):
+    """NIT-2. Not only an ImportError: any fault importing numpy or the engine is 503
+    and nothing recorded, as a run maps any to engine_unavailable; and only the fault's
+    type is kept, never its message (a path, a library). A document stating no
+    distribution never imports the engine, and is recorded."""
+    monkeypatch.setattr(pset, "importlib", types.SimpleNamespace(import_module=_broken_import))
+    response = _post_set(_client(people["analyst"]), deployment, _payment_document())
+    assert response.status_code == 503, response.content
+    assert "BLAS" not in response.content.decode()
+    _nothing_recorded()
+    with pytest.raises(pset.ProbabilisticEngineUnavailable) as unavailable:
+        pset.stated_distribution({"distribution": FREQUENCY_GOOD}, "frequency")
+    assert "RuntimeError" in str(unavailable.value) and "BLAS" not in str(unavailable.value)
+    assert _post_set(_client(people["analyst"]), deployment, _point_document()).status_code == 201
+
+
+def test_a_build_of_a_set_stating_distributions_needs_the_engine(deployment, people, monkeypatch):
+    """LOW-3 and NIT-2. A build re-checks the named version's distributions, so while
+    the engine will not import, a build of a version that states any is 503 and
+    nothing is built; a version that states none is built without it."""
+    CustomerParameterSet.record(deployment, SET_KEY, _payment_document(), author=people["analyst"])
+    asset, finding = _payment_world(deployment)
+    analyst = _client(people["analyst"])
+    with monkeypatch.context() as broken:
+        broken.setattr(pset, "importlib", types.SimpleNamespace(import_module=_broken_import))
+        response = _post_build(analyst, deployment, _build_body(asset, finding))
+        assert response.status_code == 503, response.content
+        assert not FinancialScenario.objects.exists()
+        CustomerParameterSet.record(deployment, SET_KEY, _point_document(), author=people["analyst"])
+        plain = _post_build(analyst, deployment, _build_body(asset, finding, version=2))
+        assert plain.status_code == 201, plain.content
+    assert _post_build(analyst, deployment, _build_body(asset, finding)).status_code == 201
+
+
+# ======================================================================
 # The spec
 # ======================================================================
 
@@ -775,6 +1005,14 @@ SPEC_PHRASES = (
     "Closed in step 6",
     "\"frequency\": {",
     "The writer of stated distributions",
+    "`FREQUENCY_RANGE_TESTS`",
+    "**Gamma(size, (1 - p) / p)**",
+    "`rate_median`",
+    "`rate_mass`",
+    "`exact_count_mean`",
+    "**A fixed rate is a Poisson of that rate**",
+    "`builder.check_set_distributions`",
+    "Write time, build time and run time agree",
 )
 
 
@@ -785,3 +1023,4 @@ def test_the_spec_states_the_writer_and_the_two_sided_test():
         assert phrase in text, phrase
     assert "Still open, to close before any writer states a distribution" not in text
     assert "No writer states a distribution or a frequency yet" not in text
+    assert "`COUNT_RANGE_TESTS`" not in text and "No writer states a frequency yet" not in text
