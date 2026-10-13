@@ -34,7 +34,10 @@ Unknown carries; the step-5 events route carries the same banner (sections 24.8 
 27.6). E5 (section 33) totals a deployment's scenarios into a portfolio from their
 draws, with correlation groups, a shared loss event counted once a year, every draw
 normalised before it is summed, and each scenario's contribution to the mean and to
-the tail.
+the tail. Section 36 normalizes the figures a run reads when its scenario version is
+built: a parameter-set figure in another currency, or at another date, is normalized
+into the build's currency at its as-of date, and its record is carried into the run's
+inputs, report, card and receipt.
 
 ## Contents
 
@@ -103,14 +106,18 @@ Economic Exposure E5, on step 6's report:
 
 33. [Portfolio aggregation (Economic Exposure E5)](#33-portfolio-aggregation-economic-exposure-e5)
 
+MVP steps 3 and 12 in runs, on steps 5, 7b, 8 and 6:
+
+36. [Figures normalized into a run's reporting currency](#36-figures-normalized-into-a-runs-reporting-currency-mvp-steps-3-and-12-in-runs)
+
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py`; section 36: the figures a run reads normalized at build in `run_normalization.py` and `engine/figure_normalization.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33), `0075_figure_normalizations.py` (section 36) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py`; section 36: `tests/test_economics_run_normalization.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
 
@@ -1154,11 +1161,11 @@ day, the ECB quoting EUR/USD 1.1230 and H.10 1.1310, both usable:
 The third row is the favourable secondary: the ECB's rate would state the smaller
 figure, and it is not used.
 
-**Where it shows.** Runs do not normalize their figures yet (section 24.9: a run's
-figures are stated in one reporting currency, and the report says so), so neither
-the report nor the data-health route reads a normalization today, and the record
-carries the disagreement. When runs normalize, the card inherits the record's
-downgrades and conflicts.
+**Where it shows.** Since section 36 a build normalizes the figures its run reads through
+`normalization_service.normalize_for`, so a run's record of each figure carries its
+conflicts and fallbacks into the report's currency bridge, and its downgrades lower each
+line of the card that reads the figure (section 36.5). The data-health route reads no
+normalization.
 
 **Decisions this step takes, which the owner may change:**
 
@@ -2713,7 +2720,8 @@ The body:
                                               "evidence_ref": "7 of 20 attempts, observed as sha256:<the SPINE effect>",
                                               "effective_date": "2026-10-01"}}}],
  "findings": [{"finding": "<finding uuid>", "effect": "redirect", "role": "prerequisite"}],
- "supersedes": "<an earlier scenario's uuid, optional>"}
+ "supersedes": "<an earlier scenario's uuid, optional>",
+ "normalization": "<a normalization policy, optional: section 36.1>"}
 ```
 
 - **Authentication, tenancy and roles**, as the parameter-set routes' (section 19.3):
@@ -2901,9 +2909,11 @@ and the rest) is raised as that engine's:
   (scenario, SPINE effect) constraint would refuse the second observation itself.
 - **A rebuild by another person returns the first author's draft.** The digest is the
   inputs', not the author's; that person did not author it and may review it.
-- **Nothing is normalized here.** Every money parameter a build reads is in its
-  currency already (`currency_mismatch` otherwise); FX and the cost index (section 12)
-  are a later step's.
+- **Normalized only under a policy** (section 36). A build that states a normalization
+  policy normalizes each parameter-set figure it reads that is in another currency, or
+  at another date than its as-of date, into its currency at that date; without one,
+  every money parameter a build reads is in its currency already (`currency_mismatch`
+  otherwise). An effect's attributes are never normalized (section 36.10).
 - **The window, the precedence, the larger-loss rule and the attribute vocabulary are
   this version's**; a change to any is a new grouping, pack or template version. The
   versions stayed `v1` through review round 1 (nothing was ever built under the
@@ -3386,7 +3396,9 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
   event.
 - **The limit is read per event** (section 25.4), with no yearly aggregate cap.
 - **One currency per run**: the build's; nothing converts inside it, and currency
-  uncertainty stays separate (section 3, rule 6).
+  uncertainty stays separate (section 3, rule 6). A figure stated in another currency
+  or at another date is normalized when the version is built (section 36), and the run
+  holds its record in its inputs.
 
 ### 25.10 Decisions this step takes, which the owner may change
 
@@ -3685,6 +3697,10 @@ the contributors whose base supplies its own: its share is split equally among t
 source types. The variance importance (section 26.1) ranks the most sensitive
 variables on the card and weighs nothing in the grade.
 
+A run that reads a figure its build normalized is graded under v4, v3 and the
+normalization downgrades of section 12.5, each lowering every line that reads such a
+figure one step, once per line (section 36.5); every other run under v3, unchanged.
+
 **Two lines, and the headline grade is the lower of the two** (review round 2,
 MEDIUM 2; `grade.headline`, `grade.HEADLINE_RULE`, in the grade's version record).
 Without a policy the gross cash is graded, and that is the card's grade. Under a
@@ -3830,7 +3846,7 @@ stored rows:
 | `model.version`, `model.build_digest` | the release the CARD records (`validity_service.model_release` when it was issued): the token `mythos.economics:simulation-<engine>+sensitivity-<n>+card-<n>`, and the SHA-256 of its release record -- the run's versions and limits, the sensitivity method, the grade's version record and the card's schema |
 | `simulation.seed`, `simulation.draws` | the result's |
 | `simulation.parameter_set_digest` | the result's input digest: every parameter the run read, with its figures, source, stated distribution and variation, and every version |
-| `sources` | each source snapshot the run read, its content hash recomputed from its stored rows (`source_snapshot_mismatch` where a recorded digest no longer reproduces): `parameter-set:<key>:<version>` (its content digest, `intact()`), `scenario-build:<scenario>` (its build digest, recomputed from its inputs) and `scenario-parameters:<scenario>` (the SHA-256 of every parameter row of the scenario version) |
+| `sources` | each source snapshot the run read, its content hash recomputed from its stored rows (`source_snapshot_mismatch` where a recorded digest no longer reproduces): `parameter-set:<key>:<version>` (its content digest, `intact()`), `scenario-build:<scenario>` (its build digest, recomputed from its inputs) and `scenario-parameters:<scenario>` (the SHA-256 of every parameter row of the scenario version); and for a version whose build normalized figures, `scenario-normalizations:<scenario>` (the SHA-256 of their records, section 36.6) |
 | `evidence` | `nodes`: the effects' assets; `effects`: their SPINE effects; `claims`: none (no claim is linked to a scenario yet) |
 | `result` | the reporting currency, the valuation date (the build's as-of date), and the headline line's six figures rounded half-even to the currency's minor unit (`Money.display_amount`) |
 | `validity_card` | the card's digest and grade, read by core from the card itself |
@@ -4318,7 +4334,7 @@ receipt. It runs no simulation, reads no clock and asks no engine. Its keys:
 | `model` | the model release the card records: version token and build digest (section 26.5); null where no card is recorded |
 | `source_snapshots` | the version's source snapshots with their content hashes recomputed, or why not (`source_snapshot_mismatch`) |
 | `currency` | the reporting currency, its minor unit and the rounding (section 27.5) |
-| `currency_bridge` | v2 (section 30): the run's valuation date and where it is read from, the reporting currency, and `conversions`, the normalization record of each figure the run converted -- none: a run converts nothing |
+| `currency_bridge` | v2 (section 30): the run's valuation date and where it is read from, the reporting currency, and `conversions`, the normalization record of each figure the run's build normalized, as its stored inputs hold it (section 36.4); none where the build normalized nothing |
 | `status`, `refusal` | the run's status, and a refused run's code and detail; for a result whose stored rows fail a check, the code `stored_row_unverified` naming the checks (section 27.5) |
 | `integrity` | `verified`, the checks run (`report.INTEGRITY_CHECKS`) and those failed (section 27.5) |
 | `grade`, `banner`, `excluded_from_totals`, `banner_reason` | section 27.6; the grade is the card DOCUMENT's, never the column's |
@@ -5382,10 +5398,13 @@ receipt signs as its valuation date (section 26.5); for a version with no build,
 latest as-of date of the components its stored inputs hold, read only where they still
 give their digest (the receipt's rule too). `valuation_date_from` says which, and
 `not_reported` why there is none. `conversions` is the normalization record (section
-12.6) of each figure the run converted, as stored, and it is empty: a run converts
-nothing (an event, a policy or a component's inputs in another currency are refused,
-`currency_mismatch`, sections 15, 16 and 25), and no normalization record is stored for
-any figure, so none is served and none is computed (`report.NO_CONVERSION`).
+12.6) of each figure the run converted, as stored. A run itself converts nothing (an
+event, a policy or a component's inputs in another currency are refused,
+`currency_mismatch`, sections 15, 16 and 25); since section 36 its BUILD may normalize
+the figures it reads, and the bridge serves each one's record from the run's stored
+inputs (`report.CONVERTED`, section 36.4). For a run whose build normalized nothing, no
+normalization record is stored for any figure, so none is served and none is computed
+(`report.NO_CONVERSION`).
 
 The report's bytes change with the key, so its schema moves to
 `mythos.economics.report/v2` the way this repository moves a schema (as
@@ -6460,3 +6479,236 @@ The portfolio adds no lock or wait of its own.
 - **No receipt and no card for a portfolio**: it is graded and reported, not signed.
 - **The selection reads every current version's latest report** in the request,
   bounded by `MAX_SCENARIOS` and the one deadline, not paginated.
+
+## 36. Figures normalized into a run's reporting currency (MVP steps 3 and 12, in runs)
+
+Until this section a run converted nothing: every money figure a build read had to be in
+the build's currency already (`currency_mismatch`, section 24.9), the report's currency
+bridge (section 30) listed no conversion, and step 12's normalization (sections 12.8 and
+12.9) reached the normalization route but never a run, its card or its receipt. The
+owner's specification asks for explicit multi-currency support in the MVP (its sections 9
+and 19: native-currency evidence, event-date FX, inflation to the valuation date,
+valuation-date FX, and every converted figure with auditable FX provenance and its
+valuation date). This section normalizes the figures a run reads WHEN ITS SCENARIO
+VERSION IS BUILT, through the normalization route's own service, and carries each
+figure's record into the run's inputs, its report, its card and its receipt.
+
+| | |
+|---|---|
+| Code | `assurance/economics/run_normalization.py` (the policy a build states, the normalization at build, the policy a run applies, the E6 hook), `assurance/economics/engine/figure_normalization.py` (pure: the per-figure record and its replay), `FigureNormalization` in `models.py`; the builder (`builder.py`), the run's inputs (`simulation_service.load_input`, `engine/scenario_simulation.py`), the report's bridge (`report.py`), the card and grade (`validity_service.py`, `engine/grade.py`) and the receipt (`receipt_service.source_snapshots`) |
+| Migration | `0075_figure_normalizations.py`: one new table, nothing else changed. It is numbered behind #168 (E6, `0073`) and the section-28 hardening (`0074`), which are ahead of it in the merge queue, and depends on master's latest, `0072_portfolio_results.py`, until they merge |
+| Tests | `tests/test_economics_run_normalization.py` |
+
+### 36.1 The policy, and which figures are normalized
+
+A build request (section 24.8) may state `normalization`, read exactly as section 19.3
+reads a document (`field_unrecognised`, `field_missing`, `field_malformed`, 400):
+
+| Field | Holds | Required |
+|---|---|---|
+| `base_currency` | the currency the cost index is applied in (section 12.4) | yes |
+| `providers` | the FX providers, 1 to 10 names, in order: the first with a usable rate is the primary (section 12.8) | yes |
+| `index` | the base currency's cost index: `series_id`, `geography`, `category` and `base` (section 12.3) | yes |
+| `rate_types`, `weekend_holiday_rule`, `missing_rate`, `max_interpolation_gap_days`, `freshness_days` | the FX policy's rules (section 12.2), its defaults otherwise | no |
+| `index_max_lag_months` | the index lag (section 12.3), 0 otherwise | no |
+
+The reporting currency is the build's `currency` and the valuation date its `as_of`, the
+date the receipt signs (section 26.5). The engine refuses a policy it does not hold to
+with its own code (`policy_invalid`, `currency_unknown`, ...).
+
+The figures a build READS are the parameter-set variables a template of its events
+reads (`SourceKind` `parameter_set`), and every term of the version's insurance policy
+(deductible, limit, sublimits), which every event applies (`builder.read_set_figures`).
+Each money one that is stated in another currency than the build's, or at another date
+than its as-of date (its `effective_date`, the date the figure holds from), is
+NORMALIZED: its low, its base and its high, each through
+`normalization_service.normalize_for` -- the normalization route's own service -- with
+the figure's `effective_date` as the event date: event-date FX into the base currency,
+the cost index to the valuation month, valuation-date FX into the reporting currency,
+in section 12.4's order, over the source versions a run of the deployment may use on
+the valuation date (section 12.8: a stale, blocked or missing source is refused or
+downgraded exactly as on the route). A figure the build does not read is not normalized
+and refuses nothing. A build that states no policy is as before: a figure it reads in
+another currency is refused, `currency_mismatch`, and the detail says no policy was
+stated; one at another date is read as stated.
+
+Never a number the policy did not allow: a normalization the books cannot make refuses
+the build with its reason as the code -- `rate_missing`, `index_missing`,
+`index_primary_unset` (section 12.5; also the builder's codes) -- naming the figure, the
+point and the step, and nothing is written. A figure that states a distribution is
+refused, `distribution_not_normalizable`: a distribution is not rescaled by a
+conversion (section 36.10). An event after the valuation date is `date_inversion`.
+
+**Worked** (`test_eur_jpy_and_kwd_figures_are_normalized_into_a_usd_run_in_closed_form`):
+a USD build as of 30 September 2026, base USD, the test book quoting EUR/USD 1.1,
+USD/JPY 125 and KWD/USD 3.2 on 2 March 2020, and the index 100 for March 2020 and 125
+for September 2026. A margin of EUR 800 an hour: 800 x 1.1 x 1.25 = USD 1,100. An
+engineering rate of JPY 25,000 an hour (0 decimal places): USD/JPY read the other way
+round, 25,000 x 0.008 x 1.25 = USD 250. A KWD policy (3 decimal places): a deductible of
+KWD 3,125.125 x 3.2 x 1.25 = USD 12,500.5 and a limit of KWD 1,000,000 = USD 4,000,000.
+A ten-hour provider outage then costs 11,000 interrupted, 5,000 + 8 x 250 = 7,000 to
+fail over and min(10 x 1,000, 7,500) = 7,500 in SLA credits: USD 25,500 gross, of which
+14,500 is covered, less the deductible, USD 1,999.5 recovered and 23,500.5 retained --
+exactly, in the build's step-4 figures and in the run's summary. A margin stated on
+Saturday 29 February 2020 reads Friday's EUR/USD 1.08 (`last_official_rate`) and
+February's index: USD 1,080.
+
+### 36.2 The normalized figure and its record
+
+The build reads the NORMALIZED figure in the native one's place: a parameter of the
+scenario version named `normalized:` and the variable's name, in the build's currency,
+with the native figure's unit, source type, evidence, `effective_date` and
+`fresh_until` (it is the same figure, converted: its grade counts it as the customer's,
+its freshness as the native's, and a feed citation in its evidence still names its feed
+source, section 29). Each point is the point's normalized value rounded half-even to 20
+places, a parameter's precision (section 14, `value_too_long`); the record keeps the
+value at full precision. The native figure is never overwritten.
+
+Each normalized figure has ONE record (`figure_normalization.record_of`, rule
+`mythos.economics.run-normalization/v1`), stored as a `FigureNormalization` row:
+
+| Field | Holds |
+|---|---|
+| `figure`, `native`, `normalized` | the normalized parameter's name; the native figure (its parameter, name, parameter-set version, unit, currency, low, base, high, effective date) and the normalized one (its parameter, currency, low, base, high) |
+| `event_date`, `valuation_date`, `policy`, `rounding` | the dates, the policy (section 12.6's `policy`), and the rounding to a parameter's precision |
+| `points` | each point's normalization record, section 12.6's, with its chain: every rate and index value with its provider, date, rate type or vintage, snapshot hash, source key and version |
+| `confidence_downgrades`, `conflicts`, `primary_unavailable` | what the points' records carry, each once (section 12.8) |
+| `sources` | every usable source version the records name -- an observation's by key and version, a conflict's by key -- with its tenant, provider, licence, trust tier and snapshot hash |
+
+`FigureNormalization` is append-only, has no account column and goes with its
+deployment and its scenario; one per native figure per scenario version
+(`uq_econ_normalization_native`). Its checks (`normalization_record_malformed`): the
+record is an object with no float, its digest the record's, both figures as it names
+them, and every point's chain REPLAYED (`figure_normalization.record_refusal`): each
+step's output is its input times the factor (or ratio) it records at the engine's
+precision, each output the next step's input, the last the point's value, and the
+normalized figure that value at a parameter's precision. The builder writes these rows
+in the build's transaction, after every check of every row (section 24.6), so the
+transaction still only inserts (`test_the_builds_transaction_only_writes_with_normalized_figures`).
+
+The build's document (section 24.6) states `normalization` -- the rule, the policy and
+every source version its normalizations read -- only where the request states a policy:
+a build that states none keeps the document, and the digest, it had before. Since the
+source versions are inputs, the same request after a newer usable version is a NEW
+scenario version, never the old one returned
+(`test_a_newer_source_version_is_a_new_build_not_the_old_one`).
+
+### 36.3 The run
+
+`simulation_service.load_input` reads the figures as the build left them: each
+component cites the normalized parameter, and the policy a run applies is the version's
+with each normalized term in its place (`run_normalization.policy_of`, which the report,
+the events route and the portfolio read too). The run's canonical inputs (section 25.6)
+hold every record, as stored, in figure order (`normalizations`), and its versions name
+the rule (`normalization`), so the INPUT DIGEST covers each record: a record changed by
+one digit is another input digest, never the stored run returned
+(`test_the_records_are_in_the_runs_inputs_and_its_digest_covers_them`). Both keys exist
+only for a run that reads a normalized figure. Nothing is converted inside the run:
+its figures are in one currency, the build's, as section 25.9 has it.
+
+### 36.4 The currency bridge
+
+The report's `currency_bridge` (section 30) lists `conversions`: each record as the
+run's stored inputs hold it, so the integrity check `input_digest` (section 27.5) holds
+what is served, and the statement says so (`report.CONVERTED`). Where the stored inputs
+no longer give their digest the conversions are not served (`conversions_not_reported`).
+A record over a source whose licence is not `open` or `customer` is served as a
+portfolio serves a member's normalisation (the section-28 audit's T7,
+`portfolio.served_normalization`, section 33.8): each point's record with every raw rate
+and index value, and every number made from them, withheld -- each observation by its
+source, version, snapshot hash and dates, each conflict by its sources -- and the
+normalized figure's points null; the stored inputs keep the whole record, and the
+figures derived from it stand (`test_a_restricted_sources_values_are_withheld_from_the_bridge_and_the_figures_stand`).
+The report's schema stays `mythos.economics.report/v2`: no field changes shape.
+
+### 36.5 The grade and the card
+
+A run that reads a normalized figure is graded under
+`mythos.economics.confidence-grade/v4`: v3 (section 26.2) and the NORMALIZATION
+DOWNGRADES (`grade.NORMALIZATION_DOWNGRADES`, section 12.5's: `estimated_rate`,
+`stale_rate`, `stale_index`, `source_disagreement`, `primary_unavailable`). Each LINE --
+the gross cash, and under a policy the retained cash -- is lowered one step for each
+such downgrade a normalized figure it reads carries, each at most once per line however
+many of its figures carry it (`source_disagreement` and `primary_unavailable` one step
+per affected line, as section 12.8 has them per normalization); a line that reads no
+such figure is not lowered by them. A KWD policy whose rate two sources dispute lowers
+the retained cash, which reads the policy's terms, and not the gross cash, which does
+not; the headline is the lower line, as before
+(`test_two_sources_over_the_tolerance_use_the_primary_list_the_conflict_and_lower_that_line_only`).
+Each line names the downgrades and the figures that fired them
+(`normalization_downgrades`), and the release the card records holds v4's version
+record. `index_primary_unset` never reaches a card: the build is refused. In the card's
+data freshness a native figure the build normalized is read by its normalized figure,
+never shown as read by nothing.
+
+### 36.6 The receipt
+
+The receipt's `simulation.parameter_set_digest` is the run's input digest (section 26.5),
+which covers every record. Its `sources` name the bridge too, for a version that
+normalized figures: `scenario-normalizations:<scenario>`, the SHA-256 of the stored
+records in figure order, each record's own digest recomputed first
+(`source_snapshot_mismatch` otherwise, as for the other snapshots)
+(`test_the_receipt_covers_the_bridge`). Core's receipt schema is unchanged.
+
+### 36.7 A run that normalizes nothing is as before
+
+A build that states no policy, or one whose figures are all in its currency at its
+as-of date, writes no record; its runs' canonical inputs and versions carry neither new
+key, so their input and result digests are those the same rows gave before this
+section; the grade is v3 with its unchanged version digest; the bridge is empty with its
+old statement; the receipt names the same three snapshots; and the build document of a
+request without a policy is unchanged (`test_a_pure_reporting_currency_run_is_as_before`).
+
+### 36.8 E6: the source versions are the run's dependencies
+
+`run_normalization.source_dependencies` lists, from a run's stored inputs, every source
+version its normalizations read (key, tenant, version, snapshot hash). It is the hook
+#168 (E6) reads when it merges: each is a dependency of the run, and a newer usable
+version of any of them stales it. Until then a newer version already makes a new build
+(section 36.2).
+
+### 36.9 Safety
+
+Nothing here is on a stop path. The normalizations read the stored snapshot versions --
+no network, no feed -- BEFORE the build's transaction, which only inserts, and hold no
+lock and no transaction across any read; the run, the report, the card and the receipt
+read stored rows only. A build refused for a normalization writes nothing. The
+`FigureNormalization` table has no account column, so removing an operator, a stop,
+never writes it, and it goes with its deployment.
+
+### 36.10 Decisions this section takes, which the owner may change
+
+1. **Normalized when the scenario version is built**, not when it is simulated: a
+   component's amounts are computed from the parameters it cites when it is recorded
+   (section 20), so it must cite a figure in its event's currency. Alternative:
+   normalize at simulate time and let a component cite a foreign figure.
+   Recommendation: keep.
+2. **A figure's event date is its `effective_date`**, the date it holds from.
+   Alternative: a stated date of its own on the parameter-set entry. Recommendation:
+   keep until a customer states a figure whose effective date is not its date.
+3. **Only the figures a build reads are normalized**, so an unread figure never
+   refuses a build. Alternative: every money figure of the version.
+   Recommendation: keep.
+4. **Each point is normalized on its own and rounded to 20 places**; the record keeps
+   full precision. Alternative: one factor per figure, as the portfolio applies one
+   per scenario (section 33.5). Recommendation: keep.
+5. **The source versions read are inputs of the build.** Alternative: keep the build
+   identity and leave staleness to E6 alone. Recommendation: keep.
+6. **Each normalization downgrade lowers each line that reads the figure one step,
+   once, whatever the figure's share.** Alternative: only a material figure (section
+   26.2's 5%). Recommendation: keep until calibration data exist.
+7. **A figure that states a distribution is refused.** Alternative: rescale a scale
+   family's parameters by the conversion (a lognormal's mu by ln of the factor, a
+   gamma's scale by the factor). Recommendation: take it when a customer needs a
+   foreign-currency distribution.
+8. **Effect attributes are not normalized**: an effect's money attribute is stated in
+   the build's currency (`currency_mismatch` otherwise), as before. Alternative:
+   normalize them as the parameter set's. Recommendation: keep for the MVP.
+
+### 36.11 What is still not done
+
+- **Effect attributes and stated distributions** are not normalized (36.10, 7 and 8).
+- **No triangulation, and no stored holiday calendar** (section 12.7, unchanged).
+- **E6's staleness** reads the hook when #168 merges; nothing stales a run yet.
+- **Currency uncertainty** stays outside the figures (section 3, rule 6): one rate per
+  date and step, never a distribution of rates.

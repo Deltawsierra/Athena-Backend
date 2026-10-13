@@ -127,9 +127,16 @@ def release_record(versions) -> dict:
     return {
         "engine": versions,
         "sensitivity": sensitivity.version_record(),
-        "grade": grade.version_record(),
+        # A run that read a normalized figure (its versions name the rule, spec section
+        # 36) is graded under v4; every other under v3, its record unchanged.
+        "grade": grade.version_record(normalized=_normalized_run(versions)),
         "card": {"schema": CARD_SCHEMA, "version": CARD_VERSION, "top_drivers": TOP_DRIVERS},
     }
+
+
+def _normalized_run(versions) -> bool:
+    """Whether a run's versions say it read a figure its build normalized."""
+    return isinstance(versions, dict) and "normalization" in versions
 
 
 def model_release(versions) -> dict:
@@ -203,6 +210,10 @@ def _as_of(inputs, build) -> str | None:
 UNREAD = {
     "scenario": "nothing: a parameter of the scenario version that no component, policy or frequency reads",
     "parameter_set": "nothing: a parameter-set variable no component reads",
+    "normalized": (
+        "its normalized figure: the build normalized this parameter-set figure into the reporting currency at the "
+        "valuation date, and the run reads that figure in its place (spec, section 36)"
+    ),
 }
 
 
@@ -416,9 +427,14 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
     roles, unknown_cash, unknown = _reads(inputs)
     as_of = _as_of(inputs, build)
     rows_unread = [("scenario", row) for row in FinancialParameter.objects.filter(scenario=scenario).order_by("name", "id")]
+    # Each figure the build normalized, and the downgrades its record carries (spec,
+    # section 36), as the run's stored inputs hold them: None for a run that read none.
+    held = inputs.get("normalizations")
+    normalized = None if not held else {record["figure"]: tuple(record["confidence_downgrades"]) for record in held}
+    natives = {record["native"]["name"] for record in held or []}
     if build is not None:
         rows_unread += [
-            ("parameter_set", row)
+            ("normalized" if row.name in natives else "parameter_set", row)
             for row in FinancialParameter.objects.filter(parameter_set_id=build.parameter_set_id).order_by("name", "id")
         ]
     drivers = (sensitivity or {}).get("ranked", [])[:TOP_DRIVERS]
@@ -442,6 +458,8 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
             stale_sources=stale_sources,
             per_occurrence=(sensitivity or {}).get("per_occurrence", []),
             undefined=(_level(sensitivity, line) or {}).get("undefined_because") if completed else None,
+            # Each line is lowered by the normalized figures IT reads (grade v4).
+            normalized=normalized,
         )
         for line in lines
     }
@@ -624,7 +642,10 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
             "release": release["record"],
             "methods": {
                 "sensitivity": {"id": sens.METHOD_ID, "version": sens.VERSION},
-                "grade": {"version": grade.VERSION, "version_digest": grade.version_digest()},
+                "grade": {
+                    "version": grade.VERSION_NORMALIZED if normalized is not None else grade.VERSION,
+                    "version_digest": grade.version_digest(normalized=normalized is not None),
+                },
                 "card": {"schema": CARD_SCHEMA, "version": CARD_VERSION},
             },
             "inventory": issued.get("model_inventory")

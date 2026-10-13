@@ -48,7 +48,7 @@ from django.db import models, transaction
 from django.db.models import F, Max, Q
 from django.utils import timezone
 
-from .engine import cost_index, formulas, fx, governance, money, parameters
+from .engine import cost_index, figure_normalization, formulas, fx, governance, money, parameters
 from .engine import parameter_set as pset
 from .engine import loss as engine_loss
 from .engine.provenance import LicenseClass, SourceType, TrustTier
@@ -150,6 +150,15 @@ PORTFOLIO_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(PORTFOLIO_RECORD_REFUSALS)
+NORMALIZATION_RECORD_REFUSALS = {
+    "normalization_record_malformed": (
+        "a figure's normalization record (spec, section 36) is the record of normalizing its parameter-set variable "
+        "into its scenario parameter, of the scenario version it is built with: an object with no float, its digest "
+        "the record's, both figures as it names them, and every step of every point's chain its input times the "
+        "factor it records, the last the value the normalized figure holds at a parameter's precision"
+    ),
+}
+_REFUSAL_TEXT.update(NORMALIZATION_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -2739,6 +2748,76 @@ class EffectFinding(_AppendOnly):
         return f"finding {self.finding} {self.role} of effect {self.effect_id}"
 
 
+class FigureNormalization(_AppendOnly):
+    """One figure a scenario build normalized (spec, section 36): the parameter-set
+    variable as stated (``native``), the scenario parameter the build reads in its
+    place (``normalized``: in the build's currency, at its as-of date), and the record
+    of how (:func:`~assurance.economics.engine.figure_normalization.record_of`): the
+    policy, each point's normalization with its chain, the downgrades, conflicts and
+    fallbacks, and the source versions read. Written by the scenario builder only, in
+    the build's transaction, after every check; append-only, with no account column,
+    going with its deployment. Its record is in the run's inputs, so the run's input
+    digest covers it."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    native = models.ForeignKey(FinancialParameter, on_delete=models.CASCADE, related_name="+")
+    normalized = models.OneToOneField(FinancialParameter, on_delete=models.CASCADE, related_name="+")
+    record = models.JSONField()
+    # "sha256:" + 64 hex over the record's canonical JSON.
+    record_digest = models.CharField(max_length=71)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["scenario", "native"], name="uq_econ_normalization_native"),
+        ]
+
+    def _check_form(self, native: FinancialParameter, normalized: FinancialParameter) -> None:
+        """The checks that read nothing stored: the record, its digest, and the two
+        figures it names, its chains replayed."""
+        record = self.record
+        if not isinstance(record, dict) or _has_float(record):
+            raise EconomicsRefused("normalization_record_malformed", "the record is an object with no float")
+        try:
+            digest = canonical_digest(record)
+        except (TypeError, ValueError):
+            raise EconomicsRefused("normalization_record_malformed", "the record is not canonical JSON") from None
+        if self.record_digest != digest:
+            raise EconomicsRefused("normalization_record_malformed", "the digest is not the record's")
+        if native.parameter_set_id is None or native.scenario_id is not None:
+            raise EconomicsRefused("normalization_record_malformed", "the native figure is a parameter-set variable")
+        refusal = figure_normalization.record_refusal(
+            record, native=_engine_refusal(native.as_engine), normalized=_engine_refusal(normalized.as_engine)
+        )
+        if refusal is not None:
+            raise EconomicsRefused("normalization_record_malformed", refusal)
+
+    def check_new(self) -> None:
+        normalized = FinancialParameter._base_manager.filter(pk=self.normalized_id).first()
+        native = FinancialParameter._base_manager.filter(pk=self.native_id).first()
+        if normalized is None or native is None:
+            raise EconomicsRefused("parameter_not_found", "a normalization names a parameter that is not recorded")
+        tenant = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("deployment_id", flat=True)
+        if list(tenant) != [self.deployment_id] or normalized.scenario_id != self.scenario_id:
+            raise EconomicsRefused("cross_tenant_reference", "the normalized figure is another scenario's")
+        build_set = ScenarioBuild._base_manager.filter(scenario_id=self.scenario_id).values_list(
+            "parameter_set_id", flat=True
+        )
+        if list(build_set) != [native.parameter_set_id]:
+            raise EconomicsRefused("cross_tenant_reference", "the native figure is not of the build's parameter set")
+        self._check_form(native, normalized)
+        if FigureNormalization._base_manager.filter(scenario_id=self.scenario_id, native_id=self.native_id).exists():
+            raise EconomicsRefused("duplicate_id", f"{native.name} normalized twice in one scenario")
+
+    def __str__(self) -> str:
+        return f"normalization of parameter {self.native_id} into {self.normalized_id}"
+
+
 # ---------------------------------------------------------------------------
 # SimulationResult -- one Monte Carlo run of one scenario version (step 7b)
 # ---------------------------------------------------------------------------
@@ -3572,10 +3651,14 @@ class BuildRows:
     (``test_a_builds_transaction_only_writes``). The database's constraints hold
     inside it as on any write."""
 
-    def __init__(self, *, scenario, build, parameters, events, effects, links, components, set_parameters):
+    def __init__(self, *, scenario, build, parameters, events, effects, links, components, set_parameters,
+                 normalizations=()):
         self.scenario = scenario
         self.build = build
         self.parameters = list(parameters)
+        # Each figure the build normalized (spec, section 36), after the parameters
+        # its rows name; none for a build that normalized nothing.
+        self.normalizations = list(normalizations)
         self.events = list(events)
         self.effects = list(effects)
         self.links = list(links)
@@ -3587,13 +3670,15 @@ class BuildRows:
     def in_order(self) -> list:
         """Every row, each after every row it refers to."""
         return [
-            self.scenario, self.build, *self.parameters, *self.events, *self.effects, *self.links, *self.components
+            self.scenario, self.build, *self.parameters, *self.normalizations, *self.events, *self.effects,
+            *self.links, *self.components,
         ]
 
 
 #: The only records a scenario build writes.
 _BUILD_ROW_MODELS = (
-    FinancialScenario, ScenarioBuild, FinancialParameter, LossEvent, CausalEffect, EffectFinding, LossComponent
+    FinancialScenario, ScenarioBuild, FinancialParameter, FigureNormalization, LossEvent, CausalEffect, EffectFinding,
+    LossComponent,
 )
 
 
@@ -3630,6 +3715,17 @@ def check_build_rows(rows: BuildRows) -> None:
     for row in rows.set_parameters.values():
         if row.parameter_set_id != build.parameter_set.pk:
             raise EconomicsRefused("cross_tenant_reference", f"{row.name} is not the build's parameter set's")
+    normalized_rows = {id(row) for row in rows.parameters}
+    natives: set[str] = set()
+    for row in rows.normalizations:
+        if row.scenario is not scenario or row.deployment_id != scenario.deployment_id:
+            raise EconomicsRefused("cross_tenant_reference", "the normalization is another scenario's")
+        if id(row.normalized) not in normalized_rows or str(row.native.uuid) not in rows.set_parameters:
+            raise EconomicsRefused("parameter_not_found", "a normalization names a parameter the build does not hold")
+        if str(row.native.uuid) in natives:
+            raise EconomicsRefused("duplicate_id", f"{row.native.name} normalized twice in one scenario")
+        natives.add(str(row.native.uuid))
+        row._check_form(row.native, row.normalized)
 
     event_keys: set[str] = set()
     events = {id(event): event for event in rows.events}

@@ -40,7 +40,7 @@ from types import MappingProxyType
 
 from . import parameter_set as pset
 from .formulas import MARKET_VALUE, Direction, formula
-from .money import Money, MoneyRefused
+from .money import UNAVAILABLE_REASONS, Money, MoneyRefused
 from .parameters import POINTS, Parameter, Point, Unit
 from .provenance import SourceType
 from .taxonomy import LossFamily
@@ -94,6 +94,16 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "asset_not_found": "the asset is not one of this deployment's assets",
         "parameter_set_not_found": "the customer parameter-set version is not one of this deployment's",
         "scenario_not_found": "the scenario superseded is not one of this deployment's",
+        # A figure a build normalizes (spec, section 36): never a number the policy does
+        # not allow, so a normalization the books cannot make refuses the build.
+        "rate_missing": UNAVAILABLE_REASONS["rate_missing"],
+        "index_missing": UNAVAILABLE_REASONS["index_missing"],
+        "index_primary_unset": UNAVAILABLE_REASONS["index_primary_unset"],
+        "distribution_not_normalizable": (
+            "a figure the build normalizes into its currency states a distribution in its own currency: a "
+            "distribution is not rescaled by a conversion, so state the figure in the build's currency at its as-of "
+            "date, or state it without a distribution"
+        ),
     }
 )
 

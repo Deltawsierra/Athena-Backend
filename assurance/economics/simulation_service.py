@@ -40,10 +40,10 @@ from dataclasses import dataclass
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from . import run_normalization
 from .models import (
     SIMULATION_COMPLETED,
     SIMULATION_REFUSED,
-    CustomerParameterSet,
     EconomicsRefused,
     FinancialParameter,
     FinancialScenario,
@@ -129,7 +129,9 @@ def load_input(scenario: FinancialScenario, *, remediation: RemediationOption | 
     built from states (spec, section 19.2), read as the policy is, or a parameter
     of its own named ``frequency``. Both is a conflict, refused (``duplicate_id``),
     never resolved by taking one. Every parameter is drawn once per simulated
-    year: nothing here names one to be drawn per occurrence. For a residual run,
+    year: nothing here names one to be drawn per occurrence. A figure the build
+    normalized (spec, section 36) is read as its normalized parameter, a policy term
+    among them, and its record is in the input (``normalizations``). For a residual run,
     ``remediation`` is the option whose control effect it applies (spec, section
     28); every other input is exactly the current run's."""
     _, _, ss, _ = _engine()
@@ -138,7 +140,7 @@ def load_input(scenario: FinancialScenario, *, remediation: RemediationOption | 
     policy = None
     currency = build_row.currency if build_row is not None else (events[0].currency if events else "")
     if build_row is not None:
-        policy = CustomerParameterSet.objects.get(pk=build_row.parameter_set_id).content().insurance_policy()
+        policy = run_normalization.policy_of(build_row)
     frequency_row = FinancialParameter.objects.filter(scenario=scenario, name=ss.FREQUENCY_PARAMETER).first()
     if build_row is not None:
         stated_by_set = FinancialParameter.objects.filter(
@@ -194,6 +196,7 @@ def load_input(scenario: FinancialScenario, *, remediation: RemediationOption | 
         frequency=frequency,
         derived=derived,
         remediation=None if remediation is None else remediation_of(remediation),
+        normalizations=run_normalization.normalization_records(scenario),
     )
 
 

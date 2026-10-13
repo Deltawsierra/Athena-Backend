@@ -42,8 +42,11 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   latest exposure run too.
 - **The valuation date and the currency bridge** (``currency_bridge``, schema v2,
   section 30): the run's valuation date, read from the stored rows the receipt
-  reads it from, and the normalization record of each figure the run converted --
-  none, because a run converts nothing and no such record is stored
+  reads it from, and the normalization record of each figure the run converted:
+  each figure its build normalized (section 36), as the run's stored inputs hold it,
+  so the input digest the integrity checks hold covers it (:data:`CONVERTED`), a
+  source whose licence does not allow redistributing its raw data shown by its
+  provenance only; none for a run whose build normalized nothing
   (:data:`NO_CONVERSION`). Nothing is converted or recomputed here.
 
 Nothing here is on a stop path. This module imports nothing probabilistic: the step-8
@@ -59,6 +62,7 @@ from decimal import Decimal
 
 from assurance.models import Deployment
 
+from . import run_normalization
 from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine.formulas import MARKET_VALUE
@@ -106,6 +110,14 @@ NO_CONVERSION = (
     "every figure is stated in the reporting currency as recorded: a run converts nothing (an event, a policy or a "
     "component's inputs in another currency are refused, currency_mismatch), so no figure has a normalization "
     "record to serve, and none is computed here"
+)
+#: What the currency bridge says of a run whose build normalized figures (section 36).
+CONVERTED = (
+    "each figure the scenario build normalized into the reporting currency at the valuation date (section 36): the "
+    "parameter-set figure as stated, the figure the run read in its place, and each point's normalization record "
+    "with its chain, downgrades, conflicts and fallbacks, as the run's stored inputs hold them, so the input digest "
+    "covers them; a source whose licence does not allow redistributing its raw data is shown by its provenance only, "
+    "and the figures derived from it stand. Nothing is converted or recomputed here"
 )
 #: The scenario document's schema.
 SCENARIO_SCHEMA = "mythos.economics.scenario/v1"
@@ -415,9 +427,8 @@ def _build_part(build: ScenarioBuild | None) -> dict | None:
 
 
 def _policy(build: ScenarioBuild | None):
-    if build is None:
-        return None
-    return CustomerParameterSet.objects.get(pk=build.parameter_set_id).content().insurance_policy()
+    # The version's policy, each term the build normalized read as its normalized figure.
+    return run_normalization.policy_of(build)
 
 
 def _loss_events(scenario: FinancialScenario, build: ScenarioBuild | None, shown: _Shown, *, figures: bool
@@ -739,8 +750,10 @@ def _currency_bridge(result: SimulationResult, build: ScenarioBuild | None, code
     converted (section 30), from stored values only, never recomputed: the date is
     the build's as-of date, or for a version with no build the latest as-of date of
     the components its stored inputs hold, read only where they still give their
-    digest; ``conversions`` is empty, because a run converts nothing and no
-    normalization record is stored (:data:`NO_CONVERSION`)."""
+    digest; ``conversions`` is the record of each figure the build normalized as the
+    stored inputs hold it, each served by :func:`served_conversion` (:data:`CONVERTED`),
+    never from inputs that no longer give their digest; empty for a run whose build
+    normalized nothing (:data:`NO_CONVERSION`)."""
     valuation: dict = {"valuation_date": None, "valuation_date_from": None}
     if build is not None:
         valuation = {"valuation_date": build.as_of.isoformat(), "valuation_date_from": VALUATION_FROM_BUILD}
@@ -760,7 +773,43 @@ def _currency_bridge(result: SimulationResult, build: ScenarioBuild | None, code
             valuation = {"valuation_date": dates[-1], "valuation_date_from": VALUATION_FROM_INPUTS}
         else:
             valuation["not_reported"] = "the version has no build, and its stored inputs hold no component's as-of date"
+    held = None if "input_digest" in failed else (result.inputs or {}).get("normalizations")
+    if held:
+        return {**valuation, "reporting_currency": code, "conversions": [served_conversion(r) for r in held],
+                "statement": CONVERTED}
+    if "input_digest" in failed and (result.inputs or {}).get("normalizations"):
+        # Never served from inputs that no longer give their digest.
+        return {**valuation, "reporting_currency": code, "conversions": [], "statement": CONVERTED,
+                "conversions_not_reported": (
+                    f"{STORED_ROW_UNVERIFIED}: the stored inputs no longer give the run's input digest")}
     return {**valuation, "reporting_currency": code, "conversions": [], "statement": NO_CONVERSION}
+
+
+def served_conversion(record: Mapping) -> dict:
+    """One figure's normalization record as the bridge serves it (the section-28
+    audit's T7, as a portfolio serves a member's normalisation): as stored where every
+    source it read, and every source a conflict names, may be redistributed (``open``,
+    ``customer``); otherwise each point's record with every raw rate and index value,
+    and every number made from them, withheld (provenance only), and so the
+    normalized figures. The stored inputs keep the whole record; the figures stand."""
+    from .portfolio import served_normalization
+
+    policy = {"sources": list(record.get("sources") or [])}
+    points, withheld = {}, None
+    for name, point in sorted((record.get("points") or {}).items()):
+        served = served_normalization({"record": point}, policy)
+        points[name] = served["record"]
+        withheld = withheld or served.get("withheld")
+    entry = {**record, "points": points}
+    if withheld is not None:
+        normalized = dict(record.get("normalized") or {})
+        normalized.update({point: None for point in ("low", "base", "high")})
+        entry.update(
+            normalized=normalized,
+            conflicts=[c for c in (points.get("base") or {}).get("conflicts") or []],
+            withheld=withheld,
+        )
+    return entry
 
 
 def _unknowns(result: SimulationResult, events: list[dict], failed: list[str]) -> list[dict]:
@@ -919,7 +968,9 @@ def scenario_document(scenario: FinancialScenario) -> dict:
             read_by.setdefault(contributor, []).append(f"derived:{row.name}")
         if row.scenario_id is not None and row.name == "frequency":
             read_by.setdefault(str(row.uuid), []).append("frequency")
-    policy = None if version is None else version.content().insurance_policy()
+    policy = None if version is None else run_normalization.policy_of(build)
+    for figure in run_normalization.stored(scenario):
+        read_by.setdefault(str(figure.native.uuid), []).append(f"normalized:{figure.normalized.name}")
     if policy is not None:
         terms = [("deductible", policy.deductible), ("limit", policy.limit)]
         terms += [(f"sublimit:{family}", term) for family, term in sorted(policy.sublimits.items())]
