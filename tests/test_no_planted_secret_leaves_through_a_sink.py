@@ -1750,6 +1750,10 @@ ROUTES.update(
         # built, and the events route reads one scenario's causal loss events.
         "deployment-economics-scenario-build": _READ,
         "deployment-economics-scenario-events": _READ,
+        # The industry-pack registry (E7, spec section 37.10): static data, the same for
+        # every caller; no tenant's row is read, so none of a tenant's canaries can be in it.
+        "economics-packs": _DOCS + "serves the industry-pack registry: static data, the same for every caller, "
+        "holding no tenant's row",
         # Raising a source's trust tier (spec, section 6.1): the list and a raise
         # answer the raise records; an approval and a withdrawal answer the one they
         # moved, as the list reads it.
