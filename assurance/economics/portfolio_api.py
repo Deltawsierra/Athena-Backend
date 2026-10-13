@@ -41,6 +41,7 @@ from rest_framework.views import APIView
 from . import portfolio, report
 from .api import MAX_BODY_BYTES, BodyTooLarge, StrictJSONParser, _deployment, _may_write, _table_unavailable
 from .engine import currency as _currency
+from .models import SIMULATION_COMPLETED
 from .report_api import REQUEST_BUDGET_SECONDS, SIMULATION_POLICIES, parse_simulate
 
 
@@ -133,7 +134,8 @@ class PortfolioSimulateView(APIView):
             "excluded": [
                 {"scenario": e["scenario"], "code": e["code"], "reason": e["reason"]} for e in inputs["excluded"]
             ],
-            "grade": portfolio.portfolio_grade(inputs)["grade"],
+            # A refused portfolio has no figures, so no grade (review round 1, NIT-2).
+            "grade": portfolio.portfolio_grade(inputs)["grade"] if row.status == SIMULATION_COMPLETED else None,
             "report": f"{url}?result={row.uuid}",
         }
         return Response(served, status=status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK)

@@ -4,10 +4,16 @@ section 24).
 
 - known answers: two independent scenarios sum their means within the band and
   never their percentiles; two co-driven scenarios have a wider tail; one shared
-  effect in two scenarios, and five findings on one payment loss, are counted once;
-  an Unknown scenario, and every other one not totalled, is excluded and named; a
-  currency that cannot be normalised is excluded, and one that can is normalised
-  before it is summed;
+  effect in two scenarios, and five findings on one payment loss, are counted once
+  a year, at the largest loss that year; an Unknown scenario, and every other one
+  not totalled, is excluded and named; a currency that cannot be normalised is
+  excluded, and one that can is normalised before it is summed;
+- review round 1: the portfolio is at least each included scenario, year by year
+  and at every figure it serves, and adding a scenario never lowers one (the
+  reviewer's rare duplicate, and the narrow/wide pair); a residual run is never
+  totalled; an edited input, a vanished card, a report not totalled and a record
+  not of its inputs are each caught; a group names two scenarios and a strength
+  above its floor;
 - contributions: they sum to the mean and to the expected shortfall, exactly, and
   the largest contributor to the mean may differ from the largest to the tail;
 - determinism, tenancy and roles, strict JSON, and no transaction or lock during
@@ -52,6 +58,7 @@ from assurance.economics.models import (
     LossEvent,
     PortfolioResult,
     ScenarioBuild,
+    SimulationResult,
     canonical_digest,
 )
 from assurance.models import Asset, Deployment, Finding
@@ -67,8 +74,15 @@ QUICK = "quick_10k"
 #: A customer's amount around 100,000 (sd 10,000), and a rare large one around 5,000,000 (sd 1,000,000).
 SMALL = (("80000", "100000", "120000"), {"id": "gamma", "version": 1, "params": {"shape": "100", "scale": "1000"}})
 LARGE = (("3000000", "5000000", "7000000"), {"id": "gamma", "version": 1, "params": {"shape": "25", "scale": "200000"}})
+#: The reviewer's rare duplicate (review round 1, HIGH-1): a marginally larger figure than SMALL.
+DUPLICATE = (("80001", "100001", "120001"),
+             {"id": "gamma", "version": 1, "params": {"shape": "100", "scale": "1000.01"}})
+#: The reviewer's wide one (MEDIUM-1): a gamma of shape 1, mean 100,000.
+WIDE = (("20000", "100000", "400000"), {"id": "gamma", "version": 1, "params": {"shape": "1", "scale": "100000"}})
 SPINE = "sha256:" + "5a" * 32
 WHEN = datetime(2026, 10, 1, 12, 0, tzinfo=dt_timezone.utc)
+#: Every figure a portfolio serves for a line, and each included scenario's own.
+FIGURES = ("p10", "p50", "p90", "severe_plausible", "mean", "expected_annual_loss", "expected_shortfall")
 
 
 @pytest.fixture
@@ -230,6 +244,42 @@ def _standard_error(block):
     return float(block["standard_error_of_mean"])
 
 
+def _at_least(larger, smaller, why):
+    """Every figure served in ``larger`` is at least the same one in ``smaller``,
+    both lines, at the minor unit."""
+    for line in ("gross_cash", "retained_cash"):
+        for figure in FIGURES:
+            big, small = Decimal(larger[line][figure]), Decimal(smaller[line][figure])
+            assert big >= small, (why, line, figure, big, small)
+
+
+def _years(monkeypatch):
+    """Each line's years as the engine summarises them, in order: every included
+    scenario's own (by uuid), then the portfolio's."""
+    seen = []
+    real = ep._block
+
+    def capture(vector, **kwargs):
+        seen.append(vector.copy())
+        return real(vector, **kwargs)
+
+    monkeypatch.setattr(ep, "_block", capture)
+    return seen
+
+
+def _each_year_at_least_each_scenario(seen, members):
+    per_line = members + 1
+    assert len(seen) == 2 * per_line
+    for at in range(2):
+        *owns, total = seen[at * per_line:(at + 1) * per_line]
+        for own in owns:
+            assert (total >= own).all()
+
+
+def _shared_asset(deployment):
+    return str(Asset.objects.create(deployment=deployment, kind="agent", name="pay", identifier="agent://pay").uuid)
+
+
 # ======================================================================
 # Known answers
 # ======================================================================
@@ -278,51 +328,183 @@ def test_two_co_driven_scenarios_have_a_wider_tail_than_two_independent_ones(dep
     assert {m["group"] for m in driven["scenarios"]["included"]} == {"cloud-provider"}
 
 
-def test_one_shared_effect_in_two_scenarios_is_counted_once(deployment, people):
-    """The same SPINE effect in two scenarios is one loss event: counted once, in the
-    scenario where it is largest (here equal: the first by uuid), and left out of the
-    other's draws."""
-    shared = str(Asset.objects.create(deployment=deployment, kind="agent", name="pay", identifier="agent://pay").uuid)
-    a, ra = made_and_simulated(deployment, people["analyst"], title="A", spine=SPINE, asset=shared)
+def test_one_shared_effect_in_two_scenarios_is_counted_once_a_year_at_the_larger_loss(deployment, people,
+                                                                                      monkeypatch):
+    """The same SPINE effect in two scenarios is one loss event. Each scenario keeps
+    it, drawn at its own frequency; each year the portfolio counts it once, at the
+    larger of the two losses of it that year (review round 1, HIGH-1): never below
+    either scenario, year by year, and never their sum."""
+    shared = _shared_asset(deployment)
+    a, _ = made_and_simulated(deployment, people["analyst"], title="A", spine=SPINE, asset=shared)
     # Observed a month apart: one SPINE effect is one event whatever the window (step 5).
-    b, rb = made_and_simulated(deployment, people["analyst"], title="B", spine=SPINE, asset=shared,
-                               occurred_at=WHEN + timedelta(days=30))
+    b, _ = made_and_simulated(deployment, people["analyst"], title="B", spine=SPINE, asset=shared,
+                              occurred_at=WHEN + timedelta(days=30))
+    seen = _years(monkeypatch)
     document = _totalled_report(deployment, people)
     first, second = sorted([str(a.uuid), str(b.uuid)])
     (joined,) = document["shared_events"]
-    assert joined["counted"]["scenario"] == first and joined["by"] == ["spine_effect"]
-    assert [j["scenario"] for j in joined["joined"]] == [second]
+    assert [e["scenario"] for e in joined["events"]] == [first, second]
+    assert joined["by"] == ["spine_effect"] and joined["links"] == [[0, 1]] and joined["sets"] == [[0], [1]]
+    assert joined["counted"] == portfolio.COUNTED_ONCE
     by = {m["scenario"]: m for m in document["scenarios"]["included"]}
-    assert by[second]["events"] == []
-    assert by[second]["counted_elsewhere"] == [{"event_key": "ev-pay",
-                                                "counted_in": {"scenario": first, "event_key": "ev-pay"}}]
-    record = _record(document)
-    gross = record["lines"]["gross_cash"]
-    single = _stored(ra)
-    band = 4 * math.sqrt(_standard_error(gross) ** 2 + _standard_error(single) ** 2)
-    assert abs(float(gross["mean"]) - float(single["mean"])) <= band  # once, not twice
-    assert record["contributions"]["gross_cash"]["mean"]["by_scenario"][second] == "0"
+    # No event is dropped from either scenario.
+    assert by[first]["events"] == by[second]["events"] == ["ev-pay"]
+    assert by[first]["shared"] == [{"event_key": "ev-pay", "with": [{"scenario": second, "event_key": "ev-pay"}]}]
+    _each_year_at_least_each_scenario(seen, 2)
+    lines = document["summary"]["lines"]
+    _at_least(lines, by[first]["own"], first)
+    _at_least(lines, by[second]["own"], second)
+    owns = [Decimal(by[sid]["own"]["gross_cash"]["mean"]) for sid in (first, second)]
+    assert Decimal(lines["gross_cash"]["mean"]) < Decimal("0.9") * sum(owns)  # once a year, not twice
+    years = joined["years"]["gross_cash"]
+    assert sum(years["years_counted_by"].values()) == years["years_with_loss"]
+    assert min(years["years_counted_by"].values()) > 0
+    contributions = _record(document)["contributions"]["gross_cash"]["mean"]["by_scenario"]
+    assert Decimal(contributions[first]) > 0 and Decimal(contributions[second]) > 0
 
 
 def test_five_findings_on_one_payment_loss_never_quintuple_the_portfolio(deployment, people):
     """The specification's own test (section 27, at portfolio level): five scenarios,
     each from one finding enabling the same payment-loss event -- one SPINE effect,
-    observed five times -- make ONE loss in the portfolio, not five."""
-    shared = str(Asset.objects.create(deployment=deployment, kind="agent", name="pay", identifier="agent://pay").uuid)
-    results = []
+    observed five times -- make ONE loss a year in the portfolio, not five: the
+    largest of the five that year, so at least each and far below their sum."""
+    shared = _shared_asset(deployment)
     for index in range(5):
-        _, result = made_and_simulated(deployment, people["analyst"], title=f"finding {index}", spine=SPINE,
-                                       asset=shared, occurred_at=WHEN + timedelta(days=index * 3))
-        results.append(result)
+        made_and_simulated(deployment, people["analyst"], title=f"finding {index}", spine=SPINE, asset=shared,
+                           occurred_at=WHEN + timedelta(days=index * 3))
     document = _totalled_report(deployment, people)
     assert len(document["scenarios"]["included"]) == 5
     (joined,) = document["shared_events"]
-    assert len(joined["joined"]) == 4
-    gross = _record(document)["lines"]["gross_cash"]
-    single = _stored(results[0])
-    band = 4 * math.sqrt(_standard_error(gross) ** 2 + _standard_error(single) ** 2)
-    assert abs(float(gross["mean"]) - float(single["mean"])) <= band
-    assert float(gross["mean"]) < 1.5 * float(single["mean"])  # never quintupled
+    assert len(joined["events"]) == 5 and len(joined["links"]) == 10 and len(joined["sets"]) == 5
+    lines = document["summary"]["lines"]
+    owns = []
+    for member in document["scenarios"]["included"]:
+        _at_least(lines, member["own"], member["scenario"])
+        owns.append(Decimal(member["own"]["gross_cash"]["mean"]))
+    assert Decimal(lines["gross_cash"]["mean"]) < Decimal("0.5") * sum(owns)  # never quintupled
+
+
+def test_a_rare_duplicate_never_hides_a_frequent_loss(deployment, people, monkeypatch):
+    """Review round 1, HIGH-1, the reviewer's repro: B, a loss of about 100,000 five
+    times a year, is totalled alone; then A -- the same SPINE effect and asset, 0.05 a
+    year, a marginally larger figure -- is added. Counted once A YEAR, at the larger
+    loss that year, the duplicate hides nothing: adding A lowers no figure served,
+    and the portfolio is at least B and A, year by year and at every figure."""
+    shared = _shared_asset(deployment)
+    b, _ = made_and_simulated(deployment, people["analyst"], title="B", rate="5", spine=SPINE, asset=shared)
+    alone = _totalled_report(deployment, people)
+    a, _ = made_and_simulated(deployment, people["analyst"], title="A", rate="0.05", amount=DUPLICATE, spine=SPINE,
+                              asset=shared, occurred_at=WHEN + timedelta(days=30))
+    seen = _years(monkeypatch)
+    both = _totalled_report(deployment, people)
+    assert {m["scenario"] for m in both["scenarios"]["included"]} == {str(a.uuid), str(b.uuid)}
+    assert len(both["shared_events"]) == 1
+    _each_year_at_least_each_scenario(seen, 2)
+    _at_least(both["summary"]["lines"], alone["summary"]["lines"], "adding A")
+    by = {m["scenario"]: m for m in both["scenarios"]["included"]}
+    for sid, member in by.items():
+        _at_least(both["summary"]["lines"], member["own"], sid)
+    # B's draws are its own: alone, it is the portfolio it was.
+    for line in ("gross_cash", "retained_cash"):
+        for figure in ("p10", "p50", "p90", "severe_plausible"):
+            assert by[str(b.uuid)]["own"][line][figure] == alone["summary"]["lines"][line][figure]
+    assert Decimal(both["summary"]["lines"]["gross_cash"]["mean"]) > Decimal(400_000)
+    assert both["grade"]["grade"] == "B" and both["banner"] is None and both["complete"] is True
+
+
+def test_no_included_scenario_states_a_larger_tail_than_the_portfolio(deployment, people):
+    """Review round 1, MEDIUM-1, the reviewer's narrow/wide pair: two scenarios at 2 a
+    year share one SPINE effect, a narrow figure (about 100,001) and a wide one (a
+    gamma of shape 1, mean 100,000). The year's count is the larger loss that year,
+    so the portfolio's P90, P95 and expected shortfall are at least the wide one's own
+    over the portfolio's years, and within a few per cent of its own stored run's."""
+    shared = _shared_asset(deployment)
+    made_and_simulated(deployment, people["analyst"], title="narrow", amount=DUPLICATE, spine=SPINE, asset=shared)
+    wide, stored = made_and_simulated(deployment, people["analyst"], title="wide", amount=WIDE, spine=SPINE,
+                                      asset=shared, occurred_at=WHEN + timedelta(days=30))
+    document = _totalled_report(deployment, people)
+    lines = document["summary"]["lines"]
+    for member in document["scenarios"]["included"]:
+        _at_least(lines, member["own"], member["scenario"])
+    own = next(m["own"] for m in document["scenarios"]["included"] if m["scenario"] == str(wide.uuid))
+    for figure in ("p90", "severe_plausible", "expected_shortfall"):
+        assert Decimal(lines["gross_cash"][figure]) >= Decimal(own["gross_cash"][figure])
+    for figure in ("p90", "severe_plausible"):
+        assert Decimal(lines["gross_cash"][figure]) >= Decimal("0.95") * Decimal(_stored(stored)[figure]), figure
+
+
+def test_a_residual_run_is_never_totalled_and_never_hides_the_exposure_run(deployment, people):
+    """Review round 1, MEDIUM-2: a remediation option's residual run is the scenario's
+    latest row, yet the portfolio totals the scenario at its EXPOSURE run (the one
+    results/ serves), never the residual run; and a stored portfolio rewritten to
+    name the residual run is never served."""
+    from tests.test_economics_remediation import option_body
+
+    scenario, _ = made_and_simulated(deployment, people["analyst"], title="A")
+    analyst = _client(people["analyst"])
+    base = f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario.uuid}/"
+    recorded = analyst.post(base + "mitigations/", data=json.dumps(option_body("0.5")),
+                            content_type="application/json")
+    assert recorded.status_code == 201, recorded.content
+    option = recorded.json()["option"]["uuid"]
+    ran = analyst.post(base + f"mitigations/{option}/simulate/", data=json.dumps({"seed": 7, "policy": QUICK}),
+                       content_type="application/json")
+    assert ran.status_code in (200, 201), ran.content
+    residual = SimulationResult.objects.residual_runs().get(scenario=scenario)
+    exposure = SimulationResult.objects.exposure_runs().filter(scenario=scenario).order_by("-id").first()
+    assert residual.pk > exposure.pk and exposure.remediation_id is None
+    document = _totalled_report(deployment, people)
+    (member,) = document["scenarios"]["included"]
+    assert member["result"] == str(exposure.uuid) and member["result_digest"] == exposure.result_digest
+    assert document["scenarios"]["excluded"] == [] and document["complete"] is True
+    assert str(residual.uuid) not in json.dumps(document)
+    # The stored inputs rewritten, digest and all, to name the residual run: refused.
+    row = PortfolioResult.objects.get()
+    inputs = json.loads(json.dumps(row.inputs))
+    inputs["members"][0].update(result=str(residual.uuid), result_digest=residual.result_digest,
+                                input_digest=residual.input_digest)
+    PortfolioResult._base_manager.filter(pk=row.pk).update(inputs=inputs, input_digest=canonical_digest(inputs))
+    rewritten = _report_of(deployment, people)
+    _unverified(rewritten, "record_binding", "member_rows")
+    assert rewritten["integrity"]["scenarios_failed"] == [
+        {"scenario": str(scenario.uuid), "reason": "the result is a residual run under a remediation option, never "
+                                                   "exposure"}
+    ]
+
+
+def test_a_scenario_that_links_two_others_never_lowers_the_portfolio(deployment, people, monkeypatch):
+    """Adding a scenario never lowers the portfolio, even one whose event links two
+    events that were apart: A (one day) and C (two days later) of one key are two
+    loss events; B, observed between them, is linked to each. The three are one
+    chain, counted each year at the larger of A's and C's together, or B's -- never
+    at the largest of the three, which could be below A's and C's together."""
+    shared = _shared_asset(deployment)
+    made_and_simulated(deployment, people["analyst"], title="A", asset=shared)
+    made_and_simulated(deployment, people["analyst"], title="C", asset=shared, occurred_at=WHEN + timedelta(hours=40))
+    apart = _years(monkeypatch)
+    before = _totalled_report(deployment, people)
+    assert before["shared_events"] == []
+    made_and_simulated(deployment, people["analyst"], title="B", asset=shared, occurred_at=WHEN + timedelta(hours=20))
+    monkeypatch.undo()
+    chained = _years(monkeypatch)
+    after = _totalled_report(deployment, people)
+    (joined,) = after["shared_events"]
+    assert joined["by"] == ["window"] and len(joined["links"]) == 2 and len(joined["sets"]) == 2
+    assert joined["counted"] == portfolio.COUNTED_CHAIN
+    _each_year_at_least_each_scenario(chained, 3)
+    for at in range(2):
+        assert (chained[at * 4 + 3] >= apart[at * 3 + 2]).all()
+    _at_least(after["summary"]["lines"], before["summary"]["lines"], "adding B")
+
+
+def test_a_shared_event_counted_too_many_ways_is_a_recorded_refusal(deployment, people, monkeypatch):
+    shared = _shared_asset(deployment)
+    made_and_simulated(deployment, people["analyst"], title="A", spine=SPINE, asset=shared)
+    made_and_simulated(deployment, people["analyst"], title="B", spine=SPINE, asset=shared)
+    monkeypatch.setattr(ep, "MAX_COUNTED_SETS", 1)
+    posted = _totalled(deployment, people)
+    assert posted["portfolio"]["refusal"]["code"] == "shared_too_complex" and posted["grade"] is None
+    assert PortfolioResult.objects.get().status == "refused"
 
 
 def test_every_scenario_not_totalled_is_excluded_and_named_never_silently(deployment, people):
@@ -375,6 +557,48 @@ def test_nothing_to_total_is_recorded_as_a_refusal_with_every_reason(deployment,
     assert document["excluded_from_totals"] is True and document["grade"]["grade"] is None
     assert document["summary"] == {"not_reported": "refused: nothing_to_total"}
     assert [e["scenario"] for e in document["scenarios"]["excluded"]] == [str(unknown.uuid)]
+
+
+def test_an_edited_input_excludes_its_scenario_as_inputs_changed(deployment, people):
+    """Review round 1, LOW-1 (the reviewer's M9): a parameter a scenario's run cites,
+    edited past the append-only checks after the run: its stored rows no longer give
+    the inputs it was run on, so it is excluded as ``inputs_changed`` with both
+    digests named, and the rest is totalled."""
+    edited, result = made_and_simulated(deployment, people["analyst"], title="edited")
+    kept, _ = made_and_simulated(deployment, people["analyst"], title="kept")
+    FinancialParameter._base_manager.filter(scenario=edited, name="pay.loss").update(base="100001")
+    document = _totalled_report(deployment, people)
+    (excluded,) = document["scenarios"]["excluded"]
+    assert (excluded["scenario"], excluded["code"]) == (str(edited.uuid), "inputs_changed")
+    assert excluded["reason"].startswith("sha256:") and excluded["reason"].endswith(f", not {result.input_digest}")
+    assert [m["scenario"] for m in document["scenarios"]["included"]] == [str(kept.uuid)]
+
+
+def test_a_report_refused_for_any_other_reason_is_excluded_as_not_totalled(deployment, people, monkeypatch):
+    """Review round 1, LOW-1: a verified, completed and graded report that
+    :func:`report.may_be_totalled` refuses all the same is excluded as
+    ``not_totalled``: the portfolio totals through that one rule only."""
+    scenario, _ = made_and_simulated(deployment, people["analyst"])
+    monkeypatch.setattr(report, "may_be_totalled", lambda document: False)
+    posted = _totalled(deployment, people)
+    assert [(e["scenario"], e["code"]) for e in posted["excluded"]] == [(str(scenario.uuid), "not_totalled")]
+    assert posted["portfolio"]["refusal"]["code"] == "nothing_to_total"
+
+
+def test_a_vanished_card_refuses_the_portfolio_it_was_totalled_in(deployment, people):
+    """Review round 1, LOW-1 (the reviewer's M12): an included scenario's Validity Card
+    deleted after the portfolio was totalled. Step 6's checks accept a run with no
+    card, so the portfolio's own recheck of the grade it totalled is what refuses
+    it, naming the scenario."""
+    a, ra = made_and_simulated(deployment, people["analyst"], title="A")
+    made_and_simulated(deployment, people["analyst"], title="B")
+    _totalled(deployment, people)
+    FinancialValidityCard._base_manager.filter(simulation=ra).delete()
+    document = _report_of(deployment, people)
+    _unverified(document, "member_rows")
+    assert document["integrity"]["scenarios_failed"] == [
+        {"scenario": str(a.uuid), "reason": "its card's grade is not the one totalled"}
+    ]
 
 
 @pytest.fixture
@@ -524,6 +748,26 @@ def test_the_grade_is_no_higher_than_the_lowest_scenario_and_lower_for_an_expert
     assert lowest["grade"]["base"] == "D" and lowest["grade"]["grade"] == "D"
 
 
+def test_a_group_with_one_scenario_included_applies_to_none_and_lowers_no_grade(deployment, people):
+    """Review round 1, LOW-4 and NIT-1: a group applies only where two of its scenarios
+    at least are included. One whose other scenario is excluded (Unknown) applies to
+    none: never drawn, its member drawn as its own frequency states, the figures
+    those of no group, and an expert's strength for it lowers no grade."""
+    a, _ = made_and_simulated(deployment, people["analyst"], title="A")
+    unknown, _ = made_and_simulated(deployment, people["analyst"], title="unknown", unknown=True)
+    group = {"group": "provider", "strength": "2", "source_type": "EXPERT_ESTIMATE", "evidence_ref": LABEL,
+             "scenarios": sorted([str(a.uuid), str(unknown.uuid)])}
+    plain = _totalled_report(deployment, people)
+    grouped = _totalled_report(deployment, people, groups=[group])
+    (shown,) = grouped["groups"]
+    assert shown["applied_to"] == [] and shown["not_applied"].startswith("fewer than two of its scenarios")
+    record = _record(grouped)
+    assert record["groups"]["provider"]["drawn"] is False and record["groups"]["provider"]["members"] == []
+    assert record["members"][str(a.uuid)]["group"] is None
+    assert grouped["grade"]["grade"] == plain["grade"]["grade"] == "B" and grouped["grade"]["downgrades"] == []
+    assert grouped["summary"] == plain["summary"]
+
+
 # ======================================================================
 # Determinism, storage and the report
 # ======================================================================
@@ -637,6 +881,32 @@ def test_a_tampered_portfolio_row_is_never_served(deployment, people):
     assert "not_reported" in document["groups"] and "not_reported" in document["scenarios"]
 
 
+def test_a_record_not_of_its_inputs_is_never_served(deployment, people):
+    """Review round 1, LOW-3 (the reviewer's repro): a portfolio with an expert's group
+    is graded C. Its inputs rewritten to a customer's source, their digest
+    recomputed, give their digest; but the record still names the inputs it was
+    drawn from, so the report is refused (``record_binding``), never served as B.
+    So is a record rewritten, its digest recomputed, to draw a scenario apart from
+    the group its inputs name."""
+    a, _ = made_and_simulated(deployment, people["analyst"], title="A")
+    b, _ = made_and_simulated(deployment, people["analyst"], title="B")
+    group = {"group": "provider", "strength": "0.5", "source_type": "EXPERT_ESTIMATE", "evidence_ref": LABEL,
+             "scenarios": sorted([str(a.uuid), str(b.uuid)])}
+    _totalled(deployment, people, groups=[group])
+    assert _report_of(deployment, people)["grade"]["grade"] == "C"
+    row = PortfolioResult.objects.get()
+    inputs = json.loads(json.dumps(row.inputs))
+    inputs["groups"][0]["source_type"] = "CUSTOMER_PROVIDED"
+    PortfolioResult._base_manager.filter(pk=row.pk).update(inputs=inputs, input_digest=canonical_digest(inputs))
+    _unverified(_report_of(deployment, people), "record_binding")
+    record = json.loads(json.dumps(row.record))
+    record["members"][str(a.uuid)]["group"] = None
+    PortfolioResult._base_manager.filter(pk=row.pk).update(
+        inputs=row.inputs, input_digest=row.input_digest, record=record, result_digest=canonical_digest(record)
+    )
+    _unverified(_report_of(deployment, people), "record_binding")
+
+
 def test_a_portfolio_row_is_checked_and_append_only(deployment, people):
     made_and_simulated(deployment, people["analyst"])
     _totalled(deployment, people)
@@ -670,10 +940,14 @@ def test_a_refusal_the_inputs_decide_is_recorded_and_one_they_do_not_is_not(depl
     assert not PortfolioResult.objects.exists()
     monkeypatch.undo()
     # A portfolio-only limit (in its inputs, so another digest): too many values to hold.
-    monkeypatch.setattr(ep, "LINES_PER_MEMBER", 10_000)
+    monkeypatch.setattr(ep, "LINES_PER_EVENT", 10_000)
     tight = _post(_client(people["analyst"]), deployment)
     assert tight.status_code == 201 and tight.json()["portfolio"]["refusal"]["code"] == "values_over_budget"
     assert _post(_client(people["analyst"]), deployment).status_code == 200
+    # A refused portfolio has no figures, so no grade (review round 1, NIT-2).
+    refused = _report_of(deployment, people)
+    assert tight.json()["grade"] is None and refused["grade"]["grade"] is None
+    assert refused["grade"]["reason"] == "a refused portfolio has no figures and no grade"
 
 
 # ======================================================================
@@ -703,7 +977,7 @@ def test_tenancy_and_roles(deployment, other_deployment, people):
     mine = PortfolioResult.objects.get(deployment=deployment)
     assert [m["scenario"] for m in mine.inputs["members"]] == [str(scenario.uuid)]
     group = {"group": "g", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": LABEL,
-             "scenarios": [str(theirs.uuid)]}
+             "scenarios": sorted([str(scenario.uuid), str(theirs.uuid)])}
     refused = _post(analyst, deployment, _body(groups=[group]))
     assert refused.status_code == 400 and refused.json()["code"] == "scenario_not_found"
     # Signed out: 401.
@@ -712,6 +986,14 @@ def test_tenancy_and_roles(deployment, other_deployment, people):
     assert PortfolioResult.objects.count() == 2
     nothing = Deployment.objects.create(name="empty", owner=people["owner"])
     assert _document(owner, nothing).status_code == 404
+
+
+U1, U2, U3 = (f"{n}{n}{n}{n}{n}{n}{n}{n}-{n}{n}{n}{n}-4{n}{n}{n}-8{n}{n}{n}-{n * 12}" for n in "123")
+
+
+def _group(**over):
+    return {"group": "g", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
+            "scenarios": [U1, U2], **over}
 
 
 @pytest.mark.parametrize(
@@ -725,22 +1007,19 @@ def test_tenancy_and_roles(deployment, other_deployment, people):
         (_body(reporting_currency="ZZZ"), "currency_unknown"),
         (_body(reporting_currency=7), "field_malformed"),
         (_body(valuation_date="2026-13-01"), "date_malformed"),
-        (_body(groups=[{"group": "Bad Key", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": [str(uuid.uuid4())]}]), "group_malformed"),
-        (_body(groups=[{"group": "g", "strength": "0", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": [str(uuid.uuid4())]}]), "group_malformed"),
-        (_body(groups=[{"group": "g", "strength": "10.5", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": [str(uuid.uuid4())]}]), "group_malformed"),
-        (_body(groups=[{"group": "g", "strength": "1", "source_type": "A_GUESS", "evidence_ref": "e",
-                        "scenarios": [str(uuid.uuid4())]}]), "group_malformed"),
-        (_body(groups=[{"group": "g", "strength": 1, "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": [str(uuid.uuid4())]}]), "group_malformed"),
-        (_body(groups=[{"group": "g", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": ["11111111-1111-4111-8111-111111111111"]},
-                       {"group": "h", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": ["11111111-1111-4111-8111-111111111111"]}]), "group_malformed"),
-        (_body(groups=[{"group": "g", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "e",
-                        "scenarios": [str(uuid.uuid4())]}]), "scenario_not_found"),
+        (_body(groups=[_group(group="Bad Key")]), "group_malformed"),
+        (_body(groups=[_group(strength="0")]), "group_malformed"),
+        (_body(groups=[_group(strength="10.5")]), "group_malformed"),
+        # A floor (review round 1, LOW-2): below it, and where its float is subnormal or zero.
+        (_body(groups=[_group(strength="0.0000009")]), "group_malformed"),
+        (_body(groups=[_group(strength="0." + "0" * 320 + "1")]), "group_malformed"),
+        (_body(groups=[_group(strength="0." + "0" * 400 + "1")]), "group_malformed"),
+        (_body(groups=[_group(source_type="A_GUESS")]), "group_malformed"),
+        (_body(groups=[_group(strength=1)]), "group_malformed"),
+        (_body(groups=[_group(), _group(group="h", scenarios=[U1, U3])]), "group_malformed"),
+        # A group of one correlates with nothing (review round 1, LOW-4).
+        (_body(groups=[_group(scenarios=[U1])]), "group_too_small"),
+        (_body(groups=[_group()]), "scenario_not_found"),
         (_body(normalization={"base_currency": "USD"}), "field_missing"),
         (_body(normalization={"base_currency": "USD", "providers": ["P"], "index": {"series_id": "S", "geography": "G",
                                                                                   "category": "C", "base": "B"},
@@ -894,7 +1173,8 @@ def test_events_one_spine_effect_joins_are_one_however_far_apart():
     joined = ep.shared_events([_ref("s1", spine={"x"}, at=(WHEN,)),
                                _ref("s2", spine={"x"}, at=(WHEN + timedelta(days=90),), asset="b")])
     (one,) = joined
-    assert one.kept.scenario == "s1" and [e.scenario for e in one.joined] == ["s2"] and one.by == ("spine_effect",)
+    assert [e.scenario for e in one.events] == ["s1", "s2"] and one.by == ("spine_effect",)
+    assert one.links == ((0, 1),) and one.one_event and ep.counted_sets(one) == ((0,), (1,))
 
 
 def test_the_window_joins_one_key_within_24_hours_inclusive_and_no_further():
@@ -908,32 +1188,63 @@ def test_the_window_joins_one_key_within_24_hours_inclusive_and_no_further():
     assert ep.WINDOW == builder.GROUPING_WINDOW
 
 
-def test_the_largest_event_is_counted_and_the_order_never_matters():
+def test_each_scenario_is_a_set_and_the_order_never_matters():
+    """Three scenarios' events of one SPINE effect, all linked: a year counts one
+    scenario's loss of it, the largest that year, whatever their figures at base."""
     events = [_ref("s1", spine={"x"}, at=(WHEN,), base="100"), _ref("s2", spine={"x"}, at=(WHEN,), base="300"),
               _ref("s3", spine={"x"}, at=(WHEN,), base="200")]
     (one,) = ep.shared_events(events)
-    assert one.kept.scenario == "s2" and [e.scenario for e in one.joined] == ["s1", "s3"]
+    assert one.one_event and ep.counted_sets(one) == ((0,), (1,), (2,))
     assert ep.shared_events(list(reversed(events))) == (one,)
+    # A scenario's two events in it are one set: its loss of the event is their sum.
+    (two,) = ep.shared_events([_ref("A", "a1", at=(WHEN,)), _ref("B", at=(WHEN + timedelta(hours=20),)),
+                               _ref("A", "a2", at=(WHEN + timedelta(hours=40),))])
+    assert [e.order for e in two.events] == [("A", "a1"), ("A", "a2"), ("B", "ev")]
+    assert two.one_event and ep.counted_sets(two) == ((0, 1), (2,))
+    assert ep.links_between(two.events[0], two.events[1]) == ()
 
 
-def test_hypothetical_events_of_one_key_are_one_and_join_one_observed_event_where_they_add_the_most():
+def test_a_chain_is_counted_at_its_largest_set_of_events_no_two_linked():
+    """A (day one), B (20 hours on) and C (40 hours on), of one key: A and C are each
+    linked to B, not to each other. A year counts A's and C's together, or B's."""
+    (one,) = ep.shared_events([_ref("A", at=(WHEN,)), _ref("B", at=(WHEN + timedelta(hours=20),)),
+                               _ref("C", at=(WHEN + timedelta(hours=40),))])
+    assert one.links == ((0, 1), (1, 2)) and not one.one_event and ep.counted_sets(one) == ((0, 2), (1,))
+    long = ep.shared_events([_ref(f"s{i:02d}", at=(WHEN + timedelta(hours=20 * i),)) for i in range(20)])
+    assert ep.counted_sets(long[0]) is None and len(ep.counted_sets(long[0], limit=10_000)) > ep.MAX_COUNTED_SETS
+
+
+def test_an_event_of_hypothetical_effects_alone_is_linked_to_every_event_of_its_key():
+    """Hypothetical events of one key are linked to each other, and each to every
+    observed event of its key in another scenario; two observed events days apart
+    are not linked to each other, so a year counts them together or one
+    hypothetical one."""
     hypothetical = [_ref("h1", hypothetical=True, base="500"), _ref("h2", hypothetical=True, base="50")]
     (one,) = ep.shared_events(hypothetical)
-    assert one.kept.scenario == "h1" and one.by == ("hypothetical",)
+    assert one.by == ("hypothetical",) and ep.counted_sets(one) == ((0,), (1,))
     observed = [_ref("o1", spine={"x"}, at=(WHEN,), base="1000"),
                 _ref("o2", spine={"y"}, at=(WHEN + timedelta(days=5),), base="10")]
-    joined = ep.shared_events(hypothetical + observed)
-    # The hypothetical events add 490 to o2's, nothing to o1's: they join o2's, and only it.
-    (one,) = joined
-    assert one.kept.scenario == "h1" and {e.scenario for e in one.joined} == {"h2", "o2"}
-    assert "hypothetical" in one.by
+    (one,) = ep.shared_events(hypothetical + observed)
+    assert [e.scenario for e in one.events] == ["h1", "h2", "o1", "o2"] and one.by == ("hypothetical",)
+    assert one.links == ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3)) and not one.one_event
+    assert ep.counted_sets(one) == ((0,), (1,), (2, 3))
+    # Another key, or no key at all, is never linked by it.
+    assert ep.links_between(_ref("h1", hypothetical=True), _ref("o1", at=(WHEN,), asset="b")) == ()
 
 
-def test_a_member_without_an_event_counted_elsewhere_reads_none_of_its_parameters(deployment, people):
-    scenario = made(deployment, people["analyst"])
-    si = simulation_service.load_input(scenario)
-    assert ep.without_events(si, []) is si
-    assert ep.without_events(si, ["ev-pay"]) is None
+def test_the_engine_refuses_links_that_are_not_the_rules(deployment, people):
+    a = made(deployment, people["analyst"], title="A", spine=SPINE)
+    b = made(deployment, people["analyst"], title="B", spine=SPINE)
+    members = sorted((ep.Member(str(s.uuid), simulation_service.load_input(s), Decimal(1)) for s in (a, b)),
+                     key=lambda m: m.scenario_id)
+    (one,) = ep.shared_events([_ref(m.scenario_id, "ev-pay", spine={"x"}) for m in members])
+    common = {"seed": 5, "draws": 1_000, "reporting_currency": "USD", "input_digest": "sha256:" + "0" * 64}
+    for forged in (ep.Joined(one.events, one.by, ()), ep.Joined(one.events, ("window",), one.links),
+                   ep.Joined(one.events[:1], one.by, ())):
+        with pytest.raises(ep.PortfolioRefused) as refused:
+            ep.run(members, shared=[forged], **common)
+        assert refused.value.code == "shared_malformed"
+    assert ep.run(members, shared=[one], **common).record["shared"][0]["sets"] == [[0], [1]]
 
 
 # ======================================================================

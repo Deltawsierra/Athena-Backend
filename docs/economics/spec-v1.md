@@ -4754,8 +4754,9 @@ totalled from their DRAWS, never by summing percentiles. Customer-level exposure
 not the sum of every scenario's P90: shared causes make scenarios move together, and
 one loss can be counted in two of them. So the portfolio draws its scenarios again
 on one seed, year by year, with explicit correlation groups, counts a shared loss
-event once, normalises each scenario into one reporting currency before anything is
-summed, and says what each scenario contributes to the mean and to the tail. It is
+event once a year, at the largest loss of it that year, normalises each scenario into
+one reporting currency before anything is summed, and says what each scenario
+contributes to the mean and to the tail. It is
 served at `GET deployments/<uuid>/economics/portfolio/` (the owner's
 `GET /financial/portfolio`).
 
@@ -4768,9 +4769,13 @@ served at `GET deployments/<uuid>/economics/portfolio/` (the owner's
 ### 29.1 What is totalled
 
 `mythos.economics.portfolio-selection/v1`. For one deployment, every scenario
-version no other version supersedes; of each, its LATEST stored simulation result,
-by record order (the one `results/` serves without `?simulation=`, section 27.11
-decision 7), never an older one in its place. That result's report is built
+version no other version supersedes; of each, its LATEST exposure run, by record
+order (`SimulationResult.objects.exposure_runs()`: the one `results/` serves without
+`?simulation=`, section 27.11 decision 7), never an older one in its place. A
+residual run under a remediation option (section 28) is never exposure: it is never
+selected, so it never hides the scenario's exposure run however recently it was
+recorded (review round 1, MEDIUM-2; `may_be_totalled` refuses one too). That
+result's report is built
 (`report.build_report`, section 27.3) and `report.may_be_totalled` (section 27.6)
 is the one test: only a report that carries its own digest, of a completed run whose
 every stored row verified, graded A to D, is totalled. Then the run must be annual
@@ -4815,13 +4820,25 @@ insurance per event occurrence (`scenario_simulation._sample`, which now takes t
 `random` and the years' `counts` a caller hands in; without them it draws exactly as
 before, so no stored result, analysis or series changes).
 
-The portfolio's annual loss in year `y` is the sum of its scenarios' normalised
-annual losses in year `y`, for two lines: the gross cash, and the retained cash (a
-scenario with no insurance policy retains its gross); the headline is the retained
-cash where any scenario states a policy. P10, P50, P90, the mean, the expected
-annual loss and severe-but-plausible are step 7a's summary of that vector (section
-23.5), with its bands. Market value is never added to cash, and is not aggregated.
-The run is sampled twice, from fresh streams, and the two must agree bit for bit.
+The portfolio's annual loss in year `y` is the correctly rounded sum (`math.fsum`)
+of its scenarios' normalised annual losses in year `y` of every event no other is
+linked to, and of each shared loss event's count that year (section 29.4), for two
+lines: the gross cash, and the retained cash (a scenario with no insurance policy
+retains its gross); the headline is the retained cash where any scenario states a
+policy. P10, P50, P90, the mean, the expected annual loss and severe-but-plausible
+are step 7a's summary of that vector (section 23.5), with its bands. Market value is
+never added to cash, and is not aggregated. The run is sampled twice, from fresh
+streams, and the two must agree bit for bit.
+
+**The portfolio is at least each included scenario, year by year**, and so at every
+percentile, the mean and the expected shortfall (review round 1, HIGH-1 and
+MEDIUM-1). A scenario's own annual loss over the portfolio's years -- its events'
+losses, those in one shared loss event summed first -- is summed the same way from
+terms each no larger than one of the portfolio's, all of them non-negative, so the
+correctly rounded portfolio is never below it, exactly. The engine checks it on every
+run (otherwise `invariant_broken`), the record keeps each scenario's own summary
+over the portfolio's years (`members.<uuid>.own`), and the report shows it beside the
+portfolio's (`scenarios.included[].own`).
 
 ### 29.3 Correlation groups
 
@@ -4835,16 +4852,34 @@ the source that strength rests on, with its evidence:
 ```
 
 Scenarios in one group share ONE common driver per simulated year, `M ~ Gamma(shape
-1/v, scale v)`: mean 1 and variance `v`, the group's strength, above 0 and at most
-`STRENGTH_MAX` (10). Every member's annual rate -- the rate its frequency implies
+1/v, scale v)`: mean 1 and variance `v`, the group's strength, from `STRENGTH_MIN`
+(0.000001) to `STRENGTH_MAX` (10). Below the floor the driver is 1 to the last digit,
+and a strength whose float is subnormal or zero has no finite driver at all, so it is
+refused, 400 `group_malformed`, never a 503 or a misleading recorded refusal (review
+round 1, LOW-2). Every member's annual rate -- the rate its frequency implies
 (section 25.1: a Poisson's lambda; a negative binomial's Gamma(size, (1 - p) / p); a
 zero-inflated Poisson's 0 with probability pi, else lambda) -- is multiplied by `M`,
 and the year's count is a Poisson of that product: a Gamma-mixed rate. A scenario in
 no group has `M = 1`, so its count is distributed exactly as its frequency states.
-Scenarios in different groups, or in none, are independent. Two scenarios in one
-group at strength 2 have a P95 and an expected shortfall about twice the
-independent ones', with the same mean
-(`test_two_co_driven_scenarios_have_a_wider_tail_than_two_independent_ones`).
+Scenarios in different groups, or in none, are independent.
+
+**A group names two scenarios at least** (`group_too_small`, 400: a group of one
+correlates with nothing; review round 1, LOW-4), and it APPLIES only where two of
+them at least are included. One with fewer included applies to none: its
+`applied_to` is empty and `not_applied` says why, it is not drawn, its scenario is
+drawn as its own frequency states, and its strength lowers no grade (NIT-1).
+
+Two scenarios in one group at strength 2 have a P95 and an expected shortfall about
+twice the independent ones', with the same mean
+(`test_two_co_driven_scenarios_have_a_wider_tail_than_two_independent_ones`). Much of
+that is not co-movement: the driver also widens each member's own count of events a
+year (the mixed rate is over-dispersed), keeping its mean. The reviewer measured the
+split (two scenarios at 2 a year, strength 2, 100,000 years): independent, P95
+761,603 and expected shortfall 880,191; each in a group of its own (no co-movement),
+1,296,239 and 1,757,268; one group of two, 1,590,880 and 2,346,146. So about 65% of
+the P95's rise and 60% of the expected shortfall's is each member's own
+over-dispersion, and the rest is co-movement. That is the decided MVP (decision
+29.10 #2, the owner's).
 
 The strength is a recorded parameter: its value, source type and evidence are in
 the portfolio's inputs and digest, and shown. A strength resting on
@@ -4854,35 +4889,84 @@ declaration, recorded and digested: a changed group is a new portfolio, never an
 edit of one (the owner's specification, section 28's model manipulation: priors,
 parameters, correlation groups). Copulas are out of scope (section 29.11).
 
-### 29.4 A shared loss event is counted once
+### 29.4 A shared loss event is counted once a year, at the largest loss that year
 
-`mythos.economics.portfolio-shared-events/v1` (`portfolio.shared_events`), step 5's
-grouping rule (section 24.5) across scenarios. Two events of different scenarios are
-ONE loss event when:
+`mythos.economics.portfolio-shared-events/v1` (`portfolio.links_between`,
+`portfolio.shared_events`, `portfolio.counted_sets`): step 5's grouping attributes
+(section 24.5), read pair by pair across scenarios. Two events of different scenarios
+are LINKED -- directly one loss event -- when:
 
 - an effect of each is the same SPINE effect (`spine_effect`), however far apart
   they were observed;
 - they have the same grouping key (template and version, asset and business
   process) and an observation of one is within 24 hours, inclusive, of an
-  observation of the other (`builder.GROUPING_WINDOW`, held equal by a test);
-- both are of hypothetical effects alone, with the same key.
+  observation of the other (`window`; `builder.GROUPING_WINDOW`, held equal by a
+  test);
+- they have the same grouping key and one of them at least is of hypothetical
+  effects alone (`hypothetical`).
 
-A key's events of hypothetical effects alone join the ONE event of their key, among
-the other scenarios' observed events, where they add the most gross cash at base
-(ties: at high, then low, then the first by scenario and event key), never every
-one, so they bridge nothing (step 5's pricing). Joining is transitive. Of the events
-that are one, the one of the largest gross cash at base (step 4's, normalised; ties:
-high, then low, then the first by scenario and event key) is COUNTED, and every other
-is left out of its scenario's draws: its scenario is drawn with its other events
-(`portfolio.without_events`), and a scenario all of whose events are counted
-elsewhere adds nothing. Each is listed: the report's `shared_events` (the counted
-event, the events joined to it and the links that joined them) and each scenario's
-`counted_elsewhere`.
+The pair's own attributes decide it, never a third event, and a scenario's own
+events are never linked to each other (step 5 has grouped them already). Events
+linked, directly or through others, are one SHARED loss event, connected as step 5's
+events are. The engine checks that the links it is handed are exactly the rule's,
+and that they connect the event (`shared_malformed` otherwise).
+
+**Counted once a year, at the largest loss that year** (the lead's interim decision
+on review round 1, HIGH-1, saved for the owner: decision 29.10 #3). Every scenario
+keeps every one of its events, drawn at its own frequency and with its own figures:
+nothing is taken out of a scenario because another has it. In each simulated year a
+shared loss event is counted ONCE, at the largest total that year of a set of its
+events no two of which are linked (`counted_sets`: every largest such set, at most
+`MAX_COUNTED_SETS`, 64; more is `shared_too_complex`, recorded). Ties go to the
+first set.
+
+- Where every two of its events of two scenarios are linked -- one SPINE effect, or
+  observations within the window: the usual case -- those sets are its scenarios'
+  own events. It is counted at the LARGEST of the joined scenarios' losses of it
+  that year (a scenario with two of its events in it, at their sum), never their sum
+  across scenarios.
+- Where its events are a CHAIN -- A and C each linked to B, not to each other, as
+  with observations a day apart each, or an event of hypothetical effects alone and
+  two observed events of its key days apart -- the sets are {A, C} and {B}, and the
+  year counts the larger: never the largest of the three alone, which could be less
+  than A's and C's together.
+
+What that holds:
+
+- **The portfolio is at least each included scenario, year by year** (section 29.2).
+  A scenario's own events are never linked, so they lie within one counted set, and
+  the year's count is at least their sum.
+- **Adding a scenario never lowers the portfolio.** Its events add links to its own
+  events only, never between two others', so every set the smaller portfolio counted
+  is still one no two of which are linked, and each year's count is at least what it
+  was. The reviewer's repro is a test: B, about 100,000 five times a year, is
+  totalled; then A, the same SPINE effect and asset at 0.05 a year and a marginally
+  larger figure, is added, and no figure falls
+  (`test_a_rare_duplicate_never_hides_a_frequent_loss`; the first draft's mean fell
+  from 501,573 to 5,089). So is a scenario that links two others' events into a chain
+  (`test_a_scenario_that_links_two_others_never_lowers_the_portfolio`). Where a
+  scenario links events that were apart, their losses are summed in other groups, so
+  in binary64 a figure can differ in its last place; a group applied once two of its
+  scenarios are included changes its members' draws (section 29.3).
+- **No included scenario's tail exceeds the portfolio's** (review round 1,
+  MEDIUM-1): the count is the larger loss in each year, never the event larger at
+  base. The reviewer's narrow/wide pair is a test
+  (`test_no_included_scenario_states_a_larger_tail_than_the_portfolio`; the first
+  draft's P95 was 61% of the wide scenario's own).
+
+Each shared loss event is listed: the inputs' and the report's `shared_events` give
+its events, the kinds and the pairs of its links, and how it is counted; the report
+adds the sets a year may count and, per line, the years with a loss and in how many
+of them the counted set held each scenario's events. Each scenario names its events
+in one (`shared`).
 
 The owner's test (specification, line 838): five scenarios, each built from one
 finding enabling the same payment-loss event -- one SPINE effect observed five
-times -- make ONE loss in the portfolio, never five
-(`test_five_findings_on_one_payment_loss_never_quintuple_the_portfolio`).
+times -- make ONE loss a year in the portfolio, the largest of the five that year:
+at least each one's, and under half of their sum, never five
+(`test_five_findings_on_one_payment_loss_never_quintuple_the_portfolio`). Each of
+the five still draws its own count of the event, so the year's largest is more than
+one scenario's alone (decision 29.10 #3).
 
 ### 29.5 Currency: normalised before it is summed
 
@@ -4921,9 +5005,13 @@ The owner's specification, section 24 and lines 694-697: each scenario's
 contribution to mean exposure AND to tail exposure; the biggest mean contributor
 may differ from the biggest tail contributor.
 
-- **To the mean**: each scenario's own mean over the portfolio's years, the
-  correctly rounded binary64 mean of its normalised annual losses, written as its
-  shortest decimal. The portfolio's mean and expected annual loss ARE their exact
+- **What a scenario carries**, each year: its events no other is linked to, and of
+  each shared loss event, its own events in the set counted that year (none where
+  the set is another scenario's). So a scenario whose loss of a shared event is the
+  smaller one that year carries none of it that year.
+- **To the mean**: each scenario's mean over the portfolio's years of what it
+  carries, the correctly rounded binary64 mean, written as its shortest decimal. The
+  portfolio's mean and expected annual loss ARE their exact
   decimal sum (the mean of a sum is the sum of the means), so the contributions sum
   to it exactly; it agrees with the mean of the per-draw totals to within 1E-12,
   relative, and a disagreement is a broken invariant.
@@ -4950,10 +5038,11 @@ reporting currency and valuation date, the canonical inputs and their digest, th
 record and its digest (`mythos.economics.portfolio/v1`), or the refusal's code, and
 the timing outside both digests. The inputs (`mythos.economics.portfolio-inputs/v1`)
 are: every included scenario with its result's uuid and digests, its grade, its
-currency, as-of date and normalisation, its group, the events it is drawn with and
-the ones counted elsewhere; every exclusion with its reason; the groups with their
-strengths, sources, evidence and the scenarios they apply to; the shared events; the
-normalisation policy and its sources; the rules; and every version and limit
+currency, as-of date and normalisation, its group, every one of its events and
+those in a shared loss event; every exclusion with its reason; the groups with their
+strengths, sources, evidence and the scenarios they apply to (or why none); the
+shared loss events with their links; the normalisation policy and its sources; the
+rules; and every version and limit
 (`engine.portfolio.versions()`). Nothing in it is a float, and both digests are
 recomputed on save (`portfolio_record_malformed`, `digest_mismatch`).
 
@@ -4963,14 +5052,20 @@ draw a second; every check runs before the transaction, which only inserts; two
 racing past the lookup are stopped by the constraint and the later returns the
 first's row. A new result of any scenario, a changed group or a changed limit is a
 new input digest, so a new portfolio. A refusal the inputs decide is recorded
-(`nothing_to_total`, `values_over_budget`, `events_over_limit`, `rate_out_of_range`);
+(`nothing_to_total`, `values_over_budget`, `events_over_limit`, `rate_out_of_range`,
+`shared_too_complex`);
 one they do not decide (`time_over_budget`, `memory_exhausted`, `invariant_broken`,
 `engine_unavailable`, `simulation_failed`) is 503 and never recorded.
 
-**Limits**: step 6's policies and step 7a's budget. The portfolio holds two annual
-lines per scenario, one driver per drawn group and four temporaries, each of the
+**Limits**: step 6's policies and step 7a's budget. The portfolio holds
+`LINES_PER_EVENT` (3) values per event of each scenario -- its two annual lines, and
+less than one more for what a line's shared loss events hold while it is summarised
+(each one's count and which set is counted, and a scenario's sum of its events in
+one) -- one driver per drawn group and `PORTFOLIO_TEMPORARIES` (8), each of the
 draws; with one scenario's own sample beside them (step 7b's `values_held`) they must
-fit `MAX_VALUES` (`values_over_budget`, before that scenario is sampled). So a
+fit `MAX_VALUES` (`values_over_budget`, before anything is sampled where the
+portfolio's own do not fit, and before that scenario is sampled where its sample does
+not). So a
 `detailed_1m` portfolio holds only a few scenarios. Measured on the build machine (4
 cores, numpy 2.3.3), each portfolio sampled twice: 2 scenarios of a Poisson(3)
 frequency at 100,000 years in 0.69 s (10 MB traced peak), 10 such scenarios, five in
@@ -5017,18 +5112,27 @@ limitations (`portfolio.LIMITATIONS`).
 
 **Verified the way step 6's report is** (`portfolio.stored_row_failures`), in order:
 `input_digest` (the stored inputs give their digest), `result_digest` (a completed
-record gives its digest; a refusal holds none) and `member_rows`: each included
-scenario's result is still recorded in this deployment for that scenario, with the
-digests totalled, its result, card and series pass section 27.5's checks, and its
-card's verified grade is the one totalled. A portfolio whose rows fail any check is
+record gives its digest; a refusal holds none), `record_binding` and `member_rows`.
+`record_binding` (review round 1, LOW-3): a completed record names the inputs it was
+drawn from -- its input digest, seed, draws and currency, its scenarios with their
+groups and factors, its groups and its shared loss events -- so inputs rewritten with
+their digest recomputed fail it, as step 6 binds its card and series to their
+result. `member_rows`: each included scenario's result is still recorded in this
+deployment for that scenario, an exposure run (never a residual run), with the
+digests totalled; its result, card and series pass section 27.5's checks; and its
+card's verified grade is the one totalled (a card deleted since fails here, as
+section 27.5's checks accept a run with no card). A portfolio whose rows fail any check is
 served as a refusal, `stored_row_unverified`, naming the checks and each scenario
 that failed, with no figure, the banner and `excluded_from_totals: true`.
 
 **The grade** (`portfolio.portfolio_grade`): no higher than the lowest included
 scenario's grade, each first lowered one step for every downgrade its normalisation
-carries; then one step lower, once, where the strength of a group that applies to an
-included scenario rests on `EXPERT_ESTIMATE` or `UNKNOWN` (`expert_correlation`);
-never below D. With nothing included there is no grade.
+carries; then one step lower, once, where the strength of a group that applies (to
+two included scenarios at least) rests on `EXPERT_ESTIMATE` or `UNKNOWN`
+(`expert_correlation`); a group that applies to none lowers nothing. Never below D. A
+refused portfolio, one with nothing included among them, has no figures and so no
+grade (review round 1, NIT-2): the report's `grade` is null with the reason, and the
+simulate response's `grade` is null.
 
 **The banner rule applies at portfolio level** (`portfolio.banner_reason`, section
 27.6's rule): a refused portfolio, one whose rows fail a check, and one with no
@@ -5038,8 +5142,11 @@ neither.
 
 Codes: `nothing_to_total` (no current scenario version may be totalled: recorded,
 each listed with its reason), `no_annual_loss`, `member_malformed`,
-`group_malformed` (a group's key, strength, source, evidence or scenarios, or a
-scenario in two groups), `scenarios_over_limit`, `rate_out_of_range` (a member's rate
+`group_malformed` (a group's key, strength from 0.000001 to 10, source, evidence or
+scenarios, or a scenario in two groups), `group_too_small` (a group names one
+scenario), `shared_malformed` (a shared loss event's events or links are not the
+rule's: the engine's own check), `shared_too_complex` (a chain counted more than 64
+ways: recorded), `scenarios_over_limit`, `rate_out_of_range` (a member's rate
 times its driver above the largest count mean, 1E9), `portfolio_record_malformed`,
 `scenario_not_found`, `source_not_found`; step 7a's `values_over_budget` and
 `events_over_limit`, step 6's `seed_malformed`, `policy_unrecognised`,
@@ -5079,22 +5186,39 @@ report's rule, so a broken report leaves the portfolio's routes unserved too.
    where `may_be_totalled` admits its report. Alternative: the latest result that
    verifies (an edited latest row would then silently bring back an older figure).
    Recommendation: keep.
-2. **Correlation by a Gamma-mixed rate per group** (the decided MVP): one common
-   driver of mean 1 and variance `v` multiplies each member's annual rate. It also
-   widens each member's own count (the mixed rate is over-dispersed), keeping its
-   mean. Alternatives: a Gaussian or t copula on the members' annual losses (keeps
-   each marginal exactly; section 29.11); a common-cause event added to the members.
-   Recommendation: keep for the MVP; take a copula when a buyer's tail needs the
-   marginals unchanged.
-3. **A shared event is the largest of the events it joins**, at base, normalised; the
-   others are left out of their scenarios' draws. Alternative: re-build the joined
-   event at the larger loss of every effect (step 5's merge), which can state more.
-   Recommendation: keep; the counted event never states less than the largest event
-   it joins, the floor step 5's merge holds.
-4. **Hypothetical effects join across scenarios by their key**, and a key's
-   hypothetical events join ONE observed event of their key, where they add the most
-   at base. Alternative: never join hypothetical effects across scenarios (risks
-   counting one declared loss twice). Recommendation: keep.
+2. **Correlation by a Gamma-mixed rate per group** (the decided MVP; the owner's
+   decision, saved on review round 1): one common driver of mean 1 and variance `v`
+   multiplies each member's annual rate. It also widens each member's own count (the
+   mixed rate is over-dispersed), keeping its mean: about 65% of the P95's rise and
+   60% of the expected shortfall's, in the reviewer's measure (section 29.3), is
+   that over-dispersion, not co-movement. A group names two scenarios at least and
+   applies to two included at least. Alternatives: a Gaussian or t copula on the
+   members' annual losses (keeps each marginal exactly; section 29.11); a
+   common-cause event added to the members. Recommendation: keep for the MVP; take a
+   copula when a buyer's tail needs the marginals unchanged.
+3. **A shared loss event is counted once per SIMULATED YEAR, at the largest of the
+   joined scenarios' losses of it that year** (the lead's interim decision on review
+   round 1, HIGH-1, saved for the owner). Every scenario keeps every one of its
+   events, at its own frequency. The first draft counted it once per PORTFOLIO, in
+   the scenario largest at base, and took it out of the others: a rare scenario with
+   a marginally larger figure then hid a frequent one (the reviewer's repro: the
+   mean fell from 501,573 to 5,089), and a narrow one hid a wide one's tail (a P95 at
+   61% of an included scenario's own). The per-year count is at least every
+   included scenario year by year and never falls when a scenario is added. It still
+   counts more than one scenario's loss where scenarios draw one event at
+   independent frequencies (five findings: the largest of five draws a year).
+   Alternatives: re-build the shared event at step 5's larger loss of every effect,
+   drawn at ONE frequency (which frequency is then a decision of its own); or the
+   per-portfolio rule with the event chosen by its expected annual loss.
+   Recommendation: keep the per-year rule until the owner decides.
+4. **An event of hypothetical effects alone is linked to every event of its key in
+   another scenario.** The first draft joined a key's hypothetical events to ONE
+   observed event, where they added the most at base, so that they bridged nothing;
+   under the per-year count a chain is counted at its largest set (#10), so nothing
+   is gained by the restriction, and a choice among events would let an added
+   scenario move it and lower the portfolio. Alternative: never link hypothetical
+   effects across scenarios (risks counting one declared loss twice).
+   Recommendation: keep.
 5. **One normalisation factor per scenario**, its as-of date to the valuation date,
    applied to every draw. Alternative: a factor per draw with rate and index
    uncertainty (section 3, rule 6 keeps currency uncertainty out of the figures).
@@ -5114,6 +5238,12 @@ report's rule, so a broken report leaves the portfolio's routes unserved too.
    the headline is the retained cash where any scenario states a policy. Alternative:
    total the retained cash only where every scenario states a policy.
    Recommendation: keep.
+10. **A chain is counted at its largest set of events no two of which are linked**:
+    the most it can lose with no one loss counted twice, and at least each of its
+    scenarios. Refused past 64 such sets (`shared_too_complex`). Alternative: step
+    5's connected events counted at the largest scenario's loss of all of them; then
+    a scenario that links two others' separate events would lower the portfolio.
+    Recommendation: keep.
 
 ### 29.11 What is still not done
 

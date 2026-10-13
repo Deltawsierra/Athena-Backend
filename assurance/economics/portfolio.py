@@ -4,11 +4,13 @@ Exposure E5; ``docs/economics/spec-v1.md``, section 29). The thin Django half of
 
 :func:`simulate_portfolio` picks, for one deployment, each current scenario
 version's latest stored result and totals only those :func:`report.may_be_totalled`
-admits; every other scenario is listed with its reason (:data:`EXCLUSIONS`), never
+admits (its latest EXPOSURE run: a residual run under a remediation option never
+is); every other scenario is listed with its reason (:data:`EXCLUSIONS`), never
 silently dropped. It normalises each included scenario into the reporting currency
 at the valuation date (step 3's order), finds the loss events two scenarios share
-and counts each once, draws the included scenarios again on one seed with their
-correlation groups, and records a :class:`~assurance.economics.models.PortfolioResult`:
+and counts each once a year, at the largest of their losses that year, draws the
+included scenarios again on one seed with their correlation groups (two scenarios
+at least each), and records a :class:`~assurance.economics.models.PortfolioResult`:
 
 - **Idempotent on its inputs**: the included results' digests, the exclusions, the
   groups and their parameters, the normalisations, the shared events, every
@@ -84,8 +86,8 @@ REPORT_SCHEMA = "mythos.economics.portfolio-report/v1"
 SELECTION_VERSION = "mythos.economics.portfolio-selection/v1"
 SELECTION = (
     "every scenario version of the deployment that no other version supersedes; of each, its latest stored "
-    "simulation result by record order (the one results/ serves without ?simulation=), never an older one in its "
-    "place; included only where report.may_be_totalled admits that result's report (its own digest, a completed "
+    "exposure run by record order (SimulationResult.objects.exposure_runs(): the one results/ serves without "
+    "?simulation=, never a residual run under a remediation option), never an older one in its place; included only where report.may_be_totalled admits that result's report (its own digest, a completed "
     "run, every stored row verified, graded A to D), the run is annual (it states a frequency), its stored rows "
     "still give its inputs, and its amounts normalise into the reporting currency at the valuation date. Every "
     "other version is listed with its reason"
@@ -94,7 +96,8 @@ SELECTION = (
 GRADE_RULE = (
     "no higher than the lowest included scenario's grade, each first lowered one step for every downgrade its "
     "normalisation carries (an estimated or stale rate or index, section 12.5); then one step lower, once, where "
-    "the strength of a group that applies to an included scenario rests on EXPERT_ESTIMATE or UNKNOWN; never below D"
+    "the strength of a group that applies (to two included scenarios at least) rests on EXPERT_ESTIMATE or UNKNOWN; "
+    "never below D; a refused portfolio has no grade"
 )
 #: A group strength resting on one of these lowers the grade (section 26.2's rule).
 ASSUMPTION_SOURCES = frozenset({SourceType.EXPERT_ESTIMATE.value, SourceType.UNKNOWN.value})
@@ -120,9 +123,15 @@ EXCLUSIONS = {
     "currency_unnormalisable": "its amounts cannot be normalised into the reporting currency at the valuation date",
 }
 #: The checks :func:`stored_row_failures` runs, in order.
-INTEGRITY_CHECKS = ("input_digest", "result_digest", "member_rows")
+INTEGRITY_CHECKS = ("input_digest", "result_digest", "record_binding", "member_rows")
 #: The lines a portfolio sums, in this order (the engine's).
 LINES = ("gross_cash", "retained_cash")
+#: How a shared loss event is counted, as its inputs state it.
+COUNTED_ONCE = "once a year, at the largest of these scenarios' losses of it that year"
+COUNTED_CHAIN = (
+    "once a year, at the largest total that year of a set of these events no two of which are linked: they are a "
+    "chain, two of them linked only through a third"
+)
 #: What a portfolio is not, stated in every one.
 LIMITATIONS = (
     "a total of the deployment's current scenario versions whose latest result may be totalled; every other is "
@@ -130,11 +139,14 @@ LIMITATIONS = (
     "dependence only through the correlation groups declared: one common Gamma driver of each group's annual rates; "
     "no copula, no dependence between severities; scenarios in different groups, or in none, are independent, and "
     "a customer figure two scenarios read is drawn apart in each",
-    "a group's driver also widens each member's own count of events a year (the mixed rate is over-dispersed); "
-    "it keeps the mean",
-    "a shared loss event is found by SPINE effect and step 5's grouping key and window; events of hypothetical "
-    "effects alone are matched by key; the event counted is the largest at base, not re-built at the larger loss "
-    "of every effect it joins",
+    "a group applies only where two of its scenarios at least are included; its driver also widens each member's own "
+    "count of events a year (the mixed rate is over-dispersed), keeping the mean: much of a group's tail is that, not "
+    "co-movement",
+    "a shared loss event is found pair by pair, by SPINE effect and step 5's grouping key and window; an event of "
+    "hypothetical effects alone is linked to every event of its key in another scenario; it is counted once a year at "
+    "the largest of the joined scenarios' losses of it that year (a chain, at the largest set of its events no two of "
+    "which are linked), each drawn at its own frequency and figures, never re-built at the larger loss of every "
+    "effect it joins",
     "each scenario is normalised by one factor, its as-of date to the valuation date in step 3's order; currency "
     "and index uncertainty are not in the figures",
     "market value is never added to cash and is not aggregated; insurance is each scenario's own, applied per event "
@@ -275,12 +287,17 @@ def _groups(value) -> tuple[GroupRequest, ...]:
             strength = money.parse_decimal(body["strength"], f"{path}.strength")
         except MoneyRefused as refused:
             raise _refused("group_malformed", refused.detail) from None
-        if not Decimal(0) < strength <= ep.STRENGTH_MAX:
-            raise _refused("group_malformed", f"{path}.strength is above 0 and at most {ep.STRENGTH_MAX}")
+        if not ep.STRENGTH_MIN <= strength <= ep.STRENGTH_MAX:
+            # A floor (review round 1, LOW-2): a strength whose float is zero or
+            # subnormal has no finite driver; it is refused here, never a 503.
+            raise _refused("group_malformed", f"{path}.strength is from {ep.STRENGTH_MIN} to {ep.STRENGTH_MAX}")
         source = body["source_type"]
         if not isinstance(source, str) or source not in {t.value for t in SourceType}:
             raise _refused("group_malformed", f"{path}.source_type is one of {sorted(t.value for t in SourceType)}")
         scenarios = _uuids(body["scenarios"], f"{path}.scenarios", most=ep.MAX_SCENARIOS)
+        if len(scenarios) < 2:
+            # Review round 1, LOW-4: a group of one correlates with nothing.
+            raise _refused("group_too_small", f"{path} names {len(scenarios)} of them: a group names two at least")
         twice = sorted(seen & set(scenarios))
         if twice:
             raise _refused("group_malformed", f"a scenario is in one group at most: {twice}")
@@ -509,7 +526,6 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
     named = sorted({sid for g in request.groups for sid in g.scenarios} - current)
     if named:
         raise _refused("scenario_not_found", f"a group names what is not a current scenario version here: {named}")
-    group_of = {sid: g.key for g in request.groups for sid in g.scenarios}
     normalizer = _normalizer(deployment, request)
 
     excluded = [
@@ -519,7 +535,14 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
     included = []
     for scenario in heads:
         check_time(f"selection {scenario.uuid}")
-        result = SimulationResult.objects.filter(scenario=scenario, deployment_id=deployment.pk).order_by("-id").first()
+        # The scenario's own runs only (review round 1, MEDIUM-2): a residual run under
+        # a remediation option is never exposure, and never hides the exposure run.
+        result = (
+            SimulationResult.objects.exposure_runs()
+            .filter(scenario=scenario, deployment_id=deployment.pk)
+            .order_by("-id")
+            .first()
+        )
         if result is None:
             excluded.append(_exclusion(scenario, "no_result", report.NO_RESULT))
             continue
@@ -548,22 +571,33 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
             continue
         included.append((scenario, result, document, si, build, normalization))
 
-    # The loss events two scenarios share are one: each counted once.
+    # The loss events two scenarios share are one: counted once a year, at the
+    # largest of their losses that year (review round 1, HIGH-1); every scenario
+    # keeps every event, drawn at its own frequency.
     refs = []
     for scenario, _, _, _, build, normalization in included:
         refs += _event_refs(scenario, build, Decimal(normalization["factor"]), ep)
     joined = ep.shared_events(refs)
-    counted_in: dict[tuple[str, str], tuple[str, str]] = {}
+    shared_with: dict[tuple[str, str], list[dict]] = {}
     for one in joined:
-        for event in one.joined:
-            counted_in[event.order] = one.kept.order
+        for event in one.events:
+            shared_with[event.order] = [
+                {"scenario": e.scenario, "event_key": e.event_key} for e in one.events if e is not event
+            ]
+
+    # A group applies to its included scenarios only where two at least are
+    # included (review round 1, LOW-4): a group of one correlates with nothing.
+    in_portfolio = {str(scenario.uuid) for scenario, *_ in included}
+    applied = {
+        g.key: [sid for sid in g.scenarios if sid in in_portfolio] for g in request.groups
+    }
+    applied = {key: sids if len(sids) >= 2 else [] for key, sids in applied.items()}
+    group_of = {sid: key for key, sids in applied.items() for sid in sids}
 
     members, member_inputs = [], []
     for scenario, result, document, si, build, normalization in included:
         sid = str(scenario.uuid)
-        dropped = sorted(key for (owner, key) in counted_in if owner == sid)
-        kept = ep.without_events(si, dropped)
-        members.append(ep.Member(sid, kept, Decimal(normalization["factor"]), group_of.get(sid)))
+        members.append(ep.Member(sid, si, Decimal(normalization["factor"]), group_of.get(sid)))
         grade = document["grade"]
         member_inputs.append(
             {
@@ -581,15 +615,14 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
                 "insured": si.policy is not None,
                 "normalization": normalization,
                 "group": group_of.get(sid),
-                "events": [] if kept is None else [event.loss_event_id for event in kept.events],
-                "counted_elsewhere": [
-                    {"event_key": key, "counted_in": {"scenario": counted_in[(sid, key)][0],
-                                                      "event_key": counted_in[(sid, key)][1]}}
-                    for key in dropped
+                "events": [event.loss_event_id for event in si.events],
+                "shared": [
+                    {"event_key": event.loss_event_id, "with": shared_with[(sid, event.loss_event_id)]}
+                    for event in si.events
+                    if (sid, event.loss_event_id) in shared_with
                 ],
             }
         )
-    in_portfolio = {m.scenario_id for m in members}
     groups = [ep.Group(g.key, g.strength, SourceType(g.source_type)) for g in request.groups]
     inputs = {
         "schema": INPUTS_SCHEMA,
@@ -616,17 +649,21 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
                 "source_type": g.source_type,
                 "evidence_ref": g.evidence_ref,
                 "scenarios": list(g.scenarios),
-                "applied_to": [sid for sid in g.scenarios if sid in in_portfolio],
+                "applied_to": applied[g.key],
+                "not_applied": None if applied[g.key] else (
+                    "fewer than two of its scenarios are included: a group of one correlates with nothing, so it "
+                    "applies to none"
+                ),
             }
             for g in request.groups
         ],
         "shared_events": [
             {
-                "counted": {"scenario": one.kept.scenario, "event_key": one.kept.event_key,
-                            "gross_base": decimal_text(one.kept.gross[1])},
-                "joined": [{"scenario": e.scenario, "event_key": e.event_key, "gross_base": decimal_text(e.gross[1])}
-                           for e in one.joined],
+                "events": [{"scenario": e.scenario, "event_key": e.event_key, "gross_base": decimal_text(e.gross[1])}
+                           for e in one.events],
                 "by": list(one.by),
+                "links": [list(pair) for pair in one.links],
+                "counted": COUNTED_ONCE if one.one_event else COUNTED_CHAIN,
             }
             for one in joined
         ],
@@ -655,8 +692,9 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
             # No transaction is open here, and none is opened until the insert below:
             # a stop's write never waits behind the draws (the SAFETY RULE).
             drawn = ep.run(
-                members, groups, seed=request.seed, draws=request.draws, severe_percentile=request.severe_percentile,
-                reporting_currency=request.reporting_currency, input_digest=input_digest, check_time=check_time,
+                members, groups, joined, seed=request.seed, draws=request.draws,
+                severe_percentile=request.severe_percentile, reporting_currency=request.reporting_currency,
+                input_digest=input_digest, check_time=check_time,
             )
             record = dict(drawn.record)
         except refusals as refused:
@@ -720,6 +758,8 @@ def _member_failure(row: PortfolioResult, member: dict) -> str | None:
         result = None
     if result is None:
         return "its result is not recorded in this deployment"
+    if result.remediation_id is not None:
+        return "the result is a residual run under a remediation option, never exposure"
     scenario = FinancialScenario.objects.filter(pk=result.scenario_id).first()
     if scenario is None or str(scenario.uuid) != member.get("scenario"):
         return "the result is another scenario's"
@@ -733,6 +773,35 @@ def _member_failure(row: PortfolioResult, member: dict) -> str | None:
     if report.verified_grade(card, result) != member.get("grade"):
         return "its card's grade is not the one totalled"
     return None
+
+
+def _record_unbound(row: PortfolioResult) -> bool:
+    """Whether a completed row's record is not of its own inputs (review round 1,
+    LOW-3): inputs rewritten with their digest recomputed give their digest, but
+    the record still names the inputs it was drawn from, its seed, draws and
+    currency, its scenarios with their groups and factors, its groups and its
+    shared loss events."""
+    record = row.record if isinstance(row.record, dict) else {}
+    inputs = row.inputs if isinstance(row.inputs, dict) else {}
+    try:
+        members = {
+            m["scenario"]: (m["group"], Decimal(m["normalization"]["factor"])) for m in inputs.get("members") or []
+        }
+        groups = {g["group"] for g in inputs.get("groups") or []}
+        shared = [
+            ([[e["scenario"], e["event_key"]] for e in one["events"]], one["links"])
+            for one in inputs.get("shared_events") or []
+        ]
+        held = (
+            record.get("input_digest"), record.get("seed"), record.get("simulations"),
+            record.get("reporting_currency"),
+            {sid: (m["group"], Decimal(m["factor"])) for sid, m in (record.get("members") or {}).items()},
+            set(record.get("groups") or {}),
+            [(one["events"], one["links"]) for one in record.get("shared") or []],
+        )
+    except (KeyError, TypeError, ArithmeticError, ValueError):
+        return True
+    return held != (row.input_digest, row.seed, row.draws, row.reporting_currency, members, groups, shared)
 
 
 def stored_row_failures(row: PortfolioResult) -> tuple[list[str], list[dict]]:
@@ -755,6 +824,8 @@ def stored_row_failures(row: PortfolioResult) -> tuple[list[str], list[dict]]:
             failed.append("result_digest")
     elif row.record is not None or row.result_digest:
         failed.append("result_digest")
+    if row.status == SIMULATION_COMPLETED and intact and _record_unbound(row):
+        failed.append("record_binding")
     members = (row.inputs.get("members") or []) if intact and isinstance(row.inputs, dict) else []
     failing = []
     for member in members:
@@ -914,6 +985,35 @@ def _summary(record: dict, shown) -> dict:
     }
 
 
+def _own(record: dict | None, sid: str, shown) -> dict:
+    """A scenario's own figures over the portfolio's years, each line at the minor
+    unit: the portfolio is at least each of them (the shared-event rule)."""
+    if record is None:
+        return {"not_reported": "no figures are served for this portfolio"}
+    own = ((record.get("members") or {}).get(sid) or {}).get("own") or {}
+    lines = {}
+    for line in LINES:
+        block = own.get(line) or {}
+        lines[line] = {key: shown(block.get(source)) for key, source in (
+            ("p10", "p10"), ("p50", "p50"), ("p90", "p90"), ("severe_plausible", "severe_plausible"),
+            ("mean", "mean"), ("expected_annual_loss", "expected_annual_exposure"),
+            ("expected_shortfall", "expected_shortfall"))}
+    return {**lines, "statement": "the scenario alone, over the portfolio's own years: the portfolio's figures are at "
+                                  "least these"}
+
+
+def _shared(inputs: dict, record: dict | None) -> list[dict]:
+    """The shared loss events, and, where figures are served, the sets of their
+    events a year may count (positions in ``events``), in how many years each was
+    counted and whose loss it was counted at."""
+    held = (record or {}).get("shared") or []
+    shown = []
+    for at, one in enumerate(inputs.get("shared_events") or []):
+        stored = held[at] if at < len(held) else {}
+        shown.append({**one, "sets": stored.get("sets"), "years": stored.get("years")})
+    return shown
+
+
 def build_document(row: PortfolioResult) -> dict:
     """The report of ``row``, with its digest: from the stored rows only."""
     deployment_uuid = str(Deployment.objects.get(pk=row.deployment_id).uuid)
@@ -922,7 +1022,13 @@ def build_document(row: PortfolioResult) -> dict:
     completed = row.status == SIMULATION_COMPLETED
     figures = completed and not failed
     inputs = row.inputs if "input_digest" not in failed else {}
-    grade = portfolio_grade(inputs) if not failed else None
+    if failed:
+        grade = None
+    elif not completed:
+        # A refused portfolio has no figures, so no grade (review round 1, NIT-2).
+        grade = {"grade": None, "rule": GRADE_RULE, "reason": "a refused portfolio has no figures and no grade"}
+    else:
+        grade = portfolio_grade(inputs)
     why = banner_reason(row, None if grade is None else grade["grade"], failed)
     withheld = _unverified(failed) if failed else None
     if not completed:
@@ -971,16 +1077,19 @@ def build_document(row: PortfolioResult) -> dict:
         else "at least: the included scenarios only; every excluded one is listed with its reason",
         "scenarios": untrusted if not inputs else {
             "included": [
-                {key: m.get(key) for key in ("scenario", "title", "result", "result_digest", "input_digest", "grade",
-                                             "graded", "currency", "as_of", "insured", "normalization", "group",
-                                             "events", "counted_elsewhere")}
+                {
+                    **{key: m.get(key) for key in ("scenario", "title", "result", "result_digest", "input_digest",
+                                                   "grade", "graded", "currency", "as_of", "insured", "normalization",
+                                                   "group", "events", "shared")},
+                    "own": _own(record, m["scenario"], shown),
+                }
                 for m in members
             ],
             "excluded": excluded,
             "selection": inputs.get("selection"),
         },
         "groups": untrusted if not inputs else inputs.get("groups"),
-        "shared_events": untrusted if not inputs else inputs.get("shared_events"),
+        "shared_events": untrusted if not inputs else _shared(inputs, record),
         "normalization": untrusted if not inputs else inputs.get("normalization"),
         "rules": untrusted if not inputs else inputs.get("rules"),
         "summary": {"not_reported": not_reported} if record is None else _summary(record, shown),
@@ -1016,6 +1125,8 @@ def table_available() -> bool:
 
 __all__ = [
     "ASSUMPTION_SOURCES",
+    "COUNTED_CHAIN",
+    "COUNTED_ONCE",
     "EXCLUSIONS",
     "GRADE_RULE",
     "INPUTS_SCHEMA",
