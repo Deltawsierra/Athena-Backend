@@ -532,7 +532,7 @@ NOT_STOPS = {
     },
     "deployment-economics-scenario-results": _get(),
     # The read routes the dashboard needs (assurance.economics.report_api, spec section
-    # 27.12): a deployment's scenario versions listed, and a Financial Exposure
+    # 30): a deployment's scenario versions listed, and a Financial Exposure
     # Receipt's signed bytes served as stored. Reads of economics rows only, holding no
     # lock and no transaction; nothing a stop or the decision reads.
     "deployment-economics-scenarios": _get(),
@@ -549,6 +549,9 @@ NOT_STOPS = {
         "issues their Validity Cards: economics records, append-only; it starts and stops nothing",
     },
     "deployment-economics-scenario-roi": _get(),
+    # The data-health route (assurance.economics.health_api, step 10): feed sources'
+    # freshness read. Economics records only, and it writes nothing.
+    "deployment-economics-data-health": _get(),
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

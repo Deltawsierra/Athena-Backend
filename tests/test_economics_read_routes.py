@@ -1,5 +1,5 @@
 """Economic Exposure: the read routes the dashboard needs (``docs/economics/spec-v1.md``,
-section 27.12), on step 6's conventions.
+section 30), on step 6's conventions.
 
 - ``GET deployments/<uuid>/economics/receipts/<receipt id>/`` serves a Financial
   Exposure Receipt's signed DSSE envelope as stored, byte for byte the envelope the
@@ -520,7 +520,7 @@ def test_a_stop_is_answered_while_a_read_is_held_open(read, monkeypatch):
 
 
 SPEC_PHRASES = (
-    "### 27.12 The read routes the dashboard needs",
+    "## 30. The read routes the dashboard needs (MVP step 14 support)",
     "`deployment-economics-scenarios`",
     "`deployment-economics-receipt`",
     "`mythos.economics.report/v2`",

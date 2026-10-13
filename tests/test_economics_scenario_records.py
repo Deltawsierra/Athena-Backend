@@ -671,13 +671,15 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario",
         "deployment-economics-scenario-simulate",
         "deployment-economics-scenario-results",
-        # The read routes the dashboard needs (spec, section 27.12).
+        # The read routes the dashboard needs (spec, section 30).
         "deployment-economics-scenarios",
         "deployment-economics-receipt",
         # The remediation option and its ROI (spec, section 28).
         "deployment-economics-scenario-mitigations",
         "deployment-economics-mitigation-simulate",
         "deployment-economics-scenario-roi",
+        # The data-health route (spec, section 29).
+        "deployment-economics-data-health",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
@@ -687,6 +689,7 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["economics-source-trust-raises"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-approve"]) == {"POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-withdraw"]) == {"POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-data-health"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-scenarios"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-receipt"]) == {"GET"}
 

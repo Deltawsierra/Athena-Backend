@@ -38,10 +38,10 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   the scenario version's latest stored result under it: the report applies the first
   to its result, and the step-5 events route (``scenario_api``) serves the second
   beside its deterministic figures, which are not a result and stay. The deployment's
-  scenario list (:func:`scenario_entry`, section 27.12) applies it to each version's
+  scenario list (:func:`scenario_entry`, section 30) applies it to each version's
   latest exposure run too.
 - **The valuation date and the currency bridge** (``currency_bridge``, schema v2,
-  section 27.12): the run's valuation date, read from the stored rows the receipt
+  section 30): the run's valuation date, read from the stored rows the receipt
   reads it from, and the normalization record of each figure the run converted --
   none, because a run converts nothing and no such record is stored
   (:data:`NO_CONVERSION`). Nothing is converted or recomputed here.
@@ -736,7 +736,7 @@ def served_snapshots(scenario: FinancialScenario) -> dict:
 
 def _currency_bridge(result: SimulationResult, build: ScenarioBuild | None, code: str, failed: list[str]) -> dict:
     """The run's valuation date and the normalization record of each figure it
-    converted (section 27.12), from stored values only, never recomputed: the date is
+    converted (section 30), from stored values only, never recomputed: the date is
     the build's as-of date, or for a version with no build the latest as-of date of
     the components its stored inputs hold, read only where they still give their
     digest; ``conversions`` is empty, because a run converts nothing and no
@@ -1031,7 +1031,7 @@ def templates_of(scenarios) -> dict[int, list[dict]]:
 
 
 def scenario_entry(scenario: FinancialScenario, templates: list[dict]) -> dict:
-    """One line of a deployment's scenario list (section 27.12): the version, its
+    """One line of a deployment's scenario list (section 30): the version, its
     ``templates``, its latest EXPOSURE run's status (:func:`latest_exposure_run`: a
     residual run is never listed) and that run's standing under the banner rule --
     the grade, the banner, ``excluded_from_totals`` and why -- as the events route

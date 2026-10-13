@@ -133,6 +133,11 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             f"a pending raise expires {TRUST_RAISE_EXPIRES_AFTER.days} days after its request and is never "
             "approved or withdrawn after that: request it again"
         ),
+        # The owner's decision of 13 Oct 2026, once the official publishers are wired.
+        "source_not_authoritative": (
+            "an FX or cost-index source behind a production run's receipt is trusted as authoritative (the official "
+            "publisher, raised by two admins): a lower tier may feed a run, never a production receipt"
+        ),
     }
 )
 
@@ -290,6 +295,19 @@ def production_trust_refusal(trust_tier: str) -> str | None:
     if recognised is TrustTier.UNVERIFIED:
         return "source_unverified"
     return None
+
+
+def production_authority_refusal(trust_tier: str) -> str | None:
+    """Whether an FX or cost-index source trusted as ``trust_tier`` may stand behind a
+    production run's receipt (the owner's decision of 13 Oct 2026): only
+    ``authoritative``, the official publisher's tier, which two admins record
+    (``source_not_authoritative`` for any other, and for a tier this platform does
+    not know). It applies to FX and cost-index observations only, and only where the
+    run is a production one: the caller says both, and checks the gate
+    (:func:`production_use_refusal`, :func:`production_trust_refusal`) first."""
+    if isinstance(trust_tier, str) and trust_tier == TrustTier.AUTHORITATIVE.value:
+        return None
+    return "source_not_authoritative"
 
 
 def trust_raise_admin_refusal(is_admin: bool) -> str | None:

@@ -83,16 +83,24 @@ MVP step 13, one remediation option per scenario version, on steps 7b, 8 and 6:
 
 28. [One remediation option, its residual run and its economics (MVP step 13)](#28-one-remediation-option-its-residual-run-and-its-economics-mvp-step-13)
 
+MVP step 10, built up to its gate (live fetching waits on the owner's keys):
+
+29. [The live feeds (MVP step 10)](#29-the-live-feeds-mvp-step-10)
+
+The reads the dashboard's financial views need (MVP step 14), on step 6's routes:
+
+30. [The read routes the dashboard needs (MVP step 14 support)](#30-the-read-routes-the-dashboard-needs-mvp-step-14-support)
+
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
-| Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
+| Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
 
 The package is a subpackage of the installed `assurance` app, not an app of its
 own: its models are registered by one import line in `assurance/models.py` and
@@ -103,7 +111,7 @@ with Django and every other part of mythos-core poisoned.
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
 parameter set's, the scenario builder's, the trust raises' and step 6's (section
-27); feeds and their adapters; source disagreement.
+27); source disagreement. (Feeds and their adapters: step 10, section 29.)
 Building and verifying the signed Financial Exposure Receipt
 (`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
@@ -403,15 +411,16 @@ operator runs; any other writer is a defect.
 
 | Model | Holds | Permitted writers |
 |---|---|---|
-| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review, never at `authoritative`; an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
+| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and (step 10) the feed fetch an operator runs, `manage.py fetch_financial_source`, through the same loader, never at `authoritative` (section 29); an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
 | `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, the channel it came through (`api` or `command`), who requested it and when, who approved it and when, who withdrew it, when and through which channel, and its state (`pending`, `done`, `withdrawn` or `expired`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only, and only the signed-in route approves |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint (the deployment's when the builder built the version, section 24.6; or none, and why, in `system_fingerprint_unavailable`), causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
 | `SensitiveOverride` | a request to override a parameter or value: subject, reason, requester | an admin or analyst |
 | `OverrideApproval` | one approval of one override: approver | an admin, other than the requester; one approval per person |
-| `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; later a feed adapter, after its licensing review |
+| `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; and `snapshots.register`, through which the feed fetch registers a fetched answer (step 10, section 29) |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
+| `FinancialSourceFetch` (step 10) | one fetch of one platform-wide feed source: its key, as-of date, when, and its outcome -- `recorded`, `unchanged` (the version that holds the payload named) or `refused` with its code only; the payload hash; no account, no deployment | `assurance/economics/feeds.py` `fetch`, run by `manage.py fetch_financial_source` (section 29) |
 | `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
 | `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`, for a derived one, `derived_from` (the parameters it was taken across, section 24.5), and the distribution it states, if any (section 25.1); linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 24) |
 | `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (section 24), through its build route |
@@ -617,7 +626,10 @@ Not decided here, for the owner:
   1, L2);
 - no code reads `authoritative` differently from the tiers below it: one admin
   alone makes a source usable by a production run by raising it to `benchmark`, and
-  the second person guards the `authoritative` label (review round 1, L3);
+  the second person guards the `authoritative` label (review round 1, L3).
+  (Decided on 13 Oct 2026, for the receipt only: an FX or cost-index source behind
+  a production receipt must be `authoritative`, `source_not_authoritative`; the gate
+  is unchanged. Section 28.6.)
 - a version written past the model -- the base manager, raw SQL, a migration -- is
   not held to the marker, as no economics record is (section 10).
 
@@ -658,6 +670,7 @@ that code (`EconomicsRefused.code`).
 | `second_person_required` | an `authoritative` version is recorded only by a raise one admin requested and ANOTHER approved through the signed-in route: never by the requester, the operator's command, a snapshot file or any other write through the model |
 | `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending and not expired; below `authoritative` it is done in one step, never pending |
 | `reason_too_long` | a raise's reason is at most 2000 characters |
+| `source_not_authoritative` | an FX or cost-index source behind a production run's receipt is `authoritative` (the owner's decision of 13 Oct 2026; enforced when the receipt is issued, section 29.6) |
 
 The rules read what is stored, never what a caller's in-memory object says: the
 authors of a scenario's versions, an override's requester and its approvals are
@@ -702,7 +715,8 @@ the licensing and legal review The Open Group's terms require first.
   scenario, section 25, and step 8 grades the result, section 26.)
 - **Fixture data only.** Every source in the MVP is a committed snapshot, and the
   only one committed is SYNTHETIC TEST DATA (section 13). Nothing fetches a feed,
-  and nothing is current beyond its retrieval time.
+  and nothing is current beyond its retrieval time. (Step 10 adds the feeds, which
+  wait on the owner's keys and switch: section 29.)
 - **The currency table is transcribed.** It has not yet been diffed against the
   published List One and List Three (section 5), and holds a selection of retired
   codes, not all of List Three. It carries no exchange rates and no redenomination
@@ -3481,7 +3495,7 @@ Poisson(3) frequency in 0.44 s. The analysis samples once (the run sampled twice
 
 ### 26.2 The confidence grade
 
-`engine/grade.py`, `mythos.economics.confidence-grade/v2`. A grade is computed from
+`engine/grade.py`, `mythos.economics.confidence-grade/v3` (v2 until step 10 added `stale_source`). A grade is computed from
 a line's **evidence mix**: the share of the line's LEVEL that rests on each class of
 source, each figure the line reads -- and the frequency -- weighted by its share of
 the base-case level (section 26.1's additive decomposition),
@@ -3534,6 +3548,7 @@ share is at least `MATERIAL_SHARE` (0.05):
 | `stale_inputs` | a figure the run reads -- a known cash component's, a term of the policy the run applies, the frequency, or a contributor of a derived value the gross reads -- is past its `fresh_until` at the run's as-of date (section 26.3) |
 | `expert_figures` | a material figure rests on an expert's estimate or on no named source (`EXPERT_ESTIMATE`, `UNKNOWN`; a derived value, on a supplying contributor's), fixed or ranged |
 | `derived_values` | a material figure is a derived larger-loss value |
+| `stale_source` | (step 10, grade v3) a figure the run reads rests on a feed source that is stale, blocked or missing at the run's as-of date (section 29.5) |
 
 **Collapsing a range to one figure at its base never raises the grade**: the level
 shares, the source types and the dates are those of the base, which a collapse keeps,
@@ -4017,14 +4032,14 @@ excluded from every total.
 
 | | |
 |---|---|
-| Code | `assurance/economics/report_api.py` (the three routes, and section 27.12's two read routes), `report.py` (the report and the scenario document; imports nothing probabilistic), `charts_service.py` (the series, a thin Django service) and `engine/charts.py` (pure; imports numpy); `SimulationCharts` in `models.py` |
+| Code | `assurance/economics/report_api.py` (the three routes, and section 30's two read routes), `report.py` (the report and the scenario document; imports nothing probabilistic), `charts_service.py` (the series, a thin Django service) and `engine/charts.py` (pure; imports numpy); `SimulationCharts` in `models.py` |
 | Migration | `0067_simulation_charts.py`: one new table, nothing else changed; it depends on #157's `0066_scenario_fingerprint_unavailable.py` (#155, in review, may take a 0067 too: whichever merges second renumbers its own and re-points its dependency) |
-| Tests | `tests/test_economics_report.py`, and `tests/test_economics_read_routes.py` for section 27.12; the safety tests of sections 2, 23.10 and 26.8 extended to the new modules; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_report.py`) |
+| Tests | `tests/test_economics_report.py`, and `tests/test_economics_read_routes.py` for section 30; the safety tests of sections 2, 23.10 and 26.8 extended to the new modules; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_report.py`) |
 
 ### 27.1 The routes
 
 Under `/api/assurance/`, mounted in a guard of their own (section 2): a fault in
-`report_api` or `report` leaves these three routes, and section 27.12's two read
+`report_api` or `report` leaves these three routes, and section 30's two read
 routes, unserved and nothing else.
 
 | Method and path | Name | Does |
@@ -4032,8 +4047,8 @@ routes, unserved and nothing else.
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/` | `deployment-economics-scenario` | the scenario document (section 27.7) |
 | `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/simulate/` | `deployment-economics-scenario-simulate` | runs, or returns, a simulation (section 27.2) |
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3); never a residual run under a remediation option, which the ROI route serves (section 28.7) |
-| `GET deployments/<uuid>/economics/scenarios/` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time (section 27.12) |
-| `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed bytes, as stored (section 27.12) |
+| `GET deployments/<uuid>/economics/scenarios/` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time (section 30) |
+| `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed bytes, as stored (section 30) |
 
 Access is the parameter-set routes' (section 19.3): a signed-in account (401
 otherwise); a deployment the caller cannot see, a scenario of another deployment,
@@ -4108,7 +4123,7 @@ recorded).
 ### 27.3 The report
 
 `report.build_report(result)`, schema `mythos.economics.report/v2` (v1 and
-`currency_bridge`, section 27.12; `mythos.economics.report/v1` stays readable,
+`currency_bridge`, section 30; `mythos.economics.report/v1` stays readable,
 `report.REPORT_SCHEMAS`), composes ONE stored result's report from what is stored and
 only that: the scenario version's
 rows, its build, the result, its card and sensitivity analysis, its series and its
@@ -4124,7 +4139,7 @@ receipt. It runs no simulation, reads no clock and asks no engine. Its keys:
 | `model` | the model release the card records: version token and build digest (section 26.5); null where no card is recorded |
 | `source_snapshots` | the version's source snapshots with their content hashes recomputed, or why not (`source_snapshot_mismatch`) |
 | `currency` | the reporting currency, its minor unit and the rounding (section 27.5) |
-| `currency_bridge` | v2 (section 27.12): the run's valuation date and where it is read from, the reporting currency, and `conversions`, the normalization record of each figure the run converted -- none: a run converts nothing |
+| `currency_bridge` | v2 (section 30): the run's valuation date and where it is read from, the reporting currency, and `conversions`, the normalization record of each figure the run converted -- none: a run converts nothing |
 | `status`, `refusal` | the run's status, and a refused run's code and detail; for a result whose stored rows fail a check, the code `stored_row_unverified` naming the checks (section 27.5) |
 | `integrity` | `verified`, the checks run (`report.INTEGRITY_CHECKS`) and those failed (section 27.5) |
 | `grade`, `banner`, `excluded_from_totals`, `banner_reason` | section 27.6; the grade is the card DOCUMENT's, never the column's |
@@ -4304,7 +4319,7 @@ request's own, when its one deadline runs out (section 27.1).
 ### 27.9 Safety
 
 None of the three routes is a stop, and none reads or writes anything a stop or the
-decision reads: each is in `safety.stops.NOT_STOPS`, as are section 27.12's two reads (the simulate route: "economics
+decision reads: each is in `safety.stops.NOT_STOPS`, as are section 30's two reads (the simulate route: "economics
 records, append-only; it starts and stops nothing"). The simulate route is in the
 write-route table of `tests/test_every_write_route_keeps_the_decision_current.py`
 as one that cannot move the decision, and every route is a classified sink of the
@@ -4336,11 +4351,11 @@ and series.
   engine publishes an `economics-receipt` key (section 26.9); otherwise the report
   says no receipt is recorded.
 - **The report is JSON only**: no PDF, no rendered page, no frontend chart.
-- **No figure is converted, so the currency bridge lists none** (section 27.12): a
+- **No figure is converted, so the currency bridge lists none** (section 30): a
   run states one reporting currency, and no normalization record is stored for any
   figure. When a later step normalizes a figure and stores its record, the bridge
   serves that record as stored.
-- **`results/` and `roi/` do not send `no-store`**: section 27.12's two reads do. The
+- **`results/` and `roi/` do not send `no-store`**: section 30's two reads do. The
   dashboard's server sends `no-store` on every economics answer it relays.
 - **The scenario document lists every result** of a version, unpaginated.
 - **The live review status** is read when the report is built: a review recorded
@@ -4414,96 +4429,6 @@ and series.
     the card's grade whatever its rows (the report shows it beside the banner where
     only a record or a series fails). Recommendation: keep: the route serves one
     scenario version's figures, and no grade is shown that the rows do not bear out.
-
-### 27.12 The read routes the dashboard needs
-
-Two GET routes and one key of the report, so that the dashboard's financial views
-(athena-dashboard, MVP step 14) show what the backend serves where they said "not
-served". Both routes are mounted with step 6's in `report_api`, in its guard (section
-27.1), on step 6's conventions:
-
-- access and tenancy are the report's: a signed-in account (401 otherwise), a
-  deployment the caller cannot see is 404, and every role reads;
-- the query is read strictly: only the keys a route names, each once (another key is
-  `field_unrecognised`, a repeated or malformed one `field_malformed`, 400);
-- every answer carries `Cache-Control: no-store`;
-- each route is in `safety.stops.NOT_STOPS`, reads economics rows only, and holds no
-  lock and no transaction, so a Stop is answered while one is held open mid-read
-  (`tests/test_economics_read_routes.py`, `test_a_stop_is_answered_while_a_read_is_held_open`);
-- fired twice, each answers the same bytes and writes nothing.
-
-| Method and path | Name | Does |
-|---|---|---|
-| `GET deployments/<uuid>/economics/scenarios/?page=<n>&page_size=<n>` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time |
-| `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed DSSE envelope, as stored |
-
-**The scenario list.** Every scenario version of the deployment, in record order,
-`report_api.SCENARIO_PAGE_SIZE` (25) a page unless `page_size` names another, up to
-`report_api.SCENARIO_PAGE_SIZE_MAX` (100): a larger page is refused
-(`field_malformed`), never cut short. `page` and `page_size` are whole numbers in
-ASCII digits, with no sign and no leading zero, at most nine of them. A page past the
-last is empty. The answer names `count`, `page`, `page_size`, `pages`, `previous` and
-`next`, and each version (`report.scenario_entry`):
-
-| Key | Holds |
-|---|---|
-| `uuid`, `title`, `recorded_at`, `supersedes` | the version; its title is its name, as every economics document calls it |
-| `templates` | each template its causal effects were assigned to, `template_id` and `version`, as the effects record them (section 24.3); none for a version that was not built |
-| `latest_exposure_run` | the version's latest stored run of its own, by record order: the result `results/` serves without `?simulation=` (`report.latest_exposure_run`, through `SimulationResult.objects.exposure_runs()`), with its uuid, status, refusal code and when it was recorded; null where none is stored. A residual run under a remediation option is never listed (section 28) |
-| `grade`, `banner`, `excluded_from_totals`, `banner_reason` | that run's standing under the banner rule, as the events route serves it (`report.standing`, section 27.6); the grade only where every stored row verifies |
-
-**The receipt's signed bytes.** A receipt is named by the receipt id that the report
-(`receipt.receipt_id`) and the scenario document name: a version 4 UUID, dashed in the
-path. The answer is the DSSE envelope the engine signed and the row stores
-(`FinancialExposureReceipt.envelope`), in its one canonical spelling
-(`report.canonical_bytes`: sorted keys, no whitespace, ASCII), so its payload and its
-signature are the stored ones, byte for byte. It is served with:
-
-- `Content-Type: application/json` and `X-Content-Type-Options: nosniff`;
-- `Content-Disposition: attachment; filename="financial-exposure-receipt-<receipt id>.json"`;
-- `X-Content-SHA256`: `sha256:` and the hex SHA-256 of the bytes served.
-
-Nothing is signed, verified or re-encoded: a reader verifies the envelope against the
-engine's published economics-receipt keys (`receipt_service.verify_stored_receipt` is
-the backend's verifier, section 26.6). A receipt of another deployment (the tenant) is
-404 under this one, as is a receipt id that names none. A residual run is never
-receipted (the service and the row refuse one, section 28), and a receipt row of one
-is never served.
-
-**The valuation date and the currency bridge** (`currency_bridge`, the report's v2).
-The report states the run's valuation date: the scenario build's as-of date, which the
-receipt signs as its valuation date (section 26.5); for a version with no build, the
-latest as-of date of the components its stored inputs hold, read only where they still
-give their digest (the receipt's rule too). `valuation_date_from` says which, and
-`not_reported` why there is none. `conversions` is the normalization record (section
-12.6) of each figure the run converted, as stored, and it is empty: a run converts
-nothing (an event, a policy or a component's inputs in another currency are refused,
-`currency_mismatch`, sections 15, 16 and 25), and no normalization record is stored for
-any figure, so none is served and none is computed (`report.NO_CONVERSION`).
-
-The report's bytes change with the key, so its schema moves to
-`mythos.economics.report/v2` the way this repository moves a schema (as
-`observed_effects.EVIDENCE_SCHEMAS` does): v1 stays readable, and
-`report.may_be_totalled` reads both (`report.REPORT_SCHEMAS`). The dashboard reads the
-report by key, never by its schema, so it reads v2 as it read v1. An ROI document
-carries its reports' digests, so its bytes move with theirs; its schema does not, since
-nothing in it changed shape.
-
-Decisions this adds, which the owner may change:
-
-1. **The bridge is in the report**, not on a route of its own: the valuation date is a
-   run's, and the report is the run's document. Alternative: a sibling route, leaving
-   the report at v1. Recommendation: keep.
-2. **A page larger than the cap is refused**, never cut to the cap. Alternative: serve
-   the cap and say so. Recommendation: keep: a strict query is read as written.
-3. **A version's templates are a list**: its events may come from more than one
-   template. Alternative: the first event's. Recommendation: keep.
-4. **The list is every version, in record order**, a superseded one included, naming
-   what it supersedes. Alternative: only each scenario's latest version.
-   Recommendation: keep until the dashboard asks for the other.
-5. **A receipt's bytes are its stored envelope in canonical spelling.** The database's
-   own text of the column is not served: a JSON column need not keep the spelling it
-   was given (PostgreSQL's `jsonb`, for one, reorders keys). Recommendation: keep.
 
 ## 28. One remediation option, its residual run and its economics (MVP step 13)
 
@@ -4840,3 +4765,468 @@ service transaction only inserts, after its run.
     MEDIUM-1). Alternative: serve its report too, marked residual.
 15. **The simulate route issues each run's Validity Card, not its chart series**: the
     ROI reads the grade only. Alternative: issue the series too, as step 6's simulate.
+
+## 29. The live feeds (MVP step 10)
+
+Step 10 adds the four official publishers' adapters, the fetch, the feed path of the
+snapshot store, freshness, the production receipt's authority rule and the
+data-health route. It is built up to its gate: **no live request is made until the
+owner adds the keys and turns on one setting**, and nothing in this step calls a real
+host, in a test or at import (section 29.10).
+
+| | |
+|---|---|
+| Code | `engine/feeds.py` (pure: the adapters, the feed registry, the freshness table, the evidence reference); `feeds.py` (the fetch, the outbound transport, freshness, the receipt check, data health); `health_api.py` (the route); `manage.py fetch_financial_source`; `snapshots.register` (the loader's core, shared); the card (`validity_service.py`), the grade (`engine/grade.py`) and the receipt (`receipt_service.py`), each changed as little as works |
+| Migration | `0070_financial_source_fetches.py`: one new table, `FinancialSourceFetch`, after step 13's `0069_remediation_options.py` |
+| Tests | `tests/test_economics_feeds.py`; the outbound-client sites (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`), the canary harness (`tests/test_no_planted_secret_leaves_through_a_sink.py`), and the pins of `tests/test_economics_engine.py` and `tests/test_economics_scenario_records.py` |
+| Fixtures | `tests/fixtures/economics_feeds/`, each format-faithful, NOT a recorded response; replace with a recording (owner) (section 29.9) |
+
+### 29.1 The feed registry
+
+One table (`engine/feeds.py`, `REGISTRY`) names every source the fetch reads, its
+adapter, provider, dataset, endpoint, schema version, cadence, the settings name of
+its key (if it needs one) and its licence class:
+
+| Key | Provider | What | Kind | Cadence | Key setting |
+|---|---|---|---|---|---|
+| `ecb-eur-reference-rates` | ECB, SDMX REST API, SDMX-CSV | the euro reference rates for GBP, JPY and USD (EXR `D.*.EUR.SP00.A`) | FX | daily | none |
+| `fed-h10-daily-rates` | Federal Reserve H.10, Data Download Program CSV | the noon buying rates in New York for EUR, GBP and JPY, released weekly | FX | weekly | none |
+| `fred-cpiaucsl` | FRED/ALFRED, `fred/series/observations` JSON | CPI-U, all items, U.S. city average, seasonally adjusted, as known on the as-of date | cost index | monthly | `ECONOMICS_FRED_API_KEY` |
+| `bls-ppi-final-demand` | BLS Public Data API v2 JSON | PPI final demand (`WPUFD4`) | cost index | monthly | `ECONOMICS_BLS_API_KEY` |
+| `bls-ahe-total-private` | the same | average hourly earnings, total private (`CES0500000003`), a level in USD per hour | cost index | monthly | `ECONOMICS_BLS_API_KEY` |
+
+Every source's licence class is `unreviewed` until the owner's licensing review of its
+provider's terms (section 4.4; FREEZE.md, owner exception 9): until then no run may use
+it (`unreviewed_license`). The review is a one-line change per source in the registry.
+
+### 29.2 The adapters
+
+Each adapter reads its provider's documented response format into the existing
+observation snapshot (`engine/snapshot.py`, `Snapshot`), and records, through the
+source version the snapshot is registered as, the response hash, the provider, the
+dataset, the URL (without any key), the retrieval time, the schema version, the licence
+class and the trust tier (`unverified`):
+
+- **ECB**: each line one daily rate, `1 EUR = rate <currency>`, rate type `reference`,
+  observed at 14:15 Central European Time (computed, CET or CEST). The source's dataset
+  says what the rate is: an informational average, not a transaction price.
+- **H.10**: the Fed's quotation conventions are the series': the euro and the pound in
+  US dollars per unit (`RXI$US_N.B.EU`, `RXI$US_N.B.UK`), the yen per US dollar
+  (`RXI_N.B.JA`). Each is stored as quoted, `1 base = rate quote`, never inverted, and
+  the unit the response names for each series must be the registry's, or the answer is
+  refused (`feed_mismatch`). Observed at noon in New York (EST or EDT). `ND` (no rate
+  that day) is skipped.
+- **FRED/ALFRED**: the request pins the real-time window to the as-of date
+  (`realtime_start = realtime_end = as_of`), so the answer holds the values as they
+  were known that day, each recorded with that date as its vintage. A run as of an
+  earlier date reads an earlier vintage, and nothing published after its date
+  (`index_book`; section 12.3). A monthly series only; `.` (no value) is skipped.
+- **BLS**: one series per source; `M13` (the annual average) and `-` are skipped. BLS
+  serves current values only, so a fetch as of an earlier date is refused
+  (`as_of_unsupported`); each value's vintage is the date it was fetched.
+
+**Fail safe.** An adapter reads all of an answer or none of it. An answer that is not
+the documented format (`feed_malformed`), says the request failed
+(`feed_provider_error`), is for another series, currency, unit, frequency or window
+(`feed_mismatch`), holds fewer observations or series than it says or than were asked,
+or a line cut short (`feed_partial`), holds a date or value not in the documented form
+(`feed_value_malformed`), or holds none (`feed_empty`), is refused with its code, and
+so is one the observation contract refuses (the money engine's code, such as
+`observation_duplicate`). An answer over 4 MiB is not read (`response_too_large`).
+Nothing of a refused answer is written but the fetch's own record of its code.
+
+**As asked** (review round 1, LOW-1). Each adapter checks the count and the range it
+asked for, so an answer cut at a line boundary is refused as `feed_partial`:
+
+- ECB: exactly `lastNObservations` rates of each currency, all three on the same days;
+- H.10: exactly `lastobs` business days, or, as of a date, every weekday of the
+  window asked (`ND` for a day with no rate). The weekday listing and the unit row
+  are this adapter's reading of the DDP format, and fail closed until the owner's
+  recording confirms them (LOW-5);
+- FRED: every month from the `observation_start` asked, with no gap (`.` is a month
+  with no value);
+- BLS: every month from January of the first year asked to the newest (`-` is a month
+  with no value).
+
+### 29.3 The response hash and the snapshot store
+
+The response hash is the SHA-256 of the answer's NORMALISED payload
+(`engine/feeds.py`, `payload_hash`, `NORMALISATION`):
+
+| Adapter | What is normalised |
+|---|---|
+| ECB, H.10 | nothing: the answer's bytes as they came (neither CSV carries a clock) |
+| FRED | nothing is dropped: the JSON is re-serialised canonically (sorted keys, no whitespace). The real-time window is pinned to the as-of date in the request, so the same values asked for the same date are the same payload, and another date is another vintage |
+| BLS | `responseTime` is dropped, then the JSON is re-serialised canonically: BLS times every answer |
+
+The snapshot store is the existing one: `snapshots.register` writes, in one
+transaction, the source version and every observation, each through its model's
+checks, and the committed-file loader (`register_snapshot`) now calls it too. Every
+fetch whose payload is new records a NEW platform-wide version, append-only; a fetch
+whose payload hash is already recorded for the source writes no version
+(deduplicated by response hash) and names the version that holds it. A changed value
+is a new version; a changed timestamp is not. Deduplication is over every version of
+the source: a payload seen before (A, then B, then A again) is the version that holds
+it (v1), and the latest version stays v2 (review round 1, NIT-4). This is benign for
+these feeds, whose windows only move forward.
+
+A fetched source is registered as `unverified`, and only the raise path lifts it
+(section 6.1). The loader never records `authoritative`, and a fetched version never
+inherits the tier of the version before it.
+
+### 29.4 Fetching
+
+    manage.py fetch_financial_source <source> [--as-of YYYY-MM-DD]
+    manage.py fetch_financial_source --list
+
+`feeds.fetch` sends nothing and writes nothing unless:
+
+- the source is in the registry (`source_unrecognised`);
+- its key is set, where its provider needs one (`source_key_missing`). The keys are
+  read only from `ECONOMICS_FRED_API_KEY` and `ECONOMICS_BLS_API_KEY`, each named
+  literally in the code;
+- live fetching is on: `ECONOMICS_LIVE_FEEDS_ENABLED` is `True`, the one switch
+  (`live_feeds_disabled`);
+- the date is one the provider can be asked for (`as_of_in_future`,
+  `as_of_unsupported`).
+
+Then it sends one request through the platform's outbound client (`safety.outbound`):
+no redirect is followed, nothing is taken from the environment (no `.netrc`, no
+proxy), the connect and read timeouts are 5 and 30 seconds, and its proxy, if a
+deployment needs one, is `ECONOMICS_FEED_PROXY`, passed explicitly. The whole answer
+must be read within 120 seconds (`FETCH_DEADLINE_SECONDS`), or the fetch is cut off
+(`fetch_deadline_exceeded`; review round 1, NIT-1). The FRED key goes in the query
+(`api_key`) and the BLS key in the JSON body (`registrationkey`). Each is withheld from
+any error, never printed, logged or recorded, and the source version records the URL
+without it.
+
+The HTTP client's own log records are covered too (review round 1, MEDIUM-1). urllib3
+records every request line at DEBUG, query and all. A filter that `safety.outbound`
+puts on each of urllib3's loggers withholds every query string in those records, and
+every value the call in flight withholds. So the FRED key reaches no log record
+whatever the deployment's LOGGING keeps.
+
+BLS is asked for today only. Today is today in UTC or in Washington, BLS's own date,
+so `--as-of` at 23:30 in New York still names that day (review round 1, NIT-2).
+
+Every fetch that sent a request is recorded once, append-only
+(`FinancialSourceFetch`): `recorded`, `unchanged` or `refused` with its code only
+(`fetch_failed`, `fetch_http_error`, `fetch_conflict` or an adapter's code). A fetch is
+never on a stop path, and nothing a stop reads is written by it.
+
+### 29.5 Freshness
+
+Each source carries a freshness SLA in days, from one table
+(`FRESHNESS_SLA_DAYS`), keyed by publisher and cadence: ECB daily 3, H.10 weekly 10,
+FRED monthly 45, BLS monthly 45. The age of a source on an as-of date is the number of
+days from its newest observation dated on or before that date (an FX rate's date; an
+index value's month's last day) to that date. Its state:
+
+| State | When | What it does |
+|---|---|---|
+| `fresh` | age at most the SLA | nothing |
+| `stale` | age past the SLA | each figure it feeds lowers the grade one step (`stale_source`) |
+| `blocked` | age past twice the SLA | the same, and the Validity Card's claim is stale and a receipt is refused (`source_stale`) |
+| `missing` | no version a run may use, no observation by the date, or a key the registry does not hold | the same, and a receipt is refused (`source_missing`) |
+
+**The version a run uses** (the lead's decision on review round 1, MEDIUM-2, which
+replaces the first one). A run uses the newest usable version whose coverage includes
+its as-of date. Usable means:
+
+- it passes the gate (`FinancialSource.objects.usable_for_production` for the run's
+  deployment: a reviewed licence, not synthetic, and in a production run above
+  `unverified`);
+- no raise of the same payload supersedes it.
+
+Covering the as-of date means the version holds an observation dated on or before it.
+A newer version whose observations all fall after a back-dated run's date does not
+cover it, and the older version that does is used. A date after a version's newest
+observation is covered, and only ages it. When no usable version covers the date, the
+source is `missing`. A newer fetch, still `unverified`, waits for a raise. Fetched
+versions never inherit a tier (the owner's decision of 13 Oct 2026, the conservative
+default; section 29.11 has the recommendation). The card, the receipt and the
+data-health route all read the same choice.
+
+**Which figures a source feeds.** A parameter rests on a feed source when its
+`evidence_ref` names one: `financial-source:<key>` at its very start, then the end or a
+space and any text, once. A reference to a key the registry does not hold fails closed,
+as `missing`. A near miss also fails closed (review round 1, LOW-2), as `missing` with
+the code `source_reference_malformed`, and never escapes the feed rules. A near miss
+is anything else that reads as a citation:
+
+- text or a space before it;
+- another case;
+- a space or an underscore for the hyphen;
+- a space after the colon;
+- punctuation after the key;
+- a second citation.
+
+**The card and the grade.** When a card is issued, the state of each source the run's
+figures name is read at the run's as-of date and kept in the card's `issued` section,
+so the card still reproduces from what is stored. The grade gains one downgrade,
+`stale_source`: a figure the run reads (a cash component's, a policy term, the
+frequency, a derived value's contributor) rests on a source that is stale, blocked or
+missing. Like every downgrade it lowers the grade one step and fires at most once per
+line, and it names every such figure (`stale_source_parameters`). The grade's version
+is `mythos.economics.confidence-grade/v3`. The card's `data_freshness` lists each
+source with its state, age, SLA, the version used and the figures it feeds, and the
+card says `claim: "stale"` where one is blocked or missing (`current` otherwise).
+
+**The receipt.** A receipt whose card records a source blocked is refused
+(`source_stale`), and one missing (`source_missing`), before anything is built or
+signed. Nothing is recorded. The sources are read from the run's own inputs as well
+as from the card (review round 1, LOW-3). So a card that recorded none, one stored
+before this step, never lets a run that rests on one skip the checks: such a receipt
+is refused `source_missing`, after the authority check of section 29.6.
+
+### 29.6 The production receipt's authority rule
+
+The owner's decision of 13 Oct 2026: once these official publishers are wired, an FX
+or cost-index source behind a PRODUCTION receipt must be `authoritative`. It is
+enforced when a production receipt is issued (`receipt_service.feed_refusal`,
+`feeds.receipt_refusal`), and the production gate itself is unchanged. A version
+raised below `authoritative` still feeds a production run, its card and its grade,
+and the gate accepts it (`check_usable_for_production`). Its receipt is refused
+(`source_not_authoritative`, the rule `governance.production_authority_refusal`) until
+two admins raise the source to `authoritative` (section 6.1). The rule reads, at
+issue, the version a run of the deployment uses now. It applies only where that
+version holds FX or cost-index observations, and only where the run is a production
+one (`runs_in_production`). A run for a deployment recorded as `dev` or `staging` needs
+no more than the gate.
+
+### 29.7 The data-health route
+
+`GET /api/assurance/deployments/<uuid>/economics/data-health/`
+(`deployment-economics-data-health`), from `assurance/economics/health_api.py`,
+mounted guarded in a guard of its own. It lists every feed source a run of the
+deployment can read, on today's date (UTC), with:
+
+- the latest version, and the version a run uses, with the gate's reason where a
+  newer one is not used (`gate`);
+- the newest observation's date, the age, the SLA and the state;
+- the last fetch that failed (its code and when, nothing else);
+- the Unknowns it causes, where it is blocked or missing: the deployment's current
+  parameters (each set's current version, each scenario version that no other
+  supersedes) that name it, with the code that stops them, at most 200
+  (`unknowns_truncated`).
+
+Beside the sources, `unregistered_citations` lists the deployment's current parameters
+whose evidence cites a key the registry does not hold (`source_missing`) or cites one
+in a form that is not a citation (`source_reference_malformed`). Each fails closed, and
+this is where a receipt's refusal for one is explained (review round 1, NIT-3).
+
+The route follows step 6's conventions: a signed-in account; a deployment the caller
+cannot see is 404 whether or not it exists; a viewer reads. It takes no query
+parameter (400 for any) and answers canonical JSON: the same stored rows on the same
+date give the same bytes. It writes nothing and reads nothing a stop or the decision
+reads, and it is in `safety.stops.NOT_STOPS`. It imports the feed module only inside
+its view (`test_a_feed_fault_never_takes_down_a_stop`).
+
+### 29.8 Codes
+
+| Code | Refused |
+|---|---|
+| `source_unrecognised` | the source is not in the feed registry: nothing sent or written |
+| `source_key_missing` | the provider's key setting is empty: nothing sent or written |
+| `live_feeds_disabled` | `ECONOMICS_LIVE_FEEDS_ENABLED` is not `True`: nothing sent or written |
+| `as_of_unsupported` | BLS asked what was known on an earlier date: nothing sent or written |
+| `as_of_in_future` | an as-of date after today: nothing sent or written |
+| `fetch_failed` | no answer: the connection, TLS or the time allowed failed |
+| `fetch_http_error` | an answer with a status other than 200 |
+| `response_too_large` | an answer over 4 MiB, not read |
+| `feed_malformed` | not the documented format |
+| `feed_provider_error` | the answer says the request failed |
+| `feed_mismatch` | another series, currency, unit, frequency or window than asked |
+| `feed_partial` | fewer observations or series than it says or than asked, or a line cut short |
+| `feed_value_malformed` | a date, period or value not in the documented form |
+| `feed_empty` | no observation |
+| `fetch_conflict` | another fetch recorded a version of the source at the same moment |
+| `fetch_deadline_exceeded` | the answer was not read whole within `FETCH_DEADLINE_SECONDS` (120) |
+| `source_reference_malformed` | a figure's evidence reads as a citation of a feed source but is not one exactly; it fails closed (section 29.5) |
+| `source_stale` | a receipt whose card records a source past twice its SLA |
+| `source_missing` | a receipt whose card records a source missing, or with no version a run may use now |
+| `source_not_authoritative` | a production receipt behind an FX or cost-index source below `authoritative` |
+
+The grade's downgrade is `stale_source` (section 26.2's list gains it).
+
+### 29.9 The fixtures
+
+The adapters are tested against fixtures in `tests/fixtures/economics_feeds/`. **Each is
+format-faithful, NOT a recorded response; replace with a recording (owner).** They were
+written by hand from each provider's documented format because no request to a provider
+or its documentation could be made while this step was built. The first line of each
+says so, and the tests take that line off before an adapter reads the file. A recording
+that replaces a file needs no change to the adapters or the tests. Each adapter has a
+structure test that pins the format its fixture is written in, so a recording that
+differs fails there, loudly, rather than parsing silently. The value tests read each
+fixture's own values with a reader of their own. The README beside them names the
+request each answers and what each assumes.
+
+### 29.10 Safety
+
+No fetch, adapter, freshness rule or route here is on a stop, pause, stand-down,
+terminate or revoke path, and nothing a stop reads is written by them:
+
+- the command is loaded by Django only when an operator runs it by name, and no
+  first-party module imports it;
+- the route module is imported guarded, and imports the feed module only inside its
+  view;
+- the card and the receipt import the feed module only when a figure names a feed
+  source;
+- a fault in the feed module leaves only the data-health route answering an error
+  (`tests/economics_broken_feeds.py`, `test_a_feed_fault_never_takes_down_a_stop`).
+
+Nothing calls a real host:
+
+- every test in `tests/test_economics_feeds.py` runs under a socket guard that refuses
+  every connection and name lookup that is not loopback;
+- one test drives the real transport into the guard
+  (`test_the_real_transport_is_stopped_by_the_guard`). It, and the guard's own test,
+  aim only at a `.invalid` name and a TEST-NET address, never at a provider's host, so
+  a guard that regressed could reach no publisher (review round 1, LOW-4);
+- a fresh pytest whose sockets refuse everything before Django loads
+  (`tests/economics_no_network.py`) imports the feed modules, the route and the
+  command (`test_importing_the_feed_modules_reaches_no_host`).
+
+`FinancialSourceFetch` names no account and no deployment, so removing an operator, a
+stop, never writes one.
+
+### 29.11 What waits on the owner, and decisions the owner may change
+
+What only the owner's keys or licences stand between this step and live fetching:
+
+1. **The keys**: `ECONOMICS_FRED_API_KEY` (FRED/ALFRED) and `ECONOMICS_BLS_API_KEY`
+   (BLS v2), each a settings line reading the owner's key from the environment.
+2. **The switch**: `ECONOMICS_LIVE_FEEDS_ENABLED = True`, one settings line. ECB and
+   H.10 need no key, only this.
+3. **The licences**: each source's licence class in the registry, `unreviewed` until
+   the owner's review of ECB's, the Fed's, FRED's (and each FRED series' own
+   copyright) and BLS's terms.
+4. **The recordings**: each fixture replaced by a recording of the request its README
+   names (FRED and BLS v2 with the keys). They confirm:
+   - the H.10 package id;
+   - the DDP unit spellings and the `Currency:` row (review round 1, LOW-5: the
+     reviewer recalls the unit row as `Currency:_Per_EUR`, with the `Currency:` row
+     naming the numerator; the adapter fails closed, `feed_mismatch`, until a
+     recording shows which, and then the convention is read from both rows);
+   - the DDP's listing of every weekday of an as-of window;
+   - the PPI final-demand base (`2009-11=100`).
+5. **The raises**: a fetched version reaches a production receipt only once two admins
+   raise it to `authoritative`.
+
+Decisions this step takes, which the owner may change:
+
+1. **Tier inheritance.** Fetched versions never inherit a tier (decided, 13 Oct 2026).
+   Recommendation: let a fetch from the same registered publisher endpoint and schema
+   version inherit the previous version's tier, with an audit record naming the
+   version it inherited from. Otherwise every new ECB version needs its own two-admin
+   raise before a production receipt may rest on it.
+2. **One step per line.** A stale source lowers a line's grade one step, once, however
+   many figures it feeds, as every downgrade does (section 12.5); it names them all.
+   Alternative: one step per figure it feeds, the brief's literal wording. Kept as
+   built and held for the owner's decision (review round 1, LOW-6).
+3. **The age is measured on the data's dates, whatever vintage holds them**, so a run
+   as of a date before the fetch still sees how far the series reached. Alternative:
+   count only observations of a vintage published by the as-of date: stricter, and it
+   would make every run dated before a FRED or BLS fetch `missing`.
+4. **The authority rule reads the version a run uses NOW**, when the receipt is issued,
+   so a raise after the card was issued lets the same result's receipt be issued.
+   Alternative: the version the card recorded, which a new run would then need.
+5. **Only platform-wide feed sources** are read for a `financial-source:` reference; a
+   tenant's own snapshot under a registry key is not.
+6. **The SLAs**: ECB 3 and H.10 10 (the brief), FRED and BLS monthly 45 (a month's
+   value appears about two weeks after the month ends).
+7. **The version a run uses covers its as-of date** (the lead's decision on review
+   round 1, MEDIUM-2; section 29.5). It replaces the first decision, the latest
+   version that passes the gate whatever the run's date, which read a back-dated run
+   as `missing`.
+
+## 30. The read routes the dashboard needs (MVP step 14 support)
+
+Two GET routes and one key of the report, so that the dashboard's financial views
+(athena-dashboard, MVP step 14) show what the backend serves where they said "not
+served". Both routes are mounted with step 6's in `report_api`, in its guard (section
+27.1), on step 6's conventions:
+
+- access and tenancy are the report's: a signed-in account (401 otherwise), a
+  deployment the caller cannot see is 404, and every role reads;
+- the query is read strictly: only the keys a route names, each once (another key is
+  `field_unrecognised`, a repeated or malformed one `field_malformed`, 400);
+- every answer carries `Cache-Control: no-store`;
+- each route is in `safety.stops.NOT_STOPS`, reads economics rows only, and holds no
+  lock and no transaction, so a Stop is answered while one is held open mid-read
+  (`tests/test_economics_read_routes.py`, `test_a_stop_is_answered_while_a_read_is_held_open`);
+- fired twice, each answers the same bytes and writes nothing.
+
+| Method and path | Name | Does |
+|---|---|---|
+| `GET deployments/<uuid>/economics/scenarios/?page=<n>&page_size=<n>` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time |
+| `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed DSSE envelope, as stored |
+
+**The scenario list.** Every scenario version of the deployment, in record order,
+`report_api.SCENARIO_PAGE_SIZE` (25) a page unless `page_size` names another, up to
+`report_api.SCENARIO_PAGE_SIZE_MAX` (100): a larger page is refused
+(`field_malformed`), never cut short. `page` and `page_size` are whole numbers in
+ASCII digits, with no sign and no leading zero, at most nine of them. A page past the
+last is empty. The answer names `count`, `page`, `page_size`, `pages`, `previous` and
+`next`, and each version (`report.scenario_entry`):
+
+| Key | Holds |
+|---|---|
+| `uuid`, `title`, `recorded_at`, `supersedes` | the version; its title is its name, as every economics document calls it |
+| `templates` | each template its causal effects were assigned to, `template_id` and `version`, as the effects record them (section 24.3); none for a version that was not built |
+| `latest_exposure_run` | the version's latest stored run of its own, by record order: the result `results/` serves without `?simulation=` (`report.latest_exposure_run`, through `SimulationResult.objects.exposure_runs()`), with its uuid, status, refusal code and when it was recorded; null where none is stored. A residual run under a remediation option is never listed (section 28) |
+| `grade`, `banner`, `excluded_from_totals`, `banner_reason` | that run's standing under the banner rule, as the events route serves it (`report.standing`, section 27.6); the grade only where every stored row verifies |
+
+**The receipt's signed bytes.** A receipt is named by the receipt id that the report
+(`receipt.receipt_id`) and the scenario document name: a version 4 UUID, dashed in the
+path. The answer is the DSSE envelope the engine signed and the row stores
+(`FinancialExposureReceipt.envelope`), in its one canonical spelling
+(`report.canonical_bytes`: sorted keys, no whitespace, ASCII), so its payload and its
+signature are the stored ones, byte for byte. It is served with:
+
+- `Content-Type: application/json` and `X-Content-Type-Options: nosniff`;
+- `Content-Disposition: attachment; filename="financial-exposure-receipt-<receipt id>.json"`;
+- `X-Content-SHA256`: `sha256:` and the hex SHA-256 of the bytes served.
+
+Nothing is signed, verified or re-encoded: a reader verifies the envelope against the
+engine's published economics-receipt keys (`receipt_service.verify_stored_receipt` is
+the backend's verifier, section 26.6). A receipt of another deployment (the tenant) is
+404 under this one, as is a receipt id that names none. A residual run is never
+receipted (the service and the row refuse one, section 28), and a receipt row of one
+is never served.
+
+**The valuation date and the currency bridge** (`currency_bridge`, the report's v2).
+The report states the run's valuation date: the scenario build's as-of date, which the
+receipt signs as its valuation date (section 26.5); for a version with no build, the
+latest as-of date of the components its stored inputs hold, read only where they still
+give their digest (the receipt's rule too). `valuation_date_from` says which, and
+`not_reported` why there is none. `conversions` is the normalization record (section
+12.6) of each figure the run converted, as stored, and it is empty: a run converts
+nothing (an event, a policy or a component's inputs in another currency are refused,
+`currency_mismatch`, sections 15, 16 and 25), and no normalization record is stored for
+any figure, so none is served and none is computed (`report.NO_CONVERSION`).
+
+The report's bytes change with the key, so its schema moves to
+`mythos.economics.report/v2` the way this repository moves a schema (as
+`observed_effects.EVIDENCE_SCHEMAS` does): v1 stays readable, and
+`report.may_be_totalled` reads both (`report.REPORT_SCHEMAS`). The dashboard reads the
+report by key, never by its schema, so it reads v2 as it read v1. An ROI document
+carries its reports' digests, so its bytes move with theirs; its schema does not, since
+nothing in it changed shape.
+
+Decisions this adds, which the owner may change:
+
+1. **The bridge is in the report**, not on a route of its own: the valuation date is a
+   run's, and the report is the run's document. Alternative: a sibling route, leaving
+   the report at v1. Recommendation: keep.
+2. **A page larger than the cap is refused**, never cut to the cap. Alternative: serve
+   the cap and say so. Recommendation: keep: a strict query is read as written.
+3. **A version's templates are a list**: its events may come from more than one
+   template. Alternative: the first event's. Recommendation: keep.
+4. **The list is every version, in record order**, a superseded one included, naming
+   what it supersedes. Alternative: only each scenario's latest version.
+   Recommendation: keep until the dashboard asks for the other.
+5. **A receipt's bytes are its stored envelope in canonical spelling.** The database's
+   own text of the column is not served: a JSON column need not keep the spelling it
+   was given (PostgreSQL's `jsonb`, for one, reorders keys). Recommendation: keep.

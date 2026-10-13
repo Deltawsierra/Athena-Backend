@@ -29,7 +29,7 @@ parameter-set or builder routes, not the URLconf, not a stop
   canonical bytes carrying their own digest (:mod:`assurance.economics.report`), with
   the run's valuation date and its currency bridge (schema v2).
 
-The read routes the dashboard needs (section 27.12), each answered ``no-store``, its
+The read routes the dashboard needs (section 30), each answered ``no-store``, its
 query read strictly (an unknown key is ``field_unrecognised``, a repeated or
 malformed one ``field_malformed``):
 
@@ -109,14 +109,14 @@ MAX_SEED_DIGITS = 20
 #: budget, shared by the run, the card's analysis and the series.
 REQUEST_BUDGET_SECONDS = 120.0
 #: The scenario versions a page of the list holds unless the request names another
-#: size, and the most it may name (section 27.12): a larger page is refused, never cut
+#: size, and the most it may name (section 30): a larger page is refused, never cut
 #: short.
 SCENARIO_PAGE_SIZE = 25
 SCENARIO_PAGE_SIZE_MAX = 100
 #: The most digits a page number or a page size may be written with: a longer one is
 #: refused before it is read as a number.
 MAX_QUERY_DIGITS = 9
-#: What every answer of the read routes the dashboard needs carries (section 27.12):
+#: What every answer of the read routes the dashboard needs carries (section 30):
 #: a tenant's figures and signed receipts are never kept by a cache on the way.
 NO_STORE = "no-store"
 
@@ -358,7 +358,7 @@ class ScenarioResultsView(APIView):
 
 
 def _strict_query(request, allowed: tuple[str, ...]) -> dict[str, str]:
-    """The query string read strictly (section 27.12): only the keys ``allowed``
+    """The query string read strictly (section 30): only the keys ``allowed``
     (``field_unrecognised`` otherwise), each given once (``field_malformed``)."""
     query = request.query_params
     unknown = sorted(set(query) - set(allowed))

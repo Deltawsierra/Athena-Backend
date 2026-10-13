@@ -315,6 +315,18 @@ MATRIX = {
         "send whose answer was lost is UNKNOWN and sent again only with --unknown",
         ("test_a_closure_forward_fired_twice_is_one_dataset_row",),
     ),
+    "economics-feed-fetch": Boundary(
+        "manage.py fetch_financial_source (economics step 10): an official publisher's data API read "
+        "through assurance.economics.feeds.OutboundTransport -- a GET for ECB, H.10 and FRED, and a POST "
+        "for BLS, whose query is a JSON body: a read that changes nothing at the publisher -- and its "
+        "answer recorded as a source version",
+        "none: new",
+        "the answer's normalised payload hash: one source version per (tenant, key, payload hash), "
+        "looked up in the registering transaction; every fetch is one FinancialSourceFetch row",
+        "fetched twice, the same answer is one source version and one set of observations; the second "
+        "fetch records 'unchanged' and names it",
+        ("test_a_feed_fetched_twice_is_one_source_version",),
+    ),
 }
 
 #: Every effect call site the code holds, as :func:`effect_sites` names it, and the
@@ -359,6 +371,7 @@ SITES = {
     "pentest/views.py::_send_stop::abort_scan": "engine-scan-stop",
     "pentest/views_llm.py::PentestLLMScanView.post::PentestScan.objects.create": "llm-scan-view-unrouted",
     "pentest/views_llm.py::PentestLLMScanView.post::run_llm_scan": "llm-scan-view-unrouted",
+    "assurance/economics/feeds.py::OutboundTransport.send::outbound.post": "economics-feed-fetch",
 }
 
 # ---------------------------------------------------------------------------
@@ -1262,6 +1275,39 @@ def test_a_closure_forward_fired_twice_is_one_dataset_row(settings, monkeypatch)
     assert sent == [document]
     forward.refresh_from_db()
     assert (forward.status, forward.attempts) == (ClosureEvidenceForward.Status.SENT, 1)
+
+
+def test_a_feed_fetched_twice_is_one_source_version(settings):
+    """BLS's query is a POST (its JSON body), a read at the publisher. Fetched twice,
+    with BLS timing each answer differently: two reads, one source version, one set
+    of observations, and the second fetch recorded as unchanged."""
+    from datetime import datetime, timezone as dt_timezone
+
+    from assurance.economics import feeds
+    from assurance.economics.models import CostIndexObservation, FinancialSource, FinancialSourceFetch
+
+    settings.ECONOMICS_LIVE_FEEDS_ENABLED = True
+    not_a_real_credential = "-".join(("fire", "twice", "test", "only"))
+    settings.ECONOMICS_BLS_API_KEY = not_a_real_credential
+    raw = (REPO / "tests" / "fixtures" / "economics_feeds" / "bls-ppi-final-demand.json").read_bytes()
+    first, _newline, rest = raw.partition(b"\n")
+    document = json.loads(rest if first.startswith(b"# format-faithful") else raw)
+    sent = []
+
+    class BLS:
+        def send(self, request, key):
+            sent.append((request.method, request.url))
+            document["responseTime"] = 100 + len(sent)
+            return json.dumps(document).encode()
+
+    now = datetime(2026, 10, 13, 18, 0, tzinfo=dt_timezone.utc)
+    outcomes = [feeds.fetch("bls-ppi-final-demand", transport=BLS(), now=now) for _ in range(2)]
+    assert [o.outcome for o in outcomes] == ["recorded", "unchanged"]
+    assert len(sent) == 2 and {method for method, _url in sent} == {"POST"}
+    assert FinancialSource.objects.count() == 1
+    assert CostIndexObservation.objects.count() == outcomes[0].observations
+    assert list(FinancialSourceFetch.objects.order_by("id").values_list("outcome", flat=True)) == [
+        "recorded", "unchanged"]
 
 
 def test_the_webhook_receipt_push_has_no_caller():

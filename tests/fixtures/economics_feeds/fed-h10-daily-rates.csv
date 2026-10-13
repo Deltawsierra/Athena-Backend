@@ -1,0 +1,17 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+"Series Description","Euro -- Spot Exchange Rate, US$/Euro (business day)","Japan -- Spot Exchange Rate, Yen/US$ (business day)","United Kingdom -- Spot Exchange Rate, US$/Pound (business day)"
+"Unit:","USD:_Per_EUR","JPY:_Per_USD","USD:_Per_GBP"
+"Multiplier:","1","1","1"
+"Currency:","USD","JPY","USD"
+"Unique Identifier: ","H10/H10/RXI$US_N.B.EU","H10/H10/RXI_N.B.JA","H10/H10/RXI$US_N.B.UK"
+"Time Period","RXI$US_N.B.EU","RXI_N.B.JA","RXI$US_N.B.UK"
+2026-09-28,1.1695,147.32,1.3421
+2026-09-29,1.1718,147.05,1.3446
+2026-09-30,1.1709,147.61,1.3437
+2026-10-01,1.1734,147.88,1.3462
+2026-10-02,1.1701,148.10,1.3418
+2026-10-05,1.1686,147.94,1.3405
+2026-10-06,1.1719,147.52,1.3439
+2026-10-07,1.1741,147.79,1.3467
+2026-10-08,1.1757,148.03,1.3474
+2026-10-09,1.1730,147.86,1.3452

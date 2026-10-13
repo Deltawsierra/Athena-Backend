@@ -202,6 +202,27 @@ def _posture(base, credential):
     return RequestsFetcher(base, {"Authorization": f"Bearer {credential}"}, timeout=(2, 2)).fetch("v1/config")
 
 
+def _feed_get(base, credential):
+    """Economic Exposure's feed fetch (MVP step 10), as it reads FRED: the key in the
+    ``api_key`` query parameter."""
+    from assurance.economics.engine.feeds import FeedRequest
+    from assurance.economics.feeds import OutboundTransport
+
+    request = FeedRequest("GET", f"{base}/fred/series/observations", (("series_id", "CPIAUCSL"),),
+                          key_in="query", key_name="api_key")
+    return OutboundTransport().send(request, credential)
+
+
+def _feed_post(base, credential):
+    """The same, as it reads BLS: the key in the JSON body's ``registrationkey``."""
+    from assurance.economics.engine.feeds import FeedRequest
+    from assurance.economics.feeds import OutboundTransport
+
+    request = FeedRequest("POST", f"{base}/publicAPI/v2/timeseries/data/", (), {"seriesid": ("WPUFD4",)},
+                          key_in="body", key_name="registrationkey")
+    return OutboundTransport().send(request, credential)
+
+
 _MACHINE_API = (
     "a machine API at a base URL an operator configured, which answers no request "
     "with a redirect: one that arrives is an intermediary's"
@@ -253,6 +274,17 @@ SITES: dict[str, Site] = {
         "assurance/posture/base.py::RequestsFetcher.fetch",
         "a posture source's read: a 3xx is a check that reads unknown",
         _posture,
+    ),
+    "economics.feed.get": Site(
+        "assurance/economics/feeds.py::OutboundTransport.send",
+        "an official publisher's data API at the base URL the feed registry names: a 3xx is a fetch that is "
+        "refused (fetch_http_error) and recorded by its code, never followed with the key",
+        _feed_get,
+    ),
+    "economics.feed.post": Site(
+        "assurance/economics/feeds.py::OutboundTransport.send",
+        "the same transport posting BLS's query, its key in the body: a 3xx is refused, never followed with it",
+        _feed_post,
     ),
 }
 
@@ -836,7 +868,17 @@ def _posture_path(base, secret):
     return RequestsFetcher(base, {}, timeout=(2, 2)).fetch(f"v1/{secret}?token={secret}")
 
 
-_PATH_SECRET_SITES = {"engine": _engine_path, "transport": _transport_path, "posture": _posture_path}
+def _feed_path(base, secret):
+    from assurance.economics.engine.feeds import FeedRequest
+    from assurance.economics.feeds import OutboundTransport
+
+    request = FeedRequest("GET", f"{base}/fred/{secret}", (("token", secret),), key_in="query", key_name="api_key")
+    return OutboundTransport().send(request, secret)
+
+
+_PATH_SECRET_SITES = {
+    "engine": _engine_path, "transport": _transport_path, "posture": _posture_path, "feed": _feed_path,
+}
 
 
 @pytest.mark.parametrize("name", sorted(_PATH_SECRET_SITES))
