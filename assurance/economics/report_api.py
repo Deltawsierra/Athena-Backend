@@ -23,7 +23,9 @@ parameter-set or builder routes, not the URLconf, not a stop
   (:data:`REQUEST_BUDGET_SECONDS`): the run, the card's analysis and the series share
   it, each given what remains; past it the request is 503 ``time_over_budget``, the
   stage that ran out records nothing, and the same request again issues what is
-  missing.
+  missing. It runs only in one of the host's economics run slots
+  (:mod:`assurance.economics.capacity`): when none is free it is answered at once,
+  503 ``economics_capacity`` with ``Retry-After``, and nothing runs or is recorded.
 - ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/``: the report
   JSON of one result (``?simulation=<uuid>``, else the scenario's latest), as
   canonical bytes carrying their own digest (:mod:`assurance.economics.report`).
@@ -56,7 +58,7 @@ from rest_framework.exceptions import PermissionDenied, UnsupportedMediaType, Va
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import report
+from . import capacity, report
 from .api import (
     MAX_BODY_BYTES,
     BodyTooLarge,
@@ -85,7 +87,8 @@ MAX_SEED = 2**64 - 1
 #: refused before it is read as a number (review round 1, LOW-1).
 MAX_SEED_DIGITS = 20
 #: The one deadline of a simulate request (review round 1, LOW-5): step 7b's run
-#: budget, shared by the run, the card's analysis and the series.
+#: budget, shared by the run, the card's analysis and the series. How many such
+#: requests run at once is capped too, without waiting (:mod:`.capacity`).
 REQUEST_BUDGET_SECONDS = 120.0
 
 _SIMULATE_REQUIRED = frozenset({"seed"})
@@ -183,6 +186,7 @@ class ScenarioSimulateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [StrictJSONParser]
 
+    @capacity.capped
     def post(self, request, uuid, scenario):
         deployment = _deployment(request, uuid)
         if not _may_write(request.user):

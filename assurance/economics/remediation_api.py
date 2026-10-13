@@ -16,7 +16,9 @@ the parameter-set, builder or report routes, not the URLconf, not a stop
   with its Validity Card, under ONE deadline: IDEMPOTENT, 201 where a run was
   recorded and 200 where both were. A run the engine refuses is recorded and served
   so; one it cannot make now (the time budget, memory, an engine that will not
-  import) is 503 and records nothing.
+  import) is 503 and records nothing. Both runs are made in ONE of the host's
+  economics run slots (:mod:`assurance.economics.capacity`): when none is free the
+  request is answered at once, 503 ``economics_capacity`` with ``Retry-After``.
 - ``GET .../scenarios/<scenario uuid>/roi/``: the ROI document of the version's
   option (``?simulation=<residual run uuid>``, else its latest), canonical bytes
   carrying their own digest, from stored rows only.
@@ -46,7 +48,7 @@ from rest_framework.exceptions import PermissionDenied, UnsupportedMediaType, Va
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import remediation_service, report
+from . import capacity, remediation_service, report
 from .api import MAX_BODY_BYTES, BodyTooLarge, StrictJSONParser, _deployment, _may_write, _table_unavailable
 from .engine import currency as _currency
 from .engine import parameter_set as pset
@@ -172,6 +174,7 @@ class MitigationSimulateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [StrictJSONParser]
 
+    @capacity.capped
     def post(self, request, uuid, scenario, option):
         deployment = _deployment(request, uuid)
         if not _may_write(request.user):
