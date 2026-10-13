@@ -324,8 +324,10 @@ MATRIX = {
         "the answer's normalised payload hash: one source version per (tenant, key, payload hash), "
         "looked up in the registering transaction; every fetch is one FinancialSourceFetch row",
         "fetched twice, the same answer is one source version and one set of observations; the second "
-        "fetch records 'unchanged' and names it",
-        ("test_a_feed_fetched_twice_is_one_source_version",),
+        "fetch records 'unchanged' and names it. Step 11's catalogs (cloud prices, SEC EDGAR, enforcement "
+        "listings) are read through the same transport, every page of a paginated one before anything is "
+        "written: fetched twice, one version and one records row",
+        ("test_a_feed_fetched_twice_is_one_source_version", "test_a_catalog_fetched_twice_is_one_source_version"),
     ),
 }
 
@@ -1306,6 +1308,41 @@ def test_a_feed_fetched_twice_is_one_source_version(settings):
     assert len(sent) == 2 and {method for method, _url in sent} == {"POST"}
     assert FinancialSource.objects.count() == 1
     assert CostIndexObservation.objects.count() == outcomes[0].observations
+    assert list(FinancialSourceFetch.objects.order_by("id").values_list("outcome", flat=True)) == [
+        "recorded", "unchanged"]
+
+
+def test_a_catalog_fetched_twice_is_one_source_version(settings):
+    """A paginated catalog (GCP's two pages), fetched twice, with the provider handing
+    out a new opaque page cursor each time: four reads, one source version, one
+    records row, and the second fetch recorded as unchanged (economics step 11)."""
+    from datetime import datetime, timezone as dt_timezone
+
+    from assurance.economics import feeds
+    from assurance.economics.models import FinancialSource, FinancialSourceFetch, FinancialSourceRecords
+
+    settings.ECONOMICS_LIVE_FEEDS_ENABLED = True
+    settings.ECONOMICS_GCP_BILLING_API_KEY = "-".join(("fire", "twice", "test", "only"))
+    pages = []
+    for name in ("gcp-billing-catalog-cloud-storage-p1.json", "gcp-billing-catalog-cloud-storage-p2.json"):
+        raw = (REPO / "tests" / "fixtures" / "economics_catalogs" / name).read_bytes()
+        first, _newline, rest = raw.partition(b"\n")
+        pages.append(json.loads(rest if first.startswith(b"# format-faithful") else raw))
+    sent = []
+
+    class GCP:
+        def send(self, request, key):
+            sent.append(request.method)
+            page = dict(pages[(len(sent) - 1) % 2])
+            if page["nextPageToken"]:
+                page["nextPageToken"] = f"cursor-{len(sent)}"
+            return json.dumps(page).encode()
+
+    now = datetime(2026, 10, 13, 18, 0, tzinfo=dt_timezone.utc)
+    outcomes = [feeds.fetch("gcp-billing-catalog-cloud-storage", transport=GCP(), now=now) for _ in range(2)]
+    assert [o.outcome for o in outcomes] == ["recorded", "unchanged"]
+    assert sent == ["GET"] * 4
+    assert FinancialSource.objects.count() == 1 and FinancialSourceRecords.objects.count() == 1
     assert list(FinancialSourceFetch.objects.order_by("id").values_list("outcome", flat=True)) == [
         "recorded", "unchanged"]
 

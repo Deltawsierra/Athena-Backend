@@ -546,7 +546,10 @@ def feed_refusal(result: SimulationResult, card: FinancialValidityCard) -> tuple
 
     build = ScenarioBuild.objects.filter(scenario_id=result.scenario_id).first()
     as_of = validity_service._as_of(inputs, build)
-    refused = feeds.receipt_refusal(set(fed) | set(held), result.deployment_id, date.fromisoformat(as_of) if as_of else None)
+    refused = feeds.receipt_refusal(
+        set(fed) | set(held), result.deployment_id, date.fromisoformat(as_of) if as_of else None,
+        parameters=inputs.get("parameters"),
+    )
     if refused is not None:
         return refused
     unrecorded = sorted(set(fed) - set(held))

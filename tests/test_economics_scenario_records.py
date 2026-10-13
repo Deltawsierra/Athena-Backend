@@ -680,6 +680,9 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario-roi",
         # The data-health route (spec, section 29).
         "deployment-economics-data-health",
+        # Step 11's context routes, in the data-health route's module (spec, section 31.8).
+        "deployment-economics-suggestions",
+        "deployment-economics-scenario-precedents",
         # The normalization route (spec, section 12.9).
         "deployment-economics-normalization",
     }

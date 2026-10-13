@@ -16,6 +16,12 @@ It prints the source's key, what came of the fetch, the version and the payload 
 a refusal is a CommandError naming its code. It never prints, logs or records a key,
 nor the answer's text. It is on no stop path, reads nothing a stop reads, and no
 first-party module imports it.
+
+MVP step 11 (spec, section 31): it fetches step 11's sources the same way -- the AWS,
+Azure and GCP price catalogs, a company's SEC EDGAR filing watch, facts and segment
+revenue (``sec-edgar-<submissions|companyfacts|segments>-cik<CIK>``), and the
+regulators' enforcement listings -- each as known today only, every page of a
+paginated catalog read before anything is written.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from datetime import date
 from django.core.management.base import BaseCommand, CommandError
 
 from assurance.economics import feeds
+from assurance.economics.engine import catalogs
 from assurance.economics.engine import feeds as engine
 
 
@@ -40,7 +47,10 @@ def _as_of(value: str | None) -> date | None:
 
 
 class Command(BaseCommand):
-    help = "Fetch one live feed source (ECB SDMX, Fed H.10, FRED/ALFRED, BLS) into the financial snapshot store."
+    help = (
+        "Fetch one live feed source (ECB SDMX, Fed H.10, FRED/ALFRED, BLS) or catalog (AWS, Azure and GCP prices, SEC "
+        "EDGAR, regulators' enforcement listings) into the financial snapshot store."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument("source", nargs="?", help="a key of the feed registry")
@@ -49,8 +59,8 @@ class Command(BaseCommand):
             dest="as_of",
             help=(
                 "the date the values are as known on (YYYY-MM-DD; default today, UTC). FRED reads that date's "
-                "vintage; ECB and H.10 the rates through it; BLS serves current values only, so only today, in UTC "
-                "or in Washington"
+                "vintage; ECB and H.10 the rates through it; BLS and every step-11 catalog serve current values "
+                "only, so only today, in UTC or in Washington"
             ),
         )
         parser.add_argument("--list", action="store_true", help="print the feed registry's keys and stop")
@@ -60,6 +70,18 @@ class Command(BaseCommand):
             for key, feed in sorted(engine.REGISTRY.items()):
                 needs = f"needs {feed.key_setting}" if feed.key_setting else "needs no key"
                 self.stdout.write(f"{key}: {feed.provider}, {feed.kind}, {feed.cadence}, SLA {feed.sla_days} days, {needs}")
+            for key, feed in sorted(catalogs.CATALOG_REGISTRY.items()):
+                needs = f"needs {feed.key_setting}" if feed.key_setting else "needs no key"
+                self.stdout.write(
+                    f"{key}: {feed.provider}, {feed.kind}, {feed.use} only, {feed.cadence}, SLA {feed.sla_days} days "
+                    f"({feed.freshness}), {needs}"
+                )
+            for family in catalogs.EDGAR_FAMILIES:
+                feed = catalogs.edgar_source(family, "0" * 10)
+                self.stdout.write(
+                    f"sec-edgar-{family}-cik<10-digit CIK>: {feed.provider}, {feed.kind}, {feed.use} only, "
+                    f"{feed.cadence}, SLA {feed.sla_days} day ({feed.freshness}), needs {feed.key_setting}"
+                )
             return
         if not options["source"]:
             raise CommandError("refused, nothing was sent or written: name a source (--list prints them)")

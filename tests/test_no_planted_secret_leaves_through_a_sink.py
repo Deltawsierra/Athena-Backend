@@ -1731,6 +1731,10 @@ ROUTES.update(
         # scenario versions, and a Financial Exposure Receipt's signed bytes.
         "deployment-economics-scenarios": _READ,
         "deployment-economics-receipt": "api.receipts",
+        # Step 11's context routes: a prefill suggestion (it takes its query, and a
+        # read with none is refused 400 with its code) and a scenario's precedents.
+        "deployment-economics-suggestions": _READ,
+        "deployment-economics-scenario-precedents": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1774,6 +1778,7 @@ def _readable_urls(world):
                 "deployment-economics-scenario-events",
                 "deployment-economics-scenario-results",
                 "deployment-economics-scenario-roi",
+                "deployment-economics-scenario-precedents",
             ):
                 from assurance.economics.models import FinancialScenario
 

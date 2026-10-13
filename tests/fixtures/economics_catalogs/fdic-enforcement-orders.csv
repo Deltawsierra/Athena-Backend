@@ -1,0 +1,5 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+Institution Name,Docket Number,Order Type,Issued Date,Civil Money Penalty,Restitution,Order URL
+Fixture Community Bank,FDIC-26-0099b,Consent Order,09/22/2026,,,https://orders.fdic.gov/s/order?id=fixture-0099b
+Fixture State Bank,FDIC-26-0101k,Order to Pay Civil Money Penalty,09/29/2026,"$185,000",,https://orders.fdic.gov/s/order?id=fixture-0101k
+Fixture Savings Bank,FDIC-26-0102b,Order for Restitution,10/02/2026,,"$2,100,000.00",https://orders.fdic.gov/s/order?id=fixture-0102b

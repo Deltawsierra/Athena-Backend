@@ -19,10 +19,14 @@ call site                                 what it reaches, with which credential
 ``assurance.posture.base.RequestsFetcher``  a customer's cloud, repository or
                                           secrets posture source; its read token
 ``assurance.economics.feeds               an official publisher's data API (ECB,
-.OutboundTransport``                      the Fed's H.10, FRED, BLS): the FRED key
-                                          in the query, the BLS key in the body,
-                                          each withheld from any error; its own
-                                          proxy setting only
+.OutboundTransport``                      the Fed's H.10, FRED, BLS) and (step
+                                          11) a cloud price catalog (AWS, Azure,
+                                          GCP), SEC EDGAR or a regulator's
+                                          enforcement listing: the FRED and GCP
+                                          keys in the query, the BLS key in the
+                                          body, SEC's declared User-Agent in its
+                                          header, each withheld from any error;
+                                          its own proxy setting only
 ========================================  =======================================
 
 Three things hold at every one of them.

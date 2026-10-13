@@ -728,6 +728,32 @@ fallbacks and downgrades, over the sources a run of it may use and never another
 deployment's: its query read strictly, tenant-scoped, `no-store`, no stop (spec, section
 12.9).
 
+### Cloud prices, SEC EDGAR and enforcement (step 11, context only)
+
+The same fetch reads three more families (spec, section 31): the AWS Price List offer
+file, the Azure Retail Prices API's pages and the Google Cloud Billing Catalog (a SKU's
+USD price per unit, region and effective date); a public company's SEC EDGAR filing
+watch, its XBRL `companyfacts` (revenue and operating income by period, each with its
+form, filing date and accession number) and its segment revenue from its newest
+periodic filing's XBRL instance; and the CFPB's, FTC's privacy and security, SEC's, HHS
+OCR's, OCC's, FDIC's and the Federal Reserve's enforcement listings. Each fetch is an
+append-only, `unverified` version, deduplicated on its normalised payload, every licence
+`unreviewed` until the owner's review. They are CONTEXT ONLY. A cloud price may
+prefill a cost variable, and an EDGAR fact a listed company's revenue or operating
+margin, only as a suggestion (`GET /api/assurance/deployments/<uuid>/economics/suggestions/`)
+that a person accepts by recording it in a parameter set as their own
+`EXPERT_ESTIMATE`, the snapshot version its evidence; nothing writes it for them
+(`prefill_not_accepted`). An enforcement record is listed as a scenario's precedent
+with its citation (`GET .../economics/scenarios/<uuid>/precedents/`), and never becomes
+a fine or penalty figure or reaches a loss (`context_only_source`). Freshness: cloud 7
+days, acting as step 10's rules do on a figure resting on it; EDGAR 1 day, shown and
+never acted on; enforcement 7 days, context, never stopping a receipt. Data health
+lists them under `catalog_sources`. The keys are `ECONOMICS_GCP_BILLING_API_KEY` and
+SEC's declared `ECONOMICS_SEC_USER_AGENT`. The fixtures in
+`tests/fixtures/economics_catalogs/` are format-faithful, not recorded responses, with
+fictitious companies and amounts; the enforcement listings' endpoints and formats are
+assumptions a recording confirms.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each

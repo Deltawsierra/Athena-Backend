@@ -49,6 +49,12 @@ distributions, the seeded sampler and the simulation of a stored scenario versio
   deployment from the source versions a run of it may use, the policy's primary first
   and every disagreeing source listed (MVP step 12, spec section 12.8). No route serves
   it, and nothing on Django's load path imports it.
+- MVP step 11 adds the cloud price catalogs, SEC EDGAR and the regulators'
+  enforcement listings to the same fetch and store, and
+  :mod:`assurance.economics.context_service`, the two CONTEXT ONLY readers of their
+  records -- a prefill suggestion a person accepts, and a scenario's enforcement
+  precedents -- served by two more routes in the same guarded route module, each
+  importing it only inside its view.
 
 This package is never on a stop, pause, stand-down, terminate or revoke path:
 :mod:`assurance.models` (registering the models) and :mod:`assurance.urls`

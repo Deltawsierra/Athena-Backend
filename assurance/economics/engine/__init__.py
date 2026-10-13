@@ -45,7 +45,13 @@ fixtures and the tests all read the same codes:
   confidence grade its evidence mix gives, weighted by that importance;
 - :mod:`.feeds` (MVP step 10): the four official publishers' adapters (ECB SDMX,
   the Fed's H.10, FRED/ALFRED, BLS), the feed registry, the normalised payload hash
-  and the freshness table. It parses an answer; it never sends a request.
+  and the freshness table. It parses an answer; it never sends a request;
+- :mod:`.catalogs` (MVP step 11): the AWS, Azure and GCP price catalogs', SEC
+  EDGAR's (a filing watch, companyfacts, a filing's segment revenue) and the
+  regulators' enforcement listings' adapters, their registry, records and SLA
+  table; and :mod:`.context`, what those records may do: a cloud price or an EDGAR
+  fact prefills a parameter only as a suggestion a person accepts, and an
+  enforcement record is precedent with its citation, never a figure.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of

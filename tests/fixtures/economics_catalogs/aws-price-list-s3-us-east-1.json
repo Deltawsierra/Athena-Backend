@@ -1,0 +1,175 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "formatVersion": "v1.0",
+  "disclaimer": "This pricing list is for informational purposes only. All prices are subject to the additional terms included in the pricing pages on http://aws.amazon.com. All Free Tier prices are also subject to the terms included at https://aws.amazon.com/free/",
+  "offerCode": "AmazonS3",
+  "version": "20261001000000",
+  "publicationDate": "2026-10-01T00:00:00Z",
+  "products": {
+    "FIXTURESKUSTD0001": {
+      "sku": "FIXTURESKUSTD0001",
+      "productFamily": "Storage",
+      "attributes": {
+        "servicecode": "AmazonS3",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "regionCode": "us-east-1",
+        "storageClass": "General Purpose",
+        "volumeType": "Standard",
+        "usagetype": "TimedStorage-ByteHrs",
+        "operation": "",
+        "servicename": "Amazon Simple Storage Service"
+      }
+    },
+    "FIXTURESKUGLC0002": {
+      "sku": "FIXTURESKUGLC0002",
+      "productFamily": "Storage",
+      "attributes": {
+        "servicecode": "AmazonS3",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "regionCode": "us-east-1",
+        "storageClass": "Archive",
+        "volumeType": "Amazon Glacier",
+        "usagetype": "TimedStorage-GlacierByteHrs",
+        "operation": "",
+        "servicename": "Amazon Simple Storage Service"
+      }
+    },
+    "FIXTURESKUPUT0003": {
+      "sku": "FIXTURESKUPUT0003",
+      "productFamily": "API Request",
+      "attributes": {
+        "servicecode": "AmazonS3",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "regionCode": "us-east-1",
+        "group": "S3-API-Tier1",
+        "usagetype": "Requests-Tier1",
+        "operation": "PutObject",
+        "servicename": "Amazon Simple Storage Service"
+      }
+    },
+    "FIXTURESKUFEE0004": {
+      "sku": "FIXTURESKUFEE0004",
+      "attributes": {
+        "servicecode": "AmazonS3",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "regionCode": "us-east-1",
+        "usagetype": "Fixture-Fee",
+        "servicename": "Amazon Simple Storage Service"
+      }
+    }
+  },
+  "terms": {
+    "OnDemand": {
+      "FIXTURESKUSTD0001": {
+        "FIXTURESKUSTD0001.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "FIXTURESKUSTD0001",
+          "effectiveDate": "2026-09-01T00:00:00Z",
+          "priceDimensions": {
+            "FIXTURESKUSTD0001.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "FIXTURESKUSTD0001.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.023 per GB - first 50 TB / month of storage used",
+              "beginRange": "0",
+              "endRange": "51200",
+              "unit": "GB-Mo",
+              "pricePerUnit": {
+                "USD": "0.0230000000"
+              },
+              "appliesTo": []
+            },
+            "FIXTURESKUSTD0001.JRTCKXETXF.PGHJ3S3EYE": {
+              "rateCode": "FIXTURESKUSTD0001.JRTCKXETXF.PGHJ3S3EYE",
+              "description": "$0.022 per GB - next 450 TB / month of storage used",
+              "beginRange": "51200",
+              "endRange": "512000",
+              "unit": "GB-Mo",
+              "pricePerUnit": {
+                "USD": "0.0220000000"
+              },
+              "appliesTo": []
+            },
+            "FIXTURESKUSTD0001.JRTCKXETXF.D42MF2PVJS": {
+              "rateCode": "FIXTURESKUSTD0001.JRTCKXETXF.D42MF2PVJS",
+              "description": "$0.021 per GB - storage used / month over 500 TB",
+              "beginRange": "512000",
+              "endRange": "Inf",
+              "unit": "GB-Mo",
+              "pricePerUnit": {
+                "USD": "0.0210000000"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "FIXTURESKUGLC0002": {
+        "FIXTURESKUGLC0002.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "FIXTURESKUGLC0002",
+          "effectiveDate": "2026-09-01T00:00:00Z",
+          "priceDimensions": {
+            "FIXTURESKUGLC0002.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "FIXTURESKUGLC0002.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.0036 per GB-Month of storage used in Amazon Glacier",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "GB-Mo",
+              "pricePerUnit": {
+                "USD": "0.0036000000"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "FIXTURESKUPUT0003": {
+        "FIXTURESKUPUT0003.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "FIXTURESKUPUT0003",
+          "effectiveDate": "2026-09-01T00:00:00Z",
+          "priceDimensions": {
+            "FIXTURESKUPUT0003.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "FIXTURESKUPUT0003.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.005 per 1,000 PUT, COPY, POST, or LIST requests",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "Requests",
+              "pricePerUnit": {
+                "USD": "0.0000050000"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "FIXTURESKUFEE0004": {
+        "FIXTURESKUFEE0004.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "FIXTURESKUFEE0004",
+          "effectiveDate": "2026-09-01T00:00:00Z",
+          "priceDimensions": {
+            "FIXTURESKUFEE0004.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "FIXTURESKUFEE0004.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.00 per fixture fee",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "Fees",
+              "pricePerUnit": {
+                "USD": "0.0000000000"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      }
+    }
+  }
+}

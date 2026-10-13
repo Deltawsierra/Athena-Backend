@@ -1,0 +1,56 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "BillingCurrency": "USD",
+  "CustomerEntityId": "Default",
+  "CustomerEntityType": "Retail",
+  "Items": [
+    {
+      "currencyCode": "USD",
+      "tierMinimumUnits": 0.0,
+      "retailPrice": 25.0,
+      "unitPrice": 25.0,
+      "armRegionName": "eastus",
+      "location": "US East",
+      "effectiveStartDate": "2026-07-01T00:00:00Z",
+      "meterId": "0b2f8a6c-1d3e-4f50-9a7b-000000000001",
+      "meterName": "VM Replicated to Azure",
+      "productId": "DZH318Z0BQ3F",
+      "skuId": "DZH318Z0BQ3F/0001",
+      "availabilityId": null,
+      "productName": "Azure Site Recovery",
+      "skuName": "VM Replicated to Azure",
+      "serviceName": "Azure Site Recovery",
+      "serviceId": "DZH31JZ8Q3B8",
+      "serviceFamily": "Management and Governance",
+      "unitOfMeasure": "1/Month",
+      "type": "Consumption",
+      "isPrimaryMeterRegion": true,
+      "armSkuName": ""
+    },
+    {
+      "currencyCode": "USD",
+      "tierMinimumUnits": 0.0,
+      "retailPrice": 16.0,
+      "unitPrice": 16.0,
+      "armRegionName": "eastus",
+      "location": "US East",
+      "effectiveStartDate": "2026-07-01T00:00:00Z",
+      "meterId": "0b2f8a6c-1d3e-4f50-9a7b-000000000002",
+      "meterName": "VM Replicated to Customer Owned Sites",
+      "productId": "DZH318Z0BQ3F",
+      "skuId": "DZH318Z0BQ3F/0002",
+      "availabilityId": null,
+      "productName": "Azure Site Recovery",
+      "skuName": "VM Replicated to Customer Owned Sites",
+      "serviceName": "Azure Site Recovery",
+      "serviceId": "DZH31JZ8Q3B8",
+      "serviceFamily": "Management and Governance",
+      "unitOfMeasure": "1/Month",
+      "type": "Consumption",
+      "isPrimaryMeterRegion": true,
+      "armSkuName": ""
+    }
+  ],
+  "NextPageLink": "https://prices.azure.com:443/api/retail/prices?api-version=2023-01-01-preview&$filter=serviceName%20eq%20%27Azure%20Site%20Recovery%27%20and%20armRegionName%20eq%20%27eastus%27%20and%20priceType%20eq%20%27Consumption%27&$skip=100",
+  "Count": 2
+}

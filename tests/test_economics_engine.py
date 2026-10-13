@@ -118,8 +118,9 @@ def test_the_engine_imports_with_django_poisoned():
     # two (distributions and simulation, which import numpy as well), the scenario
     # builder's templates, step 7b's two (twins and scenario_simulation, numpy
     # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
-    # (numpy too), step 13's remediation (no numpy), and step 10's feed adapters.
-    assert result.stdout.strip() == "imported 25", result.stdout
+    # (numpy too), step 13's remediation (no numpy), step 10's feed adapters, and
+    # step 11's catalogs and context rules.
+    assert result.stdout.strip() == "imported 27", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -178,6 +179,9 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "remediation.py",
         # Step 10's live-feed adapters, registry and freshness table (spec, section 29).
         "feeds.py",
+        # Step 11's catalog adapters and registry, and its context rules (spec, section 31).
+        "catalogs.py",
+        "context.py",
     }
     core_importers = set()
     for path in files:
@@ -687,7 +691,8 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     models.SIMULATION_RECORD_REFUSALS, or (a Validity Card or receipt row, step 8)
     models.CARD_RECORD_REFUSALS, or (a chart-series row, step 6)
     models.CHARTS_RECORD_REFUSALS, or (a remediation option row, step 13)
-    models.REMEDIATION_RECORD_REFUSALS; every code the money engine raises is in
+    models.REMEDIATION_RECORD_REFUSALS, or (a figure resting on a step-11 source, or a
+    catalog's records row, step 11) models.CONTEXT_RECORD_REFUSALS; every code the money engine raises is in
     money.REFUSALS, and every code the scenario engine raises as its own is in
     parameters.REFUSALS; and every published code is one something gives. A code
     two tables publish means the same in both, and the scenario engine publishes
@@ -695,6 +700,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     from assurance.economics.models import (
         CARD_RECORD_REFUSALS,
         CHARTS_RECORD_REFUSALS,
+        CONTEXT_RECORD_REFUSALS,
         REMEDIATION_RECORD_REFUSALS,
         SIMULATION_RECORD_REFUSALS,
     )
@@ -713,6 +719,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     published = (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
+        | set(CONTEXT_RECORD_REFUSALS)
     )
     assert not set(SIMULATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
@@ -727,6 +734,10 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     assert not set(REMEDIATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS)
+    )
+    assert not set(CONTEXT_RECORD_REFUSALS) & (
+        set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
     )
     assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):
@@ -984,6 +995,10 @@ SPEC_PHRASES = (
     "informational average, not a transaction price",
     "A run uses the newest usable version whose coverage includes its as-of date",
     "source_not_authoritative",
+    # MVP step 11 (section 31): the catalogs, EDGAR and enforcement, context only.
+    "never automatic penalty prediction",
+    "no code path writes an enforcement amount into a loss component",
+    "a suggestion, not a parameter",
 )
 
 

@@ -1,0 +1,138 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "skus": [
+    {
+      "name": "services/95FF-2EF5-5EA1/skus/F1X7-0001-AAAA",
+      "skuId": "F1X7-0001-AAAA",
+      "description": "Standard Storage Iowa",
+      "category": {
+        "serviceDisplayName": "Cloud Storage",
+        "resourceFamily": "Storage",
+        "resourceGroup": "RegionalStorage",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.mo",
+            "usageUnitDescription": "gibibyte month",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 2875910101401600.0,
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 20000000
+                }
+              }
+            ]
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-10-12T07:32:15.391Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/95FF-2EF5-5EA1/skus/F1X7-0002-BBBB",
+      "skuId": "F1X7-0002-BBBB",
+      "description": "Standard Storage South Carolina",
+      "category": {
+        "serviceDisplayName": "Cloud Storage",
+        "resourceFamily": "Storage",
+        "resourceGroup": "RegionalStorage",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-east1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.mo",
+            "usageUnitDescription": "gibibyte month",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 2875910101401600.0,
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 20000000
+                }
+              }
+            ]
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-10-12T07:32:15.391Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-east1"
+        ]
+      }
+    },
+    {
+      "name": "services/95FF-2EF5-5EA1/skus/F1X7-0003-CCCC",
+      "skuId": "F1X7-0003-CCCC",
+      "description": "Standard Storage Belgium",
+      "category": {
+        "serviceDisplayName": "Cloud Storage",
+        "resourceFamily": "Storage",
+        "resourceGroup": "RegionalStorage",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "europe-west1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.mo",
+            "usageUnitDescription": "gibibyte month",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 2875910101401600.0,
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 20000000
+                }
+              }
+            ]
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-10-12T07:32:15.391Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "europe-west1"
+        ]
+      }
+    }
+  ],
+  "nextPageToken": "Q2dSR1JUZDRMVTlnMHJtR3d0OUR4MXhQQUFBQUFBQUFBQUE"
+}
