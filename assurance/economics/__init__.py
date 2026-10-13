@@ -45,6 +45,12 @@ distributions, the seeded sampler and the simulation of a stored scenario versio
   fetch_financial_source``; :mod:`assurance.economics.health_api` is the data-health
   route, mounted by :mod:`assurance.urls` in a guard of its own, which imports the
   feed module only inside its view.
+- MVP step 11 adds the cloud price catalogs, SEC EDGAR and the regulators'
+  enforcement listings to the same fetch and store, and
+  :mod:`assurance.economics.context_service`, the two CONTEXT ONLY readers of their
+  records -- a prefill suggestion a person accepts, and a scenario's enforcement
+  precedents -- served by two more routes in the same guarded route module, each
+  importing it only inside its view.
 
 This package is never on a stop, pause, stand-down, terminate or revoke path:
 :mod:`assurance.models` (registering the models) and :mod:`assurance.urls`

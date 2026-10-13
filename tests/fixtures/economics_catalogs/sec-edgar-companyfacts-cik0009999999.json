@@ -1,0 +1,179 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "cik": 9999999,
+  "entityName": "FIXTURE EXAMPLE CORP",
+  "facts": {
+    "dei": {
+      "EntityCommonStockSharesOutstanding": {
+        "label": "Entity Common Stock, Shares Outstanding",
+        "description": "Indicate number of shares or other units outstanding of each of registrant's classes of capital or common stock or other ownership interests, if and as stated on cover of related periodic report. Where multiple classes or units exist define each class/interest by adding class of stock items such as Common Class A [Member], Common Class B [Member] or Partnership Interest [Member] onto the Instrument [Domain] of the Entity Listings, Instrument.",
+        "units": {
+          "shares": [
+            {
+              "end": "2026-07-24",
+              "val": 151234567,
+              "accn": "0009999999-26-000033",
+              "fy": 2026,
+              "fp": "Q3",
+              "form": "10-Q",
+              "filed": "2026-08-01",
+              "frame": "CY2026Q2I"
+            }
+          ]
+        }
+      }
+    },
+    "us-gaap": {
+      "Revenues": {
+        "label": "Revenues",
+        "description": "Amount of revenue recognized from goods sold, services rendered, insurance premiums, or other activities that constitute an earning process.",
+        "units": {
+          "USD": [
+            {
+              "start": "2022-10-02",
+              "end": "2023-09-30",
+              "val": 1200000000,
+              "accn": "0009999999-23-000091",
+              "fy": 2023,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2023-11-03",
+              "frame": "CY2023"
+            },
+            {
+              "start": "2022-10-02",
+              "end": "2023-09-30",
+              "val": 1200000000,
+              "accn": "0009999999-24-000097",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2024-11-08"
+            }
+          ]
+        }
+      },
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
+        "description": "Amount, excluding tax collected from customer, of revenue from satisfaction of performance obligation by transferring promised good or service to customer.",
+        "units": {
+          "USD": [
+            {
+              "start": "2023-10-01",
+              "end": "2024-09-28",
+              "val": 1350000000,
+              "accn": "0009999999-24-000097",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2024-11-08"
+            },
+            {
+              "start": "2023-10-01",
+              "end": "2024-09-28",
+              "val": 1348500000,
+              "accn": "0009999999-25-000102",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-11-07",
+              "frame": "CY2024"
+            },
+            {
+              "start": "2024-09-29",
+              "end": "2025-09-27",
+              "val": 1410000000,
+              "accn": "0009999999-25-000102",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-11-07",
+              "frame": "CY2025"
+            },
+            {
+              "start": "2026-03-29",
+              "end": "2026-06-27",
+              "val": 371000000,
+              "accn": "0009999999-26-000033",
+              "fy": 2026,
+              "fp": "Q3",
+              "form": "10-Q",
+              "filed": "2026-08-01",
+              "frame": "CY2026Q2"
+            }
+          ]
+        }
+      },
+      "OperatingIncomeLoss": {
+        "label": "Operating Income (Loss)",
+        "description": "The net result for the period of deducting operating expenses from operating revenues.",
+        "units": {
+          "USD": [
+            {
+              "start": "2022-10-02",
+              "end": "2023-09-30",
+              "val": 180000000,
+              "accn": "0009999999-23-000091",
+              "fy": 2023,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2023-11-03",
+              "frame": "CY2023"
+            },
+            {
+              "start": "2023-10-01",
+              "end": "2024-09-28",
+              "val": 216000000,
+              "accn": "0009999999-24-000097",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2024-11-08",
+              "frame": "CY2024"
+            },
+            {
+              "start": "2024-09-29",
+              "end": "2025-09-27",
+              "val": 239700000,
+              "accn": "0009999999-25-000102",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-11-07",
+              "frame": "CY2025"
+            },
+            {
+              "start": "2026-03-29",
+              "end": "2026-06-27",
+              "val": 59360000,
+              "accn": "0009999999-26-000033",
+              "fy": 2026,
+              "fp": "Q3",
+              "form": "10-Q",
+              "filed": "2026-08-01",
+              "frame": "CY2026Q2"
+            }
+          ]
+        }
+      },
+      "Assets": {
+        "label": "Assets",
+        "description": "Sum of the carrying amounts as of the balance sheet date of all assets.",
+        "units": {
+          "USD": [
+            {
+              "end": "2026-06-27",
+              "val": 5400000000,
+              "accn": "0009999999-26-000033",
+              "fy": 2026,
+              "fp": "Q3",
+              "form": "10-Q",
+              "filed": "2026-08-01",
+              "frame": "CY2026Q2I"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Enforcement actions | Consumer Financial Protection Bureau</title>
+    <link>https://www.consumerfinance.gov/enforcement/actions/</link>
+    <description>Enforcement actions filed by the CFPB</description>
+    <language>en-us</language>
+    <lastBuildDate>Tue, 13 Oct 2026 06:00:00 -0400</lastBuildDate>
+    <item>
+      <title>Fixture Lending Company One, LLC</title>
+      <link>https://www.consumerfinance.gov/enforcement/actions/fixture-lending-company-one-llc/</link>
+      <description>The CFPB issued an order against Fixture Lending Company One, LLC (a fixture).</description>
+      <pubDate>Thu, 01 Oct 2026 10:00:00 -0400</pubDate>
+      <guid isPermaLink="true">https://www.consumerfinance.gov/enforcement/actions/fixture-lending-company-one-llc/</guid>
+      <category>Consumer lending</category>
+      <category>Administrative proceeding</category>
+    </item>
+    <item>
+      <title>Fixture Servicing Corporation</title>
+      <link>https://www.consumerfinance.gov/enforcement/actions/fixture-servicing-corporation/</link>
+      <description>The CFPB filed a lawsuit against Fixture Servicing Corporation (a fixture).</description>
+      <pubDate>Tue, 15 Sep 2026 14:30:00 -0400</pubDate>
+      <guid isPermaLink="true">https://www.consumerfinance.gov/enforcement/actions/fixture-servicing-corporation/</guid>
+      <category>Mortgage servicing</category>
+      <category>Federal district court case</category>
+    </item>
+  </channel>
+</rss>

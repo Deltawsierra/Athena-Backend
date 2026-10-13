@@ -103,6 +103,11 @@ class Snapshot:
     holidays: Mapping[str, frozenset[date]]
     fx_rates: tuple[FXRate, ...]
     index_points: tuple[IndexPoint, ...]
+    #: A step-11 catalog's records (``engine/catalogs.py``: cloud prices, company
+    #: facts, a filing watch, enforcement records), never read by a run; and their
+    #: kind. A committed snapshot file holds none.
+    records: tuple = ()
+    record_kind: str = ""
 
     def fx_book(self) -> FXBook:
         return FXBook(self.fx_rates, self.holidays)

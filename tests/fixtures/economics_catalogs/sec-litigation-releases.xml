@@ -1,0 +1,25 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>SEC Litigation Releases</title>
+    <link>https://www.sec.gov/enforcement-litigation/litigation-releases</link>
+    <description>Litigation releases issued by the SEC</description>
+    <language>en-us</language>
+    <lastBuildDate>Tue, 13 Oct 2026 06:00:00 -0400</lastBuildDate>
+    <item>
+      <title>Fixture Capital Advisers LLC, et al.</title>
+      <link>https://www.sec.gov/enforcement-litigation/litigation-releases/2026/lr99901</link>
+      <description>A fixture: the SEC obtained a final judgment against Fixture Capital Advisers LLC.</description>
+      <pubDate>Fri, 09 Oct 2026 15:12:00 -0400</pubDate>
+      <guid isPermaLink="true">https://www.sec.gov/enforcement-litigation/litigation-releases/2026/lr99901</guid>
+    </item>
+    <item>
+      <title>Fixture Trader Two</title>
+      <link>https://www.sec.gov/enforcement-litigation/litigation-releases/2026/lr99887</link>
+      <description>A fixture: the SEC filed a complaint against Fixture Trader Two.</description>
+      <pubDate>Wed, 23 Sep 2026 11:00:00 -0400</pubDate>
+      <guid isPermaLink="true">https://www.sec.gov/enforcement-litigation/litigation-releases/2026/lr99887</guid>
+    </item>
+  </channel>
+</rss>

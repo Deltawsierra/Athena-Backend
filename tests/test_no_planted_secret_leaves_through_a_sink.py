@@ -1661,6 +1661,10 @@ ROUTES.update(
         "deployment-economics-scenario-roi": _READ,
         # The data-health route (MVP step 10): each feed source's state for a deployment.
         "deployment-economics-data-health": _READ,
+        # Step 11's context routes: a prefill suggestion (it takes its query, and a
+        # read with none is refused 400 with its code) and a scenario's precedents.
+        "deployment-economics-suggestions": _READ,
+        "deployment-economics-scenario-precedents": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1704,6 +1708,7 @@ def _readable_urls(world):
                 "deployment-economics-scenario-events",
                 "deployment-economics-scenario-results",
                 "deployment-economics-scenario-roi",
+                "deployment-economics-scenario-precedents",
             ):
                 from assurance.economics.models import FinancialScenario
 

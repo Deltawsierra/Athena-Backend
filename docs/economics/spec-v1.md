@@ -87,6 +87,10 @@ MVP step 10, built up to its gate (live fetching waits on the owner's keys):
 
 29. [The live feeds (MVP step 10)](#29-the-live-feeds-mvp-step-10)
 
+MVP step 11, on step 10's framework, context only (live fetching waits on the owner's keys):
+
+30. [The cloud price catalogs, SEC EDGAR and enforcement (MVP step 11)](#30-the-cloud-price-catalogs-sec-edgar-and-enforcement-mvp-step-11)
+
 ## 1. Status and scope
 
 | | |
@@ -417,6 +421,7 @@ operator runs; any other writer is a defect.
 | `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; and `snapshots.register`, through which the feed fetch registers a fetched answer (step 10, section 29) |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
 | `FinancialSourceFetch` (step 10) | one fetch of one platform-wide feed source: its key, as-of date, when, and its outcome -- `recorded`, `unchanged` (the version that holds the payload named) or `refused` with its code only; the payload hash; no account, no deployment | `assurance/economics/feeds.py` `fetch`, run by `manage.py fetch_financial_source` (section 29) |
+| `FinancialSourceRecords` (step 11) | the records one step-11 source version holds (cloud prices, a company's facts or filing watch, enforcement records), as one list in their stored spelling, with their kind, count and digest; one row per version | `snapshots.register`, through which the feed fetch registers a catalog's answer (section 30); read by `snapshots.records_of` only |
 | `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
 | `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`, for a derived one, `derived_from` (the parameters it was taken across, section 24.5), and the distribution it states, if any (section 25.1); linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 24) |
 | `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (section 24), through its build route |
@@ -5123,3 +5128,291 @@ Decisions this step takes, which the owner may change:
    round 1, MEDIUM-2; section 29.5). It replaces the first decision, the latest
    version that passes the gate whatever the run's date, which read a back-dated run
    as `missing`.
+
+## 30. The cloud price catalogs, SEC EDGAR and enforcement (MVP step 11)
+
+Step 11 adds three families of source to step 10's framework (section 29): the cloud
+price catalogs, SEC EDGAR and the regulators' enforcement listings. Each is fetched,
+stored, aged and listed in data health as step 10's sources are, and each is CONTEXT
+ONLY, as section 10 of the owner's specification says each is FOR: a cloud price is
+evidence for a recovery, rebuild, hosting or control cost; a public company's filings
+for its revenue and margin; a regulator's enforcement for "scenario range context;
+never automatic penalty prediction". It is built on fixtures: **no live request is
+made until the owner adds the keys and turns on step 10's one setting**, and nothing
+in this step calls a real host, in a test or at import.
+
+| | |
+|---|---|
+| Code | `engine/catalogs.py` (pure: the adapters, the registry, the records, the SLA table); `engine/context.py` (pure: the context rules, the suggestions, the precedent entry); `feeds.py` (the fetch, freshness, the receipt check and data health, extended); `context_service.py` (the suggestion and the precedent listing); `health_api.py` (two more routes); `snapshots.register` and `snapshots.records_of`; `models.py` (`FinancialSourceRecords`, the citation rule on `FinancialParameter`, the person rule on `CustomerParameterSet`) |
+| Migration | `0072_financial_source_records.py`: one new table, `FinancialSourceRecords`, after `0070_financial_source_fetches.py` (0071 is held by #162: whichever merges second points its dependency at the other's) |
+| Tests | `tests/test_economics_catalogs.py`; the pins of `tests/test_economics_engine.py`, `tests/test_economics_scenario_records.py`, the canary harness and `tests/economics_no_network_cases.py` |
+| Fixtures | `tests/fixtures/economics_catalogs/`, each format-faithful, NOT a recorded response; replace with a recording (owner) (section 30.10) |
+
+### 30.1 The sources
+
+One table (`engine/catalogs.py`, `CATALOG_REGISTRY`) names every static source, and
+EDGAR's are one per company, `sec-edgar-<family>-cik<CIK>` (`sec-edgar-submissions-cik<CIK>`,
+`sec-edgar-companyfacts-cik<CIK>`, `sec-edgar-segments-cik<CIK>`, the CIK ten digits).
+Each says what a figure may do with it (`use`: `prefill` or `context`), how its
+freshness acts (`gating` or `informational`) and which provider terms the owner's
+licensing review reads (`licence_terms`):
+
+| Key | Provider and format | Records | Use | SLA | Key setting |
+|---|---|---|---|---|---|
+| `aws-price-list-s3-us-east-1` | AWS Price List bulk offer file, Amazon S3, us-east-1 | cloud prices | prefill, gating | 7 days | none |
+| `azure-retail-prices-site-recovery-eastus` | Azure Retail Prices API, JSON pages, Azure Site Recovery, eastus | cloud prices | prefill, gating | 7 days | none |
+| `gcp-billing-catalog-cloud-storage` | Google Cloud Billing Catalog API, SKU pages, Cloud Storage in us-central1 and us-east1 | cloud prices | prefill, gating | 7 days | `ECONOMICS_GCP_BILLING_API_KEY` (query) |
+| `sec-edgar-submissions-cik<CIK>` | SEC EDGAR submissions JSON | the company and its recent filings: a filing watch | context, informational | 1 day | `ECONOMICS_SEC_USER_AGENT` (header) |
+| `sec-edgar-companyfacts-cik<CIK>` | SEC EDGAR XBRL companyfacts JSON | revenue and operating income by period | prefill, informational | 1 day | the same |
+| `sec-edgar-segments-cik<CIK>` | the newest periodic filing's XBRL instance | segment revenue by period | context, informational | 1 day | the same |
+| `cfpb-enforcement-actions` | CFPB enforcement actions, RSS 2.0 | enforcement records | context | 7 days | none |
+| `ftc-privacy-security-cases` | FTC cases, privacy and security, RSS 2.0 | the same | context | 7 days | none |
+| `sec-litigation-releases` | SEC litigation releases, RSS 2.0 | the same | context | 7 days | none |
+| `hhs-ocr-hipaa-enforcement` | HHS OCR HIPAA enforcement, RSS 2.0 | the same | context | 7 days | none |
+| `occ-enforcement-actions` | OCC enforcement action search, CSV export | the same | context | 7 days | none |
+| `fdic-enforcement-orders` | FDIC enforcement decisions and orders, CSV export | the same | context | 7 days | none |
+| `frb-enforcement-actions` | Federal Reserve enforcement actions, CSV export | the same | context | 7 days | none |
+
+Every licence class is `unreviewed` until the owner's review (section 4.4): no run may
+use a version, no suggestion reads one and no precedent lists one until then. The
+enforcement listings' datasets say "endpoint and format assumed: confirm with a
+recording (owner)": the builder knew of no documented, machine-readable enforcement
+listing with stated penalty fields, and could read none (section 30.12).
+
+### 30.2 The adapters
+
+Each reads its provider's published format into RECORDS (`engine/catalogs.py`), held by
+the source version, never into the FX or cost-index observations a run reads:
+
+- a **cloud price** (`PriceObservation`): provider, SKU, region, unit (the provider's
+  own spelling), the USD price per unit, the date it is effective from, and the usage
+  tier it starts at. AWS: every on-demand price dimension; Azure: every item, across
+  every page; GCP: every tiered rate of a SKU offered in a region asked, its price
+  `units` plus `nanos` billionths;
+- a **company fact** (`CompanyFact`): the XBRL concept, the period, the value in USD, and
+  the form, filing date and accession number of the filing that reported it, the
+  fiscal year and period; and, for segment revenue, the segment's axis and member;
+- a **filing watch**: the company (its name, entity type, tickers and exchanges) and
+  every recent filing (form, filing date, report date, accession number, primary
+  document, whether it is inline XBRL);
+- an **enforcement record** (`EnforcementRecord`): agency, date, respondent, category,
+  the civil money penalty, restitution and settlement amounts the listing STATES in a
+  field of its own, and the citation's URL and text. An amount is never read out of
+  prose: an RSS item states none, so its amounts are none. The respondent is an RSS
+  item's title where the agency titles its actions by respondent (CFPB, FTC, SEC) and
+  none for HHS OCR, whose titles are prose; a CSV export's is its column.
+
+Segment revenue is read from a filing's XBRL instance because `companyfacts` holds no
+dimensioned fact: the newest periodic report (10-K or 10-Q) in inline XBRL that the
+stored filing watch lists on or before the as-of date, its instance named as EDGAR
+extracts it (`<primary document>_htm.xml`). A fact on `us-gaap:StatementBusinessSegmentsAxis`
+is a segment's; one on no axis is the company's; one on another axis (a product, a
+geography) is not read. No document type or entity declaration is read in any XML
+answer (`feed_malformed`).
+
+**Fail safe.** As step 10's, every adapter reads all of an answer or none of it, with
+step 10's codes (`feed_malformed`, `feed_mismatch`, `feed_partial`,
+`feed_value_malformed`, `feed_empty`, `response_too_large`) and one more:
+`feed_over_limit`, an answer of more pages (20) or records (5,000) than one version
+may hold. A paginated answer is refused whole: a malformed item on its last page
+keeps nothing of its first. A next-page link to another host, path or query is
+`feed_mismatch`, and never followed. JSON numbers are read as `Decimal` from their
+own text: a price is never a float.
+
+### 30.3 The response hash and the store
+
+| Adapter | What is normalised |
+|---|---|
+| AWS, EDGAR submissions and companyfacts | nothing dropped: the JSON re-serialised canonically |
+| Azure | nothing dropped: every page re-serialised canonically, in order |
+| GCP | each page's `nextPageToken` (an opaque cursor) dropped, then every page re-serialised canonically |
+| an XBRL instance, a CSV export | nothing: the bytes as they came |
+| RSS | the channel's own elements (its `lastBuildDate`, which moves on every build) dropped; each item's title, link, date, guid, description and categories re-serialised canonically |
+
+A fetch is registered by `snapshots.register`, as step 10's: a new platform-wide
+version at `unverified`, append-only, deduplicated over every version of the source on
+its normalised payload hash, with its records as ONE `FinancialSourceRecords` row,
+checked whole BEFORE the registering transaction opens, so the transaction holds two
+inserts and no loop. A raised version reads the records of the version the fetch
+registered (`snapshots.records_of`).
+
+### 30.4 Fetching
+
+`manage.py fetch_financial_source <key>` fetches step 11's sources too (`--list`
+prints them). Step 10's rules hold: nothing is sent or written without the key where
+one is needed (`source_key_missing`: the GCP key in `ECONOMICS_GCP_BILLING_API_KEY`, sent
+in the query; SEC's fair-access policy asks every request to declare its sender, so
+the owner's contact goes in `ECONOMICS_SEC_USER_AGENT`, sent as the `User-Agent` header,
+withheld as a key is), without the switch, or for a date other than today
+(`as_of_unsupported`: every step-11 provider serves its current listing only). A
+segment source sends nothing until a filing watch of the same company names a
+periodic inline-XBRL filing (`filing_unknown`).
+
+Every page of a paginated catalog is asked and read whole, one request at a time,
+BEFORE anything is parsed or written, so no transaction is open while a request is in
+flight; a page that fails refuses the whole answer, and the fetch's record names its
+code. The answer is then parsed all or nothing and registered. The size cap is the
+registry's (32 MiB for a catalog, across all its pages).
+
+### 30.5 Context only
+
+- **A prefill is a suggestion a person accepts.** A cloud price may suggest a cost
+  variable of the parameter set (`remediation_license_cost_per_year`, `vendor_exit_cost`)
+  and an EDGAR fact a listed company's `annual_revenue` or `operating_margin`. The
+  suggestion (`engine/context.py`, `Suggestion`; the suggestion route, section 30.8)
+  is a suggestion, not a parameter: it writes nothing. It gives the low, base and
+  high and the parameter-set entry a person records to accept it: an
+  `EXPERT_ESTIMATE` whose evidence names the snapshot version
+  (`financial-source:<key> v<version> <hash> accepted suggestion: ...`). A cloud cost
+  is the quantity the person states, times the lowest, median and highest of the
+  prices they pick (one to ten, of one unit), to the cent. An EDGAR figure reads the
+  newest three fiscal years the company filed a 10-K for, each figure as last filed
+  (a restatement replaces the first): the newest is the base, the lowest and highest
+  the low and the high; the margin is operating income over revenue, to four places,
+  and a negative one is refused (no parameter is negative). EDGAR prefills a PUBLIC
+  company only: its filing watch names a ticker on an exchange (`suggestion_not_public`).
+- **The person rule.** A figure resting on a cloud price or an EDGAR fact
+  (`financial-source:<key>` of a prefill source) is held, at every writer, to what an
+  accepted suggestion is: an `EXPERT_ESTIMATE` variable of a parameter-set version that
+  a signed-in person records, for a variable that source may prefill. Anything else
+  is `prefill_not_accepted`: another source type, another variable, a scenario
+  parameter, or a version no person records (no author).
+- **Context is never a figure.** A figure whose evidence cites OR NAMES an
+  enforcement listing, a filing watch or segment revenue, in any case, is refused
+  (`context_only_source`), at the model (`FinancialParameter`), so at the parameter-set
+  route, the scenario builder and every other writer through the ORM. A loss
+  component computes only from the figures it cites, so no code path writes an
+  enforcement amount into a loss component. A figure written past the model that
+  rests on one anyway fails closed: the card records the source missing
+  (`context_only_source`), its claim is stale, and its receipt is refused
+  (`context_only_source`). No module on the path to a loss, a run, a card, a receipt
+  or a report imports the catalogs, the context rules or the context service, or names
+  an enforcement record (`test_no_loss_path_module_reads_an_enforcement_record`).
+- **Precedent is listed, with its citation.** A scenario version lists the records of
+  every enforcement source that gives precedent for one of its components' loss
+  families (each source names its families: CFPB legal, regulatory and restitution;
+  FTC and HHS OCR legal, regulatory and notification; SEC legal and regulatory; OCC
+  and the Fed regulatory; FDIC regulatory and restitution), newest first, at most 100,
+  each with its agency, date, respondent, category, citation, and its amounts AS TEXT,
+  "stated by the listing, not a figure of this scenario". The listing says: "context
+  only: a regulator's published action, listed as precedent with its citation. It is
+  never a fine or penalty figure, never a prediction of one, and never summed into a
+  loss". A source whose licence nobody has reviewed is named under `withheld`, and
+  none of its records listed.
+
+### 30.6 Freshness
+
+A catalog's age runs from the day the version a run uses was RETRIEVED (UTC): its prices
+and records carry no date that says how current the listing is. A version covers a
+date once it was retrieved. Against the SLA (`CATALOG_SLA_DAYS`: cloud 7, EDGAR 1,
+enforcement 7; step 10's table is unchanged):
+
+| Source | State | What it does |
+|---|---|---|
+| cloud price (gating) | `fresh`, `stale`, `blocked`, `missing`, as step 10's | a figure resting on it is lowered, its claim made stale and its receipt refused as section 29.5 says |
+| EDGAR (informational) | `informational`, with `age_state` (what the age would be) | shown; it never lowers a grade, makes a claim stale or stops a receipt. With no version a run may use it is `missing`, and a figure resting on it is refused its receipt |
+| enforcement, a filing watch, segment revenue (context) | `informational`, with `age_state` | shown; a figure never rests on it, so it stops nothing |
+
+The step-10 production authority rule (`source_not_authoritative`) reads FX and
+cost-index sources only, as decided; a catalog is not one.
+
+### 30.7 Data health
+
+The data-health route (section 29.7) lists step 11's sources under `catalog_sources`,
+with `catalog_freshness_sla_days`: every static source and every EDGAR company source
+a version or a fetch has been recorded for, each with its state (and `age_state`), its
+use and freshness, its licence terms, its last fetch failure (its code), what its state
+does (`effect`), and, for a prefill source that is blocked or missing, the Unknowns it
+causes. Step 10's `sources` list is unchanged.
+
+### 30.8 The routes
+
+Both in `assurance/economics/health_api.py`, the data-health route's guarded module,
+each importing the context service only inside its view; both in
+`safety.stops.NOT_STOPS`; both write nothing. Access is step 6's: a signed-in account, a
+deployment the caller cannot see is 404, a viewer reads.
+
+- `GET /api/assurance/deployments/<uuid>/economics/suggestions/?source=<key>&target=<variable>[&observation=<id>...&quantity=<decimal>]`
+  (`deployment-economics-suggestions`): a suggestion, canonical JSON; a refusal is 400
+  with its code and meaning. Any other query field is `suggestion_malformed`.
+- `GET /api/assurance/deployments/<uuid>/economics/scenarios/<scenario>/precedents/`
+  (`deployment-economics-scenario-precedents`): the scenario version's precedents,
+  canonical JSON; no query parameter (400 for any).
+
+### 30.9 Codes
+
+| Code | Refused |
+|---|---|
+| `feed_over_limit` | an answer of more pages or records than one version may hold |
+| `filing_unknown` | a segment fetch with no stored filing watch naming a periodic inline-XBRL filing: nothing sent or written |
+| `context_only_source` | a figure resting on or naming an enforcement listing, a filing watch or segment revenue; a receipt behind one |
+| `prefill_not_accepted` | a figure resting on a cloud price or an EDGAR fact that is not a person's accepted `EXPERT_ESTIMATE` of a variable that source prefills |
+| `catalog_record_malformed` | a records row that is not its source's records in their stored spelling, count and digest |
+| `suggestion_target_unrecognised` | a variable the source does not prefill |
+| `suggestion_source_unrecognised` | a source that prefills nothing |
+| `suggestion_observation_missing` | a price the suggestion names that the version does not hold |
+| `suggestion_units_differ` | prices of more than one unit |
+| `suggestion_quantity_malformed` | a quantity that is not a plain positive decimal |
+| `suggestion_not_public` | an EDGAR suggestion for a company its filing watch does not show listed |
+| `suggestion_out_of_range` | figures that make no parameter: a negative margin, no complete year |
+| `suggestion_malformed` | a query that names a field twice, misses one, or names another |
+
+A suggestion with no reviewed version answers the gate's code (`unreviewed_license`,
+`synthetic_source`) or `source_missing`.
+
+### 30.10 The fixtures
+
+The adapters are tested against fixtures in `tests/fixtures/economics_catalogs/`.
+**Each is format-faithful, NOT a recorded response; replace with a recording (owner).**
+Every company, respondent and amount in them is fictitious. Each adapter has a
+structure test that pins its fixture's format, so a recording that differs fails there,
+loudly; the value tests read each fixture's own values with a reader of their own. The
+README beside them names the request each answers, what each assumes, and how sure the
+builder was: well known for AWS, Azure, GCP and EDGAR; ASSUMED for the enforcement
+listings.
+
+### 30.11 Safety
+
+No fetch, suggestion, precedent listing or freshness rule here is on a stop, pause,
+stand-down, terminate or revoke path, and nothing a stop reads is written by them:
+the command is loaded only when an operator runs it; the routes' module is mounted
+guarded and imports the context service and the feed module only inside its views;
+the model imports the context rules only for evidence that could name a step-11 source.
+No transaction is open while a request is in flight (a test watches every send), and
+registering a version writes two rows, its records checked before the transaction
+opens. Every test runs under step 10's socket guard, and a fresh pytest whose sockets
+refuse everything imports the new modules and resolves the new routes.
+
+### 30.12 What waits on the owner, and decisions the owner may change
+
+What only the owner's keys, licences or recordings stand between this step and live use:
+
+1. **The keys**: `ECONOMICS_GCP_BILLING_API_KEY` (the Cloud Billing Catalog API) and
+   `ECONOMICS_SEC_USER_AGENT` (SEC's declared sender, e.g. a company name and a contact
+   address), each a settings line; and step 10's switch.
+2. **The licences**: each source's licence class, `unreviewed` until the owner reads the
+   terms its registry entry names (`licence_terms`).
+3. **The recordings**: each fixture replaced by a recording of the request its README
+   names. The enforcement listings' endpoints and formats are assumptions; the
+   recordings decide them, and a CSV export's columns are its registry entry's `header`.
+4. **Raises**: none is needed for a catalog's receipt (section 30.6), but a production
+   run uses a version above `unverified` only (the gate).
+
+Decisions this step takes, which the owner may change:
+
+1. **Records are one row per version**, not a table per record type: registering a
+   catalog holds the write lock for two inserts. Alternative: typed tables, queryable,
+   at the cost of a loop of inserts inside the transaction.
+2. **A catalog's age runs from its retrieval.** Alternative: from its prices' or
+   records' newest date, which would read a price unchanged for a year as a year old.
+3. **EDGAR's freshness is informational**, figures included: a 1-day SLA acted on would
+   refuse every receipt resting on a 10-K figure the day after its fetch.
+   Alternative: a gating SLA for companyfacts of about a quarter.
+4. **The prefill targets**: a cloud price suggests `remediation_license_cost_per_year`
+   or `vendor_exit_cost`; EDGAR suggests `annual_revenue` or `operating_margin`, from
+   the three newest fiscal years. A scenario parameter never rests on a prefill source.
+5. **Public means listed**: a ticker on an exchange in the company's filing watch.
+6. **The precedent families** each enforcement source gives precedent for (section
+   30.5), and the cap of 100.
+7. **No amount is read from an RSS item**: an RSS enforcement record's amounts are
+   none. Alternative: each agency's own structured listing, once a recording shows one.

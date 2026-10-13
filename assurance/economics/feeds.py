@@ -45,6 +45,24 @@ not hold).
 A parameter rests on a feed source when its ``evidence_ref`` names one,
 ``financial-source:<key>``. Nothing here is on a stop path, and no stop reads
 anything it writes.
+
+**MVP step 11** (spec, section 30) adds the cloud price catalogs, SEC EDGAR and the
+regulators' enforcement listings (:mod:`assurance.economics.engine.catalogs`) to the
+same fetch, store, freshness and data health:
+
+- a catalog's answer is read whole -- every page of a paginated one (Azure, GCP),
+  each through the same transport, BEFORE anything is parsed or written, so no
+  transaction is open while a request is in flight -- and registered as a version
+  with its records; the GCP key is ``ECONOMICS_GCP_BILLING_API_KEY`` (in the query),
+  and SEC's declared User-Agent ``ECONOMICS_SEC_USER_AGENT`` (a header);
+- a catalog's age runs from the day the version a run uses was retrieved, against
+  its own SLA (cloud 7, EDGAR 1, enforcement 7). A cloud price's freshness GATES a
+  figure resting on it as step 10's does; EDGAR's is INFORMATIONAL (the state is
+  ``informational`` and ``age_state`` says what the age would be): it never lowers a
+  grade or stops a receipt. A context source (enforcement, a filing watch, segment
+  revenue) shows its age and never stops anything, and a figure never rests on one
+  (``context_only_source``);
+- data health lists them under ``catalog_sources``.
 """
 
 from __future__ import annotations
@@ -52,7 +70,7 @@ from __future__ import annotations
 import contextlib
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
 
 import requests
@@ -64,7 +82,7 @@ from django.utils import timezone
 from safety import outbound
 
 from . import snapshots
-from .engine import cost_index, governance, money
+from .engine import catalogs, cost_index, governance, money
 from .engine import feeds as engine
 from .models import (
     FETCH_RECORDED,
@@ -78,6 +96,7 @@ from .models import (
     FinancialSource,
     FinancialSourceFetch,
     FXObservation,
+    fetch_codes,
     runs_in_production,
 )
 
@@ -107,9 +126,24 @@ def provider_key(feed: engine.FeedSource) -> str:
         value = getattr(settings, "ECONOMICS_FRED_API_KEY", "")
     elif feed.key_setting == "ECONOMICS_BLS_API_KEY":
         value = getattr(settings, "ECONOMICS_BLS_API_KEY", "")
+    elif feed.key_setting == "ECONOMICS_GCP_BILLING_API_KEY":
+        value = getattr(settings, "ECONOMICS_GCP_BILLING_API_KEY", "")
+    elif feed.key_setting == "ECONOMICS_SEC_USER_AGENT":
+        # Not a secret, but SEC's fair-access policy asks every request to say who
+        # sends it: the owner's declared contact, sent as the User-Agent header.
+        value = getattr(settings, "ECONOMICS_SEC_USER_AGENT", "")
     else:
         value = ""
     return value.strip() if isinstance(value, str) else ""
+
+
+def known_source(key) -> engine.FeedSource | None:
+    """The source ``key`` names: step 10's feed registry, or step 11's
+    (:func:`assurance.economics.engine.catalogs.known`: the catalog registry and
+    EDGAR's company sources). ``None`` for any other."""
+    if not isinstance(key, str):
+        return None
+    return engine.REGISTRY.get(key) or catalogs.known(key)
 
 
 def _feed_proxy() -> str:
@@ -152,6 +186,8 @@ class OutboundTransport:
         }
         if proxy:
             kwargs["proxies"] = {"http": proxy, "https": proxy}
+        if key and request.key_in == "header":
+            kwargs["headers"][request.key_name] = key
         try:
             if request.method == "GET":
                 params = list(request.params)
@@ -173,7 +209,7 @@ class OutboundTransport:
                 raise TransportFailed("fetch_deadline_exceeded")
             for chunk in response.iter_content(64 * 1024):
                 content += chunk
-                if len(content) > engine.MAX_RESPONSE_BYTES:
+                if len(content) > request.max_bytes:
                     raise TransportFailed("response_too_large")
                 if time.monotonic() > deadline:
                     raise TransportFailed("fetch_deadline_exceeded")
@@ -225,10 +261,9 @@ def _record_refusal(feed, as_of, code, payload_hash="") -> FetchOutcome:
 def fetch(source_key: str, *, as_of: date | None = None, transport=None, now: datetime | None = None) -> FetchOutcome:
     """Fetch ``source_key`` as known on ``as_of`` (today, UTC, when ``None``) and
     record it. Never raises for a refusal: see the module's rules."""
-    try:
-        feed = engine.source(source_key)
-    except engine.FeedRefused as refused:
-        return _refused_before_sending(str(source_key), refused.code)
+    feed = known_source(source_key)
+    if feed is None:
+        return _refused_before_sending(str(source_key), "source_unrecognised")
     key = provider_key(feed)
     if feed.key_setting and not key:
         return _refused_before_sending(feed.key, "source_key_missing")
@@ -238,6 +273,8 @@ def fetch(source_key: str, *, as_of: date | None = None, transport=None, now: da
     today = now.astimezone(dt_timezone.utc).date()
     explicit = as_of is not None
     as_of = as_of if explicit else today
+    if feed.key not in engine.REGISTRY:
+        return _fetch_catalog(feed, key, as_of=as_of, explicit=explicit, today=today, now=now, transport=transport)
     try:
         request = engine.request_for(
             feed, as_of=as_of, explicit=explicit, today=today, base_url=base_url(feed),
@@ -281,6 +318,87 @@ def _hash_or_blank(feed, raw: bytes) -> str:
         return engine.payload_hash(feed, raw)
     except (engine.FeedRefused, TypeError):
         return ""
+
+
+def _catalog_hash_or_blank(feed, pages) -> str:
+    try:
+        return catalogs.payload_hash(feed, pages)
+    except (engine.FeedRefused, TypeError):
+        return ""
+
+
+def _filing_to_read(feed: engine.FeedSource, as_of: date) -> catalogs.CompanyFiling | None:
+    """The filing whose XBRL instance an EDGAR segment source reads: the newest
+    periodic inline-XBRL filing (10-K or 10-Q) on or before ``as_of`` in the latest
+    stored filing watch of the same company. A read, before anything is sent; no
+    transaction is open."""
+    watch = catalogs.edgar_key("submissions", catalogs.edgar_cik(feed.key))
+    latest = _platform_versions(watch).order_by("-version").first()
+    if latest is None:
+        return None
+    return catalogs.newest_periodic_filing(snapshots.records_of(latest), as_of)
+
+
+def _fetch_catalog(feed, key, *, as_of, explicit, today, now, transport) -> FetchOutcome:
+    """A step-11 fetch (spec, section 30.4): every page asked and read whole, one
+    request at a time and with no transaction open, BEFORE anything is parsed; then
+    parsed all or nothing and registered as step 10's fetch registers."""
+    filing = None
+    if feed.adapter == "edgar_instance":
+        filing = _filing_to_read(feed, as_of)
+        if filing is None:
+            return _refused_before_sending(feed.key, "filing_unknown")
+    try:
+        request = catalogs.request_for(
+            feed, as_of=as_of, explicit=explicit, today=today, base_url=base_url(feed),
+            provider_today=engine.us_eastern_date(now), filing=filing,
+        )
+    except engine.FeedRefused as refused:
+        return _refused_before_sending(feed.key, refused.code)
+    sender = transport or OutboundTransport()
+    pages: list[bytes] = []
+    sent: list[engine.FeedRequest] = []
+    most = int(feed.config.get("max_pages", 1))
+    while request is not None:
+        if len(pages) >= most:
+            return _record_refusal(feed, as_of, "feed_over_limit")
+        try:
+            raw = sender.send(request, key)
+        except TransportFailed as failed:
+            return _record_refusal(feed, as_of, failed.code)
+        pages.append(raw)
+        sent.append(request)
+        if sum(len(page) for page in pages) > int(feed.config.get("max_bytes", engine.MAX_RESPONSE_BYTES)):
+            return _record_refusal(feed, as_of, "response_too_large")
+        try:
+            request = catalogs.next_request(feed, request, raw)
+        except engine.FeedRefused as refused:
+            return _record_refusal(feed, as_of, refused.code)
+    try:
+        snapshot = catalogs.parse(feed, pages, as_of=as_of, retrieved_at=now, requests=sent, filing=filing)
+    except engine.FeedRefused as refused:
+        return _record_refusal(feed, as_of, refused.code, _catalog_hash_or_blank(feed, pages))
+    except money.MoneyRefused as refused:
+        return _record_refusal(feed, as_of, refused.code, _catalog_hash_or_blank(feed, pages))
+    try:
+        with transaction.atomic():
+            version, created = snapshots.register(snapshot)
+            row = FinancialSourceFetch(
+                source_key=feed.key,
+                as_of=as_of,
+                outcome=FETCH_RECORDED if created else FETCH_UNCHANGED,
+                payload_hash=snapshot.snapshot_hash,
+                source=version,
+            )
+            row.save()
+    except IntegrityError:
+        return _record_refusal(feed, as_of, "fetch_conflict", snapshot.snapshot_hash)
+    except EconomicsRefused as refused:
+        # A records row the store refuses is a value the answer held in a form the
+        # store does not take: recorded by the fetch's own code.
+        code = refused.code if refused.code in fetch_codes() else "feed_value_malformed"
+        return _record_refusal(feed, as_of, code, snapshot.snapshot_hash)
+    return FetchOutcome(feed.key, row.outcome, None, version, row, snapshot.snapshot_hash, len(snapshot.records))
 
 
 # ------------------------------------------------------------------ freshness
@@ -335,8 +453,14 @@ def used_version(key: str, deployment, as_of: date) -> FinancialSource | None:
     if not usable:
         return None
     holders, newest, starts = _coverage_starts(key)
+    feed = known_source(key)
     for version in usable:
         if newest.get(version.snapshot_hash) != version.version:
+            continue
+        if feed is not None and feed.age_basis == catalogs.RETRIEVAL:
+            # A catalog covers a date once it was retrieved (spec, section 30.6).
+            if catalogs.ages_from_retrieval(version.retrieved_at, as_of) is not None:
+                return version
             continue
         start = starts.get(holders.get(version.snapshot_hash))
         if start is not None and start <= as_of:
@@ -367,6 +491,11 @@ def data_through(version: FinancialSource, as_of: date) -> tuple[date | None, st
     series reached by then. (A month that ended before ``as_of`` but was published
     after it counts, which can understate the age by at most the publisher's lag; the
     vintages themselves are what a run READS, through the index book.)"""
+    feed = known_source(version.source_key)
+    if feed is not None and feed.age_basis == catalogs.RETRIEVAL:
+        # A catalog's age runs from the day the version was retrieved (step 11).
+        age = catalogs.ages_from_retrieval(version.retrieved_at, as_of)
+        return (None if age is None else as_of - timedelta(days=age)), feed.kind
     holder = _holder(version)
     fx = FXObservation.objects.filter(source_id=holder)
     if fx.exists():
@@ -399,7 +528,7 @@ def source_state(key: str, *, deployment, as_of: date) -> dict:
     newest observation known on that date, its age, the SLA and the state. A key the
     registry does not hold is ``missing``. Reads only; deterministic for the stored
     rows and the date."""
-    feed = engine.REGISTRY.get(key)
+    feed = known_source(key)
     state = {
         "source_key": key,
         "in_registry": feed is not None,
@@ -421,6 +550,9 @@ def source_state(key: str, *, deployment, as_of: date) -> dict:
             "source_reference_malformed" if key == engine.MALFORMED_REFERENCE else "source_missing"
         )
         return state
+    if key not in engine.REGISTRY:
+        # Step 11's sources say what they may do and how their freshness acts.
+        state.update(use=feed.use, freshness=feed.freshness, age_basis=feed.age_basis)
     latest = _platform_versions(key).order_by("-version").first()
     used = used_version(key, deployment, as_of)
     state["latest_version"] = _version(latest)
@@ -436,7 +568,17 @@ def source_state(key: str, *, deployment, as_of: date) -> dict:
         return state
     age = (as_of - newest).days
     state.update(data_through=newest.isoformat(), age_days=age, state=engine.freshness_state(age, feed.sla_days))
+    if feed.freshness == catalogs.INFORMATIONAL:
+        # Shown, never acted on (spec, section 30.6): no downgrade, no stale claim, no
+        # refused receipt for its age. A source with no version a run may use is
+        # still missing.
+        state.update(age_state=state["state"], state=INFORMATIONAL)
     return state
+
+
+#: The state of a step-11 source whose freshness is informational and that has a
+#: version a run may use: its age is shown (``age_state``), and nothing acts on it.
+INFORMATIONAL = "informational"
 
 
 def states_for(keys, *, deployment, as_of: date | None) -> dict[str, dict]:
@@ -444,7 +586,13 @@ def states_for(keys, *, deployment, as_of: date | None) -> dict[str, dict]:
     each is ``missing`` and says it was not evaluated."""
     states = {}
     for key in sorted(set(keys)):
-        if as_of is None:
+        feed = known_source(key)
+        if feed is not None and feed.use == catalogs.CONTEXT:
+            # A figure never rests on a context source (spec, section 30.5): one that
+            # cites it anyway -- written past the model's check -- fails closed.
+            states[key] = {"source_key": key, "state": engine.MISSING, "as_of": as_of.isoformat() if as_of else None,
+                           "reason": "context_only_source"}
+        elif as_of is None:
             states[key] = {"source_key": key, "state": engine.MISSING, "as_of": None,
                            "not_evaluated": "the run has no as-of date to read its sources at"}
         else:
@@ -469,8 +617,11 @@ def receipt_refusal(keys, deployment, as_of: date | None) -> tuple[str, str] | N
     for key in sorted(set(keys)):
         if key == engine.MALFORMED_REFERENCE:
             return "source_reference_malformed", "a figure's evidence cites a feed source in a form that is not one"
-        if key not in engine.REGISTRY:
+        feed = known_source(key)
+        if feed is None:
             return "source_missing", f"{key} is not in the feed registry"
+        if feed.use == catalogs.CONTEXT:
+            return "context_only_source", f"a figure rests on {key}, which is context only"
         if as_of is None:
             return "source_missing", f"{key}: the run has no as-of date to read it at"
         used = used_version(key, deployment, as_of)
@@ -574,7 +725,7 @@ def _stray_citations(deployment, parents) -> tuple[list[dict], bool]:
     found = []
     for name, evidence_ref, set_id, scenario_id in rows:
         key = engine.feed_reference(evidence_ref)
-        if key is None or key in engine.REGISTRY:
+        if key is None or known_source(key) is not None:
             continue
         malformed = key == engine.MALFORMED_REFERENCE
         found.append({
@@ -600,6 +751,61 @@ EFFECTS = {
         "(source_missing)"
     ),
 }
+
+
+#: What a step-11 context source does, whatever its state (spec, section 30.6).
+CONTEXT_EFFECT = (
+    "context only: it shows its age, and never lowers a grade, makes a claim stale or stops a receipt; a figure "
+    "never rests on it"
+)
+#: What a step-11 source whose freshness is informational does, while it has a version
+#: a run may use.
+INFORMATIONAL_EFFECT = (
+    "informational: its age is shown (age_state, against its SLA), and never lowers a grade, makes a claim stale or "
+    "stops a receipt"
+)
+
+
+def _catalog_effect(feed: engine.FeedSource, state: str) -> str:
+    if feed.use == catalogs.CONTEXT:
+        return CONTEXT_EFFECT
+    if state == INFORMATIONAL:
+        return INFORMATIONAL_EFFECT
+    return EFFECTS[state]
+
+
+def catalog_keys() -> list[str]:
+    """Every step-11 source data health lists: the catalog registry's, and each EDGAR
+    company source a version or a fetch has been recorded for."""
+    keys = set(catalogs.CATALOG_REGISTRY)
+    for model in (FinancialSource, FinancialSourceFetch):
+        rows = model.objects.filter(source_key__startswith="sec-edgar-")
+        if model is FinancialSource:
+            rows = rows.filter(deployment__isnull=True)
+        keys |= {key for key in rows.values_list("source_key", flat=True).distinct() if catalogs.known(key)}
+    return sorted(keys)
+
+
+def _catalog_health(deployment, as_of: date, parents) -> list[dict]:
+    found = []
+    for key in catalog_keys():
+        feed = known_source(key)
+        state = source_state(key, deployment=deployment, as_of=as_of)
+        because = None
+        if feed.use == catalogs.PREFILL:
+            because = {engine.BLOCKED: "source_stale", engine.MISSING: "source_missing"}.get(state["state"])
+        unknowns, truncated = ([], False) if because is None else _unknowns(key, deployment, because, parents)
+        found.append(
+            {
+                **state,
+                "effect": _catalog_effect(feed, state["state"]),
+                "licence_terms": feed.licence_terms,
+                "last_fetch_failure": _last_failure(key),
+                "unknowns": unknowns,
+                "unknowns_truncated": truncated,
+            }
+        )
+    return found
 
 
 def data_health(deployment, *, now: datetime | None = None) -> dict:
@@ -637,19 +843,30 @@ def data_health(deployment, *, now: datetime | None = None) -> dict:
             f"{provider} {cadence}": days for (provider, cadence), days in sorted(engine.FRESHNESS_SLA_DAYS.items())
         },
         "sources": sources,
+        # MVP step 11 (spec, section 30.7): the cloud price catalogs, SEC EDGAR and
+        # the enforcement listings, each with what it may do and how its age acts.
+        "catalog_freshness_sla_days": {
+            f"{provider} {cadence}": days for (provider, cadence), days in sorted(catalogs.CATALOG_SLA_DAYS.items())
+        },
+        "catalog_sources": _catalog_health(deployment, as_of, parents),
     }
 
 
 __all__ = [
+    "CONTEXT_EFFECT",
     "EFFECTS",
+    "INFORMATIONAL",
+    "INFORMATIONAL_EFFECT",
     "TIMEOUT",
     "FetchOutcome",
     "OutboundTransport",
     "TransportFailed",
     "base_url",
+    "catalog_keys",
     "data_health",
     "data_through",
     "fetch",
+    "known_source",
     "live_feeds_enabled",
     "provider_key",
     "receipt_refusal",

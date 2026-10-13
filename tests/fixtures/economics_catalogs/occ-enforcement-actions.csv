@@ -1,0 +1,6 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+Bank Name,Individual Name,Charter Number,Docket Number,Type of Action,Amount,Start Date,Termination Date,Document URL
+Fixture National Bank,,99901,AA-ENF-2026-01,Civil Money Penalty,"$1,250,000",09/17/2026,,https://www.occ.gov/static/enforcement-actions/ea2026-099.pdf
+Fixture National Bank,,99901,AA-ENF-2026-01,Restitution,"$300,000.00",09/17/2026,,https://www.occ.gov/static/enforcement-actions/ea2026-099.pdf
+Fixture Federal Savings Bank,,99902,AA-ENF-2026-02,Formal Agreement,,08/20/2026,,https://www.occ.gov/static/enforcement-actions/ea2026-087.pdf
+,Fixture Person One,,AA-ENF-2026-03,Prohibition Order,,07/09/2026,,https://www.occ.gov/static/enforcement-actions/ea2026-075.pdf
