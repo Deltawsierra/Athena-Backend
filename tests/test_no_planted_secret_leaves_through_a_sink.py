@@ -1445,6 +1445,38 @@ class World:
         signals["scenario_roi"] = self.call(
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/roi/", "deployment-economics-scenario-roi",
         ).status_code
+        # The read routes the dashboard needs (spec, section 30): the deployment's
+        # scenario versions listed (200), each with its title, which carries the
+        # tenant's canaries; and a completed exposure run receipted -- signed by the
+        # test keyring's key, as the engine would sign it -- and its signed bytes read
+        # back (200). The built scenario's run here is a refused one, and a refused run
+        # has no figures to sign (result_not_completed), so the run receipted is step
+        # 6's stored scenario's. read_everything reads both again. Each is
+        # searched like every other sink, the receipt's as a receipt.
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        from mythos_core import exposure_receipt as receipt_core
+
+        from assurance.economics import receipt_service, simulation_service
+        from tests.test_economics_report import stored as stored_scenario
+
+        signals["scenario_list"] = self.call(
+            docs, "api.answers", admin, "get", scenarios, "deployment-economics-scenarios",
+        ).status_code
+        receipted = stored_scenario(self.deployment, self.admin, set_key="canary_receipted")
+        run = simulation_service.simulate_scenario(receipted, seed=7, draws=10_000).result
+        keyring = receipt_core.receipt_keyring(
+            [self.signing_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)], other_roles={}
+        )
+        issued = None if run is None else receipt_service.issue_receipt(
+            run, keyring=keyring, signer=lambda document: receipt_core.sign_receipt(document, self.signing_key)
+        )
+        signals["receipt_issued"] = None if issued is None else (issued.receipt is not None, issued.code)
+        receipt_id = issued.receipt.receipt_id if issued is not None and issued.receipt is not None else uuid.uuid4().hex
+        signals["receipt_bytes"] = self.call(
+            docs, "api.receipts", admin, "get",
+            f"/api/assurance/deployments/{self.deployment.uuid}/economics/receipts/{uuid.UUID(receipt_id)}/",
+            "deployment-economics-receipt",
+        ).status_code
 
     def feeds(self, docs, signals):
         """MVP step 10: the operator's fetch, with the providers' key planted. FRED
@@ -1661,6 +1693,10 @@ ROUTES.update(
         "deployment-economics-scenario-roi": _READ,
         # The data-health route (MVP step 10): each feed source's state for a deployment.
         "deployment-economics-data-health": _READ,
+        # The read routes the dashboard needs (spec, section 30): a deployment's
+        # scenario versions, and a Financial Exposure Receipt's signed bytes.
+        "deployment-economics-scenarios": _READ,
+        "deployment-economics-receipt": "api.receipts",
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1711,6 +1747,14 @@ def _readable_urls(world):
                     {**o, "scenario": str(sc.uuid)}
                     for o in options
                     for sc in FinancialScenario.objects.filter(deployment__uuid=o["uuid"])[:2]
+                ]
+            if name == "deployment-economics-receipt":
+                from assurance.economics.models import FinancialExposureReceipt
+
+                options = [
+                    {**o, "receipt": str(uuid.UUID(row.receipt_id))}
+                    for o in options
+                    for row in FinancialExposureReceipt.objects.filter(deployment__uuid=o["uuid"])[:2]
                 ]
             if name.startswith("deployment-economics-parameter-set"):
                 from assurance.economics.models import CustomerParameterSet
@@ -2068,6 +2112,10 @@ def test_every_path_ran(observed):
         s["records"]["mitigation_simulate"],
         s["records"]["scenario_roi"],
     ) == (400, 201, 200, 201, 200, 201, 201, 200), s["records"]
+    # The read routes the dashboard needs: the list read, a receipt issued and its bytes read.
+    assert (s["records"]["scenario_list"], s["records"]["receipt_issued"], s["records"]["receipt_bytes"]) == (
+        200, (True, None), 200,
+    ), s["records"]
     assert s["records"]["trust_raise"] == {
         "one_step": 201, "asked": 201, "approved": 200, "withdrawable": 201, "withdrawn": 200,
         "command_approve_refused": True,

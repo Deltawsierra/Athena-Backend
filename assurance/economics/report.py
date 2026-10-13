@@ -37,7 +37,14 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
 - **One rule, two routes.** :func:`banner_reason` is the rule, and :func:`standing` is
   the scenario version's latest stored result under it: the report applies the first
   to its result, and the step-5 events route (``scenario_api``) serves the second
-  beside its deterministic figures, which are not a result and stay.
+  beside its deterministic figures, which are not a result and stay. The deployment's
+  scenario list (:func:`scenario_entry`, section 30) applies it to each version's
+  latest exposure run too.
+- **The valuation date and the currency bridge** (``currency_bridge``, schema v2,
+  section 30): the run's valuation date, read from the stored rows the receipt
+  reads it from, and the normalization record of each figure the run converted --
+  none, because a run converts nothing and no such record is stored
+  (:data:`NO_CONVERSION`). Nothing is converted or recomputed here.
 
 Nothing here is on a stop path. This module imports nothing probabilistic: the step-8
 and builder modules it reads are imported when a report is built, never at load.
@@ -77,8 +84,29 @@ from .models import (
     card_digest,
 )
 
-#: The report's schema.
-REPORT_SCHEMA = "mythos.economics.report/v1"
+#: The report's schema. v2 is v1 and ``currency_bridge``: the run's valuation date and
+#: the normalization record of each figure the run converted (none: a run converts
+#: nothing, :data:`NO_CONVERSION`). v1 stays readable: :func:`may_be_totalled` reads a
+#: v1 report exactly as before.
+REPORT_SCHEMA = "mythos.economics.report/v2"
+REPORT_SCHEMA_V1 = "mythos.economics.report/v1"
+#: Every report schema ever served, oldest first.
+REPORT_SCHEMAS: tuple[str, ...] = (REPORT_SCHEMA_V1, REPORT_SCHEMA)
+#: Where a run's valuation date is read from: its scenario build's as-of date (the date
+#: the receipt signs as its valuation date, section 26.5), or, for a version with no
+#: build, the latest as-of date of the components its stored inputs hold (the
+#: receipt's rule too).
+VALUATION_FROM_BUILD = "the scenario build's as-of date"
+VALUATION_FROM_INPUTS = "the latest as-of date of the run's components, as its stored inputs hold them"
+#: What the currency bridge says of a run's conversions. Nothing is converted inside a
+#: run (an event, a policy or a component's inputs in another currency are refused,
+#: ``currency_mismatch``), and no normalization record is stored for any figure, so
+#: none is served; none is ever computed here.
+NO_CONVERSION = (
+    "every figure is stated in the reporting currency as recorded: a run converts nothing (an event, a policy or a "
+    "component's inputs in another currency are refused, currency_mismatch), so no figure has a normalization "
+    "record to serve, and none is computed here"
+)
 #: The scenario document's schema.
 SCENARIO_SCHEMA = "mythos.economics.scenario/v1"
 #: What a result graded Unknown, refused or not graded shows (the owner-adopted default).
@@ -164,15 +192,16 @@ def stands(report: Mapping) -> bool:
 
 def may_be_totalled(report: Mapping) -> bool:
     """Whether a total may sum ``report``'s figures. It fails closed (review round 1,
-    LOW-4): only a report of this schema (:data:`REPORT_SCHEMA`: an ROI document or
-    any other is refused) that carries the digest of its own bytes, of a completed
+    LOW-4): only a report of a schema this module serves or served
+    (:data:`REPORT_SCHEMAS`, v1 and v2: an ROI document or any other is refused) that
+    carries the digest of its own bytes, of a completed
     result whose stored rows verified, not excluded from totals, graded A to D (an
     allow-list), and of a scenario's OWN run: ``residual_of`` present and null (a
     residual run under a remediation option is never exposure, section 28; a report
     without the key is refused). A forged, edited or stale report is refused. A total
     of several reports applies this to each, and leaves out every one it refuses (the
     owner-adopted default)."""
-    if not isinstance(report, Mapping) or report.get("schema") != REPORT_SCHEMA:
+    if not isinstance(report, Mapping) or report.get("schema") not in REPORT_SCHEMAS:
         return False
     if "residual_of" not in report or report["residual_of"] is not None:
         return False
@@ -296,11 +325,21 @@ def standing(scenario: FinancialScenario) -> dict:
     ``excluded_from_totals`` and ``banner_reason``. Every row is checked as the report
     checks it (:func:`stored_row_failures`, the series' too), and a scenario version
     with no result is not graded. Reads rows, hashes them and runs nothing else."""
-    # The scenario's own runs, as results/ serves them: a residual run under a
-    # remediation option (section 28) is never the scenario's exposure.
-    result = SimulationResult.objects.exposure_runs().filter(
+    return _standing_of(scenario, latest_exposure_run(scenario))
+
+
+def latest_exposure_run(scenario: FinancialScenario) -> SimulationResult | None:
+    """``scenario``'s latest stored run, by record order, of its OWN runs, as
+    ``results/`` serves them without ``?simulation=``: a residual run under a
+    remediation option (section 28) is never the scenario's exposure."""
+    return SimulationResult.objects.exposure_runs().filter(
         scenario=scenario, deployment_id=scenario.deployment_id
     ).order_by("-id").first()
+
+
+def _standing_of(scenario: FinancialScenario, result: SimulationResult | None) -> dict:
+    """The banner rule applied to ``result``, ``scenario``'s latest exposure run (see
+    :func:`standing`)."""
     card = charts = None
     failed: list[str] = []
     if result is not None:
@@ -695,6 +734,35 @@ def served_snapshots(scenario: FinancialScenario) -> dict:
         return {"not_reported": f"{refused.code}: {refused.detail}"}
 
 
+def _currency_bridge(result: SimulationResult, build: ScenarioBuild | None, code: str, failed: list[str]) -> dict:
+    """The run's valuation date and the normalization record of each figure it
+    converted (section 30), from stored values only, never recomputed: the date is
+    the build's as-of date, or for a version with no build the latest as-of date of
+    the components its stored inputs hold, read only where they still give their
+    digest; ``conversions`` is empty, because a run converts nothing and no
+    normalization record is stored (:data:`NO_CONVERSION`)."""
+    valuation: dict = {"valuation_date": None, "valuation_date_from": None}
+    if build is not None:
+        valuation = {"valuation_date": build.as_of.isoformat(), "valuation_date_from": VALUATION_FROM_BUILD}
+    elif "input_digest" in failed:
+        valuation["not_reported"] = (
+            f"{STORED_ROW_UNVERIFIED}: the stored inputs no longer give the run's input digest, and the version has "
+            "no build to read the valuation date from"
+        )
+    else:
+        dates = sorted(
+            component["as_of"]
+            for event in (result.inputs.get("events") or [])
+            for component in (event.get("components") or [])
+            if isinstance(component.get("as_of"), str)
+        )
+        if dates:
+            valuation = {"valuation_date": dates[-1], "valuation_date_from": VALUATION_FROM_INPUTS}
+        else:
+            valuation["not_reported"] = "the version has no build, and its stored inputs hold no component's as-of date"
+    return {**valuation, "reporting_currency": code, "conversions": [], "statement": NO_CONVERSION}
+
+
 def _unknowns(result: SimulationResult, events: list[dict], failed: list[str]) -> list[dict]:
     found = []
     for event in events:
@@ -798,6 +866,7 @@ def build_report(result: SimulationResult) -> dict:
         "model": _model(card),
         "source_snapshots": served_snapshots(scenario),
         "currency": {"code": code, "minor_unit": shown.minor_unit, "rounding": ROUNDING},
+        "currency_bridge": _currency_bridge(result, build, code, failed),
         "status": result.status,
         "refusal": refusal,
         "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed)},
@@ -942,28 +1011,80 @@ def scenario_document(scenario: FinancialScenario) -> dict:
     }
 
 
+# ------------------------------------------------------------------ the deployment's scenarios
+
+
+def templates_of(scenarios) -> dict[int, list[dict]]:
+    """Each of ``scenarios``' templates, as its causal effects record them (the id and
+    version each effect was assigned to, section 24.3), by scenario id: one read for
+    the whole page. A version with no effect (one not built) has none."""
+    found: dict[int, list[dict]] = {}
+    rows = (
+        CausalEffect.objects.filter(scenario_id__in=[scenario.pk for scenario in scenarios])
+        .values_list("scenario_id", "template_id", "template_version")
+        .order_by("scenario_id", "template_id", "template_version")
+        .distinct()
+    )
+    for scenario_id, template_id, version in rows:
+        found.setdefault(scenario_id, []).append({"template_id": template_id, "version": version})
+    return found
+
+
+def scenario_entry(scenario: FinancialScenario, templates: list[dict]) -> dict:
+    """One line of a deployment's scenario list (section 30): the version, its
+    ``templates``, its latest EXPOSURE run's status (:func:`latest_exposure_run`: a
+    residual run is never listed) and that run's standing under the banner rule --
+    the grade, the banner, ``excluded_from_totals`` and why -- as the events route
+    serves it (:func:`standing`). Reads rows, hashes them and runs nothing else."""
+    result = latest_exposure_run(scenario)
+    return {
+        "uuid": str(scenario.uuid),
+        "title": scenario.title,
+        "recorded_at": scenario.recorded_at.isoformat(),
+        "supersedes": None if scenario.supersedes_id is None else str(scenario.supersedes.uuid),
+        "templates": templates,
+        "latest_exposure_run": None
+        if result is None
+        else {
+            "uuid": str(result.uuid),
+            "status": result.status,
+            "refusal_code": result.refusal_code or None,
+            "recorded_at": result.recorded_at.isoformat(),
+        },
+        **_standing_of(scenario, result),
+    }
+
+
 __all__ = [
     "FIGURES",
     "GRADES_FOR_TOTALS",
     "INTEGRITY_CHECKS",
     "LIMITATIONS",
     "LINES",
+    "NO_CONVERSION",
     "NO_RESULT",
     "REPORT_SCHEMA",
+    "REPORT_SCHEMAS",
+    "REPORT_SCHEMA_V1",
     "SCENARIO_SCHEMA",
     "STORED_ROW_UNVERIFIED",
     "UNKNOWN",
     "UNKNOWN_BANNER",
+    "VALUATION_FROM_BUILD",
+    "VALUATION_FROM_INPUTS",
     "banner_reason",
     "build_report",
     "canonical_bytes",
     "digest_of",
+    "latest_exposure_run",
     "may_be_totalled",
     "scenario_document",
+    "scenario_entry",
     "stands",
     "served_snapshots",
     "standing",
     "stored_row_failures",
+    "templates_of",
     "verified_grade",
     "verifies",
 ]
