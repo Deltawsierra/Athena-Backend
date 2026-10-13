@@ -9,8 +9,9 @@ is); every other scenario is listed with its reason (:data:`EXCLUSIONS`), never
 silently dropped. It normalises each included scenario into the reporting currency
 at the valuation date (step 3's order), finds the loss events two scenarios share
 and counts each once a year, at the largest of their losses that year, draws the
-included scenarios again on one seed with their correlation groups (two scenarios
-at least each), and records a :class:`~assurance.economics.models.PortfolioResult`:
+included scenarios again on one seed with the correlation group versions the request
+names (authored records, :func:`record_group`; two scenarios at least each), and
+records a :class:`~assurance.economics.models.PortfolioResult`:
 
 - **Idempotent on its inputs**: the included results' digests, the exclusions, the
   groups and their parameters, the normalisations, the shared events, every
@@ -60,11 +61,17 @@ from .engine import parameter_set as pset
 from .engine.confidence import ConfidenceGrade, downgraded
 from .engine.money import Money, MoneyRefused, decimal_text
 from .engine.parameters import POINTS, ParameterRefused
-from .engine.provenance import SourceType
+from .engine.provenance import LicenseClass, SourceType
 from .models import (
+    GROUP_KEY,
+    GROUP_MAX_EVIDENCE,
+    GROUP_MAX_SCENARIOS,
+    GROUP_STRENGTH_MAX,
+    GROUP_STRENGTH_MIN,
     SIMULATION_COMPLETED,
     SIMULATION_REFUSED,
     CausalEffect,
+    CorrelationGroup,
     CustomerParameterSet,
     EconomicsRefused,
     FinancialScenario,
@@ -123,7 +130,7 @@ EXCLUSIONS = {
     "currency_unnormalisable": "its amounts cannot be normalised into the reporting currency at the valuation date",
 }
 #: The checks :func:`stored_row_failures` runs, in order.
-INTEGRITY_CHECKS = ("input_digest", "result_digest", "record_binding", "member_rows")
+INTEGRITY_CHECKS = ("input_digest", "result_digest", "record_binding", "group_rows", "member_rows")
 #: The lines a portfolio sums, in this order (the engine's).
 LINES = ("gross_cash", "retained_cash")
 #: How a shared loss event is counted, as its inputs state it.
@@ -156,7 +163,6 @@ LIMITATIONS = (
     "a portfolio graded Unknown, refused or unverified is not for capital decisions and is excluded from every total",
 )
 
-_GROUP_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,59}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _REQUEST_REQUIRED = frozenset({"seed", "reporting_currency", "valuation_date"})
 _REQUEST_OPTIONAL = frozenset({"policy", "normalization", "groups"})
@@ -168,7 +174,7 @@ _INDEX_FIELDS = frozenset({"series_id", "geography", "category", "base"})
 MAX_PROVIDERS = 5
 MAX_SOURCES = 10
 MAX_INDEX_LAG_MONTHS = 12
-MAX_EVIDENCE = 500
+MAX_EVIDENCE = GROUP_MAX_EVIDENCE
 
 
 class PortfolioRequestRefused(ValueError):
@@ -210,7 +216,8 @@ class PortfolioRequest:
     reporting_currency: str
     valuation_date: date
     normalization: NormalizationRequest | None
-    groups: tuple[GroupRequest, ...]
+    #: The recorded correlation group versions it names, by uuid, in order.
+    groups: tuple[str, ...]
 
 
 def _refused(code: str, detail: str) -> PortfolioRequestRefused:
@@ -270,41 +277,47 @@ def _normalization(value) -> NormalizationRequest:
     )
 
 
-def _groups(value) -> tuple[GroupRequest, ...]:
+def parse_group(body) -> GroupRequest:
+    """One correlation group version's body read exactly, or refused (400): a key of
+    its own, a strength from the floor to the ceiling (review round 1, LOW-2: below
+    the floor the driver's float is subnormal or zero, refused here and never a
+    503), a source type, its evidence, and two scenario versions at least (LOW-4: a
+    group of one correlates with nothing)."""
+    body = _object(body, "body", _GROUP_FIELDS)
+    key = body["group"]
+    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
+        raise _refused("group_malformed", "group is a key of its own: 1 to 60 of a-z, 0-9, '-' and '_'")
+    try:
+        strength = money.parse_decimal(body["strength"], "strength")
+    except MoneyRefused as refused:
+        raise _refused("group_malformed", refused.detail) from None
+    if not GROUP_STRENGTH_MIN <= strength <= GROUP_STRENGTH_MAX:
+        raise _refused("group_malformed", f"strength is from {GROUP_STRENGTH_MIN} to {GROUP_STRENGTH_MAX}")
+    source = body["source_type"]
+    if not isinstance(source, str) or source not in {t.value for t in SourceType}:
+        raise _refused("group_malformed", f"source_type is one of {sorted(t.value for t in SourceType)}")
+    scenarios = _uuids(body["scenarios"], "scenarios", most=GROUP_MAX_SCENARIOS)
+    if len(scenarios) < 2:
+        raise _refused("group_too_small", f"scenarios names {len(scenarios)} of them: a group names two at least")
+    evidence = _text(body["evidence_ref"], "evidence_ref", longest=MAX_EVIDENCE)
+    return GroupRequest(key, strength, source, evidence, tuple(sorted(scenarios)))
+
+
+def _group_ids(value) -> tuple[str, ...]:
+    """The correlation group versions a portfolio names: recorded ones, by uuid
+    (``POST .../portfolio/groups/``), never a group stated in the request (the
+    section-28 audit's T4: a group's author and time are recorded)."""
     from .engine import portfolio as ep
 
-    if not isinstance(value, list) or len(value) > ep.MAX_GROUPS:
-        raise _refused("group_malformed", f"groups is a list of at most {ep.MAX_GROUPS} groups")
-    groups, seen, keys = [], set(), set()
-    for at, item in enumerate(value):
-        path = f"groups[{at}]"
-        body = _object(item, path, _GROUP_FIELDS)
-        key = body["group"]
-        if not isinstance(key, str) or not _GROUP_KEY.fullmatch(key) or key in keys:
-            raise _refused("group_malformed", f"{path}.group is a key of its own: 1 to 60 of a-z, 0-9, '-' and '_'")
-        keys.add(key)
-        try:
-            strength = money.parse_decimal(body["strength"], f"{path}.strength")
-        except MoneyRefused as refused:
-            raise _refused("group_malformed", refused.detail) from None
-        if not ep.STRENGTH_MIN <= strength <= ep.STRENGTH_MAX:
-            # A floor (review round 1, LOW-2): a strength whose float is zero or
-            # subnormal has no finite driver; it is refused here, never a 503.
-            raise _refused("group_malformed", f"{path}.strength is from {ep.STRENGTH_MIN} to {ep.STRENGTH_MAX}")
-        source = body["source_type"]
-        if not isinstance(source, str) or source not in {t.value for t in SourceType}:
-            raise _refused("group_malformed", f"{path}.source_type is one of {sorted(t.value for t in SourceType)}")
-        scenarios = _uuids(body["scenarios"], f"{path}.scenarios", most=ep.MAX_SCENARIOS)
-        if len(scenarios) < 2:
-            # Review round 1, LOW-4: a group of one correlates with nothing.
-            raise _refused("group_too_small", f"{path} names {len(scenarios)} of them: a group names two at least")
-        twice = sorted(seen & set(scenarios))
-        if twice:
-            raise _refused("group_malformed", f"a scenario is in one group at most: {twice}")
-        seen.update(scenarios)
-        groups.append(GroupRequest(key, strength, source, _text(body["evidence_ref"], f"{path}.evidence_ref",
-                                                                 longest=MAX_EVIDENCE), tuple(sorted(scenarios))))
-    return tuple(sorted(groups, key=lambda g: g.key))
+    if not isinstance(value, list) or len(value) > ep.MAX_GROUPS or any(
+        not isinstance(item, str) or not _UUID.fullmatch(item) for item in value
+    ) or len(set(value)) != len(value):
+        raise _refused(
+            "field_malformed",
+            f"groups is a list of at most {ep.MAX_GROUPS} recorded correlation group versions, each by its uuid "
+            "once (POST .../economics/portfolio/groups/ records one): a group is never stated in the request",
+        )
+    return tuple(sorted(value))
 
 
 def parse_request(body, *, policies, parse_seed) -> PortfolioRequest:
@@ -326,7 +339,7 @@ def parse_request(body, *, policies, parse_seed) -> PortfolioRequest:
         reporting_currency=_currency_code(body["reporting_currency"], "reporting_currency"),
         valuation_date=valuation_date,
         normalization=normalization,
-        groups=_groups(body.get("groups", [])),
+        groups=_group_ids(body.get("groups", [])),
     )
 
 
@@ -479,6 +492,80 @@ def _event_refs(scenario: FinancialScenario, build: ScenarioBuild | None, factor
     return refs
 
 
+def _named_groups(deployment, ids: tuple[str, ...]) -> list[CorrelationGroup]:
+    """The recorded correlation group versions a portfolio names, by key: each this
+    deployment's (``group_not_found``, 400, otherwise), one version of a key at most,
+    and a scenario in one of them at most (``group_malformed``)."""
+    rows = {str(g.uuid): g for g in CorrelationGroup.objects.filter(deployment=deployment, uuid__in=list(ids))}
+    missing = [u for u in ids if u not in rows]
+    if missing:
+        raise _refused("group_not_found", f"not a correlation group version recorded for this deployment: {missing}")
+    groups = sorted(rows.values(), key=lambda g: (g.key, g.version))
+    keys = [g.key for g in groups]
+    if len(set(keys)) != len(keys):
+        raise _refused("group_malformed", f"a portfolio names one version of a group at most: {sorted(keys)}")
+    seen: set[str] = set()
+    for group in groups:
+        twice = sorted(seen & set(group.scenarios))
+        if twice:
+            raise _refused("group_malformed", f"a scenario is in one group at most: {twice}")
+        seen.update(group.scenarios)
+    return groups
+
+
+@dataclass(frozen=True)
+class GroupOutcome:
+    """A correlation group version recorded (``created``), or the latest version of
+    its key returned because it states the same group; or why not (``code``)."""
+
+    group: CorrelationGroup | None
+    created: bool
+    code: str | None = None
+    detail: str = ""
+
+
+def record_group(deployment, body, *, author) -> GroupOutcome:
+    """Record a version of one of ``deployment``'s correlation groups, authored by
+    ``author``, or return its key's latest version where that states the same group
+    (strength, source, evidence and scenarios). Its scenarios are current scenario
+    versions of this deployment (``scenario_not_found``, 400). Refused (400) as
+    :func:`parse_group` reads it. No transaction but the one insert."""
+    try:
+        wanted = parse_group(body)
+        scenarios = FinancialScenario.objects.filter(deployment=deployment)
+        superseded = set(scenarios.exclude(supersedes__isnull=True).values_list("supersedes_id", flat=True))
+        current = {str(s.uuid) for s in scenarios if s.pk not in superseded}
+        missing = sorted(set(wanted.scenarios) - current)
+        if missing:
+            raise _refused("scenario_not_found", f"not a current scenario version here: {missing}")
+    except PortfolioRequestRefused as refused:
+        return GroupOutcome(None, False, refused.code, refused.detail)
+    stated = (decimal_text(wanted.strength), wanted.source_type, wanted.evidence_ref, list(wanted.scenarios))
+    for _attempt in range(3):
+        latest = CorrelationGroup.objects.filter(deployment=deployment, key=wanted.key).order_by("-version").first()
+        if latest is not None and (latest.strength, latest.source_type, latest.evidence_ref, latest.scenarios) == stated:
+            return GroupOutcome(latest, False)
+        group = CorrelationGroup(
+            deployment=deployment, key=wanted.key, strength=stated[0], source_type=wanted.source_type,
+            evidence_ref=wanted.evidence_ref, scenarios=stated[3], author=author,
+        )
+        try:
+            with transaction.atomic():
+                group.save()
+        except IntegrityError:
+            continue  # another version of the key was recorded meanwhile: read it and try again
+        except EconomicsRefused as refused:
+            return GroupOutcome(None, False, refused.code, refused.detail)
+        return GroupOutcome(group, True)
+    return GroupOutcome(None, False, "group_version_taken", f"{wanted.key}: other versions were recorded meanwhile")
+
+
+def list_groups(deployment) -> list[dict]:
+    """Every recorded version of ``deployment``'s correlation groups, by key and
+    version, each with its author and time."""
+    return [g.as_dict() for g in CorrelationGroup.objects.filter(deployment=deployment).order_by("key", "version")]
+
+
 def _engine():
     from .engine import distributions, scenario_simulation, simulation
     from .engine import portfolio as ep
@@ -523,7 +610,8 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
     if len(heads) > ep.MAX_SCENARIOS:
         raise _refused("scenarios_over_limit", f"{len(heads)} current scenario versions; at most {ep.MAX_SCENARIOS}")
     current = {str(s.uuid) for s in heads}
-    named = sorted({sid for g in request.groups for sid in g.scenarios} - current)
+    stored_groups = _named_groups(deployment, request.groups)
+    named = sorted({sid for g in stored_groups for sid in g.scenarios} - current)
     if named:
         raise _refused("scenario_not_found", f"a group names what is not a current scenario version here: {named}")
     normalizer = _normalizer(deployment, request)
@@ -589,7 +677,7 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
     # included (review round 1, LOW-4): a group of one correlates with nothing.
     in_portfolio = {str(scenario.uuid) for scenario, *_ in included}
     applied = {
-        g.key: [sid for sid in g.scenarios if sid in in_portfolio] for g in request.groups
+        g.key: [sid for sid in g.scenarios if sid in in_portfolio] for g in stored_groups
     }
     applied = {key: sids if len(sids) >= 2 else [] for key, sids in applied.items()}
     group_of = {sid: key for key, sids in applied.items() for sid in sids}
@@ -623,7 +711,7 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
                 ],
             }
         )
-    groups = [ep.Group(g.key, g.strength, SourceType(g.source_type)) for g in request.groups]
+    groups = [ep.Group(g.key, Decimal(g.strength), SourceType(g.source_type)) for g in stored_groups]
     inputs = {
         "schema": INPUTS_SCHEMA,
         "deployment": str(deployment.uuid),
@@ -636,7 +724,7 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
             "policy": normalizer.policy.as_dict(),
             "sources": [
                 {"uuid": str(s.uuid), "source_key": s.source_key, "version": s.version,
-                 "snapshot_hash": s.snapshot_hash}
+                 "snapshot_hash": s.snapshot_hash, "license_class": s.license_class}
                 for s in normalizer.sources
             ],
         },
@@ -644,18 +732,15 @@ def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> Port
         "excluded": sorted(excluded, key=lambda e: e["scenario"]),
         "groups": [
             {
-                "group": g.key,
-                "strength": decimal_text(g.strength),
-                "source_type": g.source_type,
-                "evidence_ref": g.evidence_ref,
-                "scenarios": list(g.scenarios),
+                # The recorded version, with its author and time (the section-28 audit's T4).
+                **g.as_dict(),
                 "applied_to": applied[g.key],
                 "not_applied": None if applied[g.key] else (
                     "fewer than two of its scenarios are included: a group of one correlates with nothing, so it "
                     "applies to none"
                 ),
             }
-            for g in request.groups
+            for g in stored_groups
         ],
         "shared_events": [
             {
@@ -804,6 +889,21 @@ def _record_unbound(row: PortfolioResult) -> bool:
     return held != (row.input_digest, row.seed, row.draws, row.reporting_currency, members, groups, shared)
 
 
+def _groups_changed(row: PortfolioResult) -> bool:
+    """Whether a correlation group version the inputs name is no longer recorded in
+    this deployment as the inputs state it (its key, version, strength, source,
+    evidence, scenarios, author and time)."""
+    named = row.inputs.get("groups") or [] if isinstance(row.inputs, dict) else []
+    for stated in named:
+        try:
+            group = CorrelationGroup.objects.filter(deployment_id=row.deployment_id, uuid=stated["uuid"]).first()
+        except (DjangoValidationError, ValueError, TypeError, KeyError):
+            return True
+        if group is None or any(stated.get(key) != value for key, value in group.as_dict().items()):
+            return True
+    return False
+
+
 def stored_row_failures(row: PortfolioResult) -> tuple[list[str], list[dict]]:
     """The checks of :data:`INTEGRITY_CHECKS` the stored rows of ``row`` fail, in
     order, and each included scenario whose rows fail, with why. Plain hashing and
@@ -826,6 +926,8 @@ def stored_row_failures(row: PortfolioResult) -> tuple[list[str], list[dict]]:
         failed.append("result_digest")
     if row.status == SIMULATION_COMPLETED and intact and _record_unbound(row):
         failed.append("record_binding")
+    if intact and _groups_changed(row):
+        failed.append("group_rows")
     members = (row.inputs.get("members") or []) if intact and isinstance(row.inputs, dict) else []
     failing = []
     for member in members:
@@ -1002,6 +1104,71 @@ def _own(record: dict | None, sid: str, shown) -> dict:
                                   "least these"}
 
 
+#: The licence classes whose terms allow redistributing a source's raw data (section
+#: 4.4): any other source's raw rates and index values never reach a reader.
+REDISTRIBUTABLE = frozenset({LicenseClass.OPEN.value, LicenseClass.CUSTOMER.value})
+#: What a normalisation step served over a source that may not be redistributed
+#: keeps: what was done, when and by which rule, never a number read or made.
+_STEP_PROVENANCE = frozenset({
+    "step", "from", "to", "requested_date", "rule", "provider", "rate_type", "direction", "rate_date", "age_days",
+    "stale", "estimate", "downgrades", "series_id", "geography", "category", "base", "currency", "from_date",
+    "to_date", "from_period", "to_period", "period_used", "as_of", "lag_months",
+})
+#: What an observation of such a source keeps: its source, version, snapshot hash and dates.
+_OBSERVATION_PROVENANCE = frozenset({
+    "source_key", "source_version", "source_snapshot_hash", "observations_version", "effective_date",
+    "observed_at", "period", "vintage_date",
+})
+
+
+def served_normalization(normalization, policy) -> dict | None:
+    """A member's normalisation as a reader is served it (the section-28 audit's T7):
+    as stored where every observation it read is of a source whose licence allows
+    redistribution, and otherwise with every raw rate and index value, and every
+    number made from them (the factor, each step's rate, ratio and amounts), WITHHELD:
+    each observation of a source that may not be redistributed shown by its source,
+    version, snapshot hash and dates only. The stored inputs keep the whole record
+    (the licence allows storing and deriving figures); the figures stand."""
+    if not isinstance(normalization, dict) or not isinstance(normalization.get("record"), dict):
+        return normalization
+    licences = {
+        (s.get("source_key"), s.get("version")): s.get("license_class")
+        for s in ((policy or {}).get("sources") or []) if isinstance(s, dict)
+    }
+
+    def licence(observation) -> str | None:
+        if not isinstance(observation, dict):
+            return None
+        return licences.get((observation.get("source_key"), observation.get("source_version")))
+
+    record = normalization["record"]
+    chain = [step for step in record.get("chain") or [] if isinstance(step, dict)]
+    held = {licence(o) for step in chain for o in step.get("observations") or []}
+    if held <= REDISTRIBUTABLE:
+        return normalization
+    classes = sorted(str(c) for c in held - REDISTRIBUTABLE)
+    reason = (
+        f"withheld: a source it read is licensed {', '.join(classes)}, whose terms do not allow redistributing its "
+        "raw data; its provenance is shown, and the figures derived from it stand"
+    )
+    served_chain = []
+    for step in chain:
+        observations = []
+        for observation in step.get("observations") or []:
+            if licence(observation) in REDISTRIBUTABLE:
+                observations.append(observation)
+            else:
+                observations.append({
+                    **{k: v for k, v in observation.items() if k in _OBSERVATION_PROVENANCE},
+                    "license_class": licence(observation), "withheld": "the raw value",
+                })
+        served_chain.append({**{k: v for k, v in step.items() if k in _STEP_PROVENANCE},
+                             "observations": observations, "withheld": reason})
+    served = {k: v for k, v in record.items() if k not in ("native", "value", "display", "chain")}
+    served.update(chain=served_chain, value=None, display=None, withheld=reason)
+    return {**normalization, "factor": None, "record": served, "withheld": reason}
+
+
 def _shared(inputs: dict, record: dict | None) -> list[dict]:
     """The shared loss events, and, where figures are served, the sets of their
     events a year may count (positions in ``events``), in how many years each was
@@ -1079,8 +1246,9 @@ def build_document(row: PortfolioResult) -> dict:
             "included": [
                 {
                     **{key: m.get(key) for key in ("scenario", "title", "result", "result_digest", "input_digest",
-                                                   "grade", "graded", "currency", "as_of", "insured", "normalization",
-                                                   "group", "events", "shared")},
+                                                   "grade", "graded", "currency", "as_of", "insured", "group",
+                                                   "events", "shared")},
+                    "normalization": served_normalization(m.get("normalization"), inputs.get("normalization")),
                     "own": _own(record, m["scenario"], shown),
                 }
                 for m in members
@@ -1134,7 +1302,9 @@ __all__ = [
     "LIMITATIONS",
     "REPORT_SCHEMA",
     "SELECTION",
+    "REDISTRIBUTABLE",
     "UNRECORDED",
+    "GroupOutcome",
     "PortfolioOutcome",
     "PortfolioRequest",
     "PortfolioRequestRefused",
@@ -1142,8 +1312,12 @@ __all__ = [
     "build_document",
     "find",
     "latest",
+    "list_groups",
+    "parse_group",
     "parse_request",
     "portfolio_grade",
+    "record_group",
+    "served_normalization",
     "simulate_portfolio",
     "stored_row_failures",
 ]

@@ -133,7 +133,7 @@ def test_only_economics_is_refused():
         assert "assurance.economics.portfolio_api" not in sys.modules
         assert "assurance.economics.portfolio" not in sys.modules
         assert "assurance.economics.engine.portfolio" not in sys.modules
-        for tail in ("", "simulate/"):
+        for tail in ("", "simulate/", "groups/"):
             with pytest.raises(Resolver404):
                 resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/{tail}")
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"

@@ -547,11 +547,17 @@ NOT_STOPS = {
     # freshness read. Economics records only, and it writes nothing.
     "deployment-economics-data-health": _get(),
     # The portfolio (assurance.economics.portfolio_api, E5): a deployment's scenarios
-    # totalled from their draws, and its report. Economics records only.
+    # totalled from their draws, its report, and its authored correlation groups.
+    # Economics records only.
     "deployment-economics-portfolio": _get(),
     "deployment-economics-portfolio-simulate": {
         "POST": "totals an Economic Exposure portfolio of a deployment's scenarios from their draws, or returns the "
         "one recorded for the same inputs: economics records, append-only; it starts and stops nothing",
+    },
+    "deployment-economics-portfolio-groups": {
+        "GET": _READ,
+        "POST": "records an authored version of a deployment's correlation group, or returns the one recorded the "
+        "same: economics records, append-only; it starts and stops nothing",
     },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},

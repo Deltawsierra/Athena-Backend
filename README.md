@@ -683,7 +683,12 @@ E5, `docs/economics/spec-v1.md` section 30):
   step 5's key and window) once a year, at the largest of their losses of it that
   year, normalises every draw into the reporting currency at the valuation date
   before summing, and records the result (idempotent: the same inputs return it, 200;
-  a new one is 201); an admin or analyst only;
+  a new one is 201); an admin or analyst only. Its `groups` name recorded group
+  versions by uuid, never a group stated in the request;
+- `POST /api/assurance/deployments/<uuid>/economics/portfolio/groups/`: records a
+  version of one of the deployment's correlation groups (key, strength, source type,
+  evidence, two scenario versions at least), authored by the caller, an admin or
+  analyst; `GET` lists every version with its author and time;
 - `GET /api/assurance/deployments/<uuid>/economics/portfolio/?result=<uuid>`: the
   portfolio's report (else the latest), `mythos.economics.portfolio-report/v1`: P10,
   P50, P90, mean, expected annual loss, severe-but-plausible and the expected
@@ -696,10 +701,12 @@ E5, `docs/economics/spec-v1.md` section 30):
 The report is built from the stored rows only and is deterministic, with its own
 digest; every stored row it rests on, each included scenario's result, card and
 series among them, and the record's binding to its inputs, is checked first, and a
-failure is served as a refusal. No transaction or lock is held during the draws.
+failure is served as a refusal. A source whose licence forbids redistributing its raw
+data has its rates and index values withheld from the report, its provenance kept. No
+transaction or lock is held during the draws.
 Access, tenancy, strict JSON, 64 KiB, the 503 while the currency table cannot be read
-and the one 120 s deadline are step 6's. Neither route is a stop, and a fault in this
-module leaves only these two unserved.
+and the one 120 s deadline are step 6's. No route here is a stop, and a fault in this
+module leaves only these three unserved.
 
 ## When a dependency fails
 

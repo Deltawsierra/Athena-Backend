@@ -47,6 +47,7 @@ from assurance.economics.engine import portfolio as ep
 from assurance.economics.engine import scenario_simulation as ss
 from assurance.economics.models import (
     CausalEffect,
+    CorrelationGroup,
     CustomerParameterSet,
     EconomicsRefused,
     EconomicsRewriteRefused,
@@ -236,6 +237,23 @@ def _record(document):
     return PortfolioResult.objects.get(uuid=document["portfolio"]["uuid"]).record
 
 
+def _post_group(client, deployment, body):
+    return client.post(_url(deployment) + "groups/", data=json.dumps(body), content_type="application/json")
+
+
+def _group_body(scenarios, *, key="provider", strength="2", source="CUSTOMER_PROVIDED", evidence=None):
+    return {"group": key, "strength": strength, "source_type": source,
+            "evidence_ref": evidence or f"{LABEL}: they rely on one provider",
+            "scenarios": sorted(str(s.uuid) for s in scenarios)}
+
+
+def _grouped(deployment, people, scenarios, **over):
+    """A correlation group version recorded by the analyst, through its route: its uuid."""
+    response = _post_group(_client(people["analyst"]), deployment, _group_body(scenarios, **over))
+    assert response.status_code in (200, 201), response.content
+    return response.json()["group"]["uuid"]
+
+
 def _stored(result, line="gross_cash"):
     return result.record["scenario"][line]
 
@@ -314,8 +332,7 @@ def test_two_co_driven_scenarios_have_a_wider_tail_than_two_independent_ones(dep
     a, _ = made_and_simulated(deployment, people["analyst"], title="A", rate="2")
     b, _ = made_and_simulated(deployment, people["analyst"], title="B", rate="2")
     independent = _report_of(deployment, people, _totalled(deployment, people)["portfolio"]["uuid"])
-    group = {"group": "cloud-provider", "strength": "2", "source_type": "CUSTOMER_PROVIDED",
-             "evidence_ref": f"{LABEL}: both rely on one provider", "scenarios": sorted([str(a.uuid), str(b.uuid)])}
+    group = _grouped(deployment, people, [a, b], key="cloud-provider", evidence=f"{LABEL}: both rely on one provider")
     driven = _report_of(deployment, people, _totalled(deployment, people, groups=[group])["portfolio"]["uuid"])
     loose, tight = _record(independent)["lines"]["gross_cash"], _record(driven)["lines"]["gross_cash"]
     assert float(tight["severe_plausible"]) > 1.2 * float(loose["severe_plausible"])
@@ -659,6 +676,62 @@ def test_a_currency_that_cannot_be_normalised_is_excluded_and_one_that_can_is_no
     assert ru is not None
 
 
+@pytest.fixture
+def restricted(tmp_path):
+    """The committed snapshot again, registered as a source whose licence is
+    ``restricted`` (its terms allow storing it and deriving figures from it, not
+    redistributing its raw data). SYNTHETIC TEST DATA all the same."""
+    document = json.loads(snapshots.SYNTHETIC_SNAPSHOT.read_bytes())
+    document["synthetic"] = False
+    document["source"].update(trust_tier="benchmark", license_class="restricted",
+                              source_key="restricted-fx-and-cost-index")
+    path = tmp_path / "restricted.json"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    return [snapshots.register_snapshot(path)]
+
+
+def test_a_restricted_sources_raw_rates_never_reach_a_reader(deployment, people, restricted):
+    """The section-28 audit's T7: a scenario normalised through a source whose licence
+    forbids redistributing its raw data. The portfolio's report serves no raw rate or
+    index value of it, and no number made from them (the factor, a step's rate, ratio
+    or amounts): each observation is shown by its source, version, snapshot hash and
+    dates only. The stored inputs keep the whole record, and the figures stand."""
+    valued = date(2026, 9, 30)
+    made_and_simulated(deployment, people["analyst"], title="USD", as_of=valued)
+    eur, _ = made_and_simulated(deployment, people["analyst"], title="EUR", currency="EUR", as_of=valued)
+    posted = _totalled(deployment, people, valuation_date="2026-09-30", normalization=_normalization(restricted))
+    document = _report_of(deployment, people, posted["portfolio"]["uuid"])
+    assert document["scenarios"]["excluded"] == [] and document["summary"]["lines"]["gross_cash"]["mean"]
+    assert document["normalization"]["sources"][0]["license_class"] == "restricted"
+    by = {m["scenario"]: m for m in document["scenarios"]["included"]}
+    served = by[str(eur.uuid)]["normalization"]
+    assert served["factor"] is None and "licensed restricted" in served["withheld"]
+    record = served["record"]
+    assert record["value"] is None and record["display"] is None and "native" not in record
+    assert record["chain"] and all(
+        not {"quoted_rate", "factor", "ratio", "input", "output", "interpolation_weight"} & set(step)
+        for step in record["chain"]
+    )
+    observations = [o for step in record["chain"] for o in step["observations"]]
+    assert observations
+    for observation in observations:
+        assert set(observation) <= {"source_key", "source_version", "source_snapshot_hash", "observations_version",
+                                    "effective_date", "observed_at", "period", "vintage_date", "license_class",
+                                    "withheld"}, observation
+        assert observation["source_key"] == "restricted-fx-and-cost-index"
+        assert observation["source_snapshot_hash"] == restricted[0].snapshot_hash
+    # Stored whole (the licence allows storing), served nowhere.
+    stored = next(m for m in PortfolioResult.objects.get().inputs["members"] if m["scenario"] == str(eur.uuid))
+    assert stored["normalization"]["factor"] == "1.05"
+    raw = {o.get("rate") or o.get("value") for step in stored["normalization"]["record"]["chain"]
+           for o in step["observations"]}
+    assert raw and None not in raw
+    served_text = json.dumps(document)
+    for value in raw | {"1.05"}:
+        assert f'"{value}"' not in served_text, value
+    assert by[[s for s in by if s != str(eur.uuid)][0]]["normalization"]["rule"] == "identity"
+
+
 # ======================================================================
 # Contributions
 # ======================================================================
@@ -728,15 +801,13 @@ def test_largest_remainder_shows_contributions_that_sum_to_the_shown_total():
 def test_the_grade_is_no_higher_than_the_lowest_scenario_and_lower_for_an_expert_strength(deployment, people):
     a, _ = made_and_simulated(deployment, people["analyst"], title="A")
     b, rb = made_and_simulated(deployment, people["analyst"], title="B")
-    both = sorted([str(a.uuid), str(b.uuid)])
     plain = _report_of(deployment, people, _totalled(deployment, people)["portfolio"]["uuid"])
     grade = report.verified_grade(FinancialValidityCard.objects.get(simulation=rb), rb)
     assert grade == "B"
     assert plain["grade"]["grade"] == "B" and plain["grade"]["downgrades"] == []
     assert plain["banner"] is None and plain["excluded_from_totals"] is False
-    customer = {"group": "provider", "strength": "0.5", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": LABEL,
-                "scenarios": both}
-    expert = {**customer, "source_type": "EXPERT_ESTIMATE"}
+    customer = _grouped(deployment, people, [a, b], strength="0.5")
+    expert = _grouped(deployment, people, [a, b], strength="0.5", source="EXPERT_ESTIMATE")
     assert _report_of(deployment, people, _totalled(deployment, people, groups=[customer])["portfolio"]["uuid"])[
         "grade"]["grade"] == "B"
     lowered = _report_of(deployment, people, _totalled(deployment, people, groups=[expert])["portfolio"]["uuid"])
@@ -755,8 +826,7 @@ def test_a_group_with_one_scenario_included_applies_to_none_and_lowers_no_grade(
     those of no group, and an expert's strength for it lowers no grade."""
     a, _ = made_and_simulated(deployment, people["analyst"], title="A")
     unknown, _ = made_and_simulated(deployment, people["analyst"], title="unknown", unknown=True)
-    group = {"group": "provider", "strength": "2", "source_type": "EXPERT_ESTIMATE", "evidence_ref": LABEL,
-             "scenarios": sorted([str(a.uuid), str(unknown.uuid)])}
+    group = _grouped(deployment, people, [a, unknown], source="EXPERT_ESTIMATE")
     plain = _totalled_report(deployment, people)
     grouped = _totalled_report(deployment, people, groups=[group])
     (shown,) = grouped["groups"]
@@ -885,20 +955,22 @@ def test_a_record_not_of_its_inputs_is_never_served(deployment, people):
     """Review round 1, LOW-3 (the reviewer's repro): a portfolio with an expert's group
     is graded C. Its inputs rewritten to a customer's source, their digest
     recomputed, give their digest; but the record still names the inputs it was
-    drawn from, so the report is refused (``record_binding``), never served as B.
+    drawn from, so the report is refused (``record_binding``, and ``group_rows`` as
+    the group version is not recorded so), never served as B.
     So is a record rewritten, its digest recomputed, to draw a scenario apart from
     the group its inputs name."""
     a, _ = made_and_simulated(deployment, people["analyst"], title="A")
     b, _ = made_and_simulated(deployment, people["analyst"], title="B")
-    group = {"group": "provider", "strength": "0.5", "source_type": "EXPERT_ESTIMATE", "evidence_ref": LABEL,
-             "scenarios": sorted([str(a.uuid), str(b.uuid)])}
+    group = _grouped(deployment, people, [a, b], strength="0.5", source="EXPERT_ESTIMATE")
     _totalled(deployment, people, groups=[group])
     assert _report_of(deployment, people)["grade"]["grade"] == "C"
     row = PortfolioResult.objects.get()
     inputs = json.loads(json.dumps(row.inputs))
     inputs["groups"][0]["source_type"] = "CUSTOMER_PROVIDED"
     PortfolioResult._base_manager.filter(pk=row.pk).update(inputs=inputs, input_digest=canonical_digest(inputs))
-    _unverified(_report_of(deployment, people), "record_binding")
+    # Refused twice over: the record is not of these inputs, and the group version
+    # they name is not recorded so.
+    _unverified(_report_of(deployment, people), "record_binding", "group_rows")
     record = json.loads(json.dumps(row.record))
     record["members"][str(a.uuid)]["group"] = None
     PortfolioResult._base_manager.filter(pk=row.pk).update(
@@ -958,6 +1030,7 @@ def test_a_refusal_the_inputs_decide_is_recorded_and_one_they_do_not_is_not(depl
 def test_tenancy_and_roles(deployment, other_deployment, people):
     scenario, _ = made_and_simulated(deployment, people["analyst"])
     theirs, _ = made_and_simulated(other_deployment, people["admin"])
+    theirs_too = made(other_deployment, people["admin"], title="theirs too")
     owner, stranger, analyst = _client(people["owner"]), _client(people["other"]), _client(people["analyst"])
     # The owner (a viewer) reads, and never totals.
     assert _post(owner, deployment).status_code == 403
@@ -976,10 +1049,15 @@ def test_tenancy_and_roles(deployment, other_deployment, people):
     assert _document(analyst, deployment, "not-a-uuid").status_code == 404
     mine = PortfolioResult.objects.get(deployment=deployment)
     assert [m["scenario"] for m in mine.inputs["members"]] == [str(scenario.uuid)]
-    group = {"group": "g", "strength": "1", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": LABEL,
-             "scenarios": sorted([str(scenario.uuid), str(theirs.uuid)])}
-    refused = _post(analyst, deployment, _body(groups=[group]))
+    refused = _post_group(analyst, deployment, _group_body([scenario, theirs]))
     assert refused.status_code == 400 and refused.json()["code"] == "scenario_not_found"
+    # Nor is another deployment's group named here.
+    other_group = _post_group(_client(people["admin"]), other_deployment, _group_body([theirs, theirs_too]))
+    assert other_group.status_code == 201, other_group.content
+    named = _post(analyst, deployment, _body(groups=[other_group.json()["group"]["uuid"]]))
+    assert named.status_code == 400 and named.json()["code"] == "group_not_found"
+    assert _post_group(stranger, deployment, _group_body([scenario, scenario])).status_code == 404
+    assert _client(people["other"]).get(_url(deployment) + "groups/").status_code == 404
     # Signed out: 401.
     assert _document(_client(), deployment).status_code == 401
     assert _post(_client(), deployment).status_code == 401
@@ -1007,19 +1085,11 @@ def _group(**over):
         (_body(reporting_currency="ZZZ"), "currency_unknown"),
         (_body(reporting_currency=7), "field_malformed"),
         (_body(valuation_date="2026-13-01"), "date_malformed"),
-        (_body(groups=[_group(group="Bad Key")]), "group_malformed"),
-        (_body(groups=[_group(strength="0")]), "group_malformed"),
-        (_body(groups=[_group(strength="10.5")]), "group_malformed"),
-        # A floor (review round 1, LOW-2): below it, and where its float is subnormal or zero.
-        (_body(groups=[_group(strength="0.0000009")]), "group_malformed"),
-        (_body(groups=[_group(strength="0." + "0" * 320 + "1")]), "group_malformed"),
-        (_body(groups=[_group(strength="0." + "0" * 400 + "1")]), "group_malformed"),
-        (_body(groups=[_group(source_type="A_GUESS")]), "group_malformed"),
-        (_body(groups=[_group(strength=1)]), "group_malformed"),
-        (_body(groups=[_group(), _group(group="h", scenarios=[U1, U3])]), "group_malformed"),
-        # A group of one correlates with nothing (review round 1, LOW-4).
-        (_body(groups=[_group(scenarios=[U1])]), "group_too_small"),
-        (_body(groups=[_group()]), "scenario_not_found"),
+        # A group is a recorded version, named by uuid: never stated in the request (the audit's T4).
+        (_body(groups=[_group()]), "field_malformed"),
+        (_body(groups=["not-a-uuid"]), "field_malformed"),
+        (_body(groups=[U1, U1]), "field_malformed"),
+        (_body(groups=[U1]), "group_not_found"),
         (_body(normalization={"base_currency": "USD"}), "field_missing"),
         (_body(normalization={"base_currency": "USD", "providers": ["P"], "index": {"series_id": "S", "geography": "G",
                                                                                   "category": "C", "base": "B"},
@@ -1032,6 +1102,112 @@ def test_a_portfolio_body_is_read_exactly(deployment, people, body, code):
     assert response.status_code == 400, response.content
     assert response.json()["code"] == code
     assert not PortfolioResult.objects.exists()
+
+
+@pytest.mark.parametrize(
+    "body, code",
+    [
+        (_group(group="Bad Key"), "group_malformed"),
+        (_group(strength="0"), "group_malformed"),
+        (_group(strength="10.5"), "group_malformed"),
+        # A floor (review round 1, LOW-2): below it, and where its float is subnormal or zero.
+        (_group(strength="0.0000009"), "group_malformed"),
+        (_group(strength="0." + "0" * 320 + "1"), "group_malformed"),
+        (_group(strength="0." + "0" * 400 + "1"), "group_malformed"),
+        (_group(strength="1e-3"), "group_malformed"),
+        (_group(source_type="A_GUESS"), "group_malformed"),
+        (_group(strength=1), "group_malformed"),
+        # A group of one correlates with nothing (review round 1, LOW-4).
+        (_group(scenarios=[U1]), "group_too_small"),
+        (_group(), "scenario_not_found"),
+        ({**_group(), "author": "someone-else"}, "field_unrecognised"),
+        ({"group": "g"}, "field_missing"),
+    ],
+)
+def test_a_group_body_is_read_exactly(deployment, people, body, code):
+    made_and_simulated(deployment, people["analyst"])
+    response = _post_group(_client(people["analyst"]), deployment, body)
+    assert response.status_code == 400, response.content
+    assert response.json()["code"] == code
+    assert not CorrelationGroup.objects.exists()
+
+
+def test_a_correlation_group_is_an_authored_versioned_record(deployment, people):
+    """The section-28 audit's T4: a group is recorded by an admin or analyst, with
+    its author and time, append-only; the same group again is the version already
+    recorded (200); a changed one is the next version (201), never an edit. A
+    viewer reads the versions and never records one."""
+    a, _ = made_and_simulated(deployment, people["analyst"], title="A")
+    b, _ = made_and_simulated(deployment, people["analyst"], title="B")
+    analyst, owner = _client(people["analyst"]), _client(people["owner"])
+    first = _post_group(analyst, deployment, _group_body([a, b], strength="0.50"))
+    assert first.status_code == 201, first.content
+    one = first.json()["group"]
+    assert (one["group"], one["version"], one["strength"], one["author"]) == ("provider", 1, "0.5", "ann")
+    assert one["scenarios"] == sorted([str(a.uuid), str(b.uuid)]) and one["recorded_at"]
+    again = _post_group(analyst, deployment, _group_body([a, b], strength="0.5"))
+    assert again.status_code == 200 and again.json()["group"] == one
+    changed = _post_group(_client(people["admin"]), deployment, _group_body([a, b], strength="2"))
+    assert changed.status_code == 201
+    assert (changed.json()["group"]["version"], changed.json()["group"]["author"]) == (2, "ada")
+    assert _post_group(owner, deployment, _group_body([a, b], strength="3")).status_code == 403
+    listed = owner.get(_url(deployment) + "groups/")
+    assert listed.status_code == 200
+    assert [(g["group"], g["version"], g["author"]) for g in listed.json()["groups"]] == [
+        ("provider", 1, "ann"), ("provider", 2, "ada")
+    ]
+    row = CorrelationGroup.objects.get(version=1)
+    with pytest.raises(EconomicsRewriteRefused):
+        row.save()
+    with pytest.raises(EconomicsRewriteRefused):
+        CorrelationGroup.objects.filter(pk=row.pk).update(strength="9")
+    for changes, code in (
+        ({"strength": "0.50"}, "group_record_malformed"),
+        ({"strength": "11"}, "group_record_malformed"),
+        ({"scenarios": [str(b.uuid), str(a.uuid)]}, "group_record_malformed"),
+        ({"scenarios": sorted([str(a.uuid), U3])}, "cross_tenant_reference"),
+        ({"source_type": "A_GUESS"}, "group_record_malformed"),
+    ):
+        fields = {"deployment": deployment, "key": "provider", "strength": "1", "source_type": "CUSTOMER_PROVIDED",
+                  "evidence_ref": LABEL, "scenarios": sorted([str(a.uuid), str(b.uuid)]), **changes}
+        with pytest.raises(EconomicsRefused) as refused:
+            CorrelationGroup(**fields).save()
+        assert refused.value.code == code, changes
+    assert models_constants_agree()
+
+
+def models_constants_agree():
+    from assurance.economics import models as economics_models
+
+    return (economics_models.GROUP_STRENGTH_MIN, economics_models.GROUP_STRENGTH_MAX) == (
+        ep.STRENGTH_MIN, ep.STRENGTH_MAX
+    ) and economics_models.GROUP_MAX_SCENARIOS == ep.MAX_SCENARIOS
+
+
+def test_a_portfolio_records_the_group_versions_it_draws_with(deployment, people):
+    """A portfolio names recorded group versions by uuid and records each with its
+    author and time; one version of a key at most, and a scenario in one group at
+    most. A group version changed past the append-only checks after the portfolio
+    was totalled is caught when the report is read (``group_rows``)."""
+    a, _ = made_and_simulated(deployment, people["analyst"], title="A")
+    b, _ = made_and_simulated(deployment, people["analyst"], title="B")
+    c, _ = made_and_simulated(deployment, people["analyst"], title="C")
+    first = _grouped(deployment, people, [a, b])
+    second = _grouped(deployment, people, [a, c])
+    other = _grouped(deployment, people, [b, c], key="region")
+    analyst = _client(people["analyst"])
+    both_versions = _post(analyst, deployment, _body(groups=[first, second]))
+    assert both_versions.status_code == 400 and both_versions.json()["code"] == "group_malformed"
+    overlapping = _post(analyst, deployment, _body(groups=[second, other]))
+    assert overlapping.status_code == 400 and overlapping.json()["code"] == "group_malformed"
+    document = _totalled_report(deployment, people, groups=[first])
+    (shown,) = document["groups"]
+    stored = CorrelationGroup.objects.get(uuid=first)
+    assert {k: shown[k] for k in stored.as_dict()} == stored.as_dict()
+    assert (shown["uuid"], shown["version"], shown["author"]) == (first, 1, "ann")
+    assert shown["applied_to"] == sorted([str(a.uuid), str(b.uuid)])
+    CorrelationGroup._base_manager.filter(uuid=first).update(source_type="EXPERT_ESTIMATE")
+    _unverified(_report_of(deployment, people), "group_rows")
 
 
 def test_a_synthetic_source_is_never_read_by_a_portfolio(deployment, people):

@@ -648,6 +648,24 @@ def _economics_portfolio_simulate():
     )
 
 
+def _economics_portfolio_groups():
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    author = _admin()
+    first, second = stored(dep, author, set_key="group-a"), stored(dep, author, set_key="group-b")
+    # The set-up's own writes (assets and findings the scenarios rest on) are decision
+    # inputs: the decision is brought up to date before the group is recorded, which
+    # must leave it where it is.
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + "economics/portfolio/groups/",
+        {"group": "provider", "strength": "0.5", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "one provider",
+         "scenarios": sorted([str(first.uuid), str(second.uuid)])},
+        format="json",
+    )
+
+
 def _economics_trust_raise_approval():
     """Another admin's request to authoritative, approved by the caller's admin."""
     from assurance.economics.models import FinancialSourceTrustRaise
@@ -801,6 +819,11 @@ CANNOT_MOVE = {
         "totals an Economic Exposure portfolio of the deployment's scenarios from their draws, an economics "
         "record; the decision reads no economics record",
         _economics_portfolio_simulate,
+    ),
+    ("PortfolioGroupsView", "post", "post"): (
+        "records an authored version of the deployment's correlation group, an economics record; the decision "
+        "reads no economics record",
+        _economics_portfolio_groups,
     ),
 }
 

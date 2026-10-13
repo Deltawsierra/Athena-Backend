@@ -1674,9 +1674,11 @@ ROUTES.update(
         "deployment-economics-scenario-roi": _READ,
         # The data-health route (MVP step 10): each feed source's state for a deployment.
         "deployment-economics-data-health": _READ,
-        # The portfolio (E5): the totals and their report JSON.
+        # The portfolio (E5): the totals and their report JSON, and the authored
+        # correlation group versions a portfolio names.
         "deployment-economics-portfolio": _READ,
         "deployment-economics-portfolio-simulate": _READ,
+        "deployment-economics-portfolio-groups": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"

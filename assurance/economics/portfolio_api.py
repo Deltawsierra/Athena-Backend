@@ -2,14 +2,21 @@
 section 30; the owner's specification's ``GET /financial/portfolio``).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
-its own: a fault here leaves these two routes unserved and nothing else -- not the
+its own: a fault here leaves these three routes unserved and nothing else -- not the
 other economics routes, not the URLconf, not a stop
 (``tests/test_economics_portfolio.py``, ``test_a_portfolio_fault_never_takes_down_a_stop``).
+
+- ``POST deployments/<uuid>/economics/portfolio/groups/``: record a version of one
+  of the deployment's correlation groups, authored by the caller (an admin or an
+  analyst), or return its key's latest version where that states the same group
+  (:func:`assurance.economics.portfolio.record_group`); ``GET`` lists every version,
+  each with its author and time. A portfolio names the versions it draws with.
 
 - ``POST deployments/<uuid>/economics/portfolio/simulate/``: total the deployment's
   scenarios (:func:`assurance.economics.portfolio.simulate_portfolio`) for a seed, a
   simulation policy (step 6's), a reporting currency and a valuation date, with an
-  optional normalisation policy and correlation groups: IDEMPOTENT, the same inputs
+  optional normalisation policy and the recorded correlation group versions it
+  draws with, by uuid: IDEMPOTENT, the same inputs
   return the stored portfolio (200) and never draw a second; a new one is 201. An
   admin or an analyst only.
 - ``GET deployments/<uuid>/economics/portfolio/``: the portfolio's report
@@ -23,8 +30,8 @@ economics cannot read its currency table, and one deadline per request
 portfolio the engine cannot make now (it will not import, the deadline, memory) is
 503 and records nothing; a request the rows refuse is 400 and records nothing.
 
-Neither route is a stop, and neither reads or writes anything a stop or the
-decision reads: each is in ``safety.stops.NOT_STOPS``. The draws hold no transaction
+No route here is a stop, and none reads or writes anything a stop or the decision
+reads: each is in ``safety.stops.NOT_STOPS``. The draws hold no transaction
 and no lock. This module imports the engine only inside a view: nothing Django loads
 at start imports it, or numpy.
 """
@@ -141,6 +148,43 @@ class PortfolioSimulateView(APIView):
         return Response(served, status=status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK)
 
 
+class PortfolioGroupsView(APIView):
+    """The deployment's correlation groups: every recorded version (GET), or a new
+    version recorded by the caller (POST, an admin or analyst)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    def get(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        return Response({"deployment": str(deployment.uuid), "groups": portfolio.list_groups(deployment)})
+
+    def post(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        if not _may_write(request.user):
+            raise PermissionDenied("Recording a correlation group requires an admin or analyst role.")
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"detail": "Content-Length is not a number"}) from None
+        if declared > MAX_BODY_BYTES:
+            raise BodyTooLarge()
+        body = request.data
+        if isinstance(body, QueryDict):
+            raise UnsupportedMediaType(request.content_type)
+        outcome = portfolio.record_group(deployment, body, author=request.user)
+        if outcome.group is None:
+            conflict = outcome.code == "group_version_taken"
+            return Response(
+                {"code": outcome.code, "detail": outcome.detail, "recorded": False},
+                status=status.HTTP_409_CONFLICT if conflict else status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {"deployment": str(deployment.uuid), "created": outcome.created, "group": outcome.group.as_dict()},
+            status=status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK,
+        )
+
+
 urlpatterns = [
     path(
         "deployments/<uuid:uuid>/economics/portfolio/",
@@ -151,5 +195,10 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/portfolio/simulate/",
         PortfolioSimulateView.as_view(),
         name="deployment-economics-portfolio-simulate",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/portfolio/groups/",
+        PortfolioGroupsView.as_view(),
+        name="deployment-economics-portfolio-groups",
     ),
 ]

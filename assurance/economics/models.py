@@ -110,12 +110,18 @@ REMEDIATION_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(REMEDIATION_RECORD_REFUSALS)
-#: The code a stored portfolio result is refused with on save (spec, section 30).
+#: The codes a stored portfolio result, or a correlation group version, is refused
+#: with on save (spec, section 30).
 PORTFOLIO_RECORD_REFUSALS = {
     "portfolio_record_malformed": (
         "a portfolio result names its seed (a whole number from 0 to 2^64 - 1, as text), its draws, its reporting "
         "currency and valuation date, its digests, and either a completed record of its own inputs, seed and draws "
         "or a refusal code, never both; no number in it is a float"
+    ),
+    "group_record_malformed": (
+        "a correlation group version names a key of 1 to 60 lowercase letters, digits, '-' and '_', a strength from "
+        "0.000001 to 10 in its one spelling, a source type, its evidence (1 to 500 characters), and 2 to 50 of its "
+        "deployment's scenario versions, in order, each once"
     ),
 }
 _REFUSAL_TEXT.update(PORTFOLIO_RECORD_REFUSALS)
@@ -3118,6 +3124,118 @@ class RemediationOption(_AppendOnly):
 
     def __str__(self) -> str:
         return f"remediation option {self.title}"
+
+
+# ---------------------------------------------------------------------------
+# CorrelationGroup -- one authored version of one correlation group (E5)
+# ---------------------------------------------------------------------------
+
+#: A correlation group's key; its strength's floor and ceiling (the portfolio
+#: engine's ``STRENGTH_MIN`` and ``STRENGTH_MAX``, held equal by a test: the engine
+#: imports numpy, so it is not imported here); how many scenario versions it names;
+#: and its evidence's longest.
+GROUP_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,59}")
+GROUP_STRENGTH_MIN = Decimal("0.000001")
+GROUP_STRENGTH_MAX = Decimal(10)
+GROUP_MAX_SCENARIOS = 50
+GROUP_MAX_EVIDENCE = 500
+_SCENARIO_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+class CorrelationGroup(_AppendOnly):
+    """One version of one correlation group of a deployment (spec, section 30.3; the
+    section-28 audit's T4): its key, its STRENGTH (the variance of the group's
+    common driver, as decimal text in its one spelling), the source that strength
+    rests on and its evidence, and the scenario versions in it, recorded by an
+    account at a time. A portfolio names the versions it draws with, by uuid, and
+    records each with its author and time: a group is never supplied anonymously in
+    a portfolio request.
+
+    Append-only like every economics record: a changed group is a new version of its
+    key (1, 2, ...: ``uq_econ_group_version``), never an edit. It names its author as
+    a scenario does: the account, nulled if the account is removed (a stop), and the
+    account's own username, kept. It goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    key = models.CharField(max_length=60)
+    # One more than its key's latest in its deployment, assigned on save.
+    version = models.PositiveIntegerField(editable=False)
+    strength = models.CharField(max_length=32)
+    source_type = models.CharField(max_length=32, choices=[(t, t) for t in _SOURCE_TYPE_CODES])
+    evidence_ref = models.TextField()
+    # The scenario versions' uuids, in order, each once.
+    scenarios = models.JSONField()
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_correlation_groups_authored",
+    )
+    author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "key", "version"]
+        constraints = [
+            models.UniqueConstraint(fields=["deployment", "key", "version"], name="uq_econ_group_version"),
+        ]
+
+    def as_dict(self) -> dict:
+        """The group version as a portfolio's inputs record it."""
+        return {
+            "uuid": str(self.uuid),
+            "group": self.key,
+            "version": self.version,
+            "strength": self.strength,
+            "source_type": self.source_type,
+            "evidence_ref": self.evidence_ref,
+            "scenarios": list(self.scenarios),
+            "author": self.author_username or None,
+            "recorded_at": self.recorded_at.isoformat(),
+        }
+
+    def check_new(self) -> None:
+        deployments = self._meta.get_field("deployment").related_model._base_manager
+        if not deployments.filter(pk=self.deployment_id).exists():
+            raise EconomicsRefused("cross_tenant_reference", "the group's deployment is not recorded")
+        if not isinstance(self.key, str) or not GROUP_KEY.fullmatch(self.key):
+            raise EconomicsRefused("group_record_malformed", f"key {self.key!r}")
+        try:
+            strength = money.parse_decimal(self.strength, "strength")
+        except money.MoneyRefused:
+            strength = None
+        if strength is None or money.decimal_text(strength) != self.strength or not (
+            GROUP_STRENGTH_MIN <= strength <= GROUP_STRENGTH_MAX
+        ):
+            raise EconomicsRefused("group_record_malformed", f"strength {self.strength!r}")
+        if self.source_type not in _SOURCE_TYPE_CODES:
+            raise EconomicsRefused("group_record_malformed", f"source type {self.source_type!r}")
+        if not isinstance(self.evidence_ref, str) or not self.evidence_ref.strip() or len(
+            self.evidence_ref
+        ) > GROUP_MAX_EVIDENCE:
+            raise EconomicsRefused("group_record_malformed", "evidence_ref")
+        named = self.scenarios
+        if (
+            not isinstance(named, list) or not 2 <= len(named) <= GROUP_MAX_SCENARIOS
+            or any(not isinstance(s, str) or not _SCENARIO_UUID.fullmatch(s) for s in named)
+            or named != sorted(set(named))
+        ):
+            raise EconomicsRefused("group_record_malformed", "scenarios")
+        held = FinancialScenario._base_manager.filter(deployment_id=self.deployment_id, uuid__in=named).count()
+        if held != len(named):
+            raise EconomicsRefused("cross_tenant_reference", "a scenario the group names is not its deployment's")
+        latest = CorrelationGroup._base_manager.filter(deployment_id=self.deployment_id, key=self.key).aggregate(
+            latest=Max("version")
+        )["latest"]
+        self.version = (latest or 0) + 1
+        self.author_username = _signed_in(self.author).username
+
+    def __str__(self) -> str:
+        return f"correlation group {self.key} v{self.version}"
 
 
 # ---------------------------------------------------------------------------

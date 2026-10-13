@@ -680,6 +680,7 @@ def test_no_economics_route_is_a_stop():
         # The portfolio (spec, section 30).
         "deployment-economics-portfolio",
         "deployment-economics-portfolio-simulate",
+        "deployment-economics-portfolio-groups",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
@@ -692,6 +693,7 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["deployment-economics-data-health"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-simulate"]) == {"POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-portfolio-groups"]) == {"GET", "POST"}
 
 
 # ============================================ review round 1 of #146: L3 to L6
