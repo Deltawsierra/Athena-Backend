@@ -2,7 +2,7 @@
 section 27).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
-its own: a fault here leaves these five routes unserved and nothing else -- not the
+its own: a fault here leaves these eight routes unserved and nothing else -- not the
 parameter-set or builder routes, not the URLconf, not a stop
 (``tests/test_economics_report.py``, ``test_a_report_fault_never_takes_down_a_stop``).
 

@@ -211,7 +211,8 @@ def may_be_totalled(report: Mapping) -> bool:
     residual run under a remediation option is never exposure, section 28; a report
     without the key is refused). A forged, edited or stale report is refused. A total
     of several reports applies this to each, and leaves out every one it refuses (the
-    owner-adopted default)."""
+    owner-adopted default). A stale run's report (E6, section 34) is excluded from
+    totals, so it is refused too: no total sums a stale run as current."""
     if not isinstance(report, Mapping) or report.get("schema") not in REPORT_SCHEMAS:
         return False
     if "residual_of" not in report or report["residual_of"] is not None:

@@ -762,6 +762,25 @@ def test_a_contradicted_claim_closes_the_obligation_as_contradicted(world, peopl
     assert closed["outcome"]["claims"]["data_boundary"] == "contradicted"
 
 
+def test_removing_the_operator_who_refreshed_is_never_held_back(world, people):
+    """Removing an operator is a stop: it answers 204 through the real route, nulls
+    the refresh's account and keeps the name. The map and the staleness name no
+    account; every row goes with its deployment."""
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    leaver = User.objects.create_user(username="lea", password="x", role="analyst")
+    response = _refresh(_client(leaver), world.deployment, world.outage)
+    assert response.status_code == 201 and response.json()["obligations"]["closed"], response.content
+    removed = _client(people["admin"]).delete(f"/api/accounts/users/{leaver.pk}/")
+    assert removed.status_code == 204, removed.content
+    closure = ExposureRefresh.objects.get()
+    assert (closure.author_id, closure.author_username) == (None, "lea")
+    Deployment.objects.get(pk=world.deployment.pk).delete()
+    assert not ExposureDependencies.objects.exists() and not ExposureStaleness.objects.exists()
+    assert not ExposureRefresh.objects.exists()
+
+
 def test_spine_outcome_for_the_financial_claim():
     technical = [{"code": "claim_invalidated", "dependency": "claim:data_boundary"}]
     financial = [{"code": "parameter_set_superseded", "dependency": "parameter_set:x"}]
