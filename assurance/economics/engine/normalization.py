@@ -24,6 +24,14 @@ done before it. It is never a number the policy did not allow. An estimate
 (an interpolated rate) and a stale rate or index are flagged, and each carries a
 confidence downgrade (:data:`DOWNGRADES`), which :meth:`Normalization.graded`
 applies to a scenario's grade.
+
+Which source each step read is the policy's to say, never the values' (MVP step 12;
+``docs/economics/spec-v1.md``, section 12.8): the record lists every other source that
+disagrees with one the steps used by more than the tolerance (``conflicts``: both
+sources, both values, the relative difference), and every step that had to fall back
+past the primary (``primary_unavailable``: both providers). Each carries its downgrade,
+``source_disagreement`` and ``primary_unavailable``, once for the whole normalization:
+one grade step, however many of its steps disagree or fell back.
 """
 
 from __future__ import annotations
@@ -37,13 +45,17 @@ from .cost_index import STALE_INDEX, IndexBook, IndexSelector, IndexStep, index
 from .fx import ESTIMATED_RATE, STALE_RATE, FXBook, FXPolicy, FXStep, convert
 from .money import (
     DISPLAY_ROUNDING,
+    ONCE_PER_NORMALIZATION,
     PRECISION,
+    PRIMARY_UNAVAILABLE,
     ROUNDING,
+    SOURCE_DISAGREEMENT,
     Money,
     MoneyRefused,
     Unavailable,
     check_date,
     check_reporting_currency,
+    plain_record,
 )
 
 #: The normalization order. Nothing reorders it.
@@ -58,6 +70,15 @@ DOWNGRADES = MappingProxyType(
         ESTIMATED_RATE: "an exchange rate was interpolated because the policy allowed an estimate for a missing day",
         STALE_RATE: "an exchange rate is older than the policy's freshness limit for the day it was used for",
         STALE_INDEX: "the cost index for the valuation month was not published, and an earlier month was used",
+        SOURCE_DISAGREEMENT: (
+            "another source a run may use quotes a rate or an index value the normalization read more than the "
+            "tolerance (FX 0.5%, cost index 1.0%) away from it, relative to it: the policy's source is used, and "
+            "the conflict is listed"
+        ),
+        PRIMARY_UNAVAILABLE: (
+            "the policy's first provider had no rate (or index value) a run may use, and a later provider's was "
+            "used: the record names both"
+        ),
     }
 )
 
@@ -123,7 +144,31 @@ class Normalization:
 
     @property
     def confidence_downgrades(self) -> tuple[str, ...]:
-        return tuple(reason for step in self.chain for reason in step.downgrades)
+        """Every step's downgrades, in chain order; ``source_disagreement`` and
+        ``primary_unavailable`` once each, however many steps carry them (one grade step
+        for the line, spec-v1 section 12.8)."""
+        found, seen = [], set()
+        for step in self.chain:
+            for reason in step.downgrades:
+                if reason in ONCE_PER_NORMALIZATION and reason in seen:
+                    continue
+                seen.add(reason)
+                found.append(reason)
+        return tuple(found)
+
+    @property
+    def conflicts(self) -> tuple:
+        """Every conflict a step listed, in chain order."""
+        return tuple(conflict for step in self.chain for conflict in step.conflicts)
+
+    @property
+    def fallbacks(self) -> list[dict]:
+        """Each step that used a later provider than the primary: both named."""
+        return [
+            {"step": step.step, "primary": step.configured_primary, "used": step.provider}
+            for step in self.chain
+            if getattr(step, "primary_unavailable", False)
+        ]
 
     def graded(self, grade: ConfidenceGrade) -> ConfidenceGrade:
         """``grade`` lowered one step for each downgrade this normalization carries."""
@@ -149,6 +194,8 @@ class Normalization:
             "estimate": self.estimate,
             "stale": self.stale,
             "confidence_downgrades": list(self.confidence_downgrades),
+            "conflicts": plain_record(self.conflicts),
+            "primary_unavailable": self.fallbacks,
             "unavailable": self.unavailable.as_dict() if self.unavailable is not None else None,
             "policy": self.policy.as_dict(),
             "chain": [step.as_dict() for step in self.chain],
@@ -203,6 +250,7 @@ def normalize(
         max_lag_months=policy.index_max_lag_months,
         as_of=valuation_date,
         step=ORDER[1],
+        providers=policy.fx.providers,
     )
     if isinstance(step, Unavailable):
         return outcome(chain, unavailable=step)

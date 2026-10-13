@@ -47,6 +47,7 @@ Unknown carries; the step-5 events route carries the same banner (sections 24.8 
 10. [Limitations](#10-limitations)
 11. [Money](#11-money)
 12. [FX, cost indices and normalization](#12-fx-cost-indices-and-normalization)
+    (12.8, MVP step 12: [the primary source, and sources that disagree](#128-the-primary-source-and-sources-that-disagree-mvp-step-12))
 13. [Observation data and the synthetic snapshot](#13-observation-data-and-the-synthetic-snapshot)
 14. [Parameters and units](#14-parameters-and-units)
 15. [The formula catalogue](#15-the-formula-catalogue)
@@ -92,9 +93,9 @@ MVP step 10, built up to its gate (live fetching waits on the owner's keys):
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py` |
 | Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py` |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
 
@@ -107,7 +108,7 @@ with Django and every other part of mythos-core poisoned.
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
 parameter set's, the scenario builder's, the trust raises' and step 6's (section
-27); source disagreement. (Feeds and their adapters: step 10, section 29.)
+27). (Feeds and their adapters: step 10, section 29; source disagreement: step 12, section 12.8.)
 Building and verifying the signed Financial Exposure Receipt
 (`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
@@ -958,16 +959,21 @@ done before it; its value is none, never a guess.
 |---|---|
 | `rate_missing` | no provider in the policy has a rate for the day (or its last official rate), and no estimate is allowed or possible |
 | `index_missing` | no value of the series for the month, in any vintage published by the as-of date, within the lag allowed |
+| `index_primary_unset` | several sources publish the series, the policy's providers name none of them, and they disagree by more than the tolerance: no source is chosen between them (section 12.8) |
 
 | Downgrade | When |
 |---|---|
 | `estimated_rate` | a rate was interpolated because the policy allowed it |
 | `stale_rate` | a rate was older than the freshness limit |
 | `stale_index` | the valuation month's index was not published, and an earlier month was used |
+| `source_disagreement` | another usable source quotes a rate or an index value the normalization read more than the tolerance away from it (section 12.8) |
+| `primary_unavailable` | the policy's first provider had no usable rate (or index value), and a later provider's was used (section 12.8) |
 
 Each downgrade lowers a scenario's confidence grade one step
 (`Normalization.graded`, `confidence.downgraded`): A to B, B to C, C to D, never
-below D; `Unknown` stays `Unknown`. The original native amount and currency are
+below D; `Unknown` stays `Unknown`. `source_disagreement` and `primary_unavailable`
+count once for a whole normalization, however many of its steps carry them (section
+12.8). The original native amount and currency are
 never overwritten: the result holds the very `Money` it was given, and the first
 step's input is that object.
 
@@ -988,7 +994,8 @@ and the same rate read back from its column are written alike. Abridged:
  "display": "1309.52 EUR",
  "arithmetic": "Decimal, 60 significant digits, ROUND_HALF_EVEN",
  "display_rounding": "ROUND_HALF_EVEN to the reporting currency's minor unit, for display only",
- "estimate": false, "stale": false, "confidence_downgrades": [], "unavailable": null,
+ "estimate": false, "stale": false, "confidence_downgrades": [], "conflicts": [], "primary_unavailable": [],
+ "unavailable": null,
  "policy": {"base_currency": "USD", "reporting_currency": "EUR", "fx": {"...": "..."}, "index": {"...": "..."}},
  "chain": [
   {"step": "event_fx", "from": "EUR", "to": "USD", "requested_date": "2020-03-02",
@@ -1030,9 +1037,8 @@ version, as `observations_version` (section 6.1).
   snapshot file (`calendars`), and no model holds them yet: a book built from the
   database without them treats a holiday as a publication day, so a rate missing
   on it is unavailable (the safe direction: never filled in).
-- **No source disagreement.** The first provider in the policy with a rate is
-  used; two providers that disagree are not compared, and nothing surfaces the
-  conflict yet (section 27 of the owner's specification; a later step).
+- **Source disagreement** was not compared in E1; MVP step 12 compares it
+  (section 12.8).
 - **Executable rates are not modelled.** Bid and ask are rate types a policy may
   ask for; nothing chooses the side of a trade.
 - **Monthly indices only.** A series is a value per calendar month; an index is
@@ -1042,6 +1048,115 @@ version, as `observations_version` (section 6.1).
 - **Unit checks are by currency and series.** A cost index is tied to the
   currency its policy says it prices; nothing checks that a geography uses that
   currency.
+
+### 12.8 The primary source, and sources that disagree (MVP step 12)
+
+The lead's decision for step 12 (13 Oct 2026; the owner's specification, section 27:
+"engine should surface conflict, not silently select favorable data"), with the
+refinements of the same day: the primary is the policy's, the record carries the
+disagreement, and a fallback past the primary is never silent. The Minotaur answer key
+that measures it is Minotaur-Engine #79 (`athena-economics-data`), whose field names
+the record uses.
+
+**The primary.** A conversion's PRIMARY is the first provider in the policy's
+`providers` that has a usable rate for the day (section 12.2's order, unchanged). It is
+never chosen by value, and nothing else configures it: no source registry field names
+one. With an empty `providers` list there is nothing to normalize: the policy is
+refused (`policy_invalid`, section 12.2), as it always was.
+
+**Usable.** A normalization for a deployment (`normalization_service.normalize_for`)
+reads only the versions a run of that deployment may use on its valuation date: for
+each source key, platform-wide and the deployment's own, the version section 29.5
+names (`feeds.used_version`: the newest that passes the production gate for the
+deployment, superseded by no raise of the same payload, and covering the date). A
+version the gate refuses, or one that does not cover the date, is not in the books,
+so a provider that has only such a version has no usable rate. Another deployment's
+versions are never read.
+
+**A fallback is never silent** (the section 28 audit, T8). Where the policy's first
+provider has no usable rate -- an outage, a source the gate refuses or that does not
+cover the date, a pair it never quotes, or a day it has no rate for -- and a later
+provider's rate is used, the step names both (`configured_primary` and `provider`),
+the record lists the step under `primary_unavailable` (`step`, `primary`, `used`), and
+the record carries the downgrade `primary_unavailable`.
+
+**Disagreement.** The rate a conversion used is compared with every other provider's
+in the books for the same pair on the same date -- the policy's other providers in its
+order, then any other in name order; within each, the first rate type the policy
+accepts that it has for that day; a rate quoted the other way round is inverted into
+the pair's direction first. Where one differs from it by MORE than the tolerance,
+relative to the rate used (the primary's), the two disagree:
+
+| Kind | Tolerance (`DISAGREEMENT_TOLERANCE`) |
+|---|---|
+| FX, the same pair and date | 0.5% (`engine/fx.py`) |
+| a cost index, the same series and period | 1.0% (`engine/cost_index.py`) |
+
+At or under the tolerance nothing is flagged. Only an observed rate is compared: an
+interpolated estimate (section 12.2) is a rate no source quoted, and is not.
+
+**What a disagreement does.** The primary's rate is used, never the other, and never
+the one that would state the smaller figure. The step lists the conflict, and the
+record lists every step's (`conflicts`), each with:
+
+| Field | Holds |
+|---|---|
+| `kind`, `step` | `fx` or `cost_index`, and the step of section 12.4 |
+| `pair`, `date` | FX: the pair as the primary quotes it (`EUR/USD`) and the rate's date |
+| `series`, `base`, `period` | a cost index: the series, its base and the month |
+| `primary`, `primary_provider`, `primary_value` | the source used: its registry key (or, in a book built without one, its provider), its provider and its value as it quotes it |
+| `secondary`, `secondary_provider`, `secondary_value` | the other source, and its value in the pair's direction (`secondary_quoted` holds it as quoted) |
+| `relative_difference`, `tolerance` | `abs(secondary - primary) / primary`, at 60 significant digits, never relative to the other; and the tolerance it exceeds |
+
+The record carries the downgrade `source_disagreement`. `source_disagreement` and
+`primary_unavailable` each lower a normalization ONE grade step however many of its
+steps carry them (`Normalization.confidence_downgrades` lists each once); the other
+downgrades of section 12.5 count as they always did.
+
+**A cost index.** A book may hold one series from several providers; a step reads both
+its values from ONE of them. The order is the policy's: the providers its `providers`
+names, in its order, then the others in name order. The first it names that holds the
+series is the index's primary, and where it cannot give both values and another
+provider's are used, the step carries `primary_unavailable`. Each other provider's
+value for a month the step read is compared with the one used, at 1.0%. Where the
+policy names none of the providers holding the series, there is no primary: if they
+agree within the tolerance, the first by name is read (which one is immaterial), and if
+they disagree, none is chosen between them and the step is unavailable,
+`index_primary_unset`. An index value now names its provider (`provider`, from its
+source version).
+
+**Worked, Minotaur-Engine #79's cases.** EUR 400,000 on 30 September 2026, in USD that
+day, the ECB quoting EUR/USD 1.1230 and H.10 1.1310, both usable:
+
+| Policy's providers | Used | Figure | Conflict | Downgrades |
+|---|---|---|---|---|
+| ECB, FRB-H10 | the ECB's 1.1230 | 449200.00 USD | H.10 1.1310, 0.008 / 1.1230 = 0.00712377... | `source_disagreement` |
+| ECB, FRB-H10, H.10 at 1.128615 | the ECB's 1.1230 | 449200.00 USD | none: exactly 0.5% | none |
+| FRB-H10, ECB | H.10's 1.1310 | 452400.00 USD | the ECB 1.1230, 0.008 / 1.1310 | `source_disagreement` |
+| ECB, FRB-H10, the ECB with no usable rate | H.10's 1.1310 | 452400.00 USD | none | `primary_unavailable` |
+
+The third row is the favourable secondary: the ECB's rate would state the smaller
+figure, and it is not used.
+
+**Where it shows.** Runs do not normalize their figures yet (section 24.9: a run's
+figures are stated in one reporting currency, and the report says so), so neither
+the report nor the data-health route reads a normalization today, and the record
+carries the disagreement. When runs normalize, the card inherits the record's
+downgrades and conflicts.
+
+**Decisions this step takes, which the owner may change:**
+
+1. **Compared with every usable source.** A rate is compared with every other
+   provider in the books, not only those the policy names, so a policy that leaves a
+   provider out cannot hide its disagreement. Alternative: the policy's providers
+   only.
+2. **The index's order is the policy's `providers`.** The one ordered list a policy
+   has orders the index's sources too, and unnamed index providers follow by name.
+   Alternative: a list of the index's own on its selector.
+3. **A pair the primary never quotes is a fallback.** `primary_unavailable` fires
+   whenever the first provider has no usable rate, a pair it never quotes included:
+   telling an outage from a pair it does not publish would need what the books do not
+   hold once a version is left out. Alternative: order the providers per pair.
 
 ## 13. Observation data and the synthetic snapshot
 
