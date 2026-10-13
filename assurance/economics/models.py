@@ -533,9 +533,12 @@ class FinancialSource(_AppendOnly):
                 "POST /api/assurance/economics/trust-raises/<uuid>/approve/",
             )
         _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
-        for name in ("fx_observations_digest", "index_observations_digest"):
-            if getattr(self, name):
-                _refuse(governance.snapshot_hash_refusal(getattr(self, name)), detail=name)
+        for name, digest in (
+            ("fx_observations_digest", self.fx_observations_digest),
+            ("index_observations_digest", self.index_observations_digest),
+        ):
+            if digest:
+                _refuse(governance.snapshot_hash_refusal(digest), detail=name)
         if self.version is None:
             earlier = FinancialSource._base_manager.filter(
                 deployment_id=self.deployment_id, source_key=self.source_key
@@ -2810,12 +2813,18 @@ class EffectFinding(_AppendOnly):
 
 def _parent_of(row: FinancialParameter, field: str):
     """``row``'s parent of ``field`` (``scenario`` or ``parameter_set``): its stored id,
-    or the unsaved object a build's row holds; ``None`` where it has none."""
-    held = getattr(row, f"{field}_id")
+    or the unsaved object a build's row holds; ``None`` where it has none. Each field
+    is named as written, never built at runtime."""
+    if field == "scenario":
+        held, descriptor = row.scenario_id, FinancialParameter.scenario
+    else:
+        held, descriptor = row.parameter_set_id, FinancialParameter.parameter_set
     if held is not None:
         return ("id", held)
-    cached = getattr(FinancialParameter, field).is_cached(row) and getattr(row, field) is not None
-    return ("object", id(getattr(row, field))) if cached else None
+    if not descriptor.is_cached(row):
+        return None
+    parent = row.scenario if field == "scenario" else row.parameter_set
+    return None if parent is None else ("object", id(parent))
 
 
 class FigureNormalization(_AppendOnly):
