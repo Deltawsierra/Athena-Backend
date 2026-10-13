@@ -60,6 +60,7 @@ RUN_ENTRY_POINTS = frozenset(
 CAPPED_HANDLERS = {
     "assurance.economics.report_api.ScenarioSimulateView.post",
     "assurance.economics.remediation_api.MitigationSimulateView.post",
+    "assurance.economics.portfolio_api.PortfolioSimulateView.post",
 }
 
 

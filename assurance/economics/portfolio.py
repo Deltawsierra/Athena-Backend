@@ -1,0 +1,1353 @@
+"""A deployment's portfolio: its scenarios aggregated from their draws (Economic
+Exposure E5; ``docs/economics/spec-v1.md``, section 33). The thin Django half of
+:mod:`assurance.economics.engine.portfolio`.
+
+:func:`simulate_portfolio` picks, for one deployment, each current scenario
+version's latest stored result and totals only those :func:`report.may_be_totalled`
+admits (its latest EXPOSURE run: a residual run under a remediation option never
+is); every other scenario is listed with its reason (:data:`EXCLUSIONS`), never
+silently dropped. It normalises each included scenario into the reporting currency
+at the valuation date (step 3's order), finds the loss events two scenarios share
+and counts each once a year, at the largest of their losses that year, draws the
+included scenarios again on one seed with the correlation group versions the request
+names (authored records, :func:`record_group`; two scenarios at least each), and
+records a :class:`~assurance.economics.models.PortfolioResult`:
+
+- **Idempotent on its inputs**: the included results' digests, the exclusions, the
+  groups and their parameters, the normalisations, the shared events, every
+  version and limit (the input digest), the seed and the draws. The same inputs
+  return the row already recorded; every check runs before the transaction, which
+  only inserts.
+- **No transaction or lock is held during the draws** (the SAFETY RULE): every read
+  is autocommit, and the one ``atomic`` block is the insert after the draws.
+- **Never raises.** A refusal the inputs decide is recorded; one they do not (the
+  time budget, memory, a defect, an engine that will not import) is returned and
+  never recorded; a request the rows refuse (a group naming a scenario this
+  deployment does not hold, a source it may not read) is returned, 400.
+
+:func:`build_document` is the portfolio's report: built from the stored rows ONLY
+(no draw, no clock, no engine), canonical JSON with its own digest, every stored
+row checked first as step 6's report checks its own -- the portfolio's digests and
+each included scenario's result, card and series (:func:`stored_row_failures`) --
+and served as a refusal where any fails. It is graded no higher than its lowest
+included scenario, lower still where an expert's or nobody's judgement sets a
+group's strength (:func:`portfolio_grade`), and the banner rule applies to it.
+
+Nothing here is on a stop path. This module imports the engine (and numpy) only
+when a portfolio is simulated, never at load and never to build the document.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+import uuid as _uuid
+from dataclasses import dataclass
+from datetime import date
+from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Context, Decimal, localcontext
+
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
+from django.db.models import Q
+from django.utils import timezone
+
+from assurance.models import Deployment
+
+from . import report
+from .engine import currency as _currency
+from .engine import loss as engine_loss
+from .engine import money
+from .engine import parameter_set as pset
+from .engine.confidence import ConfidenceGrade, downgraded
+from .engine.money import Money, MoneyRefused, decimal_text
+from .engine.parameters import POINTS, ParameterRefused
+from .engine.provenance import LicenseClass, SourceType
+from .models import (
+    GROUP_KEY,
+    GROUP_MAX_EVIDENCE,
+    GROUP_MAX_SCENARIOS,
+    GROUP_STRENGTH_MAX,
+    GROUP_STRENGTH_MIN,
+    SIMULATION_COMPLETED,
+    SIMULATION_REFUSED,
+    CausalEffect,
+    CorrelationGroup,
+    CustomerParameterSet,
+    EconomicsRefused,
+    FinancialScenario,
+    FinancialSource,
+    FinancialValidityCard,
+    LossEvent,
+    PortfolioResult,
+    ScenarioBuild,
+    SimulationCharts,
+    SimulationResult,
+    SourceNotUsableForProduction,
+    canonical_digest,
+)
+
+#: The schema of the canonical inputs, and of the portfolio's report.
+INPUTS_SCHEMA = "mythos.economics.portfolio-inputs/v1"
+REPORT_SCHEMA = "mythos.economics.portfolio-report/v1"
+#: Which scenarios a portfolio totals, and which result of each.
+SELECTION_VERSION = "mythos.economics.portfolio-selection/v1"
+SELECTION = (
+    "every scenario version of the deployment that no other version supersedes; of each, its latest stored "
+    "exposure run by record order (SimulationResult.objects.exposure_runs(): the one results/ serves without "
+    "?simulation=, never a residual run under a remediation option), never an older one in its place; included only where report.may_be_totalled admits that result's report (its own digest, a completed "
+    "run, every stored row verified, graded A to D), the run is annual (it states a frequency), its stored rows "
+    "still give its inputs, and its amounts normalise into the reporting currency at the valuation date. Every "
+    "other version is listed with its reason"
+)
+#: The grade rule.
+GRADE_RULE = (
+    "no higher than the lowest included scenario's grade, each first lowered one step for every downgrade its "
+    "normalisation carries (an estimated or stale rate or index, section 12.5); then one step lower, once, where "
+    "the strength of a group that applies (to two included scenarios at least) rests on EXPERT_ESTIMATE or UNKNOWN; "
+    "never below D; a refused portfolio has no grade"
+)
+#: A group strength resting on one of these lowers the grade (section 26.2's rule).
+ASSUMPTION_SOURCES = frozenset({SourceType.EXPERT_ESTIMATE.value, SourceType.UNKNOWN.value})
+#: The one deadline of a portfolio request: step 6's.
+TIME_BUDGET_SECONDS = 120.0
+#: Refusals the inputs do not decide: returned, never recorded (503).
+UNRECORDED = frozenset(
+    {"time_over_budget", "memory_exhausted", "invariant_broken", "engine_unavailable", "simulation_failed"}
+)
+#: Why a scenario version is not in a portfolio's figures.
+EXCLUSIONS = {
+    "superseded": "a later version of the same scenario supersedes this one: the later version is the one totalled",
+    "no_result": "no simulation result is recorded for this scenario version",
+    "unverified": "its latest result's stored rows fail a check: none of its figures is evidence",
+    "refused": "its latest run was refused: it has no figures",
+    "no_card": "its latest result has no Validity Card: it is not graded",
+    "unknown": "its latest result is graded Unknown: not for capital decisions",
+    "not_totalled": "report.may_be_totalled refuses its latest result's report",
+    "no_annual_loss": (
+        "its run states no frequency: a draw is one occurrence, not a simulated year, so it has no annual loss to sum"
+    ),
+    "inputs_changed": "its stored rows no longer give the inputs its latest result was run on",
+    "currency_unnormalisable": "its amounts cannot be normalised into the reporting currency at the valuation date",
+}
+#: The checks :func:`stored_row_failures` runs, in order.
+INTEGRITY_CHECKS = ("input_digest", "result_digest", "record_binding", "group_rows", "member_rows")
+#: The lines a portfolio sums, in this order (the engine's).
+LINES = ("gross_cash", "retained_cash")
+#: How a shared loss event is counted, as its inputs state it.
+COUNTED_ONCE = "once a year, at the largest of these scenarios' losses of it that year"
+COUNTED_CHAIN = (
+    "once a year, at the largest total that year of a set of these events no two of which are linked: they are a "
+    "chain, two of them linked only through a third"
+)
+#: What a portfolio is not, stated in every one.
+LIMITATIONS = (
+    "a total of the deployment's current scenario versions whose latest result may be totalled; every other is "
+    "listed with its reason and is not in the figures, which then read as at least the included scenarios' loss",
+    "dependence only through the correlation groups declared: one common Gamma driver of each group's annual rates; "
+    "no copula, no dependence between severities; scenarios in different groups, or in none, are independent, and "
+    "a customer figure two scenarios read is drawn apart in each",
+    "a group applies only where two of its scenarios at least are included; its driver also widens each member's own "
+    "count of events a year (the mixed rate is over-dispersed), keeping the mean: much of a group's tail is that, not "
+    "co-movement",
+    "a shared loss event is found pair by pair, by SPINE effect and step 5's grouping key and window; an event of "
+    "hypothetical effects alone is linked to every event of its key in another scenario; it is counted once a year at "
+    "the largest of the joined scenarios' losses of it that year (a chain, at the largest set of its events no two of "
+    "which are linked), each drawn at its own frequency and figures, never re-built at the larger loss of every "
+    "effect it joins",
+    "each scenario is normalised by one factor, its as-of date to the valuation date in step 3's order; currency "
+    "and index uncertainty are not in the figures",
+    "market value is never added to cash and is not aggregated; insurance is each scenario's own, applied per event "
+    "occurrence, and no limit is shared across scenarios",
+    "a portfolio is graded no higher than its lowest included scenario and lower where an expert sets a group's "
+    "strength; nothing here is calibrated against realised losses",
+    "a portfolio graded Unknown, refused or unverified is not for capital decisions and is excluded from every total",
+)
+
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_REQUEST_REQUIRED = frozenset({"seed", "reporting_currency", "valuation_date"})
+_REQUEST_OPTIONAL = frozenset({"policy", "normalization", "groups"})
+_GROUP_FIELDS = frozenset({"group", "strength", "source_type", "evidence_ref", "scenarios"})
+_NORMALIZATION_REQUIRED = frozenset({"base_currency", "providers", "index", "sources"})
+_NORMALIZATION_OPTIONAL = frozenset({"index_max_lag_months"})
+_INDEX_FIELDS = frozenset({"series_id", "geography", "category", "base"})
+#: The most FX providers and sources a normalisation names, and its largest lag.
+MAX_PROVIDERS = 5
+MAX_SOURCES = 10
+MAX_INDEX_LAG_MONTHS = 12
+MAX_EVIDENCE = GROUP_MAX_EVIDENCE
+
+
+class PortfolioRequestRefused(ValueError):
+    """A portfolio request refused before anything is drawn or recorded (400)."""
+
+    def __init__(self, code: str, detail: str = ""):
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
+# ------------------------------------------------------------------ the request
+
+
+@dataclass(frozen=True)
+class GroupRequest:
+    key: str
+    strength: Decimal
+    source_type: str
+    evidence_ref: str
+    scenarios: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NormalizationRequest:
+    base_currency: str
+    providers: tuple[str, ...]
+    index: tuple[str, str, str, str]
+    index_max_lag_months: int
+    sources: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PortfolioRequest:
+    seed: int
+    policy: str
+    draws: int
+    severe_percentile: Decimal
+    reporting_currency: str
+    valuation_date: date
+    normalization: NormalizationRequest | None
+    #: The recorded correlation group versions it names, by uuid, in order.
+    groups: tuple[str, ...]
+
+
+def _refused(code: str, detail: str) -> PortfolioRequestRefused:
+    return PortfolioRequestRefused(code, detail)
+
+
+def _object(value, path: str, required: frozenset, optional: frozenset = frozenset()) -> dict:
+    try:
+        return pset._object(value, path, required, optional)
+    except ParameterRefused as refused:
+        raise _refused(refused.code, refused.detail) from None
+
+
+def _text(value, path: str, *, longest: int = 200) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > longest:
+        raise _refused("field_malformed", f"{path} is text of 1 to {longest} characters")
+    return value
+
+
+def _currency_code(value, path: str) -> str:
+    if not isinstance(value, str):
+        raise _refused("field_malformed", f"{path} is a currency code")
+    try:
+        money.check_reporting_currency(value, path)
+    except MoneyRefused as refused:
+        raise _refused(refused.code, refused.detail) from None
+    return value
+
+
+def _uuids(value, path: str, *, most: int) -> tuple[str, ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= most:
+        raise _refused("field_malformed", f"{path} is a list of 1 to {most} uuids")
+    if any(not isinstance(item, str) or not _UUID.fullmatch(item) for item in value) or len(set(value)) != len(value):
+        raise _refused("field_malformed", f"{path} names each uuid once, lowercase and hyphenated")
+    return tuple(value)
+
+
+def _normalization(value) -> NormalizationRequest:
+    body = _object(value, "normalization", _NORMALIZATION_REQUIRED, _NORMALIZATION_OPTIONAL)
+    providers = body["providers"]
+    if not isinstance(providers, list) or not 1 <= len(providers) <= MAX_PROVIDERS:
+        raise _refused("field_malformed", f"normalization.providers is a list of 1 to {MAX_PROVIDERS} providers")
+    providers = tuple(_text(p, "normalization.providers[]") for p in providers)
+    if len(set(providers)) != len(providers):
+        raise _refused("field_malformed", "normalization.providers names each provider once")
+    index = _object(body["index"], "normalization.index", _INDEX_FIELDS)
+    lag = body.get("index_max_lag_months", 0)
+    if type(lag) is not int or not 0 <= lag <= MAX_INDEX_LAG_MONTHS:
+        raise _refused("field_malformed", f"normalization.index_max_lag_months is 0 to {MAX_INDEX_LAG_MONTHS}")
+    return NormalizationRequest(
+        base_currency=_currency_code(body["base_currency"], "normalization.base_currency"),
+        providers=providers,
+        index=tuple(_text(index[name], f"normalization.index.{name}") for name in
+                    ("series_id", "geography", "category", "base")),
+        index_max_lag_months=lag,
+        sources=_uuids(body["sources"], "normalization.sources", most=MAX_SOURCES),
+    )
+
+
+def parse_group(body) -> GroupRequest:
+    """One correlation group version's body read exactly, or refused (400): a key of
+    its own, a strength from the floor to the ceiling (review round 1, LOW-2: below
+    the floor the driver's float is subnormal or zero, refused here and never a
+    503), a source type, its evidence, and two scenario versions at least (LOW-4: a
+    group of one correlates with nothing)."""
+    body = _object(body, "body", _GROUP_FIELDS)
+    key = body["group"]
+    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
+        raise _refused("group_malformed", "group is a key of its own: 1 to 60 of a-z, 0-9, '-' and '_'")
+    try:
+        strength = money.parse_decimal(body["strength"], "strength")
+    except MoneyRefused as refused:
+        raise _refused("group_malformed", refused.detail) from None
+    if not GROUP_STRENGTH_MIN <= strength <= GROUP_STRENGTH_MAX:
+        raise _refused("group_malformed", f"strength is from {GROUP_STRENGTH_MIN} to {GROUP_STRENGTH_MAX}")
+    source = body["source_type"]
+    if not isinstance(source, str) or source not in {t.value for t in SourceType}:
+        raise _refused("group_malformed", f"source_type is one of {sorted(t.value for t in SourceType)}")
+    scenarios = _uuids(body["scenarios"], "scenarios", most=GROUP_MAX_SCENARIOS)
+    if len(scenarios) < 2:
+        raise _refused("group_too_small", f"scenarios names {len(scenarios)} of them: a group names two at least")
+    evidence = _text(body["evidence_ref"], "evidence_ref", longest=MAX_EVIDENCE)
+    return GroupRequest(key, strength, source, evidence, tuple(sorted(scenarios)))
+
+
+def _group_ids(value) -> tuple[str, ...]:
+    """The correlation group versions a portfolio names: recorded ones, by uuid
+    (``POST .../portfolio/groups/``), never a group stated in the request (the
+    section-28 audit's T4: a group's author and time are recorded)."""
+    from .engine import portfolio as ep
+
+    if not isinstance(value, list) or len(value) > ep.MAX_GROUPS or any(
+        not isinstance(item, str) or not _UUID.fullmatch(item) for item in value
+    ) or len(set(value)) != len(value):
+        raise _refused(
+            "field_malformed",
+            f"groups is a list of at most {ep.MAX_GROUPS} recorded correlation group versions, each by its uuid "
+            "once (POST .../economics/portfolio/groups/ records one): a group is never stated in the request",
+        )
+    return tuple(sorted(value))
+
+
+def parse_request(body, *, policies, parse_seed) -> PortfolioRequest:
+    """A portfolio request read exactly, or refused: the seed and the policy as a
+    scenario's simulate request reads them (``parse_seed``, step 6's), the reporting
+    currency, the valuation date, and optionally a normalisation and the groups."""
+    body = _object(body, "body", _REQUEST_REQUIRED, _REQUEST_OPTIONAL)
+    seed, policy, _ = parse_seed({"seed": body["seed"], **({"policy": body["policy"]} if "policy" in body else {})})
+    try:
+        valuation_date = pset._date(body["valuation_date"], "valuation_date")
+    except MoneyRefused as refused:
+        raise _refused(refused.code, refused.detail) from None
+    normalization = None if body.get("normalization") is None else _normalization(body["normalization"])
+    return PortfolioRequest(
+        seed=seed,
+        policy=policy,
+        draws=policies[policy]["draws"],
+        severe_percentile=policies[policy]["severe_percentile"],
+        reporting_currency=_currency_code(body["reporting_currency"], "reporting_currency"),
+        valuation_date=valuation_date,
+        normalization=normalization,
+        groups=_group_ids(body.get("groups", [])),
+    )
+
+
+# ------------------------------------------------------------------ the outcome
+
+
+@dataclass(frozen=True)
+class PortfolioOutcome:
+    """What :func:`simulate_portfolio` gives: the recorded result (``None`` when
+    nothing was recorded), whether this call recorded it, and the code and detail of
+    a refusal; ``refused_request`` where the request itself was refused (400)."""
+
+    result: PortfolioResult | None
+    created: bool
+    code: str | None = None
+    detail: str = ""
+    refused_request: bool = False
+
+
+def _exclusion(scenario: FinancialScenario, code: str, reason: str, result: SimulationResult | None = None) -> dict:
+    return {
+        "scenario": str(scenario.uuid),
+        "title": scenario.title,
+        "result": None if result is None else str(result.uuid),
+        "code": code,
+        "meaning": EXCLUSIONS[code],
+        "reason": reason,
+    }
+
+
+def _report_exclusion(document: dict) -> str:
+    """Which exclusion a report :func:`report.may_be_totalled` refuses names, in the
+    order :func:`report.banner_reason` gives its reasons."""
+    if not (document.get("integrity") or {}).get("verified", False) or not report.verifies(document):
+        return "unverified"
+    if document.get("status") != SIMULATION_COMPLETED:
+        return "refused"
+    if document.get("grade") is None:
+        return "no_card"
+    if document.get("grade") == report.UNKNOWN:
+        return "unknown"
+    return "not_totalled"
+
+
+@dataclass
+class _Normalizer:
+    """The normalisation of one unit of a scenario's currency at its as-of date into
+    the reporting currency at the valuation date, or why there is none."""
+
+    request: PortfolioRequest
+    policy: object | None = None
+    fx_book: object | None = None
+    index_book: object | None = None
+    sources: list | None = None
+
+    def factor(self, currency: str, as_of: date | None) -> tuple[dict | None, str | None]:
+        reporting, valuation = self.request.reporting_currency, self.request.valuation_date
+        if as_of is None:
+            return None, "no build records the date its amounts are as of"
+        if currency == reporting and as_of == valuation:
+            return {"rule": "identity", "factor": "1", "downgrades": [], "record": None}, None
+        if self.policy is None:
+            return None, (
+                f"its amounts are in {currency} as of {as_of.isoformat()}, not in {reporting} at "
+                f"{valuation.isoformat()}, and the request names no normalisation policy"
+            )
+        from .engine.normalization import UNAVAILABLE, normalize
+
+        try:
+            normalized = normalize(
+                Money(Decimal(1), currency), event_date=as_of, valuation_date=valuation, policy=self.policy,
+                fx_book=self.fx_book, index_book=self.index_book,
+            )
+        except MoneyRefused as refused:
+            return None, f"{refused.code}: {refused.detail}"
+        if normalized.status == UNAVAILABLE:
+            unavailable = normalized.unavailable
+            return None, f"{unavailable.reason} at {unavailable.step}: {unavailable.detail}"
+        return {
+            "rule": "normalized",
+            "factor": decimal_text(normalized.value.amount),
+            "downgrades": list(normalized.confidence_downgrades),
+            "record": normalized.as_dict(),
+        }, None
+
+
+def _normalizer(deployment, request: PortfolioRequest) -> _Normalizer:
+    """The request's normalisation policy and the books of the sources it names, each
+    one this deployment may read and a production run may use; refused (400)
+    otherwise."""
+    wanted = request.normalization
+    if wanted is None:
+        return _Normalizer(request)
+    from .engine.cost_index import IndexSelector
+    from .engine.fx import FXPolicy
+    from .engine.normalization import NormalizationPolicy
+    from .snapshots import fx_book, index_book
+
+    rows = {
+        str(row.uuid): row
+        for row in FinancialSource.objects.filter(
+            Q(deployment__isnull=True) | Q(deployment=deployment), uuid__in=list(wanted.sources)
+        )
+    }
+    missing = [u for u in wanted.sources if u not in rows]
+    if missing:
+        raise _refused("source_not_found", f"not a source this deployment may read: {missing}")
+    sources = [rows[u] for u in wanted.sources]
+    for source in sources:
+        try:
+            source.check_usable_for_production(deployment)
+        except SourceNotUsableForProduction as refused:
+            raise _refused(refused.code, refused.detail) from None
+    try:
+        policy = NormalizationPolicy(
+            wanted.base_currency, request.reporting_currency, FXPolicy(wanted.providers),
+            IndexSelector(*wanted.index, wanted.base_currency), wanted.index_max_lag_months,
+        )
+    except MoneyRefused as refused:
+        raise _refused(refused.code, refused.detail) from None
+    return _Normalizer(
+        request, policy, fx_book(sources, deployment=deployment), index_book(sources, deployment=deployment),
+        sources,
+    )
+
+
+def _event_refs(scenario: FinancialScenario, build: ScenarioBuild | None, factor: Decimal, ep) -> list:
+    """Each loss event of ``scenario`` as the shared-event rule reads it, its gross
+    cash at low, base and high (step 4's) normalised by ``factor``."""
+    policy = None if build is None else CustomerParameterSet.objects.get(pk=build.parameter_set_id).content(
+    ).insurance_policy()
+    refs = []
+    for row in LossEvent.objects.filter(scenario=scenario).order_by("event_key", "id"):
+        assessment = engine_loss.assess(row.as_engine(), policy)
+        with localcontext(Context(prec=60)):
+            gross = tuple(assessment.gross.total.at(point).amount * factor for point in POINTS)
+        effects = list(CausalEffect.objects.filter(scenario=scenario, loss_event=row).order_by("id"))
+        keys = {(e.template_id, e.template_version, e.asset, e.business_process) for e in effects}
+        refs.append(
+            ep.EventRef(
+                scenario=str(scenario.uuid),
+                event_key=row.event_key,
+                key=next(iter(keys)) if len(keys) == 1 else None,
+                spine_effects=frozenset(e.spine_effect for e in effects if e.spine_effect),
+                observed_at=tuple(sorted(e.occurred_at for e in effects if e.occurred_at is not None)),
+                hypothetical=bool(effects) and all(e.origin == "hypothetical" for e in effects),
+                gross=gross,
+            )
+        )
+    return refs
+
+
+def _named_groups(deployment, ids: tuple[str, ...]) -> list[CorrelationGroup]:
+    """The recorded correlation group versions a portfolio names, by key: each this
+    deployment's (``group_not_found``, 400, otherwise), one version of a key at most,
+    and a scenario in one of them at most (``group_malformed``)."""
+    rows = {str(g.uuid): g for g in CorrelationGroup.objects.filter(deployment=deployment, uuid__in=list(ids))}
+    missing = [u for u in ids if u not in rows]
+    if missing:
+        raise _refused("group_not_found", f"not a correlation group version recorded for this deployment: {missing}")
+    groups = sorted(rows.values(), key=lambda g: (g.key, g.version))
+    keys = [g.key for g in groups]
+    if len(set(keys)) != len(keys):
+        raise _refused("group_malformed", f"a portfolio names one version of a group at most: {sorted(keys)}")
+    seen: set[str] = set()
+    for group in groups:
+        twice = sorted(seen & set(group.scenarios))
+        if twice:
+            raise _refused("group_malformed", f"a scenario is in one group at most: {twice}")
+        seen.update(group.scenarios)
+    return groups
+
+
+@dataclass(frozen=True)
+class GroupOutcome:
+    """A correlation group version recorded (``created``), or the latest version of
+    its key returned because it states the same group; or why not (``code``)."""
+
+    group: CorrelationGroup | None
+    created: bool
+    code: str | None = None
+    detail: str = ""
+
+
+def record_group(deployment, body, *, author) -> GroupOutcome:
+    """Record a version of one of ``deployment``'s correlation groups, authored by
+    ``author``, or return its key's latest version where that states the same group
+    (strength, source, evidence and scenarios). Its scenarios are current scenario
+    versions of this deployment (``scenario_not_found``, 400). Refused (400) as
+    :func:`parse_group` reads it. No transaction but the one insert."""
+    try:
+        wanted = parse_group(body)
+        scenarios = FinancialScenario.objects.filter(deployment=deployment)
+        superseded = set(scenarios.exclude(supersedes__isnull=True).values_list("supersedes_id", flat=True))
+        current = {str(s.uuid) for s in scenarios if s.pk not in superseded}
+        missing = sorted(set(wanted.scenarios) - current)
+        if missing:
+            raise _refused("scenario_not_found", f"not a current scenario version here: {missing}")
+    except PortfolioRequestRefused as refused:
+        return GroupOutcome(None, False, refused.code, refused.detail)
+    stated = (decimal_text(wanted.strength), wanted.source_type, wanted.evidence_ref, list(wanted.scenarios))
+    for _attempt in range(3):
+        latest = CorrelationGroup.objects.filter(deployment=deployment, key=wanted.key).order_by("-version").first()
+        if latest is not None and (latest.strength, latest.source_type, latest.evidence_ref, latest.scenarios) == stated:
+            return GroupOutcome(latest, False)
+        group = CorrelationGroup(
+            deployment=deployment, key=wanted.key, strength=stated[0], source_type=wanted.source_type,
+            evidence_ref=wanted.evidence_ref, scenarios=stated[3], author=author,
+        )
+        try:
+            with transaction.atomic():
+                group.save()
+        except IntegrityError:
+            continue  # another version of the key was recorded meanwhile: read it and try again
+        except EconomicsRefused as refused:
+            return GroupOutcome(None, False, refused.code, refused.detail)
+        return GroupOutcome(group, True)
+    return GroupOutcome(None, False, "group_version_taken", f"{wanted.key}: other versions were recorded meanwhile")
+
+
+def list_groups(deployment) -> list[dict]:
+    """Every recorded version of ``deployment``'s correlation groups, by key and
+    version, each with its author and time."""
+    return [g.as_dict() for g in CorrelationGroup.objects.filter(deployment=deployment).order_by("key", "version")]
+
+
+def _engine():
+    from .engine import distributions, scenario_simulation, simulation
+    from .engine import portfolio as ep
+    from .simulation_service import load_input
+
+    return ep, scenario_simulation, simulation, distributions, load_input
+
+
+def simulate_portfolio(deployment, request: PortfolioRequest, *, time_budget: float = TIME_BUDGET_SECONDS
+                       ) -> PortfolioOutcome:
+    """Total ``deployment``'s scenarios for ``request``, and record the portfolio,
+    or return the one recorded for the same inputs. Never raises: see the module's
+    rules."""
+    try:
+        return _simulate(deployment, request, time_budget)
+    except PortfolioRequestRefused as refused:
+        return PortfolioOutcome(None, False, refused.code, refused.detail, refused_request=True)
+    except MemoryError:
+        return PortfolioOutcome(None, False, "memory_exhausted", "the portfolio could not hold its values")
+    except Exception as error:  # noqa: BLE001 - the service never raises: a fault is returned with its code
+        code = getattr(error, "code", None)
+        if code in UNRECORDED:
+            # The deadline ran out between two stages of the selection: nothing recorded.
+            return PortfolioOutcome(None, False, code, getattr(error, "detail", ""))
+        return PortfolioOutcome(None, False, "simulation_failed", f"{type(error).__name__}: {error}")
+
+
+def _simulate(deployment, request: PortfolioRequest, time_budget: float) -> PortfolioOutcome:
+    deadline = time.monotonic() + time_budget
+    try:
+        ep, ss, sim, dist, load_input = _engine()
+    except Exception as error:  # noqa: BLE001 - an import fault of numpy or the engine is a returned refusal
+        return PortfolioOutcome(None, False, "engine_unavailable", f"{type(error).__name__}: {error}")
+
+    def check_time(stage: str) -> None:
+        if time.monotonic() > deadline:
+            raise ss.ScenarioSimulationRefused("time_over_budget", f"past {time_budget:g} s at {stage}")
+
+    scenarios = list(FinancialScenario.objects.filter(deployment=deployment).order_by("id"))
+    newer = {s.supersedes_id: s for s in scenarios if s.supersedes_id is not None}
+    heads = sorted((s for s in scenarios if s.pk not in newer), key=lambda s: str(s.uuid))
+    if len(heads) > ep.MAX_SCENARIOS:
+        raise _refused("scenarios_over_limit", f"{len(heads)} current scenario versions; at most {ep.MAX_SCENARIOS}")
+    current = {str(s.uuid) for s in heads}
+    stored_groups = _named_groups(deployment, request.groups)
+    named = sorted({sid for g in stored_groups for sid in g.scenarios} - current)
+    if named:
+        raise _refused("scenario_not_found", f"a group names what is not a current scenario version here: {named}")
+    normalizer = _normalizer(deployment, request)
+
+    excluded = [
+        _exclusion(s, "superseded", f"superseded by {newer[s.pk].uuid}")
+        for s in sorted((s for s in scenarios if s.pk in newer), key=lambda s: str(s.uuid))
+    ]
+    included = []
+    for scenario in heads:
+        check_time(f"selection {scenario.uuid}")
+        # The scenario's own runs only (review round 1, MEDIUM-2): a residual run under
+        # a remediation option is never exposure, and never hides the exposure run.
+        result = (
+            SimulationResult.objects.exposure_runs()
+            .filter(scenario=scenario, deployment_id=deployment.pk)
+            .order_by("-id")
+            .first()
+        )
+        if result is None:
+            excluded.append(_exclusion(scenario, "no_result", report.NO_RESULT))
+            continue
+        document = report.build_report(result)
+        if not report.may_be_totalled(document):
+            code = _report_exclusion(document)
+            excluded.append(_exclusion(scenario, code, document.get("banner_reason") or EXCLUSIONS[code], result))
+            continue
+        if (document.get("simulation") or {}).get("basis") != ss.ANNUAL_BASIS:
+            excluded.append(_exclusion(scenario, "no_annual_loss", EXCLUSIONS["no_annual_loss"], result))
+            continue
+        try:
+            si = load_input(scenario)
+            again = ss.digest_of(ss.canonical_inputs(si, severe_percentile=Decimal(result.severe_percentile)))
+        except (EconomicsRefused, ParameterRefused, MoneyRefused, ss.ScenarioSimulationRefused,
+                sim.SimulationRefused, dist.DistributionRefused) as refused:
+            excluded.append(_exclusion(scenario, "inputs_changed", f"{refused.code}: {refused.detail}", result))
+            continue
+        if again != result.input_digest:
+            excluded.append(_exclusion(scenario, "inputs_changed", f"{again}, not {result.input_digest}", result))
+            continue
+        build = ScenarioBuild.objects.filter(scenario=scenario).first()
+        normalization, why = normalizer.factor(si.currency, None if build is None else build.as_of)
+        if normalization is None:
+            excluded.append(_exclusion(scenario, "currency_unnormalisable", why, result))
+            continue
+        included.append((scenario, result, document, si, build, normalization))
+
+    # The loss events two scenarios share are one: counted once a year, at the
+    # largest of their losses that year (review round 1, HIGH-1); every scenario
+    # keeps every event, drawn at its own frequency.
+    refs = []
+    for scenario, _, _, _, build, normalization in included:
+        refs += _event_refs(scenario, build, Decimal(normalization["factor"]), ep)
+    joined = ep.shared_events(refs)
+    shared_with: dict[tuple[str, str], list[dict]] = {}
+    for one in joined:
+        for event in one.events:
+            shared_with[event.order] = [
+                {"scenario": e.scenario, "event_key": e.event_key} for e in one.events if e is not event
+            ]
+
+    # A group applies to its included scenarios only where two at least are
+    # included (review round 1, LOW-4): a group of one correlates with nothing.
+    in_portfolio = {str(scenario.uuid) for scenario, *_ in included}
+    applied = {
+        g.key: [sid for sid in g.scenarios if sid in in_portfolio] for g in stored_groups
+    }
+    applied = {key: sids if len(sids) >= 2 else [] for key, sids in applied.items()}
+    group_of = {sid: key for key, sids in applied.items() for sid in sids}
+
+    members, member_inputs = [], []
+    for scenario, result, document, si, build, normalization in included:
+        sid = str(scenario.uuid)
+        members.append(ep.Member(sid, si, Decimal(normalization["factor"]), group_of.get(sid)))
+        grade = document["grade"]
+        member_inputs.append(
+            {
+                "scenario": sid,
+                "title": scenario.title,
+                "result": str(result.uuid),
+                "result_digest": result.result_digest,
+                "input_digest": result.input_digest,
+                "seed": result.seed,
+                "draws": result.draws,
+                "grade": grade,
+                "graded": downgraded(ConfidenceGrade(grade), len(normalization["downgrades"])).value,
+                "currency": si.currency,
+                "as_of": build.as_of.isoformat(),
+                "insured": si.policy is not None,
+                "normalization": normalization,
+                "group": group_of.get(sid),
+                "events": [event.loss_event_id for event in si.events],
+                "shared": [
+                    {"event_key": event.loss_event_id, "with": shared_with[(sid, event.loss_event_id)]}
+                    for event in si.events
+                    if (sid, event.loss_event_id) in shared_with
+                ],
+            }
+        )
+    groups = [ep.Group(g.key, Decimal(g.strength), SourceType(g.source_type)) for g in stored_groups]
+    inputs = {
+        "schema": INPUTS_SCHEMA,
+        "deployment": str(deployment.uuid),
+        "policy": request.policy,
+        "reporting_currency": request.reporting_currency,
+        "valuation_date": request.valuation_date.isoformat(),
+        "severe_percentile": decimal_text(request.severe_percentile),
+        "selection": {"version": SELECTION_VERSION, "rule": SELECTION},
+        "normalization": None if normalizer.policy is None else {
+            "policy": normalizer.policy.as_dict(),
+            "sources": [
+                {"uuid": str(s.uuid), "source_key": s.source_key, "version": s.version,
+                 "snapshot_hash": s.snapshot_hash, "license_class": s.license_class}
+                for s in normalizer.sources
+            ],
+        },
+        "members": member_inputs,
+        "excluded": sorted(excluded, key=lambda e: e["scenario"]),
+        "groups": [
+            {
+                # The recorded version, with its author and time (the section-28 audit's T4).
+                **g.as_dict(),
+                "applied_to": applied[g.key],
+                "not_applied": None if applied[g.key] else (
+                    "fewer than two of its scenarios are included: a group of one correlates with nothing, so it "
+                    "applies to none"
+                ),
+            }
+            for g in stored_groups
+        ],
+        "shared_events": [
+            {
+                "events": [{"scenario": e.scenario, "event_key": e.event_key, "gross_base": decimal_text(e.gross[1])}
+                           for e in one.events],
+                "by": list(one.by),
+                "links": [list(pair) for pair in one.links],
+                "counted": COUNTED_ONCE if one.one_event else COUNTED_CHAIN,
+            }
+            for one in joined
+        ],
+        "rules": {
+            "group_driver": {"version": ep.DRIVER_VERSION, "rule": ep.DRIVER},
+            "shared_events": {"version": ep.SHARED_EVENTS_VERSION, "rule": ep.SHARED_EVENTS_RULE},
+            "grade": GRADE_RULE,
+        },
+        "versions": ep.versions(),
+    }
+    input_digest = canonical_digest(inputs)
+    found = _existing(deployment, input_digest, request.seed, request.draws)
+    if found is not None:
+        return PortfolioOutcome(found, False, found.refusal_code or None, found.refusal_detail)
+
+    started_at = timezone.now()
+    clock = time.monotonic()
+    record = refusal = None
+    if not members:
+        refusal = ("nothing_to_total", "no current scenario version's latest result may be totalled: each is listed "
+                   "with its reason")
+    else:
+        refusals = (ep.PortfolioRefused, ss.ScenarioSimulationRefused, sim.SimulationRefused,
+                    dist.DistributionRefused, MoneyRefused, ParameterRefused, EconomicsRefused)
+        try:
+            # No transaction is open here, and none is opened until the insert below:
+            # a stop's write never waits behind the draws (the SAFETY RULE).
+            drawn = ep.run(
+                members, groups, joined, seed=request.seed, draws=request.draws,
+                severe_percentile=request.severe_percentile, reporting_currency=request.reporting_currency,
+                input_digest=input_digest, check_time=check_time,
+            )
+            record = dict(drawn.record)
+        except refusals as refused:
+            refusal = (refused.code, refused.detail)
+        except (sim.InvariantBroken, AssertionError) as broken:
+            return PortfolioOutcome(None, False, "invariant_broken", f"{type(broken).__name__}: {broken}")
+        if refusal is not None and refusal[0] in UNRECORDED:
+            return PortfolioOutcome(None, False, *refusal)
+    finished_at = timezone.now()
+    row = PortfolioResult(
+        deployment=deployment,
+        seed=str(request.seed),
+        draws=request.draws,
+        severe_percentile=inputs["severe_percentile"],
+        reporting_currency=request.reporting_currency,
+        valuation_date=request.valuation_date,
+        input_digest=input_digest,
+        result_digest="" if record is None else canonical_digest(record),
+        status=SIMULATION_COMPLETED if record is not None else SIMULATION_REFUSED,
+        refusal_code="" if refusal is None else refusal[0],
+        refusal_detail="" if refusal is None else refusal[1],
+        inputs=inputs,
+        record=record,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=int(round((time.monotonic() - clock) * 1000)),
+    )
+    try:
+        # Every check, the lookup of the same identity included, before the
+        # transaction, which only inserts.
+        row.check_new()
+        with transaction.atomic():
+            row.insert_checked()
+    except (IntegrityError, EconomicsRefused) as raced:
+        if isinstance(raced, EconomicsRefused) and raced.code != "duplicate_id":
+            raise
+        found = _existing(deployment, input_digest, request.seed, request.draws)
+        if found is None:
+            raise
+        return PortfolioOutcome(found, False, found.refusal_code or None, found.refusal_detail)
+    return PortfolioOutcome(row, True, row.refusal_code or None, row.refusal_detail)
+
+
+def _existing(deployment, input_digest: str, seed: int, draws: int) -> PortfolioResult | None:
+    return PortfolioResult.objects.filter(
+        deployment=deployment, input_digest=input_digest, seed=str(seed), draws=draws
+    ).first()
+
+
+# ------------------------------------------------------------------ the stored rows
+
+
+def _member_failure(row: PortfolioResult, member: dict) -> str | None:
+    """Why an included scenario's stored rows no longer bear out what the portfolio
+    totalled, or ``None``: its result is this deployment's and that scenario's, its
+    digests are the ones totalled, its result, card and series verify as step 6's
+    report checks them, and its card's grade is the one totalled."""
+    try:
+        result = SimulationResult.objects.filter(uuid=member.get("result"), deployment_id=row.deployment_id).first()
+    except (DjangoValidationError, ValueError, TypeError):
+        result = None
+    if result is None:
+        return "its result is not recorded in this deployment"
+    if result.remediation_id is not None:
+        return "the result is a residual run under a remediation option, never exposure"
+    scenario = FinancialScenario.objects.filter(pk=result.scenario_id).first()
+    if scenario is None or str(scenario.uuid) != member.get("scenario"):
+        return "the result is another scenario's"
+    if (result.input_digest, result.result_digest) != (member.get("input_digest"), member.get("result_digest")):
+        return "the result's digests are not the ones totalled"
+    card = FinancialValidityCard.objects.filter(simulation=result).first()
+    charts = SimulationCharts.objects.filter(simulation=result).first()
+    failed = report.stored_row_failures(result, card, charts, scenario)
+    if failed:
+        return f"its stored rows fail {', '.join(failed)}"
+    if report.verified_grade(card, result) != member.get("grade"):
+        return "its card's grade is not the one totalled"
+    return None
+
+
+def _record_unbound(row: PortfolioResult) -> bool:
+    """Whether a completed row's record is not of its own inputs (review round 1,
+    LOW-3): inputs rewritten with their digest recomputed give their digest, but
+    the record still names the inputs it was drawn from, its seed, draws and
+    currency, its scenarios with their groups and factors, its groups and its
+    shared loss events."""
+    record = row.record if isinstance(row.record, dict) else {}
+    inputs = row.inputs if isinstance(row.inputs, dict) else {}
+    try:
+        members = {
+            m["scenario"]: (m["group"], Decimal(m["normalization"]["factor"])) for m in inputs.get("members") or []
+        }
+        groups = {g["group"] for g in inputs.get("groups") or []}
+        shared = [
+            ([[e["scenario"], e["event_key"]] for e in one["events"]], one["links"])
+            for one in inputs.get("shared_events") or []
+        ]
+        held = (
+            record.get("input_digest"), record.get("seed"), record.get("simulations"),
+            record.get("reporting_currency"),
+            {sid: (m["group"], Decimal(m["factor"])) for sid, m in (record.get("members") or {}).items()},
+            set(record.get("groups") or {}),
+            [(one["events"], one["links"]) for one in record.get("shared") or []],
+        )
+    except (KeyError, TypeError, ArithmeticError, ValueError):
+        return True
+    return held != (row.input_digest, row.seed, row.draws, row.reporting_currency, members, groups, shared)
+
+
+def _groups_changed(row: PortfolioResult) -> bool:
+    """Whether a correlation group version the inputs name is no longer recorded in
+    this deployment as the inputs state it (its key, version, strength, source,
+    evidence, scenarios, author and time)."""
+    named = row.inputs.get("groups") or [] if isinstance(row.inputs, dict) else []
+    for stated in named:
+        try:
+            group = CorrelationGroup.objects.filter(deployment_id=row.deployment_id, uuid=stated["uuid"]).first()
+        except (DjangoValidationError, ValueError, TypeError, KeyError):
+            return True
+        if group is None or any(stated.get(key) != value for key, value in group.as_dict().items()):
+            return True
+    return False
+
+
+def stored_row_failures(row: PortfolioResult) -> tuple[list[str], list[dict]]:
+    """The checks of :data:`INTEGRITY_CHECKS` the stored rows of ``row`` fail, in
+    order, and each included scenario whose rows fail, with why. Plain hashing and
+    reads: no engine, no numpy."""
+    failed = []
+    try:
+        intact = canonical_digest(row.inputs) == row.input_digest
+    except (TypeError, ValueError):
+        intact = False
+    if not intact:
+        failed.append("input_digest")
+    if row.status == SIMULATION_COMPLETED:
+        try:
+            recorded = isinstance(row.record, dict) and canonical_digest(row.record) == row.result_digest
+        except (TypeError, ValueError):
+            recorded = False
+        if not recorded:
+            failed.append("result_digest")
+    elif row.record is not None or row.result_digest:
+        failed.append("result_digest")
+    if row.status == SIMULATION_COMPLETED and intact and _record_unbound(row):
+        failed.append("record_binding")
+    if intact and _groups_changed(row):
+        failed.append("group_rows")
+    members = (row.inputs.get("members") or []) if intact and isinstance(row.inputs, dict) else []
+    failing = []
+    for member in members:
+        why = _member_failure(row, member) if isinstance(member, dict) else "malformed"
+        if why is not None:
+            failing.append({"scenario": member.get("scenario") if isinstance(member, dict) else None, "reason": why})
+    if failing:
+        failed.append("member_rows")
+    return failed, failing
+
+
+# ------------------------------------------------------------------ grade and banner
+
+
+_LADDER = ("A", "B", "C", "D")
+
+
+def portfolio_grade(inputs: dict) -> dict:
+    """The portfolio's grade, from its stored inputs (:data:`GRADE_RULE`)."""
+    members = inputs.get("members") or []
+    if not members:
+        return {"grade": None, "rule": GRADE_RULE, "reason": "no scenario is included: nothing is graded"}
+    graded = [
+        (downgraded(ConfidenceGrade(m["grade"]), len(m["normalization"]["downgrades"])), m["scenario"]) for m in members
+    ]
+    lowest, which = min(graded, key=lambda g: (-_LADDER.index(g[0].value), g[1]))
+    expert = sorted(
+        g["group"] for g in inputs.get("groups") or [] if g["applied_to"] and g["source_type"] in ASSUMPTION_SOURCES
+    )
+    grade = downgraded(lowest, 1 if expert else 0)
+    normalised = sorted(m["scenario"] for m in members if m["normalization"]["downgrades"])
+    reason = f"the lowest included scenario, {which}, is graded {lowest.value}"
+    if normalised:
+        reason += f" (after its normalisation's downgrades, where it carries any: {', '.join(normalised)} do)"
+    if expert:
+        reason += (f"; one step lower, {grade.value}, because the strength of {', '.join(expert)} rests on an "
+                   "expert's estimate or no named source")
+    return {
+        "grade": grade.value,
+        "base": lowest.value,
+        "lowest_scenario": which,
+        "downgrades": [{"code": "expert_correlation", "groups": expert}] if expert else [],
+        "normalization_downgrades": normalised,
+        "rule": GRADE_RULE,
+        "reason": reason,
+    }
+
+
+def banner_reason(row: PortfolioResult, grade: str | None, failed: list[str]) -> str | None:
+    """Why the portfolio is not for capital decisions, or ``None``: step 6's rule
+    (:func:`report.banner_reason`) at portfolio level. It fails closed."""
+    if failed:
+        return _unverified(failed)
+    if row.status != SIMULATION_COMPLETED:
+        return f"the portfolio was refused ({row.refusal_code}): it has no figures"
+    if grade is None:
+        return "no included scenario is graded: the portfolio is not graded"
+    if grade not in report.GRADES_FOR_TOTALS:
+        return f"graded {grade}: not a grade a total may sum"
+    return None
+
+
+def _unverified(failed: list[str]) -> str:
+    return (
+        f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail {', '.join(failed)}: a row no longer gives its digest, "
+        "or no longer bears out what was totalled; served as a refusal"
+    )
+
+
+# ------------------------------------------------------------------ the document
+
+
+def _allocated(by: dict[str, str], total: str, shown) -> tuple[dict[str, str], str]:
+    """Contributions shown at the minor unit so they sum EXACTLY to the shown total:
+    the total rounded half-even, each contribution floored, and the units left over
+    given to the largest remainders (ties: the first scenario)."""
+    unit = Decimal(1).scaleb(-shown.minor_unit)
+    with localcontext(Context(prec=200)):
+        total_shown = Decimal(total).quantize(unit, rounding=ROUND_HALF_EVEN)
+        floors = {sid: Decimal(v).quantize(unit, rounding=ROUND_FLOOR) for sid, v in by.items()}
+        extra = int((total_shown - sum(floors.values(), Decimal(0))) / unit)
+        if not 0 <= extra <= len(floors):
+            raise ValueError("the shown contributions cannot sum to the shown total")
+        for sid in sorted(by, key=lambda sid: (-(Decimal(by[sid]) - floors[sid]), sid))[:extra]:
+            floors[sid] += unit
+    return {sid: format(value, "f") for sid, value in sorted(floors.items())}, format(total_shown, "f")
+
+
+def _share(part: str, whole: str) -> str | None:
+    if Decimal(whole) == 0:
+        return None
+    with localcontext(Context(prec=60)):
+        return format((Decimal(part) / Decimal(whole)).quantize(Decimal("1E-10"), rounding=ROUND_HALF_EVEN), "f")
+
+
+def _contributions(record: dict, titles: dict[str, str], shown) -> dict:
+    lines = {}
+    for line in LINES:
+        held = record["contributions"][line]
+        if held.get("mean") is None:
+            lines[line] = {"not_reported": held.get("not_reported")}
+            continue
+        mean, tail = held["mean"], held["tail"]
+        mean_shown, mean_total = _allocated(mean["by_scenario"], mean["total"], shown)
+        tail_shown, tail_total = _allocated(tail["by_scenario"], tail["total"], shown)
+        by_mean = sorted(mean["by_scenario"], key=lambda sid: (-Decimal(mean["by_scenario"][sid]), sid))
+        by_tail = sorted(tail["by_scenario"], key=lambda sid: (-Decimal(tail["by_scenario"][sid]), sid))
+        lines[line] = {
+            "mean": {"total": mean_total, "measure": "the expected annual loss"},
+            "tail": {"total": tail_total, "percentile": tail["percentile"], "draws": tail["draws"],
+                     "measure": tail["measure"]},
+            "scenarios": [
+                {
+                    "scenario": sid,
+                    "title": titles.get(sid),
+                    "mean": mean_shown[sid],
+                    "tail": tail_shown[sid],
+                    "share_of_mean": _share(mean["by_scenario"][sid], mean["total"]),
+                    "share_of_tail": _share(tail["by_scenario"][sid], tail["total"]),
+                    "rank_by_mean": by_mean.index(sid) + 1,
+                    "rank_by_tail": by_tail.index(sid) + 1,
+                }
+                for sid in sorted(mean["by_scenario"])
+            ],
+            "largest": held["largest"],
+            "largest_differ": held["largest"]["mean"] != held["largest"]["tail"],
+        }
+    return {
+        **lines,
+        "statement": (
+            "each scenario's contribution to the mean is its own mean over the portfolio's years, and to the tail its "
+            "mean over the tail's years (the years of largest total beyond the severe percentile); they sum to the "
+            "expected annual loss and to the expected shortfall exactly, in the stored record at every digit and here "
+            "at the minor unit (each floored, the units left over to the largest remainders); a share is rounded to "
+            "10 places"
+        ),
+    }
+
+
+def _summary(record: dict, shown) -> dict:
+    lines = {}
+    for line in LINES:
+        block = record["lines"][line]
+        lines[line] = {
+            **report._block(block, shown=shown, annual=True, no_annual="", missing=""),
+            "expected_shortfall": shown(block.get("expected_shortfall")),
+        }
+        if block.get("expected_shortfall") is None:
+            lines[line]["not_reported"]["expected_shortfall"] = lines[line]["not_reported"].get("mean", "no mean")
+    return {
+        "basis": record["basis"],
+        "statement": record["statement"],
+        "headline": record["headline"],
+        "severe_percentile": record["severe_percentile"],
+        "confidence_level": record["confidence_level"],
+        "lines": lines,
+    }
+
+
+def _own(record: dict | None, sid: str, shown) -> dict:
+    """A scenario's own figures over the portfolio's years, each line at the minor
+    unit: the portfolio is at least each of them (the shared-event rule)."""
+    if record is None:
+        return {"not_reported": "no figures are served for this portfolio"}
+    own = ((record.get("members") or {}).get(sid) or {}).get("own") or {}
+    lines = {}
+    for line in LINES:
+        block = own.get(line) or {}
+        lines[line] = {key: shown(block.get(source)) for key, source in (
+            ("p10", "p10"), ("p50", "p50"), ("p90", "p90"), ("severe_plausible", "severe_plausible"),
+            ("mean", "mean"), ("expected_annual_loss", "expected_annual_exposure"),
+            ("expected_shortfall", "expected_shortfall"))}
+    return {**lines, "statement": "the scenario alone, over the portfolio's own years: the portfolio's figures are at "
+                                  "least these"}
+
+
+#: The licence classes whose terms allow redistributing a source's raw data (section
+#: 4.4): any other source's raw rates and index values never reach a reader.
+REDISTRIBUTABLE = frozenset({LicenseClass.OPEN.value, LicenseClass.CUSTOMER.value})
+#: What a normalisation step served over a source that may not be redistributed
+#: keeps: what was done, when and by which rule, never a number read or made.
+_STEP_PROVENANCE = frozenset({
+    "step", "from", "to", "requested_date", "rule", "provider", "rate_type", "direction", "rate_date", "age_days",
+    "stale", "estimate", "downgrades", "series_id", "geography", "category", "base", "currency", "from_date",
+    "to_date", "from_period", "to_period", "period_used", "as_of", "lag_months",
+})
+#: What an observation of such a source keeps: its source, version, snapshot hash and dates.
+_OBSERVATION_PROVENANCE = frozenset({
+    "source_key", "source_version", "source_snapshot_hash", "observations_version", "effective_date",
+    "observed_at", "period", "vintage_date",
+})
+#: What a conflict between two sources keeps (section 12.8): which sources, providers,
+#: dates and periods disagreed, and the tolerance; never either value or how far apart.
+_CONFLICT_PROVENANCE = frozenset({
+    "kind", "step", "pair", "date", "series", "base", "period", "primary", "primary_provider",
+    "primary_rate_type", "primary_vintage", "secondary", "secondary_provider", "secondary_rate_type",
+    "secondary_vintage", "tolerance",
+})
+#: What a normalisation record keeps when anything in it is withheld: no number read or made.
+_RECORD_PROVENANCE = frozenset({
+    "status", "event_date", "valuation_date", "base_currency", "reporting_currency", "order", "arithmetic",
+    "display_rounding", "estimate", "stale", "confidence_downgrades", "primary_unavailable", "unavailable", "policy",
+})
+
+
+def served_normalization(normalization, policy) -> dict | None:
+    """A member's normalisation as a reader is served it (the section-28 audit's T7):
+    as stored where every source it read, and every source a conflict in it names
+    (section 12.8), is licensed ``open`` or ``customer``; otherwise with every raw
+    rate and index value, and every number made from them (the factor, each step's
+    rate, ratio and amounts, each conflict's values and difference), WITHHELD: each
+    observation of a source that may not be redistributed is shown by its source,
+    version, snapshot hash and dates only, and each conflict by its sources,
+    providers and dates. A source the inputs do not name is taken as one that may
+    not be redistributed. The stored inputs keep the whole record (the licence allows
+    storing and deriving figures); the figures stand."""
+    if not isinstance(normalization, dict) or not isinstance(normalization.get("record"), dict):
+        return normalization
+    named = [s for s in ((policy or {}).get("sources") or []) if isinstance(s, dict)]
+    by_version = {(s.get("source_key"), s.get("version")): s.get("license_class") for s in named}
+    by_key: dict = {}
+    for source in named:
+        by_key.setdefault(source.get("source_key"), set()).add(source.get("license_class"))
+
+    def licence(observation) -> str | None:
+        if not isinstance(observation, dict):
+            return None
+        return by_version.get((observation.get("source_key"), observation.get("source_version")))
+
+    def conflict_licences(conflict) -> set:
+        if not isinstance(conflict, dict):
+            return {None}
+        return set().union(*(by_key.get(conflict.get(side)) or {None} for side in ("primary", "secondary")))
+
+    record = normalization["record"]
+    chain = [step for step in record.get("chain") or [] if isinstance(step, dict)]
+    conflicts = [c for step in chain for c in step.get("conflicts") or []] + list(record.get("conflicts") or [])
+    held = {licence(o) for step in chain for o in step.get("observations") or []}
+    held |= set().union(*(conflict_licences(c) for c in conflicts)) if conflicts else set()
+    if held <= REDISTRIBUTABLE:
+        return normalization
+    classes = sorted(str(c) for c in held - REDISTRIBUTABLE)
+    reason = (
+        f"withheld: a source it read, or a conflict names, is licensed {', '.join(classes)}, whose terms do not "
+        "allow redistributing its raw data; its provenance is shown, and the figures derived from it stand"
+    )
+
+    def conflicts_served(found) -> list:
+        return [{**{k: v for k, v in c.items() if k in _CONFLICT_PROVENANCE}, "withheld": "both values"}
+                for c in found or [] if isinstance(c, dict)]
+
+    served_chain = []
+    for step in chain:
+        observations = []
+        for observation in step.get("observations") or []:
+            if licence(observation) in REDISTRIBUTABLE:
+                observations.append(observation)
+            else:
+                observations.append({
+                    **{k: v for k, v in observation.items() if k in _OBSERVATION_PROVENANCE},
+                    "license_class": licence(observation), "withheld": "the raw value",
+                })
+        served_chain.append({**{k: v for k, v in step.items() if k in _STEP_PROVENANCE},
+                             "observations": observations, "conflicts": conflicts_served(step.get("conflicts")),
+                             "withheld": reason})
+    served = {k: v for k, v in record.items() if k in _RECORD_PROVENANCE}
+    served.update(chain=served_chain, conflicts=conflicts_served(record.get("conflicts")), value=None,
+                  display=None, withheld=reason)
+    return {**normalization, "factor": None, "record": served, "withheld": reason}
+
+
+def _shared(inputs: dict, record: dict | None) -> list[dict]:
+    """The shared loss events, and, where figures are served, the sets of their
+    events a year may count (positions in ``events``), in how many years each was
+    counted and whose loss it was counted at."""
+    held = (record or {}).get("shared") or []
+    shown = []
+    for at, one in enumerate(inputs.get("shared_events") or []):
+        stored = held[at] if at < len(held) else {}
+        shown.append({**one, "sets": stored.get("sets"), "years": stored.get("years")})
+    return shown
+
+
+def build_document(row: PortfolioResult) -> dict:
+    """The report of ``row``, with its digest: from the stored rows only."""
+    deployment_uuid = str(Deployment.objects.get(pk=row.deployment_id).uuid)
+    shown = report._Shown(row.reporting_currency)
+    failed, failing = stored_row_failures(row)
+    completed = row.status == SIMULATION_COMPLETED
+    figures = completed and not failed
+    inputs = row.inputs if "input_digest" not in failed else {}
+    if failed:
+        grade = None
+    elif not completed:
+        # A refused portfolio has no figures, so no grade (review round 1, NIT-2).
+        grade = {"grade": None, "rule": GRADE_RULE, "reason": "a refused portfolio has no figures and no grade"}
+    else:
+        grade = portfolio_grade(inputs)
+    why = banner_reason(row, None if grade is None else grade["grade"], failed)
+    withheld = _unverified(failed) if failed else None
+    if not completed:
+        refusal = {"code": row.refusal_code, "detail": row.refusal_detail}
+    elif failed:
+        refusal = {"code": report.STORED_ROW_UNVERIFIED, "detail": withheld}
+    else:
+        refusal = None
+    excluded = inputs.get("excluded") or []
+    members = inputs.get("members") or []
+    titles = {m["scenario"]: m.get("title") for m in members}
+    record = row.record if figures else None
+    not_reported = withheld or f"refused: {row.refusal_code}"
+    untrusted = {"not_reported": f"{report.STORED_ROW_UNVERIFIED}: the stored inputs no longer give their digest"}
+    document = {
+        "schema": REPORT_SCHEMA,
+        "deployment": deployment_uuid,
+        "portfolio": {
+            "uuid": str(row.uuid),
+            "status": row.status,
+            "seed": row.seed,
+            "draws": row.draws,
+            "severe_percentile": row.severe_percentile,
+            "policy": inputs.get("policy"),
+            "reporting_currency": row.reporting_currency,
+            "valuation_date": row.valuation_date.isoformat(),
+            "input_digest": row.input_digest,
+            "result_digest": row.result_digest or None,
+            "outcomes_sha256": None if record is None else record.get("outcomes_sha256"),
+            "started_at": row.started_at.isoformat(),
+            "finished_at": row.finished_at.isoformat(),
+            "recorded_at": row.recorded_at.isoformat(),
+        },
+        "versions": inputs.get("versions"),
+        "currency": {"code": row.reporting_currency, "minor_unit": shown.minor_unit, "rounding": report.ROUNDING},
+        "status": row.status,
+        "refusal": refusal,
+        "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed),
+                      "scenarios_failed": failing},
+        "grade": grade,
+        "banner": None if why is None else report.UNKNOWN_BANNER,
+        "excluded_from_totals": why is not None,
+        "banner_reason": why,
+        "complete": bool(inputs) and not excluded,
+        "reads_as": "the loss of every current scenario version" if inputs and not excluded
+        else "at least: the included scenarios only; every excluded one is listed with its reason",
+        "scenarios": untrusted if not inputs else {
+            "included": [
+                {
+                    **{key: m.get(key) for key in ("scenario", "title", "result", "result_digest", "input_digest",
+                                                   "grade", "graded", "currency", "as_of", "insured", "group",
+                                                   "events", "shared")},
+                    "normalization": served_normalization(m.get("normalization"), inputs.get("normalization")),
+                    "own": _own(record, m["scenario"], shown),
+                }
+                for m in members
+            ],
+            "excluded": excluded,
+            "selection": inputs.get("selection"),
+        },
+        "groups": untrusted if not inputs else inputs.get("groups"),
+        "shared_events": untrusted if not inputs else _shared(inputs, record),
+        "normalization": untrusted if not inputs else inputs.get("normalization"),
+        "rules": untrusted if not inputs else inputs.get("rules"),
+        "summary": {"not_reported": not_reported} if record is None else _summary(record, shown),
+        "contributions": {"not_reported": not_reported} if record is None
+        else _contributions(record, titles, shown),
+        "limitations": list(LIMITATIONS),
+    }
+    document["digest"] = report.digest_of(document)
+    return document
+
+
+def latest(deployment) -> PortfolioResult | None:
+    """The deployment's latest portfolio, by record order."""
+    return PortfolioResult.objects.filter(deployment=deployment).order_by("-id").first()
+
+
+def find(deployment, result_uuid) -> PortfolioResult | None:
+    try:
+        wanted = _uuid.UUID(str(result_uuid))
+    except ValueError:
+        return None
+    return PortfolioResult.objects.filter(deployment=deployment, uuid=wanted).first()
+
+
+def table_available() -> bool:
+    """Whether economics can read its currency table now."""
+    try:
+        _currency.require_pinned()
+    except _currency.CurrencyTableInvalid:
+        return False
+    return True
+
+
+__all__ = [
+    "ASSUMPTION_SOURCES",
+    "COUNTED_CHAIN",
+    "COUNTED_ONCE",
+    "EXCLUSIONS",
+    "GRADE_RULE",
+    "INPUTS_SCHEMA",
+    "INTEGRITY_CHECKS",
+    "LIMITATIONS",
+    "REPORT_SCHEMA",
+    "SELECTION",
+    "REDISTRIBUTABLE",
+    "UNRECORDED",
+    "GroupOutcome",
+    "PortfolioOutcome",
+    "PortfolioRequest",
+    "PortfolioRequestRefused",
+    "banner_reason",
+    "build_document",
+    "find",
+    "latest",
+    "list_groups",
+    "parse_group",
+    "parse_request",
+    "portfolio_grade",
+    "record_group",
+    "served_normalization",
+    "simulate_portfolio",
+    "stored_row_failures",
+]
