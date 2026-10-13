@@ -486,8 +486,8 @@ parameter is drawn once per simulated year; every formula runs as
 a vectorised twin proven equal to it, and what nothing uncertain reaches is step 4's
 Decimal figure; insurance applies per event; and the run is recorded once per scenario
 version, input digest, seed and draws as a `SimulationResult`, with every version and
-limit it rests on and no float. It serves no route yet, never raises, and nothing Django loads
-at start imports it or numpy.
+limit it rests on and no float. It never raises, and nothing Django loads at start
+imports it or numpy; step 6's simulate route (below) calls it.
 
 ### The Validity Card and the receipt
 
@@ -508,8 +508,47 @@ Exposure Receipt with `mythos_core.exposure_receipt`, has the engine sign it as 
 signs assurance receipts, records it once per result only after it verifies against
 the engine's published economics-receipt keys, and verifies a stored one against the
 release it was made under, refusing a tampered card, result, source snapshot,
-signature or row with its code. Neither serves a route yet or raises, and nothing Django loads at start imports
-either.
+signature or row with its code. Neither raises, and nothing Django loads at start imports
+either; step 6's simulate route (below) calls both.
+
+### The scenario endpoints and the report
+
+A third route module (`assurance/economics/report_api.py`), imported guarded in a
+guard of its own, serves what steps 5, 7b and 8 record (section 27):
+
+- `GET /api/assurance/deployments/<uuid>/economics/scenarios/<scenario uuid>/`: the
+  scenario version, every parameter it reads with its provenance and what reads it,
+  its validity (each simulation result with its grade) and its evidence as SPINE ids,
+  never copies;
+- `POST .../economics/scenarios/<scenario uuid>/simulate/`: `{"seed": ..., "policy":
+  "standard_100k" | "quick_10k" | "detailed_1m", "receipt": false}` runs, or returns,
+  a simulation through the simulation service (idempotent: the same inputs return the
+  stored result, 200; a new one is 201), then issues its Validity Card, its chart
+  series and, when asked, its signed receipt, each once per result; an admin or
+  analyst only;
+- `GET .../economics/scenarios/<scenario uuid>/results/?simulation=<uuid>`: the report
+  JSON of one result (else the scenario's latest), `mythos.economics.report/v1`:
+  identity and versions, loss events and components at low, base and high, P10, P50,
+  P90, mean, expected annual loss and severe-but-plausible with their bands and every
+  "not reported" reason, the exceedance curve and histogram, the sensitivity
+  tornado, the grade, the Validity Card and the receipt's reference, limitations and
+  unknowns.
+
+The report is deterministic: the same stored rows give byte-identical canonical JSON,
+with no clock but the stored times, and it carries its own `sha256:` digest. Every
+stored row it serves is checked first against its digest and its result (a card's
+grade is its document's, never its column's); a result whose rows fail a check is
+served as a refusal, `stored_row_unverified`. Money is shown at the currency's minor
+unit (0 places for JPY, 3 for KWD). A refused run is served as its refusal, never as
+figures. A result graded Unknown, refused, unverified, or not graded still shows what
+figures it may, with `banner: "Unknown: not for capital decisions"` and
+`excluded_from_totals: true`, and nothing may sum it into a total: `may_be_totalled`
+fails closed (the report's own digest, and a grade of A to D). One 120 s deadline
+bounds a simulate request, shared by the run, the analysis and the series.
+Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
+cannot be read are the parameter set's; a run the engine cannot make now is 503 and
+records nothing. None of the three is a stop, and a fault in this module leaves only
+these routes unserved.
 
 ## When a dependency fails
 

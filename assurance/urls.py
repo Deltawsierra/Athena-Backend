@@ -19,15 +19,16 @@ from .views import (
 
 logger = logging.getLogger(__name__)
 
-# Economic Exposure's route modules (docs/economics/spec-v1.md, sections 2, 19 and
-# 24): the customer parameter-set routes, and the scenario builder's, none of them a
-# stop. Each is imported GUARDED, in a guard of its own. This module is the root
-# URLconf's, and an import that raised here would take the URLconf down, and every
+# Economic Exposure's route modules (docs/economics/spec-v1.md, sections 2, 19 and 24,
+# and section 27 for step 6's): the customer parameter-set routes, the scenario
+# builder's, and the scenario endpoints with the report, none of them a stop. Each is imported GUARDED,
+# in a guard of its own. This module is the root URLconf's, and an import that
+# raised here would take the URLconf down, and every
 # route with it: the scan's Stop, every other stop, and the URL check
 # `manage.py check` and `deliver_owed_stops` run first. An economics fault refuses
 # economics and nothing else, so a module that will not import is logged and its
-# routes are simply not served -- and a fault in the builder leaves the parameter-set
-# routes served.
+# routes are simply not served -- and a fault in the builder, or in the report, leaves
+# the other economics routes served.
 try:
     from .economics.api import urlpatterns as economics_urlpatterns
 except Exception:
@@ -40,6 +41,13 @@ except Exception:
         "Economic Exposure's scenario-builder routes could not be loaded; they are not served, and nothing else is"
     )
     economics_scenario_urlpatterns = []
+try:
+    from .economics.report_api import urlpatterns as economics_report_urlpatterns
+except Exception:
+    logger.exception(
+        "Economic Exposure's scenario and report routes could not be loaded; they are not served, and nothing else is"
+    )
+    economics_report_urlpatterns = []
 
 router = DefaultRouter()
 router.register(r"deployments", DeploymentViewSet, basename="deployment")
@@ -51,4 +59,4 @@ router.register(r"unknowns", UnknownViewSet, basename="unknown")
 router.register(r"claims", ClaimViewSet, basename="claim")
 router.register(r"retest-requirements", RetestRequirementViewSet, basename="retest-requirement")
 
-urlpatterns = router.urls + economics_urlpatterns + economics_scenario_urlpatterns
+urlpatterns = router.urls + economics_urlpatterns + economics_scenario_urlpatterns + economics_report_urlpatterns
