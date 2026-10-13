@@ -532,6 +532,12 @@ NOT_STOPS = {
         "capacity), and is answered 503 economics_capacity at once when none is free; no stop takes a slot",
     },
     "deployment-economics-scenario-results": _get(),
+    # The read routes the dashboard needs (assurance.economics.report_api, spec section
+    # 30): a deployment's scenario versions listed, and a Financial Exposure
+    # Receipt's signed bytes served as stored. Reads of economics rows only, holding no
+    # lock and no transaction; nothing a stop or the decision reads.
+    "deployment-economics-scenarios": _get(),
+    "deployment-economics-receipt": _get(),
     # The remediation option and its ROI (assurance.economics.remediation_api, step
     # 13): one option recorded, its current and residual runs simulated, its
     # economics read. Economics records only.

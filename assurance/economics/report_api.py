@@ -2,7 +2,7 @@
 section 27).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
-its own: a fault here leaves these three routes unserved and nothing else -- not the
+its own: a fault here leaves these five routes unserved and nothing else -- not the
 parameter-set or builder routes, not the URLconf, not a stop
 (``tests/test_economics_report.py``, ``test_a_report_fault_never_takes_down_a_stop``).
 
@@ -28,7 +28,25 @@ parameter-set or builder routes, not the URLconf, not a stop
   503 ``economics_capacity`` with ``Retry-After``, and nothing runs or is recorded.
 - ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/``: the report
   JSON of one result (``?simulation=<uuid>``, else the scenario's latest), as
-  canonical bytes carrying their own digest (:mod:`assurance.economics.report`).
+  canonical bytes carrying their own digest (:mod:`assurance.economics.report`), with
+  the run's valuation date and its currency bridge (schema v2), answered ``no-store``.
+
+The read routes the dashboard needs (section 30), each answered ``no-store``, its
+query read strictly (an unknown key is ``field_unrecognised``, a repeated or
+malformed one ``field_malformed``):
+
+- ``GET deployments/<uuid>/economics/scenarios/?page=<n>&page_size=<n>``: the
+  deployment's scenario versions in record order, :data:`SCENARIO_PAGE_SIZE` a page
+  unless the request names up to :data:`SCENARIO_PAGE_SIZE_MAX`, each with its
+  templates, its latest EXPOSURE run's status (a residual run is never listed) and
+  that run's grade, banner and ``excluded_from_totals`` (:func:`report.scenario_entry`).
+- ``GET deployments/<uuid>/economics/receipts/<receipt id>/``: a Financial Exposure
+  Receipt's signed DSSE envelope, as stored, in its canonical spelling, as a download
+  (``attachment``, ``nosniff``) with the SHA-256 of the bytes in ``X-Content-SHA256``.
+  The receipt id is the one the report and the scenario document name, in its dashed
+  form. A receipt of another deployment (tenant) is 404, and so is one of a residual
+  run (none exists). Nothing is signed, verified or re-encoded: the reader verifies the
+  envelope against the engine's published economics-receipt keys.
 
 Access is the parameter-set routes' (:mod:`assurance.economics.api`): a signed-in
 account; a deployment the caller cannot see, or a scenario or result of another
@@ -39,13 +57,16 @@ answers 503 and records nothing; a run the engine cannot make now (it will not
 import, the time budget, memory) is 503 too, and nothing is recorded.
 
 None of these routes is a stop, and none reads or writes anything a stop or the
-decision reads: each is in ``safety.stops.NOT_STOPS``. This module imports the
+decision reads: each is in ``safety.stops.NOT_STOPS``. The reads hold no lock and open
+no transaction: a Stop is answered while one is held open mid-read
+(``tests/test_economics_read_routes.py``). This module imports the
 simulation, the card, the series and the receipt services only inside a view: nothing
 Django loads at start imports them, or numpy.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid as _uuid
 from decimal import Decimal
@@ -70,7 +91,7 @@ from .api import (
 from .engine import currency as _currency
 from .engine import parameter_set as pset
 from .engine.parameters import ParameterRefused
-from .models import SIMULATION_COMPLETED, FinancialScenario, SimulationResult
+from .models import SIMULATION_COMPLETED, FinancialExposureReceipt, FinancialScenario, SimulationResult
 
 #: The simulation policies a run is made under: the draws, and the percentile its
 #: severe-but-plausible figure is (section 23.12). Named as the owner's
@@ -90,6 +111,18 @@ MAX_SEED_DIGITS = 20
 #: budget, shared by the run, the card's analysis and the series. How many such
 #: requests run at once is capped too, without waiting (:mod:`.capacity`).
 REQUEST_BUDGET_SECONDS = 120.0
+#: The scenario versions a page of the list holds unless the request names another
+#: size, and the most it may name (section 30): a larger page is refused, never cut
+#: short.
+SCENARIO_PAGE_SIZE = 25
+SCENARIO_PAGE_SIZE_MAX = 100
+#: The most digits a page number or a page size may be written with: a longer one is
+#: refused before it is read as a number.
+MAX_QUERY_DIGITS = 9
+#: What every answer of the read routes the dashboard needs carries (section 30), and
+#: the report and the ROI document too: a tenant's figures and signed receipts are
+#: never kept by a cache on the way.
+NO_STORE = "no-store"
 
 _SIMULATE_REQUIRED = frozenset({"seed"})
 _SIMULATE_OPTIONAL = frozenset({"policy", "receipt"})
@@ -323,10 +356,120 @@ class ScenarioResultsView(APIView):
             body = report.canonical_bytes(report.build_report(result))
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
-        return HttpResponse(body, content_type="application/json")
+        return HttpResponse(body, content_type="application/json", headers={"Cache-Control": NO_STORE})
+
+
+# ------------------------------------------------------------------ the read routes the dashboard needs
+
+
+def _strict_query(request, allowed: tuple[str, ...]) -> dict[str, str]:
+    """The query string read strictly (section 30): only the keys ``allowed``
+    (``field_unrecognised`` otherwise), each given once (``field_malformed``)."""
+    query = request.query_params
+    unknown = sorted(set(query) - set(allowed))
+    if unknown:
+        raise _refused("field_unrecognised", f"query: {unknown}: this route reads only {list(allowed)}")
+    for key in query:
+        if len(query.getlist(key)) != 1:
+            raise _refused("field_malformed", f"{key} is given once")
+    return {key: query[key] for key in query}
+
+
+def _whole(query: dict[str, str], key: str, default: int, most: int) -> int:
+    """``query[key]`` read as a whole number from 1 to ``most``: ASCII digits, no sign
+    and no leading zero, at most :data:`MAX_QUERY_DIGITS` of them; ``default`` where
+    the key is absent; refused otherwise (``field_malformed``)."""
+    text = query.get(key)
+    if text is None:
+        return default
+    if (
+        0 < len(text) <= MAX_QUERY_DIGITS
+        and text.isascii()
+        and text.isdigit()
+        and not text.startswith("0")
+        and int(text) <= most
+    ):
+        return int(text)
+    raise _refused("field_malformed", f"{key} is a whole number from 1 to {most}")
+
+
+class ScenarioListView(APIView):
+    """A deployment's scenario versions, a page at a time, each with its templates and
+    its latest exposure run's status, grade and exclusion from totals."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        query = _strict_query(request, ("page", "page_size"))
+        size = _whole(query, "page_size", SCENARIO_PAGE_SIZE, SCENARIO_PAGE_SIZE_MAX)
+        page = _whole(query, "page", 1, 10**MAX_QUERY_DIGITS - 1)
+        versions = FinancialScenario.objects.filter(deployment=deployment)
+        count = versions.count()
+        start = (page - 1) * size
+        rows = list(versions.select_related("supersedes").order_by("id")[start:start + size])
+        templates = report.templates_of(rows)
+        pages = -(-count // size)
+        response = Response(
+            {
+                "deployment": str(deployment.uuid),
+                "count": count,
+                "page": page,
+                "page_size": size,
+                "pages": pages,
+                "previous": page - 1 if page > 1 else None,
+                "next": page + 1 if page < pages else None,
+                "scenarios": [report.scenario_entry(row, templates.get(row.pk, [])) for row in rows],
+                "statement": "every scenario version of the deployment, in record order; each with its latest "
+                "exposure run (a residual run under a remediation option is never one) and that run's standing under "
+                "the report's banner rule",
+            }
+        )
+        response["Cache-Control"] = NO_STORE
+        return response
+
+
+class ReceiptView(APIView):
+    """A Financial Exposure Receipt's signed DSSE envelope, as stored, as a download."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, uuid, receipt):
+        deployment = _deployment(request, uuid)
+        _strict_query(request, ())
+        # The tenant's own receipt, of a scenario's own run: a residual run is never
+        # receipted (the service and the row refuse one), and is never served as one.
+        row = (
+            FinancialExposureReceipt.objects.filter(
+                deployment=deployment, receipt_id=receipt.hex, simulation__remediation__isnull=True
+            )
+            .order_by("id")
+            .first()
+        )
+        if row is None:
+            return Response({"detail": "The deployment has no such receipt."}, status=status.HTTP_404_NOT_FOUND)
+        # The envelope the signer returned and the row stores, in its one canonical
+        # spelling: nothing is signed, verified or re-encoded here.
+        body = report.canonical_bytes(row.envelope)
+        response = HttpResponse(body, content_type="application/json")
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Disposition"] = f'attachment; filename="financial-exposure-receipt-{row.receipt_id}.json"'
+        response["X-Content-SHA256"] = "sha256:" + hashlib.sha256(body).hexdigest()
+        response["Cache-Control"] = NO_STORE
+        return response
 
 
 urlpatterns = [
+    path(
+        "deployments/<uuid:uuid>/economics/scenarios/",
+        ScenarioListView.as_view(),
+        name="deployment-economics-scenarios",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/receipts/<uuid:receipt>/",
+        ReceiptView.as_view(),
+        name="deployment-economics-receipt",
+    ),
     path(
         "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/",
         ScenarioView.as_view(),

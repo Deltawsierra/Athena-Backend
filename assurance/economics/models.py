@@ -1587,6 +1587,7 @@ class CostIndexObservation(_AppendOnly):
             source_key=named.source_key if named else "",
             source_version=named.version if named else None,
             observations_version=held_by,
+            provider=source.provider if source else "",
         )
 
     def check_new(self) -> None:

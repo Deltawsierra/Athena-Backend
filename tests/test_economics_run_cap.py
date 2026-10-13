@@ -1,5 +1,5 @@
 """The cap on economics runs at once (``assurance.economics.capacity``;
-``docs/economics/spec-v1.md``, section 30): the SAFETY RULE says nothing may block,
+``docs/economics/spec-v1.md``, section 32): the SAFETY RULE says nothing may block,
 delay or drop a stop, and a simulate request holds its worker for up to 120 s.
 
 - With every slot held by a slow run (a test seam holds each run open), a further

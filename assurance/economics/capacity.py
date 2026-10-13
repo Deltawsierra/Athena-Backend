@@ -1,5 +1,5 @@
 """How many economics runs are made at once: a cap that never waits, so no stop ever
-waits behind a run (``docs/economics/spec-v1.md``, section 30; the SAFETY RULE).
+waits behind a run (``docs/economics/spec-v1.md``, section 32; the SAFETY RULE).
 
 A simulate request runs its Monte Carlo synchronously, in the worker that serves it,
 for up to its one deadline (``report_api.REQUEST_BUDGET_SECONDS``, 120 s). Nothing

@@ -557,7 +557,8 @@ either; step 6's simulate route (below) calls both.
 ### The scenario endpoints and the report
 
 A third route module (`assurance/economics/report_api.py`), imported guarded in a
-guard of its own, serves what steps 5, 7b and 8 record (section 27):
+guard of its own, serves what steps 5, 7b and 8 record (section 27), and the reads the
+dashboard needs (section 30):
 
 - `GET /api/assurance/deployments/<uuid>/economics/scenarios/<scenario uuid>/`: the
   scenario version, every parameter it reads with its provenance and what reads it,
@@ -570,12 +571,23 @@ guard of its own, serves what steps 5, 7b and 8 record (section 27):
   series and, when asked, its signed receipt, each once per result; an admin or
   analyst only;
 - `GET .../economics/scenarios/<scenario uuid>/results/?simulation=<uuid>`: the report
-  JSON of one result (else the scenario's latest), `mythos.economics.report/v1`:
+  JSON of one result (else the scenario's latest), `mythos.economics.report/v2`:
   identity and versions, loss events and components at low, base and high, P10, P50,
   P90, mean, expected annual loss and severe-but-plausible with their bands and every
   "not reported" reason, the exceedance curve and histogram, the sensitivity
   tornado, the grade, the Validity Card and the receipt's reference, limitations and
-  unknowns.
+  unknowns, and `currency_bridge`: the run's valuation date (the build's as-of date,
+  as the receipt signs it) and the normalization record of each figure it converted,
+  which is none, since a run converts nothing. v2 is v1 and that key; a v1 report
+  stays readable, and `may_be_totalled` reads both;
+- `GET .../economics/scenarios/?page=<n>&page_size=<n>`: the deployment's scenario
+  versions in record order, 25 a page (at most 100; a larger page is refused), each
+  with its title, its templates, its latest exposure run's status (a residual run is
+  never listed) and that run's grade, banner and `excluded_from_totals`;
+- `GET .../economics/receipts/<receipt id>/`: a Financial Exposure Receipt's signed
+  DSSE envelope as stored, as a download (`attachment`, `nosniff`) with the SHA-256
+  of its bytes in `X-Content-SHA256`; the receipt id is the report's, dashed; another
+  deployment's receipt is 404, and nothing is signed or verified on the way.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
@@ -591,9 +603,13 @@ route (above) applies the same rule to the version's latest result. One 120 s de
 bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
-records nothing. None of the three is a stop, and a fault in this module leaves only
+records nothing. None of the five is a stop, and a fault in this module leaves only
 these routes unserved. A residual run under a remediation option (below) is never the
-scenario's exposure: `results/` and the scenario document serve only its own runs.
+scenario's exposure: `results/`, the scenario list and the scenario document serve only
+its own runs. The list and the receipt read their query strictly (an unknown key is
+400), answer `Cache-Control: no-store` (as `results/` and the ROI route now do too),
+and hold no lock or transaction, so a Stop is
+answered while one is held open.
 
 ### The remediation option and its ROI
 
@@ -644,7 +660,7 @@ these routes unserved.
 A simulate request runs its Monte Carlo in the worker that serves it, for up to 120 s,
 so the two simulate routes (and any later Monte Carlo route, which registers with one
 line, `@capacity.capped`) run only in a free slot (`assurance/economics/capacity.py`;
-spec, section 30). A slot is an exclusive `flock` on a small file every worker on the
+spec, section 32). A slot is an exclusive `flock` on a small file every worker on the
 host shares, taken WITHOUT WAITING: when none is free the request is answered at once,
 503 with `Retry-After` and code `economics_capacity`, and nothing runs or is recorded.
 The kernel releases a dead worker's flock, so a slot never leaks; every other exit
@@ -688,6 +704,24 @@ date. The HTTP client's own log records (urllib3's request lines) withhold every
 string, so the FRED key reaches no log. The adapters are tested against format-faithful
 fixtures, not recorded responses, in `tests/fixtures/economics_feeds/`, under a socket
 guard; none of it is a stop.
+
+### The primary source, and sources that disagree (step 12)
+
+A normalization (event-date FX, cost index, valuation-date FX; spec, section 12) reads
+the policy's PRIMARY: the first provider in its `providers` with a usable rate, never
+chosen by value (section 12.8). For a deployment (`normalization_service.normalize_for`)
+the books hold only the source versions a run of it may use on the valuation date: those
+that pass the production gate and cover the date, platform-wide and its own, never
+another deployment's. Where the first provider has no usable rate and a later one's is
+used, the record names both (`primary_unavailable`) and carries that downgrade: a
+fallback is never silent. Every other usable source quoting the same pair on the same
+date (or the same index series and month) more than the tolerance away from the value
+used, relative to it (FX 0.5%, cost index 1.0%), is listed in the record's `conflicts`
+with both sources, both values and the relative difference, and the record carries
+`source_disagreement`; at or under the tolerance nothing is flagged. Each of the two
+lowers the line one grade step however many steps carry it. Runs state their figures in
+one currency and do not normalize yet, so the report and the data-health route read no
+normalization; when runs do, the card inherits the record.
 
 ## When a dependency fails
 
