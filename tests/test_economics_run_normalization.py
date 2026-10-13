@@ -705,6 +705,60 @@ def test_a_newer_usable_source_version_stales_the_run_and_a_refresh_reads_it(dep
     assert held["release"]["record"]["grade"] == grade.version_record()
 
 
+def test_nit3_an_observation_changed_past_the_model_after_registration_is_never_read(deployment, people):
+    """Review round 1, NIT-3: the loader records the digests of the FX and the
+    cost-index observations it writes with a version, and every book read checks the
+    rows against them. A rate or an index value changed past the model after
+    registration, or a row removed, refuses the build (``source_observations_changed``,
+    400 through the route, nothing written): no figure is normalized from it, so none is
+    pinned by a record. Put back, the rows read as before."""
+    from django.db.models import F
+
+    from assurance.economics.models import CostIndexObservation, FXObservation
+
+    version = books()
+    rates = [row.as_engine() for row in FXObservation.objects.filter(source=version)]
+    points = [row.as_engine() for row in CostIndexObservation.objects.filter(source=version)]
+    assert rates and points
+    assert (version.fx_observations_digest, version.index_observations_digest) == snapshots.observations_digests(
+        rates, points)
+    asset, finding = world(deployment, people["analyst"])
+    client = APIClient()
+    client.force_authenticate(user=people["analyst"])
+    url = f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/"
+
+    def refused_everywhere(kind):
+        before = _counts()
+        with pytest.raises(EconomicsRefused) as refused:
+            builder.build(deployment, body(asset, finding), author=people["analyst"])
+        assert refused.value.code == "source_observations_changed"
+        assert f"{kind} observations of {REF} version 1" in refused.value.detail
+        answer = client.post(url, data=json.dumps(body(asset, finding)), content_type="application/json")
+        assert answer.status_code == 400 and answer.json()["code"] == "source_observations_changed", answer.content
+        assert _counts() == before
+
+    used = FXObservation._base_manager.filter(source=version, base_currency="EUR", quote_currency="USD",
+                                              effective_date=EVENT)
+    held = used.get().rate
+    used.update(rate=Decimal("1.2"))
+    refused_everywhere("FX")
+    used.update(rate=held)
+    index = CostIndexObservation._base_manager.filter(source=version)
+    index.update(value=F("value") + 1)
+    refused_everywhere("cost-index")
+    index.update(value=F("value") - 1)
+    # A row nothing reads, removed: the version's rows are not the ones registered.
+    gone = FXObservation._base_manager.filter(source=version).exclude(pk=used.get().pk).order_by("pk").first()
+    FXObservation._base_manager.filter(pk=gone.pk).delete()
+    refused_everywhere("FX")
+    # Every row as registered again (the removed one written back as it was): the
+    # version builds as before.
+    gone.pk = None
+    FXObservation._base_manager.bulk_create([gone])
+    scenario, _ = builder.build(deployment, body(asset, finding), author=people["analyst"])
+    assert FigureNormalization.objects.filter(scenario=scenario).exists()
+
+
 # ======================================================================
 # Safety, and the documentation
 # ======================================================================

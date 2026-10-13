@@ -182,6 +182,11 @@ NORMALIZATION_RECORD_REFUSALS = {
         "digits, '-' and '_', holds a policy document the engine reads exactly, its digest the document's, and is "
         "recorded by an admin"
     ),
+    "source_observations_changed": (
+        "a source version's FX or cost-index observations are read only as the loader registered them (spec, "
+        "section 36.2): the rows read give the digest the version recorded when they were written, or none of "
+        "them is used"
+    ),
 }
 _REFUSAL_TEXT.update(NORMALIZATION_RECORD_REFUSALS)
 
@@ -416,7 +421,9 @@ class FinancialSource(_AppendOnly):
     ``authoritative`` needs a second admin's approval through the signed-in route.
     The new version copies every field but the tier, and names the admin who
     completed the raise as ``recorded_by``; it reads the observations its snapshot
-    was registered with (``snapshots.fx_book``). No version is recorded at
+    was registered with (``snapshots.fx_book``), checked against the digests the
+    loader recorded with them (``fx_observations_digest``, ``index_observations_digest``;
+    spec, section 36.2). No version is recorded at
     ``authoritative`` without the marker that approval sets
     (``second_person_required``): not a plain save, and not the snapshot loader,
     which refuses a file stating it and records any lower tier as stated.
@@ -452,6 +459,13 @@ class FinancialSource(_AppendOnly):
     retrieved_at = models.DateTimeField()
     # "sha256:" + 64 hex over the snapshot's bytes, as the platform's other digests.
     snapshot_hash = models.CharField(max_length=71)
+    # "sha256:" + 64 hex over the FX and the cost-index observations the loader wrote
+    # with this snapshot, each in its one spelling (``snapshots.observations_digests``):
+    # every book read checks the rows against their holder's (spec, section 36.2; review
+    # round 1, NIT-3). A raise copies them, as every field but the tier; blank on a
+    # version recorded before them, which is read as it was.
+    fx_observations_digest = models.CharField(max_length=71, blank=True, default="")
+    index_observations_digest = models.CharField(max_length=71, blank=True, default="")
     schema_version = models.CharField(max_length=64)
     # Made-up test data: never used by a production run, never trusted above unverified.
     synthetic = models.BooleanField(default=False)
@@ -519,6 +533,9 @@ class FinancialSource(_AppendOnly):
                 "POST /api/assurance/economics/trust-raises/<uuid>/approve/",
             )
         _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
+        for name in ("fx_observations_digest", "index_observations_digest"):
+            if getattr(self, name):
+                _refuse(governance.snapshot_hash_refusal(getattr(self, name)), detail=name)
         if self.version is None:
             earlier = FinancialSource._base_manager.filter(
                 deployment_id=self.deployment_id, source_key=self.source_key
@@ -654,7 +671,8 @@ def _stored_source(pk) -> dict | None:
         FinancialSource._base_manager.filter(pk=pk)
         .values(
             "pk", "deployment_id", "source_key", "version", "provider", "dataset", "url", "license_class",
-            "trust_tier", "retrieved_at", "snapshot_hash", "schema_version", "synthetic",
+            "trust_tier", "retrieved_at", "snapshot_hash", "fx_observations_digest", "index_observations_digest",
+            "schema_version", "synthetic",
         )
         .first()
     )
@@ -717,6 +735,8 @@ def _raised_version(stored: dict, to_tier: str, by, *, second_admin: bool = Fals
         trust_tier=to_tier,
         retrieved_at=stored["retrieved_at"],
         snapshot_hash=stored["snapshot_hash"],
+        fx_observations_digest=stored["fx_observations_digest"],
+        index_observations_digest=stored["index_observations_digest"],
         schema_version=stored["schema_version"],
         synthetic=stored["synthetic"],
         recorded_by=by,

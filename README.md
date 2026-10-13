@@ -794,7 +794,9 @@ figure (`normalized:<figure>`, in its currency) and stores the per-figure record
 (`FigureNormalization`, migration `0075_figure_normalizations.py`): the native and
 normalized figures, each point's chain with every rate and index value, its source and
 version, the downgrades, the conflicts and the fallbacks; every record is checked again
-whenever it is read, and one that no longer holds is never used or served. A
+whenever it is read, and one that no longer holds is never used or served; and the FX
+and cost-index rows a normalization reads are checked against the digests the loader
+recorded with their source version (`source_observations_changed` otherwise). A
 normalization the stored books cannot make refuses the build (`rate_missing`,
 `index_missing`, `index_primary_unset`); a figure stating a distribution is refused
 (`distribution_not_normalizable`); without a policy a figure in another currency is

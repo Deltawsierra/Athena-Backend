@@ -6998,6 +6998,21 @@ scenario document answer 409 with the code (`test_p3a_...`, `test_p3b_...`). A r
 its digest and its figure all changed together stay undetectable, as any scenario
 parameter edited past the model is (section 10).
 
+**The observations a normalization reads are the ones registered** (review round 1,
+NIT-3). The loader records, with each source version it writes, the digest of its FX
+observations and of its cost-index observations, each over every one in its one
+spelling (`snapshots.observations_digests`: its stored fields, a value as
+`decimal_text` writes it, an instant in UTC), computed before its transaction
+(`FinancialSource.fx_observations_digest`, `index_observations_digest`; a raise copies
+them). Every book read (`snapshots.fx_book`, `index_book`: the normalization route's, a
+build's normalization's) checks the rows it read of each version holding them against
+its digests, and a rate or an index value changed past the model, or a row removed or
+added, since registration is refused (`source_observations_changed`: the build 400,
+nothing written), so it is never used and never pinned by a record
+(`test_nit3_an_observation_changed_past_the_model_after_registration_is_never_read`). A
+version recorded before the digests has none and is read as it was; rows and digests
+changed together stay undetectable, as above.
+
 The build's document (section 24.6) states `normalization` -- the rule, the stored
 policy's reference (key, version, scope, digest), the policy the engine read, and every
 source version its normalizations read -- only where the request names a policy: a build
@@ -7125,7 +7140,10 @@ both go with their deployment.
 ### 36.10 Decisions this section takes, which the owner may change
 
 The lead's decisions on review round 1 (13 Oct 2026) are 1 to 6; the rest are this
-section's own.
+section's own. The lead also had the round's three NITs fixed: the double rounding (NIT-1)
+and the minor units a native figure may hold (NIT-2) are stated where they apply (36.2,
+36.1), and the observations a normalization reads are checked against the digests
+recorded when they were registered (NIT-3, 36.2).
 
 1. **Every record is checked on every read** (MEDIUM-1), not only when it is written: a
    tampered record or figure is refused with its code and never used or served.
@@ -7188,9 +7206,8 @@ section's own.
   not the policy's; the policy's version is in the build document, and a refresh names
   the key again and reads its latest version.
 - **No triangulation, and no stored holiday calendar** (section 12.7, unchanged).
-- **The snapshot's rows are not re-hashed** (review round 1, NIT-3; #167's posture,
-  unchanged): a source version's snapshot hash is of its file, and its observation rows are
-  read as stored, so a rate changed past the model BEFORE a build is used and then pinned by
-  the record, as any stored observation is (section 10).
+- **A version recorded before the observation digests is not checked** (36.2): it has
+  none, and nothing backfills them. **Owner item**: a one-off command that records them
+  for such a version from its committed snapshot file, where the operator still holds it.
 - **Currency uncertainty** stays outside the figures (section 3, rule 6): one rate per
   date and step, never a distribution of rates.
