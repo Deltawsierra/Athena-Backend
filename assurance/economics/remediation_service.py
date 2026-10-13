@@ -211,6 +211,23 @@ def veto(scenario: FinancialScenario) -> dict:
     }
 
 
+def acceptance_lapse(finding: Finding, now) -> str | None:
+    """Why ``finding``'s acceptance no longer stands, as the decision reads it
+    (owner decision Q6, :func:`assurance.decision.accepted_risk_signal`), or ``None``
+    while it stands: its ``risk_accepted_until`` after ``now`` and the severity it was
+    accepted at covering the finding's severity now (``decision._acceptance_covers``)."""
+    from assurance import decision as _decision
+
+    until = finding.risk_accepted_until
+    if until is None:
+        return "its acceptance never named an end"
+    if until <= now:
+        return f"its acceptance lapsed at {until.isoformat()}"
+    if not _decision._acceptance_covers(finding):
+        return "it was accepted at a lower severity than it has now, or at none"
+    return None
+
+
 def _blockers(scenario: FinancialScenario) -> tuple[list[dict], list[dict]]:
     from assurance import decision as _decision
     from assurance.dispatch import _BLOCKING_DECISIONS
@@ -220,13 +237,23 @@ def _blockers(scenario: FinancialScenario) -> tuple[list[dict], list[dict]]:
     unreadable: list[dict] = []
     linked = _linked_findings(scenario)
     rows = {str(f.uuid): f for f in Finding.objects.filter(deployment_id=scenario.deployment_id, uuid__in=linked)}
+    now = _decision.decision_now(Deployment.objects.get(pk=scenario.deployment_id))
     for uuid in linked:
         finding = rows.get(uuid)
         if finding is None:
             unreadable.append({"kind": "finding", "id": uuid,
                                "reason": f"finding {uuid} is not one of the deployment's findings now"})
             continue
-        if finding.status in RESOLVED_FINDING_STATUSES:
+        lapse = None
+        if finding.status == Finding.Status.ACCEPTED:
+            # An accepted finding is settled only while its acceptance STANDS, as the
+            # decision reads it (owner decision Q6). One that lapsed, never named an
+            # end, or was made at a lower severity is a risk nobody carries now: read
+            # as an active finding of its severity.
+            lapse = acceptance_lapse(finding, now)
+            if lapse is None:
+                continue
+        elif finding.status in RESOLVED_FINDING_STATUSES:
             continue
         if finding.status in UNTRUSTED_SEVERITY_STATUSES:
             unreadable.append({"kind": "finding", "id": uuid,
@@ -240,10 +267,12 @@ def _blockers(scenario: FinancialScenario) -> tuple[list[dict], list[dict]]:
         placed = next((d for t, d in _decision.FINDING_SEVERITY_DECISIONS if severity_rank(severity) >= severity_rank(t)),
                       None)
         if placed in _BLOCKING_DECISIONS:
+            carried = "" if lapse is None else f", accepted but {lapse}: nobody carries the risk now"
             blockers.append({"kind": "finding", "id": uuid, "severity": severity, "status": finding.status,
+                             "acceptance": lapse,
                              "places_the_deployment_at": str(placed),
-                             "reason": f"finding {uuid} ({severity}, {finding.status}) places the deployment at "
-                             f"{placed}"})
+                             "reason": f"finding {uuid} ({severity}, {finding.status}{carried}) places the deployment "
+                             f"at {placed}"})
     observed = list(CausalEffect.objects.filter(scenario=scenario, origin="observed").order_by("effect_key", "pk"))
     if observed:
         from assurance import workflow_chains
@@ -316,6 +345,10 @@ def _check_spine(scenario: FinancialScenario, option: engine_remediation.Option)
             continue
         if not found:
             raise engine_remediation.RemediationRefused("dependency_not_found", f"{item['kind']} {item['id']}")
+    if option.families is not None:
+        for family in option.families:
+            if not LossComponent.objects.filter(loss_event__scenario=scenario, family=family).exists():
+                raise engine_remediation.RemediationRefused("option_matches_nothing", family)
     if option.components is not None:
         keys = set()
         for event in LossEvent.objects.filter(scenario=scenario):
@@ -419,6 +452,14 @@ def simulate_option(option: RemediationOption, *, seed: int, draws: int, severe_
 
     runs = OptionRuns()
     scenario = FinancialScenario.objects.get(pk=option.scenario_id)
+    # The residual run holds more values than its current run (its reduction factor,
+    # its uniform draws and a reduction's draws per occurrence): checked FIRST, so a
+    # pair that cannot both fit is refused before either runs, never a completed
+    # current run beside a refused residual one (review round 1, LOW-2).
+    unfit = simulation_service.residual_unfit(scenario, option, seed=seed, draws=draws)
+    if unfit is not None:
+        (runs.code, runs.detail), runs.stage = unfit, "residual"
+        return runs
     for stage, remediation in (("current", None), ("residual", option)):
         if remaining() <= 0:
             runs.overrun.append(f"the {stage} run")
@@ -444,6 +485,41 @@ def simulate_option(option: RemediationOption, *, seed: int, draws: int, severe_
 
 
 # ------------------------------------------------------------ the ROI document
+
+#: The gross-cash figures shown beside the headline's (decision 6, the owner's interim).
+GROSS_FIGURES = (
+    "current_expected_annual_exposure",
+    "residual_expected_annual_exposure",
+    "expected_reduction",
+    "risk_adjusted_roi",
+    "payback",
+    "tail_reduction",
+)
+
+
+def ss_gross() -> str:
+    """The gross-cash line's name, as the run's record names it (no engine import)."""
+    return "gross_cash"
+
+
+def deployment_decision(scenario: FinancialScenario) -> dict:
+    """The deployment's standing decision as last recorded (``Deployment.decision``),
+    shown beside the economics as a statement and NOT as a veto: an owner's interim
+    (decision 9). Read, never recomputed, so the document stays a read of stored rows."""
+    from assurance.dispatch import _BLOCKING_DECISIONS
+
+    stored = Deployment.objects.filter(pk=scenario.deployment_id).values_list("decision", flat=True).first()
+    if not stored:
+        statement = "the deployment has no standing decision; this ROI does not stand in for one"
+    else:
+        statement = f"deployment decision: {stored}; this ROI does not override it"
+    return {
+        "decision": stored or None,
+        "blocking": bool(stored) and stored in _BLOCKING_DECISIONS,
+        "statement": statement,
+        "veto": "not a veto: the hard security veto reads the findings and effects this scenario rests on",
+        "source": "the deployment's stored standing decision, as last recorded; not recomputed here",
+    }
 
 
 def _current_of(residual: SimulationResult) -> SimulationResult | None:
@@ -544,6 +620,10 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
 
     residual_report = report.build_report(residual)
     current_report = None if current is None else report.build_report(current)
+    marked = residual_report.get("residual_of") or {}
+    if (marked.get("option"), marked.get("option_digest")) != (str(option.uuid), option.option_digest):
+        if "residual_option" not in failed:
+            failed.append("residual_option")
     for side, built in (("current", current_report), ("residual", residual_report)):
         if built is not None:
             failed.extend(f"{side}:{check}" for check in built["integrity"]["failed"])
@@ -566,9 +646,24 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
             figures_shown = False
             failed.append("current_pairing")
     if figures_shown:
-        figures = engine_remediation.economics(
-            now, after, engine_remediation.first_year_investment(parsed), code,
-            vetoed=vetoed["applies"] is not False,
+        investment = engine_remediation.first_year_investment(parsed)
+        figures = engine_remediation.economics(now, after, investment, code, vetoed=vetoed["applies"] is not False)
+        # Beside the headline (retained cash under a policy), the same economics on
+        # the gross-cash line, before insurance: an owner's interim (decision 6). The
+        # headline is unchanged.
+        if line == ss_gross():
+            figures["gross_cash"] = None
+        else:
+            gross = engine_remediation.economics(
+                engine_remediation.line_of(current.record, ss_gross())[1],
+                engine_remediation.line_of(residual.record, ss_gross())[1],
+                investment, code, vetoed=vetoed["applies"] is not False,
+            )
+            figures["gross_cash"] = {key: gross[key] for key in GROSS_FIGURES}
+        figures["gross_cash_statement"] = (
+            "the gross-cash line's reduction, ROI and payback, before insurance, shown beside the headline line's "
+            "(retained cash under a policy, else gross cash, which is then the headline itself); the headline is "
+            "unchanged"
         )
     else:
         line = None
@@ -587,9 +682,11 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
     if failed:
         why = f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail {', '.join(failed)}"
     elif not report.may_be_totalled(current_report):
-        why = f"the current run: {current_report['banner_reason']}"
-    elif not report.may_be_totalled(residual_report):
-        why = f"the residual run: {residual_report['banner_reason']}"
+        why = f"the current run: {current_report['banner_reason'] or 'not a run a total may sum'}"
+    elif not report.stands(residual_report):
+        # The residual run is never exposure (its report says so, and no total sums
+        # it): it is read as a sound account of its run, completed, verified, graded.
+        why = f"the residual run: {residual_report['banner_reason'] or 'not a sound account of its run'}"
     elif observed is not None and not observed["verified"]:
         why = "the control effect's cited retest no longer shows the control held: " + "; ".join(observed_reasons)
 
@@ -611,6 +708,7 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
         "utility_retained": utility_retained(scenario, option.utility_evidence or None),
         "confidence_delta": delta,
         "veto": vetoed,
+        "deployment_decision": deployment_decision(scenario),
         "status": SIMULATION_COMPLETED if figures_shown else "not_computed",
         "grade": grade,
         "banner": None if why is None else report.UNKNOWN_BANNER,
@@ -626,11 +724,14 @@ def roi_document(scenario: FinancialScenario, residual: SimulationResult | None 
 
 
 __all__ = [
+    "GROSS_FIGURES",
     "ROI_CHECKS",
     "ROI_LIMITATIONS",
     "VETO_POLICY",
     "OptionRuns",
+    "acceptance_lapse",
     "control_held",
+    "deployment_decision",
     "record_option",
     "resolve_retest",
     "retest_digest",

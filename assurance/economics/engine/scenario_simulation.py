@@ -1477,6 +1477,28 @@ def _check_budget(p: _Plan, length: int, years: int | None) -> None:
         raise sim.SimulationRefused("values_over_budget", f"{what} hold {held} values; at most {sim.MAX_VALUES}")
 
 
+def check_fits(si: ScenarioInput, *, seed: int, draws: int) -> int:
+    """The values a run of ``si`` would hold at its peak, or refused exactly as the run
+    would refuse it (``values_over_budget``, ``events_over_limit``) -- before anything
+    is sampled but the years' counts, which are drawn from the frequency's own stream
+    as the run draws them. So a caller can refuse a run that cannot fit before making
+    another (a residual run, which holds more than its current run, spec section 28.2).
+    Any other refusal of the inputs is raised as the run would raise it."""
+    sim.check_seed(seed)
+    sim.check_draws(draws)
+    p = plan(si)
+    if p.frequency is None:
+        _check_budget(p, draws, None)
+        return values_held(p, draws)
+    counts = np.asarray(p.frequency.distribution.sample(sim.RunRandom(seed).stream(sim.FREQUENCY_STREAM), draws),
+                        dtype=np.int64)
+    occurrences = int(counts.sum())
+    if occurrences > sim.MAX_EVENTS:
+        raise sim.SimulationRefused("events_over_limit", f"{occurrences} occurrences in {draws} years")
+    _check_budget(p, occurrences, draws)
+    return values_held(p, occurrences, draws)
+
+
 def _checked_draws(r: Resolved, drawn: np.ndarray) -> np.ndarray:
     drawn = np.asarray(drawn, dtype=np.float64)
     if not np.isfinite(drawn).all() or (drawn < 0.0).any() or (r.parameter.unit is Unit.RATIO and (drawn > 1.0).any()):
@@ -2092,6 +2114,7 @@ __all__ = [
     "REMEDIATION_STREAM_DOMAIN",
     "REMEDIATION_VERSION",
     "Remediation",
+    "check_fits",
     "draw_reduction",
     "reduction_at",
     "reductions",

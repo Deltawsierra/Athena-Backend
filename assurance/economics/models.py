@@ -83,7 +83,8 @@ CARD_RECORD_REFUSALS = {
     ),
     "receipt_record_malformed": (
         "a receipt row holds a schema-valid mythos.financial-exposure-receipt/v1 document naming its own card, "
-        "scenario and tenant, and the DSSE envelope signed over exactly that document"
+        "scenario and tenant, and the DSSE envelope signed over exactly that document; and it receipts a scenario's "
+        "own run, never a residual run under a remediation option, which is not the scenario's exposure"
     ),
 }
 _REFUSAL_TEXT.update(CARD_RECORD_REFUSALS)
@@ -2482,6 +2483,22 @@ def _checked_state(row) -> tuple:
     return tuple(json.dumps(field.value_from_object(row), sort_keys=True, default=str) for field in row._meta.concrete_fields)
 
 
+class SimulationResultQuerySet(AppendOnlyQuerySet):
+    """The append-only queryset, and the ONE place the exposure filter is written
+    (spec, section 28): a scenario's own runs are its exposure; a residual run under
+    a remediation option never is."""
+
+    def exposure_runs(self):
+        """The runs that are a scenario's exposure: none under a remediation option.
+        Every reader of exposure -- the results route, the scenario document, the
+        events banner, any total -- reads through this."""
+        return self.filter(remediation__isnull=True)
+
+    def residual_runs(self):
+        """The residual runs under a remediation option: never exposure."""
+        return self.filter(remediation__isnull=False)
+
+
 class SimulationResult(_AppendOnly):
     """One Monte Carlo run of one scenario version (spec, section 25.6): the seed and
     the draws; the canonical inputs and their digest; every version the figures rest
@@ -2497,6 +2514,8 @@ class SimulationResult(_AppendOnly):
     a decimal string (``result_malformed``), and both digests are recomputed on save
     (``digest_mismatch``). It has no account column, so removing an operator, a stop,
     never writes it, and it goes with its deployment."""
+
+    objects = SimulationResultQuerySet.as_manager()
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -2762,6 +2781,11 @@ class FinancialExposureReceipt(_AppendOnly):
         card = list(card)
         if not card or card[0][:3] != (self.simulation_id, self.scenario_id, self.deployment_id):
             raise EconomicsRefused("cross_tenant_reference", "the receipt's card is another result's")
+        residual = SimulationResult._base_manager.filter(pk=self.simulation_id).values_list("remediation_id", flat=True)
+        if any(option is not None for option in residual):
+            raise EconomicsRefused(
+                "receipt_record_malformed", "a residual run under a remediation option is not receipted: not exposure"
+            )
         try:
             # Imported on use, never at load: the models' import loads no part of
             # the receipt module (spec, section 26.7).

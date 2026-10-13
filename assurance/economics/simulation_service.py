@@ -207,6 +207,32 @@ def _code(error) -> tuple[str, str]:
     return getattr(error, "code", "simulation_failed"), getattr(error, "detail", "") or str(error)
 
 
+#: The refusals a pair of runs is checked for before either runs (spec, section 28.2).
+BUDGET_REFUSALS = frozenset({"values_over_budget", "events_over_limit"})
+
+
+def residual_unfit(scenario: FinancialScenario, option: RemediationOption, *, seed: int, draws: int
+                   ) -> tuple[str, str] | None:
+    """``(code, detail)`` where ``option``'s residual run of ``scenario`` with ``seed``
+    and ``draws`` would not fit the engine's values or events budget -- checked before
+    the current run is made, so a pair is refused whole and up front (nothing run,
+    nothing recorded) -- else ``None``. Any other refusal, or a fault, is left to the
+    runs themselves, which record or return it as step 7b does. Never raises."""
+    try:
+        _, _, ss, _ = _engine()
+        ss.check_fits(load_input(scenario, remediation=option), seed=seed, draws=draws)
+    except Exception as error:  # noqa: BLE001 - only a budget refusal is this check's to answer
+        code = getattr(error, "code", None)
+        if code in BUDGET_REFUSALS:
+            return code, (
+                f"the residual run would not fit ({error.detail}); it holds more values than its current run (its "
+                "reduction factor, uniform draws and a reduction's draws per occurrence): choose a smaller policy. "
+                "Nothing was run or recorded"
+            )
+        return None
+    return None
+
+
 def simulate_scenario(
     scenario: FinancialScenario,
     *,
@@ -318,8 +344,10 @@ __all__ = [
     "TIME_BUDGET_SECONDS",
     "UNRECORDED",
     "SimulationOutcome",
+    "BUDGET_REFUSALS",
     "load_input",
     "load_input_of",
     "remediation_of",
+    "residual_unfit",
     "simulate_scenario",
 ]

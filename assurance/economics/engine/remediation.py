@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from types import MappingProxyType
 
+from . import currency as _currency
 from . import parameter_set as pset
 from .formulas import COMPONENT_FAMILIES
 from .money import Money, MoneyRefused, compute, decimal_text
@@ -121,6 +122,14 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "gate's own verdict refuses it (every reason is named)"
         ),
         "remediation_target_unknown": "a component the control effect names is not one of the scenario's",
+        "option_matches_nothing": (
+            "a loss family the control effect names is the family of at least one of the scenario's components: an "
+            "option that acts on nothing would change nothing"
+        ),
+        "cost_below_minor_unit": (
+            "a cost is stated at the currency's minor unit or coarser (USD to the cent, JPY to the yen, KWD to the "
+            "fils): a figure finer than the money it is paid in is refused, never rounded"
+        ),
         "remediation_engine_unavailable": "the probabilistic engine will not import, so the reductions cannot be checked",
     }
 )
@@ -191,8 +200,17 @@ def _cost(entry, name: str, path: str) -> Parameter:
     entry = pset._object(entry, path, _COST_REQUIRED, _COST_OPTIONAL)
     if entry.get("fresh_until", "") is None:
         entry = {k: v for k, v in entry.items() if k != "fresh_until"}
-    parameter = pset._parameter(name, Unit.MONEY, entry, path)
-    return pset._money_is_not_observed(parameter, path)
+    parameter = pset._money_is_not_observed(pset._parameter(name, Unit.MONEY, entry, path), path)
+    places = _currency.minor_units(parameter.currency)
+    if places is not None:
+        unit = Decimal(1).scaleb(-places)
+        for point in POINTS:
+            amount = parameter.at(point).amount
+            if compute(lambda a=amount: a.quantize(unit, rounding=ROUND_HALF_EVEN)) != amount:
+                raise RemediationRefused(
+                    "cost_below_minor_unit", f"{path}.{point.value} {Parameter.text(amount)} {parameter.currency}"
+                )
+    return parameter
 
 
 def _reduction(entry, name: str, path: str, stated) -> tuple[Parameter, dict | None]:
@@ -355,12 +373,12 @@ class Line:
     p95: Decimal | None
 
 
-def line_of(record: Mapping) -> tuple[str, Line]:
-    """The headline line of a completed run's record: its name (``retained_cash``
-    under a policy, else ``gross_cash``, as the card and the receipt read it) and
-    its figures at full precision."""
+def line_of(record: Mapping, name: str | None = None) -> tuple[str, Line]:
+    """A completed run's line and its figures at full precision: ``name``, or its
+    headline (``retained_cash`` under a policy, else ``gross_cash``, as the card and
+    the receipt read it)."""
     scenario = record["scenario"]
-    name = scenario["headline"]
+    name = scenario["headline"] if name is None else name
     block = scenario[name]
 
     def decimal(text):
@@ -389,16 +407,22 @@ def _fixed(value: Decimal, places: int) -> str:
     return format(compute(lambda: value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)), "f")
 
 
+def _at_minor_unit(amount: Decimal, currency: str) -> Decimal:
+    return Money(amount, currency).display_amount()
+
+
 def economics(current: Line, residual: Line, investment: Mapping[str, Decimal], currency: str, *, vetoed: bool
               ) -> dict:
-    """The option's economics from the two runs' headline lines (spec, section 28):
-    every money figure at the currency's minor unit, half-even; the ROI to
+    """The option's economics from the two runs' lines (spec, section 28): every
+    money figure at the currency's minor unit, half-even; the ROI to
     :data:`ROI_PLACES` and the payback to :data:`PAYBACK_PLACES`, half-even; each
-    from full precision. A figure that is not meaningful is ``None`` with the
-    reason: an ROI over an investment of zero; a payback where the expected
-    reduction is not above zero (never a negative or infinite one); anything of an
-    expected annual exposure where the scenario has no frequency. ``vetoed``: the
-    hard security veto applies, so the ROI and the payback are display-only."""
+    computed from full precision. The zero rules read the figures AS SHOWN (review
+    round 1, LOW-1): beside an investment shown as zero, or a reduction shown as zero
+    or below, neither the ROI nor the payback is given, each ``None`` with the
+    reason; never a negative or infinite payback; nothing of an expected annual
+    exposure where the scenario has no frequency. ``vetoed``: the hard security veto
+    applies, so the ROI and the payback are display-only, and no reason argues
+    against acting."""
     base = investment["base"]
     if current.expected_annual is None or residual.expected_annual is None:
         why = "no expected annual exposure: the scenario states no frequency, so a run is per occurrence"
@@ -407,16 +431,27 @@ def economics(current: Line, residual: Line, investment: Mapping[str, Decimal], 
         payback = {"value": None, "not_meaningful": why}
     else:
         reduction = compute(lambda: current.expected_annual - residual.expected_annual)
-        if base == 0:
-            roi = {"value": None, "not_meaningful": "the first-year investment is zero: a ratio to it is not meaningful"}
+        no_investment = _at_minor_unit(base, currency) == 0
+        no_reduction = _at_minor_unit(reduction, currency) <= 0
+        if no_investment:
+            roi = {"value": None, "not_meaningful": "the first-year investment is zero at the currency's minor unit: "
+                   "a ratio to it is not meaningful"}
+        elif no_reduction:
+            roi = {"value": None, "not_meaningful": "the expected annual reduction is zero at the currency's minor "
+                   "unit: there is no return to state"}
         else:
             roi = {"value": _fixed(compute(lambda: reduction / base), ROI_PLACES), "not_meaningful": None}
-        if reduction <= 0:
-            payback = {
-                "value": None,
-                "not_meaningful": "the expected annual reduction is not above zero: modelled avoided loss never repays "
-                "the investment, and no negative or infinite payback is shown",
-            }
+        if no_reduction:
+            if vetoed:
+                text = "the expected annual reduction is not above zero at the currency's minor unit: no payback " \
+                    "period is shown"
+            else:
+                text = "the expected annual reduction is not above zero at the currency's minor unit: modelled " \
+                    "avoided loss never repays the investment, and no negative or infinite payback is shown"
+            payback = {"value": None, "not_meaningful": text}
+        elif no_investment:
+            payback = {"value": None, "not_meaningful": "the first-year investment is zero at the currency's minor "
+                       "unit: there is nothing to pay back"}
         else:
             payback = {"value": _fixed(compute(lambda: base / reduction), PAYBACK_PLACES), "not_meaningful": None}
     roi.update(statement=DECISION_SUPPORT, places=ROI_PLACES, display_only=vetoed)

@@ -27,12 +27,14 @@ import os
 import subprocess
 import sys
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import connection
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from assurance.economics import remediation_service, report, validity_service
@@ -240,9 +242,11 @@ def test_a_reduction_of_zero_reduces_exactly_nothing(deployment, people):
     assert roi["figures"]["expected_reduction"] == "0.00"
     assert roi["figures"]["tail_reduction"]["p90"]["reduction"] == "0.00"
     assert roi["figures"]["tail_reduction"]["p95"]["reduction"] == "0.00"
+    # Beside a reduction shown as zero, neither an ROI nor a payback is given (round 1, LOW-1).
     assert roi["figures"]["payback"]["value"] is None
     assert "not above zero" in roi["figures"]["payback"]["not_meaningful"]
-    assert roi["figures"]["risk_adjusted_roi"]["value"] == "0.0000"
+    assert roi["figures"]["risk_adjusted_roi"]["value"] is None
+    assert "zero at the currency's minor unit" in roi["figures"]["risk_adjusted_roi"]["not_meaningful"]
 
 
 def test_a_reduction_of_one_on_every_family_leaves_nothing(deployment, people):
@@ -340,20 +344,37 @@ def test_roi_and_payback_arithmetic():
     assert third["risk_adjusted_roi"]["value"] == "0.3333" and third["payback"]["value"] == "3.00"
 
 
-def test_a_zero_investment_has_no_roi_and_pays_back_at_once():
-    figures = er.economics(_line("500"), _line("100"), _investment("0", "0"), "USD", vetoed=False)
+@pytest.mark.parametrize("implementation", ["0", "0.004"])
+def test_an_investment_shown_as_zero_has_no_roi_and_no_payback(implementation):
+    """Round 1, LOW-1: the zero rules read the investment AS SHOWN. Below the minor unit
+    it is shown 0.00, so neither an ROI nor a payback is given beside it (a cost that
+    fine is refused when an option is written; the rule holds here regardless)."""
+    figures = er.economics(_line("500"), _line("100"), _investment(implementation, "0"), "USD", vetoed=False)
+    assert figures["first_year_investment"]["base"] == "0.00"
     assert figures["risk_adjusted_roi"]["value"] is None
-    assert "investment is zero" in figures["risk_adjusted_roi"]["not_meaningful"]
-    assert figures["payback"]["value"] == "0.00"
+    assert "investment is zero at the currency's minor unit" in figures["risk_adjusted_roi"]["not_meaningful"]
+    assert figures["payback"]["value"] is None
+    assert "nothing to pay back" in figures["payback"]["not_meaningful"]
 
 
-@pytest.mark.parametrize("residual", ["500", "600"])
-def test_a_reduction_not_above_zero_has_no_payback(residual):
-    """Never a negative or infinite payback: a reduction of zero, or below it."""
+@pytest.mark.parametrize("residual", ["500", "600", "499.996"])
+def test_a_reduction_not_above_zero_as_shown_has_no_roi_and_no_payback(residual):
+    """Never a negative or infinite payback, and no figure beside a reduction shown as
+    zero (round 1, LOW-1): a reduction of zero, below it, or below the minor unit
+    (0.004 is shown 0.00; the reviewer's 361,995,995.24-year payback)."""
     figures = er.economics(_line("500"), _line(residual), _investment("1000", "0"), "USD", vetoed=False)
     assert figures["payback"]["value"] is None
     assert "no negative or infinite payback" in figures["payback"]["not_meaningful"]
-    assert figures["risk_adjusted_roi"]["value"] in ("0.0000", "-0.1000")
+    assert figures["risk_adjusted_roi"]["value"] is None
+
+
+def test_under_the_veto_no_reason_argues_against_acting():
+    """Round 1, NIT: beside "remediation is required regardless of ROI", a payback
+    that is not meaningful says so neutrally."""
+    vetoed = er.economics(_line("500"), _line("500"), _investment("1000", "0"), "USD", vetoed=True)
+    text = vetoed["payback"]["not_meaningful"]
+    assert "no payback period is shown" in text and "never repays" not in text
+    assert vetoed["payback"]["display_only"] is True
 
 
 def test_without_a_frequency_nothing_annual_is_meaningful():
@@ -417,11 +438,17 @@ def test_a_critical_finding_places_it_at_not_recommended(deployment, people):
     assert roi["veto"]["blockers"][0]["places_the_deployment_at"] == "not_recommended"
 
 
-@pytest.mark.parametrize("fields", [{"severity": "medium"}, {"severity": "high", "status": "closed"},
-                                    {"severity": "critical", "status": "accepted"}])
+@pytest.mark.parametrize("fields", [
+    {"severity": "medium"},
+    {"severity": "high", "status": "closed"},
+    {"severity": "critical", "status": "false_positive"},
+    {"severity": "critical", "status": "accepted", "risk_accepted_severity": "critical",
+     "risk_accepted_until": timezone.now() + timedelta(days=30)},
+])
 def test_the_veto_does_not_apply_where_no_blocker_stands(deployment, people, fields):
-    """A medium finding places a deployment at ready_restricted; a closed or accepted
-    one no longer counts against it (Mythos policy's resolved statuses)."""
+    """A medium finding places a deployment at ready_restricted; a closed or
+    false-positive one no longer counts against it; an accepted one does not while its
+    acceptance STANDS (a named end ahead, at the severity it has now)."""
     scenario = stored(deployment, people["analyst"])
     _set_finding(scenario, **fields)
     veto = remediation_service.veto(scenario)
@@ -495,7 +522,9 @@ def test_a_clean_pair_carries_no_banner_and_may_be_totalled(deployment, people):
     assert roi["banner"] is None and roi["excluded_from_totals"] is False and roi["banner_reason"] is None
     assert roi["grade"] in report.GRADES_FOR_TOTALS
     assert roi["integrity"] == {"verified": True, "checks": roi["integrity"]["checks"], "failed": []}
-    assert report.may_be_totalled(roi) is True
+    # An ROI document is never a report of exposure: the totals test refuses its schema
+    # (round 1, MEDIUM-1).
+    assert report.may_be_totalled(roi) is False
     assert roi["confidence_delta"]["change"] == "unchanged"
 
 
@@ -977,6 +1006,200 @@ def test_every_remediation_refusal_is_published_and_given():
                 raised.update({node.body.value, node.orelse.value})
     raised.add("remediation_engine_unavailable")  # the route's 503, named from the table
     assert raised == set(er.REFUSALS), sorted(raised ^ set(er.REFUSALS))
+
+
+# ======================================================================
+# Review round 1 (#160)
+# ======================================================================
+
+
+def test_a_residual_run_is_marked_in_its_report_and_never_totalled(deployment, people):
+    """MEDIUM-1: below the routes, a residual run's report says it is residual
+    (``residual_of``) and is excluded from every total; ``may_be_totalled`` refuses it
+    while it takes the current run's report of the same pair. The residual report is
+    still a sound account of its run (``report.stands``), which the ROI reads."""
+    scenario, option, current, residual = _service_runs(deployment, people, option_body("0.5"), draws=2_000)
+    validity_service.issue_card(current)
+    validity_service.issue_card(residual)
+    built = report.build_report(residual)
+    assert built["residual_of"]["option"] == str(option.uuid)
+    assert built["residual_of"]["option_digest"] == option.option_digest
+    assert built["excluded_from_totals"] is True
+    assert report.stands(built) is True
+    assert report.may_be_totalled(built) is False
+    own = report.build_report(current)
+    assert own["residual_of"] is None and report.may_be_totalled(own) is True
+    # The one place the filter is written: exposure runs are the scenario's own.
+    assert list(SimulationResult.objects.exposure_runs().filter(scenario=scenario)) == [current]
+    assert list(SimulationResult.objects.residual_runs().filter(scenario=scenario)) == [residual]
+
+
+def _redigested(document, **changes):
+    edited = {key: value for key, value in document.items() if key != "digest"}
+    for key, value in changes.items():
+        if value is _DROP:
+            edited.pop(key)
+        else:
+            edited[key] = value
+    edited["digest"] = report.digest_of(edited)
+    return edited
+
+
+_DROP = object()
+
+
+def test_the_totals_test_requires_the_report_schema_and_the_mark(deployment, people):
+    """MEDIUM-1: ``may_be_totalled`` fails closed on what a report must say of itself:
+    its schema (an ROI document, or any other, is refused) and ``residual_of`` present
+    and null. Each edit is re-digested, so only the rule can refuse it."""
+    scenario, _, roi = proposed(deployment, people)
+    current = SimulationResult.objects.exposure_runs().get(scenario=scenario)
+    own = report.build_report(current)
+    assert report.may_be_totalled(own) is True
+    assert report.may_be_totalled(_redigested(own, residual_of=_DROP)) is False
+    assert report.may_be_totalled(_redigested(own, residual_of={"option": "x"})) is False
+    assert report.may_be_totalled(_redigested(own, schema="mythos.economics.report/v0")) is False
+    assert report.may_be_totalled(_redigested(own, schema=_DROP)) is False
+    assert report.may_be_totalled(roi) is False and report.verifies(roi)
+
+
+def test_a_residual_run_is_never_receipted(deployment, people):
+    """MEDIUM-1: the receipt service refuses a residual run before anything is read,
+    signed or recorded, and the receipt row refuses one on save."""
+    from assurance.economics import receipt_service
+    from assurance.economics.models import FinancialExposureReceipt
+
+    _, _, _, residual = _service_runs(deployment, people, option_body("0.5"), draws=2_000)
+    card = validity_service.issue_card(residual).card
+
+    def signer(document):
+        raise AssertionError("a residual run reached the signer")
+
+    outcome = receipt_service.issue_receipt(residual, keyring=None, signer=signer)
+    assert outcome.receipt is None and outcome.code == "residual_not_receipted"
+    assert not FinancialExposureReceipt.objects.exists()
+    row = FinancialExposureReceipt(
+        deployment=deployment, scenario_id=residual.scenario_id, simulation=residual, card=card,
+        receipt_id="r" * 32, document={}, envelope={}, key_id="k", generated_at=timezone.now(),
+    )
+    with pytest.raises(EconomicsRefused) as caught:
+        row.check_new()
+    assert caught.value.code == "receipt_record_malformed" and "residual" in caught.value.detail
+
+
+@pytest.mark.parametrize(
+    "acceptance, applies, decision",
+    [
+        ("standing", False, "ready_restricted"),
+        ("lapsed", True, "needs_more_evidence"),
+        ("undated", True, "needs_more_evidence"),
+        ("outgrown", True, "needs_more_evidence"),
+    ],
+)
+def test_an_accepted_finding_is_settled_only_while_its_acceptance_stands(deployment, people, acceptance, applies,
+                                                                         decision):
+    """MEDIUM-2, the reviewer's table, against Mythos's own ``compute_decision``: a
+    critical finding accepted is settled only while its acceptance stands (a named end
+    ahead, at the severity it has now: ``decision.accepted_risk_signal``). Lapsed,
+    undated or outgrown, nobody carries the critical risk: a hard release blocker, and
+    the veto applies."""
+    from assurance.decision import compute_decision
+
+    scenario = stored(deployment, people["analyst"])
+    fields = {
+        "standing": {"risk_accepted_until": timezone.now() + timedelta(days=30), "risk_accepted_severity": "critical"},
+        "lapsed": {"risk_accepted_until": timezone.now() - timedelta(days=1), "risk_accepted_severity": "critical"},
+        "undated": {"risk_accepted_until": None, "risk_accepted_severity": "critical"},
+        "outgrown": {"risk_accepted_until": timezone.now() + timedelta(days=30), "risk_accepted_severity": "low"},
+    }[acceptance]
+    _set_finding(scenario, severity="critical", status="accepted", **fields)
+    deployment.refresh_from_db()
+    assert compute_decision(deployment) == decision
+    veto = remediation_service.veto(scenario)
+    assert veto["applies"] is applies, veto["reason"]
+    if applies:
+        (blocker,) = veto["blockers"]
+        assert blocker["places_the_deployment_at"] == "not_recommended"
+        assert "nobody carries the risk now" in blocker["reason"] and blocker["acceptance"]
+        assert veto["statement"] == er.VETO_STATEMENT
+    else:
+        assert veto["statement"] is None
+
+
+@pytest.mark.parametrize("currency, figure", [("USD", "0.004"), ("JPY", "1000.5"), ("KWD", "1.0005")])
+def test_a_cost_finer_than_the_minor_unit_is_refused(deployment, people, currency, figure):
+    """LOW-1: a cost is paid in the currency's money: one finer than its minor unit is
+    refused when the option is written, never rounded."""
+    scenario = stored(deployment, people["analyst"], currency=currency)
+    body = option_body("0.5", implementation=figure, currency=currency)
+    response = _mitigate(_client(people["analyst"]), deployment, scenario, body)
+    assert response.status_code == 400 and response.json()["code"] == "cost_below_minor_unit", response.content
+    fine = option_body("0.5", implementation={"JPY": "1000", "KWD": "1.005", "USD": "0.01"}[currency],
+                       currency=currency)
+    assert _mitigate(_client(people["analyst"]), deployment, scenario, fine).status_code == 201
+
+
+def test_a_pair_that_cannot_both_fit_is_refused_before_either_runs(deployment, people):
+    """LOW-2: at detailed_1m step 6's fixture's current run fits and its residual run
+    does not (it holds about 21% more values). The pair is refused up front, 400, and
+    nothing is run or recorded: never a completed current run beside a refused
+    residual one."""
+    scenario = stored(deployment, people["analyst"])
+    client = _client(people["analyst"])
+    option = _mitigate(client, deployment, scenario, option_body("0.5")).json()["option"]["uuid"]
+    response = _simulate(client, deployment, scenario, option, {"seed": 7, "policy": "detailed_1m"})
+    assert response.status_code == 400, response.content
+    body = response.json()
+    assert body["code"] == "values_over_budget" and body["stage"] == "residual"
+    assert "Nothing was run or recorded" in body["detail"]
+    assert body["current"]["run"] is None and body["residual"]["run"] is None
+    assert not SimulationResult.objects.filter(scenario=scenario).exists()
+
+
+def test_a_family_that_matches_no_component_is_refused(deployment, people):
+    """NIT: an option that would act on nothing is refused, as a component that is not
+    the scenario's is."""
+    scenario = stored(deployment, people["analyst"])
+    body = option_body(None, "0.5", acts_on={"families": ["notification", "business_interruption"]})
+    response = _mitigate(_client(people["analyst"]), deployment, scenario, body)
+    assert response.status_code == 400 and response.json()["code"] == "option_matches_nothing"
+    assert "business_interruption" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("stored_decision", ["not_recommended", "paused", "ready", None])
+def test_the_deployments_standing_decision_is_shown_never_as_a_veto(deployment, people, stored_decision):
+    """The owner's interim on decision 9: the deployment's standing decision, as last
+    recorded, is stated beside the economics; it is not a veto, and the ROI does not
+    override it."""
+    scenario, _, _ = proposed(deployment, people)
+    Deployment.objects.filter(pk=deployment.pk).update(decision=stored_decision)
+    roi = _roi(_client(people["owner"]), deployment, scenario).json()
+    shown = roi["deployment_decision"]
+    assert shown["decision"] == stored_decision
+    assert shown["blocking"] is (stored_decision in ("not_recommended", "paused"))
+    if stored_decision is None:
+        assert shown["statement"] == "the deployment has no standing decision; this ROI does not stand in for one"
+    else:
+        assert shown["statement"] == f"deployment decision: {stored_decision}; this ROI does not override it"
+    assert roi["veto"]["applies"] is False  # the medium finding: no veto, whatever the deployment's decision
+
+
+def test_the_gross_cash_economics_are_shown_beside_the_retained_headline(deployment, people):
+    """The owner's interim on decision 6: under a policy the headline stays retained
+    cash, and the gross-cash reduction, ROI and payback are shown beside it. r_m =
+    0.25 cuts the gross by a quarter where the deductible leaves the retained cash
+    nearly as it was (the reviewer's case)."""
+    scenario, _, roi = proposed(deployment, people, option_body(None, "0.25"), policy=True)
+    assert roi["line"] == "retained_cash"
+    gross = roi["figures"]["gross_cash"]
+    assert set(gross) == set(remediation_service.GROSS_FIGURES)
+    now = Decimal(gross["current_expected_annual_exposure"])
+    after = Decimal(gross["residual_expected_annual_exposure"])
+    assert abs(after - now * Decimal("0.75")) <= Decimal("0.01")
+    assert Decimal(gross["expected_reduction"]) > Decimal(roi["figures"]["expected_reduction"])
+    assert Decimal(gross["risk_adjusted_roi"]["value"]) > Decimal(roi["figures"]["risk_adjusted_roi"]["value"] or "0")
+    _, _, plain = proposed(Deployment.objects.create(name="no-policy", owner=people["owner"]), people)
+    assert plain["line"] == "gross_cash" and plain["figures"]["gross_cash"] is None
 
 
 SPEC_PHRASES = (

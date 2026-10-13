@@ -624,12 +624,19 @@ guard of its own, serves ONE remediation option per scenario version and its eco
 
 The ROI document is canonical JSON with its own digest, built from stored rows only,
 each run verified as the report verifies one; where either is Unknown, refused,
-card-less or unverified it carries the banner and `excluded_from_totals: true`. The hard
-security veto always wins: where a finding the scenario rests on is a hard release
-blocker in Mythos policy (active and high or critical), or an observed effect's chain is
-violated, the document says "remediation is required regardless of ROI" and the ROI and
-payback are display-only; a blocker status that cannot be read is `"unknown"`, which
-applies. None of the three routes is a stop, and a fault in this module leaves only
+card-less or unverified it carries the banner and `excluded_from_totals: true`. Beside a
+first-year investment or a reduction shown as 0.00 there is no ROI and no payback, and a
+cost finer than the currency's minor unit is refused. Under a policy the headline is the
+retained cash, with the gross-cash reduction, ROI and payback shown beside it, and the
+deployment's standing decision is stated ("this ROI does not override it"), never as a
+veto. The hard security veto always wins: where a finding the scenario rests on is a
+hard release blocker in Mythos policy (active and high or critical, or accepted with an
+acceptance that lapsed, never named an end or was made at a lower severity), or an
+observed effect's chain is violated, the document says "remediation is required
+regardless of ROI" and the ROI and payback are display-only; a blocker status that
+cannot be read is `"unknown"`, which applies. A residual run is never exposure: its
+report is marked `residual_of`, `may_be_totalled` refuses it (and anything that is not a
+report, the ROI document included), and it is never receipted. None of the three routes is a stop, and a fault in this module leaves only
 these routes unserved.
 
 ## When a dependency fails

@@ -3767,6 +3767,7 @@ returned as theirs, with their meaning, and none is published twice with another
 | `card_record_malformed` | a card row that is not its own result's card: another scenario, another grade, a float, a digest that is not the card's or the analysis's |
 | `receipt_record_malformed` | a receipt row whose document is not core's schema, names another scenario, tenant, id or card, or whose envelope is not one signature, in core's form, over exactly it |
 | `result_not_completed` | a refused run has no figures to sign |
+| `residual_not_receipted` | a residual run under a remediation option (section 28) is never exposure, and is not receipted: refused before anything is read, signed or recorded; the receipt row refuses one on save (`receipt_record_malformed`) |
 | `receipt_figure_unavailable` | one of the six figures does not exist for the run |
 | `system_fingerprint_unavailable` | the card names no fingerprint to bind |
 | `source_snapshot_mismatch` | a source snapshot's rows no longer give its content hash |
@@ -4238,9 +4239,12 @@ and `excluded_from_totals: false`.
 
 Nothing may sum an excluded result into a total. `report.may_be_totalled(report)` is
 the one test a total applies, and it **fails closed** (review round 1, LOW-4): true
-only for a report that carries the digest of its own bytes (`verifies`), of a
-completed result whose rows verified, `excluded_from_totals` false, and graded A, B,
-C or D (`report.GRADES_FOR_TOTALS`, an allow-list). A forged, edited or stale report
+only for a report of this schema (`mythos.economics.report/v1`; an ROI document or any
+other is refused), that carries the digest of its own bytes (`verifies`), of a
+completed result whose rows verified, `excluded_from_totals` false, graded A, B,
+C or D (`report.GRADES_FOR_TOTALS`, an allow-list), and of a scenario's own run
+(`residual_of` present and null: a residual run under a remediation option is never
+exposure, section 28.5; step 13's review round 1, MEDIUM-1). A forged, edited or stale report
 is refused, and so is one re-digested with an Unknown grade. A total of several
 reports leaves out every one it refuses. No route serves a total yet (section
 27.10).
@@ -4423,10 +4427,10 @@ old, and the same option posted again returns the one recorded. Its document
 | Field | Holds |
 |---|---|
 | `title` | 1 to 255 characters |
-| `implementation_cost`, `recurring_cost` | money, as a parameter set's variable is stated (unit `money`, low, base, high, currency, `source_type`, `evidence_ref`, `effective_date`, optionally `fresh_until`); one currency, the scenario's (`currency_mismatch`: nothing converts here); never `MYTHOS_OBSERVED` (`observed_source_not_observable`); the recurring cost is a year's |
+| `implementation_cost`, `recurring_cost` | money, as a parameter set's variable is stated (unit `money`, low, base, high, currency, `source_type`, `evidence_ref`, `effective_date`, optionally `fresh_until`); one currency, the scenario's (`currency_mismatch`: nothing converts here); never `MYTHOS_OBSERVED` (`observed_source_not_observable`); at the currency's minor unit or coarser (`cost_below_minor_unit`: USD 0.004 or JPY 1000.5 is refused, never rounded; review round 1, LOW-1); the recurring cost is a year's |
 | `time_to_implement_days` | a whole number from 0 to 3,650 |
 | `dependencies` | at most 20, each text (1 to 500 characters) or a SPINE finding or asset of the deployment by its uuid, never a copy (`dependency_malformed`, `dependency_not_found`) |
-| `control_effect` | `frequency_reduction` `r_f` and/or `magnitude_reduction` `r_m` (`control_effect_missing` otherwise), each a ratio in [0, 1] with low, base, high, source and evidence, optionally a stated distribution; `acts_on`: every component (absent), or the loss families or the scenario's components (`<event key>/<component key>`) it names, one or the other (`acts_on_malformed`, `remediation_target_unknown`); `observed_by`: the retest it was observed in (section 28.6) |
+| `control_effect` | `frequency_reduction` `r_f` and/or `magnitude_reduction` `r_m` (`control_effect_missing` otherwise), each a ratio in [0, 1] with low, base, high, source and evidence, optionally a stated distribution; `acts_on`: every component (absent), or the loss families or the scenario's components (`<event key>/<component key>`) it names, one or the other (`acts_on_malformed`, `remediation_target_unknown`; a family that is no component's is refused, `option_matches_nothing`); `observed_by`: the retest it was observed in (section 28.6) |
 | `utility_evidence` | optionally, the retest cited for utility retained (section 28.3) |
 
 Each reduction must be admitted by the run's own parameter-to-distribution rule
@@ -4474,8 +4478,15 @@ checked against the inputs on save). A run with no option has no such key: every
 digest recorded before this step is unchanged. Every limit, the 120 s budget, the
 idempotency and the insert-only transaction of section 25.6 apply; the values budget
 counts the residual run's factor, its uniform draws and a reduction's draws per
-occurrence (`REMEDIATION_TEMPORARIES`). NO transaction or lock is held during either
-Monte Carlo (`test_no_transaction_is_held_while_either_run_computes`).
+occurrence (`REMEDIATION_TEMPORARIES`): about 21% more values than its current run on
+step 6's fixture. So the pair is checked FIRST (`ss.check_fits`, the residual run's plan
+and the years' counts from the frequency's own stream, exactly as the run draws them):
+a residual run that would not fit (`values_over_budget`, `events_over_limit`) refuses
+the pair up front, 400, with nothing run or recorded -- never a completed current run
+beside a refused residual one (review round 1, LOW-2: at `detailed_1m` step 6's fixture
+holds 28M values in its current run and 34M in its residual, past the 30M budget). NO
+transaction or lock is held during either Monte Carlo
+(`test_no_transaction_is_held_while_either_run_computes`).
 
 Each run is graded by its own Validity Card (section 26): a residual run's analysis is
 made on its own draws with the option applied, ranks a drawn reduction as it ranks a
@@ -4508,8 +4519,24 @@ else gross cash, as the card and the receipt read it -- and computed once:
 | `confidence_delta` | the residual card's grade against the current card's, each as its card document states it where it verifies (section 27.5): `improved`, `unchanged`, `worsened`, or `not_comparable` with the reason |
 
 Money is at the currency's minor unit, half-even, as section 27.5 rounds it; the ROI and
-the payback are half-even to their places. Without a frequency there is no expected
-annual exposure, so no reduction, ROI or payback, each saying so. The document carries
+the payback are half-even to their places. **The zero rules read the figures as shown**
+(review round 1, LOW-1): beside a first-year investment shown as zero, or an expected
+reduction shown as zero or below, neither the ROI nor the payback is given, each `null`
+with the reason -- never a ratio or a period beside a served 0.00. Under the veto a
+reason never argues against acting. Without a frequency there is no expected annual
+exposure, so no reduction, ROI or payback, each saying so.
+
+Two of the owner's interims (pending decisions 6 and 9, section 28.10):
+
+- **The gross-cash line beside the headline.** Under a policy the headline stays the
+  retained cash; `figures.gross_cash` gives the gross-cash line's EALs, reduction, ROI,
+  payback and tail reduction beside it (`null` where the headline is gross cash). On a
+  deductible the insurer bears most of a magnitude reduction, so the two can differ by
+  orders of magnitude.
+- **The deployment's standing decision**, as last recorded (`Deployment.decision`, read,
+  never recomputed), is stated beside the economics, `deployment_decision`: "deployment
+  decision: not_recommended; this ROI does not override it" (or that there is none). It
+  is NOT a veto. The document carries
 the option (its costs and control effect as recorded), each run's identity, status,
 grade, banner reason and integrity, the line, the currency, `limitations` and `digest`:
 `sha256:` over its canonical bytes without it, as section 27.5's report does. The same
@@ -4523,9 +4550,16 @@ from SPINE as it stands when the document is built:
 
 - a **finding** the scenario rests on (`EffectFinding`) is a hard release blocker where
   Mythos policy places a deployment holding it in a blocking decision: active (not
-  closed, accepted or a false positive), of trusted severity, and high or critical,
-  which `assurance.decision.FINDING_SEVERITY_DECISIONS` places at `needs_remediation` or
-  `not_recommended` (`assurance.dispatch`'s blocking decisions);
+  closed or a false positive), of trusted severity, and high or critical, which
+  `assurance.decision.FINDING_SEVERITY_DECISIONS` places at `needs_remediation` or
+  `not_recommended` (`assurance.dispatch`'s blocking decisions). **An accepted finding
+  is settled only while its acceptance stands** (owner decision Q6, as
+  `decision.accepted_risk_signal` reads it; review round 1, MEDIUM-2): its
+  `risk_accepted_until` after `decision.decision_now` and the severity accepted covering
+  the severity it has now (`decision._acceptance_covers`). An acceptance that lapsed,
+  never named an end, or was made at a lower severity carries nobody's decision: the
+  finding is read as an active one, so a high or critical one is a blocker, and the
+  blocker says why;
 - an **observed effect** of the scenario is one where its workflow's chain is violated
   and sets the deployment's composition at `not_recommended`
   (`assurance.workflow_chains.composition_for`, its deciding workflows).
@@ -4554,8 +4588,18 @@ the step-6 banner, `Unknown: not for capital decisions`, and
 `excluded_from_totals: true`, with the reason. Figures are shown where both runs completed and every row
 verifies; no ROI is computed on a refusal or on rows that fail a check (`not_reported`,
 with the reason). The document has `status`, `grade` (the lower of the two runs'),
-`excluded_from_totals`, `integrity` and `digest` as a report does, so
-`report.may_be_totalled` is the one test a total applies to it too, and it fails closed.
+`excluded_from_totals`, `integrity` and `digest`.
+
+**A residual run is never exposure, below the routes too** (review round 1, MEDIUM-1).
+Its report carries `residual_of` (the option and its digest) and
+`excluded_from_totals: true` whatever its grade; every other report carries
+`residual_of: null`. `report.may_be_totalled` refuses a report without the report schema
+or without `residual_of: null`, so neither a residual run's report nor an ROI document is
+ever summed as exposure. The ROI reads the current run through `may_be_totalled` and the
+residual run through `report.stands` (its digest, completed, its rows verified, graded A
+to D). `SimulationResult.objects.exposure_runs()` is the one place the exposure filter
+is written: the results route, the scenario document and the events banner read through
+it, and a portfolio total (E5) is to.
 
 ### 28.6 An observed control effect
 
@@ -4612,7 +4656,9 @@ residual run.
 No route here is a stop, and none reads or writes anything a stop or the decision reads:
 each is in `safety.stops.NOT_STOPS`; the two POSTs are in the write-route table as
 routes that cannot move the decision; all three are classified sinks of the canary
-harness. The veto reads findings and chains; it writes nothing. `RemediationOption`'s one
+harness. The veto reads findings and chains; it writes nothing. A residual run is never
+receipted: `receipt_service` refuses one (`residual_not_receipted`) before anything is
+read or signed, and the receipt row refuses one on save. `RemediationOption`'s one
 account column is SET_NULL, so removing an operator answers 204 and keeps the username
 (`test_removing_the_author_never_writes_more_than_the_account_column`); the option and
 the residual runs go with their deployment. `remediation_api` and `remediation_service`
@@ -4654,10 +4700,13 @@ service transaction only inserts, after its run.
    zeros in a per-occurrence run.
 5. **ROI = expected reduction / first-year investment at base** (4 places), **payback =
    first-year investment at base / expected annual reduction** (2 places), half-even;
-   the investment's range is shown, not swept. Alternatives: a net ROI ((reduction -
+   the investment's range is shown, not swept; neither is given beside an investment
+   or a reduction shown as zero (round 1, LOW-1). Alternatives: a net ROI ((reduction -
    investment) / investment); ROI at each point of the investment; a multi-year NPV.
-6. **The headline line** (retained under a policy, else gross cash) for every figure,
-   as the card and the receipt. Alternative: gross cash always.
+6. **The headline line** (retained under a policy, else gross cash) for every headline
+   figure, as the card and the receipt; **the gross-cash line's reduction, ROI and
+   payback are shown beside it** (the owner's interim, round 1). Pending the owner:
+   whether the headline should be gross cash.
 7. **The confidence delta compares the two cards as recorded**; the control effect's
    evidence does not weigh in a grade yet (section 28.9). Alternative: weigh it now,
    in a new sensitivity and grade version.
@@ -4665,10 +4714,13 @@ service transaction only inserts, after its run.
    their factor**, without a new sensitivity version: no analysis of a run without an
    option changes, byte for byte. Alternative: a new version for every card.
 9. **The veto reads findings by Mythos policy's severity rule and observed effects by
-   their chains**: high or critical and active vetoes; closed, accepted or false-positive
-   does not; invalidated, missing or unreadable is `"unknown"`, which applies.
-   Alternatives: veto on an accepted finding too; veto on the deployment's standing
-   decision (any blocking decision vetoes every scenario of it).
+   their chains**: high or critical and active vetoes; closed or false-positive does
+   not; accepted does not only while its acceptance stands, and a lapsed, undated or
+   outgrown one vetoes as an active finding (round 1, MEDIUM-2); invalidated, missing
+   or unreadable is `"unknown"`, which applies. **The deployment's standing decision is
+   stated beside the ROI, never as a veto** (the owner's interim, round 1). Pending the
+   owner: whether any blocking decision of the deployment should veto every scenario
+   of it.
 10. **Under the veto the ROI and the payback are shown, display-only**, with the
     statement. Alternative: withhold them.
 11. **The banner** where either run is Unknown, refused, card-less or unverified, where a
@@ -4679,7 +4731,9 @@ service transaction only inserts, after its run.
     `verified_closed`.
 13. **An observed control effect is all-observed**: every reduction `MYTHOS_OBSERVED`
     with a verified citation, and the reverse. Alternative: per-reduction citations.
-14. **A residual run is not served by `results/` or the scenario document**, and not
-    receipted. Alternative: serve its report too, marked residual.
+14. **A residual run is never exposure**: not served by `results/`, the scenario
+    document or the events banner; its report marked `residual_of` and refused by
+    `may_be_totalled`; never receipted (the service and the row refuse it; round 1,
+    MEDIUM-1). Alternative: serve its report too, marked residual.
 15. **The simulate route issues each run's Validity Card, not its chart series**: the
     ROI reads the grade only. Alternative: issue the series too, as step 6's simulate.
