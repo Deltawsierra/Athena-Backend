@@ -641,8 +641,9 @@ _DJANGO_ENV = {"DJANGO_SETTINGS_MODULE": "tests.settings_test"}
 def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
     """Nothing Django loads at start imports the distributions, the sampler, step
     7b's twins, scenario simulation and service, step 8's sensitivity analysis,
-    grade, card and receipt services and core's receipt module, or numpy:
-    ``django.setup()`` and every URLconf, the admin's included."""
+    grade, card and receipt services and core's receipt module, step 6's chart
+    series, E5's portfolio engine, or numpy: ``django.setup()`` and every URLconf,
+    the admin's included."""
     script = textwrap.dedent(
         """
         import json, sys
@@ -658,7 +659,9 @@ def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
                  "assurance.economics.validity_service", "assurance.economics.receipt_service",
                  "mythos_core.exposure_receipt",
                  # Step 6: the chart series and their service.
-                 "assurance.economics.engine.charts", "assurance.economics.charts_service")
+                 "assurance.economics.engine.charts", "assurance.economics.charts_service",
+                 # E5: the portfolio's engine (its service and routes load, and import it only when called).
+                 "assurance.economics.engine.portfolio")
         print(json.dumps(sorted(m for m in sys.modules if any(m == n or m.startswith(n + ".") for n in names))))
         print(json.dumps("assurance.economics.engine.money" in sys.modules))
         """
@@ -680,7 +683,8 @@ def test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop():
     in the economics chain): a fresh pytest under a plugin that makes numpy, the
     distributions, the sampler, step 7b's twins, scenario simulation and service,
     and step 8's sensitivity analysis, grade, card and receipt services and core's
-    receipt module unimportable before Django loads. The scan's Stop route
+    receipt module, step 6's series and E5's portfolio engine unimportable before
+    Django loads. The scan's Stop route
     resolves, answers 202 and saves the Stop."""
     env = dict(os.environ)
     env.setdefault("DJANGO_SECRET_KEY", "ci-secret-key-not-used-outside-ci")

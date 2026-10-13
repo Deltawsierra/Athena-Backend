@@ -7,7 +7,10 @@ import). ``ECONOMICS_FAULT`` says which: ``api`` or ``core``. And by
 under ``tests.economics_broken_builder`` (the scenario builder and its template
 module do not import): ``builder``. And by
 ``tests/test_economics_report.py::test_a_report_fault_never_takes_down_a_stop`` under
-``tests.economics_broken_report`` (the report does not import): ``report``.
+``tests.economics_broken_report`` (the report does not import): ``report``. And by
+``tests/test_economics_portfolio.py::test_a_portfolio_fault_never_takes_down_a_stop``
+under ``tests.economics_broken_portfolio`` (the portfolio does not import):
+``portfolio``.
 
 The safety rule (``docs/economics/spec-v1.md``, section 2): an economics fault
 never blocks a stop. Under either fault Django loads, the scan's Stop is answered
@@ -80,6 +83,11 @@ def test_only_economics_is_refused():
         for tail in ("", "simulate/", "results/"):
             with pytest.raises(Resolver404):
                 resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/{tail}")
+        # The portfolio totals by the report's rule (may_be_totalled), so it is not
+        # served either; nothing else is affected.
+        for tail in ("", "simulate/"):
+            with pytest.raises(Resolver404):
+                resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/{tail}")
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
         assert built.view_name == "deployment-economics-scenario-build"
@@ -97,6 +105,21 @@ def test_only_economics_is_refused():
         served = client.get(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{made.uuid}/events/")
         assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
         assert "assurance.economics.report" not in sys.modules
+        return
+    if FAULT == "portfolio":
+        # The portfolio's two routes are not served; every other economics route is.
+        assert "assurance.economics.portfolio_api" not in sys.modules
+        assert "assurance.economics.portfolio" not in sys.modules
+        assert "assurance.economics.engine.portfolio" not in sys.modules
+        for tail in ("", "simulate/"):
+            with pytest.raises(Resolver404):
+                resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/{tail}")
+        assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
+        built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        assert built.view_name == "deployment-economics-scenario-build"
+        scenario = "00000000-0000-4000-8000-000000000000"
+        results = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/results/")
+        assert results.view_name == "deployment-economics-scenario-results"
         return
     if FAULT == "builder":
         # The builder's routes are not served; the parameter-set routes still are.

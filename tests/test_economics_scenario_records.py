@@ -671,6 +671,9 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario",
         "deployment-economics-scenario-simulate",
         "deployment-economics-scenario-results",
+        # The portfolio (spec, section 28).
+        "deployment-economics-portfolio",
+        "deployment-economics-portfolio-simulate",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
@@ -680,6 +683,8 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["economics-source-trust-raises"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-approve"]) == {"POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-withdraw"]) == {"POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-portfolio"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-portfolio-simulate"]) == {"POST"}
 
 
 # ============================================ review round 1 of #146: L3 to L6

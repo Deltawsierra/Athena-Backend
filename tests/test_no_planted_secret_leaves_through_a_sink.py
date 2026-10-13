@@ -1392,6 +1392,19 @@ class World:
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/results/",
             "deployment-economics-scenario-results",
         ).status_code
+        # The portfolio (E5): the deployment's scenarios totalled (201: recorded,
+        # completed or refused, every scenario not totalled named with its reason)
+        # and its report read back (200); read_everything reads it again. The
+        # scenarios' titles and every reason it names are searched like every sink.
+        portfolio_url = f"/api/assurance/deployments/{self.deployment.uuid}/economics/portfolio/"
+        signals["portfolio_simulate"] = self.call(
+            docs, "api.answers", admin, "post", portfolio_url + "simulate/", "deployment-economics-portfolio-simulate",
+            data={"seed": 7, "policy": "quick_10k", "reporting_currency": "USD", "valuation_date": "2026-10-06"},
+            format="json",
+        ).status_code
+        signals["portfolio"] = self.call(
+            docs, "api.answers", admin, "get", portfolio_url, "deployment-economics-portfolio",
+        ).status_code
 
     def read_everything(self, docs, signals):
         admin = self.client(self.admin)
@@ -1542,6 +1555,9 @@ ROUTES.update(
         "deployment-economics-scenario": _READ,
         "deployment-economics-scenario-simulate": _READ,
         "deployment-economics-scenario-results": _READ,
+        # The portfolio (E5): the totals and their report JSON.
+        "deployment-economics-portfolio": _READ,
+        "deployment-economics-portfolio-simulate": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1943,7 +1959,9 @@ def test_every_path_ran(observed):
         s["records"]["scenario_events"],
         s["records"]["scenario_simulate"],
         s["records"]["scenario_results"],
-    ) == (400, 201, 200, 201, 200), s["records"]
+        s["records"]["portfolio_simulate"],
+        s["records"]["portfolio"],
+    ) == (400, 201, 200, 201, 200, 201, 200), s["records"]
     assert s["records"]["trust_raise"] == {
         "one_step": 201, "asked": 201, "approved": 200, "withdrawable": 201, "withdrawn": 200,
         "command_approve_refused": True,

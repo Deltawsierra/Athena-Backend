@@ -631,6 +631,23 @@ def _economics_scenario_simulate():
     )
 
 
+def _economics_portfolio_simulate():
+    from assurance.economics import simulation_service, validity_service
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    scenario = stored(dep, _admin())
+    # A scenario simulated and graded, so the portfolio totals it (draws and all).
+    result = simulation_service.simulate_scenario(scenario, seed=7, draws=2_000).result
+    validity_service.issue_card(result)
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + "economics/portfolio/simulate/",
+        {"seed": 7, "policy": "quick_10k", "reporting_currency": "USD", "valuation_date": "2026-10-06"},
+        format="json",
+    )
+
+
 def _economics_trust_raise_approval():
     """Another admin's request to authoritative, approved by the caller's admin."""
     from assurance.economics.models import FinancialSourceTrustRaise
@@ -739,6 +756,11 @@ CANNOT_MOVE = {
         "simulates an Economic Exposure scenario version and issues its Validity Card and chart series, all "
         "economics records; the decision reads no economics record",
         _economics_scenario_simulate,
+    ),
+    ("PortfolioSimulateView", "post", "post"): (
+        "totals an Economic Exposure portfolio of the deployment's scenarios from their draws, an economics "
+        "record; the decision reads no economics record",
+        _economics_portfolio_simulate,
     ),
 }
 

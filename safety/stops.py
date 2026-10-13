@@ -531,6 +531,13 @@ NOT_STOPS = {
         "nothing",
     },
     "deployment-economics-scenario-results": _get(),
+    # The portfolio (assurance.economics.portfolio_api, E5): a deployment's scenarios
+    # totalled from their draws, and its report. Economics records only.
+    "deployment-economics-portfolio": _get(),
+    "deployment-economics-portfolio-simulate": {
+        "POST": "totals an Economic Exposure portfolio of a deployment's scenarios from their draws, or returns the "
+        "one recorded for the same inputs: economics records, append-only; it starts and stops nothing",
+    },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

@@ -594,6 +594,40 @@ cannot be read are the parameter set's; a run the engine cannot make now is 503 
 records nothing. None of the three is a stop, and a fault in this module leaves only
 these routes unserved.
 
+### The portfolio
+
+A fourth route module (`assurance/economics/portfolio_api.py`), imported guarded in a
+guard of its own, totals a deployment's scenarios from their draws (Economic Exposure
+E5, `docs/economics/spec-v1.md` section 28):
+
+- `POST /api/assurance/deployments/<uuid>/economics/portfolio/simulate/`:
+  `{"seed": ..., "policy": "quick_10k", "reporting_currency": "USD",
+  "valuation_date": "2026-10-06", "normalization": {...}, "groups": [...]}` takes each
+  current scenario version's latest result that `may_be_totalled` admits, lists every
+  other with its reason (Unknown, refused, unverified, not graded, never simulated,
+  not annual, superseded, inputs changed, or a currency that cannot be normalised),
+  draws the included scenarios again on one seed with aligned years, scenarios in one
+  correlation group sharing one Gamma driver of their annual rates (a strength with a
+  source type), counts a loss event two scenarios share (one SPINE effect, or step 5's
+  key and window) once, normalises every draw into the reporting currency at the
+  valuation date before summing, and records the result (idempotent: the same inputs
+  return it, 200; a new one is 201); an admin or analyst only;
+- `GET /api/assurance/deployments/<uuid>/economics/portfolio/?result=<uuid>`: the
+  portfolio's report (else the latest), `mythos.economics.portfolio-report/v1`: P10,
+  P50, P90, mean, expected annual loss, severe-but-plausible and the expected
+  shortfall per line, each scenario's contribution to the mean and to the tail
+  (summing to them exactly), the groups, the shared events, every exclusion with its
+  reason, the grade (no higher than the lowest included scenario, lower for an
+  expert's correlation strength) and the banner.
+
+The report is built from the stored rows only and is deterministic, with its own
+digest; every stored row it rests on, each included scenario's result, card and
+series among them, is checked first, and a failure is served as a refusal. No
+transaction or lock is held during the draws. Access, tenancy, strict JSON, 64 KiB,
+the 503 while the currency table cannot be read and the one 120 s deadline are step
+6's. Neither route is a stop, and a fault in this module leaves only these two
+unserved.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each

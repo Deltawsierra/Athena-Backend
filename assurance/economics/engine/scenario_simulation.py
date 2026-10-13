@@ -1354,13 +1354,29 @@ def _insure(terms: Mapping[str, np.ndarray | float], policy: InsurancePolicy, ca
     return recovery, gross - recovery
 
 
-def _sample(p: _Plan, seed: int, draws: int, check_time: Callable[[str], None]) -> _Sample:
-    random = sim.RunRandom(seed)
-    counts = None
+def _sample(
+    p: _Plan,
+    seed: int,
+    draws: int,
+    check_time: Callable[[str], None],
+    *,
+    random: sim.RunRandom | None = None,
+    counts: np.ndarray | None = None,
+) -> _Sample:
+    """One sample of the run. By default the years' counts are drawn from the
+    frequency's own stream and every stream is the seed's (a run, the analysis and
+    the series all sample so). The portfolio (``engine/portfolio.py``, spec section
+    28) hands in its own ``random`` (one seed, a sub-stream per scenario) and the
+    years' ``counts`` it drew from the scenario's frequency with its group's common
+    driver; the rest of the sample is the same code."""
+    random = sim.RunRandom(seed) if random is None else random
     years = None
     occurrences = draws
-    if p.frequency is not None:
+    if counts is None and p.frequency is not None:
         counts = np.asarray(p.frequency.distribution.sample(random.stream(sim.FREQUENCY_STREAM), draws), dtype=np.int64)
+    if counts is not None:
+        if p.frequency is None or counts.shape != (draws,) or counts.dtype != np.int64 or (counts < 0).any():
+            raise sim.InvariantBroken("a year's counts are one whole number at least zero per year of a run with a frequency")
         counts.flags.writeable = False
         occurrences = int(counts.sum())
         if occurrences > sim.MAX_EVENTS:

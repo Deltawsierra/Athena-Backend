@@ -96,6 +96,15 @@ CHARTS_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(CHARTS_RECORD_REFUSALS)
+#: The code a stored portfolio result is refused with on save (spec, section 28).
+PORTFOLIO_RECORD_REFUSALS = {
+    "portfolio_record_malformed": (
+        "a portfolio result names its seed (a whole number from 0 to 2^64 - 1, as text), its draws, its reporting "
+        "currency and valuation date, its digests, and either a completed record of its own inputs, seed and draws "
+        "or a refusal code, never both; no number in it is a float"
+    ),
+}
+_REFUSAL_TEXT.update(PORTFOLIO_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -2866,6 +2875,126 @@ class SimulationCharts(_AppendOnly):
 
     def __str__(self) -> str:
         return f"chart series of simulation {self.simulation_id}"
+
+
+# ---------------------------------------------------------------------------
+# PortfolioResult -- one deployment's scenarios aggregated from their draws (E5)
+# ---------------------------------------------------------------------------
+
+
+class PortfolioResult(_AppendOnly):
+    """One portfolio of a deployment's scenarios, aggregated from their draws (spec,
+    section 28): the seed and the draws; the canonical inputs -- each scenario
+    included with its stored result's digests, its grade and its normalisation into
+    the reporting currency, each scenario excluded with its reason, the correlation
+    groups with their strengths and sources, the shared events counted once, every
+    version and limit -- and their digest; the record of the figures and its digest,
+    or the refusal's code.
+
+    Append-only like every economics record, and IDEMPOTENT on its inputs: one row
+    per deployment, input digest, seed and draws (``uq_econ_portfolio_inputs``); the
+    same inputs return the row already recorded and never draw a second. Every check
+    runs before the transaction, which only inserts. Nothing in it is a float, and
+    both digests are recomputed on save (``portfolio_record_malformed``,
+    ``digest_mismatch``). No account column: removing an operator, a stop, never
+    writes it, and it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    # 0 to 2^64 - 1, as text: wider than a signed 64-bit column, and never a double.
+    seed = models.CharField(max_length=20)
+    draws = models.PositiveIntegerField()
+    severe_percentile = models.CharField(max_length=32)
+    reporting_currency = models.CharField(max_length=3)
+    valuation_date = models.DateField()
+    input_digest = models.CharField(max_length=71)
+    result_digest = models.CharField(max_length=71, blank=True)
+    status = models.CharField(max_length=16, choices=[(s, s) for s in SIMULATION_STATUSES])
+    refusal_code = models.CharField(max_length=64, blank=True)
+    refusal_detail = models.TextField(blank=True)
+    # The canonical inputs the input digest is taken over, kept whole.
+    inputs = models.JSONField()
+    # The whole record the result digest is taken over; null for a refusal.
+    record = models.JSONField(null=True, blank=True)
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField()
+    duration_ms = models.PositiveIntegerField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "input_digest", "seed", "draws"], name="uq_econ_portfolio_inputs"
+            ),
+            models.CheckConstraint(condition=Q(status__in=SIMULATION_STATUSES), name="ck_econ_portfolio_status"),
+            models.CheckConstraint(
+                condition=(Q(status=SIMULATION_COMPLETED) & ~Q(result_digest="") & Q(refusal_code=""))
+                | (Q(status=SIMULATION_REFUSED) & Q(result_digest="") & ~Q(refusal_code="")),
+                name="ck_econ_portfolio_outcome",
+            ),
+        ]
+
+    def check_new(self) -> None:
+        deployments = self._meta.get_field("deployment").related_model._base_manager
+        tenant = list(deployments.filter(pk=self.deployment_id).values_list("uuid", flat=True))
+        if len(tenant) != 1:
+            raise EconomicsRefused("cross_tenant_reference", "the portfolio's deployment is not recorded")
+        if not isinstance(self.seed, str) or not _SEED.fullmatch(self.seed) or int(self.seed) > _MAX_SEED:
+            raise EconomicsRefused("portfolio_record_malformed", f"seed {self.seed!r}")
+        if type(self.draws) is not int or self.draws < 1:
+            raise EconomicsRefused("portfolio_record_malformed", f"draws {self.draws!r}")
+        _require_text(severe_percentile=self.severe_percentile)
+        _engine_refusal(lambda: money.check_reporting_currency(self.reporting_currency, "reporting currency"))
+        if self.valuation_date is None:
+            raise EconomicsRefused("portfolio_record_malformed", "the portfolio has no valuation date")
+        _refuse(governance.snapshot_hash_refusal(self.input_digest), detail="input_digest")
+        for name, document in (("inputs", self.inputs), ("record", self.record)):
+            if _has_float(document):
+                raise EconomicsRefused("portfolio_record_malformed", f"{name} holds a float")
+        if not isinstance(self.inputs, dict) or self.inputs.get("deployment") != str(tenant[0]):
+            raise EconomicsRefused("portfolio_record_malformed", "the inputs name another deployment")
+        held = (self.inputs.get("reporting_currency"), self.inputs.get("valuation_date"),
+                self.inputs.get("severe_percentile"))
+        if held != (self.reporting_currency, self.valuation_date.isoformat(), self.severe_percentile):
+            raise EconomicsRefused("portfolio_record_malformed", "the inputs are not this row's")
+        if canonical_digest(self.inputs) != self.input_digest:
+            raise EconomicsRefused("digest_mismatch", "input_digest")
+        if self.status == SIMULATION_COMPLETED:
+            _refuse(governance.snapshot_hash_refusal(self.result_digest), detail="result_digest")
+            if self.refusal_code or not isinstance(self.record, dict):
+                raise EconomicsRefused("portfolio_record_malformed", "a completed portfolio holds a record, no refusal")
+            if canonical_digest(self.record) != self.result_digest:
+                raise EconomicsRefused("digest_mismatch", "result_digest")
+            named = (self.record.get("input_digest"), self.record.get("seed"), self.record.get("simulations"),
+                     self.record.get("reporting_currency"))
+            if named != (self.input_digest, self.seed, self.draws, self.reporting_currency):
+                raise EconomicsRefused("portfolio_record_malformed", "the record is not this portfolio's")
+        elif self.status == SIMULATION_REFUSED:
+            if not self.refusal_code or self.result_digest or self.record is not None:
+                raise EconomicsRefused("portfolio_record_malformed", "a refused portfolio holds a code and no figures")
+        else:
+            raise EconomicsRefused("portfolio_record_malformed", f"status {self.status!r}")
+        if self.started_at is None or self.finished_at is None or self.finished_at < self.started_at:
+            raise EconomicsRefused("date_inversion", "a portfolio finishes after it starts")
+        if PortfolioResult._base_manager.filter(
+            deployment_id=self.deployment_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
+        ).exists():
+            raise EconomicsRefused("duplicate_id", "a portfolio of the same inputs, seed and draws is recorded")
+        self._portfolio_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this portfolio, whose :meth:`check_new` ran on exactly these values
+        just before, inside the caller's transaction: an INSERT and nothing read (as
+        :meth:`SimulationResult.insert_checked`)."""
+        if not self._state.adding or getattr(self, "_portfolio_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A portfolio result is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"portfolio of deployment {self.deployment_id}, seed {self.seed}, {self.draws} draws: {self.status}"
 
 
 # ---------------------------------------------------------------------------
