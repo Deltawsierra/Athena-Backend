@@ -1332,6 +1332,11 @@ class World:
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/events/",
             "deployment-economics-scenario-events",
         ).status_code
+        # The industry-pack registry (E7, spec section 37.10), read after the tenant's
+        # canaries are in its parameter set and its scenario: its answer is searched too.
+        signals["packs"] = self.call(
+            docs, "api.answers", admin, "get", "/api/assurance/economics/packs/", "economics-packs",
+        ).status_code
         # Raising a financial source's trust tier (spec, section 6.1): a tenant's source
         # raised in one step, then to authoritative by request and a second admin's
         # approval; another source's request withdrawn over the API, and one more
@@ -1751,9 +1756,9 @@ ROUTES.update(
         "deployment-economics-scenario-build": _READ,
         "deployment-economics-scenario-events": _READ,
         # The industry-pack registry (E7, spec section 37.10): static data, the same for
-        # every caller; no tenant's row is read, so none of a tenant's canaries can be in it.
-        "economics-packs": _DOCS + "serves the industry-pack registry: static data, the same for every caller, "
-        "holding no tenant's row",
+        # every caller. Searched as a sink all the same: its answer is read after every
+        # canary is planted, and none may be in it.
+        "economics-packs": _READ,
         # Raising a source's trust tier (spec, section 6.1): the list and a raise
         # answer the raise records; an approval and a withdrawal answer the one they
         # moved, as the list reads it.
@@ -2221,6 +2226,8 @@ def test_every_path_ran(observed):
         s["records"]["portfolio_simulate"],
         s["records"]["portfolio"],
     ) == (400, 201, 200, 201, 503, 200, 201, 201, 200, 201, 200), s["records"]
+    # The industry-pack registry is read, and its answer searched (E7).
+    assert s["records"]["packs"] == 200, s["records"]
     # The read routes the dashboard needs: the list read, a receipt issued and its bytes read.
     assert (s["records"]["scenario_list"], s["records"]["receipt_issued"], s["records"]["receipt_bytes"]) == (
         200, (True, None), 200,
