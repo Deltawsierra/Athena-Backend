@@ -20,7 +20,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0065_financial_validity_cards_and_receipts"),
+        ("assurance", "0066_scenario_fingerprint_unavailable"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

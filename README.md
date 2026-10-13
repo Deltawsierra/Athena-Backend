@@ -474,10 +474,13 @@ templates (section 24):
   admin or analyst only, the draft authored by the caller. An effect's attribute may
   state its distribution, held to its figures as a parameter set's is. The same
   inputs return the scenario already built (200), never a second; a build raced by
-  the same build is 409 and writes nothing;
-- `GET .../economics/scenarios/<scenario uuid>/events/`: its review status and its
-  events, each with its effects, findings, components and where every input came
-  from.
+  the same build is 409 and writes nothing. The draft records the deployment's SPINE
+  system fingerprint as it is when it is built, or none and why where it cannot be
+  computed (never a failed build); a rebuild returns the draft with the fingerprint
+  it recorded;
+- `GET .../economics/scenarios/<scenario uuid>/events/`: its system fingerprint, its
+  review status and its events, each with its effects, findings, components and
+  where every input came from.
 
 Findings that enable one effect join that effect's one loss event, so five findings
 on one payment loss never multiply it; every observation of one SPINE effect joins
@@ -525,10 +528,14 @@ at start imports it or numpy.
 loss, on the run's own draws, with a P10/P90 tornado; grades the run A, B, C, D or
 Unknown from its evidence mix, each figure, fixed or ranged, weighted by its share of
 the base-case level (an additive decomposition at base: each cash component's share
-split among its own inputs, a frequency one half), with spec-v1's downgrades and every
-figure's freshness -- under a policy the gross and the retained cash apart, the lower
-grade the headline; and records the Financial Exposure Validity Card, every field of
-the owner's table, once per result. `assurance/economics/receipt_service.py` builds the signed Financial
+split among its own inputs -- by its additive terms first where its formula is a sum,
+such as a fixed fee plus a rate times hours -- a frequency one half), with spec-v1's
+downgrades and every figure's freshness -- under a policy the gross and the retained
+cash apart, the lower grade the headline; and records the Financial Exposure Validity
+Card, every field of
+the owner's table, once per result, bound to the system fingerprint the scenario was
+built in (or, for a scenario built without one, the deployment's when the card is
+issued, said so). `assurance/economics/receipt_service.py` builds the signed Financial
 Exposure Receipt with `mythos_core.exposure_receipt`, has the engine sign it as it
 signs assurance receipts, records it once per result only after it verifies against
 the engine's published economics-receipt keys, and verifies a stored one against the
