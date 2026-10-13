@@ -721,7 +721,8 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
             EconomicsRefused,
         )
         try:
-            si = simulation_service.load_input(scenario)
+            # The result's own input: a residual run's with its control effect (section 28).
+            si = simulation_service.load_input_of(result)
             sensitivity = sens.analyse(
                 si,
                 seed=int(result.seed),

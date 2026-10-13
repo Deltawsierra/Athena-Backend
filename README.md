@@ -548,6 +548,44 @@ bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
 records nothing. None of the three is a stop, and a fault in this module leaves only
+these routes unserved. A residual run under a remediation option (below) is never the
+scenario's exposure: `results/` and the scenario document serve only its own runs.
+
+### The remediation option and its ROI
+
+A fourth route module (`assurance/economics/remediation_api.py`), imported guarded in a
+guard of its own, serves ONE remediation option per scenario version and its economics
+(section 28; the owner's specification, section 21):
+
+- `POST .../economics/scenarios/<scenario uuid>/mitigations/`: records the version's
+  one option, authored by the signed-in admin or analyst: its implementation cost and
+  annual recurring cost (money, low/base/high, a source), time to implement,
+  dependencies (text or SPINE ids, never copies), and its control effect -- a
+  frequency reduction and/or a magnitude reduction, each a ratio with low/base/high and
+  a source, acting on every component or on the families or components it names; an
+  observed effect cites the Achilles retest it was observed in, by its digest, and is
+  refused unless the retest gate's own verdict is that the control held. 201, the same
+  option again 200, another 409 (a new option is a new version);
+- `POST .../mitigations/<option uuid>/simulate/`: `{"seed": ..., "policy": ...}` runs, or
+  returns, the current run (where missing) and the residual run -- the same engine,
+  seed and streams (common random numbers), each occurrence of a component the option
+  acts on kept with probability `1 - r_f` and multiplied by `1 - r_m` -- each with its
+  Validity Card, under one 120 s deadline; idempotent; an admin or analyst only;
+- `GET .../economics/scenarios/<scenario uuid>/roi/?simulation=<uuid>`: the ROI
+  document, `mythos.economics.roi/v1`: current and residual expected annual exposure,
+  the expected reduction, the first-year investment, the risk-adjusted ROI (decision
+  support, not a guaranteed return; not meaningful over a zero investment), the payback
+  in years (never negative or infinite), the P90 and P95 tail reduction, utility
+  retained, and the confidence delta between the two runs' cards.
+
+The ROI document is canonical JSON with its own digest, built from stored rows only,
+each run verified as the report verifies one; where either is Unknown, refused,
+card-less or unverified it carries the banner and `excluded_from_totals: true`. The hard
+security veto always wins: where a finding the scenario rests on is a hard release
+blocker in Mythos policy (active and high or critical), or an observed effect's chain is
+violated, the document says "remediation is required regardless of ROI" and the ROI and
+payback are display-only; a blocker status that cannot be read is `"unknown"`, which
+applies. None of the three routes is a stop, and a fault in this module leaves only
 these routes unserved.
 
 ## When a dependency fails

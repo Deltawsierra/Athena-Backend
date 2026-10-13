@@ -77,6 +77,10 @@ MVP step 6, serving steps 5, 7b and 8:
 
 27. [The scenario endpoints and the report (MVP step 6)](#27-the-scenario-endpoints-and-the-report-mvp-step-6)
 
+MVP step 13, one remediation option per scenario version, on steps 7b, 8 and 6:
+
+28. [One remediation option, its residual run and its economics (MVP step 13)](#28-one-remediation-option-its-residual-run-and-its-economics-mvp-step-13)
+
 ## 1. Status and scope
 
 | | |
@@ -3829,7 +3833,7 @@ Under `/api/assurance/`, mounted in a guard of their own (section 2): a fault in
 |---|---|---|
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/` | `deployment-economics-scenario` | the scenario document (section 27.7) |
 | `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/simulate/` | `deployment-economics-scenario-simulate` | runs, or returns, a simulation (section 27.2) |
-| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3) |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3); never a residual run under a remediation option, which the ROI route serves (section 28.7) |
 
 Access is the parameter-set routes' (section 19.3): a signed-in account (401
 otherwise); a deployment the caller cannot see, a scenario of another deployment,
@@ -4173,3 +4177,288 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
     sum's are its component's low, base and high. Alternative: null every money
     parameter of a refused run. Recommendation: keep, so the refusal can be read and
     the inputs corrected.
+
+## 28. One remediation option, its residual run and its economics (MVP step 13)
+
+MVP step 13, on steps 7b, 8 and 6: ONE remediation option per scenario version, the
+residual run of the scenario with the option's control effect, and the option's
+economics (the owner's specification, section 21, Remediation Economics; section 18's
+`POST /financial/scenarios/{id}/mitigations` and `GET .../roi`; section 15's
+`MitigationOption` and "Mitigation PRODUCES ResidualExposure"), with the hard security
+veto, which always wins.
+
+| | |
+|---|---|
+| Code | `assurance/economics/engine/remediation.py` (pure: the option's form and digest, the economics); `assurance/economics/engine/scenario_simulation.py` (the residual run: `Remediation`, the reduction factor) and `engine/sensitivity.py` (a residual run's reductions ranked and swung); `assurance/economics/remediation_service.py` (the record, the runs, the veto, the citations, the ROI document) and `remediation_api.py` (the three routes); `RemediationOption` and `SimulationResult.remediation` in `models.py` |
+| Migration | `0068_remediation_options.py`: one new table and one new nullable column on `SimulationResult`; nothing backfilled, every stored run unchanged. #155 (the trust tier, in review) is expected to take a 0068 too: whichever merges second renumbers its own and re-points its dependency |
+| Tests | `tests/test_economics_remediation.py`; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`), the engine's module and code tables (`tests/test_economics_engine.py`) and a fault plugin (`tests/economics_broken_remediation.py`, `tests/economics_fault_cases.py`) |
+
+### 28.1 The option
+
+`RemediationOption`, append-only, ONE per scenario version (a one-to-one key, and
+`remediation_option_held`): a different option is a new version that supersedes the
+old, and the same option posted again returns the one recorded. Its document
+(`mythos.economics.remediation-option/v1`, `engine.remediation.parse_option`):
+
+| Field | Holds |
+|---|---|
+| `title` | 1 to 255 characters |
+| `implementation_cost`, `recurring_cost` | money, as a parameter set's variable is stated (unit `money`, low, base, high, currency, `source_type`, `evidence_ref`, `effective_date`, optionally `fresh_until`); one currency, the scenario's (`currency_mismatch`: nothing converts here); never `MYTHOS_OBSERVED` (`observed_source_not_observable`); the recurring cost is a year's |
+| `time_to_implement_days` | a whole number from 0 to 3,650 |
+| `dependencies` | at most 20, each text (1 to 500 characters) or a SPINE finding or asset of the deployment by its uuid, never a copy (`dependency_malformed`, `dependency_not_found`) |
+| `control_effect` | `frequency_reduction` `r_f` and/or `magnitude_reduction` `r_m` (`control_effect_missing` otherwise), each a ratio in [0, 1] with low, base, high, source and evidence, optionally a stated distribution; `acts_on`: every component (absent), or the loss families or the scenario's components (`<event key>/<component key>`) it names, one or the other (`acts_on_malformed`, `remediation_target_unknown`); `observed_by`: the retest it was observed in (section 28.6) |
+| `utility_evidence` | optionally, the retest cited for utility retained (section 28.3) |
+
+Each reduction must be admitted by the run's own parameter-to-distribution rule
+(section 25.1) when it is written: a point mass for a fixed figure, PERT for an
+`EXPERT_ESTIMATE` range, a stated distribution that holds its figures; any other range
+is refused then (`no_admissible_distribution`), not when it is run. The option's
+identity is `option_digest`: the SHA-256 of the canonical JSON of its schema, its
+scenario version and its document in the one spelling; the row's check re-reads the
+document and its digest on save (`remediation_record_malformed`). It names its author as
+a scenario does: the signed-in admin or analyst, nulled if the account is removed (a
+stop), the username kept.
+
+### 28.2 The residual run
+
+The SAME engine, seed and draws, with **common random numbers**: a residual run
+(`ScenarioInput.remediation`) draws every parameter, the frequency and every derived
+value from exactly the current run's streams, so current minus residual carries little
+Monte Carlo noise of its own, and a component the option does not act on is the current
+run's, draw for draw. The reductions draw from streams of their own (`r` and 40 hex
+digits of the SHA-256 of `mythos.economics.remediation-stream/v1`, a zero byte and the
+role), never a parameter's, so drawing the control effect moves no parameter's draws.
+
+- `r_f` and `r_m` are each resolved by the parameter-to-distribution rule and drawn once
+  per simulated year (once per draw without a frequency), as every shared parameter is.
+- **Frequency**: each occurrence of a component the option acts on is kept where a
+  uniform draw from its own stream (`remediation.kept`) is below `1 - r_f`, its year's
+  `r_f`: the expected count of occurrences it suffers is the frequency times
+  `1 - r_f`. A whole occurrence is stopped, not a fraction of a count. A frequency
+  reduction on a scenario that states no frequency is refused, and recorded
+  (`remediation_needs_frequency`): a run per occurrence has no frequency to reduce.
+- **Magnitude**: each kept occurrence of such a component is multiplied by `1 - r_m`.
+- Insurance applies after, to what remains, per event occurrence as section 25.4 says.
+- A reduction that is a point mass at zero changes nothing: the residual run of
+  `r = 0` IS the current run, its summaries byte-identical (only its input digest and
+  its record's `remediation` block differ). A component the option changes is no longer
+  exact (section 25.3): its summary is of its draws, and it is marked `remediated`.
+
+The residual run is a stored `SimulationResult` whose canonical inputs are EXACTLY the
+current run's with one key added, `remediation` (`mythos.economics.remediation-run/v1`:
+the option and its digest, each reduction with its figures, source, evidence and stated
+distribution, what it acts on, its streams and the rule), so it never collides with the
+current run's result, and the current run's input digest is the digest of the residual
+run's inputs without that key. Its row names the option (`SimulationResult.remediation`,
+checked against the inputs on save). A run with no option has no such key: every input
+digest recorded before this step is unchanged. Every limit, the 120 s budget, the
+idempotency and the insert-only transaction of section 25.6 apply; the values budget
+counts the residual run's factor, its uniform draws and a reduction's draws per
+occurrence (`REMEDIATION_TEMPORARIES`). NO transaction or lock is held during either
+Monte Carlo (`test_no_transaction_is_held_while_either_run_computes`).
+
+Each run is graded by its own Validity Card (section 26): a residual run's analysis is
+made on its own draws with the option applied, ranks a drawn reduction as it ranks a
+parameter, and swings each through the factor it puts on a reduced component.
+
+Known answers on step 6's fixed scenario (`stored`: one event of a notification and a
+regulatory range, a Poisson(2) frequency): `r_f = 0.5` halves the expected annual loss
+within four of the residual run's standard errors; `r_m = 0.25` on every family cuts it
+to three quarters to binary64's rounding (1E-12 relative), and P50, P90 and P95 with
+it; `r = 0` gives a reduction of exactly zero and byte-identical summaries; `r = 1` on
+every family leaves a residual expected annual loss of 0.
+
+### 28.3 The economics
+
+`GET .../roi/` serves the ROI document (`mythos.economics.roi/v1`), from stored rows
+only, of the option and one residual run (`?simulation=<uuid>`, else its latest) paired
+with its current run. Every figure is read at full precision from the two runs' records
+(the result digest covers them) on their headline line -- retained cash under a policy,
+else gross cash, as the card and the receipt read it -- and computed once:
+
+| Output | Definition |
+|---|---|
+| `current_expected_annual_exposure`, `residual_expected_annual_exposure` | each run's mean annual loss |
+| `expected_reduction` | current minus residual |
+| `first_year_investment` | implementation plus one year of recurring cost, at low, base and high |
+| `risk_adjusted_roi` | the expected reduction over the first-year investment at base, to 4 places; labelled decision support from modelled exposure, not a guaranteed return; `null` with the reason where the investment is 0 |
+| `payback` | the first-year investment at base over the expected annual reduction, in years, to 2 places; `null` with the reason where the reduction is not above zero: never a negative or infinite payback |
+| `tail_reduction` | the change in P90 and in P95 (the severe-but-plausible percentile, where the run's is 95) of annual loss |
+| `utility_retained` | `retained` or `broken` from a cited retest's replay (legitimate use, and every behaviour its repair contract preserves); otherwise `unknown`, with the reason |
+| `confidence_delta` | the residual card's grade against the current card's, each as its card document states it where it verifies (section 27.5): `improved`, `unchanged`, `worsened`, or `not_comparable` with the reason |
+
+Money is at the currency's minor unit, half-even, as section 27.5 rounds it; the ROI and
+the payback are half-even to their places. Without a frequency there is no expected
+annual exposure, so no reduction, ROI or payback, each saying so. The document carries
+the option (its costs and control effect as recorded), each run's identity, status,
+grade, banner reason and integrity, the line, the currency, `limitations` and `digest`:
+`sha256:` over its canonical bytes without it, as section 27.5's report does. The same
+stored rows give byte-identical bytes.
+
+### 28.4 The hard security veto (decided: the veto always wins)
+
+The owner's specification: a strong ROI does not justify accepting a control failure
+that Mythos policy marks as a hard release blocker. `remediation_service.veto` reads it
+from SPINE as it stands when the document is built:
+
+- a **finding** the scenario rests on (`EffectFinding`) is a hard release blocker where
+  Mythos policy places a deployment holding it in a blocking decision: active (not
+  closed, accepted or a false positive), of trusted severity, and high or critical,
+  which `assurance.decision.FINDING_SEVERITY_DECISIONS` places at `needs_remediation` or
+  `not_recommended` (`assurance.dispatch`'s blocking decisions);
+- an **observed effect** of the scenario is one where its workflow's chain is violated
+  and sets the deployment's composition at `not_recommended`
+  (`assurance.workflow_chains.composition_for`, its deciding workflows).
+
+`veto.applies` is `true` where one is: the document carries `veto: {"applies": true,
+"reason": ...}`, `remediation_required: true` and the statement
+"remediation is required regardless of ROI"; the ROI and the payback are
+`display_only`, and no output presents accepting the risk as preferable. Where the blocker status cannot be read -- an
+invalidated finding (its severity no longer trusted), one that is no longer the
+deployment's, a severity Mythos policy does not read, an observed effect whose SPINE
+outcome cannot be found, a scenario naming neither, or any fault reading SPINE (named
+by its type alone) -- `veto.applies` is `"unknown"`, with the reason, and it is treated
+as applying. `false` only where every finding and observed effect was read and none is
+a blocker.
+
+### 28.5 Unknown: the banner
+
+Each run is verified as step 6's report verifies a result: the ROI document builds each
+run's report (`report.build_report`) and reads its `grade`, `banner_reason`,
+`integrity` (`report.stored_row_failures`) and whether a total may sum it
+(`report.may_be_totalled`). Where the current or the residual run is Unknown, refused,
+card-less or unverified -- or the option no longer gives its digest, the residual run
+names another option, no current run of the same seed and draws is recorded, or the
+control effect's cited retest no longer shows the control held -- the document carries
+the step-6 banner, `Unknown: not for capital decisions`, and
+`excluded_from_totals: true`, with the reason. Figures are shown where both runs completed and every row
+verifies; no ROI is computed on a refusal or on rows that fail a check (`not_reported`,
+with the reason). The document has `status`, `grade` (the lower of the two runs'),
+`excluded_from_totals`, `integrity` and `digest` as a report does, so
+`report.may_be_totalled` is the one test a total applies to it too, and it fails closed.
+
+### 28.6 An observed control effect
+
+A control effect may cite an Achilles retest, a `RetestClosureEvidence` record (the
+replay of Minotaur-Backend's remediation-outcomes dataset, `assurance.retest_closure`),
+by its digest: the SHA-256 of `mythos.economics.retest-citation/v1`, the record, its
+finding and everything the retest gate reads of it (origin, content digest, fixtures,
+document, time; `remediation_service.retest_digest`). The citation is resolved among the
+records of the findings the scenario rests on, in its deployment only.
+
+- **Cited and verifiable, where the retest shows the control held**: the record is its
+  finding's latest and the retest gate's own verdict (`retest_closure.refusal_reasons`)
+  names no reason -- every fixture class and pattern ran with the outcome a closure
+  needs, an independent observer's replay shows the effect gone on the original
+  scenario and every variant with legitimate use retained, held to the finding's
+  current repair contract. Then the control effect is observed: every reduction it
+  states rests on `MYTHOS_OBSERVED` (`observed_effect_not_stated` otherwise), and a
+  reduction on `MYTHOS_OBSERVED` cites one (`observed_effect_uncited` otherwise).
+- **Cited but unverifiable**: refused, `retest_unverifiable`; a retest that is found but
+  does not show the control held is refused, `retest_control_not_held`, naming every
+  reason the gate gives.
+- The ROI document verifies the citation again when it is built: a later retest of the
+  finding (the gate reads the latest) that was fooled leaves the observed effect
+  unverified, and the document carries the banner.
+
+No Bayesian update yet: an observed control effect is cited, verified and shown as
+observed, and its figures are as stated (section 28.9).
+
+### 28.7 The routes
+
+Under `/api/assurance/`, from `assurance/economics/remediation_api.py`, mounted in a
+guard of its own (section 2): a fault in it, or in `remediation_service`, leaves these
+three routes unserved and nothing else (`test_a_remediation_fault_never_takes_down_a_stop`).
+
+| Method and path | Name | Does |
+|---|---|---|
+| `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/mitigations/` | `deployment-economics-scenario-mitigations` | records the version's one option: 201; the same option again, 200; another, 409 `remediation_option_held` |
+| `POST .../mitigations/<option uuid>/simulate/` | `deployment-economics-mitigation-simulate` | the current run (where missing) and the residual run, `{"seed", "policy"}` as section 27.1's simulate takes them (a `receipt` is `field_unrecognised`: a residual run is not receipted), each with its Validity Card, under ONE 120 s deadline: idempotent, 201 where a run was recorded, 200 where both were; 503 for a run step 7b does not record, 400 for inputs with no identity |
+| `GET .../scenarios/<scenario uuid>/roi/` | `deployment-economics-scenario-roi` | the ROI document (section 28.3), as canonical bytes; 404 where the version has no option or the option no residual run |
+
+Access is the report routes': a signed-in account; a deployment the caller cannot see,
+or a scenario, option or run of another, is 404; only an admin or an analyst records or
+simulates (403 for a viewer, even the owner), and every role reads. Strict JSON of at
+most 64 KiB; 503 while economics cannot read its currency table, recording nothing.
+
+**A residual run is never the scenario's exposure.** Step 6's `results/` route serves
+only the version's own runs (its latest is the latest of those, and a residual run's
+uuid is 404 there), and the scenario document lists only those; the ROI route serves the
+residual run.
+
+### 28.8 Safety
+
+No route here is a stop, and none reads or writes anything a stop or the decision reads:
+each is in `safety.stops.NOT_STOPS`; the two POSTs are in the write-route table as
+routes that cannot move the decision; all three are classified sinks of the canary
+harness. The veto reads findings and chains; it writes nothing. `RemediationOption`'s one
+account column is SET_NULL, so removing an operator answers 204 and keeps the username
+(`test_removing_the_author_never_writes_more_than_the_account_column`); the option and
+the residual runs go with their deployment. `remediation_api` and `remediation_service`
+import no part of the probabilistic engine at load: the simulation and card services are
+imported when an option is simulated, and the engine when an option is written. Each
+service transaction only inserts, after its run.
+
+### 28.9 What is still not done
+
+- **No Bayesian update** of the control effect from observed evidence: an Achilles
+  retest is cited and verified, and Minotaur validation is not read yet.
+- **One option per scenario version**: no cost-of-fix frontier across options, and no
+  portfolio of options.
+- **The costs are not simulated**: the ROI and the payback read the base; no net
+  present value, no multi-year horizon, no discounting.
+- **The control effect's evidence does not enter the residual card's grade**: both cards
+  weigh the scenario's figures (section 26.2), so the confidence delta moves only where
+  a card is Unknown, missing or unverified. Weighing the reductions in the residual
+  line's level -- `(1 - r_f)` beside the frequency's half, `(1 - r_m)` as one more factor
+  of each reduced component -- is the follow-up.
+- **No green-team evidence** exists in this backend: utility retained reads a cited
+  Achilles retest's replay, else Unknown.
+- **One currency**: an option costs in the scenario's currency; nothing converts.
+
+### 28.10 Decisions this step takes, which the owner may change
+
+1. **One option per scenario version**, a one-to-one key; another option is a new
+   version. Alternative: several options per version, for a frontier.
+2. **A frequency reduction stops whole occurrences** of the components it acts on (a
+   keep mask, Bernoulli `1 - r_f`, from its own stream). Alternatives: scale the
+   frequency's rate (Poisson((1 - r_f) lambda)), which numpy draws from other numbers,
+   losing the coupling; multiply each year's loss by `1 - r_f`, which keeps the mean and
+   understates the tail's change.
+3. **The reductions are drawn once per simulated year**, as every shared parameter
+   (section 25.2), each by the existing parameter-to-distribution rule, and admitted at
+   write time. Alternative: per occurrence.
+4. **A frequency reduction on a scenario with no frequency is refused** and recorded.
+   Alternative: read it as the probability an occurrence is prevented, a mixture with
+   zeros in a per-occurrence run.
+5. **ROI = expected reduction / first-year investment at base** (4 places), **payback =
+   first-year investment at base / expected annual reduction** (2 places), half-even;
+   the investment's range is shown, not swept. Alternatives: a net ROI ((reduction -
+   investment) / investment); ROI at each point of the investment; a multi-year NPV.
+6. **The headline line** (retained under a policy, else gross cash) for every figure,
+   as the card and the receipt. Alternative: gross cash always.
+7. **The confidence delta compares the two cards as recorded**; the control effect's
+   evidence does not weigh in a grade yet (section 28.9). Alternative: weigh it now,
+   in a new sensitivity and grade version.
+8. **A residual run's sensitivity ranks its drawn reductions and swings them through
+   their factor**, without a new sensitivity version: no analysis of a run without an
+   option changes, byte for byte. Alternative: a new version for every card.
+9. **The veto reads findings by Mythos policy's severity rule and observed effects by
+   their chains**: high or critical and active vetoes; closed, accepted or false-positive
+   does not; invalidated, missing or unreadable is `"unknown"`, which applies.
+   Alternatives: veto on an accepted finding too; veto on the deployment's standing
+   decision (any blocking decision vetoes every scenario of it).
+10. **Under the veto the ROI and the payback are shown, display-only**, with the
+    statement. Alternative: withhold them.
+11. **The banner** where either run is Unknown, refused, card-less or unverified, where a
+    row of the pair fails a check, or where the cited retest no longer verifies.
+12. **A retest is cited by a digest over the record and everything the gate reads**, and
+    verified by the gate's own verdict on the finding's latest record. Alternatives:
+    cite the record's `content_digest`; accept any record whose replay classifies
+    `verified_closed`.
+13. **An observed control effect is all-observed**: every reduction `MYTHOS_OBSERVED`
+    with a verified citation, and the reverse. Alternative: per-reduction citations.
+14. **A residual run is not served by `results/` or the scenario document**, and not
+    receipted. Alternative: serve its report too, marked residual.
+15. **The simulate route issues each run's Validity Card, not its chart series**: the
+    ROI reads the grade only. Alternative: issue the series too, as step 6's simulate.

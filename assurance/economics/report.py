@@ -808,7 +808,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
         }
 
     results = []
-    for result in SimulationResult.objects.filter(scenario=scenario).order_by("id"):
+    # The scenario's own runs: a residual run (section 28) is the ROI route's.
+    for result in SimulationResult.objects.filter(scenario=scenario, remediation__isnull=True).order_by("id"):
         card = FinancialValidityCard.objects.filter(simulation=result).first()
         receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
         results.append(

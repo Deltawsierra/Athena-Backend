@@ -112,7 +112,7 @@ def _issue(result: SimulationResult, time_budget: float) -> ChartsOutcome:
     scenario = FinancialScenario.objects.get(pk=result.scenario_id)
     try:
         series = charts.series(
-            simulation_service.load_input(scenario),
+            simulation_service.load_input_of(result),
             seed=int(result.seed),
             draws=result.draws,
             severe_percentile=Decimal(result.severe_percentile),

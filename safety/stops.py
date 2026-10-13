@@ -514,6 +514,18 @@ NOT_STOPS = {
         "nothing",
     },
     "deployment-economics-scenario-results": _get(),
+    # The remediation option and its ROI (assurance.economics.remediation_api, step
+    # 13): one option recorded, its current and residual runs simulated, its
+    # economics read. Economics records only.
+    "deployment-economics-scenario-mitigations": {
+        "POST": "records a scenario version's one remediation option: economics records, append-only; it starts "
+        "and stops nothing",
+    },
+    "deployment-economics-mitigation-simulate": {
+        "POST": "runs or returns a scenario version's current run and a remediation option's residual run and "
+        "issues their Validity Cards: economics records, append-only; it starts and stops nothing",
+    },
+    "deployment-economics-scenario-roi": _get(),
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

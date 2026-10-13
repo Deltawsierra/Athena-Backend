@@ -1313,6 +1313,27 @@ class World:
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/results/",
             "deployment-economics-scenario-results",
         ).status_code
+        # The remediation option and its ROI (MVP step 13): one option recorded (201),
+        # its current and residual runs simulated (201: each recorded, completed or
+        # refused) and its ROI read back (200); read_everything reads the ROI again.
+        # What they answer -- the option's title and document, the economics -- is
+        # searched like every other sink.
+        from tests.test_economics_remediation import option_body
+
+        mitigated = self.call(
+            docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/mitigations/",
+            "deployment-economics-scenario-mitigations",
+            data=option_body("0.5", title=f"re-approve {CANARY['request.body']}"), format="json",
+        )
+        signals["mitigation"] = mitigated.status_code
+        option_uuid = mitigated.json()["option"]["uuid"] if mitigated.status_code == 201 else uuid.uuid4()
+        signals["mitigation_simulate"] = self.call(
+            docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/mitigations/{option_uuid}/simulate/",
+            "deployment-economics-mitigation-simulate", data={"seed": 7, "policy": "quick_10k"}, format="json",
+        ).status_code
+        signals["scenario_roi"] = self.call(
+            docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/roi/", "deployment-economics-scenario-roi",
+        ).status_code
 
     def read_everything(self, docs, signals):
         admin = self.client(self.admin)
@@ -1455,6 +1476,11 @@ ROUTES.update(
         "deployment-economics-scenario": _READ,
         "deployment-economics-scenario-simulate": _READ,
         "deployment-economics-scenario-results": _READ,
+        # The remediation option and its ROI (MVP step 13): an option recorded, its
+        # current and residual runs' summaries, and its ROI document.
+        "deployment-economics-scenario-mitigations": _READ,
+        "deployment-economics-mitigation-simulate": _READ,
+        "deployment-economics-scenario-roi": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1497,6 +1523,7 @@ def _readable_urls(world):
                 "deployment-economics-scenario",
                 "deployment-economics-scenario-events",
                 "deployment-economics-scenario-results",
+                "deployment-economics-scenario-roi",
             ):
                 from assurance.economics.models import FinancialScenario
 
@@ -1851,7 +1878,10 @@ def test_every_path_ran(observed):
         s["records"]["scenario_events"],
         s["records"]["scenario_simulate"],
         s["records"]["scenario_results"],
-    ) == (400, 201, 200, 201, 200), s["records"]
+        s["records"]["mitigation"],
+        s["records"]["mitigation_simulate"],
+        s["records"]["scenario_roi"],
+    ) == (400, 201, 200, 201, 200, 201, 201, 200), s["records"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 
 
