@@ -49,6 +49,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from . import simulation_service
+from .engine import feeds as feed_rules
 from .engine.formulas import ESTIMATED, MARKET_VALUE
 from .models import (
     SIMULATION_COMPLETED,
@@ -205,6 +206,28 @@ UNREAD = {
 }
 
 
+def _feed_freshness(inputs, roles, issued) -> tuple[list[dict], list[str], str]:
+    """The feed sources the run's figures rest on, as read at issue (``issued``'s
+    ``feed_sources``), each with the figures it feeds; every figure the run reads
+    that rests on a stale, blocked or missing source (the grade's ``stale_source``);
+    and the claim the card may make: ``current``, or ``stale`` where a source is
+    blocked or missing (spec, section 29). A card issued before feed sources were
+    read (no ``feed_sources``) shows none."""
+    held = issued.get("feed_sources")
+    if held is None:
+        return [], [], "current"
+    fed = feed_rules.referenced_keys(inputs.get("parameters"))
+    sources, lowered, blocked = [], set(), False
+    for key in sorted(fed):
+        state = held.get(key) or {"source_key": key, "state": feed_rules.MISSING,
+                                  "not_evaluated": "not read when the card was issued"}
+        if state["state"] in feed_rules.DOWNGRADING:
+            lowered |= {name for name in fed[key] if roles.get(name, set()) & GRADED_ROLES}
+        blocked = blocked or state["state"] in feed_rules.BLOCKING
+        sources.append({**state, "feeds": fed[key]})
+    return sources, sorted(lowered), "stale" if blocked else "current"
+
+
 def _freshness(inputs, roles, rows_unread, as_of: str | None, critical: set[str]) -> dict:
     """The freshness of EVERY figure: each parameter of the run's inputs (the
     components', the policy's, the frequency, every derived value's contributors),
@@ -257,8 +280,10 @@ def _freshness(inputs, roles, rows_unread, as_of: str | None, critical: set[str]
             "its fresh_until is stale. A stale figure the run reads (a cash component's, a term of the policy it "
             "applies, the frequency, a derived value's contributor) lowers the grade one step (stale_inputs); one "
             "nothing in the cash figures reads -- a scenario parameter or a parameter-set variable nothing reads "
-            "among them -- is shown and does not. No parameter names a FinancialSource snapshot "
-            "yet (evidence_ref is text, spec section 22), so a source's own retrieval age is not shown"
+            "among them -- is shown and does not. A figure whose evidence names a feed source "
+            "(financial-source:<key>) lowers the grade one step where that source is stale, blocked or missing at "
+            "the as-of date (stale_source); a blocked or missing source makes the card's claim stale (spec, section "
+            "28)"
             if as_of is not None
             else "not evaluated: the run has no as-of date to read its figures at"
         ),
@@ -323,7 +348,7 @@ def issued_context(result: SimulationResult, scenario: FinancialScenario) -> dic
         # Never raises: one that cannot be read is stated as unavailable, never guessed.
         value, unavailable = current_system_fingerprint(scenario.deployment_id)
         fingerprint = {"value": value or None, "unavailable": unavailable or None}
-    return {
+    context = {
         "at": timezone.now().isoformat(),
         "reviewer_status": review_status(scenario),
         "model_inventory": None
@@ -340,6 +365,18 @@ def issued_context(result: SimulationResult, scenario: FinancialScenario) -> dic
         "findings": {uuid: found.get(uuid) for uuid in sorted({x.finding for x in links})},
         "deployment_system_fingerprint": fingerprint,
     }
+    # The feed sources the run's figures rest on (spec, section 29), read now at the
+    # run's as-of date and kept as issued: only where a figure names one.
+    keys = feed_rules.referenced_keys((result.inputs or {}).get("parameters"))
+    if keys:
+        from . import feeds
+
+        build = ScenarioBuild.objects.filter(scenario=scenario).first()
+        as_of = _as_of(result.inputs or {}, build)
+        context["feed_sources"] = feeds.states_for(
+            keys, deployment=scenario.deployment_id, as_of=date.fromisoformat(as_of) if as_of else None
+        )
+    return context
 
 
 # -------------------------------------------------------------------- card
@@ -393,12 +430,15 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         level_total = sum((item.level for item in items), Decimal(0))
         material |= {item.name for item in items if level_total and item.level / level_total >= grade.MATERIAL_SHARE}
     freshness = _freshness(inputs, roles, rows_unread, as_of, material | {d["name"] for d in drivers})
+    feed_sources, stale_sources, claim = _feed_freshness(inputs, roles, issued)
+    freshness.update(sources=feed_sources, stale_sources=stale_sources, claim=claim)
     grades = {
         line: grade.grade(
             refusal=None if completed else (result.refusal_code or "refused"),
             unknown_cash_components=unknown_cash,
             weighted=weighted[line],
             stale=freshness["stale"],
+            stale_sources=stale_sources,
             per_occurrence=(sensitivity or {}).get("per_occurrence", []),
             undefined=(_level(sensitivity, line) or {}).get("undefined_because") if completed else None,
         )
@@ -648,7 +688,12 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         "evidence_mix": mix,
         "assumptions": assumptions,
         "unknowns": unknown_variables["components"],
-        "freshness": {"as_of": freshness["as_of"], "stale": freshness["stale"]},
+        "freshness": {
+            "as_of": freshness["as_of"],
+            "stale": freshness["stale"],
+            "stale_sources": stale_sources,
+            "claim": claim,
+        },
         "calibration_date": None,
         "reviewer_status": reviewer,
         "issued": issued,

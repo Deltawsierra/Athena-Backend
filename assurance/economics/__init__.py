@@ -40,6 +40,11 @@ distributions, the seeded sampler and the simulation of a stored scenario versio
   (MVP step 8), recording each once per result. Both import the engine, numpy and
   ``mythos_core.exposure_receipt`` only when called; no route serves them yet, and
   nothing on Django's load path imports them.
+- :mod:`assurance.economics.feeds` fetches a live feed into the snapshot store and
+  says how fresh each feed source is (MVP step 10), run by the operator's ``manage.py
+  fetch_financial_source``; :mod:`assurance.economics.health_api` is the data-health
+  route, mounted by :mod:`assurance.urls` in a guard of its own, which imports the
+  feed module only inside its view.
 
 This package is never on a stop, pause, stand-down, terminate or revoke path:
 :mod:`assurance.models` (registering the models) and :mod:`assurance.urls`

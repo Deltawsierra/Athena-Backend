@@ -1,0 +1,95 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "realtime_start": "2026-06-30",
+  "realtime_end": "2026-06-30",
+  "observation_start": "2025-05-01",
+  "observation_end": "9999-12-31",
+  "units": "lin",
+  "output_type": 1,
+  "file_type": "json",
+  "order_by": "observation_date",
+  "sort_order": "asc",
+  "count": 13,
+  "offset": 0,
+  "limit": 100000,
+  "observations": [
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-05-01",
+      "value": "321.465"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-06-01",
+      "value": "322.020"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-07-01",
+      "value": "322.548"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-08-01",
+      "value": "322.932"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-09-01",
+      "value": "323.364"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-10-01",
+      "value": "."
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-11-01",
+      "value": "324.122"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2025-12-01",
+      "value": "324.981"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2026-01-01",
+      "value": "325.487"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2026-02-01",
+      "value": "325.912"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2026-03-01",
+      "value": "326.388"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2026-04-01",
+      "value": "326.809"
+    },
+    {
+      "realtime_start": "2026-06-30",
+      "realtime_end": "2026-06-30",
+      "date": "2026-05-01",
+      "value": "327.215"
+    }
+  ]
+}

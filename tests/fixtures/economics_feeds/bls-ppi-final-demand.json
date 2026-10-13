@@ -1,0 +1,208 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+ "status": "REQUEST_SUCCEEDED",
+ "responseTime": 143,
+ "message": [],
+ "Results": {
+  "series": [
+   {
+    "seriesID": "WPUFD4",
+    "data": [
+     {
+      "year": "2026",
+      "period": "M08",
+      "periodName": "August",
+      "latest": "true",
+      "value": "151.8",
+      "footnotes": [
+       {
+        "code": "P",
+        "text": "preliminary"
+       }
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M07",
+      "periodName": "July",
+      "value": "151.4",
+      "footnotes": [
+       {
+        "code": "P",
+        "text": "preliminary"
+       }
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M06",
+      "periodName": "June",
+      "value": "151.2",
+      "footnotes": [
+       {
+        "code": "P",
+        "text": "preliminary"
+       }
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M05",
+      "periodName": "May",
+      "value": "150.7",
+      "footnotes": [
+       {
+        "code": "P",
+        "text": "preliminary"
+       }
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M04",
+      "periodName": "April",
+      "value": "150.5",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M03",
+      "periodName": "March",
+      "value": "150.1",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M02",
+      "periodName": "February",
+      "value": "149.8",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2026",
+      "period": "M01",
+      "periodName": "January",
+      "value": "149.6",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M12",
+      "periodName": "December",
+      "value": "149.3",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M11",
+      "periodName": "November",
+      "value": "149.0",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M10",
+      "periodName": "October",
+      "value": "148.9",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M09",
+      "periodName": "September",
+      "value": "148.6",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M08",
+      "periodName": "August",
+      "value": "148.2",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M07",
+      "periodName": "July",
+      "value": "147.9",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M06",
+      "periodName": "June",
+      "value": "147.7",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M05",
+      "periodName": "May",
+      "value": "147.3",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M04",
+      "periodName": "April",
+      "value": "147.0",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M03",
+      "periodName": "March",
+      "value": "146.8",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M02",
+      "periodName": "February",
+      "value": "146.5",
+      "footnotes": [
+       {}
+      ]
+     },
+     {
+      "year": "2025",
+      "period": "M01",
+      "periodName": "January",
+      "value": "146.1",
+      "footnotes": [
+       {}
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

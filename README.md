@@ -639,6 +639,31 @@ report is marked `residual_of`, `may_be_totalled` refuses it (and anything that 
 report, the ROI document included), and it is never receipted. None of the three routes is a stop, and a fault in this module leaves only
 these routes unserved.
 
+### The live feeds (step 10, waiting on the owner's keys)
+
+Four official publishers are wired (spec, section 29): the ECB's euro reference rates
+(SDMX, labelled an informational average, not a transaction price), the Fed's H.10
+rates (with each series' quotation convention), FRED with ALFRED vintages, and BLS PPI
+and wage series. `manage.py fetch_financial_source <source> [--as-of DATE]` fetches
+one through the platform's outbound client and records it as a new platform-wide
+source version at `unverified`, append-only and deduplicated by the answer's normalised
+payload hash; a malformed or partial answer is refused with a code and nothing of it
+is kept. It sends nothing until the owner sets the keys (`ECONOMICS_FRED_API_KEY`,
+`ECONOMICS_BLS_API_KEY`; `source_key_missing` otherwise) and turns on
+`ECONOMICS_LIVE_FEEDS_ENABLED`, and every source's licence stays `unreviewed` until the
+owner's review. Each source has a freshness SLA (ECB 3 days, H.10 10, FRED and BLS
+monthly 45): a stale source lowers the grade of every figure it feeds one step, and one
+past twice its SLA makes the Validity Card's claim stale and refuses the receipt
+(`source_stale`). An FX or cost-index source behind a production receipt must be
+`authoritative` (`source_not_authoritative`). `GET
+/api/assurance/deployments/<uuid>/economics/data-health/` lists each feed's latest
+version, age, SLA, state, last fetch failure (its code) and the Unknowns it causes.
+A run uses the newest usable version of a source whose observations cover its as-of
+date. The HTTP client's own log records (urllib3's request lines) withhold every query
+string, so the FRED key reaches no log. The adapters are tested against format-faithful
+fixtures, not recorded responses, in `tests/fixtures/economics_feeds/`, under a socket
+guard; none of it is a stop.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each
@@ -777,8 +802,8 @@ e-mail, log, file, span or command output: a connector's or posture binding's
 token, the key they are encrypted under, the engine's `X-API-Key`, the closure
 forward's `MINOTAUR_OUTCOMES_KEY`, the gate's and the observed-effect service's
 tokens, the closure-evidence and failsafe tokens, a signing key, a proxy's
-userinfo, a password. And an error page says that something failed, never what it
-was given or what the exception said.
+userinfo, a password, the economics feeds' FRED and BLS keys. And an error page
+says that something failed, never what it was given or what the exception said.
 
 `tests/test_no_planted_secret_leaves_through_a_sink.py` holds the service to that.
 It plants a distinct canary in every one of those origins, and in what a tenant

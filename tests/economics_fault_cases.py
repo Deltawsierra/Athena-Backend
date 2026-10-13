@@ -10,7 +10,10 @@ module do not import): ``builder``. And by
 ``tests.economics_broken_report`` (the report does not import): ``report``. And by
 ``tests/test_economics_remediation.py::test_a_remediation_fault_never_takes_down_a_stop``
 under ``tests.economics_broken_remediation`` (the remediation step does not import):
-``remediation``.
+``remediation``. And by
+``tests/test_economics_feeds.py::test_a_feed_fault_never_takes_down_a_stop`` under
+``tests.economics_broken_feeds`` (the feed fetch and its freshness rules do not
+import): ``feeds``.
 
 The safety rule (``docs/economics/spec-v1.md``, section 2): an economics fault
 never blocks a stop. Under either fault Django loads, the scan's Stop is answered
@@ -116,6 +119,26 @@ def test_only_economics_is_refused():
         served = client.get(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{made.uuid}/events/")
         assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
         assert "assurance.economics.report" not in sys.modules
+        return
+    if FAULT == "feeds":
+        # The data-health route is served, imports the feed module inside its view,
+        # and answers an error with no body of figures; every other route stands.
+        assert "assurance.economics.feeds" not in sys.modules
+        health = f"/api/assurance/deployments/{deployment.uuid}/economics/data-health/"
+        assert resolve(health).view_name == "deployment-economics-data-health"
+        assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
+        built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        assert built.view_name == "deployment-economics-scenario-build"
+        scenario = "00000000-0000-4000-8000-000000000000"
+        assert resolve(
+            f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/results/"
+        ).view_name == "deployment-economics-scenario-results"
+        admin = get_user_model().objects.create_user(username="admin", password="x", role="admin")
+        client = APIClient(raise_request_exception=False)
+        client.force_authenticate(user=admin)
+        served = client.get(health)
+        assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
+        assert "assurance.economics.feeds" not in sys.modules
         return
     if FAULT == "builder":
         # The builder's routes are not served; the parameter-set routes still are.

@@ -1,7 +1,7 @@
 """Every HTTP request this service sends with ``requests`` itself.
 
 The engines reach the outside world through mythos-core's ``safe_http``. This
-service does not: it calls ``requests`` directly, at four call sites, and each
+service does not: it calls ``requests`` directly, at five call sites, and each
 goes through :func:`get` or :func:`post` here.
 
 ========================================  =======================================
@@ -18,6 +18,11 @@ call site                                 what it reaches, with which credential
                                           forward); each one's own token
 ``assurance.posture.base.RequestsFetcher``  a customer's cloud, repository or
                                           secrets posture source; its read token
+``assurance.economics.feeds               an official publisher's data API (ECB,
+.OutboundTransport``                      the Fed's H.10, FRED, BLS): the FRED key
+                                          in the query, the BLS key in the body,
+                                          each withheld from any error; its own
+                                          proxy setting only
 ========================================  =======================================
 
 Three things hold at every one of them.
@@ -85,6 +90,18 @@ Three things hold at every one of them.
   its report. Withholding never raises and never waits: if it fails, the
   exception says only its class.
 
+* **No log record of the HTTP client quotes a request's query or a credential.**
+  urllib3 records every request line at DEBUG, query and all (``"GET
+  /path?api_key=<the key> HTTP/1.1" 200``), and its retry and redirect records name the
+  URL; whether a deployment keeps them is its LOGGING's to say. A filter on each of
+  urllib3's loggers (:data:`CLIENT_LOGGERS`, installed when this module is imported)
+  rewrites every such record before any handler sees it: each query string is
+  withheld, and so is every value the call in flight withholds from an error (its
+  credential headers, the proxy's userinfo, ``also_withhold``), which a contextvar
+  carries from :func:`_send` to the record. The record is kept -- the method, host
+  and path still say what was sent -- and the filter never drops one and never
+  raises: a record it cannot rewrite says only that it was withheld.
+
 Nothing here decides whether a request may be sent: a scan's Stop goes through
 :func:`post` like every other call, on the engine's lane, and what changes for it
 is only which redirects are followed and that the environment gives it nothing
@@ -95,6 +112,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import contextvars
+import logging
 import os
 import re
 import time
@@ -307,6 +326,82 @@ def _withhold_body(response: requests.Response, secrets) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The HTTP client's own log records
+# ---------------------------------------------------------------------------
+
+#: The loggers the HTTP client records requests on (urllib3, under requests): every
+#: record they make is rewritten by :class:`_ClientRecordFilter`.
+CLIENT_LOGGERS = (
+    "urllib3",
+    "urllib3.connection",
+    "urllib3.connectionpool",
+    "urllib3.poolmanager",
+    "urllib3.response",
+    "urllib3.util.retry",
+    "urllib3.contrib.pyopenssl",
+    "urllib3.http2.connection",
+)
+#: What the call in flight withholds (:func:`_send`), for the filter to read.
+_IN_FLIGHT: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("outbound_withheld", default=())
+#: A query string: from its ``?`` to the next space, quote or bracket.
+_QUERY = re.compile(r"\?[^\s'\"<>)]*")
+
+
+def withheld_record_text(text: str, secrets=()) -> str:
+    """``text`` with every query string and each of ``secrets`` withheld."""
+    return _QUERY.sub("?" + WITHHELD, _replaced(text, secrets))
+
+
+class _ClientRecordFilter(logging.Filter):
+    """Rewrites an HTTP client record before any handler sees it: every query string
+    and every value the call in flight withholds, in its message and in each of its
+    arguments (an argument that is not text is written out first, an exception's
+    text included). Keeps every record; never raises."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            secrets = _IN_FLIGHT.get()
+            if isinstance(record.msg, str):
+                record.msg = withheld_record_text(record.msg, secrets)
+            else:
+                record.msg = withheld_record_text(str(record.msg), secrets)
+            args = record.args
+            if isinstance(args, tuple):
+                record.args = tuple(self._argument(value, secrets) for value in args)
+            elif isinstance(args, dict):
+                record.args = {key: self._argument(value, secrets) for key, value in args.items()}
+            if record.exc_info:
+                quiet(record.exc_info[1], secrets)
+                record.exc_text = None
+        except Exception:  # noqa: BLE001 - a record that cannot be rewritten says less, never more, and is kept
+            record.msg, record.args, record.exc_info, record.exc_text = f"{WITHHELD} (an HTTP client record)", (), None, None
+        return True
+
+    @staticmethod
+    def _argument(value, secrets):
+        if isinstance(value, (int, float)) or value is None:
+            return value
+        return withheld_record_text(value if isinstance(value, str) else str(value), secrets)
+
+
+_CLIENT_FILTER = _ClientRecordFilter()
+
+
+def install_client_record_filter() -> None:
+    """Put :class:`_ClientRecordFilter` on each of :data:`CLIENT_LOGGERS`, once. Never
+    raises: this module is imported on the stop's path, and a logger that cannot be
+    filtered is not a reason to refuse anything."""
+    with contextlib.suppress(Exception):
+        for name in CLIENT_LOGGERS:
+            logger = logging.getLogger(name)
+            if not any(isinstance(existing, _ClientRecordFilter) for existing in logger.filters):
+                logger.addFilter(_CLIENT_FILTER)
+
+
+install_client_record_filter()
+
+
+# ---------------------------------------------------------------------------
 # The engine's lane: its proxy, and the redirects it follows
 # ---------------------------------------------------------------------------
 
@@ -465,6 +560,15 @@ def _send(method: str, url: str, *, engine: bool = False, also_withhold=(), **kw
     # able to rewrite the run id a Stop names. The call site withholds it from the
     # texts it keeps.
     said = _longest_first([*said, *(value for value in also_withhold if isinstance(value, str))])
+    # What the HTTP client's own log records of this call withhold (_ClientRecordFilter).
+    in_flight = _IN_FLIGHT.set(tuple(said))
+    try:
+        return _send_withheld(method, url, engine, kwargs, carried, said, proxies)
+    finally:
+        _IN_FLIGHT.reset(in_flight)
+
+
+def _send_withheld(method, url, engine, kwargs, carried, said, proxies) -> requests.Response:
     # As requests.get and requests.post do: one Session for the call, closed after
     # it (a streamed answer is still read to its end).
     with session() as sending:
