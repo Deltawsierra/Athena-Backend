@@ -1506,6 +1506,38 @@ class World:
             f"/api/assurance/deployments/{self.deployment.uuid}/economics/receipts/{uuid.UUID(receipt_id)}/",
             "deployment-economics-receipt",
         ).status_code
+        # Continuous financial assurance (E6, spec section 34): a new version of the
+        # receipted scenario's set stales its run; the check records it (200) and the
+        # deployment's assurance and the run's freshness are read (200); a refresh of
+        # the receipted version, which the builder did not build, is refused (400), with
+        # a canary in the body it was sent; and the operator's command runs. What they
+        # answer -- the scenarios' titles and reasons, the dependency map -- is searched
+        # like every other sink; read_everything reads both reads again.
+        from assurance.economics.models import CustomerParameterSet
+        from tests.test_economics_scenarios import _entry as set_entry
+
+        CustomerParameterSet.record(self.deployment, "canary_receipted", {"variables": {
+            "notification_unit_cost": set_entry("money_per_unit", "3"),
+            "notification_fixed_cost": set_entry("money", "40000"),
+        }}, author=self.admin)
+        economics = f"/api/assurance/deployments/{self.deployment.uuid}/economics/"
+        signals["assurance_check"] = self.call(
+            docs, "api.answers", admin, "post", economics + "assurance/", "deployment-economics-assurance",
+            data={}, format="json",
+        ).status_code
+        signals["assurance"] = self.call(
+            docs, "api.answers", admin, "get", economics + "assurance/", "deployment-economics-assurance",
+        ).status_code
+        signals["scenario_freshness"] = self.call(
+            docs, "api.answers", admin, "get", scenarios + f"{receipted.uuid}/freshness/",
+            "deployment-economics-scenario-freshness",
+        ).status_code
+        signals["scenario_refresh"] = self.call(
+            docs, "api.answers", admin, "post", scenarios + f"{receipted.uuid}/refresh/",
+            "deployment-economics-scenario-refresh",
+            data={"seed": 9, "policy": "quick_10k", "as_of": "2026-10-06"}, format="json",
+        ).status_code
+        self.command(docs, "check_financial_assurance", "--deployment", str(self.deployment.uuid))
 
     def feeds(self, docs, signals):
         """MVP step 10: the operator's fetch, with the providers' key planted. FRED
@@ -1753,6 +1785,11 @@ ROUTES.update(
         "deployment-economics-portfolio": _READ,
         "deployment-economics-portfolio-simulate": _READ,
         "deployment-economics-portfolio-groups": _READ,
+        # Continuous financial assurance (E6, spec section 34): a run's freshness, the
+        # deployment's assurance and its check, and a stale scenario's refresh.
+        "deployment-economics-scenario-freshness": _READ,
+        "deployment-economics-assurance": _READ,
+        "deployment-economics-scenario-refresh": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1797,6 +1834,7 @@ def _readable_urls(world):
                 "deployment-economics-scenario-results",
                 "deployment-economics-scenario-roi",
                 "deployment-economics-scenario-precedents",
+                "deployment-economics-scenario-freshness",
             ):
                 from assurance.economics.models import FinancialScenario
 
@@ -2025,6 +2063,7 @@ COMMANDS: dict[str, str] = {
     "retry_closure_forwards": "commands",
     "raise_source_trust": "commands",
     "fetch_financial_source": "commands",
+    "check_financial_assurance": "commands",
 }
 
 
@@ -2182,6 +2221,11 @@ def test_every_path_ran(observed):
     assert (s["records"]["scenario_list"], s["records"]["receipt_issued"], s["records"]["receipt_bytes"]) == (
         200, (True, None), 200,
     ), s["records"]
+    # Continuous financial assurance: the check, the reads and a refused refresh.
+    assert (
+        s["records"]["assurance_check"], s["records"]["assurance"], s["records"]["scenario_freshness"],
+        s["records"]["scenario_refresh"],
+    ) == (200, 200, 200, 400), s["records"]
     assert s["records"]["trust_raise"] == {
         "one_step": 201, "asked": 201, "approved": 200, "withdrawable": 201, "withdrawn": 200,
         "command_approve_refused": True,

@@ -661,7 +661,9 @@ def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
                  # Step 6: the chart series and their service.
                  "assurance.economics.engine.charts", "assurance.economics.charts_service",
                  # E5: the portfolio's engine (its service and routes load, and import it only when called).
-                 "assurance.economics.engine.portfolio")
+                 "assurance.economics.engine.portfolio",
+                 # E6: continuous financial assurance, imported only inside functions.
+                 "assurance.economics.continuous_service")
         print(json.dumps(sorted(m for m in sys.modules if any(m == n or m.startswith(n + ".") for n in names))))
         print(json.dumps("assurance.economics.engine.money" in sys.modules))
         """

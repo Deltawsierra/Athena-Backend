@@ -122,6 +122,10 @@ EXCLUSIONS = {
     "refused": "its latest run was refused: it has no figures",
     "no_card": "its latest result has no Validity Card: it is not graded",
     "unknown": "its latest result is graded Unknown: not for capital decisions",
+    "stale": (
+        "its latest result is stale: something it rests on changed since it ran (E6, section 34); it is not totalled "
+        "until a refresh of it stands"
+    ),
     "not_totalled": "report.may_be_totalled refuses its latest result's report",
     "no_annual_loss": (
         "its run states no frequency: a draw is one occurrence, not a simulated year, so it has no annual loss to sum"
@@ -381,6 +385,10 @@ def _report_exclusion(document: dict) -> str:
         return "no_card"
     if document.get("grade") == report.UNKNOWN:
         return "unknown"
+    if document.get("banner") == report.STALE_BANNER:
+        # E6 (section 34.2): a stale run, which the report excludes, its reasons named
+        # in the report's banner_reason, which the exclusion carries.
+        return "stale"
     return "not_totalled"
 
 
@@ -990,6 +998,47 @@ def banner_reason(row: PortfolioResult, grade: str | None, failed: list[str]) ->
     return None
 
 
+def stale_members(row: PortfolioResult) -> list[dict]:
+    """Each included scenario whose result is stale NOW (E6, spec section 34.2), with
+    its reasons. A portfolio totalled each member while it was current; a stored
+    portfolio is read again on every request, and one whose member has gone stale
+    since is stale itself: never a total of a stale run read as current. Reads only,
+    and never raises: freshness that cannot be read is stale
+    (``dependencies_unverifiable``), never current."""
+    members = (row.inputs.get("members") or []) if isinstance(row.inputs, dict) else []
+    members = [m for m in members if isinstance(m, dict)]
+    if not members:
+        return []
+    try:
+        from . import continuous_service
+
+        now = continuous_service.Now(row.deployment_id)
+        found = []
+        for member in members:
+            result = SimulationResult.objects.filter(uuid=member.get("result"), deployment_id=row.deployment_id).first()
+            excluded = None if result is None else continuous_service.portfolio_exclusion(result, now=now)
+            if excluded is not None:
+                found.append({"scenario": member.get("scenario"), "title": member.get("title"),
+                              "result": member.get("result"), "reasons": excluded["reasons"]})
+        return found
+    except Exception:  # noqa: BLE001 - a portfolio is always served; its freshness is then not vouched for
+        unreadable = [{"code": "dependencies_unverifiable", "dependency": "dependencies"}]
+        return [{"scenario": m.get("scenario"), "title": m.get("title"), "result": m.get("result"),
+                 "reasons": unreadable} for m in members]
+
+
+def stale_reason(stale: list[dict]) -> str | None:
+    """The ``banner_reason`` part naming each stale member, or ``None``."""
+    if not stale:
+        return None
+    named = "; ".join(
+        f"{m['scenario']} ({m['title']}): " + ", ".join(f"{r['code']} ({r['dependency']})" for r in m["reasons"])
+        for m in stale
+    )
+    return (f"stale: an included scenario's result is stale, so the total is not current until it is refreshed and "
+            f"the portfolio totalled again: {named}")
+
+
 def _unverified(failed: list[str]) -> str:
     return (
         f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail {', '.join(failed)}: a row no longer gives its digest, "
@@ -1227,6 +1276,8 @@ def build_document(row: PortfolioResult) -> dict:
     else:
         grade = portfolio_grade(inputs)
     why = banner_reason(row, None if grade is None else grade["grade"], failed)
+    # E6 (section 34.2): a member stale since it was totalled makes the total stale.
+    stale = stale_reason(stale_members(row)) if figures else None
     withheld = _unverified(failed) if failed else None
     if not completed:
         refusal = {"code": row.refusal_code, "detail": row.refusal_detail}
@@ -1266,9 +1317,9 @@ def build_document(row: PortfolioResult) -> dict:
         "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed),
                       "scenarios_failed": failing},
         "grade": grade,
-        "banner": None if why is None else report.UNKNOWN_BANNER,
-        "excluded_from_totals": why is not None,
-        "banner_reason": why,
+        "banner": report.UNKNOWN_BANNER if why is not None else report.STALE_BANNER if stale is not None else None,
+        "excluded_from_totals": why is not None or stale is not None,
+        "banner_reason": report._with_stale(why, stale),
         "complete": bool(inputs) and not excluded,
         "reads_as": "the loss of every current scenario version" if inputs and not excluded
         else "at least: the included scenarios only; every excluded one is listed with its reason",
@@ -1349,5 +1400,7 @@ __all__ = [
     "record_group",
     "served_normalization",
     "simulate_portfolio",
+    "stale_members",
+    "stale_reason",
     "stored_row_failures",
 ]
