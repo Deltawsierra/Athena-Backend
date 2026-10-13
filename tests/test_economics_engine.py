@@ -687,12 +687,14 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     models.SIMULATION_RECORD_REFUSALS, or (a Validity Card or receipt row, step 8)
     models.CARD_RECORD_REFUSALS, or (a chart-series row, step 6)
     models.CHARTS_RECORD_REFUSALS, or (a remediation option row, step 13)
-    models.REMEDIATION_RECORD_REFUSALS; every code the money engine raises is in
+    models.REMEDIATION_RECORD_REFUSALS, or (a dependency map, staleness or refresh
+    row, E6) models.ASSURANCE_RECORD_REFUSALS; every code the money engine raises is in
     money.REFUSALS, and every code the scenario engine raises as its own is in
     parameters.REFUSALS; and every published code is one something gives. A code
     two tables publish means the same in both, and the scenario engine publishes
     none the money engine already does."""
     from assurance.economics.models import (
+        ASSURANCE_RECORD_REFUSALS,
         CARD_RECORD_REFUSALS,
         CHARTS_RECORD_REFUSALS,
         REMEDIATION_RECORD_REFUSALS,
@@ -713,6 +715,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     published = (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
+        | set(ASSURANCE_RECORD_REFUSALS)
     )
     assert not set(SIMULATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
@@ -727,6 +730,10 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     assert not set(REMEDIATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS)
+    )
+    assert not set(ASSURANCE_RECORD_REFUSALS) & (
+        set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
     )
     assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):
@@ -841,12 +848,17 @@ def test_nothing_but_the_models_registration_imports_economics():
 
     MVP step 10 adds the operator's ``manage.py fetch_financial_source`` on the same
     terms (no first-party module imports it, checked below), and the data-health
-    route module, ``assurance.economics.health_api``, mounted guarded (section 29)."""
+    route module, ``assurance.economics.health_api``, mounted guarded (section 29).
+
+    E6 (section 34) adds the operator's ``manage.py check_financial_assurance`` on the
+    same terms (no first-party module imports it, checked below); its routes are in
+    ``assurance.economics.report_api``, already mounted guarded."""
     importers = set()
     command_importers = set()
     commands = (
         "assurance.management.commands.raise_source_trust",
         "assurance.management.commands.fetch_financial_source",
+        "assurance.management.commands.check_financial_assurance",
     )
     skip = {".git", "node_modules", "tests", "__pycache__"}
     for directory, subdirectories, files in os.walk(REPO):
@@ -872,6 +884,7 @@ def test_nothing_but_the_models_registration_imports_economics():
         "assurance/urls.py",
         "assurance/management/commands/raise_source_trust.py",
         "assurance/management/commands/fetch_financial_source.py",
+        "assurance/management/commands/check_financial_assurance.py",
     }
     assert command_importers == set()
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")

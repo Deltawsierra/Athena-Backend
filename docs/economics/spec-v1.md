@@ -92,6 +92,10 @@ The reads the dashboard's financial views need (MVP step 14), on step 6's routes
 
 30. [The read routes the dashboard needs (MVP step 14 support)](#30-the-read-routes-the-dashboard-needs-mvp-step-14-support)
 
+Continuous financial assurance (E6), on steps 7b, 8, 6, 10 and SPINE's invalidation:
+
+34. [Continuous financial assurance (E6)](#34-continuous-financial-assurance-e6)
+
 ## 1. Status and scope
 
 | | |
@@ -5502,3 +5506,263 @@ routes that cannot move the decision; at capacity they write nothing at all.
 3. **`Retry-After: 30`**, a quarter of the 120 s deadline.
 4. **Stop routes on their own worker pool** is an operations change, not code; the cap
    does not need it.
+
+## 34. Continuous financial assurance (E6)
+
+The owner's specification, section 25, and the roadmap's row 6 ("SPINE INVALIDATES /
+SUPERSEDES, targeted recomputation"; exit: change event -> stale exposure -> minimal
+refresh/retest -> new receipt). Section 27's "Change invalidation" row is the
+acceptance test: a SPINE change marks ONLY the dependent scenarios stale, and the
+unaffected stay current. A change to what an exposure run rests on -- a SPINE claim, a
+system state, an asset, a finding, an observed effect, a parameter set, a feed source,
+the engine release -- makes that run stale, says why everywhere it is read, and records
+the refresh it owes; a refresh an analyst asks for rebuilds and re-runs only the
+scenario named, and closes the obligation once the new run stands, with SPINE's
+outcome for the financial claim.
+
+| | |
+|---|---|
+| Code | `assurance/economics/continuous_service.py` (the map, the assessment, the check, the refresh's rebuild and closure); `ExposureDependencies`, `ExposureStaleness` and `ExposureRefresh` in `models.py`; the capture in `simulation_service.py`; the reads in `report.py`; three routes and the receipt route's headers in `report_api.py`; `manage.py check_financial_assurance` |
+| Migration | `0073_exposure_assurance.py`: three new tables, nothing else changed. Numbered behind #165's 0071 and #162's 0072 (both in the merge queue); it depends on master's latest, `0070_financial_source_fetches.py`, and is re-pointed when they merge |
+| Tests | `tests/test_economics_continuous_assurance.py`; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_economics_run_cap.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and the import tests (`tests/test_economics_engine.py`, `tests/test_economics_simulation.py`) extended to them |
+
+### 34.1 The dependency map
+
+Every completed exposure run records what it depends on (`ExposureDependencies`, schema
+`mythos.economics.exposure-dependencies/v1`, one per run, append-only, no account
+column, going with its deployment). `simulation_service.simulate_scenario` reads it
+(`continuous_service.capture`) BEFORE the run, so a change during the run reads as a
+change, and records it once the run is inserted; a map that cannot be read or recorded
+never fails the run, which then reads stale (`dependencies_unrecorded`). A residual run
+under a remediation option is never exposure and has none; nor has a refused run.
+
+| Part | What is recorded |
+|---|---|
+| `claim_types` | the SPINE claim types the scenario's templates rest on (`continuous_service.TEMPLATE_CLAIMS`; every type for a template it does not list, or a version with no effect) |
+| `claims` | for each of those types, each current claim: its identity, version, status, input and system fingerprints, the policy it was judged under, and whether a retest of it is open |
+| `inputs`, `policy`, `build_system_fingerprint` | the input fingerprint of each bound type and the assurance policy in force when the run was made, and the system fingerprint the build recorded (kept as the record of them) |
+| `assets` | each effect's asset: the digest of its stable descriptor (`assurance.fingerprint`'s, salient configuration included) and whether it is in the graph |
+| `findings` | each enabling finding's status and severity |
+| `observed_effects` | each observed effect's row: its status and the evidence digest |
+| `parameter_set` | the set key, version and content digest the build read |
+| `as_of`, `sources` | the run's as-of date, and for each feed source a figure cites (section 29.5), the version a run of the deployment reads at that date and its state |
+| `release` | the engine release: the run's engine versions and limits (every one but the formulas, which a scenario names by version and which never change), the sensitivity method, the grade and the card (`validity_service.release_record`), and its digest |
+
+`TEMPLATE_CLAIMS`, the binding of a template's loss to the SPINE claims it follows from:
+
+| Template | Claim types |
+|---|---|
+| `payment_agent_misuse` | `ai_bom`, `effective_access` |
+| `cross_customer_data_exposure` | `data_boundary`, `effective_access` |
+| `customer_service_ai_misstatement` | `ai_bom` |
+| `fraud_aml_workflow_failure` | `ai_bom`, `effective_access` |
+| `agent_approval_bypass` | `ai_bom`, `effective_access` |
+| `third_party_provider_outage` | `ai_bom`, `data_boundary` |
+
+### 34.2 Change makes stale
+
+`continuous_service.assess(result)` compares a completed exposure run's map with what
+holds now, and adds every reason a check recorded for it (section 34.3). Each moved
+dependency is one reason, with the code, the dependency (`claim:<type>`,
+`inputs:<type>`, `asset:<uuid>`, `finding:<uuid>`, `observed_effect:<uuid>`,
+`parameter_set:<key>`, `source:<key>`, `release`, `scenario:<uuid>`, `dependencies`),
+what it was, what it is, in words, and for a parameter set or a release what changed.
+A run with no reason is current; a reason only another scenario's dependency gives
+leaves this one current. Reads only, holds no transaction, and never raises: a fault
+reading what holds now is a reason (`dependencies_unverifiable`), never a pass.
+
+| Code | When |
+|---|---|
+| `dependencies_unrecorded` | no map was recorded with the run (made before E6, or its map could not be read) |
+| `dependencies_unverifiable` | what the run rests on, or its obligations, could not be read now |
+| `claim_superseded` | SPINE superseded or closed the claim version the run was bound to |
+| `claim_invalidated` | the claim is STALE, or a retest of it is open -- now, or when the run was made |
+| `claim_status_moved` | the claim's status moved (a person contradicted or revoked it, the evidence audit held it) |
+| `claim_established` | SPINE established a claim of a bound type after the run |
+| `fingerprint_moved` | the state a bound claim rests on moved, by SPINE's own predicate (`assurance.fingerprint.claim_state_moved`, the one its invalidation acts on), or its policy is no longer in force: before SPINE's check has run |
+| `asset_changed` | an effect's asset changed, left the graph or is gone |
+| `finding_changed` | an enabling finding's status or severity moved, or it is gone |
+| `evidence_changed` | an observed effect no longer holds the status or the evidence it held |
+| `parameter_set_superseded` | a newer version of the set the build read is current (the reason names the variables that differ, or says none does) |
+| `contract_terms_changed` | an insurance or contract term of that set (an `insurance_` variable or the exclusions) changed in the current version |
+| `source_superseded` | a feed source a figure cites would now be read at another version on the run's as-of date |
+| `source_stale` | that source is stale, blocked or missing as of the day the run is read (section 29.5) |
+| `release_changed` | the engine release moved since the run (the reason names which part) |
+| `release_unverifiable` | the release could not be read now, or was not when the run was made |
+| `scenario_superseded` | a later version of the scenario supersedes the run's |
+
+**Stale is never silent.** Where a stale run is read, it says so and why, and a stale
+run is never totalled as current:
+
+- the report (`results/`): where no other reason excludes the run, `banner` is
+  `report.STALE_BANNER` ("Stale: a dependency changed since this run; not current until
+  it is refreshed"), `excluded_from_totals` is true and `banner_reason` names every
+  reason (`stale: <code> (<dependency>), ...`); `unknowns` lists each reason as
+  `{"kind": "stale", ...}`. The schema stays `mythos.economics.report/v2`: these keys
+  are v2's own. `report.may_be_totalled` refuses it (its `excluded_from_totals`), and
+  `report.stands` still reads the run as the sound account it is;
+- the events route and the scenario list apply the same rule (`report.standing`), and
+  each list entry carries `freshness` (the state and each reason's code and dependency);
+- the scenario document's `validity.simulations[]` carry `freshness`;
+- `GET .../scenarios/<scenario uuid>/freshness/` serves one run's freshness in full: its
+  map, its reasons, its obligations, what superseded it, and what a refresh must
+  refresh now; `GET .../economics/assurance/` every current version's latest exposure
+  run and every open obligation;
+- the receipt route serves the signed bytes unchanged and says the run's freshness
+  beside them: `X-Exposure-Freshness` (`current` or `stale`),
+  `X-Exposure-Stale-Reasons`, `X-Exposure-Superseded-By-Run` and
+  `X-Exposure-Superseded-By-Receipt`. A stale run's receipt still verifies
+  (`receipt_service.verify_stored_receipt`): nothing it signed was changed;
+- the ROI route reads the current run's report through `may_be_totalled`, so a stale
+  current run is its banner reason;
+- a portfolio (E5, section 33) excludes a stale member: `continuous_service.portfolio_exclusion`
+  names it (`{"code": "stale", ...}`), and until E5 merges its report is already
+  refused by `may_be_totalled`, which every total applies.
+
+### 34.3 The refresh obligation
+
+`continuous_service.check(deployment)` -- `POST .../economics/assurance/` (an admin or
+an analyst) and `manage.py check_financial_assurance [--deployment <uuid>]`, which a
+deploy runs so a release change is recorded at once -- reads each current exposure run
+(each scenario version no other supersedes, its latest exposure run, completed) and
+records each stale one as an `ExposureStaleness`: the run, its reasons and their digest,
+and the refresh it owes (`refresh`): the scenario, the action, the parameters, sources,
+claims, assets, findings and observed effects that moved, whether the release did, and
+whether it waits on SPINE (`awaits_spine`: a technical reason). Once per set of reasons
+(`uq_econ_staleness_reasons`); a re-run records nothing new. Recorded, a run stays stale
+whatever its dependencies do later -- a release moved back, a claim re-derived -- until
+a refresh supersedes it: an open obligation is closed by a refresh that stands, never by
+its cause going away. **No recompute here**: the check runs no Monte Carlo and imports
+nothing that does, takes no run slot, holds no transaction while it reads, and inserts
+each row in a short transaction of its own; SPINE's own `check-invalidations` route is
+unchanged and recomputes nothing economic.
+
+### 34.4 The refresh
+
+`POST .../economics/scenarios/<scenario uuid>/refresh/` (`deployment-economics-scenario-refresh`),
+an admin or an analyst, `{"seed": ..., "policy": ..., "receipt": <bool>, "as_of":
+"YYYY-MM-DD"}` (a simulate request's fields, and the date to rebuild at, today UTC by
+default and never later): the ONLY way a stale run is recomputed, and only when asked.
+It is a Monte Carlo route, `@capacity.capped`, under one 120 s deadline (section 32).
+
+1. `continuous_service.prepare_refresh`: the version must be the latest
+   (`scenario_superseded`, 409, naming the one to refresh), with a completed exposure
+   run (`nothing_to_refresh`, 409) that is stale (`exposure_current`, 409: nothing is
+   run). A run found stale now and not yet recorded is recorded first.
+2. The version is rebuilt (`builder.build`, section 24) from what its build recorded --
+   the same effects, attributes and findings -- with the parameter set's CURRENT version
+   and the as-of date, superseding it; the builder resolves every reference again (an
+   observed effect no longer in force is refused) and records the deployment's system
+   fingerprint now. A version the builder did not build is `refresh_not_rebuildable`
+   (400). The same inputs return the version already built.
+3. Only that version is run (`simulate_scenario`, which records the new run's map), its
+   Validity Card and chart series issued and, where asked, its receipt signed. A run
+   that is the stale run's own (same inputs and seed) is `refresh_same_run` (409).
+4. `continuous_service.close_obligations`: every open obligation of the version and of
+   each version it supersedes closes ONLY once the new run STANDS -- its report may be
+   totalled (completed, every stored row verified, graded A to D, and current itself). A
+   run that rests on a claim SPINE has not yet re-assessed is stale from birth
+   (`claim_invalidated`), so a refresh made while a retest is open closes nothing: the
+   response names the obligations left open and why.
+
+Each closure is an `ExposureRefresh` (append-only, one per obligation; it names the
+person who asked as a scenario names its author): the stale run, the new run, its card
+and its receipt (or none), and SPINE's outcome for the financial claim with what SPINE
+says of each claim type the new run rests on:
+
+| Outcome | When |
+|---|---|
+| `restored` | a technical reason, and every claim the new run rests on is a pass (verified, supported, partially verified) |
+| `contradicted` | a technical reason, and a claim it rests on is contradicted |
+| `unknown` | a technical reason, and a claim it rests on is neither (unknown, draft, revoked) or there is none |
+| `superseded` | nothing technical moved (a parameter set, a source, the release): the new figures supersede the stale ones |
+
+Nothing is rewritten: the stale run, its card and its receipt stay as recorded and
+still verify; the closure is what says a later run (and receipt) supersedes them.
+
+### 34.5 The routes
+
+| Method and path | Name | Does |
+|---|---|---|
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/freshness/` | `deployment-economics-scenario-freshness` | one run's freshness in full (`?simulation=<uuid>`, else the version's latest exposure run) |
+| `GET`, `POST deployments/<uuid>/economics/assurance/` | `deployment-economics-assurance` | the deployment's exposure, current or stale, and its open obligations; the check (admin or analyst) |
+| `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/refresh/` | `deployment-economics-scenario-refresh` | the refresh (section 34.4) |
+
+Step 6's conventions: a signed-in account, a deployment the caller cannot see is 404,
+every role reads, only an admin or an analyst writes (403), strict JSON of at most 64
+KiB, a strict query, `Cache-Control: no-store`, and 503 while the currency table cannot
+be read. The reads write nothing and give the same bytes fired twice.
+
+### 34.6 Safety
+
+None of the three routes is a stop: each is in `safety.stops.NOT_STOPS`, the refresh as
+a run that takes a slot, and the check and the reads as economics records that start
+and stop nothing. Nothing here is on a stop path: stale marking is a read, done by the
+reads themselves and by the check, never by a write of SPINE's -- no signal, no hook in
+`check_invalidations` or `derive_claims`, so no stop's write does any of it. The check
+reads with no transaction held and writes only economics rows, each in a short
+transaction: a scan's Stop sent while a check of many stale runs is held open mid-way is
+answered (202) and saved within the stop tripwire's bound
+(`test_a_stop_is_answered_in_its_bound_while_a_large_check_is_held_open`). The refresh
+takes a run slot like every Monte Carlo route. `continuous_service` is imported only
+inside functions and views; nothing Django loads at start imports it.
+
+### 34.7 What is still not done
+
+- **The portfolio (E5)**: until #162 merges, a stale member is left out of a total by
+  `may_be_totalled`, as `not_totalled`; once it merges the portfolio names the
+  exclusion `stale` with its reasons through `continuous_service.portfolio_exclusion`.
+- **A pre-E6 run reads stale** (`dependencies_unrecorded`) until it is refreshed: no map
+  is backfilled.
+- **Claims are bound by template**, not by an analyst: no route binds a scenario to a
+  claim of its own choosing.
+- **Observed effects are compared by their rows** (status and evidence digest); their
+  signatures are verified again when a refresh rebuilds the version, not on every read.
+- **The card and the receipt keep the build's system fingerprint**: a refresh records
+  the deployment's now in the rebuilt version, and its new card and receipt bind it.
+
+### Choices for the owner
+
+Where the specification leaves a choice open this step takes the conservative one
+(more stale, never less); each may be changed.
+
+1. **Claims are bound by template** (`TEMPLATE_CLAIMS`): a template's loss rests on the
+   claim types whose falsification could change how likely or how large it is, two for
+   most. Alternatives: every claim type for every scenario (no scenario could stay
+   current through any SPINE change, failing section 27's row); an analyst's explicit
+   binding. Recommendation: keep, and add the explicit binding when a buyer asks.
+2. **Technical staleness follows SPINE's determination**: a bound claim superseded,
+   invalidated, moved, established, or drifted by SPINE's own predicate before its check
+   runs. The deployment-wide system fingerprint alone moves with any change anywhere in
+   the deployment and would stale every scenario; it stays on the card as the build's
+   record. Recommendation: keep.
+3. **A run made while a bound claim is stale, or has a retest open, is stale from
+   birth**, so its obligation stays open until SPINE restores, contradicts or leaves the
+   claim Unknown. Recommendation: keep.
+4. **A feed source's freshness is read on the day the run is read** (UTC), not only on
+   the run's as-of date as the card grades it: a run whose data have aged past their SLA
+   is stale until it is refreshed with newer data. Alternative: the as-of date only.
+5. **Any new version of the parameter set stales the run**, even one whose figures do
+   not differ (the reason says so). Alternative: compare the content digest.
+6. **A run with no map is stale** (`dependencies_unrecorded`), so every run recorded
+   before E6 reads stale after the deploy until refreshed. Alternative: rebuild a map from
+   the card's `issued` section.
+7. **A recorded staleness never lifts by itself**: only a refresh that stands closes it,
+   even where the dependency moves back.
+8. **The refresh always rebuilds** from the parameter set's current version, as of the
+   refresh date, superseding the version. Alternative: re-run the same version with a new
+   seed where only a source or the release moved.
+9. **An obligation closes only when the new run may be totalled** (completed, verified,
+   graded A to D, current): a refresh graded Unknown leaves it open.
+10. **SPINE's outcome** is computed from the claims the new run rests on, as in 34.4;
+    `superseded` where nothing technical moved.
+11. **The engine release** compared is the run's versions and limits but the formulas,
+    the analysis, the grade and the card: a release change stales every run made under
+    the old one, detected on every read and recorded by the deploy's command.
+12. **The report keeps schema v2**: stale is said in v2's own keys (`banner`,
+    `banner_reason`, `excluded_from_totals`, `unknowns`), and the events route keeps its
+    keys; a `freshness` key would be a v3. The list, the document and the freshness route
+    carry `freshness`.
+13. **The receipt route says freshness in headers**, never in the signed body.
+14. **The staleness names no account**: the machine finds a run stale, as SPINE's own
+    invalidation does; the refresh names who asked.

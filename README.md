@@ -680,6 +680,37 @@ caps, each read from the environment by name:
 No stop takes a slot: a scan's Stop and every operator stop are answered within their
 bound while every slot is held (`tests/test_economics_run_cap.py`).
 
+### Continuous financial assurance (E6)
+
+Every completed exposure run records what it depends on, read before it ran (spec,
+section 34): the SPINE claims its scenario's templates rest on (each version, status and
+open retest), each effect's asset, each enabling finding and observed effect, the
+parameter-set version, each feed source a figure cites, and the engine release. A run
+whose dependencies moved is STALE, and only it: a boundary change SPINE invalidates
+stales the scenarios bound to the boundary claim and leaves the others current. Every
+read says so -- the report (`banner` "Stale: ...", `excluded_from_totals: true`, the
+reasons in `banner_reason` and `unknowns`), the events route, the scenario list and
+document (`freshness`), and the receipt route in headers beside the signed bytes, which
+still verify -- and a stale run is never totalled (`may_be_totalled` refuses it).
+
+- `GET .../economics/scenarios/<scenario uuid>/freshness/`: one run's dependency map,
+  its reasons, its obligations and what to refresh;
+- `GET .../economics/assurance/`: every current run, current or stale, and the open
+  obligations; `POST` (admin or analyst) records each stale run with the refresh it owes,
+  once. It runs no Monte Carlo; `manage.py check_financial_assurance [--deployment
+  <uuid>]` does the same from the shell (a deploy runs it);
+- `POST .../economics/scenarios/<scenario uuid>/refresh/`: `{"seed": ..., "policy": ...,
+  "receipt": <bool>, "as_of": "YYYY-MM-DD"}`, the one way a stale run is recomputed, and
+  only when an analyst asks: the version is rebuilt from its parameter set's current
+  version (superseding it), run, carded and, where asked, receipted, under a run slot and
+  one deadline. Its obligations close only once the new run stands (graded A to D,
+  verified, and current: a refresh made while SPINE's retest of a claim it rests on is
+  open closes nothing), each naming SPINE's outcome -- restored, contradicted, Unknown or
+  superseded. Nothing is rewritten: the old run, card and receipt stay as signed.
+
+None of the three routes is a stop; stale marking is a read, never a hook on a write of
+SPINE's, and a scan's Stop is answered within its bound while a large check is held open.
+
 ### The live feeds (step 10, waiting on the owner's keys)
 
 Four official publishers are wired (spec, section 29): the ECB's euro reference rates
