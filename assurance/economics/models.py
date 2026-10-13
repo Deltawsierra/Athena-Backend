@@ -111,7 +111,7 @@ REMEDIATION_RECORD_REFUSALS = {
 }
 _REFUSAL_TEXT.update(REMEDIATION_RECORD_REFUSALS)
 #: The codes a stored portfolio result, or a correlation group version, is refused
-#: with on save (spec, section 32).
+#: with on save (spec, section 33).
 PORTFOLIO_RECORD_REFUSALS = {
     "portfolio_record_malformed": (
         "a portfolio result names its seed (a whole number from 0 to 2^64 - 1, as text), its draws, its reporting "
@@ -3144,7 +3144,7 @@ _SCENARIO_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 
 
 class CorrelationGroup(_AppendOnly):
-    """One version of one correlation group of a deployment (spec, section 32.3; the
+    """One version of one correlation group of a deployment (spec, section 33.3; the
     section-28 audit's T4): its key, its STRENGTH (the variance of the group's
     common driver, as decimal text in its one spelling), the source that strength
     rests on and its evidence, and the scenario versions in it, recorded by an
@@ -3246,7 +3246,7 @@ class CorrelationGroup(_AppendOnly):
 
 class PortfolioResult(_AppendOnly):
     """One portfolio of a deployment's scenarios, aggregated from their draws (spec,
-    section 32): the seed and the draws; the canonical inputs -- each scenario
+    section 33): the seed and the draws; the canonical inputs -- each scenario
     included with its stored result's digests, its grade and its normalisation into
     the reporting currency, each scenario excluded with its reason, the correlation
     groups with their strengths and sources, the shared events counted once, every

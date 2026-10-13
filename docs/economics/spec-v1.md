@@ -31,7 +31,7 @@ its row's figures from both sides, and the frequency by the rate its count impli
 version with its parameters' provenance, a simulation of it under a named policy,
 and the deterministic report JSON of a stored result, with the banner a result graded
 Unknown carries; the step-5 events route carries the same banner (sections 24.8 and
-27.6). E5 (section 32) totals a deployment's scenarios into a portfolio from their
+27.6). E5 (section 33) totals a deployment's scenarios into a portfolio from their
 draws, with correlation groups, a shared loss event counted once a year, every draw
 normalised before it is summed, and each scenario's contribution to the mean and to
 the tail.
@@ -97,7 +97,7 @@ The reads the dashboard's financial views need (MVP step 14), on step 6's routes
 
 Economic Exposure E5, on step 6's report:
 
-32. [Portfolio aggregation (Economic Exposure E5)](#32-portfolio-aggregation-economic-exposure-e5)
+33. [Portfolio aggregation (Economic Exposure E5)](#33-portfolio-aggregation-economic-exposure-e5)
 
 ## 1. Status and scope
 
@@ -105,7 +105,7 @@ Economic Exposure E5, on step 6's report:
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
 | Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0072_portfolio_results.py` (E5, section 32) |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0072_portfolio_results.py` (E5, section 33) |
 | Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
@@ -4465,7 +4465,7 @@ and series.
 ### 27.10 What is still not done
 
 - **No total across deployments.** `may_be_totalled` is the rule any total applies;
-  E5's portfolio (section 32) totals one deployment's scenarios by it, from their
+  E5's portfolio (section 33) totals one deployment's scenarios by it, from their
   draws.
 - **A range that states no distribution is still refused** (section 25.1): the
   parameter set and the builder now write distributions and the frequency (section
@@ -5355,7 +5355,7 @@ Decisions this adds, which the owner may change:
    own text of the column is not served: a JSON column need not keep the spelling it
    was given (PostgreSQL's `jsonb`, for one, reorders keys). Recommendation: keep.
 
-## 32. Portfolio aggregation (Economic Exposure E5)
+## 33. Portfolio aggregation (Economic Exposure E5)
 
 E5 answers the owner's question "how does this affect the entire AI portfolio?"
 (the owner's specification, lines 69-70 and section 24): one deployment's scenarios
@@ -5375,7 +5375,7 @@ served at `GET deployments/<uuid>/economics/portfolio/` (the owner's
 | Migration | `0072_portfolio_results.py`: two new tables, nothing else changed, on step 10's `0070_financial_source_fetches.py`: numbered 0072 as step 11 (#165) takes 0071, and re-pointed to it when #165 merges |
 | Tests | `tests/test_economics_portfolio.py`; the safety tests of sections 2, 23.10, 26.8 and 27.9 extended to the new modules, the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_portfolio.py`) |
 
-### 32.1 What is totalled
+### 33.1 What is totalled
 
 `mythos.economics.portfolio-selection/v1`. For one deployment, every scenario
 version no other version supersedes; of each, its LATEST exposure run, by record
@@ -5389,7 +5389,7 @@ result's report is built
 is the one test: only a report that carries its own digest, of a completed run whose
 every stored row verified, graded A to D, is totalled. Then the run must be annual
 (it states a frequency), its stored rows must still give the inputs it was run on
-(its input digest, recomputed), and its amounts must normalise (section 32.5).
+(its input digest, recomputed), and its amounts must normalise (section 33.5).
 
 **No scenario is dropped silently.** Every scenario version the portfolio does not
 total is listed with its code, the code's meaning and its own reason
@@ -5413,7 +5413,7 @@ Where any is excluded, the report says `complete: false` and reads "at least: th
 included scenarios only". At most `MAX_SCENARIOS` (50) current versions and
 `MAX_GROUPS` (20) groups (`scenarios_over_limit`, 400).
 
-### 32.2 One seed, aligned years: never by summing percentiles
+### 33.2 One seed, aligned years: never by summing percentiles
 
 Every included scenario is drawn AGAIN for the portfolio's own seed and draws (the
 simulation policy's, section 27.2). Each from sub-streams of that one seed keyed by
@@ -5432,7 +5432,7 @@ before, so no stored result, analysis or series changes).
 The portfolio's annual loss in year `y` is the sum, added in one fixed order
 (`portfolio.ordered_sum`), of its scenarios' normalised annual losses in year `y` of
 every event no other is linked to (scenario by scenario, event by event), then of
-each shared loss event's count that year (section 32.4), for two lines: the gross cash, and the retained cash (a scenario with no insurance policy
+each shared loss event's count that year (section 33.4), for two lines: the gross cash, and the retained cash (a scenario with no insurance policy
 retains its gross); the headline is the retained cash where any scenario states a
 policy. P10, P50, P90, the mean, the expected annual loss and severe-but-plausible
 are step 7a's summary of that vector (section 23.5), with its bands. Market value is
@@ -5450,7 +5450,7 @@ run (otherwise `invariant_broken`), the record keeps each scenario's own summary
 over the portfolio's years (`members.<uuid>.own`), and the report shows it beside the
 portfolio's (`scenarios.included[].own`).
 
-### 32.3 Correlation groups
+### 33.3 Correlation groups
 
 `mythos.economics.group-driver/v1` (the decided MVP). A correlation group is an
 AUTHORED RECORD (`CorrelationGroup`; the section-28 audit's T4): a key, the scenario
@@ -5507,19 +5507,19 @@ split (two scenarios at 2 a year, strength 2, 100,000 years): independent, P95
 1,296,239 and 1,757,268; one group of two, 1,590,880 and 2,346,146. So about 65% of
 the P95's rise and 60% of the expected shortfall's is each member's own
 over-dispersion, and the rest is co-movement. That is the decided MVP (decision
-32.10 #2, the owner's).
+33.10 #2, the owner's).
 
 The strength is a recorded parameter: its value, source type and evidence are in
 the group version and in the portfolio's inputs and digest, and shown. A strength
-resting on `EXPERT_ESTIMATE` or `UNKNOWN` lowers the portfolio's grade (section 32.8),
+resting on `EXPERT_ESTIMATE` or `UNKNOWN` lowers the portfolio's grade (section 33.8),
 as an expert figure lowers a scenario's (section 26.2). The groups are an analyst's
 declaration, authored, versioned and digested: a changed group is a new version and
 a new portfolio, never an edit of either (the owner's specification, section 28's
 model manipulation: priors, parameters, correlation groups). A second person's
-approval of a group is not required yet (section 32.11). Copulas are out of scope
-(section 32.11).
+approval of a group is not required yet (section 33.11). Copulas are out of scope
+(section 33.11).
 
-### 32.4 A shared loss event is counted once a year, at the largest loss that year
+### 33.4 A shared loss event is counted once a year, at the largest loss that year
 
 `mythos.economics.portfolio-shared-events/v1` (`portfolio.links_between`,
 `portfolio.shared_events`, `portfolio.counted_sets`): step 5's grouping attributes
@@ -5542,7 +5542,7 @@ events are. The engine checks that the links it is handed are exactly the rule's
 and that they connect the event (`shared_malformed` otherwise).
 
 **Counted once a year, at the largest loss that year** (the lead's interim decision
-on review round 1, HIGH-1, saved for the owner: decision 32.10 #3). Every scenario
+on review round 1, HIGH-1, saved for the owner: decision 33.10 #3). Every scenario
 keeps every one of its events, drawn at its own frequency and with its own figures:
 nothing is taken out of a scenario because another has it. In each simulated year a
 shared loss event is counted ONCE, at the largest total that year of a set of its
@@ -5563,7 +5563,7 @@ first set.
 
 What that holds:
 
-- **The portfolio is at least each included scenario, year by year** (section 32.2).
+- **The portfolio is at least each included scenario, year by year** (section 33.2).
   A scenario's own events are never linked, so they lie within one counted set, and
   the year's count is at least their sum.
 - **Adding a scenario never lowers the portfolio.** Its events add links to its own
@@ -5578,7 +5578,7 @@ What that holds:
   the exact sum; an added scenario can change the order the binary64 sum adds a
   year's losses in, so it can differ in its last place, far below the minor unit. A
   group that applies once two of its scenarios are included changes its members'
-  draws (section 32.3).
+  draws (section 33.3).
 - **No included scenario's tail exceeds the portfolio's** (review round 1,
   MEDIUM-1): the count is the larger loss in each year, never the event larger at
   base. The reviewer's narrow/wide pair is a test
@@ -5597,9 +5597,9 @@ times -- make ONE loss a year in the portfolio, the largest of the five that yea
 at least each one's, and under half of their sum, never five
 (`test_five_findings_on_one_payment_loss_never_quintuple_the_portfolio`). Each of
 the five still draws its own count of the event, so the year's largest is more than
-one scenario's alone (decision 32.10 #3).
+one scenario's alone (decision 33.10 #3).
 
-### 32.5 Currency: normalised before it is summed
+### 33.5 Currency: normalised before it is summed
 
 Owner's specification, line 676: every draw is normalised into the same reporting
 currency at the same valuation-date policy before summation. A request names its
@@ -5630,7 +5630,7 @@ the valuation date -- is excluded, `currency_unnormalisable`, naming the step an
 reason. A downgrade the normalisation carries (an estimated or stale rate or index,
 section 12.5) lowers that scenario's grade one step in the portfolio.
 
-### 32.6 Contributions to the mean and to the tail
+### 33.6 Contributions to the mean and to the tail
 
 The owner's specification, section 24 and lines 694-697: each scenario's
 contribution to mean exposure AND to tail exposure; the biggest mean contributor
@@ -5661,7 +5661,7 @@ may differ from the biggest tail contributor.
 - Where an input's mean is infinite (section 23.5), there is no mean, no
   contribution to it and no expected shortfall; each says why.
 
-### 32.7 The stored result
+### 33.7 The stored result
 
 `PortfolioResult`, append-only like every economics record, with no account column,
 going with its deployment: the seed (as text), the draws and severe percentile, the
@@ -5677,7 +5677,7 @@ shared loss events with their links; the normalisation policy and its sources, e
 with its licence class; the rules; and every version and limit
 (`engine.portfolio.versions()`). Nothing in it is a float, and both digests are
 recomputed on save (`portfolio_record_malformed`, `digest_mismatch`).
-`CorrelationGroup` (section 32.3) is the second table: one authored version of one
+`CorrelationGroup` (section 33.3) is the second table: one authored version of one
 group, append-only, going with its deployment.
 
 **Idempotent on its inputs**: one row per deployment, input digest, seed and draws
@@ -5708,7 +5708,7 @@ in 1.4 s (13 MB traced peak); 10 such scenarios, five in one group, in 5.3 s (19
 4.5 s (17 MB); 2 scenarios of Poisson(1) at 1,000,000 years in 13.9 s (67 MB); 3 such
 at 1,000,000 are refused for the budget.
 
-### 32.8 The routes, the report, the grade and the banner
+### 33.8 The routes, the report, the grade and the banner
 
 Mounted under `/api/assurance/` from `assurance/economics/portfolio_api.py`, in a
 guard of its own (section 2):
@@ -5717,7 +5717,7 @@ guard of its own (section 2):
 |---|---|---|
 | `POST deployments/<uuid>/economics/portfolio/simulate/` | `deployment-economics-portfolio-simulate` | totals the deployment's scenarios, or returns the portfolio recorded for the same inputs: 201 new, 200 recorded |
 | `GET deployments/<uuid>/economics/portfolio/` | `deployment-economics-portfolio` | the portfolio's report: `?result=<uuid>`, else the deployment's latest by record order |
-| `POST deployments/<uuid>/economics/portfolio/groups/` | `deployment-economics-portfolio-groups` | records a version of one of the deployment's correlation groups, authored by the caller (section 32.3): 201 new, 200 the version that states the same group; 409 `group_version_taken` where other versions of its key kept being recorded meanwhile |
+| `POST deployments/<uuid>/economics/portfolio/groups/` | `deployment-economics-portfolio-groups` | records a version of one of the deployment's correlation groups, authored by the caller (section 33.3): 201 new, 200 the version that states the same group; 409 `group_version_taken` where other versions of its key kept being recorded meanwhile |
 | `GET deployments/<uuid>/economics/portfolio/groups/` | `deployment-economics-portfolio-groups` | every version of the deployment's correlation groups, by key and version, each with its author and time |
 
 The request: `{"seed": <0 to 2^64 - 1>, "policy": <name>, "reporting_currency":
@@ -5816,7 +5816,7 @@ times its driver above the largest count mean, 1E9), `portfolio_record_malformed
 `field_missing`, `field_unrecognised` and `field_malformed`, and money's
 `currency_unknown` and `date_malformed`, each with its meaning.
 
-### 32.9 Safety
+### 33.9 Safety
 
 **No transaction or lock is held during the draws** (the SAFETY RULE). Every read
 of the selection is autocommit; the draws run outside any atomic block; the one
@@ -5846,12 +5846,13 @@ report's rule, so a broken report leaves the portfolio's routes unserved too.
 
 **No cap on simulations at once yet** (the section-28 audit's S1, HIGH): the
 portfolio's simulate route, like step 6's and step 13's, runs its draws in the
-request, bounded by the one 120 s deadline but not in number. A separate change adds
-a cross-process, non-blocking cap for the economics Monte Carlo routes (an immediate
-503 `economics_capacity`, never a wait); this route registers under it once it
-merges. Until then the portfolio adds no lock or wait of its own.
+request, bounded by the one 120 s deadline but not in number. A separate change
+(#166, spec section 32) adds a cross-process, non-blocking cap for the economics
+Monte Carlo routes (an immediate 503 `economics_capacity`, never a wait); the
+portfolio's simulate route carries its `@capacity.capped` once that merges. Until
+then the portfolio adds no lock or wait of its own.
 
-### 32.10 Decisions this step takes, which the owner may change
+### 33.10 Decisions this step takes, which the owner may change
 
 1. **Each scenario's latest result, never an older one in its place**, and only
    where `may_be_totalled` admits its report. Alternative: the latest result that
@@ -5861,10 +5862,10 @@ merges. Until then the portfolio adds no lock or wait of its own.
    decision, saved on review round 1): one common driver of mean 1 and variance `v`
    multiplies each member's annual rate. It also widens each member's own count (the
    mixed rate is over-dispersed), keeping its mean: about 65% of the P95's rise and
-   60% of the expected shortfall's, in the reviewer's measure (section 32.3), is
+   60% of the expected shortfall's, in the reviewer's measure (section 33.3), is
    that over-dispersion, not co-movement. A group names two scenarios at least and
    applies to two included at least. Alternatives: a Gaussian or t copula on the
-   members' annual losses (keeps each marginal exactly; section 32.11); a
+   members' annual losses (keeps each marginal exactly; section 33.11); a
    common-cause event added to the members. Recommendation: keep for the MVP; take a
    copula when a buyer's tail needs the marginals unchanged.
 3. **A shared loss event is counted once per SIMULATED YEAR, at the largest of the
@@ -5925,14 +5926,14 @@ merges. Until then the portfolio adds no lock or wait of its own.
     raw rates (the factor of a one-step conversion IS the rate, so it would leak).
     Recommendation: keep.
 
-### 32.11 What is still not done
+### 33.11 What is still not done
 
 - **Copulas** (the owner's specification, line 205: "copulas or conditional
   simulation in later phases"), and dependence between severities: only frequencies
   move together, through a group's driver.
 - **A customer figure two scenarios read** (one parameter-set variable) is drawn
   apart in each: scenarios in different groups are independent by the MVP's rule.
-- **Groups are declared by an analyst**, authored and versioned (section 32.3), not
+- **Groups are declared by an analyst**, authored and versioned (section 33.3), not
   inferred from SPINE (shared identity, provider, data store, business process,
   region: specification, section 24); the latest portfolio is served by default.
   `LossEvent.correlation_group` (step 4's column, which no writer sets) is not read.
@@ -5941,8 +5942,8 @@ merges. Until then the portfolio adds no lock or wait of its own.
   approval is not wired to a portfolio yet; the source type is the author's own
   statement. The record says who stated it and when.
 - **No cap on simulations at once** until the economics capacity cap merges
-  (section 32.9; the audit's S1).
-- **No licence term or expiry**: a source's licence class is read (section 32.8),
+  (section 33.9; the audit's S1).
+- **No licence term or expiry**: a source's licence class is read (section 33.8),
   but no `licensed_until` is recorded or checked (the audit's T7).
 - **No limit shared across scenarios**: insurance is each scenario's, per event
   occurrence; a yearly aggregate limit is section 25.10's open decision.

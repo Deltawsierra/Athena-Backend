@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Economic Exposure's route modules (docs/economics/spec-v1.md, sections 2, 19 and 24,
 # section 27 for step 6's, section 28 for step 13's, section 29 for step 10's and
-# section 32 for the portfolio's): the customer parameter-set routes, the scenario
+# section 33 for the portfolio's): the customer parameter-set routes, the scenario
 # builder's, the scenario endpoints with the report, the remediation option with its
 # ROI, the data-health route and the portfolio's, none of them a stop. Each is
 # imported GUARDED,
