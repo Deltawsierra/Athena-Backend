@@ -5,8 +5,9 @@
 :func:`simulate_scenario` loads one scenario version as the scenario engine reads
 it (its loss events, each component recomputed from the parameters it cites; the
 insurance policy of the parameter-set version it was built from; each cited
-parameter's stated distribution; its frequency parameter, if it holds one),
-runs it, and records the run as a :class:`~assurance.economics.models.SimulationResult`:
+parameter's stated distribution; its frequency, the one the parameter-set version
+states or, failing that, a parameter of its own), runs it, and records the run as a
+:class:`~assurance.economics.models.SimulationResult`:
 
 - **Idempotent.** A run's identity is its scenario version, the digest of its
   canonical inputs (every parameter's figures, source and stated distribution,
@@ -87,9 +88,11 @@ def load_input(scenario: FinancialScenario):
     in key order, each component recomputed from the rows it cites; the policy of
     the parameter-set version it was built from; every cited row's stated
     distribution; each derived row's contributors (``derived_from``), with
-    theirs; and the scenario's frequency parameter, if it holds one. Every
-    parameter is drawn once per simulated year: nothing here names one to be
-    drawn per occurrence."""
+    theirs; and the scenario's frequency: the one the parameter-set version it was
+    built from states (spec, section 19.2), read as the policy is, or a parameter
+    of its own named ``frequency``. Both is a conflict, refused (``duplicate_id``),
+    never resolved by taking one. Every parameter is drawn once per simulated
+    year: nothing here names one to be drawn per occurrence."""
     _, _, ss, _ = _engine()
     build_row = ScenarioBuild.objects.filter(scenario=scenario).first()
     events = tuple(row.as_engine() for row in LossEvent.objects.filter(scenario=scenario).order_by("event_key"))
@@ -98,6 +101,17 @@ def load_input(scenario: FinancialScenario):
     if build_row is not None:
         policy = CustomerParameterSet.objects.get(pk=build_row.parameter_set_id).content().insurance_policy()
     frequency_row = FinancialParameter.objects.filter(scenario=scenario, name=ss.FREQUENCY_PARAMETER).first()
+    if build_row is not None:
+        stated_by_set = FinancialParameter.objects.filter(
+            parameter_set_id=build_row.parameter_set_id, name=ss.FREQUENCY_PARAMETER
+        ).first()
+        if stated_by_set is not None:
+            if frequency_row is not None:
+                raise EconomicsRefused(
+                    "duplicate_id",
+                    "the scenario and the parameter-set version it was built from each state a frequency",
+                )
+            frequency_row = stated_by_set
     frequency = frequency_row.as_engine() if frequency_row is not None else None
 
     cited = {

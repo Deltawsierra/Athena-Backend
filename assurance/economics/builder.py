@@ -27,7 +27,10 @@ version, :func:`build`:
    (:func:`assurance.economics.engine.templates.larger_loss`): joined effects never
    understate, and never depend on how their keys are spelled;
 5. makes the scenario version, its build record, each effect's attributes as the
-   scenario's parameters, each event's larger-loss values, the loss events, the
+   scenario's parameters (each with the distribution it states, if it states one,
+   held to the simulation's own range test of its figures, as the parameter
+   set's are: spec, sections 19.2 and 25.1), each event's larger-loss values, the
+   loss events, the
    effects and the findings they rest on, and each event's components through
    #146's models, CHECKS every row before its transaction, then writes them in one
    that only inserts (:func:`assurance.economics.models.check_build_rows`).
@@ -133,11 +136,18 @@ class EffectInput:
     observation: str = ""
     spine_effect: str = ""
     occurred_at: datetime | None = None
+    #: The distribution each attribute states, by attribute name, in its stored
+    #: spelling; an attribute that states none is absent.
+    distributions: Mapping[str, dict] = field(default_factory=dict)
 
     def canonical(self) -> dict:
-        def attribute(parameter: Parameter) -> dict:
+        def attribute(name: str, parameter: Parameter) -> dict:
             row = parameter.as_dict()
             del row["name"], row["parameter_id"]
+            # Only where one is stated: a build whose attributes state none keeps
+            # the document, and the digest, it had before one could be stated.
+            if name in self.distributions:
+                row["distribution"] = self.distributions[name]
             return row
 
         return {
@@ -150,7 +160,7 @@ class EffectInput:
             "observation": self.observation,
             "spine_effect": self.spine_effect,
             "occurred_at": _instant_text(self.occurred_at),
-            "attributes": {name: attribute(p) for name, p in sorted(self.attributes.items())},
+            "attributes": {name: attribute(name, p) for name, p in sorted(self.attributes.items())},
         }
 
 
@@ -494,6 +504,7 @@ class EffectRequest:
     business_process: tpl.BusinessProcess
     attributes: Mapping[str, Parameter]
     observed_effect: str
+    distributions: Mapping[str, dict] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -564,6 +575,15 @@ def parse_request(body) -> BuildRequest:
             observed = _uuid_text(observed, f"{path}.observed_effect")
         elif observed is not None:
             raise ParameterRefused("field_unrecognised", f"{path}: ['observed_effect'] on a hypothetical effect")
+        raw_attributes = raw.get("attributes", {})
+        attributes = tpl.parse_attributes(key, raw_attributes, f"{path}.attributes", origin=origin)
+        # The distribution an attribute states, read as the parameter set reads one
+        # (pset.stated_distribution); it is held to its figures when its row is checked.
+        distributions = {}
+        for name in sorted(attributes):
+            stated = pset.stated_distribution(raw_attributes[name], f"{path}.attributes.{name}")
+            if stated is not None:
+                distributions[name] = stated
         effects.append(
             EffectRequest(
                 key=key,
@@ -571,8 +591,9 @@ def parse_request(body) -> BuildRequest:
                 effect_type=tpl.check_effect_type(raw["effect_type"], f"{path}.effect_type"),
                 asset=_uuid_text(raw["asset"], f"{path}.asset"),
                 business_process=tpl.check_business_process(raw["business_process"], f"{path}.business_process"),
-                attributes=tpl.parse_attributes(key, raw.get("attributes", {}), f"{path}.attributes", origin=origin),
+                attributes=attributes,
                 observed_effect=observed or "",
+                distributions=distributions,
             )
         )
     observed_twice = [e.observed_effect for e in effects if e.observed_effect]
@@ -658,6 +679,22 @@ class Resolved:
     digest: str
 
 
+def check_set_distributions(rows: Iterable[FinancialParameter]) -> None:
+    """Each distribution the named parameter-set version states, held again to the
+    rule a run applies NOW (spec, sections 19.4 and 25.1; review round 1, LOW-3): a
+    version recorded under an earlier rule or floor is refused here, with the run's
+    code and detail word for word, never built and then refused by its run. A version
+    that states none never imports the probabilistic engine; one that does while the
+    engine will not import is :class:`~.engine.parameter_set.ProbabilisticEngineUnavailable`
+    (503), and nothing is built."""
+    stated = sorted((row for row in rows if row.distribution is not None), key=lambda row: (row.name, row.id))
+    if not stated:
+        return
+    pset.probabilistic_engine("the parameter set's distributions")
+    for row in stated:
+        row.checked_distribution(row.as_engine())
+
+
 def resolve(deployment, request: BuildRequest) -> Resolved:
     """Resolve every reference of ``request`` in ``deployment``, and only there."""
     version = CustomerParameterSet.objects.filter(
@@ -668,6 +705,7 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     rows = version.parameter_rows()
     if not version.intact(rows):
         raise tpl.BuildRefused("parameter_set_not_found", f"{request.set_key} version {request.set_version} is not intact")
+    check_set_distributions(rows)
     variables = version.content(rows).variables
 
     wanted = {e.asset for e in request.effects}
@@ -716,6 +754,7 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
                 observation=observation,
                 spine_effect=spine_effect,
                 occurred_at=occurred_at,
+                distributions=request_effect.distributions,
             )
         )
     observations = [e.observation for e in effects if e.observation]
@@ -780,7 +819,9 @@ def build_rows(deployment, resolved: Resolved, *, author) -> BuildRows:
     for effect in resolved.effects:
         stored[effect.key] = {}
         for name, parameter in sorted(effect.attributes.items()):
-            row = FinancialParameter.from_engine(parameter, scenario=scenario)
+            row = FinancialParameter.from_engine(
+                parameter, scenario=scenario, distribution=effect.distributions.get(name)
+            )
             parameters.append(row)
             stored[effect.key][name] = row
     events: list[LossEvent] = []
@@ -1090,7 +1131,8 @@ def describe(scenario: FinancialScenario) -> dict:
                         "in_scope_of": e.in_scope_of,
                         "joined": e.loss_event_id != event.pk,
                         "attributes": {
-                            row.name.partition(".")[2]: row.as_engine().as_dict() for row in e.attribute_rows()
+                            row.name.partition(".")[2]: {**row.as_engine().as_dict(), "distribution": row.distribution}
+                            for row in e.attribute_rows()
                         },
                         "findings": [
                             {
