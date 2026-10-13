@@ -557,7 +557,8 @@ either; step 6's simulate route (below) calls both.
 ### The scenario endpoints and the report
 
 A third route module (`assurance/economics/report_api.py`), imported guarded in a
-guard of its own, serves what steps 5, 7b and 8 record (section 27):
+guard of its own, serves what steps 5, 7b and 8 record (section 27), and the reads the
+dashboard needs (section 27.12):
 
 - `GET /api/assurance/deployments/<uuid>/economics/scenarios/<scenario uuid>/`: the
   scenario version, every parameter it reads with its provenance and what reads it,
@@ -570,12 +571,23 @@ guard of its own, serves what steps 5, 7b and 8 record (section 27):
   series and, when asked, its signed receipt, each once per result; an admin or
   analyst only;
 - `GET .../economics/scenarios/<scenario uuid>/results/?simulation=<uuid>`: the report
-  JSON of one result (else the scenario's latest), `mythos.economics.report/v1`:
+  JSON of one result (else the scenario's latest), `mythos.economics.report/v2`:
   identity and versions, loss events and components at low, base and high, P10, P50,
   P90, mean, expected annual loss and severe-but-plausible with their bands and every
   "not reported" reason, the exceedance curve and histogram, the sensitivity
   tornado, the grade, the Validity Card and the receipt's reference, limitations and
-  unknowns.
+  unknowns, and `currency_bridge`: the run's valuation date (the build's as-of date,
+  as the receipt signs it) and the normalization record of each figure it converted,
+  which is none, since a run converts nothing. v2 is v1 and that key; a v1 report
+  stays readable, and `may_be_totalled` reads both;
+- `GET .../economics/scenarios/?page=<n>&page_size=<n>`: the deployment's scenario
+  versions in record order, 25 a page (at most 100; a larger page is refused), each
+  with its title, its templates, its latest exposure run's status (a residual run is
+  never listed) and that run's grade, banner and `excluded_from_totals`;
+- `GET .../economics/receipts/<receipt id>/`: a Financial Exposure Receipt's signed
+  DSSE envelope as stored, as a download (`attachment`, `nosniff`) with the SHA-256
+  of its bytes in `X-Content-SHA256`; the receipt id is the report's, dashed; another
+  deployment's receipt is 404, and nothing is signed or verified on the way.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
 with no clock but the stored times, and it carries its own `sha256:` digest. Every
@@ -591,9 +603,12 @@ route (above) applies the same rule to the version's latest result. One 120 s de
 bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
-records nothing. None of the three is a stop, and a fault in this module leaves only
+records nothing. None of the five is a stop, and a fault in this module leaves only
 these routes unserved. A residual run under a remediation option (below) is never the
-scenario's exposure: `results/` and the scenario document serve only its own runs.
+scenario's exposure: `results/`, the scenario list and the scenario document serve only
+its own runs. The list and the receipt read their query strictly (an unknown key is
+400), answer `Cache-Control: no-store`, and hold no lock or transaction, so a Stop is
+answered while one is held open.
 
 ### The remediation option and its ROI
 

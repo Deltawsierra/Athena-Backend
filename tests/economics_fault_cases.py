@@ -86,6 +86,10 @@ def test_only_economics_is_refused():
                 resolve(base + tail)
         assert resolve(base + "simulate/").view_name == "deployment-economics-scenario-simulate"
         assert resolve(base + "results/").view_name == "deployment-economics-scenario-results"
+        # The read routes the dashboard needs (spec, section 27.12) are the report's.
+        economics = f"/api/assurance/deployments/{deployment.uuid}/economics/"
+        assert resolve(economics + "scenarios/").view_name == "deployment-economics-scenarios"
+        assert resolve(economics + f"receipts/{scenario}/").view_name == "deployment-economics-receipt"
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
         assert built.view_name == "deployment-economics-scenario-build"
@@ -99,6 +103,11 @@ def test_only_economics_is_refused():
         for tail in ("", "simulate/", "results/"):
             with pytest.raises(Resolver404):
                 resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/{tail}")
+        # Nor are the read routes the dashboard needs (spec, section 27.12): the list and
+        # a receipt's signed bytes.
+        for path in ("scenarios/", f"receipts/{scenario}/"):
+            with pytest.raises(Resolver404):
+                resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/{path}")
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
         assert built.view_name == "deployment-economics-scenario-build"
