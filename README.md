@@ -696,7 +696,12 @@ with both sources, both values and the relative difference, and the record carri
 `source_disagreement`; at or under the tolerance nothing is flagged. Each of the two
 lowers the line one grade step however many steps carry it. Runs state their figures in
 one currency and do not normalize yet, so the report and the data-health route read no
-normalization; when runs do, the card inherits the record.
+normalization; when runs do, the card inherits the record. `GET
+/api/assurance/deployments/<uuid>/economics/normalization/?amount=&currency=&event_date=&valuation_date=&base_currency=&reporting_currency=&providers=&index_series_id=&index_geography=&index_category=&index_base=`
+answers one such normalization for a deployment, its record with its conflicts,
+fallbacks and downgrades, over the sources a run of it may use and never another
+deployment's: its query read strictly, tenant-scoped, `no-store`, no stop (spec, section
+12.9).
 
 ### The portfolio
 

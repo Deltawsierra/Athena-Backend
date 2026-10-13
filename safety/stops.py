@@ -552,6 +552,10 @@ NOT_STOPS = {
     # The data-health route (assurance.economics.health_api, step 10): feed sources'
     # freshness read. Economics records only, and it writes nothing.
     "deployment-economics-data-health": _get(),
+    # The normalization route (assurance.economics.health_api, step 12): one amount
+    # normalized for a deployment over the source versions a run of it may use. Reads
+    # economics rows only, holds no lock and no transaction, and writes nothing.
+    "deployment-economics-normalization": _get(),
     # The portfolio (assurance.economics.portfolio_api, E5): a deployment's scenarios
     # totalled from their draws, its report, and its authored correlation groups.
     # Economics records only.

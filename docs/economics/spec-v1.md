@@ -1169,6 +1169,57 @@ downgrades and conflicts.
    telling an outage from a pair it does not publish would need what the books do not
    hold once a version is left out. Alternative: order the providers per pair.
 
+
+### 12.9 The normalization route (MVP step 12)
+
+`GET /api/assurance/deployments/<uuid>/economics/normalization/?<query>`
+(`deployment-economics-normalization`), from `assurance/economics/health_api.py`, mounted
+with the data-health route (section 29.7) in its guard. It answers ONE amount, recorded on
+its event date, normalized for a run of the deployment as of its valuation date: the
+record `normalization_service.normalize_for` makes (section 12.8) over the source versions
+a run of that deployment may use on that date, platform-wide and its own, never another
+deployment's. It is how a reader -- the Minotaur answer key `athena-economics-data`
+(Minotaur-Engine #79) among them -- asks the engine for a normalization without a run.
+
+**The query** is read strictly, as the read routes the dashboard needs read theirs
+(section 30): only the keys named, each once (`field_unrecognised`, `field_malformed`),
+every required one present (`field_missing`); each 400.
+
+| Key | Holds | Required |
+|---|---|---|
+| `amount`, `currency` | the native amount, a decimal string in the one spelling (section 11), and its currency | yes |
+| `event_date`, `valuation_date` | `YYYY-MM-DD`; the event is not after the valuation (`date_inversion`) | yes |
+| `base_currency`, `reporting_currency` | the currency the index is applied in, and the one reported (section 12.4) | yes |
+| `providers` | the FX policy's providers, comma-separated, in order: the first with a usable rate is the primary (section 12.8) | yes |
+| `index_series_id`, `index_geography`, `index_category`, `index_base` | the base currency's cost index (section 12.3); its currency is the base currency | yes |
+| `rate_types` | the rate types accepted, comma-separated, in order (`FXPolicy`'s default otherwise) | no |
+| `weekend_holiday_rule`, `missing_rate` | the policy's rules (section 12.2) | no |
+| `max_interpolation_gap_days`, `freshness_days`, `index_max_lag_months` | whole numbers in ASCII digits, no sign and no leading zero, at most four | no |
+
+The required keys are `health_api.NORMALIZATION_REQUIRED`, the others
+`health_api.NORMALIZATION_OPTIONAL`. A query the engine refuses -- an amount not in the
+one spelling (`not_decimal`), a currency it does not know, a policy it does not hold to
+(`policy_invalid`), an event after its valuation date -- is 400 with the engine's own
+code (`MoneyRefused`).
+
+**The answer** is `{"deployment": <uuid>, "normalization": <record>}`, the record of
+section 12.6 with its `conflicts`, its `primary_unavailable` steps and its
+`confidence_downgrades` (section 12.8), as canonical JSON (sorted keys, no whitespace,
+UTF-8): the same stored rows give the same bytes, fired twice. A normalization the books
+cannot make is `unavailable`, with its reason (`rate_missing`, `index_primary_unset`,
+...), and that record is the answer, 200: never a number the policy did not allow. Every
+answer carries `Cache-Control: no-store`. While economics cannot read its currency table
+the route is 503 and computes nothing.
+
+**Access and safety** are the data-health route's: a signed-in account (401 otherwise),
+a deployment the caller cannot see is 404 whether or not it exists, and every role reads.
+It writes nothing, holds no lock and no transaction, is in `safety.stops.NOT_STOPS`, and
+a Stop is answered while it is held open mid-read
+(`tests/test_economics_normalization_route.py`). Its views import the normalization
+service, the feed module and the engine only when called, so a fault in any of them
+leaves this route answering an error and every other route, and every stop, standing
+(`tests/economics_fault_cases.py`, `feeds` and `core`).
+
 ## 13. Observation data and the synthetic snapshot
 
 Phase E1 reads no feed. Every rate and index value comes from a committed snapshot

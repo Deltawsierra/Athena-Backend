@@ -680,6 +680,8 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario-roi",
         # The data-health route (spec, section 29).
         "deployment-economics-data-health",
+        # The normalization route (spec, section 12.9).
+        "deployment-economics-normalization",
         # The portfolio (spec, section 33).
         "deployment-economics-portfolio",
         "deployment-economics-portfolio-simulate",
@@ -694,6 +696,7 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["economics-trust-raise-approve"]) == {"POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-withdraw"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-data-health"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-normalization"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-simulate"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-groups"]) == {"GET", "POST"}
