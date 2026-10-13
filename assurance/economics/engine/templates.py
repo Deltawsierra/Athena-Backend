@@ -734,8 +734,10 @@ def check_role(value, what: str = "role") -> FindingRole:
 def parse_attributes(effect_key: str, raw, path: str, *, origin: Origin) -> dict[str, Parameter]:
     """An effect's attributes read from ``raw`` (``{name: entry}``, each entry in the
     parameter-set document's form: unit, low, base, high, currency for money,
-    source_type, evidence_ref, effective_date, and optionally fresh_until), or
-    refused. Each becomes a :class:`.parameters.Parameter` named ``<effect>.<name>``,
+    source_type, evidence_ref, effective_date, and optionally fresh_until and the
+    distribution it states, which the builder reads with
+    :func:`.parameter_set.stated_distribution`), or refused. Each becomes a
+    :class:`.parameters.Parameter` named ``<effect>.<name>``,
     so every rule of a parameter holds. An attribute the pack does not hold is
     ``attribute_unrecognised``; a unit that is not its unit is ``unit_mismatch``.
     ``MYTHOS_OBSERVED`` is never on a hypothetical effect's attribute

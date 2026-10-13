@@ -774,7 +774,9 @@ def test_an_unrelated_parameter_leaves_every_other_parameters_draws_unchanged():
 
 def test_a_parameter_is_one_value_a_year_unless_named_per_occurrence():
     event, distributions = _gamma_event()
-    frequency = p(ss.FREQUENCY_PARAMETER, "count", "1", "2", "3", source="INDUSTRY_BENCHMARK")
+    # 2 / 4 / 6, not 1 / 2 / 3: a frequency's figures are its rate, and Poisson(4)'s
+    # rate, its mean, is 4, above a high of 3, which step 6's rate test refuses.
+    frequency = p(ss.FREQUENCY_PARAMETER, "count", "2", "4", "6", source="INDUSTRY_BENCHMARK")
     distributions[ss.FREQUENCY_PARAMETER] = stated("poisson", rate="4")
     shared = ss.run(scenario(event, stated=distributions, frequency=frequency), seed=9, draws=5_000)
     varying = ss.run(scenario(event, stated=distributions, frequency=frequency, per_occurrence={"loss.amount"}),

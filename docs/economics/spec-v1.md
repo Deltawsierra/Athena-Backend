@@ -23,7 +23,10 @@ formulas and the loss model through a service that simulates a stored scenario v
 and records the result, and serves no route; and MVP step 8 (section 26) analyses a
 stored result's sensitivity on its own draws, grades it, writes its Financial
 Exposure Validity Card and signs its Financial Exposure Receipt, and serves no route
-either.
+either. MVP step 6 gives a stated distribution and the scenario's frequency their
+writers, the parameter set and the builder, and holds every stated distribution to
+its row's figures from both sides, and the frequency by the rate its count implies
+(sections 19.4 and 25.1).
 
 ## Contents
 
@@ -46,6 +49,7 @@ either.
 17. [Insurance](#17-insurance)
 18. [The invariants](#18-the-invariants)
 19. [The customer parameter set and its API](#19-the-customer-parameter-set-and-its-api)
+    (19.4, MVP step 6: [the writer of stated distributions and the frequency](#194-the-writer-of-stated-distributions-and-the-frequency-mvp-step-6))
 20. [The scenario records](#20-the-scenario-records)
 21. [Known-answer fixtures](#21-known-answer-fixtures)
 22. [Limitations of the scenario engine, and decisions for the owner](#22-limitations-of-the-scenario-engine-and-decisions-for-the-owner)
@@ -1220,10 +1224,25 @@ one.
                             "effective_date": "2026-09-30"},
    "legal_retainer": {"unit": "money", "currency": "USD", "low": "50000", "base": "50000", "high": "75000",
                       "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "engagement letter",
-                      "effective_date": "2026-07-01", "fresh_until": "2027-06-30"}},
+                      "effective_date": "2026-07-01", "fresh_until": "2027-06-30"},
+   "average_transaction_value": {"unit": "money_per_unit", "currency": "USD",
+                                 "low": "20000", "base": "25000", "high": "32000",
+                                 "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "payments ledger 2026-Q3",
+                                 "effective_date": "2026-09-30",
+                                 "distribution": {"id": "lognormal", "version": 1,
+                                                  "params": {"mu": "10.1266", "sigma": "0.15"}}}},
  "insurance_sublimits": {"notification": {"unit": "money", "currency": "USD", "low": "150000", "...": "..."}},
- "insurance_exclusions": ["regulatory_compliance"]}
+ "insurance_exclusions": ["regulatory_compliance"],
+ "frequency": {"unit": "count", "low": "1", "base": "2", "high": "4",
+               "source_type": "INDUSTRY_BENCHMARK", "evidence_ref": "industry loss data, 2021-2025",
+               "effective_date": "2026-09-30",
+               "distribution": {"id": "poisson", "version": 1, "params": {"rate": "2"}}}}
 ```
+
+Every entry, a variable, a sublimit or the frequency, may state the distribution it
+draws from in a simulation (`distribution`, section 25.1), and the document may state
+the scenario's `frequency`, events a year, which always states its count
+distribution. Section 19.4 says how each is read and held to its figures.
 
 Read exactly or refused, with the field's path in the detail. Unknown fields are
 refused (`field_unrecognised`), at the top, in an entry and as a variable name;
@@ -1245,7 +1264,10 @@ quantity entry may be observed.
 
 A version's identity is its `content_digest`: `sha256:` and the SHA-256 of its
 canonical JSON (sorted keys, the one decimal spelling, `schema` included), the
-same whether read from the request or back from the stored rows.
+same whether read from the request or back from the stored rows. A stated
+distribution, in its one spelling, and the frequency are part of it; a version that
+states neither has the canonical document, and the digest, it had before either
+could be stated, so every version recorded before step 6 stays intact.
 
 ### 19.3 The routes
 
@@ -1276,11 +1298,75 @@ Mounted under `/api/assurance/` from `assurance/economics/api.py`:
   `detail` (the field's path), and nothing is recorded.
 - **Unavailable**: while economics cannot read its currency table (section 2),
   the write and the read of a version answer 503 and record nothing; the list of
-  versions, which reads no amount, still answers.
+  versions, which reads no amount, still answers. A version that states a
+  distribution is 503 too while the probabilistic engine (or numpy) will not import,
+  and records nothing; one that states none never imports it (section 19.4).
 - **A race**: two versions posted at the same moment that would take one number
   are refused by the unique constraint: the later is 409 and writes nothing.
 - **Not on a stop path**: both routes are in `safety.stops.NOT_STOPS`; the POST
   writes nothing the decision reads.
+
+### 19.4 The writer of stated distributions and the frequency (MVP step 6)
+
+Before step 6 the column existed (`FinancialParameter.distribution`, section 25.1) and
+the run read it, but no route or document set it, so a customer's range could only be
+refused (`no_admissible_distribution`). Step 6 gives it its writers, with one rule for
+each:
+
+| What | Written by | Stored as |
+|---|---|---|
+| a variable's or a sublimit's distribution | the parameter-set POST (section 19.3), the entry's `distribution` | the set row's `distribution` |
+| the scenario's frequency, with its count distribution | the parameter-set POST, the document's `frequency` | a set row named `frequency`, unit `count` |
+| an effect attribute's distribution | the scenario builder's POST (section 24.8), the attribute's `distribution` | the scenario row's `distribution` |
+
+**Why these writers.** An event's parameters are written in two places, so both take a
+distribution: the customer's variables by the parameter set, and an effect's attributes
+by the builder (section 24.2); a derived parameter states none, and draws from its
+contributors' (section 25.1, rule 5). The frequency is the parameter set's, as the
+lead's brief for step 6 places it: it is the customer's figure of how often a loss
+recurs, read at run time through the parameter-set version the build names, exactly as
+the policy's terms are (section 25.5), and part of that version's digest and so of the
+build's. It applies to every scenario built from the version; a frequency per scenario
+or per template is an owner decision (section 25.10, decision 12).
+
+**The same rules for every writer**, the routes' own: a signed-in admin or analyst
+only (a viewer is 403), the author the signed-in account, append-only, strict JSON of
+at most 64 KiB (413 on the declared length), refused whole with the engine's code and
+nothing written. A stated distribution is read exactly (`scenario_simulation.parse_stated`:
+`distribution_malformed`, `distribution_unknown`, `distribution_version_unknown`) and
+kept in its one spelling (`"mu": "10.12660"` is stored `"10.1266"`); then, when its
+row is checked, it is held to its row by the simulation's own test, the one a run
+applies (section 25.1): built by step 7a's catalogue with all its checks
+(`expert_not_allowed` for an expert range a customer's figure states), fitting its unit
+(`distribution_not_for_unit`), and holding its figures (`distribution_contradicts_range`,
+naming the variable and the test it failed): every stated distribution from both sides
+and never on a fixed row (`distribution_on_fixed_row`), a count on any row but the
+frequency included; the frequency, whose figures are values of its rate, by the rate
+its count implies, a fixed rate only as a Poisson of that rate. A frequency must state
+a count distribution (`field_missing` without one, `frequency_not_a_count`). Only the
+fault's type is kept when the probabilistic engine will not import, for any fault
+(503, nothing recorded; review round 1, NIT-2).
+
+**Write time, build time and run time agree.** All three call one function,
+`check_fits_range`, on the row as stored: the refusal a POST gives is, code and detail
+word for word, the refusal a build gives a version recorded before the rule or under
+an earlier floor (`builder.check_set_distributions` re-checks every distribution the
+named version states, review round 1, LOW-3), and the refusal a run gives a scenario
+built from it (`test_write_time_and_run_time_refusals_agree`). A build of a version
+that states a distribution needs the probabilistic engine: 503 while it will not
+import, and nothing built.
+
+**The transaction only inserts.** Every check of the version and of each of its rows,
+each stated distribution's test included, runs before the version's transaction
+(`CustomerParameterSet.check_rows`), which then only inserts, each row exactly as it
+was checked (`_insert_as_marked`; a row changed since its check is refused): on SQLite
+a stop's write waits for the inserts alone, as section 24.6 has it for a build
+(`test_a_versions_transaction_only_writes`). A version raced to the same number is
+still stopped by the unique constraint, 409.
+
+**Served back.** The version's GET serves each variable's and sublimit's
+`distribution` (null where it states none) and the `frequency` (null where it states
+none); the builder's events serve each effect attribute's.
 
 ## 20. The scenario records
 
@@ -1292,7 +1378,8 @@ deployment, and are checked on save with the engine's codes.
   (`bank_prod_2026q4`, as the owner's specification's scenario request names
   one); `version` counts from 1 per deployment and key; the highest is current.
   `CustomerParameterSet.record` writes a version and its parameters in one
-  transaction, refused whole or written whole. `variable_count` and
+  transaction, refused whole or written whole; every check runs before it, and it
+  only inserts (section 19.4). `variable_count` (the rows, the frequency's included) and
   `content_digest` are taken from the validated document before any row is
   written; a parameter added to a recorded version afterwards is
   `parameter_set_sealed`, and `intact()` re-reads the rows and compares their
@@ -1301,7 +1388,8 @@ deployment, and are checked on save with the engine's codes.
   version (`parent_required`, and the check constraint
   `ck_econ_parameter_one_parent`); one name per parent (`duplicate_id`, and a
   unique constraint); a set version's parameter is one of the schema's variables
-  with its unit. Its values are decimal strings in the one spelling (section 12.6),
+  with its unit, a sublimit, or the frequency (a count). It may state a distribution
+  (section 19.4). Its values are decimal strings in the one spelling (section 12.6),
   exact at any width where a decimal column on SQLite keeps 15 significant digits;
   `"200.000"` is stored as `"200"`. The unit and the source type are check
   constraints too.
@@ -1354,7 +1442,8 @@ for Minotaur's economic-exposure tests.
 - **Deterministic ranges, not distributions.** Low, base and high are the ends
   and the middle of the inputs' ranges, not percentiles: they are not P10, P50 and
   P90, and nothing here estimates a frequency. The probabilistic engine is a later
-  step; `FinancialParameter` has no distribution type yet.
+  step (sections 23 and 25; step 6 writes a parameter's distribution and the
+  frequency, section 19.4).
 - **The event's range is a box, not a joint scenario.** Summing component lows
   treats every component as at its own low at once, so a parameter two components
   read in opposite directions widens the range.
@@ -1851,8 +1940,11 @@ An effect is a SPINE observed effect or a declared hypothetical effect:
 Each effect has a type and a business process from the pack's vocabularies, and
 states the attributes the templates read, each in the parameter-set document's form
 (unit, low, base, high, currency for money, `source_type`, `evidence_ref`,
-`effective_date`, optionally `fresh_until`), so every rule of a parameter (section
-14) holds for it.
+`effective_date`, optionally `fresh_until`, and from step 6 optionally the
+`distribution` it draws from in a simulation, held to its figures as a parameter set's
+is: section 19.4), so every rule of a parameter (section 14) holds for it. A stated
+distribution is part of the build's inputs, so the same effects stating another are
+another build; one stating none keeps the build digest it had before.
 
 Effect types:
 
@@ -2483,7 +2575,7 @@ added: step 6 serves reports and scenario endpoints.
 
 ### 25.1 The parameter-to-distribution rule
 
-`mythos.economics.parameter-distribution/v2` (`scenario_simulation.RULE_VERSION`),
+`mythos.economics.parameter-distribution/v3` (`scenario_simulation.RULE_VERSION`; v3 is step 6's two-sided test),
 `scenario_simulation.resolve`. Every parameter a run reads draws from exactly one
 distribution, decided by this rule and recorded with the run (`parameters.<name>.rule`):
 
@@ -2499,22 +2591,97 @@ distribution, decided by this rule and recorded with the run (`parameters.<name>
    (`distribution_not_for_unit`): a ratio from a rate (Beta) or an expert range inside
    [0, 1]; a count from a count, severity or expert distribution; any other unit from a
    severity distribution or an expert range at or above zero. It must also **hold the
-   row's own figures** (`check_fits_range`, `distribution_contradicts_range`): the base
-   between the distribution's P5 and P95 (`RANGE_FIT_PERCENTILES`), and the low and the
-   high inside the closure of its support (a count, lognormal or gamma from 0 up; a
-   rate from 0 to 1; a PERT or triangular from its minimum to its maximum; a
-   generalized Pareto from its threshold, up to `threshold - scale/shape` where the
-   shape is negative; a splice from 0 to its tail's end), each compared as the binary64
-   the run draws. A lognormal(0, 1) stated on 100,000 / 200,000 / 400,000 would run with
-   a mean of 1.63: it is refused, naming the parameter, its figures and the
-   distribution's support and P5 to P95, so the conflict is surfaced, never resolved by
-   silently taking one (owner's specification, section 27). The frequency's stated
-   distribution is held to the same test, with one difference: a count's percentiles
-   are whole numbers and its base a rate, so the base may lie anywhere below the count
-   after its P95 (a Poisson rarer than once in twenty years has a P95 of 0 and holds a
-   base of its own rate; `test_a_rare_count_holds_its_own_rate`). The row is checked when it is written, with
-   the engine's code (`EngineRefused`), and stored in the one spelling; it is checked
-   again when it is run.
+   row's own figures** (`check_fits_range`, `distribution_contradicts_range`, naming the
+   test it failed), each figure compared as the binary64 the run draws (the
+   frequency's mean exactly). How depends on what the figure is.
+
+   **Every stated distribution but the frequency's** -- a severity, a rate, an expert
+   range, and a count stated on any other count row (an observed repeat count, a
+   number of affected customers: the count itself) -- describes the figure itself, so
+   it holds the row **from both sides**, four tests in this order (`RANGE_TESTS`):
+   - `support`: the low and the high inside the closure of its support (a lognormal or
+     gamma from 0 up; a rate from 0 to 1; a PERT or triangular from its minimum to its
+     maximum; a generalized Pareto from its threshold, up to `threshold - scale/shape`
+     where the shape is negative; a splice from 0 to its tail's end; a count from 0 up);
+   - `base`: the base between the distribution's P5 and P95 (`RANGE_FIT_PERCENTILES`);
+   - `median`: its median between the low and the high, low <= P50 <= high, both
+     included;
+   - `mass`: at least `RANGE_MASS_FLOOR` (0.5, one constant) of its mass between the
+     low and the high, both included: P(low <= X <= high) >= 0.5 (`mass_between`; a
+     count's mass is that of the whole numbers in the range).
+
+   And it is stated only on a range: a row whose low, base and high are one figure is a
+   point mass (rule 2), and a distribution stated on it is refused
+   (`distribution_on_fixed_row`), a count on a fixed count row included (review round
+   1, MEDIUM-1: the reviewer's ZIP(0.5, 6) on an observed repeat count of 3 / 3 / 3,
+   half of whose draws said the effect never repeated, was built and drawn from). The
+   first two tests alone were one-sided: a gamma whose median lies far below the row's
+   low held a base below its P95 and a low inside its support, and fitted. A
+   lognormal(0, 1) stated on 100,000 / 200,000 / 400,000 would run with a mean of
+   1.63; a gamma of shape 0.2 and mean 25,000 on 20,000 / 25,000 / 32,000 has its
+   median at 2,593. Each is refused, and the refusal names the test it failed, the
+   parameter and its figures, and the distribution's support, P5 to P95, P50 and mass
+   in range, each in its shortest round-trip spelling (review round 1, NIT-1: a mass of
+   0.49995 is printed so, never as 0.5), so the conflict is surfaced, never resolved by
+   silently taking one (owner's specification, section 27). The bounds are inclusive:
+   Triangular(0, 1, 2) on 1 / 1.5 / 2 has its median at the low and exactly half its
+   mass in range, and holds; on 1 / 1.5 / 1.99 it is refused
+   (`test_the_floor_and_the_median_are_inclusive`).
+
+   **The frequency** (the parameter named `frequency`, which `resolve_frequency`
+   checks; it states a Poisson, negative binomial or zero-inflated Poisson) is another
+   matter. Its row's low, base and high are **values of its rate**, which the formulas
+   multiply (events a year), and its count distribution says how the count varies from
+   year to year GIVEN the rate, and how uncertain the rate is. The count's yearly
+   spread is not compared with the row; **the rate its count implies** is
+   (`implied_rate`):
+   - a Poisson(lambda): the rate lambda, a point;
+   - a negative binomial (numpy's size r and probability p, failures before the r-th
+     success): a Poisson whose rate is **Gamma(size, (1 - p) / p)** -- shape r, scale
+     (1 - p) / p -- the Gamma-Poisson mixture, whose mean r (1 - p) / p and variance
+     r (1 - p) / p^2 are the negative binomial's;
+   - a zero-inflated Poisson(pi, lambda): a rate of 0 with probability pi, and lambda
+     otherwise (a point where pi is 0).
+
+   It is held to five tests in this order (`FREQUENCY_RANGE_TESTS`):
+   - `support`: as above (from 0 up);
+   - `rate`: the count's mean between the low and the high, compared EXACTLY, the mean
+     computed from the stated decimal parameters by its closed form (`exact_count_mean`:
+     lambda; r (1 - p) / p; (1 - pi) lambda; review round 1, LOW-2: ZIP(0.7, 1)'s mean is
+     0.3, which binary64 makes 0.30000000000000004, above a high of 0.3);
+   - `base`: its base at or above the count's P5 and below the count after its P95
+     (round 2: a count's percentiles are whole numbers and its base a rate; a Poisson
+     rarer than once in twenty years has a P95 of 0 and holds a base of its own rate,
+     `test_a_rare_count_holds_its_own_rate`). Kept because it refuses what the rate
+     test does not: a base far from the mean while the mean is still in range, as
+     0 / 1 / 2 stating Poisson(0.02) (rate 0.02, P95 count 0, a base of 1) or 0 / 10 /
+     20 stating Poisson(1) (P95 count 3, a base of 10)
+     (`test_round_2s_base_rule_refuses_what_the_rate_test_does_not`);
+   - `rate_median`: the implied rate's median between the low and the high (a
+     Gamma's P50; a zero-inflated Poisson's is 0 where pi is at least one half);
+   - `rate_mass`: at least `RANGE_MASS_FLOOR` of the implied rate between the low and
+     the high, both included (exact for a point, and for a zero and a point).
+
+   The last two are review round 1's MEDIUM-2: bounding the mean alone reopened the
+   one-sided hole for an over-dispersed count. A negative binomial of mean 1,200 on
+   1,000 / 1,200 / 1,400 holds the mean test at every size, but at size 0.1 its rate's
+   median is 7 a year and only 2.5% of its rate lies in range; sizes 0.1, 0.3 and 1 are
+   refused by the rate's median (7, 293, 832), size 10 by its mass (40%), and sizes 50
+   and 100 hold (76% and 91%) (`test_the_frequencys_figures_bound_the_rate_its_count_implies`).
+   So Poisson(5) on 4 / 5 / 6 holds (its rate is 5, though only 49.7% of a year's count
+   falls in 4 to 6), and so does Poisson(0.05) on 0.01 / 0.05 / 0.2 (no whole number
+   lies in that range, which says nothing about the rate); Poisson(4) on 1 / 2 / 3 is
+   refused (its rate, 4, is above the high), as is a negative binomial whose mean lies
+   above the high, and a zero-inflated Poisson(0.5, 4) on 1 / 2 / 4 (its rate is 0 in
+   half its years). **A fixed rate is a Poisson of that rate**: 2 / 2 / 2 with
+   Poisson(2) is a rate known exactly whose count still varies, and the rate test asks
+   that its mean be exactly that figure, so Poisson(3) on 2 / 2 / 2 is refused; a count
+   whose implied rate is not that point (a negative binomial, or a zero-inflated
+   Poisson with pi above 0: ZIP(0.7, 1) on 0.3 / 0.3 / 0.3, whose mean is 0.3) states
+   the rate uncertain, which a fixed row denies (`distribution_on_fixed_row`). The row
+   is checked when it is written, with the engine's code (`EngineRefused`), and stored
+   in the one spelling; it is checked again when a build names its version and when it
+   is run, by the same function, and the refusals agree word for word (section 19.4).
 2. **A point mass** where it states none and its low, base and high are one figure.
    A point mass draws nothing.
 3. **PERT(low, base, high)**, weight 4, where it states none, its values are a range,
@@ -2683,8 +2850,10 @@ headline then) and market value; each event's; and each component's.
 
 ### 25.5 Frequency
 
-A scenario has a frequency where it holds a parameter named `frequency` (unit `count`,
-events a year) stating a count distribution. Then a draw is a simulated year of N
+A scenario has a frequency where the parameter-set version it was built from states
+one (section 19.4), or where it holds a parameter of its own named `frequency`: a
+count of events a year stating a count distribution. Both at once is a conflict,
+refused (`duplicate_id`), never resolved by taking one. Then a draw is a simulated year of N
 occurrences, N from the frequency's own stream (`@frequency`), each occurrence every
 event of the scenario once, and the year's loss the sum of its occurrences'
 (`compound_annual`); the basis is `annual_loss`, each line's **expected annual
@@ -2706,7 +2875,7 @@ going with its deployment:
 | `scenario`, `deployment` | the scenario version run, and its deployment (`cross_tenant_reference` otherwise) |
 | `seed`, `draws`, `severe_percentile` | the seed as text (0 to 2^64 - 1: wider than a signed 64-bit column, never a double), the draws, the percentile |
 | `inputs`, `input_digest` | the canonical inputs (below) and `sha256:` of their canonical JSON |
-| `versions` | every version the figures rest on: the wiring, the rule, the variation, the twins and their tolerance, each formula, each catalogue distribution, the sampler, the bit generator, the stream domains, numpy; and every limit that decides a recorded refusal (`limits`: the values and events budgets, the largest sample and count mean, the generalized Pareto's shapes, a splice's body share, the largest standard exponential, the range-fit percentiles) |
+| `versions` | every version the figures rest on: the wiring, the rule, the variation, the twins and their tolerance, each formula, each catalogue distribution, the sampler, the bit generator, the stream domains, numpy; and every limit that decides a recorded refusal (`limits`: the values and events budgets, the largest sample and count mean, the generalized Pareto's shapes, a splice's body share, the largest standard exponential, the range-fit percentiles and mass floor) |
 | `record`, `summaries`, `result_digest` | the whole record (schema `mythos.economics.scenario-simulation/v1`) and its digest; its scenario and event figures as decimal strings |
 | `status`, `refusal_code`, `refusal_detail` | `completed`, or `refused` with the code; never both (a check constraint) |
 | `started_at`, `finished_at`, `duration_ms` | the timing, outside both digests |
@@ -2745,7 +2914,8 @@ will not import) is returned and never recorded.
 severe_percentile=95)` loads the scenario version as the scenario engine reads it: its
 events in key order, each component recomputed from the rows it cites; the policy of
 the parameter-set version its build names; each cited row's stated distribution; each
-derived row's contributors (`derived_from`) and theirs; and its frequency row. Every
+derived row's contributors (`derived_from`) and theirs; and its frequency, the
+parameter-set version's or its own (section 25.5). Every
 parameter is drawn once per simulated year: the service names none per occurrence. It looks up the result of the same identity, runs the pure engine if
 there is none, and records the result. It returns a `SimulationOutcome` (the result,
 whether this call recorded it, and the code and detail of a refusal), and **never
@@ -2784,12 +2954,10 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
   (the Financial Exposure Receipt). What step 8 leaves is section 26.9.
 - **No route.** Step 6 serves reports and scenario endpoints, and will call the
   service.
-- **No writer states a distribution or a frequency yet, and nothing names a parameter
-  per occurrence.** The column and the frequency parameter are read and checked, but
-  neither the parameter-set API nor the builder's request takes them, so a stored
-  scenario's ranges resolve by the rule: point masses, expert PERTs, derived
-  parameters from their contributors, and a refusal for every other range. A parameter-set
-  version's content digest does not cover a distribution, since none is written there.
+- **Nothing names a parameter per occurrence.** Since step 6 the parameter set states
+  a variable's distribution and the frequency, and the builder an effect attribute's
+  (section 19.4), and a version's and a build's digests cover them; nothing yet takes
+  `variation: per_occurrence`, so every parameter is drawn once per simulated year.
 - **No dependency between parameters** beyond the sharing of section 25.2: no copula,
   no shared-cause event, no correlation between events.
 - **One frequency per scenario**, not one per event; every occurrence realises every
@@ -2831,18 +2999,35 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
    (review round 1) are part of the canonical inputs, so a version or limit change is a
    new stored result, never an old one returned. Alternative: leave the limits out and
    never record a budget refusal, returning it each time instead.
-9. **A stated distribution must hold its row's figures** (review round 1): the base
-   between its P5 and P95 and the low and the high inside the closure of its support,
-   refused otherwise (`distribution_contradicts_range`), at write and at run time. The
-   thresholds are the owner's: P5 and P95, and the closed support (so a low of 0 fits a
-   lognormal or a gamma); a count's base may lie below the count after its P95 (review
-   round 2). Still open, to close before any writer states a distribution: the test is
-   one-sided, holding the low and the high only to the support, so a gamma whose median
-   lies far below the row's low still fits; a two-sided test (low <= P50 <= high and a
-   floor on P(low <= X <= high)) and refusing a stated distribution on a fixed row are
-   the proposed fix. Alternatives: a narrower test (the base between P10 and P90,
-   or each of low, base and high near its own percentile), a wider one (the base
-   anywhere in the support), or a warning recorded with the run instead of a refusal.
+9. **A stated distribution must hold its row's figures, from both sides** (review round
+   1; closed in step 6). Closed in step 6, before any writer stated a distribution, as
+   the lead decided it (the owner may change it). A continuous distribution: the base
+   between its P5 and P95 and the low and the high inside the closure of its support, as
+   before; its median between the low and the high; and at least `RANGE_MASS_FLOOR`,
+   0.5, of its mass between them, both included; and never on a fixed row (low = base =
+   high: `distribution_on_fixed_row`, the row is a point mass). A count stated on any
+   row but the frequency is held so too: its figures are the count itself (review
+   round 1, MEDIUM-1, the lead's call; an observed repeat count stating ZIP(0.5, 6) on
+   3 / 3 / 3 is refused). The frequency is held to the rate its count implies instead
+   (decision 12). Refused otherwise (`distribution_contradicts_range`, naming the
+   parameter and the test it failed, each compared figure in full), at write, build and
+   run time, by one function (a build re-checks its set version's distributions under
+   the rule then in force: review round 1, LOW-3). Alternative for observed counts,
+   not taken: refuse any stated distribution on a `MYTHOS_OBSERVED` attribute (the
+   observation is the figure); the fixed-row refusal already refuses one on a fixed
+   observed figure, and an observed range may state one that holds it. The
+   thresholds are the owner's: P5 and P95, the closed support (so a low of 0 fits a
+   lognormal or a gamma), and the floor of 0.5. With the floor at 0.5, a median outside
+   the range leaves at most half the mass inside it, so the mass test alone refuses
+   nearly every case the median test does; the median test is kept, and named, so a
+   refusal says which side failed, and so a lower floor keeps a two-sided test. The floor
+   and the percentiles are limits of the inputs (`limits`), so changing either is a new
+   input digest, and the rule is v3. Alternatives for the floor: 0.8 (the row's low and
+   high as roughly its P10 and P90), 0.9 (as its P5 and P95), or a lower one with the
+   median test alone carrying the two-sided check; for the test: a narrower one (the
+   base between P10 and P90, or each of low, base and high near its own percentile), a
+   wider one (the base anywhere in the support), or a warning recorded with the run
+   instead of a refusal.
 10. **A derived parameter draws from its contributors** (review round 1): each by its
     own rule, per draw the larger loss in the inputs' direction, refused where any
     contributor is, naming it (section 25.1, rule 5). Alternatives: refuse every
@@ -2855,6 +3040,38 @@ a default run allows 60 s, so it catches a per-draw Python loop and never CI loa
     the first's row is returned. Alternative: the save's own checks inside the
     transaction, as first drafted, which a test on one connection cannot race (the
     other row would be rolled back with the savepoint).
+12. **A frequency's figures are its rate, not its count, and the rate its count implies
+    is held to them; one frequency per parameter-set version** (step 6, the lead's call;
+    review round 1, MEDIUM-1 and MEDIUM-2, the lead's calls; section 25.1). A frequency
+    row's low, base and high are values of its annual RATE, which step 4's formulas
+    multiply into annual loss; a stated count distribution says how the count varies
+    from year to year given the rate, and how uncertain the rate is. The first draft of
+    step 6 held a count to its median and its mass in range, which compares the count's
+    yearly spread with the rate's uncertainty: it refused Poisson(5) on 4 / 5 / 6 (49.7%
+    of its count in range), refused 0.01 / 0.05 / 0.2 (no whole number in range), and
+    left no way to write a rate known exactly. The second held a count by its mean
+    alone, which let an over-dispersed count state a rate that contradicts the row (a
+    negative binomial of mean 1,200 and size 0.1 on 1,000 / 1,200 / 1,400: its rate's
+    median 7 a year) and reached every count row, an observed repeat count's included.
+    Now the reading is the FREQUENCY's alone: every other count row holds the count
+    itself and is held from both sides (decision 9). The frequency is held by its mean
+    between the low and the high, exactly from its stated parameters (`rate`); its
+    support; round 2's base rule, kept because it refuses a base far from the mean while
+    the mean is in range (0 / 1 / 2 with Poisson(0.02)); and the rate its count implies
+    from both sides (`rate_median`, `rate_mass`, the floor of decision 9): a Poisson's
+    rate is its lambda, a negative binomial's is Gamma(size, (1 - p) / p), a
+    zero-inflated Poisson's is 0 with probability pi and lambda otherwise. A fixed rate
+    (2 / 2 / 2) is a known rate, and may state only a count whose implied rate is that
+    point, a Poisson of the figure; a negative binomial, or a zero-inflated Poisson with
+    pi above 0, states the rate uncertain and is refused (`distribution_on_fixed_row`).
+    The frequency is stated in the set's document, applies to every scenario built from
+    that version, and is read through the build, as the policy's terms are; a
+    scenario's own `frequency` row beside it is refused. Alternatives: for the rate, the
+    mean alone (the second draft: an over-dispersed count passes whatever its rate's
+    spread), or a narrower band for the implied rate (its P10 and P90 inside the range);
+    for the base rule, dropped, or a count's mean within a tolerance of its base; for
+    the frequency, one per scenario, in the build's request, or one per template in the
+    set (one per set version stays for the MVP).
 
 ## 26. Sensitivity, grade, Validity Card and receipt (MVP step 8)
 
@@ -3355,8 +3572,8 @@ why, as a code, and never raises out of a service.
   yet: step 6 does, with `engine_keyring()` or a keyring fetched out of band.
 - **No receipt for a run without a frequency**: core's schema requires an expected
   annual exposure, which such a run does not have (section 25.5), and none is
-  estimated. No writer states a frequency yet (section 25.9), so in production only
-  a scenario with a stated frequency can be receipted.
+  estimated. Since step 6 a parameter-set version states the frequency (section
+  19.4); only a scenario built from a version that states one can be receipted.
 - **No system fingerprint at build.** The builder records none (section 24.9); a card
   reads the deployment's at issue and says so, and a receipt binds that.
 - **No calibration**: "Last calibrated: never; no calibration set exists". Interval
