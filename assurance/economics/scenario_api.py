@@ -129,6 +129,10 @@ class ScenarioEventsView(APIView):
             served = builder.describe(found)
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
+        except EconomicsRefused as refused:
+            # A stored row that no longer holds (a figure's normalization record, section
+            # 36) is refused, never served.
+            return Response({"code": refused.code, "detail": refused.detail}, status=status.HTTP_409_CONFLICT)
         # The figures are step 4's, not a result: they stay. Only the banner rule is added.
         return Response({"deployment": str(deployment.uuid), **served, **report.standing(found)})
 

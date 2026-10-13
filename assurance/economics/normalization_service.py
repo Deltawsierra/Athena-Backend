@@ -12,9 +12,10 @@ then unavailable, and a later one's rate carries ``primary_unavailable``. Every 
 usable source is compared with the rate or value used (``source_disagreement``,
 ``conflicts``). Another deployment's versions are never read.
 
-Runs do not normalize their figures yet (section 24.9): a run's figures are stated in
-one reporting currency. When they do, the card inherits the record's downgrades and
-conflicts. Reads only; nothing here is on a stop path.
+A scenario build normalizes the figures its run reads through :func:`normalize_for`
+too (section 36, :mod:`.run_normalization`), so a run's report and card carry each
+figure's record, its downgrades and its conflicts. Reads only; nothing here is on a
+stop path.
 """
 
 from __future__ import annotations

@@ -176,18 +176,21 @@ def _as_of_of(inputs, build) -> date | None:
     return date.fromisoformat(max(dates)) if dates else None
 
 
-def _release() -> dict:
+def _release(normalized: bool = False) -> dict:
     """The engine release a run's figures and its card rest on, apart from the
     formulas a run names by version (a recorded formula version never changes): the
     run's engine versions and limits, the sensitivity method, the grade and the card
-    (``validity_service.release_record``). Imports the engine."""
+    (``validity_service.release_record``). ``normalized``: the run read a figure its
+    build normalized, so its versions name the rule and its grade is v4 (spec, section
+    36.5); every other run's release is as it was. Imports the engine."""
     from types import SimpleNamespace
 
     from . import validity_service
     from .engine import scenario_simulation as ss
 
-    # ss.versions reads only the formulas off its input; with no events it names none.
-    versions = dict(ss.versions(SimpleNamespace(events=())))
+    # ss.versions reads only the formulas off its input (with no events it names none)
+    # and whether it holds a normalized figure (only that it does, never which).
+    versions = dict(ss.versions(SimpleNamespace(events=(), normalizations=(normalized,) if normalized else ())))
     versions.pop("formulas", None)
     return validity_service.release_record(versions)
 
@@ -409,17 +412,18 @@ class Now:
             lambda: feeds.states_for([key], deployment=self.deployment_id, as_of=as_of, parameters=parameters)[key],
         )
 
-    def release(self) -> tuple[str | None, dict | None, str]:
-        """``(digest, record, "")`` of the engine release, or ``(None, None, why)``."""
+    def release(self, *, normalized: bool = False) -> tuple[str | None, dict | None, str]:
+        """``(digest, record, "")`` of the engine release (a normalized run's when
+        ``normalized``: :func:`_release`), or ``(None, None, why)``."""
 
         def read():
             try:
-                record = _release()
+                record = _release(normalized)
             except Exception as error:  # noqa: BLE001 - an engine that will not import is a reason, never a raise
                 return None, None, type(error).__name__
             return canonical_digest(record), record, ""
 
-        return self._once("release", read)
+        return self._once(("release", normalized), read)
 
 
 def _source_entry(state: dict) -> dict:
@@ -454,7 +458,16 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
             if as_of is None
             else _source_entry(now.source(key, as_of, (inputs or {}).get("parameters")))
         )
-    digest, record, why = now.release()
+    # A run that read a normalized figure rests on the release that grades it (v4,
+    # section 36.5); the entry says so, and only then, so every other map is as it was.
+    normalized = bool((inputs or {}).get("normalizations"))
+    digest, record, why = now.release(normalized=normalized)
+    # The source versions the run's normalized figures read (spec, section 36.8): each a
+    # dependency, compared on the run's as-of date (``source_superseded``). Only a run
+    # that reads a normalized figure has the part, so every other map is as it was.
+    from . import run_normalization
+
+    normalization_sources = run_normalization.source_dependencies(inputs)
     # A run rests on what serves where its scenario rests on the model's composition
     # (an ai_bom claim type) or an effect is on a serving asset.
     route_bound = "ai_bom" in types or any(e.asset in now.serving_routes for e in effects)
@@ -475,7 +488,10 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
         "parameter_set": parameter_set,
         "as_of": None if as_of is None else as_of.isoformat(),
         "sources": sources,
-        "release": {"digest": digest, "record": record, "unavailable": why or None},
+        "release": {"digest": digest, "record": record, "unavailable": why or None,
+                    **({"normalized": True} if normalized else {})},
+        **({"normalization_sources": {"as_of": None if as_of is None else as_of.isoformat(),
+                                       "versions": normalization_sources}} if normalization_sources else {}),
     }
 
 
@@ -761,12 +777,29 @@ def _financial_reasons(recorded: dict, now: Now, parameters=None) -> list[dict]:
                 f"past the source's SLA of {today.get('sla_days')} days, or there is none a run may use",
                 was=entry.get("state"), now=today.get("state"),
             ))
+    # The FX and index versions the run's normalized figures read (section 36.8): a
+    # newer usable version on the run's as-of date -- or none a run may use -- stales it.
+    held = recorded.get("normalization_sources") or {}
+    if held.get("versions"):
+        from . import run_normalization
+
+        for moved in run_normalization.moved_sources(now.deployment, held["versions"],
+                                                     date.fromisoformat(held["as_of"])):
+            whose = "" if moved["tenant"] == "platform" else " (the deployment's own)"
+            found.append(_reason(
+                "source_superseded", f"source:{moved['source_key']}",
+                f"a figure of this run was normalized from version {moved['was']} of {moved['source_key']}{whose}; "
+                f"a run as of {held['as_of']} would now read "
+                + (f"version {moved['now']}" if moved["now"] is not None else "no version a run may use"),
+                was=None if moved["was"] is None else str(moved["was"]),
+                now=None if moved["now"] is None else str(moved["now"]),
+            ))
     return found
 
 
 def _release_reasons(recorded: dict, now: Now) -> list[dict]:
     held = recorded.get("release") or {}
-    digest, current, why = now.release()
+    digest, current, why = now.release(normalized=held.get("normalized") is True)
     if digest is None or held.get("digest") is None:
         return [_reason(
             "release_unverifiable", "release",
@@ -1174,7 +1207,7 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         if effect["origin"] == "observed":
             entry["observed_effect"] = effect["observed_effect"]
         effects.append(entry)
-    return {
+    body = {
         "title": scenario.title,
         "parameter_set": {"set_key": set_key, "version": version or current.version},
         "currency": build.currency,
@@ -1183,6 +1216,12 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         "findings": [{"finding": f, "effect": e, "role": r} for f, e, r in document["findings"]],
         "supersedes": str(scenario.uuid),
     }
+    named = (document.get("normalization") or {}).get("policy")
+    if isinstance(named, dict) and named.get("key"):
+        # The stored normalization policy it named (section 36): the rebuild names it
+        # again, and reads the source versions a run may use NOW.
+        body["normalization"] = named["key"]
+    return body
 
 
 def lineage(scenario: FinancialScenario) -> list[int]:
