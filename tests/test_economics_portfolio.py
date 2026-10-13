@@ -1,5 +1,5 @@
 """Economic Exposure E5: a deployment's portfolio, aggregated from its scenarios'
-draws (``docs/economics/spec-v1.md``, section 29; the owner's specification,
+draws (``docs/economics/spec-v1.md``, section 30; the owner's specification,
 section 24).
 
 - known answers: two independent scenarios sum their means within the band and
@@ -1253,7 +1253,7 @@ def test_the_engine_refuses_links_that_are_not_the_rules(deployment, people):
 
 
 SPEC_PHRASES = (
-    "## 29. Portfolio aggregation (Economic Exposure E5)",
+    "## 30. Portfolio aggregation (Economic Exposure E5)",
     "`POST deployments/<uuid>/economics/portfolio/simulate/`",
     "`GET deployments/<uuid>/economics/portfolio/`",
     "`mythos.economics.portfolio/v1`",
@@ -1263,7 +1263,7 @@ SPEC_PHRASES = (
     "never by summing percentiles",
     "expected shortfall",
     "Copulas",
-    "### 29.10 Decisions this step takes, which the owner may change",
+    "### 30.10 Decisions this step takes, which the owner may change",
 )
 
 

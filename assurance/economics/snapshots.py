@@ -6,7 +6,8 @@ section 6): an operator registers a committed snapshot file, and
 :class:`~assurance.economics.models.FinancialSource` version the file says it is
 (its snapshot hash the SHA-256 of the file's bytes) and every observation in it,
 each through its model's checks. A file already registered under that hash is
-not written again. Nothing fetches a feed.
+not written again. A live feed's answer is registered the same way
+(:func:`register`), deduplicated on its normalised payload hash.
 
 :data:`SYNTHETIC_SNAPSHOT` is the snapshot committed for tests: SYNTHETIC TEST
 DATA, not real rates or indices, registered with licence class ``open`` and trust
@@ -22,8 +23,10 @@ a raised version copies the hash and holds no rows of its own, and nothing copie
 them, which would hold the database's write lock for as long as the copy took and
 delay every stop's write behind it.
 
-Nothing calls this module but the tests and an operator: no route, command or
-signal imports it, and it is on no stop path.
+Nothing calls this module but the tests, an operator, and (MVP step 10) the feed
+fetch an operator runs (:mod:`assurance.economics.feeds`, ``manage.py
+fetch_financial_source``), which registers a feed's parsed answer through
+:func:`register`: no route or signal imports it, and it is on no stop path.
 """
 
 from __future__ import annotations
@@ -58,7 +61,18 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
     """Register the snapshot at ``path`` as a source version of ``deployment``
     (``None``: platform-wide), with every observation it holds. Returns the source
     version; one already registered with the file's hash is returned as it is."""
-    snapshot = read_snapshot(path)
+    version, _created = register(read_snapshot(path), deployment=deployment, recorded_by=recorded_by)
+    return version
+
+
+def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None) -> tuple[FinancialSource, bool]:
+    """Register ``snapshot`` -- a committed file's, or a live feed's answer parsed by
+    its adapter (:mod:`assurance.economics.engine.feeds`, whose snapshot hash is the
+    answer's normalised payload hash) -- as a source version of ``deployment``
+    (``None``: platform-wide), with every observation it holds, in one transaction.
+    Returns ``(version, created)``: a snapshot already registered under its hash, for
+    the same tenant and key, is the version that holds it, and nothing is written.
+    A snapshot stating ``authoritative`` is refused before anything is written."""
     source = snapshot.source
     if governance.needs_second_person(source["trust_tier"]):
         raise EconomicsRefused(
@@ -75,7 +89,7 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
             .first()
         )
         if existing is not None:
-            return existing
+            return existing, False
         registered = FinancialSource.objects.create(
             deployment=deployment,
             source_key=source["source_key"],
@@ -113,7 +127,7 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
                 value=point.value,
                 vintage_date=point.vintage_date,
             )
-    return registered
+    return registered, True
 
 
 def _tenant_sources(sources: Iterable[FinancialSource], deployment) -> list[int]:

@@ -639,39 +639,67 @@ report is marked `residual_of`, `may_be_totalled` refuses it (and anything that 
 report, the ROI document included), and it is never receipted. None of the three routes is a stop, and a fault in this module leaves only
 these routes unserved.
 
+### The live feeds (step 10, waiting on the owner's keys)
+
+Four official publishers are wired (spec, section 29): the ECB's euro reference rates
+(SDMX, labelled an informational average, not a transaction price), the Fed's H.10
+rates (with each series' quotation convention), FRED with ALFRED vintages, and BLS PPI
+and wage series. `manage.py fetch_financial_source <source> [--as-of DATE]` fetches
+one through the platform's outbound client and records it as a new platform-wide
+source version at `unverified`, append-only and deduplicated by the answer's normalised
+payload hash; a malformed or partial answer is refused with a code and nothing of it
+is kept. It sends nothing until the owner sets the keys (`ECONOMICS_FRED_API_KEY`,
+`ECONOMICS_BLS_API_KEY`; `source_key_missing` otherwise) and turns on
+`ECONOMICS_LIVE_FEEDS_ENABLED`, and every source's licence stays `unreviewed` until the
+owner's review. Each source has a freshness SLA (ECB 3 days, H.10 10, FRED and BLS
+monthly 45): a stale source lowers the grade of every figure it feeds one step, and one
+past twice its SLA makes the Validity Card's claim stale and refuses the receipt
+(`source_stale`). An FX or cost-index source behind a production receipt must be
+`authoritative` (`source_not_authoritative`). `GET
+/api/assurance/deployments/<uuid>/economics/data-health/` lists each feed's latest
+version, age, SLA, state, last fetch failure (its code) and the Unknowns it causes.
+A run uses the newest usable version of a source whose observations cover its as-of
+date. The HTTP client's own log records (urllib3's request lines) withhold every query
+string, so the FRED key reaches no log. The adapters are tested against format-faithful
+fixtures, not recorded responses, in `tests/fixtures/economics_feeds/`, under a socket
+guard; none of it is a stop.
+
 ### The portfolio
 
-A fourth route module (`assurance/economics/portfolio_api.py`), imported guarded in a
+A sixth route module (`assurance/economics/portfolio_api.py`), imported guarded in a
 guard of its own, totals a deployment's scenarios from their draws (Economic Exposure
-E5, `docs/economics/spec-v1.md` section 29):
+E5, `docs/economics/spec-v1.md` section 30):
 
 - `POST /api/assurance/deployments/<uuid>/economics/portfolio/simulate/`:
   `{"seed": ..., "policy": "quick_10k", "reporting_currency": "USD",
   "valuation_date": "2026-10-06", "normalization": {...}, "groups": [...]}` takes each
-  current scenario version's latest result that `may_be_totalled` admits, lists every
-  other with its reason (Unknown, refused, unverified, not graded, never simulated,
-  not annual, superseded, inputs changed, or a currency that cannot be normalised),
-  draws the included scenarios again on one seed with aligned years, scenarios in one
-  correlation group sharing one Gamma driver of their annual rates (a strength with a
-  source type), counts a loss event two scenarios share (one SPINE effect, or step 5's
-  key and window) once, normalises every draw into the reporting currency at the
-  valuation date before summing, and records the result (idempotent: the same inputs
-  return it, 200; a new one is 201); an admin or analyst only;
+  current scenario version's latest exposure run that `may_be_totalled` admits (never
+  a remediation option's residual run), lists every other with its reason (Unknown,
+  refused, unverified, not graded, never simulated, not annual, superseded, inputs
+  changed, or a currency that cannot be normalised), draws the included scenarios
+  again on one seed with aligned years, scenarios in one correlation group (two at
+  least, a strength from 0.000001 to 10 with a source type) sharing one Gamma driver
+  of their annual rates, counts a loss event two scenarios share (one SPINE effect, or
+  step 5's key and window) once a year, at the largest of their losses of it that
+  year, normalises every draw into the reporting currency at the valuation date
+  before summing, and records the result (idempotent: the same inputs return it, 200;
+  a new one is 201); an admin or analyst only;
 - `GET /api/assurance/deployments/<uuid>/economics/portfolio/?result=<uuid>`: the
   portfolio's report (else the latest), `mythos.economics.portfolio-report/v1`: P10,
   P50, P90, mean, expected annual loss, severe-but-plausible and the expected
-  shortfall per line, each scenario's contribution to the mean and to the tail
-  (summing to them exactly), the groups, the shared events, every exclusion with its
-  reason, the grade (no higher than the lowest included scenario, lower for an
-  expert's correlation strength) and the banner.
+  shortfall per line, each included scenario's own figures over the same years (the
+  portfolio is at least each), each scenario's contribution to the mean and to the
+  tail (summing to them exactly), the groups, the shared events, every exclusion with
+  its reason, the grade (no higher than the lowest included scenario, lower for an
+  expert's correlation strength; none for a refused portfolio) and the banner.
 
 The report is built from the stored rows only and is deterministic, with its own
 digest; every stored row it rests on, each included scenario's result, card and
-series among them, is checked first, and a failure is served as a refusal. No
-transaction or lock is held during the draws. Access, tenancy, strict JSON, 64 KiB,
-the 503 while the currency table cannot be read and the one 120 s deadline are step
-6's. Neither route is a stop, and a fault in this module leaves only these two
-unserved.
+series among them, and the record's binding to its inputs, is checked first, and a
+failure is served as a refusal. No transaction or lock is held during the draws.
+Access, tenancy, strict JSON, 64 KiB, the 503 while the currency table cannot be read
+and the one 120 s deadline are step 6's. Neither route is a stop, and a fault in this
+module leaves only these two unserved.
 
 ## When a dependency fails
 
@@ -811,8 +839,8 @@ e-mail, log, file, span or command output: a connector's or posture binding's
 token, the key they are encrypted under, the engine's `X-API-Key`, the closure
 forward's `MINOTAUR_OUTCOMES_KEY`, the gate's and the observed-effect service's
 tokens, the closure-evidence and failsafe tokens, a signing key, a proxy's
-userinfo, a password. And an error page says that something failed, never what it
-was given or what the exception said.
+userinfo, a password, the economics feeds' FRED and BLS keys. And an error page
+says that something failed, never what it was given or what the exception said.
 
 `tests/test_no_planted_secret_leaves_through_a_sink.py` holds the service to that.
 It plants a distinct canary in every one of those origins, and in what a tenant

@@ -543,6 +543,9 @@ NOT_STOPS = {
         "issues their Validity Cards: economics records, append-only; it starts and stops nothing",
     },
     "deployment-economics-scenario-roi": _get(),
+    # The data-health route (assurance.economics.health_api, step 10): feed sources'
+    # freshness read. Economics records only, and it writes nothing.
+    "deployment-economics-data-health": _get(),
     # The portfolio (assurance.economics.portfolio_api, E5): a deployment's scenarios
     # totalled from their draws, and its report. Economics records only.
     "deployment-economics-portfolio": _get(),

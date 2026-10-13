@@ -134,6 +134,11 @@ ORIGINS: dict[str, Origin] = {
     "proxy.userinfo": Origin(
         "cnryproxy" + _hex(12), "the password in HTTP_PROXY/HTTPS_PROXY/ALL_PROXY's userinfo"
     ),
+    "economics.feed_key": Origin(
+        "cnryfeedkey" + _hex(12),
+        "ECONOMICS_FRED_API_KEY and ECONOMICS_BLS_API_KEY, the feed providers' keys (FRED's in the query, BLS's in "
+        "the body)",
+    ),
     "request.password": Origin(
         "cnrypw" + _hex(12), "the password in a sign-in body"
     ),
@@ -175,6 +180,7 @@ CREDENTIALS = frozenset(
         "signing.key",
         "proxy.userinfo",
         "request.password",
+        "economics.feed_key",
     }
 )
 
@@ -219,10 +225,18 @@ DECLARATIONS: tuple[Declaration, ...] = (
         "``secret`` is write-only and encrypted at rest",
     ),
     Declaration(
-        frozenset({"engine.api_key", "connector.token", "posture.token", "minotaur.outcomes_key", "proxy.userinfo"}),
+        frozenset({"engine.api_key", "connector.token", "posture.token", "minotaur.outcomes_key", "proxy.userinfo",
+                   "economics.feed_key"}),
         _ALL,
         "safety/outbound.py",
         "No error quotes a credential.",
+    ),
+    Declaration(
+        frozenset({"economics.feed_key"}),
+        _ALL,
+        "assurance/economics/feeds.py",
+        "a key's value is never printed, logged, recorded or quoted, and a source version records the URL it was "
+        "read from WITHOUT it.",
     ),
     Declaration(
         frozenset({"minotaur.outcomes_key"}),
@@ -291,6 +305,8 @@ PATHS: dict[str, str] = {
     "and delivered by manage.py deliver_owed_stops), every other call not",
     "route_raises": "a route that raises with a message, and a route that does not exist",
     "records": "claims derived, a provider and its assertion written, a retest opened",
+    "feeds": "manage.py fetch_financial_source reads FRED with its key in the query, and is refused by a BLS that "
+    "quotes the request back, its key in the body; one with no key set; the deployment's data health read",
     "read_everything": "every route that reads, over every object the paths made",
 }
 
@@ -505,6 +521,11 @@ class _Tee:
 
 _FORMAT = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s")
 _HARNESS_LOGGERS = ("urllib3", "asyncio", "faker")
+#: The HTTP client's logger: its records are searched on the paths that set
+#: ``World.client_records`` (the feeds path), as its own filters leave them for a
+#: handler (safety.outbound's ``_ClientRecordFilter``). Everywhere else it is the
+#: harness's, as before.
+_CLIENT_LOGGER = "urllib3"
 
 
 def _record_line(record: logging.LogRecord) -> str:
@@ -564,6 +585,8 @@ class World:
     paths: list[PathRun] = field(default_factory=list)
     called: set[tuple[str, str]] = field(default_factory=set)
     timed: list[Timed] = field(default_factory=list)
+    #: Whether urllib3's records are searched too (the feeds path).
+    client_records: bool = False
 
     # -- set-up ----------------------------------------------------------------
 
@@ -625,6 +648,9 @@ class World:
             MEDIA_ROOT=str(self.media),
             EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
             DEFENDER_TIMEOUT_SECONDS=2,
+            ECONOMICS_LIVE_FEEDS_ENABLED=True,
+            ECONOMICS_FRED_API_KEY=CANARY["economics.feed_key"],
+            ECONOMICS_BLS_API_KEY=CANARY["economics.feed_key"],
         )
         self.overrides.enable()
         mail.outbox = []
@@ -652,8 +678,14 @@ class World:
         lines = self.lines
         original = logging.Logger.handle
 
+        world = self
+
         def handle(logger, record):
-            if record.name.split(".", 1)[0] not in _HARNESS_LOGGERS:
+            root = record.name.split(".", 1)[0]
+            if root not in _HARNESS_LOGGERS:
+                lines.write(_record_line(record))
+            elif root == _CLIENT_LOGGER and world.client_records and logger.filter(record):
+                # As a handler receives it: after the logger's own filters.
                 lines.write(_record_line(record))
             return original(logger, record)
 
@@ -1427,6 +1459,65 @@ class World:
             docs, "api.answers", admin, "get", portfolio_url, "deployment-economics-portfolio",
         ).status_code
 
+    def feeds(self, docs, signals):
+        """MVP step 10: the operator's fetch, with the providers' key planted. FRED
+        answers with its observations for the window asked (the key in the query);
+        BLS answers 500 with a page quoting the request, its body and the key in it;
+        then BLS again with no key set. Every sink is searched for the key."""
+        from django.test.utils import override_settings
+
+        from assurance.economics import feeds as economics_feeds
+
+        fixtures = ROOT / "tests" / "fixtures" / "economics_feeds"
+        observations = json.loads(
+            (fixtures / "fred-cpiaucsl-2026-10-13.json").read_bytes().partition(b"\n")[2]
+        )
+        def provider(method, path, headers, body):
+            if path.startswith("/fred/"):
+                from urllib.parse import parse_qs, urlsplit
+
+                window = parse_qs(urlsplit(path).query)["realtime_start"][0]
+                answer = copy.deepcopy(observations)
+                answer.update(realtime_start=window, realtime_end=window)
+                for entry in answer["observations"]:
+                    entry.update(realtime_start=window, realtime_end=window)
+                return 200, answer
+            return 404, {"detail": f"no {method} {path}"}
+
+        fake = Fake("feeds", provider)
+        # urllib3's own records of these requests are searched too: FRED's key is in
+        # the query of the request line it records at DEBUG.
+        self.client_records = True
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(economics_feeds, "base_url", lambda feed: fake.base)
+                self.command(docs, "fetch_financial_source", "fred-cpiaucsl")
+                signals["client_request_line"] = "/fred/series/observations?" in "".join(self.lines._parts)
+                with _in_mode(fake, "echo"):
+                    refused, _ = self.command(docs, "fetch_financial_source", "bls-ppi-final-demand", raises=True)
+                with override_settings(ECONOMICS_BLS_API_KEY=""):
+                    missing, _ = self.command(docs, "fetch_financial_source", "bls-ahe-total-private", raises=True)
+        finally:
+            self.client_records = False
+            fake.close()
+        from assurance.economics.models import FinancialSourceFetch
+
+        signals["fetches"] = list(
+            FinancialSourceFetch.objects.order_by("id").values_list("source_key", "outcome", "code")
+        )
+        signals["bls_refused"] = bool(refused) and "fetch_http_error" in refused
+        signals["no_key_refused"] = bool(missing) and "source_key_missing" in missing
+        # The key went in: FRED's in the query the provider saw; BLS's in the body of
+        # the POST its echo page quoted back (tests/test_economics_feeds.py pins where
+        # each key goes).
+        signals["provider_got_key"] = any(CANARY["economics.feed_key"] in path for _m, path, _h in fake.seen)
+        signals["bls_posted"] = any(method == "POST" for method, _p, _h in fake.seen)
+        dep, _finding = self._deployment()
+        signals["data_health"] = self.call(
+            docs, "api.answers", self.client(self.admin), "get",
+            f"/api/assurance/deployments/{dep.uuid}/economics/data-health/", "deployment-economics-data-health",
+        ).status_code
+
     def read_everything(self, docs, signals):
         admin = self.client(self.admin)
         read, failed = 0, []
@@ -1581,6 +1672,8 @@ ROUTES.update(
         "deployment-economics-scenario-mitigations": _READ,
         "deployment-economics-mitigation-simulate": _READ,
         "deployment-economics-scenario-roi": _READ,
+        # The data-health route (MVP step 10): each feed source's state for a deployment.
+        "deployment-economics-data-health": _READ,
         # The portfolio (E5): the totals and their report JSON.
         "deployment-economics-portfolio": _READ,
         "deployment-economics-portfolio-simulate": _READ,
@@ -1846,6 +1939,7 @@ COMMANDS: dict[str, str] = {
     "retry_blocking_dispatches": "commands: retries owed dispatches; prints counts and ids",
     "retry_closure_forwards": "commands",
     "raise_source_trust": "commands",
+    "fetch_financial_source": "commands",
 }
 
 
@@ -1997,6 +2091,14 @@ def test_every_path_ran(observed):
         "command_approve_refused": True,
         "command": [("withdrawn", "api", "api"), ("withdrawn", "command", "command")],
     }, s["records"]
+    assert s["feeds"]["fetches"] == [
+        ("fred-cpiaucsl", "recorded", ""), ("bls-ppi-final-demand", "refused", "fetch_http_error"),
+    ], s["feeds"]
+    assert s["feeds"]["bls_refused"] is True and s["feeds"]["no_key_refused"] is True, s["feeds"]
+    assert s["feeds"]["provider_got_key"] is True and s["feeds"]["bls_posted"] is True, s["feeds"]
+    assert s["feeds"]["data_health"] == 200, s["feeds"]
+    # urllib3's request-line record was searched: the channel is live, not vacuous.
+    assert s["feeds"]["client_request_line"] is True, s["feeds"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 
 

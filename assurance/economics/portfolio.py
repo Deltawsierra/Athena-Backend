@@ -1,5 +1,5 @@
 """A deployment's portfolio: its scenarios aggregated from their draws (Economic
-Exposure E5; ``docs/economics/spec-v1.md``, section 29). The thin Django half of
+Exposure E5; ``docs/economics/spec-v1.md``, section 30). The thin Django half of
 :mod:`assurance.economics.engine.portfolio`.
 
 :func:`simulate_portfolio` picks, for one deployment, each current scenario
