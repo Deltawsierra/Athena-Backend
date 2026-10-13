@@ -683,6 +683,8 @@ def test_no_economics_route_is_a_stop():
         # Step 11's context routes, in the data-health route's module (spec, section 31.8).
         "deployment-economics-suggestions",
         "deployment-economics-scenario-precedents",
+        # The normalization route (spec, section 12.9).
+        "deployment-economics-normalization",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
@@ -693,6 +695,7 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["economics-trust-raise-approve"]) == {"POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-withdraw"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-data-health"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-normalization"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-scenarios"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-receipt"]) == {"GET"}
 

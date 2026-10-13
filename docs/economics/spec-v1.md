@@ -1167,6 +1167,57 @@ downgrades and conflicts.
    telling an outage from a pair it does not publish would need what the books do not
    hold once a version is left out. Alternative: order the providers per pair.
 
+
+### 12.9 The normalization route (MVP step 12)
+
+`GET /api/assurance/deployments/<uuid>/economics/normalization/?<query>`
+(`deployment-economics-normalization`), from `assurance/economics/health_api.py`, mounted
+with the data-health route (section 29.7) in its guard. It answers ONE amount, recorded on
+its event date, normalized for a run of the deployment as of its valuation date: the
+record `normalization_service.normalize_for` makes (section 12.8) over the source versions
+a run of that deployment may use on that date, platform-wide and its own, never another
+deployment's. It is how a reader -- the Minotaur answer key `athena-economics-data`
+(Minotaur-Engine #79) among them -- asks the engine for a normalization without a run.
+
+**The query** is read strictly, as the read routes the dashboard needs read theirs
+(section 30): only the keys named, each once (`field_unrecognised`, `field_malformed`),
+every required one present (`field_missing`); each 400.
+
+| Key | Holds | Required |
+|---|---|---|
+| `amount`, `currency` | the native amount, a decimal string in the one spelling (section 11), and its currency | yes |
+| `event_date`, `valuation_date` | `YYYY-MM-DD`; the event is not after the valuation (`date_inversion`) | yes |
+| `base_currency`, `reporting_currency` | the currency the index is applied in, and the one reported (section 12.4) | yes |
+| `providers` | the FX policy's providers, comma-separated, in order: the first with a usable rate is the primary (section 12.8) | yes |
+| `index_series_id`, `index_geography`, `index_category`, `index_base` | the base currency's cost index (section 12.3); its currency is the base currency | yes |
+| `rate_types` | the rate types accepted, comma-separated, in order (`FXPolicy`'s default otherwise) | no |
+| `weekend_holiday_rule`, `missing_rate` | the policy's rules (section 12.2) | no |
+| `max_interpolation_gap_days`, `freshness_days`, `index_max_lag_months` | whole numbers in ASCII digits, no sign and no leading zero, at most four | no |
+
+The required keys are `health_api.NORMALIZATION_REQUIRED`, the others
+`health_api.NORMALIZATION_OPTIONAL`. A query the engine refuses -- an amount not in the
+one spelling (`not_decimal`), a currency it does not know, a policy it does not hold to
+(`policy_invalid`), an event after its valuation date -- is 400 with the engine's own
+code (`MoneyRefused`).
+
+**The answer** is `{"deployment": <uuid>, "normalization": <record>}`, the record of
+section 12.6 with its `conflicts`, its `primary_unavailable` steps and its
+`confidence_downgrades` (section 12.8), as canonical JSON (sorted keys, no whitespace,
+UTF-8): the same stored rows give the same bytes, fired twice. A normalization the books
+cannot make is `unavailable`, with its reason (`rate_missing`, `index_primary_unset`,
+...), and that record is the answer, 200: never a number the policy did not allow. Every
+answer carries `Cache-Control: no-store`. While economics cannot read its currency table
+the route is 503 and computes nothing.
+
+**Access and safety** are the data-health route's: a signed-in account (401 otherwise),
+a deployment the caller cannot see is 404 whether or not it exists, and every role reads.
+It writes nothing, holds no lock and no transaction, is in `safety.stops.NOT_STOPS`, and
+a Stop is answered while it is held open mid-read
+(`tests/test_economics_normalization_route.py`). Its views import the normalization
+service, the feed module and the engine only when called, so a fault in any of them
+leaves this route answering an error and every other route, and every stop, standing
+(`tests/economics_fault_cases.py`, `feeds` and `core`).
+
 ## 13. Observation data and the synthetic snapshot
 
 Phase E1 reads no feed. Every rate and index value comes from a committed snapshot
@@ -4480,10 +4531,10 @@ and series.
 - **The live review status** is read when the report is built: a review recorded
   later changes the report's bytes and digest, as it should (the card keeps the
   status at issue).
-- **No cap on simulations at once** (review round 1, LOW-5): one request is bounded
-  by its one deadline, but how many a process runs at once, or a scenario holds, is
-  not. Open for the testing phase: a per-process cap (503 when busy), so a pool of
-  synchronous workers cannot fill with long simulations a stop's request might need.
+- **The cap on simulations at once is done** (review round 1, LOW-5; the section 28
+  threat-model audit, S1): how many runs a host makes at once, and a deployment, is
+  capped across worker processes without waiting, and a run with no slot free is 503
+  `economics_capacity` at once (section 32).
 - **The step-5 events route carries the banner** (`.../scenarios/<uuid>/events/`,
   sections 24.8 and 27.6; review round 1, LOW-6(b), done in the follow-up to #158). It
   still serves step 4's deterministic totals, which are not a result, and says
@@ -5695,3 +5746,108 @@ Decisions this step takes, which the owner may change:
    a figure as fresh when the figure itself was taken from a stale listing.
 10. **The number bound**: at most 64 characters, 40 digits and an exponent of 30 for
     any JSON number an adapter reads. Alternative: a bound per field.
+
+## 32. Economics runs at once: the cap (SAFETY RULE)
+
+The SAFETY RULE: nothing may block, delay or drop a stop, a pause, a stand-down, a
+terminate, a revoke or a scan's Stop. Every simulate route runs its Monte Carlo
+synchronously, in the worker that serves it, for up to its one 120 s deadline (section
+27.1). Nothing bounded how many ran at once, so one analyst, or a stolen analyst token,
+could fill every worker with long runs, and a scan's Stop then waited for a free worker
+(the section 28 threat-model audit, finding S1, HIGH).
+
+| | |
+|---|---|
+| Code | `assurance/economics/capacity.py`; `@capacity.capped` on `report_api.ScenarioSimulateView.post` and `remediation_api.MitigationSimulateView.post` |
+| Tests | `tests/test_economics_run_cap.py`; the canary harness's records path (a simulate at capacity) |
+
+### 32.1 What takes a slot
+
+Every handler that runs a Monte Carlo, or the sensitivity analysis a Validity Card is:
+the scenario simulate route and the remediation option's simulate route (its two runs
+share one slot). A route registers with ONE line, `@capacity.capped` on its handler; a
+later Monte Carlo route (E5's portfolio simulate) registers the same way, and
+`test_every_handler_that_runs_a_monte_carlo_takes_a_slot` walks the URLconf and fails
+on a handler that calls a run (`simulate_scenario`, `simulate_option`,
+`simulate_portfolio`, `issue_card`, `issue_charts`, `issue_receipt`) and is not
+capped. No management command runs a Monte Carlo.
+
+Before a slot is touched the deployment is looked up as the handler looks it up (404
+for one the caller cannot see: a tenant's runs are never disclosed to another), and a
+caller who may not write goes straight to the handler, which refuses them (403) and
+runs nothing. Then one of the deployment's slots and one of the host's are taken, both
+WITHOUT WAITING. When either is not free the request is answered at once:
+
+```
+503 Service Unavailable
+Retry-After: 30
+{"code": "economics_capacity", "detail": "...: nothing was run or recorded; send the same request again after 30 s", "recorded": false}
+```
+
+Nothing runs and nothing is recorded; nothing queues. The answer carries nothing from
+the request. A request that would only return a stored result is refused the same way
+while every slot is held.
+
+### 32.2 The slots
+
+A slot is an exclusive `flock` (`LOCK_EX | LOCK_NB`) on one small file in the slot
+directory, which every worker on the host shares: `run-<i>.lock` for the host's
+slots, `tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's.
+
+- **No slot leaks.** The kernel releases a flock when the last descriptor of its open
+  file closes, so a worker that dies by any means (SIGKILL, the OOM killer, gunicorn's
+  timeout) gives its slots back at once. A database lease with an expiry was the
+  alternative: it leaks a dead worker's slot until it expires, and it would put a
+  database read in front of the cap. The cap reads no database.
+- **Every exit gives the slot back**: the handler's answer, a refusal, an exception,
+  and `SystemExit` (gunicorn's abort of a timed-out worker) release it in a `finally`;
+  a client that disconnects is the same (the handler runs to its end, bounded by its
+  deadline). The descriptors are close-on-exec, and released with `LOCK_UN`, so a child
+  process never keeps one.
+- **Per host.** The cap protects the host's worker pool, so it is per host; a deployment
+  of several machines has a cap on each. The directory must be local to the host.
+- **Fails closed.** Slot files that cannot be opened refuse the run, 503
+  `economics_capacity` ("cannot be read"); a run is never made uncapped.
+
+### 32.3 The caps
+
+Each read from the environment by its literal name; no Django setting is read.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ATHENA_ECONOMICS_RUN_CAP` | `max(1, WEB_CONCURRENCY - 2)` | runs the host makes at once; `0` refuses every run |
+| `WEB_CONCURRENCY` | `1` (gunicorn's own default) | gunicorn's worker count, which gunicorn itself reads |
+| `ATHENA_ECONOMICS_RUN_CAP_PER_TENANT` | `1` | runs one deployment makes at once |
+| `ATHENA_ECONOMICS_SLOT_DIR` | `<system temp dir>/athena-economics-slots` | where the slot files are |
+
+The default global cap leaves at least two workers free for everything else, every
+stop included, wherever the host runs three workers or more. Below three it is 1, the
+least that still lets economics run: one run can then take the only spare worker. A
+server that also runs threads per worker (`gunicorn --threads`) serves
+`workers x threads` requests at once; set `ATHENA_ECONOMICS_RUN_CAP` to that less two.
+This repository holds no Procfile, gunicorn configuration, Dockerfile or Fly
+configuration, so the worker count is taken from the environment, never assumed.
+
+### 32.4 Safety
+
+No stop takes a slot or reads the cap. `test_no_stop_route_takes_a_slot` walks the
+URLconf and fails on a capped handler of any route in `safety.stops.EXEMPT_ROUTES`;
+`test_with_every_slot_held_a_run_is_refused_at_once_and_every_stop_is_answered_in_its_bound`
+holds every slot with slow runs (a test seam holds each open) and drives every stop
+the stop tripwire drives -- a scan's Stop, a pause, a stand-down, a terminate, a revoke,
+a contradiction, the kill switch off, an engagement's authority withdrawn, a demotion, a
+removal, the stop lane's reads, the engine's poll and the refresh -- through
+`config.wsgi.application`, each within the tripwire's `STOP_LATENCY_BOUND` (0.25 s).
+The two simulate routes stay in `safety.stops.NOT_STOPS` and the write-route table's
+routes that cannot move the decision; at capacity they write nothing at all.
+
+### 32.5 Decisions this step takes, which the owner may change
+
+1. **flock slots, per host**, over database leases. Recommendation: keep.
+2. **The per-tenant cap is per deployment**, the tenant boundary (`assurance.models`).
+   An analyst sees every deployment, so one analyst can still hold every host slot
+   through several deployments; the host cap is what keeps the stop's workers free.
+   Alternative: also cap per account.
+3. **`Retry-After: 30`**, a quarter of the 120 s deadline.
+4. **Stop routes on their own worker pool** is an operations change, not code; the cap
+   does not need it.

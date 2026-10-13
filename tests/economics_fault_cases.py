@@ -42,6 +42,12 @@ from pentest.models import PentestScan
 pytestmark = pytest.mark.django_db
 
 FAULT = os.environ["ECONOMICS_FAULT"]
+#: A well-formed normalization query (spec, section 12.9): what a fault leaves unanswered.
+NORMALIZATION = (
+    "amount=400000&currency=EUR&event_date=2026-09-30&valuation_date=2026-09-30&base_currency=USD"
+    "&reporting_currency=USD&providers=ECB&index_series_id=CPIAUCSL&index_geography=US"
+    "&index_category=consumer+prices&index_base=1982-1984%3D100"
+)
 
 
 def test_the_scan_stop_is_answered_and_saved():
@@ -130,11 +136,13 @@ def test_only_economics_is_refused():
         assert "assurance.economics.report" not in sys.modules
         return
     if FAULT == "feeds":
-        # The data-health route is served, imports the feed module inside its view,
-        # and answers an error with no body of figures; every other route stands.
+        # The data routes are served, import the feed module inside their views, and
+        # answer an error with no body of figures; every other route stands.
         assert "assurance.economics.feeds" not in sys.modules
         health = f"/api/assurance/deployments/{deployment.uuid}/economics/data-health/"
         assert resolve(health).view_name == "deployment-economics-data-health"
+        normalization = f"/api/assurance/deployments/{deployment.uuid}/economics/normalization/?" + NORMALIZATION
+        assert resolve(normalization.partition("?")[0]).view_name == "deployment-economics-normalization"
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
         assert built.view_name == "deployment-economics-scenario-build"
@@ -151,7 +159,10 @@ def test_only_economics_is_refused():
         client.force_authenticate(user=admin)
         served = client.get(health)
         assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
+        served = client.get(normalization)
+        assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
         assert "assurance.economics.feeds" not in sys.modules
+        assert "assurance.economics.normalization_service" not in sys.modules
         return
     if FAULT == "builder":
         # The builder's routes are not served; the parameter-set routes still are.
@@ -190,3 +201,8 @@ def test_only_economics_is_refused():
     from assurance.economics.models import CustomerParameterSet
 
     assert not CustomerParameterSet.objects.exists()
+    # The normalization route answers too, and computes nothing it cannot: 503.
+    normalization = client.get(
+        f"/api/assurance/deployments/{deployment.uuid}/economics/normalization/?" + NORMALIZATION
+    )
+    assert normalization.status_code == 503, normalization.content

@@ -1420,6 +1420,22 @@ class World:
             docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/simulate/",
             "deployment-economics-scenario-simulate", data={"seed": 7, "policy": "quick_10k"}, format="json",
         ).status_code
+        # The same route with every one of the deployment's economics run slots held
+        # (assurance.economics.capacity): answered 503 economics_capacity at once,
+        # before the body is read. Its answer is searched like every other, with a
+        # canary in the body it was sent.
+        from assurance.economics import capacity
+
+        slots, _why = capacity.acquire(str(self.deployment.uuid))
+        try:
+            signals["scenario_simulate_at_capacity"] = self.call(
+                docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/simulate/",
+                "deployment-economics-scenario-simulate",
+                data={"seed": 8, "policy": "quick_10k", "note": f"busy {CANARY['request.body']}"}, format="json",
+            ).status_code
+        finally:
+            if slots is not None:
+                slots.release()
         signals["scenario_results"] = self.call(
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/results/",
             "deployment-economics-scenario-results",
@@ -1535,6 +1551,22 @@ class World:
         signals["data_health"] = self.call(
             docs, "api.answers", self.client(self.admin), "get",
             f"/api/assurance/deployments/{dep.uuid}/economics/data-health/", "deployment-economics-data-health",
+        ).status_code
+        # The normalization route (MVP step 12): an amount normalized for the
+        # deployment over the sources a run of it may use; what it answers is searched
+        # like every other sink.
+        from urllib.parse import urlencode
+
+        normalization = urlencode({
+            "amount": "400000", "currency": "EUR", "event_date": "2026-09-30", "valuation_date": "2026-09-30",
+            "base_currency": "USD", "reporting_currency": "USD", "providers": "ECB,FRB-H10",
+            "index_series_id": "CPIAUCSL", "index_geography": "US",
+            "index_category": "consumer prices, all items", "index_base": "1982-1984=100",
+        })
+        signals["normalization"] = self.call(
+            docs, "api.answers", self.client(self.admin), "get",
+            f"/api/assurance/deployments/{dep.uuid}/economics/normalization/?{normalization}",
+            "deployment-economics-normalization",
         ).status_code
 
     def read_everything(self, docs, signals):
@@ -1693,6 +1725,8 @@ ROUTES.update(
         "deployment-economics-scenario-roi": _READ,
         # The data-health route (MVP step 10): each feed source's state for a deployment.
         "deployment-economics-data-health": _READ,
+        # The normalization route (MVP step 12): one amount normalized for a deployment.
+        "deployment-economics-normalization": _READ,
         # The read routes the dashboard needs (spec, section 30): a deployment's
         # scenario versions, and a Financial Exposure Receipt's signed bytes.
         "deployment-economics-scenarios": _READ,
@@ -2002,6 +2036,12 @@ _WRITES = re.compile(
 FILE_WRITERS: dict[str, str] = {
     "pentest/models.py": "files: the scan's PDF report (upload_to pentest_reports/, under MEDIA_ROOT), "
     "written by pentest.utils.save_pdf_to_scan through the scan's FileField",
+    # Not under MEDIA_ROOT, so not read by the files search: each slot file is created
+    # empty and never written to, and is named by a slot's index or a digest of a
+    # deployment's uuid (tests/test_economics_run_cap.py, test_a_slot_file_carries_nothing).
+    "assurance/economics/capacity.py": "files: the economics run slots, empty lock files in "
+    "ATHENA_ECONOMICS_SLOT_DIR (run-<i>.lock, tenant-<sha256 of a deployment uuid>-<i>.lock), never written to; "
+    "they carry no byte of any request",
 }
 
 
@@ -2112,11 +2152,12 @@ def test_every_path_ran(observed):
         s["records"]["scenario_build"],
         s["records"]["scenario_events"],
         s["records"]["scenario_simulate"],
+        s["records"]["scenario_simulate_at_capacity"],
         s["records"]["scenario_results"],
         s["records"]["mitigation"],
         s["records"]["mitigation_simulate"],
         s["records"]["scenario_roi"],
-    ) == (400, 201, 200, 201, 200, 201, 201, 200), s["records"]
+    ) == (400, 201, 200, 201, 503, 200, 201, 201, 200), s["records"]
     # The read routes the dashboard needs: the list read, a receipt issued and its bytes read.
     assert (s["records"]["scenario_list"], s["records"]["receipt_issued"], s["records"]["receipt_bytes"]) == (
         200, (True, None), 200,
@@ -2132,6 +2173,7 @@ def test_every_path_ran(observed):
     assert s["feeds"]["bls_refused"] is True and s["feeds"]["no_key_refused"] is True, s["feeds"]
     assert s["feeds"]["provider_got_key"] is True and s["feeds"]["bls_posted"] is True, s["feeds"]
     assert s["feeds"]["data_health"] == 200, s["feeds"]
+    assert s["feeds"]["normalization"] == 200, s["feeds"]
     # urllib3's request-line record was searched: the channel is live, not vacuous.
     assert s["feeds"]["client_request_line"] is True, s["feeds"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
