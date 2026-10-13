@@ -732,6 +732,48 @@ def test_a_restricted_sources_raw_rates_never_reach_a_reader(deployment, people,
     assert by[[s for s in by if s != str(eur.uuid)][0]]["normalization"]["rule"] == "identity"
 
 
+def test_a_conflict_naming_a_restricted_source_never_shows_its_values(deployment, people, sources, tmp_path):
+    """The audit's T7 with step 12's conflicts (spec 12.8): an open source is read, and
+    a restricted one quoting the same pair that day disagrees by 10%. The record lists
+    the conflict with both values; the report shows which sources disagreed, never
+    either value or how far apart."""
+    document = json.loads(snapshots.SYNTHETIC_SNAPSHOT.read_bytes())
+    document["synthetic"] = False
+    document["source"].update(trust_tier="benchmark", license_class="restricted", source_key="restricted-other-ref")
+    document["calendars"] = {"OTHER-REF": {"non_publication_dates": []}}
+    document["fx"] = [
+        {**rate, "provider": "OTHER-REF", "rate": "1.1550"} for rate in document["fx"]
+        if (rate["base"], rate["quote"], rate["effective_date"], rate["rate_type"])
+        == ("EUR", "USD", "2026-09-30", "reference")
+    ]
+    document["cost_index"] = []
+    path = tmp_path / "other.json"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    other = snapshots.register_snapshot(path)
+    valued = date(2026, 9, 30)
+    eur, _ = made_and_simulated(deployment, people["analyst"], title="EUR", currency="EUR", as_of=valued)
+    posted = _totalled(deployment, people, valuation_date="2026-09-30",
+                       normalization=_normalization([*sources, other]))
+    stored = PortfolioResult.objects.get().inputs["members"][0]["normalization"]
+    (conflict,) = stored["record"]["conflicts"]
+    assert (conflict["secondary"], conflict["secondary_value"]) == ("restricted-other-ref", "1.155")
+    served = _report_of(deployment, people, posted["portfolio"]["uuid"])
+    (member,) = served["scenarios"]["included"]
+    normalization = member["normalization"]
+    assert normalization["factor"] is None and "licensed restricted" in normalization["withheld"]
+    (shown,) = normalization["record"]["conflicts"]
+    assert (shown["primary"], shown["secondary"], shown["withheld"]) == (
+        "synthetic-fx-and-cost-index", "restricted-other-ref", "both values")
+    assert not {"primary_value", "secondary_value", "secondary_quoted", "relative_difference"} & set(shown)
+    text = json.dumps(served)
+    for value in ("1.155", "1.1550", conflict["relative_difference"]):
+        assert f'"{value}"' not in text, value
+    # The open source's own observation may be redistributed, and is shown.
+    (observation,) = normalization["record"]["chain"][0]["observations"]
+    assert (observation["source_key"], observation["rate"]) == ("synthetic-fx-and-cost-index", "1.05")
+    assert str(eur.uuid) == member["scenario"]
+
+
 # ======================================================================
 # Contributions
 # ======================================================================

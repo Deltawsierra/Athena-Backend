@@ -1119,38 +1119,66 @@ _OBSERVATION_PROVENANCE = frozenset({
     "source_key", "source_version", "source_snapshot_hash", "observations_version", "effective_date",
     "observed_at", "period", "vintage_date",
 })
+#: What a conflict between two sources keeps (section 12.8): which sources, providers,
+#: dates and periods disagreed, and the tolerance; never either value or how far apart.
+_CONFLICT_PROVENANCE = frozenset({
+    "kind", "step", "pair", "date", "series", "base", "period", "primary", "primary_provider",
+    "primary_rate_type", "primary_vintage", "secondary", "secondary_provider", "secondary_rate_type",
+    "secondary_vintage", "tolerance",
+})
+#: What a normalisation record keeps when anything in it is withheld: no number read or made.
+_RECORD_PROVENANCE = frozenset({
+    "status", "event_date", "valuation_date", "base_currency", "reporting_currency", "order", "arithmetic",
+    "display_rounding", "estimate", "stale", "confidence_downgrades", "primary_unavailable", "unavailable", "policy",
+})
 
 
 def served_normalization(normalization, policy) -> dict | None:
     """A member's normalisation as a reader is served it (the section-28 audit's T7):
-    as stored where every observation it read is of a source whose licence allows
-    redistribution, and otherwise with every raw rate and index value, and every
-    number made from them (the factor, each step's rate, ratio and amounts), WITHHELD:
-    each observation of a source that may not be redistributed shown by its source,
-    version, snapshot hash and dates only. The stored inputs keep the whole record
-    (the licence allows storing and deriving figures); the figures stand."""
+    as stored where every source it read, and every source a conflict in it names
+    (section 12.8), is licensed ``open`` or ``customer``; otherwise with every raw
+    rate and index value, and every number made from them (the factor, each step's
+    rate, ratio and amounts, each conflict's values and difference), WITHHELD: each
+    observation of a source that may not be redistributed is shown by its source,
+    version, snapshot hash and dates only, and each conflict by its sources,
+    providers and dates. A source the inputs do not name is taken as one that may
+    not be redistributed. The stored inputs keep the whole record (the licence allows
+    storing and deriving figures); the figures stand."""
     if not isinstance(normalization, dict) or not isinstance(normalization.get("record"), dict):
         return normalization
-    licences = {
-        (s.get("source_key"), s.get("version")): s.get("license_class")
-        for s in ((policy or {}).get("sources") or []) if isinstance(s, dict)
-    }
+    named = [s for s in ((policy or {}).get("sources") or []) if isinstance(s, dict)]
+    by_version = {(s.get("source_key"), s.get("version")): s.get("license_class") for s in named}
+    by_key: dict = {}
+    for source in named:
+        by_key.setdefault(source.get("source_key"), set()).add(source.get("license_class"))
 
     def licence(observation) -> str | None:
         if not isinstance(observation, dict):
             return None
-        return licences.get((observation.get("source_key"), observation.get("source_version")))
+        return by_version.get((observation.get("source_key"), observation.get("source_version")))
+
+    def conflict_licences(conflict) -> set:
+        if not isinstance(conflict, dict):
+            return {None}
+        return set().union(*(by_key.get(conflict.get(side)) or {None} for side in ("primary", "secondary")))
 
     record = normalization["record"]
     chain = [step for step in record.get("chain") or [] if isinstance(step, dict)]
+    conflicts = [c for step in chain for c in step.get("conflicts") or []] + list(record.get("conflicts") or [])
     held = {licence(o) for step in chain for o in step.get("observations") or []}
+    held |= set().union(*(conflict_licences(c) for c in conflicts)) if conflicts else set()
     if held <= REDISTRIBUTABLE:
         return normalization
     classes = sorted(str(c) for c in held - REDISTRIBUTABLE)
     reason = (
-        f"withheld: a source it read is licensed {', '.join(classes)}, whose terms do not allow redistributing its "
-        "raw data; its provenance is shown, and the figures derived from it stand"
+        f"withheld: a source it read, or a conflict names, is licensed {', '.join(classes)}, whose terms do not "
+        "allow redistributing its raw data; its provenance is shown, and the figures derived from it stand"
     )
+
+    def conflicts_served(found) -> list:
+        return [{**{k: v for k, v in c.items() if k in _CONFLICT_PROVENANCE}, "withheld": "both values"}
+                for c in found or [] if isinstance(c, dict)]
+
     served_chain = []
     for step in chain:
         observations = []
@@ -1163,9 +1191,11 @@ def served_normalization(normalization, policy) -> dict | None:
                     "license_class": licence(observation), "withheld": "the raw value",
                 })
         served_chain.append({**{k: v for k, v in step.items() if k in _STEP_PROVENANCE},
-                             "observations": observations, "withheld": reason})
-    served = {k: v for k, v in record.items() if k not in ("native", "value", "display", "chain")}
-    served.update(chain=served_chain, value=None, display=None, withheld=reason)
+                             "observations": observations, "conflicts": conflicts_served(step.get("conflicts")),
+                             "withheld": reason})
+    served = {k: v for k, v in record.items() if k in _RECORD_PROVENANCE}
+    served.update(chain=served_chain, conflicts=conflicts_served(record.get("conflicts")), value=None,
+                  display=None, withheld=reason)
     return {**normalization, "factor": None, "record": served, "withheld": reason}
 
 

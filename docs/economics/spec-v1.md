@@ -5791,8 +5791,12 @@ read is of an `open` or `customer` source. Otherwise every raw rate and index va
 and every number made from them -- the factor, each step's quoted rate, factor,
 ratio and amounts, the normalised value -- is WITHHELD (`factor: null`, with
 `withheld` saying why), and each such observation is shown by its source key,
-version, snapshot hash and dates only. The portfolio's figures, derived from them,
-stand. (Before E5 no route served a normalisation record, so this is the first
+version, snapshot hash and dates only. So it is where a conflict (section 12.8)
+names such a source: each conflict is shown by its sources, providers and dates,
+never either value or the difference. A source the inputs do not name is taken as
+one that may not be redistributed, and what a withheld record keeps is listed, so a
+field added to the record later is withheld until it is. The portfolio's figures,
+derived from them, stand. (Before E5 no route served a normalisation record, so this is the first
 reader such a rule binds.)
 
 Codes: `nothing_to_total` (no current scenario version may be totalled: recorded,
