@@ -5206,10 +5206,10 @@ insurance per event occurrence (`scenario_simulation._sample`, which now takes t
 `random` and the years' `counts` a caller hands in; without them it draws exactly as
 before, so no stored result, analysis or series changes).
 
-The portfolio's annual loss in year `y` is the correctly rounded sum (`math.fsum`)
-of its scenarios' normalised annual losses in year `y` of every event no other is
-linked to, and of each shared loss event's count that year (section 30.4), for two
-lines: the gross cash, and the retained cash (a scenario with no insurance policy
+The portfolio's annual loss in year `y` is the sum, added in one fixed order
+(`portfolio.ordered_sum`), of its scenarios' normalised annual losses in year `y` of
+every event no other is linked to (scenario by scenario, event by event), then of
+each shared loss event's count that year (section 30.4), for two lines: the gross cash, and the retained cash (a scenario with no insurance policy
 retains its gross); the headline is the retained cash where any scenario states a
 policy. P10, P50, P90, the mean, the expected annual loss and severe-but-plausible
 are step 7a's summary of that vector (section 23.5), with its bands. Market value is
@@ -5219,9 +5219,10 @@ streams, and the two must agree bit for bit.
 **The portfolio is at least each included scenario, year by year**, and so at every
 percentile, the mean and the expected shortfall (review round 1, HIGH-1 and
 MEDIUM-1). A scenario's own annual loss over the portfolio's years -- its events'
-losses, those in one shared loss event summed first -- is summed the same way from
-terms each no larger than one of the portfolio's, all of them non-negative, so the
-correctly rounded portfolio is never below it, exactly. The engine checks it on every
+losses, those in one shared loss event summed first -- is summed in the same order
+from terms each no larger than the portfolio's term in its place, all of them
+non-negative. Rounding is monotone, so the binary64 portfolio is never below it,
+exactly, not merely within a band. The engine checks it on every
 run (otherwise `invariant_broken`), the record keeps each scenario's own summary
 over the portfolio's years (`members.<uuid>.own`), and the report shows it beside the
 portfolio's (`scenarios.included[].own`).
@@ -5330,10 +5331,11 @@ What that holds:
   larger figure, is added, and no figure falls
   (`test_a_rare_duplicate_never_hides_a_frequent_loss`; the first draft's mean fell
   from 501,573 to 5,089). So is a scenario that links two others' events into a chain
-  (`test_a_scenario_that_links_two_others_never_lowers_the_portfolio`). Where a
-  scenario links events that were apart, their losses are summed in other groups, so
-  in binary64 a figure can differ in its last place; a group applied once two of its
-  scenarios are included changes its members' draws (section 30.3).
+  (`test_a_scenario_that_links_two_others_never_lowers_the_portfolio`). That is
+  the exact sum; an added scenario can change the order the binary64 sum adds a
+  year's losses in, so it can differ in its last place, far below the minor unit. A
+  group that applies once two of its scenarios are included changes its members'
+  draws (section 30.3).
 - **No included scenario's tail exceeds the portfolio's** (review round 1,
   MEDIUM-1): the count is the larger loss in each year, never the event larger at
   base. The reviewer's narrow/wide pair is a test
@@ -5396,8 +5398,8 @@ may differ from the biggest tail contributor.
   the set is another scenario's). So a scenario whose loss of a shared event is the
   smaller one that year carries none of it that year.
 - **To the mean**: each scenario's mean over the portfolio's years of what it
-  carries, the correctly rounded binary64 mean, written as its shortest decimal. The
-  portfolio's mean and expected annual loss ARE their exact
+  carries, the correctly rounded binary64 mean (`math.fsum`), written as its
+  shortest decimal. The portfolio's mean and expected annual loss ARE their exact
   decimal sum (the mean of a sum is the sum of the means), so the contributions sum
   to it exactly; it agrees with the mean of the per-draw totals to within 1E-12,
   relative, and a disagreement is a broken invariant.
@@ -5444,19 +5446,21 @@ one they do not decide (`time_over_budget`, `memory_exhausted`, `invariant_broke
 `engine_unavailable`, `simulation_failed`) is 503 and never recorded.
 
 **Limits**: step 6's policies and step 7a's budget. The portfolio holds
-`LINES_PER_EVENT` (3) values per event of each scenario -- its two annual lines, and
-less than one more for what a line's shared loss events hold while it is summarised
-(each one's count and which set is counted, and a scenario's sum of its events in
-one) -- one driver per drawn group and `PORTFOLIO_TEMPORARIES` (8), each of the
-draws; with one scenario's own sample beside them (step 7b's `values_held`) they must
-fit `MAX_VALUES` (`values_over_budget`, before anything is sampled where the
+`LINES_PER_EVENT` (2) values per event of each scenario (its two annual lines),
+`LINES_PER_SHARED_EVENT` (3) per shared loss event while a line is summarised (its
+count, which set is counted, and a scenario's sum of its events in it), one driver
+per drawn group and `PORTFOLIO_TEMPORARIES` (6: the total, a sorted copy, its order,
+a set's total, a scenario's own line or its contribution, and their masks), each of
+the draws; with one scenario's own sample beside them (step 7b's `values_held`) they
+must fit `MAX_VALUES` (`values_over_budget`, before anything is sampled where the
 portfolio's own do not fit, and before that scenario is sampled where its sample does
-not). So a
-`detailed_1m` portfolio holds only a few scenarios. Measured on the build machine (4
-cores, numpy 2.3.3), each portfolio sampled twice: 2 scenarios of a Poisson(3)
-frequency at 100,000 years in 0.69 s (10 MB traced peak), 10 such scenarios, five in
-one group, in 2.1 s (17 MB); 2 scenarios of Poisson(1) at 1,000,000 years in 6.9 s
-(59 MB); 5 such at 1,000,000 are refused for the budget.
+not). So a `detailed_1m` portfolio holds only a few scenarios. Measured on the build
+machine (4 cores, numpy 2.3.3), each portfolio sampled twice and summarised with
+every scenario's own figures: 2 scenarios of a Poisson(3) frequency at 100,000 years
+in 1.4 s (13 MB traced peak); 10 such scenarios, five in one group, in 5.3 s (19 MB);
+5 sharing one SPINE effect in 2.9 s (14 MB); 8 whose events are one chain (9 sets) in
+4.5 s (17 MB); 2 scenarios of Poisson(1) at 1,000,000 years in 13.9 s (67 MB); 3 such
+at 1,000,000 are refused for the budget.
 
 ### 30.8 The routes, the report, the grade and the banner
 

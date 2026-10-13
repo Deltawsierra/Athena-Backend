@@ -29,18 +29,20 @@ in two of them. So a portfolio is aggregated from DRAWS, year by year:
   linked: :func:`counted_sets`.) So the portfolio is at least each included scenario
   year by year, and at every percentile; a rare duplicate never hides a frequent
   loss; and adding a scenario never lowers it, as no pair of the others' events
-  becomes linked by it.
+  becomes linked by it (exactly; in binary64, to the last place).
 - **Normalised before it is summed.** Each scenario's annual losses are multiplied,
   draw by draw, by the factor that normalises one unit of its currency at its as-of
   date into the reporting currency at the valuation date (step 3's order, section
   12.4: every step is a multiplication), and only then summed.
-- **Summed per year, never by percentile, correctly rounded.** The portfolio's
-  annual loss in year ``y`` is the correctly rounded sum (``math.fsum``) of every
-  scenario's event losses not shared that year and of each shared event's largest
-  loss; its P10, P50, P90, mean, expected annual loss and severe-but-plausible are
-  step 7a's summary of that vector. A scenario's own annual loss is the correctly
-  rounded sum of its own event losses, so the portfolio's is at least it exactly,
-  year by year, in binary64 too.
+- **Summed per year, never by percentile, in one order.** The portfolio's annual
+  loss in year ``y`` is the sum, added in one fixed order (:func:`ordered_sum`), of
+  every scenario's losses that year of its events no other is linked to, and then of
+  each shared loss event's count; its P10, P50, P90, mean, expected annual loss and
+  severe-but-plausible are step 7a's summary of that vector. A scenario's own annual
+  loss is the sum, in the same order, of its own events' losses (those in one shared
+  loss event summed first, as the counted sets are): its terms are some of the
+  portfolio's, or each at most one of them, all non-negative, so the portfolio's is
+  at least it exactly, year by year, in binary64 too (rounding is monotone).
 - **Each scenario's contribution to the mean AND to the tail.** A scenario carries
   its own event losses not shared, and each shared event's largest loss in the
   years its own is the largest (ties: the first scenario). To the mean: its mean of
@@ -133,19 +135,17 @@ STRENGTH_MAX = Decimal(10)
 #: The lines a portfolio sums: the gross cash, and the retained cash (a scenario
 #: with no insurance policy retains its gross). Market value is never added to cash.
 LINES = (ss.GROSS_CASH, ss.RETAINED_CASH)
-#: Values the portfolio holds per event of each scenario, each of the draws: its two
-#: annual lines, and one more for what a line's shared loss events hold while it is
-#: summarised (each one's count and which set is counted, and a scenario's sum of its
-#: events in one: less than one per event, as a shared loss event joins two events at
-#: least); and beside them (the total, a sorted copy and its order, a set's total, a
-#: scenario's own line and its contribution, and their sorted copies).
-LINES_PER_EVENT = 3
-PORTFOLIO_TEMPORARIES = 8
+#: Values the portfolio holds, each of the draws: per event of each scenario, its two
+#: annual lines; per shared loss event, while a line is summarised, its count, which
+#: set is counted, and a scenario's sum of its events in it; and beside them, the
+#: total, a sorted copy, its order, a set's total, a scenario's own line or its
+#: contribution, and their masks.
+LINES_PER_EVENT = 2
+LINES_PER_SHARED_EVENT = 3
+PORTFOLIO_TEMPORARIES = 6
 #: How far the sum of the scenarios' means may be from the mean of the per-draw
 #: totals (relative, and at least one unit absolute): the two differ by rounding.
 AGREEMENT = 1e-12
-#: The block a correctly rounded row sum works in.
-_BLOCK = 16_384
 
 REFUSALS: Mapping[str, str] = MappingProxyType(
     {
@@ -199,6 +199,7 @@ def limits() -> dict:
         "max_events": sim.MAX_EVENTS,
         "max_count_mean": dist.float_text(dist.MAX_COUNT_MEAN),
         "lines_per_event": LINES_PER_EVENT,
+        "lines_per_shared_event": LINES_PER_SHARED_EVENT,
         "portfolio_temporaries": PORTFOLIO_TEMPORARIES,
         "grouping_window_hours": int(WINDOW.total_seconds() // 3600),
         "agreement": dist.float_text(AGREEMENT),
@@ -460,20 +461,14 @@ def _hash(hasher, label: str, vector: np.ndarray) -> None:
     hasher.update(np.ascontiguousarray(vector, dtype=kind).data)
 
 
-def exact_rows(vectors: Sequence[np.ndarray], n: int) -> np.ndarray:
-    """Each year's correctly rounded sum of ``vectors`` (``math.fsum``): one rounding,
-    so a sum of more, or of larger, non-negative terms is never smaller. One vector
-    is itself, two are an IEEE addition (correctly rounded already)."""
-    if not vectors:
-        return np.zeros(n, dtype=np.float64)
-    if len(vectors) == 1:
-        return np.array(vectors[0], dtype=np.float64, copy=True)
-    if len(vectors) == 2:
-        return np.add(vectors[0], vectors[1])
-    out = np.empty(n, dtype=np.float64)
-    for start in range(0, n, _BLOCK):
-        columns = [vector[start : start + _BLOCK].tolist() for vector in vectors]
-        out[start : start + len(columns[0])] = [math.fsum(row) for row in zip(*columns, strict=True)]
+def ordered_sum(vectors: Sequence[np.ndarray], n: int) -> np.ndarray:
+    """Each year's sum of ``vectors``, added in their order, one IEEE addition at a
+    time, into a new vector. Rounding is monotone, so of non-negative terms a sum in
+    the same order of more of them, or of each at least as large, is never smaller:
+    what the portfolio's domination of each scenario rests on."""
+    out = np.zeros(n, dtype=np.float64) if not vectors else np.array(vectors[0], dtype=np.float64, copy=True)
+    for vector in vectors[1:]:
+        np.add(out, vector, out=out)
     return out
 
 
@@ -695,12 +690,12 @@ def _block(vector: np.ndarray, *, severe: Decimal, currency: str, mean_undefined
 
 def _parts(sid: str, chosen: Iterable[int], one: Joined, held: Mapping[int, Mapping[str, np.ndarray]], line: str,
            draws: int) -> np.ndarray | None:
-    """``sid``'s loss that year of the events ``chosen`` of ``one``: the correctly
-    rounded sum of its events among them (the one vector itself where it has one)."""
+    """``sid``'s loss that year of the events ``chosen`` of ``one``: the sum of its
+    events among them, in order (the one vector itself where it has one)."""
     vectors = [held[i][line] for i in chosen if one.events[i].scenario == sid]
     if not vectors:
         return None
-    return vectors[0] if len(vectors) == 1 else exact_rows(vectors, draws)
+    return vectors[0] if len(vectors) == 1 else ordered_sum(vectors, draws)
 
 
 def _line(
@@ -725,7 +720,7 @@ def _line(
         held = drawn.shared[at]
         best = winner = None
         for number, chosen in enumerate(sets[at]):
-            value = exact_rows([held[i][line] for i in chosen], draws)
+            value = ordered_sum([held[i][line] for i in chosen], draws)
             if best is None:
                 best, winner = value, np.zeros(draws, dtype=np.uint8)
                 continue
@@ -735,7 +730,7 @@ def _line(
             del value, larger
         counts.append(best)
         winners.append(winner)
-    total = exact_rows([vector for m in members for vector in drawn.alone[m.scenario_id][line]] + counts, draws)
+    total = ordered_sum([vector for m in members for vector in drawn.alone[m.scenario_id][line]] + counts, draws)
     infinite_mean: list[str] = []
     infinite_variance: list[str] = []
     own_blocks: dict[str, dict] = {}
@@ -746,7 +741,7 @@ def _line(
         infinite_variance += variance
         mine = [_parts(sid, range(len(one.events)), one, drawn.shared[at], line, draws)
                 for at, one in enumerate(shared)]
-        own = exact_rows(drawn.alone[sid][line] + [part for part in mine if part is not None], draws)
+        own = ordered_sum(drawn.alone[sid][line] + [part for part in mine if part is not None], draws)
         del mine
         # The portfolio is at least each of its scenarios, year by year, exactly: its
         # terms are a superset of the scenario's, each at least the scenario's own.
@@ -772,14 +767,14 @@ def _line(
         )
         return block, {"mean": None, "tail": None, "largest": None, "not_reported": reason}, own_blocks, years
     order = np.argsort(total, kind="stable")
-    tail = order[draws - k:]
+    tail = order[draws - k:].copy()
     del order
     by_mean, by_tail = {}, {}
     for member in members:
         sid = member.scenario_id
         # A scenario carries its events no other is linked to, and its own events in
         # the set each shared loss event is counted at that year.
-        contribution = exact_rows(drawn.alone[sid][line], draws)
+        contribution = ordered_sum(drawn.alone[sid][line], draws)
         for at, one in enumerate(shared):
             for number, chosen in enumerate(sets[at]):
                 part = _parts(sid, chosen, one, drawn.shared[at], line, draws)
@@ -860,7 +855,7 @@ def run(
         plans[member.scenario_id] = p
     used = {m.group for m in members if m.group is not None}
     events = sum(len(m.si.events) for m in members)
-    held = (LINES_PER_EVENT * events + len(used) + PORTFOLIO_TEMPORARIES) * draws
+    held = (LINES_PER_EVENT * events + LINES_PER_SHARED_EVENT * len(shared) + len(used) + PORTFOLIO_TEMPORARIES) * draws
     if held > sim.MAX_VALUES:
         raise sim.SimulationRefused("values_over_budget", f"{held} values; at most {sim.MAX_VALUES}")
     check_time("plan")
@@ -967,9 +962,9 @@ __all__ = [
     "PortfolioRefused",
     "PortfolioSimulation",
     "counted_sets",
-    "exact_rows",
     "limits",
     "links_between",
+    "ordered_sum",
     "run",
     "shared_events",
     "substream_key",
