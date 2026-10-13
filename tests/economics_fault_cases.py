@@ -194,8 +194,11 @@ def test_only_economics_is_refused():
         assert "assurance.economics.scenario_api" not in sys.modules
         assert "assurance.economics.builder" not in sys.modules
         assert "assurance.economics.engine.templates" not in sys.modules
+        assert "assurance.economics.engine.pack_registry" not in sys.modules
         with pytest.raises(Resolver404):
             resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        with pytest.raises(Resolver404):
+            resolve("/api/assurance/economics/packs/")
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         return
     if FAULT == "api":

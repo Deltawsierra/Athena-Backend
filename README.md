@@ -512,6 +512,29 @@ check runs before the build's transaction, which only inserts. Every reference i
 looked up in the path's deployment only. A fault in the builder leaves these two routes unserved and nothing
 else; neither is a stop.
 
+### Industry packs (E7)
+
+The banking templates are one pack of a registry (spec, section 37); E7 adds the
+insurance, healthcare and life-sciences, and AI-heavy SaaS packs, each with its scenario
+templates (the same precedence model), the loss families they price and its
+customer-input schema: the special data of the owner's section 23 (claims volume, loss
+ratio and policy count; patient records, care disruption and OCR breach data; tenants,
+recurring margin, SLA terms and cloud spend), each a parameter the customer states with
+its provenance.
+
+- A parameter set may name its pack (`"pack"`) and state its inputs (`"pack_inputs"`); a
+  missing required input is refused (`pack_input_missing`), never defaulted. A set that
+  names no pack is the banking pack's, unchanged.
+- A build may name its pack (`"pack"`); it builds under exactly that ONE pack, which its
+  parameter set must answer (`pack_mismatch`), and records it on the version, the events
+  route, the report and the Validity Card. A build that names no pack is a banking build,
+  byte for byte what it was.
+- No pack holds a figure, or a geographic or company-size weight (a static test scans
+  every pack); harm to a person is never priced (`safety_monetisation_refused`); a
+  physical-world template carries its caution wherever its figures are shown.
+- `GET /api/assurance/economics/packs/`: every pack's library and schema, for any
+  signed-in caller. It reads no row and is not a stop.
+
 ### The simulation
 
 `assurance/economics/simulation_service.py` simulates a stored scenario version

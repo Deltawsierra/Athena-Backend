@@ -101,6 +101,24 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "MYTHOS_OBSERVED is only a rate, a count or a duration an assessment observes; a money amount or a "
             "market figure is CUSTOMER_PROVIDED, EXPERT_ESTIMATE or another source that is not an observation"
         ),
+        # The industry packs (E7, spec section 37).
+        "pack_unrecognised": (
+            "a pack is one of the registry's industry packs, named by its id and version; a parameter set or a build "
+            "that names no pack is the banking pack's, which is never named"
+        ),
+        "pack_input_unrecognised": "a parameter set states only its pack's inputs, each in its unit",
+        "pack_input_missing": (
+            "every input the pack requires, and every input a template the build uses reads, is stated in the "
+            "parameter set: a missing input is refused, never defaulted and never read as zero"
+        ),
+        "pack_mismatch": (
+            "a scenario builds under exactly one pack: the build's pack is the pack its parameter-set version answers"
+        ),
+        "safety_monetisation_refused": (
+            "harm to a person -- an injury, a death, a patient's or the public's safety -- is never priced: no "
+            "owner-approved model of it exists; the physical and operational effects are priced, and the harm is "
+            "listed as excluded"
+        ),
     }
 )
 

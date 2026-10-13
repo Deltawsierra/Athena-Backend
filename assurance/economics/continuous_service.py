@@ -59,6 +59,7 @@ from django.utils import timezone
 from assurance.composition import OFF_ROUTE
 
 from .engine import feeds as feed_rules
+from .engine.pack_inputs import SCHEMAS as INDUSTRY_PACKS
 from .report import STALE_BANNER
 from .models import (
     DEPENDENCIES_SCHEMA,
@@ -1174,7 +1175,7 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         if effect["origin"] == "observed":
             entry["observed_effect"] = effect["observed_effect"]
         effects.append(entry)
-    return {
+    body = {
         "title": scenario.title,
         "parameter_set": {"set_key": set_key, "version": version or current.version},
         "currency": build.currency,
@@ -1183,6 +1184,11 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         "findings": [{"finding": f, "effect": e, "role": r} for f, e, r in document["findings"]],
         "supersedes": str(scenario.uuid),
     }
+    # Rebuilt under the pack it was built under (E7, spec section 37): an industry
+    # pack's build names it; a banking build names none, as it never did.
+    if document.get("pack") in INDUSTRY_PACKS:
+        body["pack"] = document["pack"]
+    return body
 
 
 def lineage(scenario: FinancialScenario) -> list[int]:
