@@ -2174,9 +2174,15 @@ the draft and are not in it. `ScenarioBuild` holds the digest, unique per deploy
   `system_fingerprint` form of section 8: 64 lowercase hex;
   `builder.current_system_fingerprint`), read before the transaction, and the routes
   show it. One that cannot be computed, or is not in that form, is recorded as none,
-  with the reason (`system_fingerprint_unavailable`, the error's type and message, at
-  most 500 characters): never one made up, and never a failed build
-  (`test_a_fingerprint_that_cannot_be_had_is_recorded_as_none_with_the_reason`). A
+  with the reason in fixed words (`system_fingerprint_unavailable`: "the system
+  fingerprint could not be computed (<the fault's type>)", or "... is not in SPINE's
+  form (64 lowercase hex)"): never one made up, and never a failed build
+  (`test_a_fingerprint_that_cannot_be_had_is_recorded_as_none_with_the_reason`). The
+  reason is shown on the card, which is the customer's, so a fault is named by its
+  type alone -- its message can carry a SQL fragment, a path or a value -- and a value
+  not in the form is never echoed (the lead's review of #157;
+  `test_a_faults_message_is_never_recorded_or_shown`). The card's reading of the
+  deployment's fingerprint at issue goes through the same words. A
   version records one or the other, never both (`field_malformed`). The fingerprint
   is NOT in the digest: it is the state the version was built in, observed, not
   something it is built from, so a rebuild of the same inputs after the deployment

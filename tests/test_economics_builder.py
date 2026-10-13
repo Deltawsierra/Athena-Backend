@@ -1392,25 +1392,32 @@ def test_a_build_records_the_deployments_system_fingerprint(deployment, people):
 
 
 def _raises(_deployment):
-    raise RuntimeError("the asset graph could not be read")
+    raise RuntimeError("the asset graph could not be read at /srv/athena/db.sqlite3")
 
 
-def _raises_at_length(_deployment):
-    raise RuntimeError("x" * 2000)
+def _raises_from_the_database(_deployment):
+    from django.db.utils import OperationalError
+
+    raise OperationalError("no such table: assurance_asset")
+
+
+NOT_COMPUTED = "the system fingerprint could not be computed ({})"
+NOT_IN_FORM = "the system fingerprint computed is not in SPINE's form (64 lowercase hex)"
 
 
 @pytest.mark.parametrize("computed, reason", [
-    (_raises, "RuntimeError: the asset graph could not be read"),
-    (lambda _deployment: "not-a-fingerprint", "not a SPINE system fingerprint (64 lowercase hex): 'not-a-fingerprint'"),
-    (lambda _deployment: "AB" * 32, f"not a SPINE system fingerprint (64 lowercase hex): '{'AB' * 32}'"),
-    (lambda _deployment: None, "not a SPINE system fingerprint (64 lowercase hex): None"),
-    (_raises_at_length, "RuntimeError: " + "x" * (500 - 14 - 3) + "..."),
-], ids=["raises", "malformed", "uppercase", "none", "a long reason"])
+    (_raises, NOT_COMPUTED.format("RuntimeError")),
+    (_raises_from_the_database, NOT_COMPUTED.format("OperationalError")),
+    (lambda _deployment: "not-a-fingerprint", NOT_IN_FORM),
+    (lambda _deployment: "AB" * 32, NOT_IN_FORM),
+    (lambda _deployment: None, NOT_IN_FORM),
+], ids=["raises", "a database fault", "malformed", "uppercase", "none"])
 def test_a_fingerprint_that_cannot_be_had_is_recorded_as_none_with_the_reason(deployment, people, monkeypatch,
                                                                               computed, reason):
     """One that cannot be computed, or is not in SPINE's form (64 lowercase hex), is
-    recorded as none, with the reason (at most 500 characters): never one made up,
-    and the build stands."""
+    recorded as none, with the reason in fixed words -- a fault's type, never its
+    message (which can name a path, a table or a value), and never the value not in
+    the form (the lead's review of #157): never one made up, and the build stands."""
     import assurance.fingerprint as fingerprint
 
     asset, (finding,) = _payment_world(deployment, people, 1)
@@ -1420,10 +1427,13 @@ def test_a_fingerprint_that_cannot_be_had_is_recorded_as_none_with_the_reason(de
     assert response.status_code == 201, response.content
     scenario = response.json()["scenario"]
     assert scenario["system_fingerprint"] is None and scenario["system_fingerprint_unavailable"] == reason
+    for leaked in ("/srv/athena", "no such table", "assurance_asset", "not-a-fingerprint", "AB" * 32):
+        assert leaked not in response.content.decode("utf-8"), leaked
     stored = FinancialScenario.objects.get(uuid=scenario["uuid"])
     assert (stored.system_fingerprint, stored.system_fingerprint_unavailable) == ("", reason)
     assert _figures(response.json()["totals"]["gross_cash"]) == SECTION_30_GROSS
-    assert len(reason) <= builder.FINGERPRINT_REASON_MAX == 500
+    assert (builder.FINGERPRINT_NOT_COMPUTED, builder.FINGERPRINT_NOT_IN_FORM) == (NOT_COMPUTED.format("{fault}"),
+                                                                                 NOT_IN_FORM)
 
 
 def test_a_version_records_its_fingerprint_or_why_it_has_none_never_both(deployment, people):

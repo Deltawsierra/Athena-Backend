@@ -444,11 +444,12 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
             "statement": "the SPINE system fingerprint the scenario version was bound to when it was recorded",
         }
     elif scenario.system_fingerprint_unavailable:
-        # Built after the builder recorded fingerprints, and it could not compute one.
+        # Built after the builder recorded fingerprints, and it could not have one: its
+        # reason is in the builder's fixed words (a fault's type, never its message).
         at_issue = issued.get("deployment_system_fingerprint") or {}
         at_build = (
-            "the builder could not compute the system fingerprint when it built the scenario version "
-            f"({scenario.system_fingerprint_unavailable}), and recorded none"
+            "the builder recorded no system fingerprint when it built the scenario version: "
+            f"{scenario.system_fingerprint_unavailable}"
         )
         fingerprint = {
             "value": at_issue.get("value"),
@@ -457,7 +458,8 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
                 f"{at_build}; this is the deployment's SPINE fingerprint when the card was issued, not when the "
                 "scenario was built"
                 if at_issue.get("value")
-                else f"unavailable: {at_build}, and the deployment's could not be read ({at_issue.get('unavailable')})"
+                else f"unavailable: {at_build}; and the deployment's could not be read either: "
+                f"{at_issue.get('unavailable')}"
             ),
         }
     else:

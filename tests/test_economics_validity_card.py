@@ -1224,12 +1224,10 @@ def _now_fingerprint(deployment) -> str:
     return compute_system_fingerprint(Deployment.objects.get(pk=deployment.pk))
 
 
-def built(deployment, author):
-    """A scenario version BUILT by the builder (spec, section 24): section 30's
-    payment agent, one hypothetical effect and the finding enabling it, from a
-    customer parameter set. No writer states a frequency yet (section 25.9) and a
-    receipt needs one, so the scenario's frequency is added after the build, as the
-    fixtures above state theirs. SYNTHETIC / ILLUSTRATIVE."""
+def _payments_body(deployment, author) -> dict:
+    """A build request for section 30's payment agent: one hypothetical effect and the
+    finding enabling it, from a customer parameter set recorded here. SYNTHETIC /
+    ILLUSTRATIVE."""
     variables = {
         "transactions_per_day": _entry("count_per_day", "18000"),
         "average_transaction_value": _entry("money_per_unit", "25000"),
@@ -1244,7 +1242,7 @@ def built(deployment, author):
     def attribute(unit, *figures):
         return _entry(unit, *figures, source_type="EXPERT_ESTIMATE", evidence_ref=f"{LABEL}: made up")
 
-    body = {
+    return {
         "title": "Payment agent: destination changed after approval",
         "parameter_set": {"set_key": "payments_2026q4", "version": 1}, "currency": "USD", "as_of": AS_OF.isoformat(),
         "effects": [{"key": "redirect", "origin": "hypothetical", "effect_type": "funds_transfer_altered",
@@ -1255,7 +1253,14 @@ def built(deployment, author):
                          "legal_response_cost": attribute("money", "150000", "825000", "1500000")}}],
         "findings": [{"finding": str(finding.uuid), "effect": "redirect", "role": "prerequisite"}],
     }
-    scenario, created = builder.build(deployment, body, author=author)
+
+
+def built(deployment, author):
+    """A scenario version BUILT by the builder (spec, section 24) from
+    :func:`_payments_body`. No writer states a frequency yet (section 25.9) and a
+    receipt needs one, so the scenario's frequency is added after the build, as the
+    fixtures above state theirs. SYNTHETIC / ILLUSTRATIVE."""
+    scenario, created = builder.build(deployment, _payments_body(deployment, author), author=author)
     assert created
     _parameter(scenario, ss.FREQUENCY_PARAMETER, "count", "1", "2", "4", source="CUSTOMER_PROVIDED",
                distribution=POISSON)
@@ -1298,12 +1303,14 @@ def test_a_built_scenario_binds_the_fingerprint_it_was_built_in_after_the_deploy
 def test_a_fingerprint_the_builder_could_not_compute_is_none_and_the_card_says_why(deployment, people, keys,
                                                                                     monkeypatch):
     """A fingerprint the builder could not compute is recorded as none, with the
-    reason, and the build stands. Its card reads the deployment's at issue, as for an
-    older version, and says why the build has none; where that cannot be read either,
-    the card says both and the receipt has nothing to bind."""
+    reason in fixed words (the fault's type), and the build stands. Its card reads the
+    deployment's at issue, as for an older version, and says why the build has none;
+    where that cannot be read either, the card says both and the receipt has nothing
+    to bind."""
     import assurance.fingerprint as fingerprint
 
     real = fingerprint.compute_system_fingerprint
+    reason = "the system fingerprint could not be computed (RuntimeError)"
 
     def unreadable(_deployment):
         raise RuntimeError("the asset graph could not be read")
@@ -1311,9 +1318,8 @@ def test_a_fingerprint_the_builder_could_not_compute_is_none_and_the_card_says_w
     monkeypatch.setattr(fingerprint, "compute_system_fingerprint", unreadable)
     scenario = built(deployment, people["analyst"])
     assert scenario.system_fingerprint == ""
-    assert scenario.system_fingerprint_unavailable == "RuntimeError: the asset graph could not be read"
-    at_build = ("the builder could not compute the system fingerprint when it built the scenario version "
-                "(RuntimeError: the asset graph could not be read), and recorded none")
+    assert scenario.system_fingerprint_unavailable == reason
+    at_build = f"the builder recorded no system fingerprint when it built the scenario version: {reason}"
     monkeypatch.setattr(fingerprint, "compute_system_fingerprint", real)
     field = validity_service.issue_card(simulated(scenario)).card.card["fields"]["system_fingerprint"]
     assert field == {
@@ -1326,10 +1332,45 @@ def test_a_fingerprint_the_builder_could_not_compute_is_none_and_the_card_says_w
     result = simulated(scenario, seed=8)
     field = validity_service.issue_card(result).card.card["fields"]["system_fingerprint"]
     assert field["value"] is None and field["binding"] is None
-    assert field["statement"] == (f"unavailable: {at_build}, and the deployment's could not be read "
-                                  "(RuntimeError: the asset graph could not be read)")
+    assert field["statement"] == f"unavailable: {at_build}; and the deployment's could not be read either: {reason}"
     outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "system_fingerprint_unavailable"
+
+
+MARKER = "marker-5e1f0c9a"
+
+
+def test_a_faults_message_is_never_recorded_or_shown(deployment, people, monkeypatch):
+    """The lead's review of #157: a fault computing the fingerprint is recorded and
+    shown by its type alone, in fixed words. Its message can carry a SQL fragment, a
+    path or a value, and the card is the customer's: here a marker in both appears
+    nowhere in the version, the build route's answer or the card, at build or at
+    issue."""
+    from django.db.utils import OperationalError
+
+    import assurance.fingerprint as fingerprint
+
+    def leaky(_deployment):
+        raise OperationalError(f"no such table: {MARKER} (SELECT * FROM /var/lib/{MARKER}/db.sqlite3)")
+
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", leaky)
+    client = APIClient()
+    client.force_authenticate(user=people["analyst"])
+    response = client.post(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/",
+                           data=json.dumps(_payments_body(deployment, people["analyst"])),
+                           content_type="application/json")
+    assert response.status_code == 201, response.content
+    assert MARKER not in response.content.decode("utf-8")
+    scenario = FinancialScenario.objects.get(uuid=response.json()["scenario"]["uuid"])
+    assert scenario.system_fingerprint == ""
+    assert scenario.system_fingerprint_unavailable == "the system fingerprint could not be computed (OperationalError)"
+    assert MARKER not in json.dumps(FinancialScenario.objects.filter(pk=scenario.pk).values().get(), default=str)
+    card = validity_service.issue_card(simulated(scenario)).card
+    assert MARKER not in json.dumps(card.card) and MARKER not in json.dumps(card.sensitivity)
+    field = card.card["fields"]["system_fingerprint"]
+    assert field["value"] is None and field["statement"].count("(OperationalError)") == 2, field
+    assert card.card["issued"]["deployment_system_fingerprint"] == {
+        "value": None, "unavailable": "the system fingerprint could not be computed (OperationalError)"}
 
 
 def test_an_older_version_with_no_fingerprint_keeps_the_fallback_unchanged(deployment, people):

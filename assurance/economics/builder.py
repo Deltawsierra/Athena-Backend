@@ -108,8 +108,6 @@ GROUPING_WINDOW = timedelta(hours=24)
 #: them too; these keep a build's writes small.
 MAX_EFFECTS = 50
 MAX_LINKS = 500
-#: The longest reason recorded for a system fingerprint that could not be had.
-FINGERPRINT_REASON_MAX = 500
 
 _REQUEST_REQUIRED = frozenset({"title", "parameter_set", "currency", "as_of", "effects"})
 _REQUEST_OPTIONAL = frozenset({"findings", "supersedes"})
@@ -759,8 +757,12 @@ def existing(deployment, digest: str) -> FinancialScenario | None:
     return None if row is None else FinancialScenario.objects.get(pk=row.scenario_id)
 
 
-def _reason(text: str) -> str:
-    return text if len(text) <= FINGERPRINT_REASON_MAX else text[: FINGERPRINT_REASON_MAX - 3] + "..."
+#: Why a version records no system fingerprint, in fixed words: the reason is shown
+#: on the card, the customer's, so a fault is named by its type alone -- its message
+#: can carry a SQL fragment, a path or a value -- and a value not in SPINE's form is
+#: never echoed.
+FINGERPRINT_NOT_COMPUTED = "the system fingerprint could not be computed ({fault})"
+FINGERPRINT_NOT_IN_FORM = "the system fingerprint computed is not in SPINE's form (64 lowercase hex)"
 
 
 def current_system_fingerprint(deployment_id) -> tuple[str, str]:
@@ -768,10 +770,12 @@ def current_system_fingerprint(deployment_id) -> tuple[str, str]:
     (:func:`assurance.fingerprint.compute_system_fingerprint`), in the form a scenario
     version holds it -- 64 lowercase hex, the ``system_fingerprint`` form of
     :data:`~assurance.economics.engine.governance.REFERENCE_FORMS` -- and ``""``; or
-    ``""`` and why there is none: it could not be computed (the error's type and
-    message), or what was computed is not in that form. Never one made up, and never
-    raises: a build never fails over its fingerprint. Reads only; the card reads the
-    deployment's at issue through it too, where a version records none."""
+    ``""`` and why there is none, in fixed words: it could not be computed
+    (:data:`FINGERPRINT_NOT_COMPUTED`, naming the fault's type and never its message),
+    or what was computed is not in that form (:data:`FINGERPRINT_NOT_IN_FORM`, never
+    echoing it). Never one made up, and never raises: a build never fails over its
+    fingerprint. Reads only; the card reads the deployment's at issue through it too,
+    where a version records none."""
     try:
         from assurance.fingerprint import compute_system_fingerprint
         from assurance.models import Deployment
@@ -782,10 +786,10 @@ def current_system_fingerprint(deployment_id) -> tuple[str, str]:
             .get(pk=deployment_id)
         )
         value = compute_system_fingerprint(deployment)
-    except Exception as error:  # noqa: BLE001 - none, with the reason: never a failed build
-        return "", _reason(f"{type(error).__name__}: {error}")
+    except Exception as error:  # noqa: BLE001 - none, with the fault's type: never a failed build
+        return "", FINGERPRINT_NOT_COMPUTED.format(fault=type(error).__name__)
     if governance.spine_reference_refusal("system_fingerprint", value) is not None:
-        return "", _reason(f"not a SPINE system fingerprint (64 lowercase hex): {value!r}")
+        return "", FINGERPRINT_NOT_IN_FORM
     return value, ""
 
 
