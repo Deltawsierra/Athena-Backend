@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from django.contrib.auth import get_user_model
 from mythos_core import exposure_receipt as core
+from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
 
 from assurance.economics import (
@@ -81,6 +82,9 @@ LABEL = "SYNTHETIC / ILLUSTRATIVE"
 SET_KEY = "bank_prod_2026q4"
 GAMMA = {"id": "gamma", "version": 1, "params": {"shape": "4", "scale": "25000"}}
 POISSON = {"id": "poisson", "version": 1, "params": {"rate": "2"}}
+#: A count of affected customers around 50,000 (P5 about 22,000, P95 about 114,000): the distribution a
+#: customer's own range states, which an expert's range need not.
+LOGNORMAL = {"id": "lognormal", "version": 1, "params": {"mu": "10.8198", "sigma": "0.5"}}
 FINGERPRINT = "ab" * 32
 QUICK = "quick_10k"
 
@@ -117,7 +121,7 @@ def _parameter(scenario, name, unit, low, base=None, high=None, *, source="EXPER
 
 
 def stored(deployment, author, *, currency="USD", frequency=True, refused=False, unknown=False, policy=False,
-           set_key=SET_KEY, reverse_components=False):
+           set_key=SET_KEY, reverse_components=False, affected_source="EXPERT_ESTIMATE"):
     """A scenario version as rows (as step 8's tests make one): one event of two
     components, a notification (an expert-ranged population at a customer's unit
     cost) and a customer's regulatory range stating a gamma; a benchmark frequency
@@ -125,7 +129,9 @@ def stored(deployment, author, *, currency="USD", frequency=True, refused=False,
     build record. ``refused``: the regulatory range states no distribution, which the
     run refuses. ``unknown``: the notification cites the population only, so it is an
     unknown component and the grade is Unknown. ``reverse_components``: the two
-    components inserted in the other order. SYNTHETIC / ILLUSTRATIVE."""
+    components inserted in the other order. ``affected_source``: the source type of the
+    affected customers (an expert's estimate, which grades D; a customer's own count,
+    stating the distribution such a range must, grades B). SYNTHETIC / ILLUSTRATIVE."""
     variables = {
         "notification_unit_cost": _entry("money_per_unit", "2.375", currency=currency),
         "notification_fixed_cost": _entry("money", "40000", currency=currency),
@@ -138,7 +144,9 @@ def stored(deployment, author, *, currency="USD", frequency=True, refused=False,
     scenario = FinancialScenario.objects.create(
         deployment=deployment, title="Cross-customer exposure", author=author, system_fingerprint=FINGERPRINT
     )
-    affected = _parameter(scenario, "exposure.affected_customers", "count", "20000", "50000", "120000")
+    affected = _parameter(scenario, "exposure.affected_customers", "count", "20000", "50000", "120000",
+                          source=affected_source,
+                          distribution=None if affected_source == "EXPERT_ESTIMATE" else LOGNORMAL)
     amount = _parameter(scenario, "exposure.regulatory_response_cost", "money", "0", "100000", "500000",
                         source="CUSTOMER_PROVIDED", distribution=None if refused else GAMMA, currency=currency)
     if frequency:
@@ -947,6 +955,225 @@ def test_one_deadline_bounds_a_simulate_request(deployment, people, monkeypatch)
 
 
 # ======================================================================
+# The step-5 events route follows the Unknown banner rule (#158's review, LOW-6(b))
+# ======================================================================
+
+BANNER_KEYS = ("grade", "banner", "excluded_from_totals", "banner_reason")
+#: What the events route served before the banner: the keys of the builder's description.
+EVENTS_KEYS = frozenset({"deployment", "scenario", "build", "events", "totals"})
+
+
+def _events(client, deployment, scenario):
+    return client.get(_base(deployment, scenario) + "events/")
+
+
+def _standing(body):
+    return {key: body[key] for key in BANNER_KEYS}
+
+
+def _figures_stay(body):
+    """The figures are step 4's deterministic low, base and high of ``stored``'s one
+    event (87,500 / 258,750 / 825,000 USD), whatever the result is: they are not a
+    result, so the banner is added and nothing is taken away."""
+    gross = body["totals"]["gross_cash"]
+    assert (gross["low"], gross["base"], gross["high"]) == ("87500", "258750", "825000")
+    assert gross["complete"] is True
+    (event,) = body["events"]
+    assert event["event_key"] == "ev-exposure"
+
+
+def _banner(body, reason):
+    """``body`` is not for capital decisions, with no grade A to D, for ``reason``."""
+    assert body["banner"] == report.UNKNOWN_BANNER == "Unknown: not for capital decisions", body["banner"]
+    assert body["excluded_from_totals"] is True
+    assert body["grade"] not in report.GRADES_FOR_TOTALS
+    assert body["banner_reason"].startswith(reason), body["banner_reason"]
+
+
+def test_a_scenario_with_no_result_yet_is_served_with_the_banner(deployment, people):
+    scenario = stored(deployment, people["analyst"])
+    response = _events(_client(people["owner"]), deployment, scenario)
+    assert response.status_code == 200, response.content
+    body = response.json()
+    _banner(body, report.NO_RESULT)
+    assert body["grade"] is None and "no simulation result" in body["banner_reason"]
+    _figures_stay(body)
+
+
+def test_a_refused_result_is_served_with_the_banner_and_the_figures_stay(deployment, people):
+    scenario, simulated = _simulated(deployment, people, refused=True)
+    assert simulated["simulation"]["status"] == "refused"
+    body = _events(_client(people["owner"]), deployment, scenario).json()
+    _banner(body, "the run was refused (no_admissible_distribution)")
+    assert body["grade"] == "Unknown"  # a refused run's card is graded Unknown; the refusal is the reason
+    _figures_stay(body)
+
+
+def test_a_result_with_no_card_is_served_with_the_banner(deployment, people, monkeypatch):
+    monkeypatch.setattr(validity_service, "issue_card",
+                        lambda result, **_: validity_service.CardOutcome(None, False, "card_failed", "injected"))
+    scenario, simulated = _simulated(deployment, people)
+    assert simulated["validity_card"]["issued"] is False
+    body = _events(_client(people["owner"]), deployment, scenario).json()
+    _banner(body, "no Validity Card is recorded for this result: it is not graded")
+    assert body["grade"] is None
+    _figures_stay(body)
+
+
+def test_an_edited_grade_column_is_served_with_the_banner_never_its_grade(deployment, people):
+    """The #158 reviewer's repro: the Unknown card's grade COLUMN edited to A past the
+    append-only checks. The events route serves no A: the card counts as no card, the
+    result is unverified, and the banner stands."""
+    scenario, _ = _simulated(deployment, people, unknown=True)
+    card = FinancialValidityCard.objects.get()
+    FinancialValidityCard._base_manager.filter(pk=card.pk).update(confidence_grade="A")
+    body = _events(_client(people["owner"]), deployment, scenario).json()
+    _banner(body, f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail card_grade")
+    assert body["grade"] is None
+    assert body["totals"]["gross_cash"]["base"] is not None  # the figures stay
+
+
+def test_an_unknown_result_is_served_with_the_banner_and_the_figures_stay(deployment, people):
+    scenario, simulated = _simulated(deployment, people, unknown=True)
+    assert simulated["validity_card"]["grade"] == "Unknown"
+    body = _events(_client(people["owner"]), deployment, scenario).json()
+    _banner(body, "graded Unknown: Mythos cannot responsibly quantify this scenario")
+    assert body["grade"] == "Unknown"
+    assert body["totals"]["gross_cash"]["base"] is not None and body["totals"]["gross_cash"]["complete"] is False
+    assert body["totals"]["gross_cash"]["reads_as"] == "at least: the known components only"
+
+
+def test_a_result_graded_b_is_served_with_no_banner_and_its_grade(deployment, people):
+    scenario, simulated = _simulated(deployment, people, affected_source="CUSTOMER_PROVIDED")
+    assert simulated["validity_card"]["grade"] == "B"
+    body = _events(_client(people["owner"]), deployment, scenario).json()
+    assert _standing(body) == {"grade": "B", "banner": None, "excluded_from_totals": False, "banner_reason": None}
+    _figures_stay(body)
+
+
+def _tamper_the_grade_column():
+    card = FinancialValidityCard.objects.get()
+    FinancialValidityCard._base_manager.filter(pk=card.pk).update(confidence_grade="A")
+
+
+def _tamper_the_record():
+    result = SimulationResult.objects.get()
+    record = json.loads(json.dumps(result.record))
+    record["scenario"]["gross_cash"]["p50"] = "1.00"
+    SimulationResult._base_manager.filter(pk=result.pk).update(record=record)
+
+
+def _tamper_the_series():
+    row = SimulationCharts.objects.get()
+    charts = json.loads(json.dumps(row.charts))
+    charts["lines"]["gross_cash"]["histogram"]["bins"][0]["count"] += 12345
+    SimulationCharts._base_manager.filter(pk=row.pk).update(charts=charts)
+
+
+@pytest.mark.parametrize(
+    "failed, tamper, kwargs",
+    [
+        ("card_grade", _tamper_the_grade_column, {"unknown": True}),
+        ("result_digest", _tamper_the_record, {}),
+        ("charts_digest", _tamper_the_series, {}),
+    ],
+)
+def test_a_result_whose_stored_rows_fail_a_check_is_served_with_the_banner(deployment, people, failed, tamper, kwargs):
+    """Every check #158's report runs (``stored_row_failures``), not the card's alone: a
+    series that no longer gives its digest puts the banner on the events route too, and
+    the route says what the report says of the same rows."""
+    scenario, _ = _simulated(deployment, people, **kwargs)
+    tamper()
+    reader = _client(people["owner"])
+    body = _events(reader, deployment, scenario).json()
+    _banner(body, f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail {failed}")
+    assert body["grade"] is None  # a grade of unverified rows is never shown
+    assert body["totals"]["gross_cash"]["base"] is not None  # the figures stay
+    served = _report(reader, deployment, scenario).json()
+    assert served["integrity"]["failed"] == [failed]
+    assert {key: served[key] for key in BANNER_KEYS[1:]} == {key: body[key] for key in BANNER_KEYS[1:]}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"unknown": True}, {"refused": True}, {"affected_source": "CUSTOMER_PROVIDED"}],
+    ids=["graded D", "Unknown", "refused", "graded B"],
+)
+def test_the_events_route_and_the_report_say_the_same_of_a_result(deployment, people, kwargs):
+    """One rule, not two: the banner, the exclusion, the grade and the reason are the
+    report's of the same stored rows, and the exclusion is the allow-list's."""
+    scenario, _ = _simulated(deployment, people, **kwargs)
+    reader = _client(people["owner"])
+    body = _events(reader, deployment, scenario).json()
+    served = _report(reader, deployment, scenario).json()
+    assert _standing(body) == {key: served[key] for key in BANNER_KEYS}
+    assert (body["banner"] is None) == (body["excluded_from_totals"] is False) == (body["grade"] in report.GRADES_FOR_TOTALS)
+    assert report.may_be_totalled(served) is (not body["excluded_from_totals"])
+
+
+def test_the_events_route_reads_the_scenarios_latest_result(deployment, people):
+    """The version's latest result by record order, as ``results/`` serves it: an
+    earlier result whose card was edited does not put the banner on a later, clean one,
+    and the later one, once edited, does."""
+    scenario = stored(deployment, people["analyst"])
+    analyst, reader = _client(people["analyst"]), _client(people["owner"])
+    first = _simulate(analyst, deployment, scenario, {"seed": 7, "policy": QUICK}).json()["simulation"]["uuid"]
+    second = _simulate(analyst, deployment, scenario, {"seed": 8, "policy": QUICK}).json()["simulation"]["uuid"]
+    assert SimulationResult.objects.get(uuid=second).pk > SimulationResult.objects.get(uuid=first).pk
+    FinancialValidityCard._base_manager.filter(simulation__uuid=first).update(confidence_grade="A")
+    body = _events(reader, deployment, scenario).json()
+    assert body["banner"] is None and body["excluded_from_totals"] is False, body["banner_reason"]
+    assert body["grade"] in report.GRADES_FOR_TOTALS
+    assert _standing(body) == {key: _report(reader, deployment, scenario).json()[key] for key in BANNER_KEYS}
+    FinancialValidityCard._base_manager.filter(simulation__uuid=second).update(confidence_grade="A")
+    _banner(_events(reader, deployment, scenario).json(), f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail card_grade")
+
+
+def test_a_scenario_never_borrows_another_scenarios_result(deployment, people):
+    """A result of another scenario version of the same deployment grades nothing here."""
+    simulated, _ = _simulated(deployment, people)
+    fresh = stored(deployment, people["analyst"], set_key="q2")
+    reader = _client(people["owner"])
+    assert _events(reader, deployment, simulated).json()["banner"] is None
+    _banner(_events(reader, deployment, fresh).json(), report.NO_RESULT)
+
+
+def test_only_the_banner_is_added_to_the_events_response(deployment, people):
+    """Nothing else in the response changes: the same keys the route served before, the
+    same bytes of each, and the four banner keys beside them -- before a result, and
+    after one."""
+    scenario = stored(deployment, people["analyst"])
+    reader = _client(people["owner"])
+    before = _events(reader, deployment, scenario).json()
+    assert _simulate(_client(people["analyst"]), deployment, scenario).status_code == 201
+    after = _events(reader, deployment, scenario).json()
+    assert before["banner"] == report.UNKNOWN_BANNER and after["banner"] is None
+    assert set(before) == set(after) == EVENTS_KEYS | set(BANNER_KEYS)
+
+    def unchanged(body):
+        return {key: value for key, value in body.items() if key not in BANNER_KEYS}
+
+    assert unchanged(before) == unchanged(after)
+    described = {"deployment": str(deployment.uuid), **builder.describe(scenario)}
+    assert unchanged(after) == json.loads(JSONRenderer().render(described))
+
+
+def test_the_banner_rule_fails_closed(deployment, people):
+    """``report.banner_reason`` is the one rule the report and the events route apply:
+    no reason only for a completed result whose rows verified and a grade on the
+    allow-list."""
+    _simulated(deployment, people)
+    result = SimulationResult.objects.get()
+    assert report.banner_reason(result, "B", []) is None
+    assert report.banner_reason(result, "Unknown", []) == (
+        "graded Unknown: Mythos cannot responsibly quantify this scenario")
+    assert report.banner_reason(result, None, []).endswith("it is not graded")
+    assert report.banner_reason(result, "E", []) is not None  # not on the list: excluded
+    assert report.banner_reason(result, "B", ["charts_digest"]).startswith(report.STORED_ROW_UNVERIFIED)
+    assert report.banner_reason(None, "B", []) == report.NO_RESULT
+
+
+# ======================================================================
 # The spec
 # ======================================================================
 
@@ -964,6 +1191,11 @@ SPEC_PHRASES = (
     "ONE deadline",
     "fails closed",
     "verified: false",
+    # The step-5 events route follows the banner rule (the follow-up to #158's review).
+    "The step-5 events route follows the same rule",
+    "`report.banner_reason(result, grade, failed)`",
+    "`report.NO_RESULT`",
+    "The step-5 events route carries the banner",
 )
 
 

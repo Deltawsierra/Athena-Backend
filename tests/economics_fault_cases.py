@@ -83,6 +83,20 @@ def test_only_economics_is_refused():
         assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
         built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
         assert built.view_name == "deployment-economics-scenario-build"
+        # The events route applies the report's banner rule, imported inside its view and not at
+        # load: the route module imports, so the URLconf serves it. It answers an error and serves
+        # no figures (never figures without the banner), and nothing else is affected.
+        events = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/events/")
+        assert events.view_name == "deployment-economics-scenario-events"
+        from assurance.economics.models import FinancialScenario
+
+        admin = get_user_model().objects.create_user(username="admin", password="x", role="admin")
+        made = FinancialScenario.objects.create(deployment=deployment, title="t", author=admin)
+        client = APIClient(raise_request_exception=False)
+        client.force_authenticate(user=admin)
+        served = client.get(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{made.uuid}/events/")
+        assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
+        assert "assurance.economics.report" not in sys.modules
         return
     if FAULT == "builder":
         # The builder's routes are not served; the parameter-set routes still are.
