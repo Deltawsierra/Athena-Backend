@@ -448,7 +448,13 @@ templates (section 24):
   it recorded;
 - `GET .../economics/scenarios/<scenario uuid>/events/`: its system fingerprint, its
   review status and its events, each with its effects, findings, components and
-  where every input came from.
+  where every input came from. It follows the report's Unknown banner rule: with no
+  verified grade A to D on the version's latest stored result (none yet, refused, no
+  card, rows that do not verify, or graded Unknown) it carries `banner: "Unknown: not
+  for capital decisions"`, `excluded_from_totals: true` and `banner_reason`; a verified
+  grade A to D carries `banner: null`, `excluded_from_totals: false` and the `grade`.
+  The figures stay (they are step 4's deterministic low, base and high, not a result);
+  nothing else in the response changes.
 
 Findings that enable one effect join that effect's one loss event, so five findings
 on one payment loss never multiply it; every observation of one SPINE effect joins
@@ -543,7 +549,8 @@ unit (0 places for JPY, 3 for KWD). A refused run is served as its refusal, neve
 figures. A result graded Unknown, refused, unverified, or not graded still shows what
 figures it may, with `banner: "Unknown: not for capital decisions"` and
 `excluded_from_totals: true`, and nothing may sum it into a total: `may_be_totalled`
-fails closed (the report's own digest, and a grade of A to D). One 120 s deadline
+fails closed (the report's own digest, and a grade of A to D). The builder's events
+route (above) applies the same rule to the version's latest result. One 120 s deadline
 bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and

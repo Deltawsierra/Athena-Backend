@@ -29,7 +29,8 @@ its row's figures from both sides, and the frequency by the rate its count impli
 (sections 19.4 and 25.1); and it serves steps 5, 7b and 8 (section 27): a scenario
 version with its parameters' provenance, a simulation of it under a named policy,
 and the deterministic report JSON of a stored result, with the banner a result graded
-Unknown carries.
+Unknown carries; the step-5 events route carries the same banner (sections 24.8 and
+27.6).
 
 ## Contents
 
@@ -2326,7 +2327,7 @@ GUARDED in a guard of its own (section 2):
 | Route | Name | Does |
 |---|---|---|
 | `POST deployments/<uuid>/economics/scenarios/build/` | `deployment-economics-scenario-build` | builds a scenario draft: 201 with the scenario, its build and its events; 200 with the scenario already built from the same inputs; 409 on a race |
-| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's system fingerprint as built (or none, and why: section 24.6), its review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's system fingerprint as built (or none, and why: section 24.6), its review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals; and the Unknown banner of the version's latest stored result: `grade`, `banner`, `excluded_from_totals` and `banner_reason` (section 24.8's banner paragraph, section 27.6) |
 
 The body:
 
@@ -2355,6 +2356,22 @@ The body:
 - **Author-recorded, and reviewed under section 7**: the draft names the signed-in
   account as its author, so its author never reviews it; another admin or analyst
   does, through `ScenarioReview`.
+- **The Unknown banner** (the follow-up #158's review asked for, LOW-6(b)): the events
+  route follows the report's rule (section 27.6). It reads the scenario version's
+  latest stored result (the one `results/` serves without `?simulation=`), its Validity
+  Card and its series, checks every stored row as the report does
+  (`report.stored_row_failures`), and applies `report.banner_reason`: with no verified
+  grade A to D the response carries `banner: "Unknown: not for capital decisions"` and
+  `excluded_from_totals: true`, and `banner_reason` says why -- no result yet, the run
+  was refused, no card, rows that do not verify, or graded Unknown. A verified grade A
+  to D carries `banner: null`, `excluded_from_totals: false`, the `grade` and no
+  reason. `grade` is the card DOCUMENT's and only where every stored row verified: it
+  is `null` where one does not (a refused run's card is graded Unknown, and says so).
+  **The figures stay**: the events and totals are step 4's deterministic low, base and
+  high, which are not a result, so the banner and the exclusion are added and nothing
+  else in the response changes (`report.standing`; `test_only_the_banner_is_added_to_the_events_response`).
+  The build route's response is the draft just built, which has no result by
+  construction, and carries none of this (section 27.10).
 - **Strict JSON**: exactly the fields at every level, the 64 KiB cap (413 on the
   declared length, and the parser never reads past it), a key twice in one object and
   a bare `NaN` refused by the parser, the strict decimal-string rule for every value.
@@ -2368,7 +2385,11 @@ The body:
   and nothing else: under `tests/economics_broken_builder.py`, the scan's Stop
   answers 202, `deliver_owed_stops` runs its checks and reaches its handler,
   `manage.py check` passes and the parameter-set routes are served
-  (`test_a_builder_fault_never_takes_down_a_stop`).
+  (`test_a_builder_fault_never_takes_down_a_stop`). The events route imports
+  `report` inside its view, never at load: under `tests/economics_broken_report.py`
+  the build route and the events route still resolve, and the events route answers
+  a server error with no figures (it never serves figures without the banner)
+  (`test_a_report_fault_never_takes_down_a_stop`).
 
 The builder's refusal codes (`templates.REFUSALS`, raised as `BuildRefused`, a
 `MoneyRefused`); a code the money or scenario engine already publishes
@@ -4045,6 +4066,16 @@ is refused, and so is one re-digested with an Unknown grade. A total of several
 reports leaves out every one it refuses. No route serves a total yet (section
 27.10).
 
+The step-5 events route follows the same rule (`GET .../scenarios/<uuid>/events/`,
+section 24.8; review round 1, LOW-6(b)). `report.banner_reason(result, grade, failed)`
+is the one rule: the report applies it to its result, and `report.standing(scenario)`
+applies it to the version's latest stored result for the events route, which serves
+`grade`, `banner`, `excluded_from_totals` and `banner_reason` beside its figures.
+A reason -- no result stored (`report.NO_RESULT`), rows that fail a check, a refused
+run, no card, a grade of Unknown, or any grade `GRADES_FOR_TOTALS` does not list --
+is the banner and the exclusion; no reason is a completed result, every row
+verified, graded A to D. The figures there are step 4's, not a result, and stay.
+
 ### 27.7 The scenario document
 
 `report.scenario_document(scenario)`, schema `mythos.economics.scenario/v1`: the
@@ -4096,7 +4127,12 @@ URLconf, and `test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop`
 makes them unimportable before Django loads. A broken `report` module
 (`tests/economics_broken_report.py`) leaves the three routes unserved while the
 parameter-set and builder routes resolve and the scan's Stop answers 202 and is
-saved (`test_a_report_fault_never_takes_down_a_stop`).
+saved (`test_a_report_fault_never_takes_down_a_stop`). The step-5 events route (section
+24.8) reads the same rows and applies the report's rule, imported inside its view: a
+broken `report` leaves it resolving and answering a server error with no figures,
+never figures without the banner, and takes nothing else down. It is in
+`safety.stops.NOT_STOPS` and reads only economics rows of one result: its record, card
+and series.
 
 ### 27.10 What is still not done
 
@@ -4118,11 +4154,13 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
   by its one deadline, but how many a process runs at once, or a scenario holds, is
   not. Open for the testing phase: a per-process cap (503 when busy), so a pool of
   synchronous workers cannot fill with long simulations a stop's request might need.
-- **The step-5 events route** (`.../scenarios/<uuid>/events/`, section 24.8) serves a
-  scenario's deterministic totals with no banner, even where its result is graded
-  Unknown; it says `complete: false` and "at least: the known components only".
-  A follow-up carries the banner there too (review round 1, LOW-6(b)); this step
-  does not change that route.
+- **The step-5 events route carries the banner** (`.../scenarios/<uuid>/events/`,
+  sections 24.8 and 27.6; review round 1, LOW-6(b), done in the follow-up to #158). It
+  still serves step 4's deterministic totals, which are not a result, and says
+  `complete: false` and "at least: the known components only" where a component is
+  unknown. **The build route's response** (`POST .../scenarios/build/`, a draft just
+  built) carries no banner: it has no result by construction, and nothing may total it.
+  A later change may add the standing there too.
 
 ### 27.11 Decisions this step takes, which the owner may change
 
@@ -4173,3 +4211,10 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
     sum's are its component's low, base and high. Alternative: null every money
     parameter of a refused run. Recommendation: keep, so the refusal can be read and
     the inputs corrected.
+13. **The events route's banner is that of the version's latest stored result**, by
+    record order, as `results/` without `?simulation=` serves it (the follow-up to
+    #158's review, LOW-6(b)), and its `grade` is shown only where every stored row
+    verified. Alternatives: a banner per result (the route would take `?simulation=`);
+    the card's grade whatever its rows (the report shows it beside the banner where
+    only a record or a series fails). Recommendation: keep: the route serves one
+    scenario version's figures, and no grade is shown that the rows do not bear out.

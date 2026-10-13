@@ -13,7 +13,15 @@ URLconf, not a stop (``tests/test_economics_builder.py``,
   when a build of the same inputs is recorded at the same moment, and nothing is
   written.
 - ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/``: the
-  scenario's events with their effects, findings, components and provenance.
+  scenario's events with their effects, findings, components and provenance, and the
+  Unknown banner rule of the report (``docs/economics/spec-v1.md``, sections 24.8 and
+  27.6), applied to the scenario version's latest stored result and its Validity Card:
+  ``grade`` (the card document's, where every stored row verifies), ``banner``,
+  ``excluded_from_totals`` and ``banner_reason``. With no verified grade A to D (no
+  result yet, a refused run, no card, rows that do not verify, or graded Unknown) the
+  banner is ``Unknown: not for capital decisions`` and the scenario is excluded from
+  every total. The figures stay: they are step 4's deterministic low, base and high,
+  not a result.
 
 Access is the parameter-set routes' (:mod:`assurance.economics.api`): a signed-in
 account; a deployment the caller cannot see, or a scenario of another deployment,
@@ -26,7 +34,13 @@ figures as a parameter set's (spec, section 25.1); a body that states one while 
 probabilistic engine will not import is 503, and nothing is written.
 
 Neither route is a stop, and neither reads or writes anything a stop or the decision
-reads: both are in ``safety.stops.NOT_STOPS``.
+reads: both are in ``safety.stops.NOT_STOPS``. The events route reads the economics
+rows of one result (its record, card and series) and hashes them, and nothing else.
+
+The banner rule is :mod:`assurance.economics.report`'s, imported inside the events view
+and not at load, so a report that will not import leaves the build route and the
+parameter-set routes served (``tests/economics_fault_cases.py``) and the events route
+answering an error with no figures: it never serves figures without the banner.
 """
 
 from __future__ import annotations
@@ -109,11 +123,14 @@ class ScenarioEventsView(APIView):
     def get(self, request, uuid, scenario):
         deployment = _deployment(request, uuid)
         found = get_object_or_404(FinancialScenario.objects.filter(deployment=deployment), uuid=scenario)
+        from . import report  # not at load: see the module's last paragraph
+
         try:
             served = builder.describe(found)
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
-        return Response({"deployment": str(deployment.uuid), **served})
+        # The figures are step 4's, not a result: they stay. Only the banner rule is added.
+        return Response({"deployment": str(deployment.uuid), **served, **report.standing(found)})
 
 
 urlpatterns = [
