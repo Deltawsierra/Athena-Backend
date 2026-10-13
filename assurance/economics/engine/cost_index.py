@@ -32,6 +32,17 @@ input times the recorded ratio is the recorded output
   (``stale_index``). Otherwise ``index_missing``. Nothing is interpolated.
 - **Dates in order.** An index from a later date to an earlier one is
   ``date_inversion``.
+- **One source, and sources that disagree** (MVP step 12; ``docs/economics/spec-v1.md``,
+  section 12.8). A book may hold one series from several providers (each value names
+  its own). A step reads both its values from ONE of them, in an order the policy sets
+  and the values never do: the providers the policy's ``providers`` names, in its
+  order, then the others in name order. The first the policy names that holds the
+  series is the PRIMARY; where it cannot give both values and another provider's are
+  used, the step carries ``primary_unavailable``. Each other provider's value for a
+  period the step read, more than :data:`DISAGREEMENT_TOLERANCE` from the value used,
+  relative to it, is a conflict the step lists, and the step carries
+  ``source_disagreement``. Where the policy names none of the providers holding the
+  series and they disagree, no source is chosen between them: ``index_primary_unset``.
 """
 
 from __future__ import annotations
@@ -44,6 +55,8 @@ from decimal import Decimal
 from types import MappingProxyType
 
 from .money import (
+    PRIMARY_UNAVAILABLE,
+    SOURCE_DISAGREEMENT,
     Money,
     MoneyRefused,
     Unavailable,
@@ -54,6 +67,9 @@ from .money import (
     check_text,
     compute,
     decimal_text,
+    frozen_record,
+    plain_record,
+    relative_difference,
 )
 
 _PERIOD = re.compile(r"([0-9]{4})-(0[1-9]|1[0-2])")
@@ -63,6 +79,10 @@ EXACT_PERIOD = "exact_period"
 LATEST_PUBLISHED_PERIOD = "latest_published_period"
 #: The confidence downgrade a lagged index carries.
 STALE_INDEX = "stale_index"
+#: How far another source's value for the same series and period may be from the
+#: value used, relative to it, before the two disagree (the lead's decision for MVP
+#: step 12, 13 Oct 2026). At or under it nothing is flagged.
+DISAGREEMENT_TOLERANCE = Decimal("0.010")
 
 
 def check_period(value) -> str:
@@ -115,9 +135,14 @@ class IndexPoint:
     #: not ``source_version``: a raised version reads the rows the loader registered
     #: under the same snapshot hash, and the provenance names both.
     observations_version: int | None = None
+    #: Who published the value (the source's provider); ``""`` where a book was built
+    #: without one. A book holds one series from each provider apart.
+    provider: str = ""
 
     def __post_init__(self):
         check_text(series_id=self.series_id, geography=self.geography, category=self.category, base=self.base)
+        if not isinstance(self.provider, str):
+            raise MoneyRefused("required_field_blank", "provider")
         check_period(self.period)
         check_decimal(self.value, "index value")
         if self.value <= 0:
@@ -145,6 +170,7 @@ class IndexPoint:
             "source_snapshot_hash": self.source_snapshot_hash,
             "source_key": self.source_key,
             "source_version": self.source_version,
+            "provider": self.provider,
         }
         if self.observations_version is not None:
             provenance["observations_version"] = self.observations_version
@@ -182,11 +208,12 @@ class IndexSelector:
 
 class IndexBook:
     """The index values an indexing step may read. A series is one geography, one
-    category and one base; each (series, period, vintage) is held once."""
+    category and one base, whoever publishes it; each provider's (series, period,
+    vintage) is held once."""
 
     def __init__(self, points: Iterable[IndexPoint]):
         series: dict[str, tuple[str, str, str]] = {}
-        values: dict[str, dict[str, dict[date, IndexPoint]]] = {}
+        values: dict[str, dict[str, dict[str, dict[date, IndexPoint]]]] = {}
         for point in points:
             if not isinstance(point, IndexPoint):
                 raise TypeError(f"an IndexBook holds IndexPoints, not {type(point).__name__}")
@@ -197,29 +224,51 @@ class IndexBook:
                     "index_series_mismatch",
                     f"{point.series_id} is (geography, category, base) {identity}, and also {own}",
                 )
-            vintages = values.setdefault(point.series_id, {}).setdefault(point.period, {})
+            vintages = (
+                values.setdefault(point.series_id, {}).setdefault(point.provider, {}).setdefault(point.period, {})
+            )
             if point.vintage_date in vintages:
                 raise MoneyRefused(
-                    "observation_duplicate", f"{point.series_id} {point.period} vintage {point.vintage_date}"
+                    "observation_duplicate",
+                    f"{point.series_id} {point.period} vintage {point.vintage_date}"
+                    + (f" from {point.provider}" if point.provider else ""),
                 )
             vintages[point.vintage_date] = point
         self._series = MappingProxyType(series)
         self._values = MappingProxyType(values)
 
-    def value(self, selector: IndexSelector, period: str, as_of: date) -> IndexPoint | None:
-        """The latest vintage of ``selector``'s value for ``period`` published on or
-        before ``as_of``, or ``None``."""
+    def _checked(self, selector: IndexSelector) -> bool:
         identity = self._series.get(selector.series_id)
         if identity is None:
-            return None
+            return False
         if identity != selector.identity:
             raise MoneyRefused(
                 "index_series_mismatch",
                 f"{selector.series_id} is (geography, category, base) {identity}, not {selector.identity}",
             )
-        vintages = self._values[selector.series_id].get(period, {})
-        published = [vintage for vintage in vintages if vintage <= as_of]
-        return vintages[max(published)] if published else None
+        return True
+
+    def providers(self, selector: IndexSelector) -> list[str]:
+        """Every provider holding ``selector``'s series, in name order."""
+        return sorted(self._values[selector.series_id]) if self._checked(selector) else []
+
+    def value(self, selector: IndexSelector, period: str, as_of: date, provider: str | None = None) -> IndexPoint | None:
+        """The latest vintage of ``selector``'s value for ``period`` published on or
+        before ``as_of`` by ``provider``, or ``None``. Without a provider, the latest
+        any provider published (on one day, the first provider's by name)."""
+        if not self._checked(selector):
+            return None
+        held = self._values[selector.series_id]
+        found = []
+        for name in sorted(held) if provider is None else [provider]:
+            vintages = held.get(name, {}).get(period, {})
+            published = [vintage for vintage in vintages if vintage <= as_of]
+            if published:
+                found.append((max(published), name, vintages[max(published)]))
+        if not found:
+            return None
+        latest = max(vintage for vintage, _, _ in found)
+        return next(point for vintage, _, point in found if vintage == latest)
 
 
 @dataclass(frozen=True)
@@ -239,13 +288,36 @@ class IndexStep:
     rule: str
     lag_months: int
     stale: bool
+    #: The first provider the policy names that holds the series, or ``None`` where it
+    #: names none of them (spec-v1 section 12.8).
+    configured_primary: str | None = None
+    #: Every other provider whose value for a period the step read is more than
+    #: :data:`DISAGREEMENT_TOLERANCE` from the value used, relative to it.
+    conflicts: tuple = ()
 
     status = "indexed"
     estimate = False
 
     @property
+    def provider(self) -> str:
+        return self.from_point.provider
+
+    @property
+    def primary_unavailable(self) -> bool:
+        """Whether another provider's values were used: the primary could not give both."""
+        return self.configured_primary is not None and self.provider != self.configured_primary
+
+    @property
     def downgrades(self) -> tuple[str, ...]:
-        return (STALE_INDEX,) if self.stale else ()
+        return tuple(
+            reason
+            for reason, applies in (
+                (STALE_INDEX, self.stale),
+                (SOURCE_DISAGREEMENT, bool(self.conflicts)),
+                (PRIMARY_UNAVAILABLE, self.primary_unavailable),
+            )
+            if applies
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -262,11 +334,72 @@ class IndexStep:
             "ratio": decimal_text(self.ratio),
             "stale": self.stale,
             "estimate": False,
+            "provider": self.provider,
+            "configured_primary": self.configured_primary,
+            "primary_unavailable": self.primary_unavailable,
             "downgrades": list(self.downgrades),
+            "conflicts": plain_record(self.conflicts),
             "observations": [self.from_point.as_provenance(), self.to_point.as_provenance()],
             "input": self.input.as_dict(),
             "output": self.output.as_dict(),
         }
+
+
+def _read(book, selector, from_period, to_period, as_of, max_lag_months, provider):
+    """``provider``'s value for the event period, and for the valuation period or
+    the latest within the lag, with the lag: ``(start, None, 0)`` where only the first
+    is there, ``(None, None, 0)`` where neither is."""
+    start = book.value(selector, from_period, as_of, provider)
+    if start is None:
+        return None, None, 0
+    end, lag = None, 0
+    for lag in range(max_lag_months + 1):
+        candidate = shift_period(to_period, lag)
+        if candidate < from_period:
+            break
+        end = book.value(selector, candidate, as_of, provider)
+        if end is not None:
+            break
+    return start, end, lag
+
+
+def _source(point: IndexPoint) -> str:
+    return point.source_key or point.provider
+
+
+def _conflicts(book, selector, as_of, used: tuple[IndexPoint, ...], others, step: str) -> list:
+    """Each other provider's value for each period ``used`` read, more than
+    :data:`DISAGREEMENT_TOLERANCE` from it, relative to it."""
+    conflicts = []
+    for provider in others:
+        for primary in used:
+            other = book.value(selector, primary.period, as_of, provider)
+            if other is None:
+                continue
+            difference = relative_difference(primary.value, other.value)
+            if difference > DISAGREEMENT_TOLERANCE:
+                conflicts.append(
+                    frozen_record(
+                        {
+                            "kind": "cost_index",
+                            "step": step,
+                            "series": selector.series_id,
+                            "base": selector.base,
+                            "period": primary.period,
+                            "primary": _source(primary),
+                            "primary_provider": primary.provider,
+                            "primary_value": decimal_text(primary.value),
+                            "primary_vintage": primary.vintage_date.isoformat(),
+                            "secondary": _source(other),
+                            "secondary_provider": other.provider,
+                            "secondary_value": decimal_text(other.value),
+                            "secondary_vintage": other.vintage_date.isoformat(),
+                            "relative_difference": decimal_text(difference),
+                            "tolerance": decimal_text(DISAGREEMENT_TOLERANCE),
+                        }
+                    )
+                )
+    return conflicts
 
 
 def index(
@@ -279,10 +412,12 @@ def index(
     max_lag_months: int = 0,
     as_of: date | None = None,
     step: str = "cost_index",
+    providers: tuple[str, ...] = (),
 ) -> IndexStep | Unavailable:
     """``amount`` at ``to_date``'s prices: multiplied by the series' value for
-    ``to_date``'s month over its value for ``from_date``'s month. An
-    :class:`IndexStep`, or an explicit :class:`Unavailable` (``index_missing``)."""
+    ``to_date``'s month over its value for ``from_date``'s month, both from one
+    provider (``providers`` orders them: the policy's). An :class:`IndexStep`, or an
+    explicit :class:`Unavailable` (``index_missing``, ``index_primary_unset``)."""
     if not isinstance(amount, Money):
         raise TypeError(f"index takes Money, not {type(amount).__name__}")
     if not isinstance(book, IndexBook) or not isinstance(selector, IndexSelector):
@@ -300,23 +435,36 @@ def index(
     if type(max_lag_months) is not int or max_lag_months < 0:
         raise MoneyRefused("policy_invalid", f"max_lag_months {max_lag_months!r}")
     from_period, to_period = period_of(from_date), period_of(to_date)
-    start = book.value(selector, from_period, as_of)
-    if start is None:
-        return Unavailable(step, "index_missing", f"{selector.series_id} has no value for {from_period} by {as_of}")
-    end, lag = None, 0
-    for lag in range(max_lag_months + 1):
-        candidate = shift_period(to_period, lag)
-        if candidate < from_period:
-            break
-        end = book.value(selector, candidate, as_of)
+    holders = book.providers(selector)
+    # The order is the policy's, never the values': the providers it names, in its
+    # order, then the others by name. The first it names is the primary.
+    named = [provider for provider in providers if provider in holders]
+    order = named + [provider for provider in holders if provider not in named]
+    configured = named[0] if named else None
+    start = end = None
+    started, lag = False, 0
+    for provider in order:
+        start, end, lag = _read(book, selector, from_period, to_period, as_of, max_lag_months, provider)
+        started = started or start is not None
         if end is not None:
             break
+    if not started:
+        return Unavailable(step, "index_missing", f"{selector.series_id} has no value for {from_period} by {as_of}")
     if end is None:
         return Unavailable(
             step,
             "index_missing",
             f"{selector.series_id} has no value for {to_period}, or within {max_lag_months} month(s) before it, "
             f"by {as_of}",
+        )
+    used = (start,) if end.period == start.period else (start, end)
+    conflicts = _conflicts(book, selector, as_of, used, [p for p in order if p != start.provider], step)
+    if conflicts and configured is None:
+        return Unavailable(
+            step,
+            "index_primary_unset",
+            f"{selector.series_id} is published by {', '.join(repr(p) for p in holders)}, which disagree by more "
+            f"than {decimal_text(DISAGREEMENT_TOLERANCE)} relative, and the policy's providers name none of them",
         )
     # The output is the input times the RECORDED ratio, so the chain reproduces it:
     # input x ratio is the output, digit for digit.
@@ -335,4 +483,6 @@ def index(
         rule=EXACT_PERIOD if lag == 0 else LATEST_PUBLISHED_PERIOD,
         lag_months=lag,
         stale=lag > 0,
+        configured_primary=configured,
+        conflicts=tuple(conflicts),
     )

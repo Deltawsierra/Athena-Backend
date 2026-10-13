@@ -290,8 +290,9 @@ def _platform_versions(key: str):
     return FinancialSource.objects.filter(deployment__isnull=True, source_key=key)
 
 
-def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int, date]]:
-    """For the platform-wide versions of ``key``: ``{snapshot hash: the version
+def _coverage_starts(key: str, tenant=None) -> tuple[dict[str, int], dict[str, int], dict[int, date]]:
+    """For the platform-wide versions of ``key`` (or ``tenant``'s own, where one is
+    given): ``{snapshot hash: the version
     holding its rows}`` (the earliest of that hash: a raised version holds none of its
     own), ``{snapshot hash: its newest version number}`` (a raise of the same payload
     supersedes the version it was raised from), and ``{holder: the date of its earliest
@@ -299,7 +300,7 @@ def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int
     holders: dict[str, int] = {}
     newest: dict[str, int] = {}
     for row in (
-        FinancialSource._base_manager.filter(deployment__isnull=True, source_key=key)
+        FinancialSource._base_manager.filter(_scope(tenant), source_key=key)
         .order_by("version")
         .values("pk", "version", "snapshot_hash")
     ):
@@ -317,7 +318,12 @@ def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int
     return holders, newest, starts
 
 
-def used_version(key: str, deployment, as_of: date) -> FinancialSource | None:
+def _scope(tenant) -> Q:
+    """Platform-wide versions, or ``tenant``'s own."""
+    return Q(deployment__isnull=True) if tenant is None else Q(deployment=tenant)
+
+
+def used_version(key: str, deployment, as_of: date, *, own: bool = False) -> FinancialSource | None:
     """The version of ``key`` a run of ``deployment`` dated ``as_of`` uses (the lead's
     decision on review round 1, MEDIUM-2): the NEWEST platform-wide version that is
     usable -- it passes the production gate for that deployment
@@ -326,15 +332,19 @@ def used_version(key: str, deployment, as_of: date) -> FinancialSource | None:
     A version whose observations all fall after ``as_of`` does not cover it, and an
     older one that does is used instead; a date after a version's newest observation
     is covered, and only ages it (stale, blocked). None covers it: ``None``, and the
-    source is ``missing``."""
+    source is ``missing``. With ``own``, the same rule over ``deployment``'s own
+    versions of ``key`` (a normalization reads them, section 12.8)."""
+    tenant = deployment if own else None
+    if own and deployment is None:
+        return None
     usable = list(
         FinancialSource.objects.usable_for_production(deployment)
-        .filter(deployment__isnull=True, source_key=key)
+        .filter(_scope(tenant), source_key=key)
         .order_by("-version")
     )
     if not usable:
         return None
-    holders, newest, starts = _coverage_starts(key)
+    holders, newest, starts = _coverage_starts(key, tenant)
     for version in usable:
         if newest.get(version.snapshot_hash) != version.version:
             continue

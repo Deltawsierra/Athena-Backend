@@ -680,6 +680,24 @@ string, so the FRED key reaches no log. The adapters are tested against format-f
 fixtures, not recorded responses, in `tests/fixtures/economics_feeds/`, under a socket
 guard; none of it is a stop.
 
+### The primary source, and sources that disagree (step 12)
+
+A normalization (event-date FX, cost index, valuation-date FX; spec, section 12) reads
+the policy's PRIMARY: the first provider in its `providers` with a usable rate, never
+chosen by value (section 12.8). For a deployment (`normalization_service.normalize_for`)
+the books hold only the source versions a run of it may use on the valuation date: those
+that pass the production gate and cover the date, platform-wide and its own, never
+another deployment's. Where the first provider has no usable rate and a later one's is
+used, the record names both (`primary_unavailable`) and carries that downgrade: a
+fallback is never silent. Every other usable source quoting the same pair on the same
+date (or the same index series and month) more than the tolerance away from the value
+used, relative to it (FX 0.5%, cost index 1.0%), is listed in the record's `conflicts`
+with both sources, both values and the relative difference, and the record carries
+`source_disagreement`; at or under the tolerance nothing is flagged. Each of the two
+lowers the line one grade step however many steps carry it. Runs state their figures in
+one currency and do not normalize yet, so the report and the data-health route read no
+normalization; when runs do, the card inherits the record.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each
