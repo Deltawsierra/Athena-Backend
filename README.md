@@ -681,6 +681,53 @@ caps, each read from the environment by name:
 No stop takes a slot: a scan's Stop and every operator stop are answered within their
 bound while every slot is held (`tests/test_economics_run_cap.py`).
 
+### Continuous financial assurance (E6)
+
+Every completed exposure run records what it depends on, read before it ran (spec,
+section 34): the SPINE claims its scenario's templates rest on (each version, status and
+open retest) and the input fingerprint and policy of each claim type, each effect's
+asset, each enabling finding (with SPINE's evidence ageing and change state) and
+observed effect (with the route it was taken against), the parameter-set version, each
+feed source a figure cites, and the engine release; and, for a run resting on what
+serves, the served route of each serving asset and the configuration no claim reads
+(prompt and generation configuration, system prompt, temperature, region). A run whose
+dependencies moved is STALE, and only it: a boundary change SPINE invalidates stales the
+scenarios bound to the boundary claim and leaves the others current, and a model's
+fallback, quantization, revision or prompt change stales the runs resting on the model
+(`route_moved`) and leaves a scenario on an agent current. Every read says so -- the
+report (`banner` "Stale: ...", `excluded_from_totals: true`, the reasons in
+`banner_reason`, beside any other reason, and `unknowns`), the events route, the
+scenario list and document (`freshness`), and the receipt route in headers beside the
+signed bytes, which still verify -- and a stale run is never totalled (`may_be_totalled`
+refuses it). A downloaded receipt is a point-in-time attestation and carries no
+freshness: whoever relies on one checks the receipt route or the freshness route, or
+holds it to a maximum age.
+
+- `GET .../economics/scenarios/<scenario uuid>/freshness/`: one run's dependency map,
+  its reasons, its obligations and what to refresh;
+- `GET .../economics/assurance/`: every current run, current or stale, and the open
+  obligations; `POST` (admin or analyst) records each stale run with the refresh it owes,
+  once. It runs no Monte Carlo; `manage.py check_financial_assurance [--deployment
+  <uuid>]` does the same from the shell. Nothing in this repository runs it: an operator
+  runs it after a deploy, or on a schedule the owner sets (every read detects a change
+  regardless; the check records it);
+- `POST .../economics/scenarios/<scenario uuid>/refresh/`: `{"seed": ..., "policy": ...,
+  "receipt": <bool>, "as_of": "YYYY-MM-DD"}`, the one way a stale run is recomputed, and
+  only when an analyst asks: the version is rebuilt from its parameter set's current
+  version (superseding it), run, carded and, where asked, receipted, under a run slot and
+  one deadline. Its obligations close only once the new run stands (graded A to D,
+  verified, and current: a refresh made while SPINE's retest of a claim it rests on is
+  open closes nothing), each naming SPINE's outcome -- restored, contradicted, Unknown or
+  superseded. Nothing is rewritten: the old run, card and receipt stay as signed. A
+  refresh whose card or receipt was not issued (its deadline ran out), or whose new run
+  did not stand, is finished by a refresh of the version it rebuilt: what is missing is
+  issued and the obligations close once the run stands, with nothing run again. A
+  version has one successor: a refresh that loses a race to supersede it is 409, naming
+  the version that won.
+
+None of the three routes is a stop; stale marking is a read, never a hook on a write of
+SPINE's, and a scan's Stop is answered within its bound while a large check is held open.
+
 ### The live feeds (step 10, waiting on the owner's keys)
 
 Four official publishers are wired (spec, section 29): the ECB's euro reference rates
@@ -792,8 +839,8 @@ E5, `docs/economics/spec-v1.md` section 33):
   "valuation_date": "2026-10-06", "normalization": {...}, "groups": [...]}` takes each
   current scenario version's latest exposure run that `may_be_totalled` admits (never
   a remediation option's residual run), lists every other with its reason (Unknown,
-  refused, unverified, not graded, never simulated, not annual, superseded, inputs
-  changed, or a currency that cannot be normalised), draws the included scenarios
+  refused, unverified, not graded, stale (E6), never simulated, not annual, superseded,
+  inputs changed, or a currency that cannot be normalised), draws the included scenarios
   again on one seed with aligned years, scenarios in one correlation group (two at
   least, a strength from 0.000001 to 10 with a source type) sharing one Gamma driver
   of their annual rates, counts a loss event two scenarios share (one SPINE effect, or
@@ -813,7 +860,10 @@ E5, `docs/economics/spec-v1.md` section 33):
   portfolio is at least each), each scenario's contribution to the mean and to the
   tail (summing to them exactly), the groups, the shared events, every exclusion with
   its reason, the grade (no higher than the lowest included scenario, lower for an
-  expert's correlation strength; none for a refused portfolio) and the banner.
+  expert's correlation strength; none for a refused portfolio) and the banner. A
+  stored portfolio whose included scenario has gone stale since it was totalled reads
+  stale (`banner` "Stale: ...", `excluded_from_totals: true`, `banner_reason` naming
+  each stale scenario and why): its total is never read as current.
 
 The report is built from the stored rows only and is deterministic, with its own
 digest; every stored row it rests on, each included scenario's result, card and

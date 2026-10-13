@@ -11,8 +11,9 @@
 # table changes, nothing is backfilled. No foreign key has a reverse accessor
 # (related_name "+").
 #
-# Numbered 0075 behind #168 (E6, 0073) and the section-28 hardening (0074) in the
-# merge queue; it depends on master's latest, 0072_portfolio_results, until they merge.
+# Numbered 0075 behind #168 (E6, 0073_exposure_assurance, merged) and the section-28
+# hardening (0074, in the merge queue); it depends on master's latest, 0073, until 0074
+# merges.
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -23,7 +24,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0072_portfolio_results"),
+        ("assurance", "0073_exposure_assurance"),
     ]
 
     operations = [

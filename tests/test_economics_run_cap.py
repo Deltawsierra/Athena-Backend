@@ -61,6 +61,9 @@ CAPPED_HANDLERS = {
     "assurance.economics.report_api.ScenarioSimulateView.post",
     "assurance.economics.remediation_api.MitigationSimulateView.post",
     "assurance.economics.portfolio_api.PortfolioSimulateView.post",
+    # E6's refresh (spec, section 34.4): it rebuilds, runs, cards and receipts a stale
+    # scenario version.
+    "assurance.economics.report_api.ScenarioRefreshView.post",
 }
 
 

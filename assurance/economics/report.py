@@ -40,6 +40,15 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   beside its deterministic figures, which are not a result and stay. The deployment's
   scenario list (:func:`scenario_entry`, section 30) applies it to each version's
   latest exposure run too.
+- **Stale is never silent** (E6, section 34): a completed exposure run whose
+  dependencies moved since it ran -- a SPINE claim it rests on, its system state, an
+  asset, finding or observed effect, its parameter set, a feed source, the engine
+  release -- or that a check recorded stale, carries :data:`STALE_BANNER`, is
+  ``excluded_from_totals`` and names every reason in ``banner_reason`` and
+  ``unknowns`` (``kind: "stale"``): the banner stays :data:`UNKNOWN_BANNER` where
+  another reason already excludes it, and ``banner_reason`` then names both
+  (:func:`stale_reason`, :mod:`.continuous_service`). Read, never written: a report
+  read writes nothing, and the run, its card and its receipt are never altered.
 - **The valuation date and the currency bridge** (``currency_bridge``, schema v2,
   section 30): the run's valuation date, read from the stored rows the receipt
   reads it from, and the normalization record of each figure the run converted:
@@ -123,6 +132,9 @@ CONVERTED = (
 SCENARIO_SCHEMA = "mythos.economics.scenario/v1"
 #: What a result graded Unknown, refused or not graded shows (the owner-adopted default).
 UNKNOWN_BANNER = "Unknown: not for capital decisions"
+#: What a completed exposure run carries where a dependency moved since it ran and
+#: nothing else excludes it (E6, section 34): stale, never totalled as current.
+STALE_BANNER = "Stale: a dependency changed since this run; not current until it is refreshed"
 #: The reason a scenario version with no stored result is served with the banner (the
 #: step-5 events route; a report is of a stored result, so it never says this).
 NO_RESULT = "no simulation result is recorded for this scenario version: it is not graded"
@@ -212,7 +224,8 @@ def may_be_totalled(report: Mapping) -> bool:
     residual run under a remediation option is never exposure, section 28; a report
     without the key is refused). A forged, edited or stale report is refused. A total
     of several reports applies this to each, and leaves out every one it refuses (the
-    owner-adopted default)."""
+    owner-adopted default). A stale run's report (E6, section 34) is excluded from
+    totals, so it is refused too: no total sums a stale run as current."""
     if not isinstance(report, Mapping) or report.get("schema") not in REPORT_SCHEMAS:
         return False
     if "residual_of" not in report or report["residual_of"] is not None:
@@ -308,6 +321,29 @@ def verified_grade(card: FinancialValidityCard | None, result: SimulationResult)
     return card.card["confidence_grade"]
 
 
+def stale_reason(result: SimulationResult | None, now=None) -> tuple[str | None, list[dict], dict | None]:
+    """Whether ``result`` is stale (E6, section 34): ``(why, unknowns, summary)`` --
+    the reason a stale run is not current (``None`` where it is current or not
+    assessed: a residual or refused run), the report's ``unknowns`` entries for it, and
+    its state and reasons as a list line serves them. Reads, never writes, and never
+    raises: freshness that cannot be read is stale, never current."""
+    if result is None:
+        return None, [], None
+    try:
+        from . import continuous_service
+
+        freshness = continuous_service.safe_assess(result, now=now)
+    except Exception as error:  # noqa: BLE001 - a report is always served; its freshness is then not vouched for
+        why = (f"stale: dependencies_unverifiable (dependencies): continuous assurance could not be read "
+               f"({type(error).__name__}): not current until it is refreshed")
+        entry = {"kind": "stale", "id": "dependencies_unverifiable", "reason": why, "missing": ["dependencies"]}
+        return why, [entry], {"state": "stale", "reasons": [{"code": "dependencies_unverifiable",
+                                                              "dependency": "dependencies"}]}
+    if freshness is None:
+        return None, [], None
+    return freshness.banner_reason(), freshness.unknowns(), freshness.summary()
+
+
 def banner_reason(result: SimulationResult | None, grade: str | None, failed: list[str]) -> str | None:
     """Why ``result`` is not for capital decisions, or ``None`` where it may be totalled:
     a completed result whose stored rows verified (``failed`` is empty) and a ``grade``
@@ -330,14 +366,25 @@ def banner_reason(result: SimulationResult | None, grade: str | None, failed: li
     return None
 
 
-def standing(scenario: FinancialScenario) -> dict:
+def _with_stale(reason: str | None, stale: str | None) -> str | None:
+    """The ``banner_reason`` of a run excluded for ``reason`` and stale for ``stale``:
+    both where both hold, so no route is silent that a run is stale (review round 1 of
+    #168, L2)."""
+    if stale is None:
+        return reason
+    return stale if reason is None else f"{reason}; {stale}"
+
+
+def standing(scenario: FinancialScenario, now=None) -> dict:
     """The banner rule applied to ``scenario``'s latest stored result, by record order
     (the result ``results/`` serves without ``?simulation=``): the ``grade`` (the card
     DOCUMENT's, only where every stored row verified, else ``None``), the ``banner``,
     ``excluded_from_totals`` and ``banner_reason``. Every row is checked as the report
     checks it (:func:`stored_row_failures`, the series' too), and a scenario version
-    with no result is not graded. Reads rows, hashes them and runs nothing else."""
-    return _standing_of(scenario, latest_exposure_run(scenario))
+    with no result is not graded. A stale run (E6) is excluded and its reasons named
+    in ``banner_reason``, beside any other reason; it carries :data:`STALE_BANNER`
+    where nothing else excludes it. Reads rows, hashes them and runs nothing else."""
+    return _standing_of(scenario, latest_exposure_run(scenario), now=now)
 
 
 def latest_exposure_run(scenario: FinancialScenario) -> SimulationResult | None:
@@ -349,9 +396,14 @@ def latest_exposure_run(scenario: FinancialScenario) -> SimulationResult | None:
     ).order_by("-id").first()
 
 
-def _standing_of(scenario: FinancialScenario, result: SimulationResult | None) -> dict:
+def _standing_of(scenario: FinancialScenario, result: SimulationResult | None, now=None) -> dict:
     """The banner rule applied to ``result``, ``scenario``'s latest exposure run (see
-    :func:`standing`)."""
+    :func:`standing`), and its freshness (E6)."""
+    return _standing_and_freshness(scenario, result, now)[0]
+
+
+def _standing_and_freshness(scenario: FinancialScenario, result: SimulationResult | None, now=None
+                            ) -> tuple[dict, dict | None]:
     card = charts = None
     failed: list[str] = []
     if result is not None:
@@ -360,12 +412,14 @@ def _standing_of(scenario: FinancialScenario, result: SimulationResult | None) -
         failed = stored_row_failures(result, card, charts, scenario)
     grade = None if result is None or failed else verified_grade(card, result)
     reason = banner_reason(result, grade, failed)
-    return {
+    stale, _unknowns, freshness = stale_reason(result, now=now)
+    standing = {
         "grade": grade,
-        "banner": None if reason is None else UNKNOWN_BANNER,
-        "excluded_from_totals": reason is not None,
-        "banner_reason": reason,
+        "banner": UNKNOWN_BANNER if reason is not None else STALE_BANNER if stale is not None else None,
+        "excluded_from_totals": reason is not None or stale is not None,
+        "banner_reason": _with_stale(reason, stale),
     }
+    return standing, freshness
 
 
 # ------------------------------------------------------------------ money
@@ -865,6 +919,8 @@ def build_report(result: SimulationResult) -> dict:
     grade = card.card["confidence_grade"] if card is not None else None
     withheld = _unverified(failed) if failed else None
     why = banner_reason(result, grade, failed)
+    # A stale run (E6, section 34) is excluded and says why, where nothing else does.
+    stale, stale_unknowns, _freshness = stale_reason(result)
     events = _loss_events(scenario, build, shown, figures=figures)
     record = result.record if completed and "result_digest" not in failed else None
     if not completed:
@@ -920,9 +976,9 @@ def build_report(result: SimulationResult) -> dict:
         "refusal": refusal,
         "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed)},
         "grade": grade,
-        "banner": None if why is None else UNKNOWN_BANNER,
-        "excluded_from_totals": why is not None or residual_of is not None,
-        "banner_reason": why,
+        "banner": UNKNOWN_BANNER if why is not None else STALE_BANNER if stale is not None else None,
+        "excluded_from_totals": why is not None or stale is not None or residual_of is not None,
+        "banner_reason": _with_stale(why, stale),
         "residual_of": residual_of,
         "loss_events": events,
         "parameters": _parameters(result.inputs) if "input_digest" not in failed else {
@@ -934,7 +990,7 @@ def build_report(result: SimulationResult) -> dict:
         "validity_card": _card(card, unverified=card_unverified),
         "receipt": _receipt(receipt),
         "limitations": list(LIMITATIONS),
-        "unknowns": _unknowns(result, events, failed),
+        "unknowns": _unknowns(result, events, failed) + stale_unknowns,
     }
     report["digest"] = digest_of(report)
     return report
@@ -1022,6 +1078,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
                 "card_digest": None if card is None else card.card_digest,
                 "charts": SimulationCharts.objects.filter(simulation=result).exists(),
                 "receipt_id": None if receipt is None else receipt.receipt_id,
+                # Current or stale, and why (E6, section 34): a refused run is not assessed.
+                "freshness": stale_reason(result)[2],
             }
         )
     effects = [
@@ -1051,7 +1109,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
         "validity": {
             "simulations": results,
             "statement": "each simulation result with the grade its Validity Card's document states, where the card "
-            "verifies; a result with none, or with one that does not verify, is not graded",
+            "verifies; a result with none, or with one that does not verify, is not graded; and whether it is current "
+            "or stale, and why",
         },
         "evidence": {
             "spine": spine_evidence(scenario),
@@ -1081,13 +1140,15 @@ def templates_of(scenarios) -> dict[int, list[dict]]:
     return found
 
 
-def scenario_entry(scenario: FinancialScenario, templates: list[dict]) -> dict:
+def scenario_entry(scenario: FinancialScenario, templates: list[dict], now=None) -> dict:
     """One line of a deployment's scenario list (section 30): the version, its
     ``templates``, its latest EXPOSURE run's status (:func:`latest_exposure_run`: a
     residual run is never listed) and that run's standing under the banner rule --
     the grade, the banner, ``excluded_from_totals`` and why -- as the events route
-    serves it (:func:`standing`). Reads rows, hashes them and runs nothing else."""
+    serves it (:func:`standing`), and its ``freshness`` (E6): current or stale, and
+    each reason's code and dependency. Reads rows, hashes them and runs nothing else."""
     result = latest_exposure_run(scenario)
+    standing, freshness = _standing_and_freshness(scenario, result, now)
     return {
         "uuid": str(scenario.uuid),
         "title": scenario.title,
@@ -1102,7 +1163,8 @@ def scenario_entry(scenario: FinancialScenario, templates: list[dict]) -> dict:
             "refusal_code": result.refusal_code or None,
             "recorded_at": result.recorded_at.isoformat(),
         },
-        **_standing_of(scenario, result),
+        **standing,
+        "freshness": freshness,
     }
 
 
@@ -1118,6 +1180,7 @@ __all__ = [
     "REPORT_SCHEMAS",
     "REPORT_SCHEMA_V1",
     "SCENARIO_SCHEMA",
+    "STALE_BANNER",
     "STORED_ROW_UNVERIFIED",
     "UNKNOWN",
     "UNKNOWN_BANNER",
@@ -1133,6 +1196,7 @@ __all__ = [
     "scenario_entry",
     "stands",
     "served_snapshots",
+    "stale_reason",
     "standing",
     "stored_row_failures",
     "templates_of",

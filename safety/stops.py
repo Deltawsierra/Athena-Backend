@@ -538,6 +538,23 @@ NOT_STOPS = {
     # lock and no transaction; nothing a stop or the decision reads.
     "deployment-economics-scenarios": _get(),
     "deployment-economics-receipt": _get(),
+    # Continuous financial assurance (assurance.economics.report_api, E6, spec section
+    # 34): a run's freshness read, the deployment's stale exposure checked, and a stale
+    # scenario refreshed. Economics records only; SPINE's rows are read, never written.
+    "deployment-economics-scenario-freshness": _get(),
+    "deployment-economics-assurance": {
+        "GET": _READ,
+        "POST": "records each stale Economic Exposure run of the deployment with the refresh it owes: economics "
+        "records, append-only; it runs no Monte Carlo, reads SPINE's rows without a transaction and writes none of "
+        "them; it starts and stops nothing",
+    },
+    "deployment-economics-scenario-refresh": {
+        "POST": "rebuilds a stale Economic Exposure scenario version, runs it and issues its Validity Card, chart "
+        "series and, where asked, its receipt, and closes its refresh obligations once the new run stands: "
+        "economics records, append-only; it starts and stops nothing. It runs only in a free economics run slot, "
+        "taken without waiting (assurance.economics.capacity), and is answered 503 economics_capacity at once when "
+        "none is free; no stop takes a slot",
+    },
     # The remediation option and its ROI (assurance.economics.remediation_api, step
     # 13): one option recorded, its current and residual runs simulated, its
     # economics read. Economics records only.
