@@ -120,7 +120,19 @@ class Input:
 @dataclass(frozen=True)
 class Formula:
     """One versioned formula: its id, version, expression in words, the families it
-    serves, its inputs, and the function that computes it from one value per input."""
+    serves, its inputs, the function that computes it from one value per input, and
+    its additive ``terms``.
+
+    ``terms`` names the formula's additive terms, each by the inputs it multiplies
+    (an input that decreases the loss, a recovery rate, through its complement
+    ``1 - rate``): ``fixed_cost + hourly_rate x hours`` is
+    ``(("fixed_cost",), ("hourly_rate", "hours"))``, and its value is the sum of the
+    products. A formula that is not a sum -- a product, a cap, a lump sum -- is ONE
+    term of every input, which is what an empty ``terms`` means. The level's
+    attribution reads them (:func:`assurance.economics.engine.sensitivity.level_shares`);
+    ``tests/test_economics_sensitivity_and_grade.py`` proves, for every formula of
+    the catalogue, that a sum is the sum of its declared terms and that one term is
+    not a sum."""
 
     formula_id: str
     version: int
@@ -128,10 +140,14 @@ class Formula:
     families: frozenset[str]
     inputs: tuple[Input, ...]
     calculate: Callable[[Mapping[str, Money | Decimal]], Money] = field(repr=False, compare=False)
+    terms: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self):
         # Plain codes, so a family read from a row and one named by the enum match.
         object.__setattr__(self, "families", frozenset(str(family) for family in self.families))
+        # Not a sum: one term of every input.
+        terms = tuple(tuple(term) for term in self.terms) or (tuple(i.name for i in self.inputs),)
+        object.__setattr__(self, "terms", terms)
 
     @property
     def key(self) -> tuple[str, int]:
@@ -254,6 +270,7 @@ def _formulas() -> tuple[Formula, ...]:
                 Input("hours", Unit.HOURS, INC, "the hours worked"),
             ),
             lambda v: v["fixed_cost"] + v["hourly_rate"].times(v["hours"]),
+            (("fixed_cost",), ("hourly_rate", "hours")),
         ),
         Formula(
             "per_affected_plus_fixed",
@@ -274,6 +291,7 @@ def _formulas() -> tuple[Formula, ...]:
                 Input("fixed_cost", Unit.MONEY, INC, "a fixed amount: a campaign, a field team"),
             ),
             lambda v: v["unit_cost"].times(v["affected"]) + v["fixed_cost"],
+            (("affected", "unit_cost"), ("fixed_cost",)),
         ),
         Formula(
             "per_affected",
