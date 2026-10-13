@@ -113,13 +113,13 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its twenty-two modules: E1's ten, the scenario engine's four
+    # The package and its twenty-three modules: E1's ten, the scenario engine's four
     # (parameters, formulas, loss and parameter_set), the probabilistic engine's
     # two (distributions and simulation, which import numpy as well), the scenario
     # builder's templates, step 7b's two (twins and scenario_simulation, numpy
-    # too), step 8's two (sensitivity, numpy too, and grade), and step 6's charts
-    # (numpy too).
-    assert result.stdout.strip() == "imported 23", result.stdout
+    # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
+    # (numpy too), and step 10's feed adapters.
+    assert result.stdout.strip() == "imported 24", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -174,6 +174,8 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "grade.py",
         # Step 6's chart series (spec, section 27).
         "charts.py",
+        # Step 10's live-feed adapters, registry and freshness table (spec, section 28).
+        "feeds.py",
     }
     core_importers = set()
     for path in files:
@@ -793,7 +795,7 @@ def test_the_economics_routes_are_imported_guarded():
     modules = sorted(
         inner.module for node in guarded for inner in node.body if isinstance(inner, ast.ImportFrom)
     )
-    assert modules == ["economics.api", "economics.report_api", "economics.scenario_api"], (
+    assert modules == ["economics.api", "economics.health_api", "economics.report_api", "economics.scenario_api"], (
         "an economics route module is imported unguarded"
     )
     for node in guarded:
@@ -823,10 +825,17 @@ def test_nothing_but_the_models_registration_imports_economics():
     Raising a source's trust tier (spec, section 6.1) adds the operator's command,
     ``manage.py raise_source_trust``: a management command Django loads only when an
     operator runs it by name, which no first-party module imports (checked below),
-    so it is on no stop path; its routes are in ``assurance.economics.api``."""
+    so it is on no stop path; its routes are in ``assurance.economics.api``.
+
+    MVP step 10 adds the operator's ``manage.py fetch_financial_source`` on the same
+    terms (no first-party module imports it, checked below), and the data-health
+    route module, ``assurance.economics.health_api``, mounted guarded (section 28)."""
     importers = set()
     command_importers = set()
-    command = "assurance.management.commands.raise_source_trust"
+    commands = (
+        "assurance.management.commands.raise_source_trust",
+        "assurance.management.commands.fetch_financial_source",
+    )
     skip = {".git", "node_modules", "tests", "__pycache__"}
     for directory, subdirectories, files in os.walk(REPO):
         here = Path(directory)
@@ -844,12 +853,13 @@ def test_nothing_but_the_models_registration_imports_economics():
             for module in _imports(path, package):
                 if module == "assurance.economics" or module.startswith("assurance.economics."):
                     importers.add(path.relative_to(REPO).as_posix())
-                if module == command or module.startswith(command + "."):
+                if any(module == command or module.startswith(command + ".") for command in commands):
                     command_importers.add(path.relative_to(REPO).as_posix())
     assert importers == {
         "assurance/models.py",
         "assurance/urls.py",
         "assurance/management/commands/raise_source_trust.py",
+        "assurance/management/commands/fetch_financial_source.py",
     }
     assert command_importers == set()
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
@@ -862,6 +872,8 @@ def test_nothing_but_the_models_registration_imports_economics():
         "assurance.economics.scenario_api.urlpatterns",
         "assurance.economics.report_api",
         "assurance.economics.report_api.urlpatterns",
+        "assurance.economics.health_api",
+        "assurance.economics.health_api.urlpatterns",
     ]
 
 
@@ -953,6 +965,10 @@ SPEC_PHRASES = (
     "A pending request expires** 30 days after its request",
     "Expiry is found lazily, at approve time, with no background job",
     "computing it and writing nothing",
+    # MVP step 10 (section 28): the live feeds, freshness and the production receipt.
+    "informational average, not a transaction price",
+    "A run uses the latest version of the key that passes the gate",
+    "source_not_authoritative",
 )
 
 

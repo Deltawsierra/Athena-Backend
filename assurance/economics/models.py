@@ -1592,6 +1592,91 @@ class CostIndexObservation(_AppendOnly):
 
 
 # ---------------------------------------------------------------------------
+# FinancialSourceFetch -- one fetch of one live feed (MVP step 10)
+# ---------------------------------------------------------------------------
+
+FETCH_RECORDED = "recorded"
+FETCH_UNCHANGED = "unchanged"
+FETCH_REFUSED = "refused"
+FETCH_OUTCOMES = (FETCH_RECORDED, FETCH_UNCHANGED, FETCH_REFUSED)
+
+
+def fetch_codes() -> frozenset[str]:
+    """Every code a refused fetch may record: the feed adapters' and the fetch's
+    (:data:`assurance.economics.engine.feeds.FEED_REFUSALS`), the money engine's for a
+    value the observation contract refuses, and the governance rules' for a version
+    the store refuses."""
+    from .engine.feeds import FEED_REFUSALS
+
+    return frozenset(FEED_REFUSALS) | frozenset(money.REFUSALS) | frozenset(governance.REFUSALS)
+
+
+class FinancialSourceFetch(_AppendOnly):
+    """One fetch of one feed source by ``manage.py fetch_financial_source`` (spec,
+    section 28): which source, as known on which date, when it was asked, and what
+    came of it -- ``recorded`` (a new source version, whose snapshot hash is the
+    response's normalised payload hash), ``unchanged`` (the payload was one already
+    recorded: no new version, and the version that holds it named), or ``refused``
+    (nothing recorded but this row, and the refusal's CODE, never its text, which
+    could quote the answer).
+
+    A fetch refused before anything is sent -- no key, live fetching switched off,
+    an unknown source, a date it cannot ask for -- writes nothing at all, not even
+    this. A feed source is platform-wide, so a fetch names no deployment, and no
+    account: removing an operator, a stop, never writes one. Append-only."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    source_key = models.SlugField(max_length=200)
+    as_of = models.DateField()
+    requested_at = models.DateTimeField(default=timezone.now)
+    outcome = models.CharField(max_length=16, choices=[(o, o) for o in FETCH_OUTCOMES])
+    # The refusal's code: blank unless the fetch was refused.
+    code = models.CharField(max_length=64, blank=True, default="")
+    # "sha256:" + 64 hex: the normalised payload's hash, where an answer was read.
+    payload_hash = models.CharField(max_length=71, blank=True, default="")
+    # The version recorded, or the one already holding the payload; none when refused.
+    source = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["source_key", "requested_at", "id"]
+        verbose_name = "financial source fetch"
+        constraints = [
+            models.CheckConstraint(condition=Q(outcome__in=FETCH_OUTCOMES), name="ck_econ_fetch_outcome"),
+            models.CheckConstraint(
+                condition=(Q(outcome=FETCH_REFUSED) & ~Q(code="") & Q(source__isnull=True))
+                | (Q(outcome__in=(FETCH_RECORDED, FETCH_UNCHANGED)) & Q(code="") & Q(source__isnull=False)),
+                name="ck_econ_fetch_outcome_fields",
+            ),
+        ]
+        indexes = [models.Index(fields=["source_key", "requested_at"], name="assurance_econ_fetch_key")]
+
+    def check_new(self) -> None:
+        _require_text(source_key=self.source_key)
+        _refuse(governance.code_refusal(self.outcome, FETCH_OUTCOMES), detail="outcome")
+        refused = self.outcome == FETCH_REFUSED
+        if refused != (self.source_id is None) or refused != bool(self.code):
+            raise EconomicsRefused("code_unrecognised", "a refused fetch has a code and no version; any other, both not")
+        if refused:
+            _refuse(governance.code_refusal(self.code, fetch_codes()), detail="code")
+        if self.payload_hash:
+            _refuse(governance.snapshot_hash_refusal(self.payload_hash), detail="payload_hash")
+        if self.source_id is not None:
+            stored = (
+                FinancialSource._base_manager.filter(pk=self.source_id)
+                .values_list("deployment_id", "source_key", "snapshot_hash")
+                .first()
+            )
+            if stored is None or stored[0] is not None or stored[1] != self.source_key:
+                raise EconomicsRefused("cross_tenant_reference", "a fetch names a platform-wide version of its source")
+            if stored[2] != self.payload_hash:
+                raise EconomicsRefused("snapshot_hash_mismatch")
+
+    def __str__(self) -> str:
+        return f"{self.source_key} as of {self.as_of}: {self.outcome}{f' ({self.code})' if self.code else ''}"
+
+
+# ---------------------------------------------------------------------------
 # CustomerParameterSet, FinancialParameter, LossEvent, LossComponent: the
 # scenario parameters, loss events and components (spec, sections 14 to 20)
 # ---------------------------------------------------------------------------

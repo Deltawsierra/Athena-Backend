@@ -40,7 +40,10 @@ fixtures and the tests all read the same codes:
   them. These import numpy, and nothing on Django's load path imports them;
 - :mod:`.sensitivity` and :mod:`.grade` (MVP step 8): which parameters drive a
   simulated scenario's uncertainty, on the run's own draws (numpy too), and the
-  confidence grade its evidence mix gives, weighted by that importance.
+  confidence grade its evidence mix gives, weighted by that importance;
+- :mod:`.feeds` (MVP step 10): the four official publishers' adapters (ECB SDMX,
+  the Fed's H.10, FRED/ALFRED, BLS), the feed registry, the normalised payload hash
+  and the freshness table. It parses an answer; it never sends a request.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of

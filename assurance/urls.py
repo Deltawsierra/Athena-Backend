@@ -20,8 +20,9 @@ from .views import (
 logger = logging.getLogger(__name__)
 
 # Economic Exposure's route modules (docs/economics/spec-v1.md, sections 2, 19 and 24,
-# and section 27 for step 6's): the customer parameter-set routes, the scenario
-# builder's, and the scenario endpoints with the report, none of them a stop. Each is imported GUARDED,
+# section 27 for step 6's and section 28 for step 10's): the customer parameter-set
+# routes, the scenario builder's, the scenario endpoints with the report, and the
+# data-health route, none of them a stop. Each is imported GUARDED,
 # in a guard of its own. This module is the root URLconf's, and an import that
 # raised here would take the URLconf down, and every
 # route with it: the scan's Stop, every other stop, and the URL check
@@ -48,6 +49,13 @@ except Exception:
         "Economic Exposure's scenario and report routes could not be loaded; they are not served, and nothing else is"
     )
     economics_report_urlpatterns = []
+try:
+    from .economics.health_api import urlpatterns as economics_health_urlpatterns
+except Exception:
+    logger.exception(
+        "Economic Exposure's data-health route could not be loaded; it is not served, and nothing else is"
+    )
+    economics_health_urlpatterns = []
 
 router = DefaultRouter()
 router.register(r"deployments", DeploymentViewSet, basename="deployment")
@@ -59,4 +67,10 @@ router.register(r"unknowns", UnknownViewSet, basename="unknown")
 router.register(r"claims", ClaimViewSet, basename="claim")
 router.register(r"retest-requirements", RetestRequirementViewSet, basename="retest-requirement")
 
-urlpatterns = router.urls + economics_urlpatterns + economics_scenario_urlpatterns + economics_report_urlpatterns
+urlpatterns = (
+    router.urls
+    + economics_urlpatterns
+    + economics_scenario_urlpatterns
+    + economics_report_urlpatterns
+    + economics_health_urlpatterns
+)

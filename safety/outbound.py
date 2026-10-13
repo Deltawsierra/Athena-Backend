@@ -1,7 +1,7 @@
 """Every HTTP request this service sends with ``requests`` itself.
 
 The engines reach the outside world through mythos-core's ``safe_http``. This
-service does not: it calls ``requests`` directly, at four call sites, and each
+service does not: it calls ``requests`` directly, at five call sites, and each
 goes through :func:`get` or :func:`post` here.
 
 ========================================  =======================================
@@ -18,6 +18,11 @@ call site                                 what it reaches, with which credential
                                           forward); each one's own token
 ``assurance.posture.base.RequestsFetcher``  a customer's cloud, repository or
                                           secrets posture source; its read token
+``assurance.economics.feeds               an official publisher's data API (ECB,
+.OutboundTransport``                      the Fed's H.10, FRED, BLS): the FRED key
+                                          in the query, the BLS key in the body,
+                                          each withheld from any error; its own
+                                          proxy setting only
 ========================================  =======================================
 
 Three things hold at every one of them.

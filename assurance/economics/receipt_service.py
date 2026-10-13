@@ -35,7 +35,11 @@ the same row, where it verifies; one that does not is never returned, and never
 overwritten. A receipt that cannot be built (no expected annual exposure without
 a frequency, no system fingerprint, a seed past 2^53 - 1, a stored snapshot whose
 digest no longer reproduces) or signed is returned with its code and never
-recorded. **Never raises.**
+recorded. **Never raises.** A run whose figures rest on a feed source (spec, section
+28) is refused before anything is built where its card records the source blocked
+(``source_stale``) or missing (``source_missing``), and, in a production run, where
+an FX or cost-index source it rests on is not ``authoritative`` now
+(``source_not_authoritative``; :func:`feed_refusal`).
 
 :func:`verify_stored_receipt` verifies a stored receipt against a
 ``ReceiptKeyring`` and refuses, with a code, a forged or wrongly keyed envelope
@@ -131,6 +135,19 @@ REFUSALS = {
         "whatever the release"
     ),
     "verification_failed": "an unexpected fault while verifying: nothing is vouched for",
+    # The feed sources a run's figures rest on (spec, section 28).
+    "source_stale": (
+        "a feed source the run's figures rest on was past twice its freshness SLA at the run's as-of date: the "
+        "Validity Card says stale, and a stale claim is never signed as current"
+    ),
+    "source_missing": (
+        "a feed source the run's figures rest on had no version a run may use, or no observation by the run's "
+        "as-of date, or is not in the feed registry: the Validity Card says stale, and nothing is signed"
+    ),
+    "source_not_authoritative": (
+        "an FX or cost-index source behind a production run's receipt is trusted as authoritative (the owner's "
+        "decision of 13 Oct 2026): a lower tier may feed the run and its card, never its production receipt"
+    ),
 }
 
 
@@ -427,6 +444,9 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
     if issued.card is None:
         return ReceiptOutcome(None, False, issued.code or "card_unavailable", issued.detail)
     card = issued.card
+    refused = feed_refusal(result, card)
+    if refused is not None:
+        return ReceiptOutcome(None, False, *refused)
     try:
         document = core.build_receipt(**_fields(result, card))
     except (ReceiptRefused, EconomicsRefused) as refused:
@@ -485,6 +505,36 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
             return ReceiptOutcome(None, False, "recorded_receipt_unverified", f"{check.code}: {check.reason}")
         return ReceiptOutcome(found, False)
     return ReceiptOutcome(row, True)
+
+
+def feed_refusal(result: SimulationResult, card: FinancialValidityCard) -> tuple[str, str] | None:
+    """Why the feed sources ``result``'s figures rest on (spec, section 28) stop its
+    receipt, as ``(code, detail)``, or ``None``. Read before anything is built or
+    signed, and nothing is recorded when it refuses:
+
+    - NOW, for the sources the card names: the version a run of the deployment uses
+      must exist (the gate's refusal of the latest version, or ``source_missing``),
+      and in a production run one holding FX or cost-index observations must be
+      ``authoritative`` (``source_not_authoritative``; the owner's decision of 13 Oct
+      2026). The production gate itself is unchanged: a lower tier feeds the run;
+    - AS THE CARD SAYS: a source it records blocked (``source_stale``) or missing
+      (``source_missing``) at the run's as-of date: the card's claim is stale, and it
+      is never signed as current."""
+    held = (card.card.get("issued") or {}).get("feed_sources") or {}
+    if not held:
+        return None
+    from . import feeds
+
+    refused = feeds.receipt_refusal(held, result.deployment_id)
+    if refused is not None:
+        return refused
+    for key in sorted(held):
+        state = held[key].get("state")
+        if state == "blocked":
+            return "source_stale", f"{key}, {held[key].get('age_days')} days old at {held[key].get('as_of')}"
+        if state == "missing":
+            return "source_missing", f"{key}, at {held[key].get('as_of')}"
+    return None
 
 
 def _signer_refusal(error) -> tuple[str, str] | None:
@@ -641,6 +691,7 @@ __all__ = [
     "ReceiptOutcome",
     "ReceiptRefused",
     "engine_signer",
+    "feed_refusal",
     "envelope_problem",
     "issue_receipt",
     "engine_keyring",

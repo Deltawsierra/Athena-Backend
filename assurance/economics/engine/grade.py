@@ -24,6 +24,10 @@ step, A to B to C to D, never below D), each firing at most once:
 - ``stale_inputs``: a figure the run reads -- a cash component's, a policy term
   where a policy applies, the frequency, or a derived value's contributor -- is
   past its ``fresh_until`` at the run's as-of date;
+- ``stale_source``: such a figure rests on a feed source (its ``evidence_ref``
+  names ``financial-source:<key>``, spec section 28) that is stale, blocked or
+  missing at the run's as-of date; the rule names every figure each such source
+  feeds;
 - ``expert_figures``: a MATERIAL figure (a level share of at least
   :data:`MATERIAL_SHARE`) rests on an expert's estimate or on no named source,
   fixed or ranged;
@@ -58,7 +62,7 @@ from .confidence import ConfidenceGrade, downgraded
 from .money import decimal_text
 from .provenance import SourceType
 
-VERSION = "mythos.economics.confidence-grade/v2"
+VERSION = "mythos.economics.confidence-grade/v3"
 
 #: The class each source type counts in.
 CLASSES: Mapping[SourceType, str] = MappingProxyType(
@@ -95,6 +99,7 @@ THRESHOLDS: Mapping[ConfidenceGrade, Mapping[str, Decimal | None]] = MappingProx
 MATERIAL_SHARE = Decimal("0.05")
 
 STALE = "stale_inputs"
+STALE_SOURCE = "stale_source"
 EXPERT = "expert_figures"
 DERIVED = "derived_values"
 DOWNGRADES: Mapping[str, str] = MappingProxyType(
@@ -102,6 +107,10 @@ DOWNGRADES: Mapping[str, str] = MappingProxyType(
         STALE: (
             "a figure the run reads (a cash component's, a policy term where a policy applies, the frequency, or a "
             "derived value's contributor) is past its fresh_until at the run's as-of date"
+        ),
+        STALE_SOURCE: (
+            "a figure the run reads rests on a feed source (financial-source:<key>) that is stale, blocked or "
+            "missing at the run's as-of date: past its freshness SLA, past twice it, or with no version a run may use"
         ),
         EXPERT: (
             "a material figure (a level share of at least the materiality) rests on an expert's estimate or on no "
@@ -192,6 +201,7 @@ class Grade:
     expert: tuple[str, ...] = ()
     derived: tuple[str, ...] = ()
     unknown_because: str | None = None
+    stale_sources: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -202,6 +212,7 @@ class Grade:
             "evidence_mix": dict(self.shares),
             "downgrades": [{"rule": rule, "meaning": DOWNGRADES[rule]} for rule in self.downgrades],
             "stale_parameters": list(self.stale),
+            "stale_source_parameters": list(self.stale_sources),
             "material_expert_figures": list(self.expert),
             "material_derived_figures": list(self.derived),
             "unknown_because": self.unknown_because,
@@ -245,12 +256,14 @@ def grade(
     stale: Iterable[str] = (),
     per_occurrence: Iterable[str] = (),
     undefined: str | None = None,
+    stale_sources: Iterable[str] = (),
 ) -> Grade:
     """The grade of one line of one run. ``refusal`` is the run's refusal code, or
     ``None`` for a completed run; ``unknown_cash_components`` names every cash
     component the run could not compute; ``weighted`` is every figure the line reads
     (and the frequency), with its level share; ``stale`` names every figure the run
-    reads that is past its ``fresh_until``; ``per_occurrence`` names the parameters
+    reads that is past its ``fresh_until``; ``stale_sources`` names every figure the
+    run reads that rests on a stale, blocked or missing feed source; ``per_occurrence`` names the parameters
     of an annual run drawn per occurrence; ``undefined`` says why the line has no
     level to weigh, where it has none. See the module's rules."""
     if refusal is not None:
@@ -292,12 +305,17 @@ def grade(
         return Fraction(item.level) / total >= Fraction(MATERIAL_SHARE)
 
     stale_names = tuple(sorted(set(stale)))
+    stale_source_names = tuple(sorted(set(stale_sources)))
     expert_names = tuple(
         sorted(item.name for item in items if material(item) and any(CLASSES[s] in ASSUMPTION for s in item.sources))
     )
     derived_names = tuple(sorted(item.name for item in items if item.derived and material(item)))
     fired = tuple(
-        rule for rule, names in ((STALE, stale_names), (EXPERT, expert_names), (DERIVED, derived_names)) if names
+        rule
+        for rule, names in (
+            (STALE, stale_names), (STALE_SOURCE, stale_source_names), (EXPERT, expert_names), (DERIVED, derived_names)
+        )
+        if names
     )
     final = downgraded(base, len(fired))
     reason = (
@@ -307,9 +325,12 @@ def grade(
         f"{_percent(assumption)}% on expert or unsourced estimates, which is {base.value}"
     )
     if fired:
-        details = {STALE: stale_names, EXPERT: expert_names, DERIVED: derived_names}
+        details = {STALE: stale_names, STALE_SOURCE: stale_source_names, EXPERT: expert_names, DERIVED: derived_names}
         reason += "; lowered " + ", ".join(f"one step for {rule} ({', '.join(details[rule])})" for rule in fired)
-    return Grade(final, base, reason, LEVEL, shares, fired, stale_names, expert_names, derived_names)
+    return Grade(
+        final, base, reason, LEVEL, shares, fired, stale_names, expert_names, derived_names,
+        stale_sources=stale_source_names,
+    )
 
 
 def headline(gross: Grade, retained: Grade | None) -> tuple[str, Grade]:
@@ -335,6 +356,7 @@ __all__ = [
     "MATERIAL_SHARE",
     "ORDER",
     "STALE",
+    "STALE_SOURCE",
     "THRESHOLDS",
     "VERSION",
     "Grade",
