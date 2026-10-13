@@ -389,8 +389,8 @@ operator runs; any other writer is a defect.
 
 | Model | Holds | Permitted writers |
 |---|---|---|
-| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review; an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise; an admin may record a reviewed license class as a new version |
-| `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, who requested it and when, who approved it and when, when it was withdrawn, and its state (`pending`, `done` or `withdrawn`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only |
+| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review, never at `authoritative`; an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
+| `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, the channel it came through (`api` or `command`), who requested it and when, who approved it and when, who withdrew it, when and through which channel, and its state (`pending`, `done` or `withdrawn`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only, and only the signed-in route approves |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint, causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
@@ -445,8 +445,8 @@ never the object handed in: a run for a deployment recorded as `dev` or `staging
 not one and keeps the gate as it was; a run for a deployment in `production` (the
 default) or `other`, for one that is not recorded, or for no deployment (`None`) is
 one. A version's tier never changes; a higher tier is a new version, recorded only by
-an admin's raise (section 6.1). The snapshot loader an operator runs still takes the
-tier from the snapshot's own document.
+an admin's raise (section 6.1). The snapshot loader an operator runs takes the tier
+from the snapshot's own document, except `authoritative`, which it refuses.
 
 `SensitiveOverride.check_in_force()` raises unless two
 different people, neither the requester, have approved it. Whatever would use a
@@ -456,9 +456,10 @@ source or apply an override calls these first.
 
 The owner's decision of 12 Oct 2026, after the trust-tier gate: an admin-only action
 raises a tier, it records who raised it and when, and the top tier needs a second
-person. `FinancialSourceTrustRaise` (`models.py`) holds the rules on the record
-itself, and the routes and the command call its methods, so each refuses with the
-same code.
+person. Review round 1 of #155 closed the ways round the second person and decided
+the rest (13 Oct 2026). `FinancialSourceTrustRaise` (`models.py`) holds the rules on
+the record itself, and the routes and the command call its methods, so each refuses
+with the same code.
 
 - **A new version.** A version's tier never changes, so a raise records a NEW version
   of the same source: the same tenant, key, provider, dataset, URL, licence, snapshot
@@ -466,10 +467,28 @@ same code.
   `recorded_by` the admin who completed the raise. It is saved through
   `FinancialSource`'s own checks, so a synthetic source stays `unverified`
   (`synthetic_source`), `customer` needs a tenant (`customer_source_without_tenant`),
-  and the check constraints hold. The version raised from stays as it was, and a
-  production run still refuses it (`source_unverified`) while it accepts the new one.
-  The new version carries no FX or cost-index observations: they stay on the version
-  registered from the snapshot, under the same snapshot hash.
+  and the check constraints hold. Its version number is pinned to the one after the
+  version raised: a version recorded meanwhile (a snapshot registered between the
+  check and the insert, which PostgreSQL's READ COMMITTED allows) collides with it,
+  and the approval is refused 409 with nothing written. The version raised from
+  stays as it was, and a production run still refuses it (`source_unverified`) while
+  it accepts the new one.
+- **Its observations.** A raised version holds no FX or cost-index rows of its own,
+  and none are copied: a copy would hold the database's write lock for as long as it
+  took, and every stop's write would wait behind it. `snapshots.fx_book` and
+  `snapshots.index_book` read a version's rows from the EARLIEST version of the same
+  tenant, key and snapshot hash, the one the loader registered: one indexed read, no
+  write. Each observation's provenance names the version handed in, the one the gate
+  checked, as `source_version`, and the version holding the row as
+  `observations_version`; the second key appears only where the two differ, so the
+  provenance of a version read as itself is unchanged. Normalised from the raised
+  version, an amount comes out the same as from the version the loader registered.
+- **Only a second admin's approval records `authoritative`.** `FinancialSource`
+  refuses a version at `authoritative` (`second_person_required`) unless it carries
+  a marker only `FinancialSourceTrustRaise.approve()` sets: a plain save, the snapshot
+  loader and any other writer through the model are refused. The loader refuses a
+  file stating `authoritative` before it writes anything, and its message names the
+  raise route. Lower tiers are recorded as their file states them.
 - **Admin only** (`admin_required`): an active account whose role is admin, or a
   superuser, as every write to the assurance record is. Anonymous is 401; any other
   signed-in account is 403, before the body is read. A tenant's source is found as its
@@ -482,38 +501,52 @@ same code.
 - **From the latest version only** (`source_superseded`): a raise starts from the
   latest version of its source (its tenant and key), and an approval is refused if a
   newer version was recorded since the request, by another raise or the snapshot
-  loader.
+  loader. A message names a version by its key and number, never a database key.
 - **A reason** (`required_field_blank`, `reason_too_long`): text, not blank, at most
   2000 characters.
 - **One step below the top.** Below `authoritative`, one admin raises in one call:
   the new version and the record, `done`, its requester its approver, are written in
   one transaction.
 - **Two people for `authoritative`.** The request is recorded `pending` and no version
-  is written. An admin OTHER than the requester approves it (`second_person_required`,
-  matched on the account and on the recorded username, so a removed requester is still
-  the requester); that records the version and the record moves to `done`. The
-  requester may withdraw a pending request (`withdrawn_by_requester_only` for anyone
-  else), and the record moves to `withdrawn`. A request that is done or withdrawn is
-  never approved or withdrawn again (`trust_raise_not_pending`). No write through the
-  ORM records a raise to `authoritative` as done without that approval: the model
-  inserts it only pending.
+  is written. An admin OTHER than the requester approves it, through the signed-in
+  route only (`second_person_required` for the requester, matched on the account and
+  on the recorded username so a removed requester is still the requester, and for
+  the operator's command, which never approves); and only while the requester is
+  still an active admin (`requester_no_longer_admin` for a requester demoted,
+  deactivated or removed). That records the version and the record moves to `done`.
+  Any active admin may withdraw a pending request, and the record names who did,
+  when and through which channel: cancelling a request for more trust is never harder
+  than granting it. A request that is done or withdrawn is never approved or
+  withdrawn again (`trust_raise_not_pending`). No write through the ORM records a
+  raise to `authoritative` as done without that approval: the model inserts it only
+  pending.
 - **Atomic and single-use.** An approval locks the raise's row (`select_for_update`)
   and reads under that lock that it is still pending, that the approver is not the
-  requester and that its version is still the latest; then it records the version and
-  moves the record with one conditional write (only while it is still pending), all in
-  one transaction. Two concurrent approvals give exactly one version: the second waits
-  for the lock and finds the raise done. On PostgreSQL the row lock does that; SQLite,
-  which the tests run on, ignores `select_for_update` and serialises the whole
-  transaction at BEGIN IMMEDIATE. The transaction is a few reads and three writes.
+  requester, that the requester is still an admin and that its version is still the
+  latest; then it records the version and moves the record with one conditional write
+  (only while it is still pending), all in one transaction. Two concurrent approvals
+  give exactly one version: the second waits for the lock and finds the raise done.
+  On PostgreSQL the row lock does that; SQLite, which the tests run on, ignores
+  `select_for_update` and serialises the whole transaction at BEGIN IMMEDIATE. The
+  transaction is a few reads and three writes.
+- **A busy database.** A write that meets a lock it cannot get ("database is locked",
+  a serialisation failure) is answered 503 with Retry-After (`trust_raise_busy`), as
+  the stops' service-token path answers a busy database, and writes nothing; the
+  command says so and writes nothing.
 - **The record.** One row per raise: the version raised from and (once done) the
-  version recorded, the tiers, the reason, `requested_by` and `requested_by_username`
-  with `requested_at`, `approved_by` and `approved_by_username` with `approved_at`,
-  `withdrawn_at`, and the state. It is append-only but for its one transition, and
-  the usernames outlive a removed account. Its check constraints hold the state's
-  fields (`done` has a version, an approval time and an approver's name; `pending` has
-  none; `withdrawn` has a withdrawal time) and an upward pair of tiers; none of them
-  names an account column, so removing an operator, a stop, is never held back by a
-  raise.
+  version recorded, the tiers, the reason, the `channel` it came through (`api` or
+  `command`), `requested_by` and `requested_by_username` with `requested_at`,
+  `approved_by` and `approved_by_username` with `approved_at`, `withdrawn_by` and
+  `withdrawn_by_username` with `withdrawn_at` and `withdrawn_via`, and the state. It
+  is append-only but for its one transition, and the usernames outlive a removed
+  account. Its check constraints hold the state's fields (`done` has a version, an
+  approval time and an approver's name; `pending` has none; `withdrawn` has a
+  withdrawal time, a withdrawer's name and a channel), a known channel and an upward
+  pair of tiers; none of them names an account column, so removing an operator, a
+  stop, is never refused by a raise. It waits only for an approval or withdrawal
+  already in flight, for that transaction's few milliseconds: on the raise row's lock
+  and its foreign keys' on PostgreSQL, on the database's write lock on SQLite, as
+  behind any write.
 
 The routes are mounted under `/api/assurance/` with the parameter set's, from
 `assurance/economics/api.py`, guarded as that module is, and none is a stop
@@ -523,28 +556,43 @@ The routes are mounted under `/api/assurance/` with the parameter set's, from
   every raise of the source the version `<uuid>` belongs to, newest first, at most
   200 (`truncated` says if there are more);
 - `POST economics/sources/<uuid>/trust-raises/`: raise that version, from a strict
-  JSON body holding `to_tier` and `reason` and nothing else, at most 64 KiB (413):
-  201, `done` (below the top tier) or `pending` (`authoritative`);
+  JSON body holding `to_tier` and `reason` and nothing else, at most 64 KiB (413,
+  saying what the route takes): 201, `done` (below the top tier) or `pending`
+  (`authoritative`);
 - `POST economics/trust-raises/<uuid>/approve/` (`economics-trust-raise-approve`):
   200, `done`;
 - `POST economics/trust-raises/<uuid>/withdraw/` (`economics-trust-raise-withdraw`):
   200, `withdrawn`.
 
-A refusal answers its code: 403 for `admin_required`, `second_person_required` and
-`withdrawn_by_requester_only`; 409 for `trust_raise_not_pending` and
-`source_superseded` (and for another version of the source recorded at the same
-moment); 400 for the rest. The operator's command is the same rules and the same
-record, recorded under the account `--as` names, which must be an admin:
+An approval or a withdrawal takes no body: none, or `{}`; a body that says anything
+is 400, never ignored. A refusal answers its code: 403 for `admin_required` and
+`second_person_required`; 409 for `trust_raise_not_pending`, `source_superseded` and
+`requester_no_longer_admin` (and for another version of the source recorded at the
+same moment); 503 for `trust_raise_busy`; 400 for the rest.
+
+The operator's command is the same rules and the same record, recorded with channel
+`command` under the account `--as` names. The operator proves they hold it: the
+command reads that account's password with getpass, at a terminal only -- never
+from its arguments or the environment -- and refuses unless
+`django.contrib.auth.authenticate` accepts it and the account is an active admin.
+It never approves (`second_person_required`, before any password is asked):
 
     manage.py raise_source_trust request <source version uuid> --to <tier> --reason <why> --as <username>
-    manage.py raise_source_trust approve <raise uuid> --as <username>
     manage.py raise_source_trust withdraw <raise uuid> --as <username>
 
-Not decided here, for the owner: lowering a tier (a source found unreliable) has no
-path, as the decision was raise only; another admin cannot reject a pending request,
-which stays pending until approved or withdrawn; and the snapshot loader still
-records whatever tier its file states, `authoritative` included, with no second
-person (it is run by an operator on a committed file).
+Not decided here, for the owner:
+
+- lowering a tier (a source found unreliable) has no path, as the decision was raise
+  only; adding one would be a revoke under the SAFETY RULE;
+- a pending request never expires (review round 1, M2: no expiry for now);
+- re-registering a snapshot whose source was since raised returns the version the
+  loader registered first, still at its own tier, not the raised one (review round
+  1, L2);
+- no code reads `authoritative` differently from the tiers below it: one admin
+  alone makes a source usable by a production run by raising it to `benchmark`, and
+  the second person guards the `authoritative` label (review round 1, L3);
+- a version written past the model -- the base manager, raw SQL, a migration -- is
+  not held to the marker, as no economics record is (section 10).
 
 ## 7. Governance rules and refusal codes
 
@@ -576,11 +624,11 @@ that code (`EconomicsRefused.code`).
 | `required_field_blank` | a source key, provider, dataset, schema version, scenario title or a raise's reason is not blank |
 | `bulk_create_refused` | records are written one at a time, through the checks above |
 | `admin_required` | only an admin (role admin, or a superuser) requests, approves or withdraws a raise of a source's trust tier (section 6.1) |
+| `requester_no_longer_admin` | a pending raise is approved only while the admin who requested it is still an active admin; any admin may withdraw it |
 | `trust_not_raised` | a raise moves a source to a tier above its own, in the order of section 4.5; the same tier or a lower one is refused |
 | `source_superseded` | a raise starts from the latest version of its source, and is approved only while that version is still the latest |
-| `second_person_required` | a raise to `authoritative` is approved by an admin other than its requester, and is never recorded done without that approval |
+| `second_person_required` | an `authoritative` version is recorded only by a raise one admin requested and ANOTHER approved through the signed-in route: never by the requester, the operator's command, a snapshot file or any other write through the model |
 | `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending; below `authoritative` it is done in one step, never pending |
-| `withdrawn_by_requester_only` | a pending raise is withdrawn only by the admin who requested it |
 | `reason_too_long` | a raise's reason is at most 2000 characters |
 
 The rules read what is stored, never what a caller's in-memory object says: the
@@ -931,7 +979,9 @@ and the same rate read back from its column are written alike. Abridged:
 
 Each step's output is the next step's input, and the last step's output is the
 value. Every rate and index used is in the chain with its provider (or series),
-date, rate type (or vintage), snapshot hash and source version.
+date, rate type (or vintage), snapshot hash and source version; a rate or index a
+raised version read from the version its snapshot was registered as also names that
+version, as `observations_version` (section 6.1).
 
 ### 12.7 Limitations of E1
 
@@ -997,13 +1047,17 @@ hash), a bare `NaN` or `Infinity`, and any other broken document are
 
 `snapshots.register_snapshot(path)` writes, in one transaction, the source version
 and every observation, each through its model's checks; a file already registered
-under its hash is returned, not written again. `snapshots.fx_book(sources,
-deployment=...)` and `snapshots.index_book(sources, deployment=...)` read stored
-observations back into the engine for a run of that deployment: every source must
-be platform-wide or the deployment's own, as stored (`None` is a run for no
-deployment: platform-wide only), and any other is refused
-(`cross_tenant_reference`). A test shows the normalization from the rows equals
-the one from the file.
+under its hash is returned, not written again. A file stating trust tier
+`authoritative` is refused before anything is written (`second_person_required`):
+that tier is recorded only by a second admin's approval of a raise (section 6.1).
+`snapshots.fx_book(sources, deployment=...)` and `snapshots.index_book(sources,
+deployment=...)` read stored observations back into the engine for a run of that
+deployment: every source must be platform-wide or the deployment's own, as stored
+(`None` is a run for no deployment: platform-wide only), and any other is refused
+(`cross_tenant_reference`). Each source version's rows are those of the earliest
+version of the same tenant, key and snapshot hash, so a raised version reads the
+rows its snapshot was registered with (section 6.1). A test shows the normalization
+from the rows equals the one from the file.
 
 Django keeps a decimal on SQLite, this service's database, as a float rounded to
 15 significant digits. So every decimal column holds at most 15 digits -- a rate

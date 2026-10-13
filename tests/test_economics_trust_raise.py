@@ -81,7 +81,10 @@ def other_deployment():
     return Deployment.objects.create(name="other-tenant")
 
 
-def _source(**over):
+def _source(second_admin=False, **over):
+    """A source version. ``second_admin``: an authoritative one, recorded as the one
+    writer of that tier records it, through the marker a second admin's approval
+    sets (review round 1 of #155, H2)."""
     fields = {
         "source_key": "fed-h10-daily",
         "provider": "Federal Reserve",
@@ -93,7 +96,12 @@ def _source(**over):
         "schema_version": "1",
     }
     fields.update(over)
-    return FinancialSource.objects.create(**fields)
+    if not second_admin:
+        return FinancialSource.objects.create(**fields)
+    row = FinancialSource(**fields)
+    row._second_admin = econ._SECOND_ADMIN_APPROVED
+    row.save()
+    return row
 
 
 def _client(user=None):
@@ -184,10 +192,12 @@ def test_the_second_person_is_someone_else_by_account_or_by_name():
         "second_person_required"
     )
     assert governance.trust_raise_approval_refusal(ada, governance.Person()) == "approver_not_named"
-    assert governance.trust_raise_withdrawal_refusal(ada, ada) is None
-    assert governance.trust_raise_withdrawal_refusal(ada, governance.Person(id=2, username="bea")) == (
-        "withdrawn_by_requester_only"
-    )
+    assert governance.trust_raise_approval_channel_refusal("api") is None
+    for channel in ("command", "", None, "API"):
+        assert governance.trust_raise_approval_channel_refusal(channel) == "second_person_required"
+    assert governance.trust_raise_requester_refusal(True) is None
+    for not_admin in (False, None, 1):
+        assert governance.trust_raise_requester_refusal(not_admin) == "requester_no_longer_admin"
     assert governance.trust_raise_admin_refusal(True) is None
     for not_admin in (False, None, 1, "yes"):
         assert governance.trust_raise_admin_refusal(not_admin) == "admin_required"
@@ -203,7 +213,7 @@ def test_the_second_person_is_someone_else_by_account_or_by_name():
 
 def test_a_signed_out_caller_is_refused_401(people):
     source = _source()
-    pending = _raises().request(source, "authoritative", REASON, by=people["ada"])
+    pending = _raises().request(source, "authoritative", REASON, by=people["ada"], channel="api")
     client = _client()
     assert client.get(_raise_url(source)).status_code == 401
     assert _ask(client, source, "benchmark").status_code == 401
@@ -219,7 +229,7 @@ def test_a_signed_in_non_admin_is_refused_403_and_nothing_is_recorded(people, de
     tenant's, before the body is read; they may read the list."""
     platform = _source()
     own = _source(deployment=deployment, source_key="revenue", license_class="customer")
-    pending = _raises().request(platform, "authoritative", REASON, by=people["ada"])
+    pending = _raises().request(platform, "authoritative", REASON, by=people["ada"], channel="api")
     for name in ("ann", "vic"):
         client = _client(people[name])
         for source in (platform, own):
@@ -239,13 +249,13 @@ def test_a_signed_in_non_admin_is_refused_403_and_nothing_is_recorded(people, de
     # The model refuses them too, whatever calls it.
     for name in ("ann", "vic"):
         with pytest.raises(EconomicsRefused) as refused:
-            _raises().request(platform, "benchmark", REASON, by=people[name])
+            _raises().request(platform, "benchmark", REASON, by=people[name], channel="api")
         assert refused.value.code == "admin_required"
     # So is an admin whose account is switched off.
     people["bea"].is_active = False
     people["bea"].save()
     with pytest.raises(EconomicsRefused) as refused:
-        _raises().objects.get(pk=pending.pk).approve(by=people["bea"])
+        _raises().objects.get(pk=pending.pk).approve(by=people["bea"], channel="api")
     assert refused.value.code == "admin_required"
 
 
@@ -260,7 +270,7 @@ def test_a_tenants_source_is_raised_only_where_the_scoping_shows_that_tenant(
     from assurance.economics import api
 
     theirs = _source(deployment=other_deployment, source_key="revenue", license_class="customer")
-    pending = _raises().request(theirs, "authoritative", REASON, by=people["bea"])
+    pending = _raises().request(theirs, "authoritative", REASON, by=people["bea"], channel="api")
 
     # The owner of another tenant, a viewer: 404, not 403.
     viewer = _client(people["vic"])
@@ -373,7 +383,7 @@ def test_a_raise_the_rules_refuse_records_nothing(people, what, source_fields, t
     _nothing_recorded()
     # The same through the model, whichever route calls it.
     with pytest.raises(EconomicsRefused) as refused:
-        _raises().request(source, to_tier, reason, by=people["ada"])
+        _raises().request(source, to_tier, reason, by=people["ada"], channel="api")
     assert refused.value.code == code
     _nothing_recorded()
 
@@ -413,7 +423,7 @@ def test_the_body_is_read_as_the_parameter_set_route_reads_one(people):
         assert method(url).status_code == 405
     _nothing_recorded()
     # Approving and withdrawing read the declared length the same way.
-    pending = _raises().request(source, "authoritative", REASON, by=people["bea"])
+    pending = _raises().request(source, "authoritative", REASON, by=people["bea"], channel="api")
     for who, url in (("cid", _approve_url(pending)), ("bea", _withdraw_url(pending))):
         refused = _client(people[who]).post(
             url, data="{}", content_type="application/json", CONTENT_LENGTH=str(MAX_BODY_BYTES + 1)
@@ -492,14 +502,13 @@ def test_a_second_approval_of_the_same_request_is_refused(people):
 
 def test_a_withdrawn_request_cannot_be_approved(people):
     body = _pending(people)
-    # Only the requester withdraws it.
-    other = _post(_client(people["bea"]), _withdraw_url(body))
-    assert other.status_code == 403 and other.json()["code"] == "withdrawn_by_requester_only"
-    withdrawn = _post(_client(people["ada"]), _withdraw_url(body))
+    # Any admin withdraws it, and the record names who (review round 1, M2).
+    withdrawn = _post(_client(people["bea"]), _withdraw_url(body))
     assert withdrawn.status_code == 200, withdrawn.content
     assert (withdrawn.json()["state"], withdrawn.json()["approved_by"]) == ("withdrawn", None)
+    assert (withdrawn.json()["withdrawn_by"], withdrawn.json()["withdrawn_via"]) == ("bea", "api")
     assert withdrawn.json()["withdrawn_at"] is not None
-    refused = _post(_client(people["bea"]), _approve_url(body))
+    refused = _post(_client(people["cid"]), _approve_url(body))
     assert refused.status_code == 409 and refused.json()["code"] == "trust_raise_not_pending"
     again = _post(_client(people["ada"]), _withdraw_url(body))
     assert again.status_code == 409
@@ -543,7 +552,7 @@ def test_two_concurrent_approvals_give_exactly_one_version(monkeypatch):
 
     ada, bea, cid = (User.objects.create_user(username=n, password="x", role="admin") for n in ("ada", "bea", "cid"))
     source = _source()
-    pending = _raises().request(source, "authoritative", REASON, by=ada)
+    pending = _raises().request(source, "authoritative", REASON, by=ada, channel="api")
 
     locked = []
     real_select_for_update = QuerySet.select_for_update
@@ -572,7 +581,7 @@ def test_two_concurrent_approvals_give_exactly_one_version(monkeypatch):
     def approve(admin):
         start.wait()
         try:
-            _raises().objects.get(pk=pending.pk).approve(by=admin)
+            _raises().objects.get(pk=pending.pk).approve(by=admin, channel="api")
             outcomes[admin.username] = "done"
         except EconomicsRefused as refused:
             outcomes[admin.username] = refused.code
@@ -647,28 +656,36 @@ def test_no_orm_write_records_a_raise_past_the_rules(people, deployment):
     The database refuses a downward pair and a state its fields do not match."""
     source = _source()
     raise_ = _raises()
-    v2 = _source(trust_tier="authoritative")
+    v2 = _source(trust_tier="authoritative", second_admin=True)
     for state in ("done", "withdrawn"):
         with pytest.raises(EconomicsRefused) as refused:
             raise_.objects.create(
                 from_version=source, to_version=v2, to_tier="authoritative", reason=REASON, state=state,
-                requested_by=people["ada"], approved_by=people["bea"],
+                requested_by=people["ada"], approved_by=people["bea"], channel="api",
             )
         assert refused.value.code == "second_person_required"
     fresh = _source(source_key="ecb-reference")
     with pytest.raises(EconomicsRefused) as refused:
-        raise_.objects.create(from_version=fresh, to_tier="benchmark", reason=REASON, requested_by=people["ada"])
+        raise_.objects.create(
+            from_version=fresh, to_tier="benchmark", reason=REASON, requested_by=people["ada"], channel="api"
+        )
     assert refused.value.code == "trust_raise_not_pending"
     with pytest.raises(EconomicsRefused) as refused:
         raise_.objects.create(
-            from_version=fresh, to_tier="authoritative", reason=REASON, requested_by=people["ann"]
+            from_version=fresh, to_tier="authoritative", reason=REASON, requested_by=people["ann"], channel="api"
         )
     assert refused.value.code == "admin_required"
+    # A channel the record does not know.
+    with pytest.raises(EconomicsRefused) as refused:
+        raise_.objects.create(
+            from_version=fresh, to_tier="authoritative", reason=REASON, requested_by=people["ada"], channel="shell"
+        )
+    assert (refused.value.code, refused.value.detail) == ("code_unrecognised", "channel")
     # A one-step raise naming a version that is not the next of its source.
     with pytest.raises(EconomicsRefused) as refused:
         raise_.objects.create(
             from_version=fresh, to_version=v2, to_tier="benchmark", reason=REASON, state="done",
-            requested_by=people["ada"],
+            requested_by=people["ada"], channel="api",
         )
     assert refused.value.code == "source_superseded"
     assert not raise_.objects.exists()
@@ -679,8 +696,12 @@ def test_no_orm_write_records_a_raise_past_the_rules(people, deployment):
         {"from_tier": "unverified", "to_tier": "authoritative", "state": "done", "requested_by_username": "ada"},
         {"from_tier": "unverified", "to_tier": "authoritative", "state": "pending", "requested_by_username": ""},
         {"from_tier": "unverified", "to_tier": "authoritative", "state": "lost", "requested_by_username": "ada"},
+        {"from_tier": "unverified", "to_tier": "authoritative", "state": "pending", "requested_by_username": "ada",
+         "channel": "shell"},
+        {"from_tier": "unverified", "to_tier": "authoritative", "state": "withdrawn", "requested_by_username": "ada",
+         "withdrawn_at": datetime(2026, 10, 2, tzinfo=UTC)},
     ):
-        row = raise_(from_version=fresh, reason=REASON, **fields)
+        row = raise_(from_version=fresh, reason=REASON, **{"channel": "api", **fields})
         with pytest.raises(IntegrityError), transaction.atomic():
             models.Model.save(row, force_insert=True)
     assert not raise_.objects.exists()
@@ -723,44 +744,321 @@ def _command(*args):
     return out.getvalue()
 
 
-def test_the_command_raises_with_the_same_rules_and_the_same_record(people):
+def test_the_command_raises_with_the_same_rules_and_the_same_record(people, monkeypatch):
+    _typing(monkeypatch, "x")
     source = _source()
     printed = _command("request", str(source.uuid), "--to", "benchmark", "--reason", REASON, "--as", "ada")
     assert "done" in printed and "unverified -> benchmark" in printed and "recorded as v2" in printed
+    assert "via command" in printed
     assert REASON not in printed
     v2 = FinancialSource.objects.get(source_key="fed-h10-daily", version=2)
     assert v2.recorded_by_username == "ada"
     printed = _command("request", str(v2.uuid), "--to", "authoritative", "--reason", REASON, "--as", "ada")
     pending = _raises().objects.get(state="pending")
     assert f"raise {pending.uuid}: pending" in printed
-    with pytest.raises(CommandError, match="second_person_required"):
-        _command("approve", str(pending.uuid), "--as", "ada")
-    printed = _command("approve", str(pending.uuid), "--as", "bea")
-    assert "done" in printed and "approved by bea" in printed
+    # The command never approves: the second person signs in to the route.
+    for who in ("ada", "bea"):
+        with pytest.raises(CommandError, match="second_person_required"):
+            _command("approve", str(pending.uuid), "--as", who)
+    assert _post(_client(people["bea"]), _approve_url(pending)).status_code == 200
     assert _versions() == [(1, "unverified"), (2, "benchmark"), (3, "authoritative")]
     with pytest.raises(CommandError, match="trust_raise_not_pending"):
         _command("withdraw", str(pending.uuid), "--as", "ada")
     other = _source(source_key="ecb-reference")
     _command("request", str(other.uuid), "--to", "authoritative", "--reason", REASON, "--as", "cid")
     asked = _raises().objects.get(from_version=other)
-    with pytest.raises(CommandError, match="withdrawn_by_requester_only"):
-        _command("withdraw", str(asked.uuid), "--as", "bea")
-    assert "withdrawn" in _command("withdraw", str(asked.uuid), "--as", "cid")
+    # Any admin withdraws a pending request.
+    assert "withdrawn by bea via command" in _command("withdraw", str(asked.uuid), "--as", "bea")
 
 
-def test_the_command_refuses_a_non_admin_and_writes_nothing(people):
+def test_the_command_refuses_a_non_admin_and_writes_nothing(people, monkeypatch):
+    _typing(monkeypatch, "x")
     source = _source()
     for name in ("ann", "vic"):
         with pytest.raises(CommandError, match="admin_required"):
             _command("request", str(source.uuid), "--to", "benchmark", "--reason", REASON, "--as", name)
-    with pytest.raises(CommandError, match="no account"):
+    with pytest.raises(CommandError, match="authenticate"):
         _command("request", str(source.uuid), "--to", "benchmark", "--reason", REASON, "--as", "nobody")
     with pytest.raises(CommandError, match="required_field_blank"):
         _command("request", str(source.uuid), "--to", "benchmark", "--reason", " ", "--as", "ada")
-    pending = _raises().request(source, "authoritative", REASON, by=people["ada"])
-    with pytest.raises(CommandError, match="admin_required"):
+    pending = _raises().request(source, "authoritative", REASON, by=people["ada"], channel="api")
+    with pytest.raises(CommandError, match="second_person_required"):
         _command("approve", str(pending.uuid), "--as", "ann")
     with pytest.raises(CommandError, match="go with request only"):
         _command("approve", str(pending.uuid), "--to", "benchmark", "--as", "bea")
     assert list(_raises().objects.values_list("state", flat=True)) == ["pending"]
     assert _versions() == [(1, "unverified")]
+
+
+# ============================================================ review round 1 of #155
+#
+# Each test is the reviewer's repro (P1 to P8b), run through the routes, the command
+# and the ORM as they stand, so that it fails on the head the review read.
+
+
+class _Terminal:
+    """A stdin that is a terminal, for the command's password prompt."""
+
+    def isatty(self):
+        return True
+
+
+def _typing(monkeypatch, password, prompts=None):
+    """The operator types ``password`` at the command's getpass prompt."""
+    import getpass
+    import sys
+
+    def typed(prompt="Password: ", stream=None):
+        if prompts is not None:
+            prompts.append(prompt)
+        return password
+
+    monkeypatch.setattr(sys, "stdin", _Terminal())
+    monkeypatch.setattr(getpass, "getpass", typed)
+
+
+def _snapshot_copy(tmp_path, **source_over):
+    """The committed snapshot, NOT synthetic, its source stated as ``source_over`` says."""
+    document = json.loads(snapshots.SYNTHETIC_SNAPSHOT.read_bytes())
+    document["synthetic"] = False
+    document["source"].update(source_over)
+    path = tmp_path / f"snapshot-{len(list(tmp_path.iterdir()))}.json"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    return path
+
+
+def test_r1_h1_the_command_never_approves_a_top_tier_raise(people, monkeypatch):
+    """P3: one operator, no credentials, typed ``--as ada`` then ``--as bea``, and the
+    record said two people acted. The command never approves a raise to
+    authoritative (``second_person_required``): that is the signed-in route's alone."""
+    _typing(monkeypatch, "x")
+    source = _source()
+    _command("request", str(source.uuid), "--to", "authoritative", "--reason", REASON, "--as", "ada")
+    pending = _raises().objects.get()
+    with pytest.raises(CommandError, match="second_person_required"):
+        _command("approve", str(pending.uuid), "--as", "bea")
+    assert _raises().objects.get().state == "pending"
+    assert _versions() == [(1, "unverified")]
+    with pytest.raises(SourceNotUsableForProduction):
+        source.check_usable_for_production(None)
+    # The signed-in route still approves it.
+    assert _post(_client(people["bea"]), _approve_url(pending)).status_code == 200
+
+
+def test_r1_h1_the_command_authenticates_the_as_account_with_a_typed_password(people, monkeypatch):
+    """``--as`` named an account and nothing checked that the operator held it. The
+    command reads the account's password with getpass, at a terminal only -- never
+    from its arguments or the environment -- and refuses unless
+    ``django.contrib.auth.authenticate`` accepts it."""
+    import io
+    import sys
+
+    source = _source()
+    args = ("request", str(source.uuid), "--to", "benchmark", "--reason", REASON, "--as", "ada")
+    # No terminal: refused before anything is asked or written.
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x\n"))
+    with pytest.raises(CommandError, match="terminal"):
+        _command(*args)
+    # The wrong password, an inactive admin's, an account that does not exist.
+    _typing(monkeypatch, "not-the-password")
+    with pytest.raises(CommandError, match="authenticate"):
+        _command(*args)
+    people["cid"].is_active = False
+    people["cid"].save()
+    _typing(monkeypatch, "x")
+    with pytest.raises(CommandError, match="authenticate"):
+        _command(*args[:-1], "cid")
+    with pytest.raises(CommandError, match="authenticate"):
+        _command(*args[:-1], "nobody")
+    # No option takes a password.
+    with pytest.raises(CommandError):
+        _command(*args, "--password", "x")
+    _nothing_recorded()
+    # The right one, typed at the prompt that names the account.
+    prompts = []
+    _typing(monkeypatch, "x", prompts)
+    assert "done" in _command(*args)
+    assert prompts and "ada" in prompts[0]
+    assert _versions() == [(1, "unverified"), (2, "benchmark")]
+
+
+def test_r1_h1_every_raise_records_the_channel_it_came_through(people, monkeypatch):
+    _typing(monkeypatch, "x")
+    by_route = _ask(_client(people["ada"]), _source(), "benchmark").json()
+    other = _source(source_key="ecb-reference")
+    _command("request", str(other.uuid), "--to", "authoritative", "--reason", REASON, "--as", "bea")
+    by_command = _raises().objects.get(from_version=other)
+    assert _raises().objects.get(uuid=by_route["uuid"]).channel == "api"
+    assert by_route["channel"] == "api"
+    assert by_command.channel == "command"
+    _command("withdraw", str(by_command.uuid), "--as", "ada")
+    withdrawn = _raises().objects.get(pk=by_command.pk)
+    assert (withdrawn.state, withdrawn.withdrawn_via, withdrawn.withdrawn_by_username) == ("withdrawn", "command", "ada")
+
+
+def test_r1_h2_no_version_is_recorded_authoritative_but_through_a_second_admins_approval(people, tmp_path):
+    """P1: a plain create at authoritative was recorded and the gate accepted it, with
+    no raise. P2: so was a snapshot file stating authoritative. Both are refused
+    (``second_person_required``); the loader's refusal points to the raise route. A
+    lower tier is still recorded as stated, and approve() still records one."""
+    with pytest.raises(EconomicsRefused) as refused:
+        _source(trust_tier="authoritative")
+    assert refused.value.code == "second_person_required"
+    with pytest.raises(EconomicsRefused) as refused:
+        snapshots.register_snapshot(_snapshot_copy(tmp_path, trust_tier="authoritative"))
+    assert refused.value.code == "second_person_required"
+    # The loader's own refusal, before anything is written, naming the raise route.
+    assert "the snapshot states trust tier authoritative" in refused.value.detail
+    assert "trust-raises" in refused.value.detail
+    assert not FinancialSource.objects.exists()
+    stated = snapshots.register_snapshot(_snapshot_copy(tmp_path, trust_tier="benchmark"))
+    assert (stated.version, stated.trust_tier) == (1, "benchmark")
+    pending = _pending(people, stated)
+    assert _post(_client(people["bea"]), _approve_url(pending)).status_code == 200
+    raised = FinancialSource.objects.get(source_key=stated.source_key, version=2)
+    assert raised.trust_tier == "authoritative"
+    raised.check_usable_for_production(None)
+
+
+def test_r1_h3_a_raised_version_reads_the_observations_its_snapshot_registered(people, tmp_path, deployment):
+    """P5: a raised version carried no observations, so a production run that gated
+    it found no rates. A version's FX and cost-index observations are read from the
+    version the loader registered under the same tenant, key and snapshot hash, and
+    the provenance names both: the version the gate checked and the version that
+    holds the rows. Nothing is copied."""
+    from datetime import date
+
+    from assurance.economics.engine.cost_index import IndexSelector
+    from assurance.economics.engine.fx import FXPolicy
+    from assurance.economics.engine.money import Money
+    from assurance.economics.engine.normalization import NormalizationPolicy, normalize
+
+    v1 = snapshots.register_snapshot(_snapshot_copy(tmp_path))
+    counts = (v1.fx_observations.count(), v1.cost_index_observations.count())
+    assert counts == (18, 7)
+    assert _ask(_client(people["ada"]), v1, "benchmark").status_code == 201
+    v2 = FinancialSource.objects.get(source_key=v1.source_key, version=2)
+    assert (v2.fx_observations.count(), v2.cost_index_observations.count()) == (0, 0)  # nothing copied
+    v2.check_usable_for_production(deployment)
+    assert list(FinancialSource.objects.usable_for_production(deployment)) == [v2]
+
+    holidays = snapshots.read_snapshot().holidays
+    selector = IndexSelector("SYN-CPI-US", "US", "consumer prices, all items (SYNTHETIC)", "2020-03=100", "USD")
+    policy = NormalizationPolicy("USD", "EUR", FXPolicy(("SYNTHETIC-REF",)), selector)
+    args = {"event_date": date(2020, 3, 2), "valuation_date": date(2026, 9, 30), "policy": policy}
+
+    def normalized(versions):
+        return normalize(
+            Money.parse("1000.00", "EUR"),
+            fx_book=snapshots.fx_book(versions, deployment=deployment, holidays=holidays),
+            index_book=snapshots.index_book(versions, deployment=deployment),
+            **args,
+        )
+
+    from_v1, from_v2 = normalized([v1]), normalized([v2])
+    assert from_v2.value == from_v1.value and from_v2.display() == "1309.52 EUR"
+    v2_observations = [o for step in from_v2.as_dict()["chain"] for o in step["observations"]]
+    assert v2_observations
+    assert {(o["source_version"], o["observations_version"]) for o in v2_observations} == {(2, 1)}
+    # v1 read as itself names one version, as before.
+    v1_observations = [o for step in from_v1.as_dict()["chain"] for o in step["observations"]]
+    assert {o["source_version"] for o in v1_observations} == {1}
+    assert not any("observations_version" in o for o in v1_observations)
+    # Both versions handed in: each row once, named by the later version.
+    assert normalized([v1, v2]).value == from_v1.value
+
+
+def test_r1_m1_an_approval_racing_a_new_version_records_nothing(people, monkeypatch):
+    """P4: a version recorded between approve()'s superseded check and its insert
+    (a loader's commit, under PostgreSQL READ COMMITTED) was itself superseded by an
+    authoritative copy of the OLD snapshot. The raised version's number is pinned
+    to the next after the one approved, so the newer version collides: 409, and
+    nothing is written."""
+    source = _source()
+    pending = _pending(people, source)
+    real = econ._superseded
+
+    def a_snapshot_lands_meanwhile(stored):
+        answer = real(stored)
+        _source(snapshot_hash="sha256:" + "9c" * 32)  # v2, after the check
+        return answer
+
+    monkeypatch.setattr(econ, "_superseded", a_snapshot_lands_meanwhile)
+    raced = _post(_client(people["bea"]), _approve_url(pending))
+    assert raced.status_code == 409, raced.content
+    assert not FinancialSource.objects.filter(trust_tier="authoritative").exists()
+    assert _raises().objects.get(uuid=pending["uuid"]).state == "pending"
+
+
+def test_r1_m2_a_request_outlives_its_requesters_role_only_to_be_withdrawn(people):
+    """P8b: the requester demoted, nobody could withdraw the request and another
+    admin could still approve it. An approval needs the requester still an active
+    admin (``requester_no_longer_admin``); any active admin withdraws a pending
+    request, and the record names who did."""
+    pending = _pending(people)
+    people["ada"].role = "viewer"
+    people["ada"].save()
+    refused = _post(_client(people["bea"]), _approve_url(pending))
+    assert refused.status_code == 409, refused.content
+    assert refused.json()["code"] == "requester_no_longer_admin"
+    withdrawn = _post(_client(people["bea"]), _withdraw_url(pending))
+    assert withdrawn.status_code == 200, withdrawn.content
+    assert (withdrawn.json()["state"], withdrawn.json()["withdrawn_by"]) == ("withdrawn", "bea")
+    record = _raises().objects.get()
+    assert (record.withdrawn_by, record.withdrawn_by_username) == (people["bea"], "bea")
+    assert _versions() == [(1, "unverified")]
+    # A requester whose account is gone: the same.
+    asked = _pending(people, _source(source_key="ecb-reference"), by="cid")
+    assert _client(people["bea"]).delete(f"/api/accounts/users/{people['cid'].pk}/").status_code == 204
+    gone = _post(_client(people["bea"]), _approve_url(asked))
+    assert gone.status_code == 409 and gone.json()["code"] == "requester_no_longer_admin"
+
+
+def test_r1_l1_a_lock_error_is_a_retryable_refusal_and_writes_nothing(people, monkeypatch):
+    """An approval, or a one-step raise, that meets "database is locked" (or a
+    serialisation failure) answered 500. It answers 503 with Retry-After, as the
+    stop's service-token path does when the database is busy, and nothing is written."""
+    from django.db import OperationalError
+
+    source = _source()
+    pending = _pending(people, source)
+    real = econ._stored_source
+
+    def locked(pk):
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(econ, "_stored_source", locked)
+    busy = _post(_client(people["bea"]), _approve_url(pending))
+    assert busy.status_code == 503, busy.content
+    assert busy["Retry-After"] == "1"
+    assert busy.json()["code"] == "trust_raise_busy"
+    one_step = _ask(_client(people["bea"]), _source(source_key="ecb-reference"), "benchmark")
+    assert one_step.status_code == 503 and one_step["Retry-After"] == "1"
+    assert _raises().objects.get(uuid=pending["uuid"]).state == "pending"
+    assert _versions() == [(1, "unverified")] and _versions("ecb-reference") == [(1, "unverified")]
+    monkeypatch.setattr(econ, "_stored_source", real)
+    assert _post(_client(people["bea"]), _approve_url(pending)).status_code == 200
+
+
+def test_r1_nits_messages_name_versions_and_what_the_route_takes(people):
+    """N1: no internal key in a message, the version number instead. N2: the 413 says
+    what this route takes. N3: approve and withdraw refuse a body that says anything."""
+    from assurance.economics.api import MAX_BODY_BYTES
+
+    source = _source()
+    pending = _pending(people, source)
+    _source(trust_tier="benchmark")  # v2
+    superseded = _post(_client(people["bea"]), _approve_url(pending))
+    assert superseded.json() == {"code": "source_superseded", "detail": "source fed-h10-daily v1"}
+    big = _client(people["ada"]).post(
+        _raise_url(source), data="{}", content_type="application/json", CONTENT_LENGTH=str(MAX_BODY_BYTES + 1)
+    )
+    assert big.status_code == 413 and "trust raise" in big.json()["detail"]
+    assert "parameter-set" not in big.json()["detail"]
+    fresh = _pending(people, _source(source_key="ecb-reference"))
+    for url in (_approve_url(fresh), _withdraw_url(fresh)):
+        said = _post(_client(people["bea"]), url, {"approved_by": "cid"})
+        assert said.status_code == 400, said.content
+    assert _raises().objects.get(uuid=fresh["uuid"]).state == "pending"
+    # An empty body, or {}, is no body.
+    assert _client(people["bea"]).post(_approve_url(fresh)).status_code == 200

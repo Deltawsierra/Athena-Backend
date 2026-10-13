@@ -442,16 +442,25 @@ source's tier (spec, section 6.1), from the same module:
   field as before but the tier, recorded by the admin); `authoritative` is recorded
   pending, with no version;
 - `POST /api/assurance/economics/trust-raises/<uuid>/approve/`: a pending raise
-  approved by an admin OTHER than the one who asked; it records the version;
-- `POST .../trust-raises/<uuid>/withdraw/`: a pending raise withdrawn by the admin
-  who asked.
+  approved by an admin OTHER than the one who asked, while that admin is still one;
+  it records the version. This route is the only approver;
+- `POST .../trust-raises/<uuid>/withdraw/`: a pending raise withdrawn by any admin,
+  who is named on the record.
 
 Only upward, and only from the latest version of the source. Anyone but an admin is
 403 (anonymous 401); a tenant's source is 404 to whoever cannot see that deployment.
-Every raise is one append-only record of who asked, who approved, why and when, and
-the names outlive a removed account. `manage.py raise_source_trust request|approve|withdraw
-... --as <admin>` is the same rules and the same record for the operator. None of
-these is a stop.
+Every raise is one append-only record of who asked, who approved or withdrew, why,
+when and through which channel (`api` or `command`), and the names outlive a removed
+account. Nothing else records an `authoritative` version: not a plain save and not
+the snapshot loader, which refuses a file stating it. A raised version reads the FX
+and cost-index rows its snapshot was registered with, and its provenance names both
+versions. A write that meets a busy database is 503 with Retry-After, and writes
+nothing.
+
+`manage.py raise_source_trust request|withdraw ... --as <admin>` is the same rules and
+the same record for the operator: it asks for the `--as` account's password at the
+terminal (never from its arguments or the environment) and authenticates it, and it
+never approves. None of these is a stop.
 
 ### The scenario builder
 

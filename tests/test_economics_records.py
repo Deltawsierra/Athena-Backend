@@ -48,6 +48,7 @@ from assurance.economics.models import (
     SensitiveOverride,
     SeparationOfDutiesRefused,
     SourceNotUsableForProduction,
+    _SECOND_ADMIN_APPROVED,
 )
 from assurance.models import Deployment
 
@@ -69,7 +70,10 @@ def deployment():
     return Deployment.objects.create(name="payments-agent")
 
 
-def _source(**over):
+def _source(second_admin=False, **over):
+    """A source version. ``second_admin``: an authoritative one, recorded as the one
+    writer of that tier records it -- a raise a second admin approved, through the
+    marker approve() sets (spec, section 6.1)."""
     fields = {
         "source_key": "fed-h10-daily",
         "provider": "Federal Reserve",
@@ -80,7 +84,12 @@ def _source(**over):
         "schema_version": "1",
     }
     fields.update(over)
-    return FinancialSource.objects.create(**fields)
+    if not second_admin:
+        return FinancialSource.objects.create(**fields)
+    row = FinancialSource(**fields)
+    row._second_admin = _SECOND_ADMIN_APPROVED
+    row.save()
+    return row
 
 
 def _scenario(deployment, author, **over):
@@ -216,7 +225,7 @@ def test_an_unreviewed_source_is_never_usable_for_production():
     with pytest.raises(SourceNotUsableForProduction) as refused:
         unreviewed.check_usable_for_production(None)
     assert refused.value.code == "unreviewed_license"
-    reviewed = _source(license_class="open", trust_tier="authoritative")
+    reviewed = _source(license_class="open", trust_tier="authoritative", second_admin=True)
     reviewed.check_usable_for_production(None)
     assert list(FinancialSource.objects.usable_for_production(None)) == [reviewed]
 
@@ -549,7 +558,7 @@ def test_l3_a_run_uses_the_platform_sources_and_its_own_deployments_only(deploym
     # Every source here is trusted above unverified, so tenancy alone decides: a
     # production run refuses an unverified one besides (the owner's decision of 12
     # Oct 2026, tested below).
-    platform = _source(license_class="open", trust_tier="authoritative")
+    platform = _source(license_class="open", trust_tier="authoritative", second_admin=True)
     mine = _source(deployment=deployment, license_class="customer", trust_tier="customer", source_key="revenue")
     theirs = _source(deployment=other, license_class="customer", trust_tier="customer", source_key="revenue")
     _source(deployment=deployment, source_key="unreviewed-feed")
@@ -794,7 +803,7 @@ def test_r1_m1_the_synthetic_snapshot_is_never_usable_for_production(deployment)
         source.check_usable_for_production(None)
     assert refused.value.code == "synthetic_source"
     # A real, reviewed source beside it still is usable.
-    real = _source(source_key="fed-h10", license_class="open", trust_tier="authoritative")
+    real = _source(source_key="fed-h10", license_class="open", trust_tier="authoritative", second_admin=True)
     assert list(FinancialSource.objects.usable_for_production(None)) == [real]
     assert real.synthetic is False
 
@@ -885,7 +894,7 @@ def test_a_production_run_refuses_a_source_still_unverified(deployment):
     own = _source(deployment=deployment, license_class="customer", source_key="revenue")
     assert own.production_use_refusal(deployment) == "source_unverified"
     # A version at a higher tier is usable; the unverified version stays refused.
-    raised = _source(license_class="open", trust_tier="authoritative")
+    raised = _source(license_class="open", trust_tier="authoritative", second_admin=True)
     trusted_own = _source(deployment=deployment, license_class="customer", trust_tier="customer", source_key="revenue")
     assert (raised.version, trusted_own.version) == (2, 2)
     for run in runs:
@@ -957,7 +966,7 @@ def test_the_gate_reads_the_stored_row_and_refuses_one_never_stored(deployment):
     assert refused.value.code == "source_unverified"
     assert refused.value.detail == "source fed-h10-daily v1, trust tier unverified"
     assert unverified.production_use_refusal(None) == "source_unverified"
-    unreviewed = _source(source_key="unreviewed-feed", trust_tier="authoritative")
+    unreviewed = _source(source_key="unreviewed-feed", trust_tier="authoritative", second_admin=True)
     unreviewed.license_class = "open"
     assert unreviewed.production_use_refusal(deployment) == "unreviewed_license"
     synthetic = snapshots.register_snapshot()
@@ -978,6 +987,6 @@ def test_the_gate_reads_the_stored_row_and_refuses_one_never_stored(deployment):
         assert (refused.value.code, refused.value.detail) == ("cross_tenant_reference", "a source that is not stored")
     # The stored row decides both ways: a trusted version is usable, whatever the
     # object in hand says.
-    trusted = _source(license_class="open", trust_tier="authoritative")
+    trusted = _source(license_class="open", trust_tier="authoritative", second_admin=True)
     trusted.trust_tier = "unverified"
     trusted.check_usable_for_production(deployment)

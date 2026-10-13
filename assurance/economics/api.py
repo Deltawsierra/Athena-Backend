@@ -45,19 +45,26 @@ Raising a financial source's trust tier (the owner's decision of 12 Oct 2026;
   recorded ``pending`` (201), and no version is written until a second admin
   approves it.
 - ``POST economics/trust-raises/<uuid>/approve/``: a pending raise approved by an
-  admin other than its requester (200, ``done``, the new version recorded).
-- ``POST economics/trust-raises/<uuid>/withdraw/``: a pending raise withdrawn by its
-  requester (200, ``withdrawn``).
+  admin other than its requester, while the requester is still an active admin
+  (200, ``done``, the new version recorded). This route is the ONLY approver: the
+  operator's command never approves.
+- ``POST economics/trust-raises/<uuid>/withdraw/``: a pending raise withdrawn by any
+  admin (200, ``withdrawn``, naming who withdrew it).
 
-A source is visible as a deployment is: a platform-wide one to every signed-in
-account, a tenant's to those who see that deployment (404 otherwise, whether or not
-it exists). Reading needs no more. Every write is an admin's only, refused 403
-(``admin_required``) for anyone else, before the body is read; so is an approval by
-the requester (``second_person_required``) and a withdrawal by anyone but the
-requester (``withdrawn_by_requester_only``). A raise whose state or source moved
-meanwhile is 409 (``trust_raise_not_pending``, ``source_superseded``), and every
-other refusal 400 with its code. The body is read as the parameter-set route reads
-one: strict JSON, at most :data:`MAX_BODY_BYTES` (413).
+Each raise records the channel it came through, ``api`` here. A source is visible as
+a deployment is: a platform-wide one to every signed-in account, a tenant's to those
+who see that deployment (404 otherwise, whether or not it exists). Reading needs no
+more. Every write is an admin's only, refused 403 (``admin_required``) for anyone
+else, before the body is read; so is an approval by the requester
+(``second_person_required``). A raise whose state or source moved meanwhile is 409
+(``trust_raise_not_pending``, ``source_superseded``, ``requester_no_longer_admin``,
+or another version of the source recorded at the same moment), and every other
+refusal 400 with its code. A write that meets a lock it cannot get ("database is
+locked", a serialisation failure) is 503 with Retry-After (``trust_raise_busy``), as
+the stops' service-token path answers a busy database, and writes nothing. A
+request's body is read as the parameter-set route reads one: strict JSON, at most
+:data:`MAX_BODY_BYTES` (413, saying what the route takes); an approval or a
+withdrawal takes no body (none, or ``{}``), and one that says anything is 400.
 
 None of these routes is a stop, and none sits on a stop's path: each is classified
 in ``safety.stops.NOT_STOPS``, and none reads or writes anything a stop or the
@@ -72,7 +79,7 @@ from __future__ import annotations
 
 import json
 
-from django.db import IntegrityError
+from django.db import IntegrityError, OperationalError
 from django.db.models import Q
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404
@@ -131,6 +138,9 @@ class StrictJSONParser(SafeJSONParser):
     """JSON only, and strictly: a duplicate key in any object, and a bare NaN or
     Infinity, are refused, where ``json`` would keep the last key and read NaN."""
 
+    #: What a body past the limit is refused with: a route's own 413.
+    too_large = BodyTooLarge
+
     def parse(self, stream, media_type=None, parser_context=None):
         parser_context = parser_context or {}
         encoding = parser_context.get("encoding", "utf-8")
@@ -138,7 +148,7 @@ class StrictJSONParser(SafeJSONParser):
         # the limit is enough to know the body is too large.
         raw = stream.read(MAX_BODY_BYTES + 1)
         if len(raw) > MAX_BODY_BYTES:
-            raise BodyTooLarge()
+            raise self.too_large()
         try:
             text = raw.decode(encoding)
             return json.loads(text, object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constant)
@@ -306,16 +316,41 @@ TRUST_RAISE_LIST_LIMIT = 200
 #: The fields a raise is posted with, and nothing else.
 _TRUST_RAISE_FIELDS = frozenset({"to_tier", "reason"})
 
+
+class TrustRaiseTooLarge(BodyTooLarge):
+    default_detail = (
+        f"A trust raise is posted in at most {MAX_BODY_BYTES} bytes: a JSON object holding to_tier and reason, "
+        "and nothing else."
+    )
+
+
+class TrustDecisionTooLarge(BodyTooLarge):
+    default_detail = (
+        f"Approving or withdrawing a trust raise takes no body: send none, or {{}} (at most {MAX_BODY_BYTES} "
+        "bytes are read)."
+    )
+
+
+class TrustRaiseJSONParser(StrictJSONParser):
+    too_large = TrustRaiseTooLarge
+
+
+class TrustDecisionJSONParser(StrictJSONParser):
+    too_large = TrustDecisionTooLarge
+
 #: The answer to a refused raise, by its code: a person who may not do this (403),
 #: and a raise whose state or source moved meanwhile (409). Any other code is a
 #: body the rules refuse (400).
 _TRUST_REFUSAL_STATUS = {
     "admin_required": status.HTTP_403_FORBIDDEN,
     "second_person_required": status.HTTP_403_FORBIDDEN,
-    "withdrawn_by_requester_only": status.HTTP_403_FORBIDDEN,
     "trust_raise_not_pending": status.HTTP_409_CONFLICT,
     "source_superseded": status.HTTP_409_CONFLICT,
+    "requester_no_longer_admin": status.HTTP_409_CONFLICT,
 }
+
+#: How long a caller waits before sending a write again that met a lock.
+TRUST_RAISE_RETRY_AFTER_SECONDS = 1
 
 
 def _visible(prefix: str, user) -> Q:
@@ -350,14 +385,41 @@ def _trust_admin(request) -> Response | None:
     return None
 
 
-def _declared_length(request) -> None:
+def _declared_length(request, too_large) -> None:
     """The DECLARED length, before the body is read, as the parameter-set route does."""
     try:
         declared = int(request.META.get("CONTENT_LENGTH") or 0)
     except ValueError:
         raise ValidationError({"detail": "Content-Length is not a number"}) from None
     if declared > MAX_BODY_BYTES:
-        raise BodyTooLarge()
+        raise too_large()
+
+
+def _no_body(request) -> None:
+    """An approval or a withdrawal says nothing: no body, or ``{}``. A body that says
+    anything -- a field, a list, a value -- is refused (400), never ignored."""
+    _declared_length(request, TrustDecisionTooLarge)
+    body = request.data
+    if isinstance(body, QueryDict):
+        if body:
+            raise UnsupportedMediaType(request.content_type)
+        return
+    if body != {}:
+        raise ValidationError({"detail": "Approving or withdrawing a trust raise takes no body: send none, or {}."})
+
+
+def _busy() -> Response:
+    """A write that met a lock it could not get: nothing was written, and the same
+    request may be sent again. 503 with Retry-After, as the stops' service-token
+    path answers a busy database (``safety.service_token``)."""
+    return Response(
+        {
+            "code": "trust_raise_busy",
+            "detail": "The database was busy and nothing was recorded; send the same request again.",
+        },
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Retry-After": str(TRUST_RAISE_RETRY_AFTER_SECONDS)},
+    )
 
 
 def _raced() -> Response:
@@ -371,7 +433,7 @@ class SourceTrustRaisesView(APIView):
     """Every raise of one source's trust tier, and requesting the next."""
 
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [StrictJSONParser]
+    parser_classes = [TrustRaiseJSONParser]
 
     def get(self, request, uuid):
         source = _visible_source(request, uuid)
@@ -397,7 +459,7 @@ class SourceTrustRaisesView(APIView):
         refused = _trust_admin(request)
         if refused is not None:
             return refused
-        _declared_length(request)
+        _declared_length(request, TrustRaiseTooLarge)
         body = request.data
         if isinstance(body, QueryDict):
             raise UnsupportedMediaType(request.content_type)
@@ -407,11 +469,15 @@ class SourceTrustRaisesView(APIView):
         if unknown:
             raise ValidationError({"detail": f"A raise holds to_tier and reason only; not {unknown}."})
         try:
-            raised = FinancialSourceTrustRaise.request(source, body.get("to_tier"), body.get("reason"), by=request.user)
+            raised = FinancialSourceTrustRaise.request(
+                source, body.get("to_tier"), body.get("reason"), by=request.user, channel="api"
+            )
         except EconomicsRefused as refused:
             return _trust_refused(refused)
         except IntegrityError:
             return _raced()
+        except OperationalError:
+            return _busy()
         return Response(FinancialSourceTrustRaise.objects.get(pk=raised.pk).as_dict(), status=status.HTTP_201_CREATED)
 
 
@@ -419,39 +485,43 @@ class TrustRaiseApproveView(APIView):
     """A pending raise approved by an admin other than the one who requested it."""
 
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [StrictJSONParser]
+    parser_classes = [TrustDecisionJSONParser]
 
     def post(self, request, uuid):
         found = _visible_raise(request, uuid)
         refused = _trust_admin(request)
         if refused is not None:
             return refused
-        _declared_length(request)
+        _no_body(request)
         try:
-            done = found.approve(by=request.user)
+            done = found.approve(by=request.user, channel="api")
         except EconomicsRefused as refused:
             return _trust_refused(refused)
         except IntegrityError:
             return _raced()
+        except OperationalError:
+            return _busy()
         return Response(done.as_dict())
 
 
 class TrustRaiseWithdrawView(APIView):
-    """A pending raise withdrawn by the admin who requested it."""
+    """A pending raise withdrawn by any admin."""
 
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [StrictJSONParser]
+    parser_classes = [TrustDecisionJSONParser]
 
     def post(self, request, uuid):
         found = _visible_raise(request, uuid)
         refused = _trust_admin(request)
         if refused is not None:
             return refused
-        _declared_length(request)
+        _no_body(request)
         try:
-            withdrawn = found.withdraw(by=request.user)
+            withdrawn = found.withdraw(by=request.user, channel="api")
         except EconomicsRefused as refused:
             return _trust_refused(refused)
+        except OperationalError:
+            return _busy()
         return Response(withdrawn.as_dict())
 
 

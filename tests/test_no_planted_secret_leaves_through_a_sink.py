@@ -1349,15 +1349,34 @@ class World:
                 docs, "api.answers", admin, "post", f"{raises}{withdrawable.json()['uuid']}/withdraw/",
                 "economics-trust-raise-withdraw", data={}, format="json",
             ).status_code
-        self.command(
-            docs, "raise_source_trust", "request", str(survey.uuid), "--to", "authoritative",
-            "--reason", f"the survey again {CANARY['tenant.evidence']}", "--as", second.username,
-        )
-        pending = FinancialSourceTrustRaise.objects.filter(from_version=survey, state="pending").first()
-        if pending is not None:
-            self.command(docs, "raise_source_trust", "withdraw", str(pending.uuid), "--as", second.username)
+        # The command authenticates its --as account with the password typed at a
+        # terminal: the canary admin's own, the sign-in canary, so every sink is
+        # searched for a typed password too. It never approves (refused before any
+        # password is asked); any admin withdraws.
+        import getpass
+
+        class _Terminal:
+            def isatty(self):
+                return True
+
+        with pytest.MonkeyPatch.context() as typing:
+            typing.setattr(sys, "stdin", _Terminal())
+            typing.setattr(getpass, "getpass", lambda prompt="", stream=None: CANARY["request.password"])
+            self.command(
+                docs, "raise_source_trust", "request", str(survey.uuid), "--to", "authoritative",
+                "--reason", f"the survey again {CANARY['tenant.evidence']}", "--as", self.admin.username,
+            )
+            pending = FinancialSourceTrustRaise.objects.filter(from_version=survey, state="pending").first()
+            if pending is not None:
+                refused, _elapsed = self.command(
+                    docs, "raise_source_trust", "approve", str(pending.uuid), "--as", second.username, raises=True,
+                )
+                trust["command_approve_refused"] = bool(refused) and "second_person_required" in refused
+                self.command(docs, "raise_source_trust", "withdraw", str(pending.uuid), "--as", self.admin.username)
         trust["command"] = list(
-            FinancialSourceTrustRaise.objects.filter(from_version=survey).order_by("id").values_list("state", flat=True)
+            FinancialSourceTrustRaise.objects.filter(from_version=survey)
+            .order_by("id")
+            .values_list("state", "channel", "withdrawn_via")
         )
         signals["trust_raise"] = trust
 
@@ -1903,7 +1922,8 @@ def test_every_path_ran(observed):
     ) == (400, 201, 200), s["records"]
     assert s["records"]["trust_raise"] == {
         "one_step": 201, "asked": 201, "approved": 200, "withdrawable": 201, "withdrawn": 200,
-        "command": ["withdrawn", "withdrawn"],
+        "command_approve_refused": True,
+        "command": [("withdrawn", "api", "api"), ("withdrawn", "command", "command")],
     }, s["records"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 

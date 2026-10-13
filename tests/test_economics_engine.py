@@ -925,6 +925,12 @@ SPEC_PHRASES = (
     "`unverified` < `benchmark` < `licensed_vendor` < `customer` < `authoritative`",
     "Two concurrent approvals give exactly one version",
     "No write through the ORM records a raise to `authoritative` as done without that approval",
+    # Review round 1 of #155 (13 Oct 2026).
+    "never from its arguments or the environment",
+    "It never approves (`second_person_required`, before any password is asked)",
+    "Any active admin may withdraw a pending request",
+    "the EARLIEST version of the same tenant, key and snapshot hash",
+    "refuses a version at `authoritative` (`second_person_required`) unless it carries",
 )
 
 
@@ -934,7 +940,7 @@ def test_the_spec_states_the_policy(phrase):
 
 
 def test_the_spec_names_every_code():
-    from assurance.economics.models import TrustRaiseState
+    from assurance.economics.models import TrustRaiseChannel, TrustRaiseState
 
     text = SPEC.read_text(encoding="utf-8")
     codes = [
@@ -977,6 +983,7 @@ def test_the_spec_names_every_code():
         "economics-trust-raise-approve",
         "economics-trust-raise-withdraw",
         *(state.value for state in TrustRaiseState),
+        *(channel.value for channel in TrustRaiseChannel),
     ]
     missing = [str(code) for code in codes if f"`{code}`" not in text]
     assert not missing, missing

@@ -622,19 +622,19 @@ def _economics_trust_raise_approval():
 
     dep = _scanned()
     pending = FinancialSourceTrustRaise.request(
-        _economics_tenant_source(dep), "authoritative", "the official publisher", by=_admin()
+        _economics_tenant_source(dep), "authoritative", "the official publisher", by=_admin(), channel="api"
     )
     return dep, lambda c: c.post(f"/api/assurance/economics/trust-raises/{pending.uuid}/approve/", {}, format="json")
 
 
 def _economics_trust_raise_withdrawal():
-    """A pending request withdrawn by the admin who asked: only they may."""
+    """A pending request withdrawn by the admin who asked (any admin may)."""
     from assurance.economics.models import FinancialSourceTrustRaise
 
     dep = _scanned()
     requester = _admin()
     pending = FinancialSourceTrustRaise.request(
-        _economics_tenant_source(dep), "authoritative", "the official publisher", by=requester
+        _economics_tenant_source(dep), "authoritative", "the official publisher", by=requester, channel="api"
     )
 
     def withdraw(_another_admin):

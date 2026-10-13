@@ -110,13 +110,18 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "the latest: a newer version has been recorded since"
         ),
         "second_person_required": (
-            "a raise to authoritative is approved by an admin other than the one who requested it"
+            "an authoritative version is recorded only by a raise one admin requested and ANOTHER approved, "
+            "through the signed-in route: never by the requester, never by the operator's command, never by a "
+            "snapshot or any other write"
         ),
         "trust_raise_not_pending": (
             "the raise is no longer pending: a request is approved or withdrawn once, and a raise that is done or "
             "withdrawn stays as it is"
         ),
-        "withdrawn_by_requester_only": "a pending raise is withdrawn only by the admin who requested it",
+        "requester_no_longer_admin": (
+            "the admin who requested this raise is no longer an active admin, or their account is gone: it is "
+            "not approved, and any admin may withdraw it"
+        ),
         "reason_too_long": f"a raise's reason is at most {TRUST_RAISE_REASON_MAX} characters",
     }
 )
@@ -134,6 +139,10 @@ TRUST_ORDER: tuple[TrustTier, ...] = (
 #: The tiers a raise to needs a second person: requested by one admin, approved by
 #: another.
 TWO_PERSON_TIERS: frozenset[TrustTier] = frozenset({TrustTier.AUTHORITATIVE})
+
+#: The one channel a second person approves through: the signed-in route, where the
+#: approver is the account the request authenticated, never a name typed at a shell.
+SIGNED_IN_CHANNEL = "api"
 
 #: How SPINE names each thing a financial record may point at. Financial records
 #: reference SPINE by these ids and never copy what they name (specification,
@@ -333,12 +342,23 @@ def trust_raise_approval_refusal(requester: Person, approver: Person) -> str | N
     return None
 
 
-def trust_raise_withdrawal_refusal(requester: Person, withdrawer: Person) -> str | None:
-    """Whether ``withdrawer`` may withdraw a pending raise ``requester`` asked for:
-    only the requester does."""
-    if withdrawer.named and same_person(requester, withdrawer):
+def trust_raise_approval_channel_refusal(channel) -> str | None:
+    """Whether a raise may be approved through ``channel``: only the signed-in route
+    (:data:`SIGNED_IN_CHANNEL`). The operator's command never approves one
+    (``second_person_required``): a name typed after ``--as`` is not a second person
+    signed in."""
+    if channel == SIGNED_IN_CHANNEL:
         return None
-    return "withdrawn_by_requester_only"
+    return "second_person_required"
+
+
+def trust_raise_requester_refusal(requester_is_admin: bool) -> str | None:
+    """Whether a pending raise may still be approved: only while the admin who
+    requested it is still an active admin (``requester_no_longer_admin``), so the
+    first of the two people is one when the version is recorded."""
+    if requester_is_admin is True:
+        return None
+    return "requester_no_longer_admin"
 
 
 _SNAPSHOT_HASH = re.compile(r"sha256:[0-9a-f]{64}")
