@@ -702,7 +702,7 @@ normalization; when runs do, the card inherits the record.
 
 A sixth route module (`assurance/economics/portfolio_api.py`), imported guarded in a
 guard of its own, totals a deployment's scenarios from their draws (Economic Exposure
-E5, `docs/economics/spec-v1.md` section 31):
+E5, `docs/economics/spec-v1.md` section 32):
 
 - `POST /api/assurance/deployments/<uuid>/economics/portfolio/simulate/`:
   `{"seed": ..., "policy": "quick_10k", "reporting_currency": "USD",

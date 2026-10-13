@@ -1,5 +1,5 @@
 """A portfolio of scenarios aggregated from their draws (Economic Exposure E5;
-``docs/economics/spec-v1.md``, section 31; the owner's specification, section 24).
+``docs/economics/spec-v1.md``, section 32; the owner's specification, section 24).
 
 Customer-level exposure is never the sum of every scenario's P90: shared causes and
 shared consequences make scenarios move together, and the same loss can be counted
@@ -97,7 +97,7 @@ DRIVER = (
     "the rate its frequency implies: a Poisson's lambda; a negative binomial's Gamma(size, (1 - p) / p); a "
     "zero-inflated Poisson's 0 with probability pi, else lambda -- is multiplied by M, and the year's count is a "
     "Poisson of that product (a Gamma-mixed rate, which also widens each member's own count, keeping its mean: owner "
-    "decision 31.10 #2). A scenario in no group has M = 1, so its count is distributed as its frequency states. "
+    "decision 32.10 #2). A scenario in no group has M = 1, so its count is distributed as its frequency states. "
     "Scenarios in different groups, or in none, are independent"
 )
 

@@ -680,7 +680,7 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario-roi",
         # The data-health route (spec, section 29).
         "deployment-economics-data-health",
-        # The portfolio (spec, section 31).
+        # The portfolio (spec, section 32).
         "deployment-economics-portfolio",
         "deployment-economics-portfolio-simulate",
         "deployment-economics-portfolio-groups",
