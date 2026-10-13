@@ -3771,7 +3771,9 @@ method (405).
 
 **The simulate request.** `{"seed": <0 to 2^64 - 1>, "policy": <name>, "receipt":
 <bool>}`; only `seed` is required. The seed is a JSON integer or its decimal digits
-without a leading zero (`seed_malformed`); the policy is one of section 27.2's
+without a leading zero, at most 20 of them (`seed_malformed`: a longer string is
+refused before it is read as a number, so 4,301 digits are a 400, never a 500;
+review round 1, LOW-1); the policy is one of section 27.2's
 (`policy_unrecognised`, default `standard_100k`); `receipt` is true or false
 (`field_malformed`, default false); any other key is `field_unrecognised` and a
 missing seed `field_missing`. A refused body records nothing.
@@ -3782,8 +3784,12 @@ version's stored rows -- its source snapshot set is fixed by the version: the
 parameter-set version its build names, the build and its own parameters, each with
 its content hash (`source_snapshots`) -- and then, once per result, issues its
 Validity Card (`validity_service.issue_card`, section 26.4), its chart series
-(section 27.4) and, where the body says `"receipt": true`, its receipt
-(`receipt_service.issue_receipt` with `engine_keyring()`, section 26.5). It is
+(section 27.4) and, where the body says `"receipt": true` and the run completed, its
+receipt (`receipt_service.issue_receipt` with `engine_keyring()`, section 26.5; for
+a refused run the engine's keyring is not fetched: `result_not_completed`). A
+keyring that cannot be fetched is `keyring_unavailable` with the error's type and
+HTTP status only, never its text, which may carry the engine's response body or host
+(review round 1, LOW-2), as `signer_unavailable` reports it. It is
 IDEMPOTENT: the same inputs, seed and draws return the stored result (200) and never
 run a second; a new result is 201. A run the engine refuses is recorded as its
 refusal and served so (201, then 200), with no card figures, no series and no
@@ -3794,7 +3800,18 @@ whose inputs have no identity (a scenario its rows cannot load, a seed or draws 
 the policy, the result (uuid, status, seed, draws, digests, refusal), the source
 snapshots, what each issue gave (`issued`, or its code and detail: a card, series or
 receipt that cannot be made now is said so and never fails the request) and the
-report's URL.
+report's URL; the card's grade is its document's, where it verifies (section 27.5).
+
+**ONE deadline** bounds the whole request (review round 1, LOW-5;
+`report_api.REQUEST_BUDGET_SECONDS`, step 7b's 120 s): the run, the card's
+sensitivity analysis and the series share it, each given what remains, and a stage
+with nothing left is not started. Past it the request is 503 `time_over_budget`: the
+stage that ran out records nothing (a run past it is not recorded, section 25.7), and
+the same request again returns the stored result and issues what is missing. Before,
+each stage had its own 120 s, so one request could run three times as long. The
+Monte Carlo holds no transaction and no lock (the reviewer measured a stop answering
+in milliseconds during a `detailed_1m` run); how many simulations a process runs at
+once is not capped yet (section 27.10).
 
 ### 27.2 The simulation policies
 
@@ -3829,22 +3846,27 @@ receipt. It runs no simulation, reads no clock and asks no engine. Its keys:
 | `model` | the model release the card records: version token and build digest (section 26.5); null where no card is recorded |
 | `source_snapshots` | the version's source snapshots with their content hashes recomputed, or why not (`source_snapshot_mismatch`) |
 | `currency` | the reporting currency, its minor unit and the rounding (section 27.5) |
-| `status`, `refusal` | the run's status, and a refused run's code and detail |
-| `grade`, `banner`, `excluded_from_totals`, `banner_reason` | section 27.6 |
-| `loss_events` | each event (key, currency, effect, business process, trigger) with its components -- family, formula and version, status, low, base and high, the reason an unknown one is unknown and what it misses, and `reads`: the parameter each input reads -- and its gross cash, retained cash under a policy and market value at low, base and high, each saying whether it is complete; market value is `never_added_to_cash` |
+| `status`, `refusal` | the run's status, and a refused run's code and detail; for a result whose stored rows fail a check, the code `stored_row_unverified` naming the checks (section 27.5) |
+| `integrity` | `verified`, the checks run (`report.INTEGRITY_CHECKS`) and those failed (section 27.5) |
+| `grade`, `banner`, `excluded_from_totals`, `banner_reason` | section 27.6; the grade is the card DOCUMENT's, never the column's |
+| `loss_events` | each event (key, currency, effect, business process, trigger) with its components, in component-key order (review round 1: the order the rows were inserted in, which step 7b's inputs keep, never changes a report) -- family, formula and version, status, low, base and high, the reason an unknown one is unknown and what it misses, and `reads`: the parameter each input reads -- and its gross cash, retained cash under a policy and market value at low, base and high, each saying whether it is complete; market value is `never_added_to_cash` |
 | `parameters` | every parameter the run read, as its canonical inputs hold it, with `read_by`: each component input, policy term, frequency or derived value that reads it |
 | `summary` | the basis and its statement; for each line (gross cash, retained cash, market value) P10, P50, P90, mean, expected annual loss and severe-but-plausible, the standard error of the mean and each figure's band at the run's confidence level; for an annual run the per-occurrence lines beside; `not_reported` on every figure, band or line that does not exist, with the reason (no frequency: no expected annual loss; an infinite mean or variance: no mean, standard error or band; no policy: no retained cash; no market-value component) |
 | `charts` | the stored series (section 27.4) with their digest, or why there are none |
-| `sensitivity` | the stored analysis (section 26.1): its digest, method, basis, baseline, and the tornado, every ranked parameter with its rank, importance, direction, P10, P50 and P90, and its low and high outcomes; the fixed parameters and statements |
+| `sensitivity` | the stored analysis (section 26.1): its digest, method, basis, baseline, and the tornado, every ranked parameter with its rank, importance, direction, P10, P50 and P90 (a money parameter's at the minor unit, section 27.5; any other's as the analysis has them), and its low and high outcomes; the fixed parameters and statements |
 | `validity_card` | the card's digest, schema, issue time, grade, model version, reviewer status at issue, and its non-money fields as stored (`confidence_grade`, the three shares, `last_calibrated`, `data_freshness`, `system_fingerprint`, `technical_evidence`, `unknown_variables`, `reproduction`); the card's figures and most sensitive variables are the report's `summary` and `sensitivity` at the minor unit, and the whole card is the stored record its digest names |
-| `receipt` | a reference: the receipt id, key id, generation time, the document's digest and the card digest it signs; the signature is verified by `receipt_service.verify_stored_receipt` (section 26.6), not by the report |
+| `receipt` | a reference, marked `verified: false`: the receipt id, key id, generation time, the document's digest and the card digest it signs; the signature is verified by `receipt_service.verify_stored_receipt` (section 26.6), not by the report |
 | `limitations` | the eight statements of `report.LIMITATIONS`, in every report |
-| `unknowns` | every unknown component with its reason and missing inputs, and a refused run's refusal |
+| `unknowns` | every unknown component with its reason and missing inputs, a refused run's refusal, and an integrity refusal's failed checks |
 | `digest` | section 27.5 |
 
 **A refusal is served as the refusal**, never as figures: a refused run's report has
 its refusal, its events and components with every amount null, and `summary`,
-`charts` and `sensitivity` each `not_reported` with the reason.
+`charts` and `sensitivity` each `not_reported` with the reason. Its `parameters` are
+still served: they are what was entered (a lump sum's low, base and high among them),
+not results (review round 1, LOW-6; an owner note, section 27.11). A result's report
+can gain a card later, as it can gain a review: between the result's insert and its
+card's, it reads "not graded", with the banner, which is the conservative answer.
 
 ### 27.4 The chart series
 
@@ -3879,7 +3901,8 @@ two issues racing past the lookup are stopped by the one-to-one key. The service
 **never raises**: a failure the stored rows do not decide (`result_not_completed`,
 `engine_unavailable`, `inputs_changed`, `result_not_reproduced`,
 `time_over_budget`, `memory_exhausted`, `invariant_broken`, `charts_failed`) is
-returned and never recorded. The report reads the stored series and never draws
+returned and never recorded. The report reads the stored series, checks them
+against their digest and their result first (section 27.5), and never draws
 them: a result recorded before step 6 has none until it is simulated again (the
 same request returns the stored result and issues what is missing).
 
@@ -3895,10 +3918,38 @@ changes nothing. `digest` is `sha256:` and the SHA-256 of the canonical bytes of
 report without it (`report.digest_of`, `report.verifies`), so a reader recomputes it
 from the bytes served.
 
+**Every stored row is checked before it is served** (review round 1, MEDIUM-1;
+`report.stored_row_failures`, plain hashing, no engine): a report's digest covers
+what it serves, so it must not serve a row that is no longer as recorded. In order
+(`report.INTEGRITY_CHECKS`):
+
+| Check | Holds |
+|---|---|
+| `input_digest` | the result's stored inputs give its input digest |
+| `result_digest` | a completed result's record gives its result digest; a refused one holds none |
+| `card_digest` | the card's document gives its card digest |
+| `card_grade` | the card's grade COLUMN is the grade its DOCUMENT states (the column is outside the digest), and a grade of the card's vocabulary |
+| `card_result` | the card is the result's (its row's result, scenario and deployment) and its reproduction names the result's seed, draws, input digest and result digest |
+| `sensitivity_digest` | the stored analysis gives the digest the card signs, and the column holds it |
+| `charts_digest` | the series give their digest, of their schema |
+| `charts_result` | the series are the result's: their row's result, scenario and deployment, and the scenario, seed, draws, input digest and outcomes digest they name |
+
+A result whose rows fail any check is served as a refusal: `refusal.code`
+`stored_row_unverified` naming the checks, no figure (every amount null, `summary`,
+`charts` and `sensitivity` not reported), the banner and `excluded_from_totals:
+true`. A card that fails a check counts as no card (the result is not graded), and
+series that fail one are not served. The grade the report, the scenario document and
+the simulate response state is always the card document's, and only where the card
+verifies (`report.verified_grade`). The reviewer's repros -- a grade column edited
+from Unknown to A, a record's P50 edited, a histogram bin inflated, a series moved
+to another result -- are each a test.
+
 **Money at the currency's minor unit.** Every amount of loss the report states -- a
 component's and an event's low, base and high, the summary's figures, standard
 errors and bands, the series' losses, edges and widths, the tornado's baseline and
-outcomes -- is the stored amount rounded half-even to the reporting currency's minor
+outcomes, and a money parameter's P10, P50 and P90 in the tornado (quantiles the
+analysis computed, not recorded figures; review round 1, LOW-3) -- is the stored
+amount rounded half-even to the reporting currency's minor
 unit (`Money.display_amount`, section 11.3), as a decimal string: 0 places for JPY,
 2 for USD, 3 for KWD. A parameter's own figures are shown as recorded, since a cost
 per unit may lie below the minor unit (USD 0.375 a record). The stored result, card
@@ -3914,9 +3965,13 @@ not graded; `banner_reason` says which. A graded result (A to D) has `banner: nu
 and `excluded_from_totals: false`.
 
 Nothing may sum an excluded result into a total. `report.may_be_totalled(report)` is
-the one test a total applies -- true only for a completed result whose
-`excluded_from_totals` is false -- and a total of several reports leaves out every
-one it refuses. No route serves a total yet (section 27.10).
+the one test a total applies, and it **fails closed** (review round 1, LOW-4): true
+only for a report that carries the digest of its own bytes (`verifies`), of a
+completed result whose rows verified, `excluded_from_totals` false, and graded A, B,
+C or D (`report.GRADES_FOR_TOTALS`, an allow-list). A forged, edited or stale report
+is refused, and so is one re-digested with an Unknown grade. A total of several
+reports leaves out every one it refuses. No route serves a total yet (section
+27.10).
 
 ### 27.7 The scenario document
 
@@ -3931,8 +3986,9 @@ scenario (as section 27.3), its build, and:
   policy term or frequency that reads it; a parameter nothing reads has none);
 - `frequency`: the scenario's frequency parameter's name, or null;
 - `validity`: each simulation result of the version (uuid, seed, draws, status,
-  refusal code, when recorded) with its card's grade and digest (null where none),
-  whether its series are recorded, and its receipt id;
+  refusal code, when recorded) with its card's grade (the document's, null where
+  there is no card or it does not verify: `card_verified`) and digest, whether its
+  series are recorded, and its receipt id;
 - `evidence`: the SPINE evidence as ids, never copies (`spine_evidence`, the
   receipt's), each effect's key, origin, observed effect, observation, SPINE effect,
   asset and loss event, and each enabling finding's id, effect and role.
@@ -3940,15 +3996,17 @@ scenario (as section 27.3), its build, and:
 ### 27.8 Codes
 
 New codes: `seed_malformed` (a seed that is not a whole number from 0 to 2^64 - 1, as
-a JSON integer or its digits), `policy_unrecognised` (a policy section 27.2 does not
-name), `charts_record_malformed` (a series row that is not its own completed
+a JSON integer or at most 20 digits), `policy_unrecognised` (a policy section 27.2
+does not name), `stored_row_unverified` (a result whose stored rows fail a check of
+section 27.5: served as a refusal, never as figures), `charts_record_malformed` (a series row that is not its own completed
 result's series: another scenario or tenant, a refused result, another schema or
 identity, a float, a digest that is not the series'), and `charts_failed` (an
 unexpected fault while making a series: nothing recorded). `field_missing`,
 `field_unrecognised` and `field_malformed` are the parameter-set API's (section
-19.3); `inputs_changed`, `result_not_reproduced` and `result_not_completed` are
-step 8's (section 26.7), and the run's codes step 7b's (section 25.7), each with its
-meaning.
+19.3); `inputs_changed`, `result_not_reproduced`, `result_not_completed` and
+`keyring_unavailable` are step 8's (section 26.7), and the run's codes step 7b's
+(section 25.7), each with its meaning; `time_over_budget` is also the simulate
+request's own, when its one deadline runs out (section 27.1).
 
 ### 27.9 Safety
 
@@ -3984,6 +4042,15 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
 - **The live review status** is read when the report is built: a review recorded
   later changes the report's bytes and digest, as it should (the card keeps the
   status at issue).
+- **No cap on simulations at once** (review round 1, LOW-5): one request is bounded
+  by its one deadline, but how many a process runs at once, or a scenario holds, is
+  not. Open for the testing phase: a per-process cap (503 when busy), so a pool of
+  synchronous workers cannot fill with long simulations a stop's request might need.
+- **The step-5 events route** (`.../scenarios/<uuid>/events/`, section 24.8) serves a
+  scenario's deterministic totals with no banner, even where its result is graded
+  Unknown; it says `complete: false` and "at least: the known components only".
+  A follow-up carries the banner there too (review round 1, LOW-6(b)); this step
+  does not change that route.
 
 ### 27.11 Decisions this step takes, which the owner may change
 
@@ -4015,3 +4082,22 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
    beyond a point; the histogram has 40 bins to P99.** Alternatives: return periods
    chosen by the request; more bins. Recommendation: keep, and move them with the
    series' version.
+9. **A result whose stored rows fail a check is served as a refusal**
+   (`stored_row_unverified`), and a card that fails one counts as no card (review
+   round 1, MEDIUM-1, the lead's call). Alternative: drop only the failing part (a bad
+   series not reported, a bad card ungraded) and serve the rest. Recommendation: keep:
+   a row that no longer gives its digest says the stored state was changed outside
+   the code, and none of that result's figures is then evidence.
+10. **One deadline per simulate request**, step 7b's 120 s shared by the run, the
+    analysis and the series (review round 1, LOW-5, the lead's call); past it, 503,
+    nothing more recorded, and a retry issues what is missing. Alternative: a
+    deadline per stage (the first draft: up to three times as long). Open: a cap per
+    process, for the testing phase (section 27.10).
+11. **`may_be_totalled` fails closed**: the report's own digest, its rows verified,
+    and an allow-list of grades A to D (review round 1, LOW-4). Alternative: a block
+    list of Unknown (the first draft). Recommendation: keep.
+12. **A refused run's report keeps its recorded inputs** (review round 1, LOW-6(a),
+    an owner note): its `parameters` are what was entered, not results, though a lump
+    sum's are its component's low, base and high. Alternative: null every money
+    parameter of a refused run. Recommendation: keep, so the refusal can be read and
+    the inputs corrected.

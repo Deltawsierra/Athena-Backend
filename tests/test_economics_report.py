@@ -12,7 +12,10 @@ JSON (``docs/economics/spec-v1.md``, section 27).
   evidence by SPINE id and never copies it; a fault in the report never takes down a
   stop;
 - the chart series: made on the run's own draws, the exceedance curve at fixed
-  probabilities and a histogram whose counts sum to the draws.
+  probabilities and a histogram whose counts sum to the draws;
+- review round 1 (#158): every stored row is checked before it is served, a total
+  fails closed, a seed of any length is a 400, a keyring failure names only its type,
+  the tornado's money is at the minor unit, and one deadline bounds a request.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import types
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -41,6 +45,7 @@ from assurance.economics import (
     charts_service,
     receipt_service,
     report,
+    report_api,
     simulation_service,
     validity_service,
 )
@@ -112,14 +117,15 @@ def _parameter(scenario, name, unit, low, base=None, high=None, *, source="EXPER
 
 
 def stored(deployment, author, *, currency="USD", frequency=True, refused=False, unknown=False, policy=False,
-           set_key=SET_KEY):
+           set_key=SET_KEY, reverse_components=False):
     """A scenario version as rows (as step 8's tests make one): one event of two
     components, a notification (an expert-ranged population at a customer's unit
     cost) and a customer's regulatory range stating a gamma; a benchmark frequency
     where asked; one hypothetical effect on an asset, enabled by one finding; the
     build record. ``refused``: the regulatory range states no distribution, which the
     run refuses. ``unknown``: the notification cites the population only, so it is an
-    unknown component and the grade is Unknown. SYNTHETIC / ILLUSTRATIVE."""
+    unknown component and the grade is Unknown. ``reverse_components``: the two
+    components inserted in the other order. SYNTHETIC / ILLUSTRATIVE."""
     variables = {
         "notification_unit_cost": _entry("money_per_unit", "2.375", currency=currency),
         "notification_fixed_cost": _entry("money", "40000", currency=currency),
@@ -145,14 +151,14 @@ def stored(deployment, author, *, currency="USD", frequency=True, refused=False,
     if not unknown:
         cited.update(unit_cost=str(rows["notification_unit_cost"].uuid),
                      fixed_cost=str(rows["notification_fixed_cost"].uuid))
-    LossComponent.objects.create(
-        loss_event=event, component_key="notification", family="notification", formula_id="per_affected_plus_fixed",
-        formula_version=1, as_of=AS_OF, cited_parameters=cited,
-    )
-    LossComponent.objects.create(
-        loss_event=event, component_key="regulatory", family="regulatory_compliance", formula_id="lump_sum",
-        formula_version=1, as_of=AS_OF, cited_parameters={"amount": str(amount.uuid)},
-    )
+    components = [
+        dict(loss_event=event, component_key="notification", family="notification",
+             formula_id="per_affected_plus_fixed", formula_version=1, as_of=AS_OF, cited_parameters=cited),
+        dict(loss_event=event, component_key="regulatory", family="regulatory_compliance", formula_id="lump_sum",
+             formula_version=1, as_of=AS_OF, cited_parameters={"amount": str(amount.uuid)}),
+    ]
+    for fields in reversed(components) if reverse_components else components:
+        LossComponent.objects.create(**fields)
     asset = Asset.objects.create(deployment=deployment, kind="agent", name="support-agent",
                                  identifier=f"agent://support-{uuid.uuid4().hex[:6]}")
     finding = Finding.objects.create(deployment=deployment, fingerprint=f"fp-{uuid.uuid4().hex[:8]}",
@@ -371,6 +377,7 @@ def test_a_receipt_asked_for_is_signed_and_referenced(deployment, people, monkey
     assert body["receipt"]["receipt_id"] == stored_receipt.receipt_id
     assert body["receipt"]["document_digest"] == canonical_digest(stored_receipt.document)
     assert body["receipt"]["validity_card_digest"] == body["validity_card"]["digest"]
+    assert body["receipt"]["verified"] is False  # a reference this report did not verify (round 1, NIT)
     # Without the engine's keyring nothing is signed or recorded, and the run stands.
     def no_engine():
         raise RuntimeError("no engine")
@@ -408,7 +415,7 @@ def test_an_unknown_scenario_shows_its_figures_with_the_banner_and_its_exclusion
 
 def test_a_result_with_no_card_is_not_for_capital_decisions(deployment, people, monkeypatch):
     monkeypatch.setattr(validity_service, "issue_card",
-                        lambda result: validity_service.CardOutcome(None, False, "card_failed", "injected"))
+                        lambda result, **_: validity_service.CardOutcome(None, False, "card_failed", "injected"))
     scenario, simulated = _simulated(deployment, people)
     assert simulated["validity_card"] == {"issued": False, "code": "card_failed", "detail": "injected"}
     body = _report(_client(people["owner"]), deployment, scenario).json()
@@ -534,6 +541,8 @@ def test_tenancy_and_permissions(deployment, other_deployment, people):
         ({"seed": 7.0}, "seed_malformed"),
         ({"seed": True}, "seed_malformed"),
         ({"seed": "007"}, "seed_malformed"),
+        ({"seed": "1" * 21}, "seed_malformed"),
+        ({"seed": "1" * 4301}, "seed_malformed"),  # past Python's 4300-digit limit: never a 500 (round 1, LOW-1)
         ({"seed": 7, "policy": "standard_5"}, "policy_unrecognised"),
         ({"seed": 7, "receipt": "yes"}, "field_malformed"),
     ],
@@ -725,6 +734,219 @@ def test_removing_an_operator_never_writes_a_series(deployment, people):
 
 
 # ======================================================================
+# Review round 1 (#158): the reviewer's repros, each a test
+# ======================================================================
+
+
+def _unverified(body, *failed):
+    """``body`` serves its result as an integrity refusal naming ``failed``: first what
+    a reader sees (the banner, the exclusion, no figure), then the reason."""
+    assert body["banner"] == report.UNKNOWN_BANNER and body["excluded_from_totals"] is True, body["banner"]
+    assert report.may_be_totalled(body) is False
+    for event in body["loss_events"]:
+        assert all(event["gross_cash"][point] is None for point in ("low", "base", "high"))
+        for component in event["components"]:
+            assert all(component[point] is None for point in ("low", "base", "high"))
+    assert body["banner_reason"].startswith(f"{report.STORED_ROW_UNVERIFIED}: the stored rows fail {failed[0]}")
+    for part in ("summary", "charts", "sensitivity"):
+        assert body[part] == {"not_reported": body["banner_reason"]}, part
+    assert body["refusal"]["code"] == report.STORED_ROW_UNVERIFIED
+    assert body["integrity"]["verified"] is False and body["integrity"]["failed"] == list(failed), body["integrity"]
+    assert body["unknowns"][-1]["id"] == report.STORED_ROW_UNVERIFIED
+    assert report.verifies(body)
+
+
+def test_an_edited_grade_column_is_never_served(deployment, people):
+    """MEDIUM-1, the reviewer's repro: the Unknown card's grade COLUMN edited to A past
+    the append-only checks. The column is outside the card's digest, so only the
+    cross-check finds it: the grade is the card document's, the card counts as no
+    card, and the result is served as a refusal with the banner; no total takes it."""
+    scenario, _ = _simulated(deployment, people, unknown=True)
+    card = FinancialValidityCard.objects.get()
+    FinancialValidityCard._base_manager.filter(pk=card.pk).update(confidence_grade="A")
+    body = _report(_client(people["owner"]), deployment, scenario).json()
+    assert body["grade"] is None, body["grade"]
+    _unverified(body, "card_grade")
+    assert "counts as no card" in body["validity_card"]["not_reported"]
+    document = _client(people["owner"]).get(_base(deployment, scenario)).json()
+    (listed,) = document["validity"]["simulations"]
+    assert listed["grade"] is None and listed["card_verified"] is False
+
+
+def test_an_edited_record_is_never_served(deployment, people):
+    """MEDIUM-1: the record's gross P50 edited to 1.00. The record no longer gives the
+    result's digest: no figure of it is served."""
+    scenario, _ = _simulated(deployment, people)
+    result = SimulationResult.objects.get()
+    record = json.loads(json.dumps(result.record))
+    record["scenario"]["gross_cash"]["p50"] = "1.00"
+    SimulationResult._base_manager.filter(pk=result.pk).update(record=record)
+    response = _report(_client(people["owner"]), deployment, scenario)
+    body = response.json()
+    _unverified(body, "result_digest")
+    assert body["simulation"]["basis"] is None and body["simulation"]["outcomes_sha256"] is None
+
+
+def test_an_inflated_histogram_bin_is_never_served(deployment, people):
+    """MEDIUM-1: one histogram bin's count raised by 12,345. The series no longer gives
+    its digest."""
+    scenario, _ = _simulated(deployment, people)
+    row = SimulationCharts.objects.get()
+    charts = json.loads(json.dumps(row.charts))
+    charts["lines"]["gross_cash"]["histogram"]["bins"][0]["count"] += 12345
+    SimulationCharts._base_manager.filter(pk=row.pk).update(charts=charts)
+    _unverified(_report(_client(people["owner"]), deployment, scenario).json(), "charts_digest")
+
+
+def test_a_series_moved_to_another_result_is_never_served(deployment, people):
+    """MEDIUM-1: the second result's series removed and the first's pointed at it. The
+    series is intact, but it names the first result's seed and draws: the second's
+    report serves no series of another run."""
+    scenario = stored(deployment, people["analyst"])
+    analyst = _client(people["analyst"])
+    first = _simulate(analyst, deployment, scenario, {"seed": 7, "policy": QUICK}).json()["simulation"]["uuid"]
+    second = _simulate(analyst, deployment, scenario, {"seed": 8, "policy": QUICK}).json()["simulation"]["uuid"]
+    r1, r2 = SimulationResult.objects.get(uuid=first), SimulationResult.objects.get(uuid=second)
+    SimulationCharts._base_manager.filter(simulation=r2).delete()
+    SimulationCharts._base_manager.filter(simulation=r1).update(simulation=r2)
+    _unverified(_report(_client(people["owner"]), deployment, scenario, second).json(), "charts_result")
+
+
+def test_every_check_holds_on_rows_as_recorded(deployment, people):
+    """The checks pass on every row as it was recorded: graded, Unknown and refused."""
+    for kwargs in ({}, {"unknown": True, "set_key": "q2"}, {"refused": True, "set_key": "q3"}):
+        scenario, _ = _simulated(deployment, people, **kwargs)
+        body = _report(_client(people["owner"]), deployment, scenario).json()
+        assert body["integrity"] == {"verified": True, "checks": list(report.INTEGRITY_CHECKS), "failed": []}
+
+
+def test_a_total_fails_closed(deployment, people):
+    """LOW-4. ``may_be_totalled`` takes a report only where its digest holds, its rows
+    verified, and its grade is A to D (an allow-list): the reviewer's Unknown report
+    with ``excluded_from_totals`` set false and its digest stale is refused, and so is
+    one re-digested with the grade left Unknown."""
+    graded, _ = _simulated(deployment, people)
+    body = _report(_client(people["owner"]), deployment, graded).json()
+    assert report.may_be_totalled(body) is True
+    stale = json.loads(json.dumps(body))
+    stale["summary"]["lines"]["gross_cash"]["p50"] = "1"
+    assert report.may_be_totalled(stale) is False
+    unknown, _ = _simulated(deployment, people, unknown=True, set_key="q2")
+    forged = _report(_client(people["owner"]), deployment, unknown).json()
+    forged["excluded_from_totals"] = False
+    assert report.may_be_totalled(forged) is False  # the digest is stale
+    forged["digest"] = report.digest_of(forged)
+    assert report.verifies(forged) and report.may_be_totalled(forged) is False  # Unknown is not on the list
+    ungraded = json.loads(json.dumps(body))
+    ungraded["grade"] = None
+    ungraded["digest"] = report.digest_of(ungraded)
+    assert report.verifies(ungraded) and report.may_be_totalled(ungraded) is False  # nor is no grade at all
+    assert report.GRADES_FOR_TOTALS == frozenset({"A", "B", "C", "D"})
+
+
+class _EngineDown(Exception):
+    status = 502
+
+
+def test_a_keyring_failure_names_only_its_type_and_status(deployment, people, monkeypatch):
+    """LOW-2, the reviewer's repro: the engine's keyring fetch fails with its response
+    body and host in the error's text. The reply names the error's type and status
+    only, as the signer's path does."""
+    def down():
+        raise _EngineDown("Engine error 502: CANARY-ENGINE-BODY host=engine.internal")
+
+    monkeypatch.setattr(receipt_service, "engine_keyring", down)
+    scenario = stored(deployment, people["analyst"])
+    response = _simulate(_client(people["analyst"]), deployment, scenario, {"seed": 7, "policy": QUICK,
+                                                                           "receipt": True})
+    assert response.status_code == 201, response.content
+    assert response.json()["receipt"] == {"issued": False, "code": "keyring_unavailable",
+                                          "detail": "_EngineDown (status 502)"}
+    assert b"CANARY-ENGINE-BODY" not in response.content and b"engine.internal" not in response.content
+
+
+def test_a_refused_result_fetches_no_keyring(deployment, people, monkeypatch):
+    """NIT: a refused run has no figures to sign, so the engine's keyring is never
+    fetched for it."""
+    fetched = []
+    monkeypatch.setattr(receipt_service, "engine_keyring", lambda: fetched.append(1))
+    scenario = stored(deployment, people["analyst"], refused=True)
+    response = _simulate(_client(people["analyst"]), deployment, scenario, {"seed": 7, "policy": QUICK,
+                                                                           "receipt": True})
+    assert response.status_code == 201, response.content
+    assert response.json()["receipt"]["code"] == "result_not_completed" and fetched == []
+    assert response.json()["source_snapshots"] == report.served_snapshots(scenario)
+
+
+@pytest.mark.parametrize("currency, places", [("JPY", 0), ("KWD", 3)])
+def test_the_tornados_money_is_at_the_minor_unit(deployment, people, currency, places):
+    """LOW-3, the reviewer's repro: in a JPY report the regulatory cost's P10, P50 and
+    P90 were "42887.939189583936" and the like. A money parameter's quantiles are now at
+    the minor unit, half-even; a count's are as the analysis has them."""
+    scenario, _ = _simulated(deployment, people, currency=currency)
+    body = _report(_client(people["owner"]), deployment, scenario).json()
+    card = FinancialValidityCard.objects.get()
+    analysed = {entry["name"]: entry["swing"] for entry in card.sensitivity["ranked"] if entry["swing"]}
+    tornado = {entry["name"]: entry["swing"] for entry in body["sensitivity"]["tornado"] if entry["swing"]}
+    money = tornado["exposure.regulatory_response_cost"]
+    quantum = Decimal(1).scaleb(-places)
+    for point in ("p10", "p50", "p90"):
+        assert Decimal(money[point]).as_tuple().exponent == -places, money
+        held = Decimal(analysed["exposure.regulatory_response_cost"][point])
+        assert Decimal(money[point]) == held.quantize(quantum, rounding="ROUND_HALF_EVEN")
+    count = tornado["exposure.affected_customers"]
+    assert count["p50"] == analysed["exposure.affected_customers"]["p50"]
+
+
+def test_components_are_in_key_order_whatever_order_they_were_inserted_in(deployment, people):
+    """NIT: the report orders an event's components by key; the order the rows were
+    inserted in, which step 7b's inputs keep, never decides it."""
+    for kwargs in ({}, {"reverse_components": True, "set_key": "q2"}):
+        scenario, _ = _simulated(deployment, people, **kwargs)
+        body = _report(_client(people["owner"]), deployment, scenario).json()
+        (event,) = body["loss_events"]
+        assert [c["component_id"] for c in event["components"]] == ["notification", "regulatory"], kwargs
+
+
+def test_one_deadline_bounds_a_simulate_request(deployment, people, monkeypatch):
+    """LOW-5. The run, the card's analysis and the series share ONE deadline of 120 s,
+    each given what remains: a run that takes 100 s leaves the card 20 s, and a card
+    that takes 30 more leaves the series nothing, so it is not started. The request is
+    503 time_over_budget; what was not issued is recorded nowhere; the same request
+    again returns the stored result and issues the series."""
+    now = [0.0]
+    budgets: dict[str, list] = {"run": [], "card": [], "charts": []}
+    real_run, real_card, real_charts = (simulation_service.simulate_scenario, validity_service.issue_card,
+                                        charts_service.issue_charts)
+
+    def spy(name, real, takes):
+        def call(*args, **kwargs):
+            budgets[name].append(kwargs.get("time_budget"))
+            now[0] += takes
+            return real(*args, **kwargs)
+        return call
+
+    monkeypatch.setattr(report_api, "time", types.SimpleNamespace(monotonic=lambda: now[0]), raising=False)
+    monkeypatch.setattr(simulation_service, "simulate_scenario", spy("run", real_run, 100.0))
+    monkeypatch.setattr(validity_service, "issue_card", spy("card", real_card, 30.0))
+    monkeypatch.setattr(charts_service, "issue_charts", spy("charts", real_charts, 0.0))
+    scenario = stored(deployment, people["analyst"])
+    analyst = _client(people["analyst"])
+    response = _simulate(analyst, deployment, scenario)
+    assert budgets["run"] == [120.0] and budgets["card"] == [20.0] and budgets["charts"] == [], budgets
+    assert response.status_code == 503 and response.json()["code"] == "time_over_budget", response.content
+    assert response.json()["charts"]["code"] == "time_over_budget"
+    assert SimulationResult.objects.count() == 1 and FinancialValidityCard.objects.count() == 1
+    assert not SimulationCharts.objects.exists()
+    monkeypatch.setattr(simulation_service, "simulate_scenario", spy("run", real_run, 0.0))
+    monkeypatch.setattr(validity_service, "issue_card", spy("card", real_card, 0.0))
+    again = _simulate(analyst, deployment, scenario)
+    assert again.status_code == 200, again.content
+    assert again.json()["charts"]["issued"] is True and again.json()["charts"]["created"] is True
+    assert SimulationResult.objects.count() == 1 and SimulationCharts.objects.count() == 1
+
+
+# ======================================================================
 # The spec
 # ======================================================================
 
@@ -738,6 +960,10 @@ SPEC_PHRASES = (
     "`charts_record_malformed`",
     "`policy_unrecognised`",
     "`0067_simulation_charts.py`",
+    "`stored_row_unverified`",
+    "ONE deadline",
+    "fails closed",
+    "verified: false",
 )
 
 

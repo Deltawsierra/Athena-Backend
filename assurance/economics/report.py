@@ -21,11 +21,19 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   below the minor unit (USD 0.375 a record).
 - **A refusal is served as the refusal**, never as figures: a refused run has no
   summary, no series and no tornado, and the report says why.
+- **Every stored row is checked before it is served** (review round 1, MEDIUM-1):
+  the result's inputs and record give their digests, the card its digest, its grade
+  column the grade its document states, and its reproduction the result's identity,
+  the analysis the digest the card signs, and the series its digest and the result's
+  identity (:func:`stored_row_failures`). A result whose rows fail a check is served
+  as a refusal (``stored_row_unverified``, naming the checks), and a card that fails
+  one counts as no card. The grade is the card DOCUMENT's, never the column's.
 - **Unknown is not for capital decisions** (the owner-adopted default): a result
-  graded Unknown -- or refused, or not graded at all -- still shows whatever figures
-  it has, with ``banner`` :data:`UNKNOWN_BANNER` and ``excluded_from_totals: true``.
-  Nothing may sum such a result into a total, now or later: :func:`may_be_totalled`
-  is the one test a total applies.
+  graded Unknown -- or refused, or not graded at all, or unverified -- still shows
+  whatever figures it may, with ``banner`` :data:`UNKNOWN_BANNER` and
+  ``excluded_from_totals: true``. Nothing may sum such a result into a total, now or
+  later: :func:`may_be_totalled` is the one test a total applies, and it fails
+  closed.
 
 Nothing here is on a stop path. This module imports nothing probabilistic: the step-8
 and builder modules it reads are imported when a report is built, never at load.
@@ -44,8 +52,9 @@ from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine.formulas import MARKET_VALUE
 from .engine.money import Money
-from .engine.parameters import POINTS
+from .engine.parameters import MONEY_UNITS, POINTS
 from .models import (
+    CARD_GRADES,
     SIMULATION_COMPLETED,
     CausalEffect,
     CustomerParameterSet,
@@ -60,6 +69,7 @@ from .models import (
     SimulationCharts,
     SimulationResult,
     canonical_digest,
+    card_digest,
 )
 
 #: The report's schema.
@@ -70,6 +80,18 @@ SCENARIO_SCHEMA = "mythos.economics.scenario/v1"
 UNKNOWN_BANNER = "Unknown: not for capital decisions"
 #: The grade that is not for capital decisions.
 UNKNOWN = "Unknown"
+#: The grades a total may sum (an allow-list: anything else is refused).
+GRADES_FOR_TOTALS = frozenset({"A", "B", "C", "D"})
+#: The reason a result whose stored rows fail a check is served as a refusal.
+STORED_ROW_UNVERIFIED = "stored_row_unverified"
+#: The checks :func:`stored_row_failures` runs, in order: the result's (its inputs
+#: and its record), the card's (its digest, its grade column against its document,
+#: its reproduction against the result, its analysis against the digest it signs),
+#: and the series' (its digest, its identity against the result).
+RESULT_CHECKS = ("input_digest", "result_digest")
+CARD_CHECKS = ("card_digest", "card_grade", "card_result", "sensitivity_digest")
+CHARTS_CHECKS = ("charts_digest", "charts_result")
+INTEGRITY_CHECKS = RESULT_CHECKS + CARD_CHECKS + CHARTS_CHECKS
 #: A line's figures, as the report names them (the run's record names the expected
 #: annual loss ``expected_annual_exposure``).
 FIGURES = ("p10", "p50", "p90", "mean", "expected_annual_loss", "severe_plausible")
@@ -116,10 +138,111 @@ def verifies(report: Mapping) -> bool:
 
 
 def may_be_totalled(report: Mapping) -> bool:
-    """Whether a total may sum ``report``'s figures: only a completed result that is
-    graded, and not Unknown. A total of several reports applies this to each, and
-    leaves out every one it refuses (the owner-adopted default)."""
-    return report.get("status") == SIMULATION_COMPLETED and report.get("excluded_from_totals") is False
+    """Whether a total may sum ``report``'s figures. It fails closed (review round 1,
+    LOW-4): only a report that carries the digest of its own bytes, of a completed
+    result whose stored rows verified, not excluded from totals, and graded A to D
+    (an allow-list). A forged, edited or stale report is refused. A total of several
+    reports applies this to each, and leaves out every one it refuses (the
+    owner-adopted default)."""
+    try:
+        genuine = verifies(report)
+    except (TypeError, ValueError):
+        return False
+    return (
+        genuine
+        and report.get("status") == SIMULATION_COMPLETED
+        and report.get("excluded_from_totals") is False
+        and report.get("grade") in GRADES_FOR_TOTALS
+        and (report.get("integrity") or {}).get("verified") is True
+    )
+
+
+# ------------------------------------------------------------------ the stored rows
+
+
+def _digest(function, document) -> str | None:
+    """``function(document)``, or ``None`` where the stored value cannot be digested."""
+    try:
+        return function(document)
+    except (TypeError, ValueError):
+        return None
+
+
+def _result_failures(result: SimulationResult) -> list[str]:
+    failed = []
+    if _digest(canonical_digest, result.inputs) != result.input_digest:
+        failed.append("input_digest")
+    if result.status == SIMULATION_COMPLETED:
+        if not isinstance(result.record, dict) or _digest(canonical_digest, result.record) != result.result_digest:
+            failed.append("result_digest")
+    elif result.record is not None or result.result_digest:
+        failed.append("result_digest")
+    return failed
+
+
+def _card_failures(card: FinancialValidityCard | None, result: SimulationResult) -> list[str]:
+    if card is None:
+        return []
+    failed = []
+    document = card.card if isinstance(card.card, dict) else {}
+    if _digest(card_digest, card.card) != card.card_digest:
+        failed.append("card_digest")
+    grade = document.get("confidence_grade")
+    if grade != card.confidence_grade or grade not in CARD_GRADES:
+        failed.append("card_grade")
+    reproduction = (document.get("fields") or {}).get("reproduction") or {}
+    held = (reproduction.get("seed"), reproduction.get("draws"), reproduction.get("input_digest"),
+            reproduction.get("result_digest"))
+    identity = (card.simulation_id, card.scenario_id, card.deployment_id)
+    if identity != (result.pk, result.scenario_id, result.deployment_id) or held != (
+        result.seed, result.draws, result.input_digest, result.result_digest or None
+    ):
+        failed.append("card_result")
+    analysis = None if card.sensitivity is None else _digest(canonical_digest, card.sensitivity)
+    if analysis != reproduction.get("sensitivity_digest") or (card.sensitivity_digest or None) != analysis:
+        failed.append("sensitivity_digest")
+    return failed
+
+
+def _charts_failures(row: SimulationCharts | None, result: SimulationResult, scenario: FinancialScenario
+                     ) -> list[str]:
+    if row is None:
+        return []
+    failed = []
+    charts = row.charts if isinstance(row.charts, dict) else {}
+    if _digest(canonical_digest, row.charts) != row.charts_digest or charts.get("schema") != row.schema:
+        failed.append("charts_digest")
+    record = result.record if isinstance(result.record, dict) else {}
+    named = (charts.get("scenario_id"), charts.get("seed"), charts.get("draws"), charts.get("input_digest"),
+             charts.get("outcomes_sha256"))
+    identity = (row.simulation_id, row.scenario_id, row.deployment_id)
+    if (
+        identity != (result.pk, result.scenario_id, result.deployment_id)
+        or result.status != SIMULATION_COMPLETED
+        or named != (str(scenario.uuid), result.seed, result.draws, result.input_digest, record.get("outcomes_sha256"))
+    ):
+        failed.append("charts_result")
+    return failed
+
+
+def stored_row_failures(
+    result: SimulationResult,
+    card: FinancialValidityCard | None,
+    charts: SimulationCharts | None,
+    scenario: FinancialScenario,
+) -> list[str]:
+    """The checks of :data:`INTEGRITY_CHECKS` that the stored rows of ``result`` fail,
+    in order (none: every row is as recorded). Plain hashing: no engine, no numpy."""
+    return _result_failures(result) + _card_failures(card, result) + _charts_failures(charts, result, scenario)
+
+
+def verified_grade(card: FinancialValidityCard | None, result: SimulationResult) -> str | None:
+    """The grade of ``card``, from its DOCUMENT, where the card and ``result`` verify
+    (:func:`stored_row_failures`); ``None`` otherwise: a card that fails a check counts
+    as no card."""
+    if card is None or _result_failures(result) or _card_failures(card, result):
+        return None
+    return card.card["confidence_grade"]
 
 
 # ------------------------------------------------------------------ money
@@ -198,7 +321,9 @@ def _loss_events(scenario: FinancialScenario, build: ScenarioBuild | None, shown
         event = row.as_engine()
         assessment = engine_loss.assess(event, policy)
         components = []
-        for component in event.components:
+        # In the report, by component key (review round 1): the order the rows were
+        # inserted in, which step 7b's inputs keep, never changes a report.
+        for component in sorted(event.components, key=lambda c: c.component_id):
             known = figures and component.status == "estimated"
             components.append(
                 {
@@ -339,7 +464,10 @@ def _summary(result: SimulationResult, shown: _Shown) -> dict:
     }
 
 
-def _charts(row: SimulationCharts | None, result: SimulationResult, shown: _Shown) -> dict:
+def _charts(row: SimulationCharts | None, result: SimulationResult, shown: _Shown, withheld: str | None = None
+            ) -> dict:
+    if withheld is not None:
+        return {"not_reported": withheld}
     if row is None:
         reason = (
             "a refused run has no figures to chart"
@@ -379,21 +507,32 @@ def _charts(row: SimulationCharts | None, result: SimulationResult, shown: _Show
     }
 
 
-def _sensitivity(card: FinancialValidityCard | None, shown: _Shown) -> dict:
+#: The money units, as the canonical inputs spell them.
+_MONEY_UNITS = frozenset(unit.value for unit in MONEY_UNITS)
+
+
+def _sensitivity(card: FinancialValidityCard | None, shown: _Shown, units: Mapping[str, str] | None = None,
+                 withheld: str | None = None) -> dict:
+    if withheld is not None:
+        return {"not_reported": withheld}
     if card is None or card.sensitivity is None:
         return {"not_reported": "no sensitivity analysis is recorded for this result"
                 if card is None else "a refused run has nothing to analyse"}
+    units = units or {}
     analysis = card.sensitivity
     tornado = []
     for entry in analysis.get("ranked", []):
         swing = entry.get("swing")
+        # A money parameter's quantiles are money: at the minor unit, as every amount
+        # the report states (review round 1, LOW-3); any other's as the analysis has them.
+        quantile = shown if units.get(entry.get("name")) in _MONEY_UNITS else (lambda value: value)
         tornado.append(
             {
                 **{k: v for k, v in entry.items() if k != "swing"},
                 "swing": None
                 if swing is None
                 else {
-                    "p10": swing["p10"], "p50": swing["p50"], "p90": swing["p90"],
+                    "p10": quantile(swing["p10"]), "p50": quantile(swing["p50"]), "p90": quantile(swing["p90"]),
                     "low_outcome": shown(swing["low_outcome"]), "high_outcome": shown(swing["high_outcome"]),
                 },
             }
@@ -438,7 +577,10 @@ def _model(card: FinancialValidityCard | None) -> dict | None:
     return {"version": model.get("version"), "build_digest": model.get("build_digest")}
 
 
-def _card(card: FinancialValidityCard | None) -> dict:
+def _card(card: FinancialValidityCard | None, unverified: bool = False) -> dict:
+    if unverified:
+        return {"not_reported": "the Validity Card recorded for this result does not verify against its digest, its "
+                "grade or its result: it counts as no card, and the result is not graded"}
     if card is None:
         return {"not_reported": "no Validity Card is recorded for this result: it is not graded"}
     fields = card.card.get("fields", {})
@@ -446,7 +588,7 @@ def _card(card: FinancialValidityCard | None) -> dict:
         "digest": card.card_digest,
         "schema": card.schema,
         "issued_at": card.issued_at.isoformat(),
-        "grade": card.confidence_grade,
+        "grade": card.card["confidence_grade"],
         "model_version": _model(card),
         "reviewer_status_at_issue": card.card.get("reviewer_status"),
         "fields": {name: fields.get(name) for name in _CARD_FIELDS},
@@ -464,12 +606,15 @@ def _receipt(receipt: FinancialExposureReceipt | None) -> dict:
         "generated_at": receipt.generated_at.isoformat(),
         "document_digest": canonical_digest(receipt.document),
         "validity_card_digest": (receipt.document.get("validity_card") or {}).get("digest"),
-        "statement": "a reference: the signature is verified against the engine's published keyring "
-        "(receipt_service.verify_stored_receipt), not by this report",
+        "verified": False,
+        "statement": "a reference, not verified by this report: the signature is verified against the engine's "
+        "published keyring (receipt_service.verify_stored_receipt)",
     }
 
 
-def _snapshots(scenario: FinancialScenario) -> dict:
+def served_snapshots(scenario: FinancialScenario) -> dict:
+    """The scenario version's source snapshots with their content hashes recomputed
+    from the stored rows, or why they are not reported (``source_snapshot_mismatch``)."""
     from .receipt_service import ReceiptRefused, source_snapshots
 
     try:
@@ -478,7 +623,7 @@ def _snapshots(scenario: FinancialScenario) -> dict:
         return {"not_reported": f"{refused.code}: {refused.detail}"}
 
 
-def _unknowns(result: SimulationResult, events: list[dict]) -> list[dict]:
+def _unknowns(result: SimulationResult, events: list[dict], failed: list[str]) -> list[dict]:
     found = []
     for event in events:
         for component in event["components"]:
@@ -493,7 +638,17 @@ def _unknowns(result: SimulationResult, events: list[dict]) -> list[dict]:
                 )
     if result.status != SIMULATION_COMPLETED:
         found.append({"kind": "refusal", "id": result.refusal_code, "reason": result.refusal_detail, "missing": []})
+    if failed:
+        found.append({"kind": "integrity", "id": STORED_ROW_UNVERIFIED, "reason": _unverified(failed),
+                      "missing": list(failed)})
     return found
+
+
+def _unverified(failed: list[str]) -> str:
+    return (
+        f"{STORED_ROW_UNVERIFIED}: the stored rows fail {', '.join(failed)}: a row no longer gives its digest, or "
+        "names another result; served as a refusal"
+    )
 
 
 # ------------------------------------------------------------------ the report
@@ -509,9 +664,20 @@ def build_report(result: SimulationResult) -> dict:
     card = FinancialValidityCard.objects.filter(simulation=result).first()
     receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
     charts = SimulationCharts.objects.filter(simulation=result).first()
+    # Every stored row checked before it is served (review round 1, MEDIUM-1).
+    failed = stored_row_failures(result, card, charts, scenario)
+    card_unverified = card is not None and any(check in CARD_CHECKS for check in failed)
+    if card_unverified:
+        card = None  # a card that fails a check counts as no card
+    if any(check in CHARTS_CHECKS for check in failed):
+        charts = None
     completed = result.status == SIMULATION_COMPLETED
-    grade = card.confidence_grade if card is not None else None
-    if not completed:
+    figures = completed and not failed
+    grade = card.card["confidence_grade"] if card is not None else None
+    withheld = None
+    if failed:
+        why = withheld = _unverified(failed)
+    elif not completed:
         why = f"the run was refused ({result.refusal_code}): it has no figures"
     elif grade is None:
         why = "no Validity Card is recorded for this result: it is not graded"
@@ -519,8 +685,22 @@ def build_report(result: SimulationResult) -> dict:
         why = "graded Unknown: Mythos cannot responsibly quantify this scenario"
     else:
         why = None
-    events = _loss_events(scenario, build, shown, figures=completed)
-    record = result.record if completed else None
+    events = _loss_events(scenario, build, shown, figures=figures)
+    record = result.record if completed and "result_digest" not in failed else None
+    if not completed:
+        refusal = {"code": result.refusal_code, "detail": result.refusal_detail}
+    elif failed:
+        refusal = {"code": STORED_ROW_UNVERIFIED, "detail": withheld}
+    else:
+        refusal = None
+    if figures:
+        summary = _summary(result, shown)
+    elif failed:
+        summary = {"not_reported": withheld}
+    else:
+        summary = {"not_reported": f"refused: {result.refusal_code}"}
+    units = {name: (entry or {}).get("unit") for name, entry in (result.inputs.get("parameters") or {}).items()} \
+        if "input_digest" not in failed else {}
     report = {
         "schema": REPORT_SCHEMA,
         "scenario": _scenario_part(scenario, deployment_uuid),
@@ -541,23 +721,26 @@ def build_report(result: SimulationResult) -> dict:
         },
         "versions": result.versions,
         "model": _model(card),
-        "source_snapshots": _snapshots(scenario),
+        "source_snapshots": served_snapshots(scenario),
         "currency": {"code": code, "minor_unit": shown.minor_unit, "rounding": ROUNDING},
         "status": result.status,
-        "refusal": None if completed else {"code": result.refusal_code, "detail": result.refusal_detail},
+        "refusal": refusal,
+        "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed)},
         "grade": grade,
         "banner": None if why is None else UNKNOWN_BANNER,
         "excluded_from_totals": why is not None,
         "banner_reason": why,
         "loss_events": events,
-        "parameters": _parameters(result.inputs),
-        "summary": _summary(result, shown) if completed else {"not_reported": f"refused: {result.refusal_code}"},
-        "charts": _charts(charts, result, shown),
-        "sensitivity": _sensitivity(card, shown),
-        "validity_card": _card(card),
+        "parameters": _parameters(result.inputs) if "input_digest" not in failed else {
+            "not_reported": f"{STORED_ROW_UNVERIFIED}: the stored inputs no longer give the run's input digest"
+        },
+        "summary": summary,
+        "charts": _charts(charts, result, shown, withheld),
+        "sensitivity": _sensitivity(card, shown, units, withheld),
+        "validity_card": _card(card, unverified=card_unverified),
         "receipt": _receipt(receipt),
         "limitations": list(LIMITATIONS),
-        "unknowns": _unknowns(result, events),
+        "unknowns": _unknowns(result, events, failed),
     }
     report["digest"] = digest_of(report)
     return report
@@ -637,7 +820,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
                 "status": result.status,
                 "refusal_code": result.refusal_code or None,
                 "recorded_at": result.recorded_at.isoformat(),
-                "grade": None if card is None else card.confidence_grade,
+                "grade": verified_grade(card, result),
+                "card_verified": None if card is None else verified_grade(card, result) is not None,
                 "card_digest": None if card is None else card.card_digest,
                 "charts": SimulationCharts.objects.filter(simulation=result).exists(),
                 "receipt_id": None if receipt is None else receipt.receipt_id,
@@ -669,7 +853,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
         "frequency": frequency,
         "validity": {
             "simulations": results,
-            "statement": "each simulation result with the grade of its Validity Card; a result with none is not graded",
+            "statement": "each simulation result with the grade its Validity Card's document states, where the card "
+            "verifies; a result with none, or with one that does not verify, is not graded",
         },
         "evidence": {
             "spine": spine_evidence(scenario),
@@ -682,10 +867,13 @@ def scenario_document(scenario: FinancialScenario) -> dict:
 
 __all__ = [
     "FIGURES",
+    "GRADES_FOR_TOTALS",
+    "INTEGRITY_CHECKS",
     "LIMITATIONS",
     "LINES",
     "REPORT_SCHEMA",
     "SCENARIO_SCHEMA",
+    "STORED_ROW_UNVERIFIED",
     "UNKNOWN",
     "UNKNOWN_BANNER",
     "build_report",
@@ -693,5 +881,8 @@ __all__ = [
     "digest_of",
     "may_be_totalled",
     "scenario_document",
+    "served_snapshots",
+    "stored_row_failures",
+    "verified_grade",
     "verifies",
 ]

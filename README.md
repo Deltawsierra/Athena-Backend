@@ -528,11 +528,16 @@ guard of its own, serves what steps 5, 7b and 8 record (section 27):
   unknowns.
 
 The report is deterministic: the same stored rows give byte-identical canonical JSON,
-with no clock but the stored times, and it carries its own `sha256:` digest. Money is
-shown at the currency's minor unit (0 places for JPY, 3 for KWD). A refused run is
-served as its refusal, never as figures. A result graded Unknown, refused, or not
-graded still shows what figures it has, with `banner: "Unknown: not for capital
-decisions"` and `excluded_from_totals: true`, and nothing may sum it into a total.
+with no clock but the stored times, and it carries its own `sha256:` digest. Every
+stored row it serves is checked first against its digest and its result (a card's
+grade is its document's, never its column's); a result whose rows fail a check is
+served as a refusal, `stored_row_unverified`. Money is shown at the currency's minor
+unit (0 places for JPY, 3 for KWD). A refused run is served as its refusal, never as
+figures. A result graded Unknown, refused, unverified, or not graded still shows what
+figures it may, with `banner: "Unknown: not for capital decisions"` and
+`excluded_from_totals: true`, and nothing may sum it into a total: `may_be_totalled`
+fails closed (the report's own digest, and a grade of A to D). One 120 s deadline
+bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
 records nothing. None of the three is a stop, and a fault in this module leaves only
