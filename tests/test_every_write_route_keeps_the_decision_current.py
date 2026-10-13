@@ -665,6 +665,36 @@ _TRUST_RAISE = (
     "source version it raises to; the decision reads no economics record"
 )
 
+def _economics_mitigations():
+    from tests.test_economics_remediation import option_body
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    scenario = stored(dep, _admin())
+    # The set-up's own writes (an asset and a finding the scenario rests on) are
+    # decision inputs: the decision is brought up to date before the option is
+    # recorded, which must leave it where it is.
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/mitigations/", option_body("0.5"), format="json"
+    )
+
+
+def _economics_mitigation_simulate():
+    from assurance.economics import remediation_service
+    from tests.test_economics_remediation import option_body
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    author = _admin()
+    scenario = stored(dep, author)
+    option, _ = remediation_service.record_option(scenario, option_body("0.5"), author=author)
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/mitigations/{option.uuid}/simulate/",
+        {"seed": 7, "policy": "quick_10k"}, format="json",
+    )
+
 
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
@@ -739,6 +769,16 @@ CANNOT_MOVE = {
         "simulates an Economic Exposure scenario version and issues its Validity Card and chart series, all "
         "economics records; the decision reads no economics record",
         _economics_scenario_simulate,
+    ),
+    ("MitigationsView", "post", "post"): (
+        "records a scenario version's one remediation option, an economics record; the decision reads no "
+        "economics record",
+        _economics_mitigations,
+    ),
+    ("MitigationSimulateView", "post", "post"): (
+        "simulates a scenario version's current run and a remediation option's residual run and issues their "
+        "Validity Cards, all economics records; the decision reads no economics record",
+        _economics_mitigation_simulate,
     ),
 }
 

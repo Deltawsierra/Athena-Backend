@@ -48,6 +48,7 @@ from .models import (
     FinancialParameter,
     FinancialScenario,
     LossEvent,
+    RemediationOption,
     ScenarioBuild,
     SimulationResult,
 )
@@ -83,7 +84,43 @@ def _engine():
     return distributions, money, scenario_simulation, simulation
 
 
-def load_input(scenario: FinancialScenario):
+def remediation_of(option: RemediationOption):
+    """A remediation option's control effect as a residual run reads it (spec,
+    section 28): its id and digest, its reductions with their stated
+    distributions, and what it acts on. An option whose stored document no longer
+    holds to its form is refused (``remediation_record_malformed``)."""
+    from .engine import remediation as engine_remediation
+
+    _, money, ss, _ = _engine()
+    try:
+        parsed = option.option()
+        stated = {name: ss.parse_stated(form, f"{name}.distribution") for name, form in parsed.distributions.items()}
+    except (engine_remediation.RemediationRefused, ss.ScenarioSimulationRefused, money.MoneyRefused,
+            ValueError) as refused:
+        detail = f"{getattr(refused, 'code', type(refused).__name__)}: {getattr(refused, 'detail', '')}"
+        raise EconomicsRefused("remediation_record_malformed", detail) from None
+    return ss.Remediation(
+        option_id=str(option.uuid),
+        option_digest=option.option_digest,
+        frequency_reduction=parsed.frequency_reduction,
+        magnitude_reduction=parsed.magnitude_reduction,
+        stated=stated,
+        families=parsed.families,
+        components=parsed.components,
+    )
+
+
+def load_input_of(result: SimulationResult):
+    """The ``ScenarioInput`` a stored result was run on: its scenario version's, and,
+    for a residual run, its remediation option's control effect with it."""
+    scenario = FinancialScenario.objects.get(pk=result.scenario_id)
+    option = None
+    if result.remediation_id is not None:
+        option = RemediationOption.objects.get(pk=result.remediation_id)
+    return load_input(scenario, remediation=option)
+
+
+def load_input(scenario: FinancialScenario, *, remediation: RemediationOption | None = None):
     """The scenario version as one run reads it (a ``ScenarioInput``): its events
     in key order, each component recomputed from the rows it cites; the policy of
     the parameter-set version it was built from; every cited row's stated
@@ -92,7 +129,9 @@ def load_input(scenario: FinancialScenario):
     built from states (spec, section 19.2), read as the policy is, or a parameter
     of its own named ``frequency``. Both is a conflict, refused (``duplicate_id``),
     never resolved by taking one. Every parameter is drawn once per simulated
-    year: nothing here names one to be drawn per occurrence."""
+    year: nothing here names one to be drawn per occurrence. For a residual run,
+    ``remediation`` is the option whose control effect it applies (spec, section
+    28); every other input is exactly the current run's."""
     _, _, ss, _ = _engine()
     build_row = ScenarioBuild.objects.filter(scenario=scenario).first()
     events = tuple(row.as_engine() for row in LossEvent.objects.filter(scenario=scenario).order_by("event_key"))
@@ -144,6 +183,8 @@ def load_input(scenario: FinancialScenario):
     if frequency_row is not None:
         rows.append(frequency_row)
     stated = {row.name: row.stated_distribution() for row in rows if row.distribution is not None}
+    if remediation is not None and remediation.scenario_id != scenario.pk:
+        raise EconomicsRefused("cross_tenant_reference", "the option is another scenario version's")
     return ss.ScenarioInput(
         scenario_id=str(scenario.uuid),
         currency=currency,
@@ -152,6 +193,7 @@ def load_input(scenario: FinancialScenario):
         stated=stated,
         frequency=frequency,
         derived=derived,
+        remediation=None if remediation is None else remediation_of(remediation),
     )
 
 
@@ -165,6 +207,32 @@ def _code(error) -> tuple[str, str]:
     return getattr(error, "code", "simulation_failed"), getattr(error, "detail", "") or str(error)
 
 
+#: The refusals a pair of runs is checked for before either runs (spec, section 28.2).
+BUDGET_REFUSALS = frozenset({"values_over_budget", "events_over_limit"})
+
+
+def residual_unfit(scenario: FinancialScenario, option: RemediationOption, *, seed: int, draws: int
+                   ) -> tuple[str, str] | None:
+    """``(code, detail)`` where ``option``'s residual run of ``scenario`` with ``seed``
+    and ``draws`` would not fit the engine's values or events budget -- checked before
+    the current run is made, so a pair is refused whole and up front (nothing run,
+    nothing recorded) -- else ``None``. Any other refusal, or a fault, is left to the
+    runs themselves, which record or return it as step 7b does. Never raises."""
+    try:
+        _, _, ss, _ = _engine()
+        ss.check_fits(load_input(scenario, remediation=option), seed=seed, draws=draws)
+    except Exception as error:  # noqa: BLE001 - only a budget refusal is this check's to answer
+        code = getattr(error, "code", None)
+        if code in BUDGET_REFUSALS:
+            return code, (
+                f"the residual run would not fit ({error.detail}); it holds more values than its current run (its "
+                "reduction factor, uniform draws and a reduction's draws per occurrence): choose a smaller policy. "
+                "Nothing was run or recorded"
+            )
+        return None
+    return None
+
+
 def simulate_scenario(
     scenario: FinancialScenario,
     *,
@@ -172,19 +240,23 @@ def simulate_scenario(
     draws: int | None = None,
     severe_percentile=None,
     time_budget: float = TIME_BUDGET_SECONDS,
+    remediation: RemediationOption | None = None,
 ) -> SimulationOutcome:
     """Simulate ``scenario`` with ``seed`` and ``draws`` (the engine's default when
     not given), and record the run, or return the one recorded for the same
-    inputs. Never raises: see the module's rules."""
+    inputs. With ``remediation``, the residual run of that option (spec, section
+    28): the same seed, draws and streams, the option's control effect applied, its
+    digest in the canonical inputs, and the option on the row. Never raises: see
+    the module's rules."""
     try:
-        return _simulate(scenario, seed, draws, severe_percentile, time_budget)
+        return _simulate(scenario, seed, draws, severe_percentile, time_budget, remediation)
     except MemoryError:
         return SimulationOutcome(None, False, "memory_exhausted", "the run could not hold its values")
     except Exception as error:  # noqa: BLE001 - the service never raises: a fault is returned with its code
         return SimulationOutcome(None, False, "simulation_failed", f"{type(error).__name__}: {error}")
 
 
-def _simulate(scenario, seed, draws, severe_percentile, time_budget) -> SimulationOutcome:
+def _simulate(scenario, seed, draws, severe_percentile, time_budget, remediation=None) -> SimulationOutcome:
     try:
         distributions, money, ss, sim = _engine()
     except Exception as error:  # noqa: BLE001 - an import fault of numpy or the engine is a returned refusal
@@ -202,7 +274,7 @@ def _simulate(scenario, seed, draws, severe_percentile, time_budget) -> Simulati
         sim.check_seed(seed)
         sim.check_draws(draws)
         severe = sim.check_severe_percentile(severe_percentile)
-        si = load_input(scenario)
+        si = load_input(scenario, remediation=remediation)
         inputs = ss.canonical_inputs(si, severe_percentile=severe)
     except refusals as refused:
         # Not recorded: without a valid seed, draws and inputs, a run has no identity.
@@ -249,6 +321,7 @@ def _simulate(scenario, seed, draws, severe_percentile, time_budget) -> Simulati
         started_at=started_at,
         finished_at=finished_at,
         duration_ms=duration_ms,
+        remediation=remediation,
     )
     try:
         # Every check, the lookup of the same identity included, before the
@@ -267,4 +340,14 @@ def _simulate(scenario, seed, draws, severe_percentile, time_budget) -> Simulati
     return SimulationOutcome(row, True, row.refusal_code or None, row.refusal_detail)
 
 
-__all__ = ["TIME_BUDGET_SECONDS", "UNRECORDED", "SimulationOutcome", "load_input", "simulate_scenario"]
+__all__ = [
+    "TIME_BUDGET_SECONDS",
+    "UNRECORDED",
+    "SimulationOutcome",
+    "BUDGET_REFUSALS",
+    "load_input",
+    "load_input_of",
+    "remediation_of",
+    "residual_unfit",
+    "simulate_scenario",
+]

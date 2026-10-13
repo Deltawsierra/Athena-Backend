@@ -671,6 +671,10 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario",
         "deployment-economics-scenario-simulate",
         "deployment-economics-scenario-results",
+        # The remediation option and its ROI (spec, section 28).
+        "deployment-economics-scenario-mitigations",
+        "deployment-economics-mitigation-simulate",
+        "deployment-economics-scenario-roi",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
