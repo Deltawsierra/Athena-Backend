@@ -1257,9 +1257,9 @@ def _payments_body(deployment, author) -> dict:
 
 def built(deployment, author):
     """A scenario version BUILT by the builder (spec, section 24) from
-    :func:`_payments_body`. No writer states a frequency yet (section 25.9) and a
-    receipt needs one, so the scenario's frequency is added after the build, as the
-    fixtures above state theirs. SYNTHETIC / ILLUSTRATIVE."""
+    :func:`_payments_body`. A receipt needs a frequency, and the body's parameter set
+    states none, so the scenario's is added after the build, as the fixtures above
+    state theirs. SYNTHETIC / ILLUSTRATIVE."""
     scenario, created = builder.build(deployment, _payments_body(deployment, author), author=author)
     assert created
     _parameter(scenario, ss.FREQUENCY_PARAMETER, "count", "1", "2", "4", source="CUSTOMER_PROVIDED",
