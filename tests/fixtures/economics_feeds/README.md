@@ -1,7 +1,7 @@
 # Economic Exposure feed fixtures (MVP step 10)
 
 The answers the four live-feed adapters (`assurance/economics/engine/feeds.py`;
-`docs/economics/spec-v1.md`, section 28) are tested against.
+`docs/economics/spec-v1.md`, section 29) are tested against.
 
 **Every file here is format-faithful, NOT a recorded response; replace with a recording (owner).**
 Each was written by hand from the provider's documented response format. None was

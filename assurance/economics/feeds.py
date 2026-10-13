@@ -1,5 +1,5 @@
 """Fetching a live feed into the snapshot store, the freshness of a feed source, and
-a deployment's data health (MVP step 10; ``docs/economics/spec-v1.md``, section 28).
+a deployment's data health (MVP step 10; ``docs/economics/spec-v1.md``, section 29).
 
 **Fetching** (:func:`fetch`, run by ``manage.py fetch_financial_source <source>
 [--as-of DATE]``): one source of the feed registry

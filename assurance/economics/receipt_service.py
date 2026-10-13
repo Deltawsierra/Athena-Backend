@@ -89,6 +89,10 @@ FIGURES = ("p10", "p50", "p90", "mean", "expected_annual_exposure", "severe_plau
 #: ``KEYRING_CODES``) are returned as core's.
 REFUSALS = {
     "result_not_completed": "a receipt is made for a completed run: a refused run has no figures to sign",
+    "residual_not_receipted": (
+        "a receipt is made for a scenario's own run: a residual run under a remediation option (section 28) is "
+        "the scenario as the option would leave it, never its exposure, and is not receipted"
+    ),
     "receipt_figure_unavailable": (
         "every one of the receipt's six figures exists for the run: a run without a frequency has no expected "
         "annual exposure, and one with an infinite mean no mean; none is estimated"
@@ -135,7 +139,7 @@ REFUSALS = {
         "whatever the release"
     ),
     "verification_failed": "an unexpected fault while verifying: nothing is vouched for",
-    # The feed sources a run's figures rest on (spec, section 28).
+    # The feed sources a run's figures rest on (spec, section 29).
     "source_stale": (
         "a feed source the run's figures rest on was past twice its freshness SLA at the run's as-of date: the "
         "Validity Card says stale, and a stale claim is never signed as current"
@@ -428,6 +432,9 @@ def issue_receipt(result: SimulationResult, *, keyring=None, signer=None) -> Rec
 
 
 def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
+    if result.remediation_id is not None:
+        # Before anything is read, signed or recorded: a residual run is not exposure.
+        return ReceiptOutcome(None, False, "residual_not_receipted", f"remediation option {result.remediation_id}")
     try:
         core, _ = _core()
     except Exception as error:  # noqa: BLE001 - an import fault is a returned refusal
@@ -512,7 +519,7 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
 
 
 def feed_refusal(result: SimulationResult, card: FinancialValidityCard) -> tuple[str, str] | None:
-    """Why the feed sources ``result``'s figures rest on (spec, section 28) stop its
+    """Why the feed sources ``result``'s figures rest on (spec, section 29) stop its
     receipt, as ``(code, detail)``, or ``None``. Read before anything is built or
     signed, and nothing is recorded when it refuses. The sources are read from the
     RUN's own inputs (each figure's ``evidence_ref``), and from the card as well, so a

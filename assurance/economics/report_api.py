@@ -298,7 +298,9 @@ class ScenarioResultsView(APIView):
     def get(self, request, uuid, scenario):
         deployment = _deployment(request, uuid)
         found = _scenario(deployment, scenario)
-        results = SimulationResult.objects.filter(scenario=found, deployment=deployment)
+        # The scenario's own runs only: a residual run under a remediation option is
+        # never the scenario's exposure, and is served by the ROI route (section 28).
+        results = SimulationResult.objects.exposure_runs().filter(scenario=found, deployment=deployment)
         named = request.query_params.get("simulation")
         if named is not None:
             try:

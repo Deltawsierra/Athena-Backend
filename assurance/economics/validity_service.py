@@ -211,7 +211,7 @@ def _feed_freshness(inputs, roles, issued) -> tuple[list[dict], list[str], str]:
     ``feed_sources``), each with the figures it feeds; every figure the run reads
     that rests on a stale, blocked or missing source (the grade's ``stale_source``);
     and the claim the card may make: ``current``, or ``stale`` where a source is
-    blocked or missing (spec, section 28). A card issued before feed sources were
+    blocked or missing (spec, section 29). A card issued before feed sources were
     read (no ``feed_sources``) shows none."""
     held = issued.get("feed_sources")
     if held is None:
@@ -365,7 +365,7 @@ def issued_context(result: SimulationResult, scenario: FinancialScenario) -> dic
         "findings": {uuid: found.get(uuid) for uuid in sorted({x.finding for x in links})},
         "deployment_system_fingerprint": fingerprint,
     }
-    # The feed sources the run's figures rest on (spec, section 28), read now at the
+    # The feed sources the run's figures rest on (spec, section 29), read now at the
     # run's as-of date and kept as issued: only where a figure names one.
     keys = feed_rules.referenced_keys((result.inputs or {}).get("parameters"))
     if keys:
@@ -766,7 +766,8 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
             EconomicsRefused,
         )
         try:
-            si = simulation_service.load_input(scenario)
+            # The result's own input: a residual run's with its control effect (section 28).
+            si = simulation_service.load_input_of(result)
             sensitivity = sens.analyse(
                 si,
                 seed=int(result.seed),

@@ -83,7 +83,8 @@ CARD_RECORD_REFUSALS = {
     ),
     "receipt_record_malformed": (
         "a receipt row holds a schema-valid mythos.financial-exposure-receipt/v1 document naming its own card, "
-        "scenario and tenant, and the DSSE envelope signed over exactly that document"
+        "scenario and tenant, and the DSSE envelope signed over exactly that document; and it receipts a scenario's "
+        "own run, never a residual run under a remediation option, which is not the scenario's exposure"
     ),
 }
 _REFUSAL_TEXT.update(CARD_RECORD_REFUSALS)
@@ -96,6 +97,19 @@ CHARTS_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(CHARTS_RECORD_REFUSALS)
+#: The codes a remediation option row is refused with on save (spec, section 28).
+REMEDIATION_RECORD_REFUSALS = {
+    "remediation_record_malformed": (
+        "a remediation option row holds its option's document in the one spelling, held to every rule of its form; "
+        "its digest the document's for its scenario version; and its title, currency, days and citations the "
+        "document's"
+    ),
+    "remediation_option_held": (
+        "a scenario version holds ONE remediation option: another option is a new scenario version that supersedes "
+        "it, append-only"
+    ),
+}
+_REFUSAL_TEXT.update(REMEDIATION_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -1613,7 +1627,7 @@ def fetch_codes() -> frozenset[str]:
 
 class FinancialSourceFetch(_AppendOnly):
     """One fetch of one feed source by ``manage.py fetch_financial_source`` (spec,
-    section 28): which source, as known on which date, when it was asked, and what
+    section 29): which source, as known on which date, when it was asked, and what
     came of it -- ``recorded`` (a new source version, whose snapshot hash is the
     response's normalised payload hash), ``unchanged`` (the payload was one already
     recorded: no new version, and the version that holds it named), or ``refused``
@@ -2554,6 +2568,22 @@ def _checked_state(row) -> tuple:
     return tuple(json.dumps(field.value_from_object(row), sort_keys=True, default=str) for field in row._meta.concrete_fields)
 
 
+class SimulationResultQuerySet(AppendOnlyQuerySet):
+    """The append-only queryset, and the ONE place the exposure filter is written
+    (spec, section 28): a scenario's own runs are its exposure; a residual run under
+    a remediation option never is."""
+
+    def exposure_runs(self):
+        """The runs that are a scenario's exposure: none under a remediation option.
+        Every reader of exposure -- the results route, the scenario document, the
+        events banner, any total -- reads through this."""
+        return self.filter(remediation__isnull=True)
+
+    def residual_runs(self):
+        """The residual runs under a remediation option: never exposure."""
+        return self.filter(remediation__isnull=False)
+
+
 class SimulationResult(_AppendOnly):
     """One Monte Carlo run of one scenario version (spec, section 25.6): the seed and
     the draws; the canonical inputs and their digest; every version the figures rest
@@ -2569,6 +2599,8 @@ class SimulationResult(_AppendOnly):
     a decimal string (``result_malformed``), and both digests are recomputed on save
     (``digest_mismatch``). It has no account column, so removing an operator, a stop,
     never writes it, and it goes with its deployment."""
+
+    objects = SimulationResultQuerySet.as_manager()
 
     id = models.BigAutoField(primary_key=True)
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -2595,6 +2627,13 @@ class SimulationResult(_AppendOnly):
     finished_at = models.DateTimeField()
     duration_ms = models.PositiveIntegerField()
     recorded_at = models.DateTimeField(default=timezone.now)
+    # A residual run (spec, section 28): the remediation option whose control effect it
+    # applies, named in its canonical inputs too. Null for the scenario as it is. A
+    # residual run is never the scenario's exposure: the results route and the
+    # scenario document serve only runs with none, and the ROI route serves this one.
+    remediation = models.ForeignKey(
+        "RemediationOption", on_delete=models.CASCADE, null=True, blank=True, related_name="+"
+    )
 
     class Meta:
         ordering = ["scenario", "id"]
@@ -2652,6 +2691,21 @@ class SimulationResult(_AppendOnly):
             raise EconomicsRefused("result_malformed", f"status {self.status!r}")
         if self.started_at is None or self.finished_at is None or self.finished_at < self.started_at:
             raise EconomicsRefused("date_inversion", "a result finishes after it starts")
+        # A residual run names its option in its column and in its inputs, the same
+        # one, of its own scenario version; any other run names none in either.
+        block = self.inputs.get("remediation") if isinstance(self.inputs, dict) else None
+        if self.remediation_id is None:
+            if block is not None:
+                raise EconomicsRefused("result_malformed", "a run whose inputs name a remediation option is residual")
+        else:
+            option = list(
+                RemediationOption._base_manager.filter(pk=self.remediation_id).values_list(
+                    "scenario_id", "uuid", "option_digest"
+                )
+            )
+            named = (block.get("option"), block.get("option_digest")) if isinstance(block, dict) else None
+            if len(option) != 1 or option[0][0] != self.scenario_id or named != (str(option[0][1]), option[0][2]):
+                raise EconomicsRefused("result_malformed", "a residual run's inputs name its own option, of its scenario")
         if SimulationResult._base_manager.filter(
             scenario_id=self.scenario_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
         ).exists():
@@ -2812,6 +2866,11 @@ class FinancialExposureReceipt(_AppendOnly):
         card = list(card)
         if not card or card[0][:3] != (self.simulation_id, self.scenario_id, self.deployment_id):
             raise EconomicsRefused("cross_tenant_reference", "the receipt's card is another result's")
+        residual = SimulationResult._base_manager.filter(pk=self.simulation_id).values_list("remediation_id", flat=True)
+        if any(option is not None for option in residual):
+            raise EconomicsRefused(
+                "receipt_record_malformed", "a residual run under a remediation option is not receipted: not exposure"
+            )
         try:
             # Imported on use, never at load: the models' import loads no part of
             # the receipt module (spec, section 26.7).
@@ -2951,6 +3010,105 @@ class SimulationCharts(_AppendOnly):
 
     def __str__(self) -> str:
         return f"chart series of simulation {self.simulation_id}"
+
+
+# ---------------------------------------------------------------------------
+# RemediationOption -- one remediation option of a scenario version (step 13)
+# ---------------------------------------------------------------------------
+
+
+class RemediationOption(_AppendOnly):
+    """ONE remediation option of ONE scenario version (spec, section 28; the owner's
+    specification, section 21 and the ``MitigationOption`` of section 15): what it
+    costs to implement and to run for a year, how long it takes, what it depends on
+    (text, or SPINE ids, never copies), its control effect (a frequency reduction
+    and/or a magnitude reduction, each a ratio with a low, base and high and a source,
+    acting on every component or on the families or components it names), the retest
+    an observed control effect was observed in, and the evidence that legitimate use
+    survives, if any. Its document is held to every rule of its form on save, in its
+    one spelling, and its digest is the document's for its scenario version: the
+    residual run names that digest in its canonical inputs.
+
+    Append-only like every economics record, and ONE per scenario version (a
+    one-to-one key, and ``remediation_option_held``): another option is a new
+    version. It names its author as a scenario does: the account, nulled if the
+    account is removed (a stop), and the account's own username, kept. It goes with
+    its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.OneToOneField(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    title = models.CharField(max_length=255)
+    # The option as engine.remediation.parse_option holds it, in its one spelling.
+    document = models.JSONField()
+    option_digest = models.CharField(max_length=71)
+    currency = models.CharField(max_length=3)
+    time_to_implement_days = models.PositiveIntegerField()
+    # The retest record a control effect was observed in, and the one cited for
+    # utility retained, each by its digest (engine.remediation.RETEST_CITATION_SCHEMA);
+    # blank where none is cited.
+    observed_by = models.CharField(max_length=71, blank=True)
+    utility_evidence = models.CharField(max_length=71, blank=True)
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_remediation_options_authored",
+    )
+    author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+
+    def option(self):
+        """The option the stored document states, as the engine reads it."""
+        from .engine import remediation as engine_remediation
+
+        return engine_remediation.parse_option(self.document)
+
+    def check_new(self) -> None:
+        from .engine import remediation as engine_remediation
+
+        scenario = list(FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("deployment_id", "uuid"))
+        if not scenario or scenario[0][0] != self.deployment_id:
+            raise EconomicsRefused("cross_tenant_reference", "the option's scenario is another deployment's")
+        try:
+            option = engine_remediation.parse_option(self.document)
+        except (engine_remediation.RemediationRefused, parameters.ParameterRefused, money.MoneyRefused) as refused:
+            raise EconomicsRefused("remediation_record_malformed", f"{refused.code}: {refused.detail}") from None
+        if dict(option.document) != self.document:
+            raise EconomicsRefused("remediation_record_malformed", "the document is not in its one spelling")
+        if engine_remediation.option_digest(str(scenario[0][1]), option.document) != self.option_digest:
+            raise EconomicsRefused("remediation_record_malformed", "option_digest is not the document's")
+        held = (self.title, self.currency, self.time_to_implement_days, self.observed_by, self.utility_evidence)
+        stated = (option.title, option.currency, option.time_to_implement_days, option.observed_by or "",
+                  option.utility_evidence or "")
+        if held != stated:
+            raise EconomicsRefused("remediation_record_malformed", "a column is not the document's")
+        built = ScenarioBuild._base_manager.filter(scenario_id=self.scenario_id).values_list("currency", flat=True)
+        for currency in built:
+            if currency != self.currency:
+                raise EconomicsRefused(
+                    "currency_mismatch", f"the option costs {self.currency}; the scenario is built in {currency}"
+                )
+        if RemediationOption._base_manager.filter(scenario_id=self.scenario_id).exists():
+            raise EconomicsRefused("remediation_option_held", f"scenario {scenario[0][1]}")
+        self.author_username = _signed_in(self.author).username
+        self._option_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this option, checked just before on exactly these values: an INSERT
+        and nothing read (as :meth:`SimulationResult.insert_checked`)."""
+        if not self._state.adding or getattr(self, "_option_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A remediation option is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"remediation option {self.title}"
 
 
 # ---------------------------------------------------------------------------

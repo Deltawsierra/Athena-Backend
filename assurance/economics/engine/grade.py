@@ -25,7 +25,7 @@ step, A to B to C to D, never below D), each firing at most once:
   where a policy applies, the frequency, or a derived value's contributor -- is
   past its ``fresh_until`` at the run's as-of date;
 - ``stale_source``: such a figure rests on a feed source (its ``evidence_ref``
-  names ``financial-source:<key>``, spec section 28) that is stale, blocked or
+  names ``financial-source:<key>``, spec section 29) that is stale, blocked or
   missing at the run's as-of date; the rule names every figure each such source
   feeds;
 - ``expert_figures``: a MATERIAL figure (a level share of at least

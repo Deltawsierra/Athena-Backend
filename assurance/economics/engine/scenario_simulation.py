@@ -68,7 +68,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from fractions import Fraction
 from types import MappingProxyType
@@ -78,7 +78,7 @@ import numpy as np
 from . import distributions as dist
 from . import simulation as sim
 from . import twins as tw
-from .formulas import ESTIMATED, MARKET_VALUE, Direction, LossComponent
+from .formulas import COMPONENT_FAMILIES, ESTIMATED, MARKET_VALUE, Direction, LossComponent
 from .loss import NEVER_COVERED, InsurancePolicy, LossEvent, assess
 from .money import Money, MoneyRefused, check_reporting_currency, decimal_text, parse_decimal
 from .parameters import POINTS, Parameter, ParameterRefused, Point, Unit
@@ -127,6 +127,32 @@ VARIATION_VERSION = "mythos.economics.variation/v2"
 STREAM_DOMAIN = "mythos.economics.parameter-stream/v1"
 #: The name of a scenario's frequency parameter: events a year.
 FREQUENCY_PARAMETER = "frequency"
+
+#: A residual run (MVP step 13; spec, section 28): the scenario run again with ONE
+#: remediation option's control effect, on the SAME seed and the SAME parameter
+#: streams, so the current and the residual run differ only by the control effect.
+REMEDIATION_SCHEMA = "mythos.economics.remediation-run/v1"
+REMEDIATION_VERSION = 1
+#: Hashed before a reduction's role to give its own stream's name: never a
+#: parameter's stream, so drawing the control effect moves no parameter's draws.
+REMEDIATION_STREAM_DOMAIN = "mythos.economics.remediation-stream/v1"
+#: The two reductions' names (``assurance.economics.engine.remediation`` names them
+#: alike), and the role of the stream deciding which occurrences the control stops.
+FREQUENCY_REDUCTION = "remediation.frequency_reduction"
+MAGNITUDE_REDUCTION = "remediation.magnitude_reduction"
+REMEDIATION_KEPT = "remediation.kept"
+#: Vectors a residual run holds beside a run's own: the factor each reduced
+#: component is multiplied by, the uniform draws deciding what is kept, and one
+#: reduction's draws, one per occurrence.
+REMEDIATION_TEMPORARIES = 3
+REMEDIATION_RULE = (
+    "the current run's seed and parameter streams, unchanged; r_f and r_m each drawn by the parameter-to-distribution "
+    "rule (a point mass for a fixed figure, PERT for an expert range, a stated distribution), once per simulated year "
+    "(per draw without a frequency), each from its own stream; each occurrence of a component the option acts on is "
+    "kept where a uniform draw from its own stream is below 1 - r_f (its year's r_f), so the expected count of "
+    "occurrences it suffers is the frequency times 1 - r_f, and is multiplied by 1 - r_m; insurance applies after, to "
+    "what remains; a component the option does not act on is the current run's, draw for draw"
+)
 
 SHARED = "shared"
 PER_OCCURRENCE = "per_occurrence"
@@ -209,6 +235,17 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "variation_unrecognised": "a parameter drawn per occurrence is one a component or the policy reads",
         "out_of_range": "a component's, event's or year's loss too large to hold as a binary64 float",
         "time_over_budget": "the run took longer than its time budget, and was stopped between two stages",
+        "remediation_malformed": (
+            "a residual run's remediation names its option and the option's digest, states a frequency reduction, a "
+            "magnitude reduction or both, each a ratio named remediation.frequency_reduction or "
+            "remediation.magnitude_reduction, and acts on every component or on the loss families or components it "
+            "names, one or the other"
+        ),
+        "remediation_needs_frequency": (
+            "a frequency reduction reduces the scenario's frequency: a scenario that states none is run per "
+            "occurrence, each given it happens, and has no frequency to reduce"
+        ),
+        "remediation_target_unknown": "a component the control effect names is not one of the scenario's",
     }
 )
 
@@ -795,13 +832,47 @@ def resolve_frequency(parameter: Parameter, stated: StatedDistribution | None) -
 
 
 @dataclass(frozen=True)
+class Remediation:
+    """One remediation option's control effect, for a residual run (spec, section
+    28): the option's id and digest, its frequency reduction ``r_f`` and magnitude
+    reduction ``r_m`` (each a ratio parameter, or ``None``), the distribution each
+    states (by its name), and what it acts on: every component (both ``None``), the
+    loss families named, or the components named (``<event key>/<component key>``)."""
+
+    option_id: str
+    option_digest: str
+    frequency_reduction: Parameter | None = None
+    magnitude_reduction: Parameter | None = None
+    stated: Mapping[str, StatedDistribution] = field(default_factory=dict)
+    families: tuple[str, ...] | None = None
+    components: tuple[str, ...] | None = None
+
+    def reductions(self) -> list[tuple[str, Parameter]]:
+        return [
+            (name, parameter)
+            for name, parameter in ((FREQUENCY_REDUCTION, self.frequency_reduction),
+                                    (MAGNITUDE_REDUCTION, self.magnitude_reduction))
+            if parameter is not None
+        ]
+
+
+def remediation_stream(role: str) -> str:
+    """The step-7a stream a residual run draws ``role`` from: ``r`` and the first 40
+    hex digits of the SHA-256 of :data:`REMEDIATION_STREAM_DOMAIN`, a zero byte and
+    the role's UTF-8. Never a parameter's stream (``p...``) or the frequency's."""
+    digest = hashlib.sha256(REMEDIATION_STREAM_DOMAIN.encode("ascii") + b"\x00" + role.encode("utf-8")).hexdigest()
+    return "r" + digest[:40]
+
+
+@dataclass(frozen=True)
 class ScenarioInput:
     """What one run reads: the scenario's events (step 4's, each component
     computed from the parameters it cites), the policy their insurance applies,
     each parameter's stated distribution by name, the names drawn afresh for each
     occurrence (every other parameter is drawn once per simulated year), the
     frequency parameter, if any, and each derived parameter's contributors, by
-    the derived parameter's name."""
+    the derived parameter's name. A residual run also reads one remediation
+    option's control effect (``remediation``; ``None`` for the scenario as it is)."""
 
     scenario_id: str | None
     currency: str
@@ -811,6 +882,7 @@ class ScenarioInput:
     per_occurrence: frozenset[str] = frozenset()
     frequency: Parameter | None = None
     derived: Mapping[str, tuple[Parameter, ...]] = field(default_factory=dict)
+    remediation: Remediation | None = None
 
 
 def _policy_terms(policy: InsurancePolicy | None) -> list[tuple[str, Parameter]]:
@@ -953,7 +1025,7 @@ def canonical_inputs(si: ScenarioInput, *, severe_percentile=sim.DEFAULT_SEVERE_
         if not isinstance(value, StatedDistribution):
             raise ScenarioSimulationRefused("distribution_malformed", f"{name}: a {type(value).__name__}")
     policy = si.policy
-    return {
+    document = {
         "schema": INPUTS_SCHEMA,
         "scenario_id": si.scenario_id,
         "reporting_currency": si.currency,
@@ -999,6 +1071,76 @@ def canonical_inputs(si: ScenarioInput, *, severe_percentile=sim.DEFAULT_SEVERE_
         "rules": {"parameter_distribution": RULE_VERSION, "rule": RULE, "variation": VARIATION_VERSION},
         "versions": versions(si),
     }
+    if si.remediation is not None:
+        # Only a residual run has this key: the scenario as it is keeps the inputs,
+        # and so the input digest, it had before remediation existed, and a residual
+        # run's inputs are exactly its current run's with this one key added.
+        document["remediation"] = _remediation_inputs(si, named)
+    return document
+
+
+def _is_digest(value) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in value[7:])
+    )
+
+
+def _remediation_inputs(si: ScenarioInput, named: Mapping[str, Parameter]) -> dict:
+    """A residual run's remediation in canonical form: the option and its digest,
+    each reduction with its figures, source, evidence and stated distribution, what
+    it acts on, its streams and the rule. Refused (``remediation_malformed``) unless
+    well formed, and ``duplicate_id`` where a reduction's name is a parameter's."""
+    rem = si.remediation
+    if not isinstance(rem, Remediation):
+        raise ScenarioSimulationRefused("remediation_malformed", f"a {type(rem).__name__}")
+    if not isinstance(rem.option_id, str) or not rem.option_id or not _is_digest(rem.option_digest):
+        raise ScenarioSimulationRefused("remediation_malformed", "the option's id, and its digest (sha256: and 64 hex)")
+    reductions = rem.reductions()
+    if not reductions:
+        raise ScenarioSimulationRefused("remediation_malformed", "it states no reduction")
+    for name, parameter in reductions:
+        if not isinstance(parameter, Parameter) or parameter.name != name or parameter.unit is not Unit.RATIO:
+            raise ScenarioSimulationRefused("remediation_malformed", f"{name} is a ratio parameter named {name}")
+        if name in named:
+            raise ParameterRefused("duplicate_id", f"{name} is also a parameter of the scenario")
+    stated = dict(rem.stated)
+    if not set(stated) <= {name for name, _ in reductions} or not all(
+        isinstance(value, StatedDistribution) for value in stated.values()
+    ):
+        raise ScenarioSimulationRefused("remediation_malformed", "a stated distribution names no reduction")
+    if rem.families is not None and rem.components is not None:
+        raise ScenarioSimulationRefused("remediation_malformed", "it acts on families or on components, not both")
+    targets = rem.families if rem.families is not None else rem.components
+    if targets is not None and (
+        not targets
+        or not all(isinstance(t, str) for t in targets)
+        or len(set(targets)) != len(targets)
+        or (rem.families is not None and not set(targets) <= COMPONENT_FAMILIES)
+    ):
+        raise ScenarioSimulationRefused("remediation_malformed", f"acts on {targets!r}")
+    acts_on = None
+    if rem.families is not None:
+        acts_on = {"families": sorted(rem.families)}
+    elif rem.components is not None:
+        acts_on = {"components": sorted(rem.components)}
+    return {
+        "schema": REMEDIATION_SCHEMA,
+        "version": REMEDIATION_VERSION,
+        "option": rem.option_id,
+        "option_digest": rem.option_digest,
+        "reductions": {
+            name: {**parameter.as_dict(), "distribution": stated[name].as_json() if name in stated else None}
+            for name, parameter in reductions
+        },
+        "acts_on": acts_on,
+        "stream_domain": REMEDIATION_STREAM_DOMAIN,
+        "kept_stream": remediation_stream(REMEDIATION_KEPT),
+        "temporaries": REMEDIATION_TEMPORARIES,
+        "rule": REMEDIATION_RULE,
+    }
 
 
 def digest_of(document: Mapping) -> str:
@@ -1016,6 +1158,10 @@ class _Component:
     reads: Mapping[str, str]
     twin: tw.Twin | None
     exact: Decimal | None
+    #: A residual run's control effect changes this component: each occurrence is
+    #: multiplied by the reduction factor, so its summary is no longer the exact
+    #: Decimal value even where its inputs are all point masses.
+    reduced: bool = False
 
     @property
     def constant(self) -> float | None:
@@ -1052,6 +1198,64 @@ class _Plan:
     #: the event reads is uncertain; ``None`` otherwise. The scenario's likewise.
     exact_events: tuple[Mapping[str, Decimal | None] | None, ...] = ()
     exact_scenario: Mapping[str, Decimal | None] | None = None
+    #: A residual run's control effect, resolved; ``None`` for the scenario as it is.
+    remediation: _RemedyPlan | None = None
+
+
+@dataclass(frozen=True)
+class _RemedyPlan:
+    """A residual run's control effect as the run applies it: each reduction
+    resolved by the parameter-to-distribution rule (``None`` where the option states
+    none), whether it changes anything (a point mass at zero changes nothing), and
+    the components it changes, by index."""
+
+    remediation: Remediation
+    frequency: Resolved | None
+    magnitude: Resolved | None
+    keeps: bool
+    scales: bool
+    reduced: frozenset[int]
+
+    def resolved(self) -> list[Resolved]:
+        return [r for r in (self.frequency, self.magnitude) if r is not None]
+
+
+def _changes(r: Resolved | None) -> bool:
+    """Whether a reduction changes a run: one that is drawn, or a point mass above zero."""
+    return r is not None and (r.drawn or r.point != 0)
+
+
+def _plan_remediation(si: ScenarioInput, components: list[_Component]) -> _RemedyPlan:
+    """Resolve a residual run's reductions by the parameter-to-distribution rule and
+    find the components its control effect acts on (every known component, or those
+    of the families or keys it names). Refused where a frequency reduction meets a
+    scenario with no frequency (``remediation_needs_frequency``), or a component it
+    names is not the scenario's (``remediation_target_unknown``): recorded, as every
+    refusal the inputs decide."""
+    rem = si.remediation
+    stated = dict(rem.stated)
+
+    def resolved(name: str, parameter: Parameter | None) -> Resolved | None:
+        return None if parameter is None else resolve(parameter, stated.get(name))
+
+    frequency = resolved(FREQUENCY_REDUCTION, rem.frequency_reduction)
+    magnitude = resolved(MAGNITUDE_REDUCTION, rem.magnitude_reduction)
+    if frequency is not None and si.frequency is None:
+        raise ScenarioSimulationRefused("remediation_needs_frequency", "the scenario states no frequency")
+    keys = {f"{si.events[c.event].loss_event_id}/{c.component.component_id}": index
+            for index, c in enumerate(components)}
+    if rem.components is not None:
+        unknown = sorted(set(rem.components) - set(keys))
+        if unknown:
+            raise ScenarioSimulationRefused("remediation_target_unknown", ", ".join(unknown))
+        targets = {keys[name] for name in rem.components}
+    elif rem.families is not None:
+        targets = {index for index, c in enumerate(components) if c.component.family in rem.families}
+    else:
+        targets = set(range(len(components)))
+    keeps, scales = _changes(frequency), _changes(magnitude)
+    reduced = frozenset(i for i in targets if components[i].estimated) if keeps or scales else frozenset()
+    return _RemedyPlan(rem, frequency, magnitude, keeps, scales, reduced)
 
 
 def _exact(component: LossComponent, resolved: Mapping[str, Resolved]) -> Decimal | None:
@@ -1159,8 +1363,14 @@ def plan(si: ScenarioInput) -> _Plan:
                     "twin_missing", f"{missing.formula_id} version {missing.version} ({component.component_id})"
                 ) from None
             components.append(_Component(index, component, reads, twin, _exact(component, resolved)))
+    remedy = None
+    if si.remediation is not None:
+        remedy = _plan_remediation(si, components)
+        components = [replace(c, reduced=True) if i in remedy.reduced else c for i, c in enumerate(components)]
     exact_events = tuple(
-        _exact_lines(event, si.policy, [c for c in components if c.event == index], resolved, terms)
+        None
+        if any(c.reduced for c in components if c.event == index)
+        else _exact_lines(event, si.policy, [c for c in components if c.event == index], resolved, terms)
         for index, event in enumerate(si.events)
     )
     exact_scenario = None
@@ -1174,6 +1384,7 @@ def plan(si: ScenarioInput) -> _Plan:
         frequency,
         exact_events,
         exact_scenario,
+        remedy,
     )
 
 
@@ -1249,6 +1460,13 @@ def values_held(p: _Plan, length: int, years: int | None = None) -> int:
     if years is not None:
         shared = sum(1 + merging[name] for name in drawn if p.resolved[name].variation == SHARED)
         held += (shared + ANNUAL_LINES + sim.YEAR_VECTORS) * years
+    if p.remediation is not None and p.remediation.reduced:
+        # A residual run's reduction factor, its uniform draws and one reduction's
+        # draws per occurrence, held beside everything above; and each drawn
+        # reduction's yearly draws.
+        held += REMEDIATION_TEMPORARIES * length
+        if years is not None:
+            held += sum(1 for r in p.remediation.resolved() if r.drawn) * years
     return held
 
 
@@ -1257,6 +1475,28 @@ def _check_budget(p: _Plan, length: int, years: int | None) -> None:
     if held > sim.MAX_VALUES:
         what = f"{length} draws" if years is None else f"{length} occurrences in {years} years"
         raise sim.SimulationRefused("values_over_budget", f"{what} hold {held} values; at most {sim.MAX_VALUES}")
+
+
+def check_fits(si: ScenarioInput, *, seed: int, draws: int) -> int:
+    """The values a run of ``si`` would hold at its peak, or refused exactly as the run
+    would refuse it (``values_over_budget``, ``events_over_limit``) -- before anything
+    is sampled but the years' counts, which are drawn from the frequency's own stream
+    as the run draws them. So a caller can refuse a run that cannot fit before making
+    another (a residual run, which holds more than its current run, spec section 28.2).
+    Any other refusal of the inputs is raised as the run would raise it."""
+    sim.check_seed(seed)
+    sim.check_draws(draws)
+    p = plan(si)
+    if p.frequency is None:
+        _check_budget(p, draws, None)
+        return values_held(p, draws)
+    counts = np.asarray(p.frequency.distribution.sample(sim.RunRandom(seed).stream(sim.FREQUENCY_STREAM), draws),
+                        dtype=np.int64)
+    occurrences = int(counts.sum())
+    if occurrences > sim.MAX_EVENTS:
+        raise sim.SimulationRefused("events_over_limit", f"{occurrences} occurrences in {draws} years")
+    _check_budget(p, occurrences, draws)
+    return values_held(p, occurrences, draws)
 
 
 def _checked_draws(r: Resolved, drawn: np.ndarray) -> np.ndarray:
@@ -1286,6 +1526,40 @@ def _draw(r: Resolved, random: sim.RunRandom, length: int) -> np.ndarray | float
             larger(merged, drawn, out=merged)
         del drawn
     return _checked_draws(r, merged)
+
+
+def draw_reduction(r: Resolved, random: sim.RunRandom, length: int) -> np.ndarray | float:
+    """``length`` draws of a residual run's reduction ``r``, from its OWN stream
+    (:func:`remediation_stream`), never a parameter's; a point mass is its value."""
+    if not r.drawn:
+        return float(r.point)
+    return _checked_draws(r, r.distribution.sample(random.stream(remediation_stream(r.name)), length))
+
+
+def _reduction_factor(p: _Plan, random: sim.RunRandom, counts: np.ndarray | None, draws: int, n: int) -> np.ndarray:
+    """What each of the ``n`` occurrences of a reduced component is multiplied by in
+    a residual run: 0 or 1 by whether the control stops the occurrence -- kept where
+    a uniform draw of its own stream is below ``1 - r_f``, its year's ``r_f`` -- times
+    ``1 - r_m``, its year's ``r_m``. Each reduction is drawn once per simulated year
+    (once per draw without a frequency), as every shared parameter is."""
+    rem = p.remediation
+    factor = np.ones(n, dtype=np.float64)
+
+    def per_occurrence(r: Resolved) -> np.ndarray | float:
+        drawn = draw_reduction(r, random, draws)
+        if isinstance(drawn, float) or counts is None:
+            return drawn
+        return np.repeat(drawn, counts)
+
+    if rem.keeps:
+        kept = 1.0 - per_occurrence(rem.frequency)
+        uniform = random.stream(remediation_stream(REMEDIATION_KEPT)).random(n)
+        factor *= uniform < kept
+        del uniform, kept
+    if rem.scales:
+        factor *= 1.0 - per_occurrence(rem.magnitude)
+    factor.flags.writeable = False
+    return factor
 
 
 def _finite(vector: np.ndarray, what: str) -> np.ndarray:
@@ -1388,6 +1662,12 @@ def _sample(p: _Plan, seed: int, draws: int, check_time: Callable[[str], None]) 
         check_time(f"parameter {name}")
 
     n = occurrences
+    factor = None
+    if p.remediation is not None and p.remediation.reduced:
+        # A residual run: the control effect's draws come from streams of their own,
+        # so every parameter above drew exactly what the current run drew.
+        factor = _reduction_factor(p, random, counts, draws, n)
+        check_time("remediation")
     last = _last_reads(p)
     components: dict[int, np.ndarray] = {}
     for index, c in enumerate(p.components):
@@ -1399,6 +1679,8 @@ def _sample(p: _Plan, seed: int, draws: int, check_time: Callable[[str], None]) 
             vector = c.twin({name: values[source] for name, source in c.reads.items()})
             if vector.shape != (n,):
                 vector = np.array(np.broadcast_to(vector, (n,)), dtype=np.float64)
+        if c.reduced:
+            vector = vector * factor
         components[index] = _finite(vector, f"component {c.component.component_id}")
         for name in [name for name, at in last.items() if at == index]:
             values.pop(name, None)  # its last reader is evaluated: its draws are let go
@@ -1611,23 +1893,28 @@ def run(
         component_records = []
         for c in mine:
             index = p.components.index(c)
-            component_records.append(
-                {
-                    "component_id": c.component.component_id,
-                    "family": c.component.family,
-                    "cash": c.cash,
-                    "formula": [c.component.formula.formula_id, c.component.formula.version],
-                    "status": c.component.status,
-                    "evaluated_by": c.evaluated_by,
-                    "reads": dict(sorted(c.reads.items())),
-                    "summary": summarise(yearly(s.components[index]), reads([c]) + freq_inputs, exact=c.exact)
-                    if c.estimated
-                    else None,
-                    "unknown": None
-                    if c.estimated
-                    else {"reason": c.component.unknown_reason, "inputs": list(c.component.missing)},
-                }
-            )
+            component_record = {
+                "component_id": c.component.component_id,
+                "family": c.component.family,
+                "cash": c.cash,
+                "formula": [c.component.formula.formula_id, c.component.formula.version],
+                "status": c.component.status,
+                "evaluated_by": c.evaluated_by,
+                "reads": dict(sorted(c.reads.items())),
+                "summary": summarise(
+                    yearly(s.components[index]), reads([c]) + freq_inputs, exact=None if c.reduced else c.exact
+                )
+                if c.estimated
+                else None,
+                "unknown": None
+                if c.estimated
+                else {"reason": c.component.unknown_reason, "inputs": list(c.component.missing)},
+            }
+            if c.reduced:
+                # Only where a residual run's control effect changes the component: a
+                # component it leaves as it is records exactly what the current run does.
+                component_record["remediated"] = True
+            component_records.append(component_record)
         exact = p.exact_events[event_index] or dict.fromkeys(LINES)
         events_record.append(
             {
@@ -1719,6 +2006,8 @@ def run(
         "input_digest": input_digest,
         "outcomes_sha256": digest_of_outcomes,
     }
+    if p.remediation is not None:
+        record["remediation"] = _remediation_record(p)
     vectors = {label: _readonly(vector) for label, vector in ordered}
     return ScenarioSimulation(
         record=MappingProxyType(record),
@@ -1732,6 +2021,57 @@ def run(
 def _readonly(vector: np.ndarray) -> np.ndarray:
     vector.flags.writeable = False
     return vector
+
+
+def _remediation_record(p: _Plan) -> dict:
+    """What a residual run records of its control effect: the option and its digest,
+    each reduction's rule, distribution and stream, the components it changed, and
+    whether it changed any (a point mass at zero changes nothing)."""
+    rem = p.remediation
+
+    def reduction(r: Resolved | None) -> dict | None:
+        if r is None:
+            return None
+        return {
+            "rule": r.rule,
+            "distribution": r.distribution_record(),
+            "stream": remediation_stream(r.name) if r.drawn else None,
+            "expert": r.expert,
+        }
+
+    return {
+        "schema": REMEDIATION_SCHEMA,
+        "option": rem.remediation.option_id,
+        "option_digest": rem.remediation.option_digest,
+        "frequency_reduction": reduction(rem.frequency),
+        "magnitude_reduction": reduction(rem.magnitude),
+        "kept_stream": remediation_stream(REMEDIATION_KEPT) if rem.keeps and rem.reduced else None,
+        "reduced_components": sorted(
+            f"{p.si.events[c.event].loss_event_id}/{c.component.component_id}" for c in p.components if c.reduced
+        ),
+        "changes_the_run": bool(rem.reduced),
+    }
+
+
+def reductions(p: _Plan) -> list[Resolved]:
+    """A residual run's reductions, resolved, in name order; none for the scenario as it is."""
+    if p.remediation is None:
+        return []
+    return sorted(p.remediation.resolved(), key=lambda r: r.name)
+
+
+def reduction_at(p: _Plan, values: Mapping[str, float]) -> float:
+    """The factor a reduced component's ONE occurrence is multiplied by in
+    expectation, at the reductions' ``values`` (a point mass at its own):
+    ``(1 - r_f) (1 - r_m)``, each where it changes the run. For the sensitivity
+    analysis's swings (spec, section 28)."""
+    rem = p.remediation
+    factor = 1.0
+    if rem.keeps:
+        factor *= 1.0 - values[rem.frequency.name]
+    if rem.scales:
+        factor *= 1.0 - values[rem.magnitude.name]
+    return factor
 
 
 def _limit_share(p: _Plan, s: _Sample) -> str | None:
@@ -1767,6 +2107,18 @@ __all__ = [
     "ENGINE_VERSION",
     "FREQUENCY_PARAMETER",
     "FREQUENCY_RANGE_TESTS",
+    "FREQUENCY_REDUCTION",
+    "MAGNITUDE_REDUCTION",
+    "REMEDIATION_RULE",
+    "REMEDIATION_SCHEMA",
+    "REMEDIATION_STREAM_DOMAIN",
+    "REMEDIATION_VERSION",
+    "Remediation",
+    "check_fits",
+    "draw_reduction",
+    "reduction_at",
+    "reductions",
+    "remediation_stream",
     "NATIVE_PARAMETERS",
     "PER_OCCURRENCE",
     "REFUSALS",

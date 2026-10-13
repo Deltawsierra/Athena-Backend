@@ -113,13 +113,13 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its twenty-three modules: E1's ten, the scenario engine's four
+    # The package and its twenty-four modules: E1's ten, the scenario engine's four
     # (parameters, formulas, loss and parameter_set), the probabilistic engine's
     # two (distributions and simulation, which import numpy as well), the scenario
     # builder's templates, step 7b's two (twins and scenario_simulation, numpy
     # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
-    # (numpy too), and step 10's feed adapters.
-    assert result.stdout.strip() == "imported 24", result.stdout
+    # (numpy too), step 13's remediation (no numpy), and step 10's feed adapters.
+    assert result.stdout.strip() == "imported 25", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -174,7 +174,9 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "grade.py",
         # Step 6's chart series (spec, section 27).
         "charts.py",
-        # Step 10's live-feed adapters, registry and freshness table (spec, section 28).
+        # Step 13's remediation option and its economics (spec, section 28).
+        "remediation.py",
+        # Step 10's live-feed adapters, registry and freshness table (spec, section 29).
         "feeds.py",
     }
     core_importers = set()
@@ -684,7 +686,8 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     scenario engine) parameters.REFUSALS, or (a stored simulation result, step 7b)
     models.SIMULATION_RECORD_REFUSALS, or (a Validity Card or receipt row, step 8)
     models.CARD_RECORD_REFUSALS, or (a chart-series row, step 6)
-    models.CHARTS_RECORD_REFUSALS; every code the money engine raises is in
+    models.CHARTS_RECORD_REFUSALS, or (a remediation option row, step 13)
+    models.REMEDIATION_RECORD_REFUSALS; every code the money engine raises is in
     money.REFUSALS, and every code the scenario engine raises as its own is in
     parameters.REFUSALS; and every published code is one something gives. A code
     two tables publish means the same in both, and the scenario engine publishes
@@ -692,6 +695,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     from assurance.economics.models import (
         CARD_RECORD_REFUSALS,
         CHARTS_RECORD_REFUSALS,
+        REMEDIATION_RECORD_REFUSALS,
         SIMULATION_RECORD_REFUSALS,
     )
 
@@ -708,7 +712,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     assert not set(parameters.REFUSALS) & set(money.REFUSALS)
     published = (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
-        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
     )
     assert not set(SIMULATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
@@ -719,6 +723,10 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     assert not set(CHARTS_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS)
+    )
+    assert not set(REMEDIATION_RECORD_REFUSALS) & (
+        set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS)
     )
     assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):
@@ -779,8 +787,9 @@ def test_an_economics_fault_never_takes_down_a_stop(fault, plugin):
 
 def test_the_economics_routes_are_imported_guarded():
     """Read, not run: assurance/urls.py imports each economics route module -- the
-    parameter-set routes, the scenario builder's (section 24), and the scenario
-    endpoints with the report (section 27) -- inside a try of its own whose handler
+    parameter-set routes, the scenario builder's (section 24), the scenario
+    endpoints with the report (section 27), the remediation option with its ROI
+    (section 28) and the data-health route (section 29) -- inside a try of its own whose handler
     logs and serves none of that module's routes, never re-raising. A fault in one
     leaves the others served."""
     tree = ast.parse((REPO / "assurance" / "urls.py").read_text(encoding="utf-8"))
@@ -795,7 +804,10 @@ def test_the_economics_routes_are_imported_guarded():
     modules = sorted(
         inner.module for node in guarded for inner in node.body if isinstance(inner, ast.ImportFrom)
     )
-    assert modules == ["economics.api", "economics.health_api", "economics.report_api", "economics.scenario_api"], (
+    assert modules == [
+        "economics.api", "economics.health_api", "economics.remediation_api", "economics.report_api",
+        "economics.scenario_api",
+    ], (
         "an economics route module is imported unguarded"
     )
     for node in guarded:
@@ -829,7 +841,7 @@ def test_nothing_but_the_models_registration_imports_economics():
 
     MVP step 10 adds the operator's ``manage.py fetch_financial_source`` on the same
     terms (no first-party module imports it, checked below), and the data-health
-    route module, ``assurance.economics.health_api``, mounted guarded (section 28)."""
+    route module, ``assurance.economics.health_api``, mounted guarded (section 29)."""
     importers = set()
     command_importers = set()
     commands = (
@@ -863,8 +875,9 @@ def test_nothing_but_the_models_registration_imports_economics():
     }
     assert command_importers == set()
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
-    # The scenario step's route module, (section 24) the scenario builder's, and
-    # (section 27, step 6) the scenario endpoints with the report.
+    # The scenario step's route module, (section 24) the scenario builder's,
+    # (section 27, step 6) the scenario endpoints with the report, (section 28, step
+    # 13) the remediation option with its ROI, and (section 29, step 10) data health.
     assert [m for m in mounted if m.startswith("assurance.economics")] == [
         "assurance.economics.api",
         "assurance.economics.api.urlpatterns",
@@ -872,6 +885,8 @@ def test_nothing_but_the_models_registration_imports_economics():
         "assurance.economics.scenario_api.urlpatterns",
         "assurance.economics.report_api",
         "assurance.economics.report_api.urlpatterns",
+        "assurance.economics.remediation_api",
+        "assurance.economics.remediation_api.urlpatterns",
         "assurance.economics.health_api",
         "assurance.economics.health_api.urlpatterns",
     ]
@@ -965,7 +980,7 @@ SPEC_PHRASES = (
     "A pending request expires** 30 days after its request",
     "Expiry is found lazily, at approve time, with no background job",
     "computing it and writing nothing",
-    # MVP step 10 (section 28): the live feeds, freshness and the production receipt.
+    # MVP step 10 (section 29): the live feeds, freshness and the production receipt.
     "informational average, not a transaction price",
     "A run uses the newest usable version whose coverage includes its as-of date",
     "source_not_authoritative",

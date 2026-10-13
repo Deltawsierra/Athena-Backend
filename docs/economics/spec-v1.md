@@ -79,20 +79,24 @@ MVP step 6, serving steps 5, 7b and 8:
 
 27. [The scenario endpoints and the report (MVP step 6)](#27-the-scenario-endpoints-and-the-report-mvp-step-6)
 
+MVP step 13, one remediation option per scenario version, on steps 7b, 8 and 6:
+
+28. [One remediation option, its residual run and its economics (MVP step 13)](#28-one-remediation-option-its-residual-run-and-its-economics-mvp-step-13)
+
 MVP step 10, built up to its gate (live fetching waits on the owner's keys):
 
-28. [The live feeds (MVP step 10)](#28-the-live-feeds-mvp-step-10)
+29. [The live feeds (MVP step 10)](#29-the-live-feeds-mvp-step-10)
 
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 28): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0070_financial_source_fetches.py` (step 10, section 28) |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29) |
 | Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
-| Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 28), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
+| Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
 
 The package is a subpackage of the installed `assurance` app, not an app of its
 own: its models are registered by one import line in `assurance/models.py` and
@@ -103,7 +107,7 @@ with Django and every other part of mythos-core poisoned.
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
 parameter set's, the scenario builder's, the trust raises' and step 6's (section
-27); source disagreement. (Feeds and their adapters: step 10, section 28.)
+27); source disagreement. (Feeds and their adapters: step 10, section 29.)
 Building and verifying the signed Financial Exposure Receipt
 (`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
@@ -403,16 +407,16 @@ operator runs; any other writer is a defect.
 
 | Model | Holds | Permitted writers |
 |---|---|---|
-| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and (step 10) the feed fetch an operator runs, `manage.py fetch_financial_source`, through the same loader, never at `authoritative` (section 28); an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
+| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and (step 10) the feed fetch an operator runs, `manage.py fetch_financial_source`, through the same loader, never at `authoritative` (section 29); an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
 | `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, the channel it came through (`api` or `command`), who requested it and when, who approved it and when, who withdrew it, when and through which channel, and its state (`pending`, `done`, `withdrawn` or `expired`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only, and only the signed-in route approves |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint (the deployment's when the builder built the version, section 24.6; or none, and why, in `system_fingerprint_unavailable`), causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
 | `SensitiveOverride` | a request to override a parameter or value: subject, reason, requester | an admin or analyst |
 | `OverrideApproval` | one approval of one override: approver | an admin, other than the requester; one approval per person |
-| `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; and `snapshots.register`, through which the feed fetch registers a fetched answer (step 10, section 28) |
+| `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; and `snapshots.register`, through which the feed fetch registers a fetched answer (step 10, section 29) |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
-| `FinancialSourceFetch` (step 10) | one fetch of one platform-wide feed source: its key, as-of date, when, and its outcome -- `recorded`, `unchanged` (the version that holds the payload named) or `refused` with its code only; the payload hash; no account, no deployment | `assurance/economics/feeds.py` `fetch`, run by `manage.py fetch_financial_source` (section 28) |
+| `FinancialSourceFetch` (step 10) | one fetch of one platform-wide feed source: its key, as-of date, when, and its outcome -- `recorded`, `unchanged` (the version that holds the payload named) or `refused` with its code only; the payload hash; no account, no deployment | `assurance/economics/feeds.py` `fetch`, run by `manage.py fetch_financial_source` (section 29) |
 | `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
 | `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`, for a derived one, `derived_from` (the parameters it was taken across, section 24.5), and the distribution it states, if any (section 25.1); linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 24) |
 | `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (section 24), through its build route |
@@ -662,7 +666,7 @@ that code (`EconomicsRefused.code`).
 | `second_person_required` | an `authoritative` version is recorded only by a raise one admin requested and ANOTHER approved through the signed-in route: never by the requester, the operator's command, a snapshot file or any other write through the model |
 | `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending and not expired; below `authoritative` it is done in one step, never pending |
 | `reason_too_long` | a raise's reason is at most 2000 characters |
-| `source_not_authoritative` | an FX or cost-index source behind a production run's receipt is `authoritative` (the owner's decision of 13 Oct 2026; enforced when the receipt is issued, section 28.6) |
+| `source_not_authoritative` | an FX or cost-index source behind a production run's receipt is `authoritative` (the owner's decision of 13 Oct 2026; enforced when the receipt is issued, section 29.6) |
 
 The rules read what is stored, never what a caller's in-memory object says: the
 authors of a scenario's versions, an override's requester and its approvals are
@@ -708,7 +712,7 @@ the licensing and legal review The Open Group's terms require first.
 - **Fixture data only.** Every source in the MVP is a committed snapshot, and the
   only one committed is SYNTHETIC TEST DATA (section 13). Nothing fetches a feed,
   and nothing is current beyond its retrieval time. (Step 10 adds the feeds, which
-  wait on the owner's keys and switch: section 28.)
+  wait on the owner's keys and switch: section 29.)
 - **The currency table is transcribed.** It has not yet been diffed against the
   published List One and List Three (section 5), and holds a selection of retired
   codes, not all of List Three. It carries no exchange rates and no redenomination
@@ -3540,7 +3544,7 @@ share is at least `MATERIAL_SHARE` (0.05):
 | `stale_inputs` | a figure the run reads -- a known cash component's, a term of the policy the run applies, the frequency, or a contributor of a derived value the gross reads -- is past its `fresh_until` at the run's as-of date (section 26.3) |
 | `expert_figures` | a material figure rests on an expert's estimate or on no named source (`EXPERT_ESTIMATE`, `UNKNOWN`; a derived value, on a supplying contributor's), fixed or ranged |
 | `derived_values` | a material figure is a derived larger-loss value |
-| `stale_source` | (step 10, grade v3) a figure the run reads rests on a feed source that is stale, blocked or missing at the run's as-of date (section 28.5) |
+| `stale_source` | (step 10, grade v3) a figure the run reads rests on a feed source that is stale, blocked or missing at the run's as-of date (section 29.5) |
 
 **Collapsing a range to one figure at its base never raises the grade**: the level
 shares, the source types and the dates are those of the base, which a collapse keeps,
@@ -3774,6 +3778,7 @@ returned as theirs, with their meaning, and none is published twice with another
 | `card_record_malformed` | a card row that is not its own result's card: another scenario, another grade, a float, a digest that is not the card's or the analysis's |
 | `receipt_record_malformed` | a receipt row whose document is not core's schema, names another scenario, tenant, id or card, or whose envelope is not one signature, in core's form, over exactly it |
 | `result_not_completed` | a refused run has no figures to sign |
+| `residual_not_receipted` | a residual run under a remediation option (section 28) is never exposure, and is not receipted: refused before anything is read, signed or recorded; the receipt row refuses one on save (`receipt_record_malformed`) |
 | `receipt_figure_unavailable` | one of the six figures does not exist for the run |
 | `system_fingerprint_unavailable` | the card names no fingerprint to bind |
 | `source_snapshot_mismatch` | a source snapshot's rows no longer give its content hash |
@@ -4036,7 +4041,7 @@ Under `/api/assurance/`, mounted in a guard of their own (section 2): a fault in
 |---|---|---|
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/` | `deployment-economics-scenario` | the scenario document (section 27.7) |
 | `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/simulate/` | `deployment-economics-scenario-simulate` | runs, or returns, a simulation (section 27.2) |
-| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3) |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3); never a residual run under a remediation option, which the ROI route serves (section 28.7) |
 
 Access is the parameter-set routes' (section 19.3): a signed-in account (401
 otherwise); a deployment the caller cannot see, a scenario of another deployment,
@@ -4245,9 +4250,12 @@ and `excluded_from_totals: false`.
 
 Nothing may sum an excluded result into a total. `report.may_be_totalled(report)` is
 the one test a total applies, and it **fails closed** (review round 1, LOW-4): true
-only for a report that carries the digest of its own bytes (`verifies`), of a
-completed result whose rows verified, `excluded_from_totals` false, and graded A, B,
-C or D (`report.GRADES_FOR_TOTALS`, an allow-list). A forged, edited or stale report
+only for a report of this schema (`mythos.economics.report/v1`; an ROI document or any
+other is refused), that carries the digest of its own bytes (`verifies`), of a
+completed result whose rows verified, `excluded_from_totals` false, graded A, B,
+C or D (`report.GRADES_FOR_TOTALS`, an allow-list), and of a scenario's own run
+(`residual_of` present and null: a residual run under a remediation option is never
+exposure, section 28.5; step 13's review round 1, MEDIUM-1). A forged, edited or stale report
 is refused, and so is one re-digested with an Unknown grade. A total of several
 reports leaves out every one it refuses. No route serves a total yet (section
 27.10).
@@ -4405,22 +4413,358 @@ and series.
     only a record or a series fails). Recommendation: keep: the route serves one
     scenario version's figures, and no grade is shown that the rows do not bear out.
 
-## 28. The live feeds (MVP step 10)
+## 28. One remediation option, its residual run and its economics (MVP step 13)
+
+MVP step 13, on steps 7b, 8 and 6: ONE remediation option per scenario version, the
+residual run of the scenario with the option's control effect, and the option's
+economics (the owner's specification, section 21, Remediation Economics; section 18's
+`POST /financial/scenarios/{id}/mitigations` and `GET .../roi`; section 15's
+`MitigationOption` and "Mitigation PRODUCES ResidualExposure"), with the hard security
+veto, which always wins.
+
+| | |
+|---|---|
+| Code | `assurance/economics/engine/remediation.py` (pure: the option's form and digest, the economics); `assurance/economics/engine/scenario_simulation.py` (the residual run: `Remediation`, the reduction factor) and `engine/sensitivity.py` (a residual run's reductions ranked and swung); `assurance/economics/remediation_service.py` (the record, the runs, the veto, the citations, the ROI document) and `remediation_api.py` (the three routes); `RemediationOption` and `SimulationResult.remediation` in `models.py` |
+| Migration | `0069_remediation_options.py`, on #155's `0068_financial_source_trust_raises`: one new table and one new nullable column on `SimulationResult`; nothing backfilled, every stored run unchanged |
+| Tests | `tests/test_economics_remediation.py`; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`), the engine's module and code tables (`tests/test_economics_engine.py`) and a fault plugin (`tests/economics_broken_remediation.py`, `tests/economics_fault_cases.py`) |
+
+### 28.1 The option
+
+`RemediationOption`, append-only, ONE per scenario version (a one-to-one key, and
+`remediation_option_held`): a different option is a new version that supersedes the
+old, and the same option posted again returns the one recorded. Its document
+(`mythos.economics.remediation-option/v1`, `engine.remediation.parse_option`):
+
+| Field | Holds |
+|---|---|
+| `title` | 1 to 255 characters |
+| `implementation_cost`, `recurring_cost` | money, as a parameter set's variable is stated (unit `money`, low, base, high, currency, `source_type`, `evidence_ref`, `effective_date`, optionally `fresh_until`); one currency, the scenario's (`currency_mismatch`: nothing converts here); never `MYTHOS_OBSERVED` (`observed_source_not_observable`); at the currency's minor unit or coarser (`cost_below_minor_unit`: USD 0.004 or JPY 1000.5 is refused, never rounded; review round 1, LOW-1); the recurring cost is a year's |
+| `time_to_implement_days` | a whole number from 0 to 3,650 |
+| `dependencies` | at most 20, each text (1 to 500 characters) or a SPINE finding or asset of the deployment by its uuid, never a copy (`dependency_malformed`, `dependency_not_found`) |
+| `control_effect` | `frequency_reduction` `r_f` and/or `magnitude_reduction` `r_m` (`control_effect_missing` otherwise), each a ratio in [0, 1] with low, base, high, source and evidence, optionally a stated distribution; `acts_on`: every component (absent), or the loss families or the scenario's components (`<event key>/<component key>`) it names, one or the other (`acts_on_malformed`, `remediation_target_unknown`; a family that is no component's is refused, `option_matches_nothing`); `observed_by`: the retest it was observed in (section 28.6) |
+| `utility_evidence` | optionally, the retest cited for utility retained (section 28.3) |
+
+Each reduction must be admitted by the run's own parameter-to-distribution rule
+(section 25.1) when it is written: a point mass for a fixed figure, PERT for an
+`EXPERT_ESTIMATE` range, a stated distribution that holds its figures; any other range
+is refused then (`no_admissible_distribution`), not when it is run. The option's
+identity is `option_digest`: the SHA-256 of the canonical JSON of its schema, its
+scenario version and its document in the one spelling; the row's check re-reads the
+document and its digest on save (`remediation_record_malformed`). It names its author as
+a scenario does: the signed-in admin or analyst, nulled if the account is removed (a
+stop), the username kept.
+
+### 28.2 The residual run
+
+The SAME engine, seed and draws, with **common random numbers**: a residual run
+(`ScenarioInput.remediation`) draws every parameter, the frequency and every derived
+value from exactly the current run's streams, so current minus residual carries little
+Monte Carlo noise of its own, and a component the option does not act on is the current
+run's, draw for draw. The reductions draw from streams of their own (`r` and 40 hex
+digits of the SHA-256 of `mythos.economics.remediation-stream/v1`, a zero byte and the
+role), never a parameter's, so drawing the control effect moves no parameter's draws.
+
+- `r_f` and `r_m` are each resolved by the parameter-to-distribution rule and drawn once
+  per simulated year (once per draw without a frequency), as every shared parameter is.
+- **Frequency**: each occurrence of a component the option acts on is kept where a
+  uniform draw from its own stream (`remediation.kept`) is below `1 - r_f`, its year's
+  `r_f`: the expected count of occurrences it suffers is the frequency times
+  `1 - r_f`. A whole occurrence is stopped, not a fraction of a count. A frequency
+  reduction on a scenario that states no frequency is refused, and recorded
+  (`remediation_needs_frequency`): a run per occurrence has no frequency to reduce.
+- **Magnitude**: each kept occurrence of such a component is multiplied by `1 - r_m`.
+- Insurance applies after, to what remains, per event occurrence as section 25.4 says.
+- A reduction that is a point mass at zero changes nothing: the residual run of
+  `r = 0` IS the current run, its summaries byte-identical (only its input digest and
+  its record's `remediation` block differ). A component the option changes is no longer
+  exact (section 25.3): its summary is of its draws, and it is marked `remediated`.
+
+The residual run is a stored `SimulationResult` whose canonical inputs are EXACTLY the
+current run's with one key added, `remediation` (`mythos.economics.remediation-run/v1`:
+the option and its digest, each reduction with its figures, source, evidence and stated
+distribution, what it acts on, its streams and the rule), so it never collides with the
+current run's result, and the current run's input digest is the digest of the residual
+run's inputs without that key. Its row names the option (`SimulationResult.remediation`,
+checked against the inputs on save). A run with no option has no such key: every input
+digest recorded before this step is unchanged. Every limit, the 120 s budget, the
+idempotency and the insert-only transaction of section 25.6 apply; the values budget
+counts the residual run's factor, its uniform draws and a reduction's draws per
+occurrence (`REMEDIATION_TEMPORARIES`): about 21% more values than its current run on
+step 6's fixture. So the pair is checked FIRST (`ss.check_fits`, the residual run's plan
+and the years' counts from the frequency's own stream, exactly as the run draws them):
+a residual run that would not fit (`values_over_budget`, `events_over_limit`) refuses
+the pair up front, 400, with nothing run or recorded -- never a completed current run
+beside a refused residual one (review round 1, LOW-2: at `detailed_1m` step 6's fixture
+holds 28M values in its current run and 34M in its residual, past the 30M budget). NO
+transaction or lock is held during either Monte Carlo
+(`test_no_transaction_is_held_while_either_run_computes`).
+
+Each run is graded by its own Validity Card (section 26): a residual run's analysis is
+made on its own draws with the option applied, ranks a drawn reduction as it ranks a
+parameter, and swings each through the factor it puts on a reduced component.
+
+Known answers on step 6's fixed scenario (`stored`: one event of a notification and a
+regulatory range, a Poisson(2) frequency): `r_f = 0.5` halves the expected annual loss
+within four of the residual run's standard errors; `r_m = 0.25` on every family cuts it
+to three quarters to binary64's rounding (1E-12 relative), and P50, P90 and P95 with
+it; `r = 0` gives a reduction of exactly zero and byte-identical summaries; `r = 1` on
+every family leaves a residual expected annual loss of 0.
+
+### 28.3 The economics
+
+`GET .../roi/` serves the ROI document (`mythos.economics.roi/v1`), from stored rows
+only, of the option and one residual run (`?simulation=<uuid>`, else its latest) paired
+with its current run. Every figure is read at full precision from the two runs' records
+(the result digest covers them) on their headline line -- retained cash under a policy,
+else gross cash, as the card and the receipt read it -- and computed once:
+
+| Output | Definition |
+|---|---|
+| `current_expected_annual_exposure`, `residual_expected_annual_exposure` | each run's mean annual loss |
+| `expected_reduction` | current minus residual |
+| `first_year_investment` | implementation plus one year of recurring cost, at low, base and high |
+| `risk_adjusted_roi` | the expected reduction over the first-year investment at base, to 4 places; labelled decision support from modelled exposure, not a guaranteed return; `null` with the reason where the investment is 0 |
+| `payback` | the first-year investment at base over the expected annual reduction, in years, to 2 places; `null` with the reason where the reduction is not above zero: never a negative or infinite payback |
+| `tail_reduction` | the change in P90 and in P95 (the severe-but-plausible percentile, where the run's is 95) of annual loss |
+| `utility_retained` | `retained` or `broken` from a cited retest's replay (legitimate use, and every behaviour its repair contract preserves); otherwise `unknown`, with the reason |
+| `confidence_delta` | the residual card's grade against the current card's, each as its card document states it where it verifies (section 27.5): `improved`, `unchanged`, `worsened`, or `not_comparable` with the reason |
+
+Money is at the currency's minor unit, half-even, as section 27.5 rounds it; the ROI and
+the payback are half-even to their places. **The zero rules read the figures as shown**
+(review round 1, LOW-1): beside a first-year investment shown as zero, or an expected
+reduction shown as zero or below, neither the ROI nor the payback is given, each `null`
+with the reason -- never a ratio or a period beside a served 0.00. Under the veto a
+reason never argues against acting. Without a frequency there is no expected annual
+exposure, so no reduction, ROI or payback, each saying so.
+
+Two of the owner's interims (pending decisions 6 and 9, section 28.10):
+
+- **The gross-cash line beside the headline.** Under a policy the headline stays the
+  retained cash; `figures.gross_cash` gives the gross-cash line's EALs, reduction, ROI,
+  payback and tail reduction beside it (`null` where the headline is gross cash). On a
+  deductible the insurer bears most of a magnitude reduction, so the two can differ by
+  orders of magnitude.
+- **The deployment's standing decision**, as last recorded (`Deployment.decision`, read,
+  never recomputed), is stated beside the economics, `deployment_decision`: "deployment
+  decision: not_recommended; this ROI does not override it" (or that there is none). It
+  is NOT a veto. The document carries
+the option (its costs and control effect as recorded), each run's identity, status,
+grade, banner reason and integrity, the line, the currency, `limitations` and `digest`:
+`sha256:` over its canonical bytes without it, as section 27.5's report does. The same
+stored rows give byte-identical bytes.
+
+### 28.4 The hard security veto (decided: the veto always wins)
+
+The owner's specification: a strong ROI does not justify accepting a control failure
+that Mythos policy marks as a hard release blocker. `remediation_service.veto` reads it
+from SPINE as it stands when the document is built:
+
+- a **finding** the scenario rests on (`EffectFinding`) is a hard release blocker where
+  Mythos policy places a deployment holding it in a blocking decision: active (not
+  closed or a false positive), of trusted severity, and high or critical, which
+  `assurance.decision.FINDING_SEVERITY_DECISIONS` places at `needs_remediation` or
+  `not_recommended` (`assurance.dispatch`'s blocking decisions). **An accepted finding
+  is settled only while its acceptance stands** (owner decision Q6, as
+  `decision.accepted_risk_signal` reads it; review round 1, MEDIUM-2): its
+  `risk_accepted_until` after `decision.decision_now` and the severity accepted covering
+  the severity it has now (`decision._acceptance_covers`). An acceptance that lapsed,
+  never named an end, or was made at a lower severity carries nobody's decision: the
+  finding is read as an active one, so a high or critical one is a blocker, and the
+  blocker says why;
+- an **observed effect** of the scenario is one where its workflow's chain is violated
+  and sets the deployment's composition at `not_recommended`
+  (`assurance.workflow_chains.composition_for`, its deciding workflows).
+
+`veto.applies` is `true` where one is: the document carries `veto: {"applies": true,
+"reason": ...}`, `remediation_required: true` and the statement
+"remediation is required regardless of ROI"; the ROI and the payback are
+`display_only`, and no output presents accepting the risk as preferable. Where the blocker status cannot be read -- an
+invalidated finding (its severity no longer trusted), one that is no longer the
+deployment's, a severity Mythos policy does not read, an observed effect whose SPINE
+outcome cannot be found, a scenario naming neither, or any fault reading SPINE (named
+by its type alone) -- `veto.applies` is `"unknown"`, with the reason, and it is treated
+as applying. `false` only where every finding and observed effect was read and none is
+a blocker.
+
+### 28.5 Unknown: the banner
+
+Each run is verified as step 6's report verifies a result: the ROI document builds each
+run's report (`report.build_report`) and reads its `grade`, `banner_reason`,
+`integrity` (`report.stored_row_failures`) and whether a total may sum it
+(`report.may_be_totalled`). Where the current or the residual run is Unknown, refused,
+card-less or unverified -- or the option no longer gives its digest, the residual run
+names another option, no current run of the same seed and draws is recorded, or the
+control effect's cited retest no longer shows the control held -- the document carries
+the step-6 banner, `Unknown: not for capital decisions`, and
+`excluded_from_totals: true`, with the reason. Figures are shown where both runs completed and every row
+verifies; no ROI is computed on a refusal or on rows that fail a check (`not_reported`,
+with the reason). The document has `status`, `grade` (the lower of the two runs'),
+`excluded_from_totals`, `integrity` and `digest`.
+
+**A residual run is never exposure, below the routes too** (review round 1, MEDIUM-1).
+Its report carries `residual_of` (the option and its digest) and
+`excluded_from_totals: true` whatever its grade; every other report carries
+`residual_of: null`. `report.may_be_totalled` refuses a report without the report schema
+or without `residual_of: null`, so neither a residual run's report nor an ROI document is
+ever summed as exposure. The ROI reads the current run through `may_be_totalled` and the
+residual run through `report.stands` (its digest, completed, its rows verified, graded A
+to D). `SimulationResult.objects.exposure_runs()` is the one place the exposure filter
+is written: the results route, the scenario document and the events banner read through
+it, and a portfolio total (E5) is to.
+
+### 28.6 An observed control effect
+
+A control effect may cite an Achilles retest, a `RetestClosureEvidence` record (the
+replay of Minotaur-Backend's remediation-outcomes dataset, `assurance.retest_closure`),
+by its digest: the SHA-256 of `mythos.economics.retest-citation/v1`, the record, its
+finding and everything the retest gate reads of it (origin, content digest, fixtures,
+document, time; `remediation_service.retest_digest`). The citation is resolved among the
+records of the findings the scenario rests on, in its deployment only.
+
+- **Cited and verifiable, where the retest shows the control held**: the record is its
+  finding's latest and the retest gate's own verdict (`retest_closure.refusal_reasons`)
+  names no reason -- every fixture class and pattern ran with the outcome a closure
+  needs, an independent observer's replay shows the effect gone on the original
+  scenario and every variant with legitimate use retained, held to the finding's
+  current repair contract. Then the control effect is observed: every reduction it
+  states rests on `MYTHOS_OBSERVED` (`observed_effect_not_stated` otherwise), and a
+  reduction on `MYTHOS_OBSERVED` cites one (`observed_effect_uncited` otherwise).
+- **Cited but unverifiable**: refused, `retest_unverifiable`; a retest that is found but
+  does not show the control held is refused, `retest_control_not_held`, naming every
+  reason the gate gives.
+- The ROI document verifies the citation again when it is built: a later retest of the
+  finding (the gate reads the latest) that was fooled leaves the observed effect
+  unverified, and the document carries the banner.
+
+No Bayesian update yet: an observed control effect is cited, verified and shown as
+observed, and its figures are as stated (section 28.9).
+
+### 28.7 The routes
+
+Under `/api/assurance/`, from `assurance/economics/remediation_api.py`, mounted in a
+guard of its own (section 2): a fault in it, or in `remediation_service`, leaves these
+three routes unserved and nothing else (`test_a_remediation_fault_never_takes_down_a_stop`).
+
+| Method and path | Name | Does |
+|---|---|---|
+| `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/mitigations/` | `deployment-economics-scenario-mitigations` | records the version's one option: 201; the same option again, 200; another, 409 `remediation_option_held` |
+| `POST .../mitigations/<option uuid>/simulate/` | `deployment-economics-mitigation-simulate` | the current run (where missing) and the residual run, `{"seed", "policy"}` as section 27.1's simulate takes them (a `receipt` is `field_unrecognised`: a residual run is not receipted), each with its Validity Card, under ONE 120 s deadline: idempotent, 201 where a run was recorded, 200 where both were; 503 for a run step 7b does not record, 400 for inputs with no identity |
+| `GET .../scenarios/<scenario uuid>/roi/` | `deployment-economics-scenario-roi` | the ROI document (section 28.3), as canonical bytes; 404 where the version has no option or the option no residual run |
+
+Access is the report routes': a signed-in account; a deployment the caller cannot see,
+or a scenario, option or run of another, is 404; only an admin or an analyst records or
+simulates (403 for a viewer, even the owner), and every role reads. Strict JSON of at
+most 64 KiB; 503 while economics cannot read its currency table, recording nothing.
+
+**A residual run is never the scenario's exposure.** Step 6's `results/` route serves
+only the version's own runs (its latest is the latest of those, and a residual run's
+uuid is 404 there), the scenario document lists only those, and the events route's
+banner (section 27.11, decision 13) reads the latest of those; the ROI route serves the
+residual run.
+
+### 28.8 Safety
+
+No route here is a stop, and none reads or writes anything a stop or the decision reads:
+each is in `safety.stops.NOT_STOPS`; the two POSTs are in the write-route table as
+routes that cannot move the decision; all three are classified sinks of the canary
+harness. The veto reads findings and chains; it writes nothing. A residual run is never
+receipted: `receipt_service` refuses one (`residual_not_receipted`) before anything is
+read or signed, and the receipt row refuses one on save. `RemediationOption`'s one
+account column is SET_NULL, so removing an operator answers 204 and keeps the username
+(`test_removing_the_author_never_writes_more_than_the_account_column`); the option and
+the residual runs go with their deployment. `remediation_api` and `remediation_service`
+import no part of the probabilistic engine at load: the simulation and card services are
+imported when an option is simulated, and the engine when an option is written. Each
+service transaction only inserts, after its run.
+
+### 28.9 What is still not done
+
+- **No Bayesian update** of the control effect from observed evidence: an Achilles
+  retest is cited and verified, and Minotaur validation is not read yet.
+- **One option per scenario version**: no cost-of-fix frontier across options, and no
+  portfolio of options.
+- **The costs are not simulated**: the ROI and the payback read the base; no net
+  present value, no multi-year horizon, no discounting.
+- **The control effect's evidence does not enter the residual card's grade**: both cards
+  weigh the scenario's figures (section 26.2), so the confidence delta moves only where
+  a card is Unknown, missing or unverified. Weighing the reductions in the residual
+  line's level -- `(1 - r_f)` beside the frequency's half, `(1 - r_m)` as one more factor
+  of each reduced component -- is the follow-up.
+- **No green-team evidence** exists in this backend: utility retained reads a cited
+  Achilles retest's replay, else Unknown.
+- **One currency**: an option costs in the scenario's currency; nothing converts.
+
+### 28.10 Decisions this step takes, which the owner may change
+
+1. **One option per scenario version**, a one-to-one key; another option is a new
+   version. Alternative: several options per version, for a frontier.
+2. **A frequency reduction stops whole occurrences** of the components it acts on (a
+   keep mask, Bernoulli `1 - r_f`, from its own stream). Alternatives: scale the
+   frequency's rate (Poisson((1 - r_f) lambda)), which numpy draws from other numbers,
+   losing the coupling; multiply each year's loss by `1 - r_f`, which keeps the mean and
+   understates the tail's change.
+3. **The reductions are drawn once per simulated year**, as every shared parameter
+   (section 25.2), each by the existing parameter-to-distribution rule, and admitted at
+   write time. Alternative: per occurrence.
+4. **A frequency reduction on a scenario with no frequency is refused** and recorded.
+   Alternative: read it as the probability an occurrence is prevented, a mixture with
+   zeros in a per-occurrence run.
+5. **ROI = expected reduction / first-year investment at base** (4 places), **payback =
+   first-year investment at base / expected annual reduction** (2 places), half-even;
+   the investment's range is shown, not swept; neither is given beside an investment
+   or a reduction shown as zero (round 1, LOW-1). Alternatives: a net ROI ((reduction -
+   investment) / investment); ROI at each point of the investment; a multi-year NPV.
+6. **The headline line** (retained under a policy, else gross cash) for every headline
+   figure, as the card and the receipt; **the gross-cash line's reduction, ROI and
+   payback are shown beside it** (the owner's interim, round 1). Pending the owner:
+   whether the headline should be gross cash.
+7. **The confidence delta compares the two cards as recorded**; the control effect's
+   evidence does not weigh in a grade yet (section 28.9). Alternative: weigh it now,
+   in a new sensitivity and grade version.
+8. **A residual run's sensitivity ranks its drawn reductions and swings them through
+   their factor**, without a new sensitivity version: no analysis of a run without an
+   option changes, byte for byte. Alternative: a new version for every card.
+9. **The veto reads findings by Mythos policy's severity rule and observed effects by
+   their chains**: high or critical and active vetoes; closed or false-positive does
+   not; accepted does not only while its acceptance stands, and a lapsed, undated or
+   outgrown one vetoes as an active finding (round 1, MEDIUM-2); invalidated, missing
+   or unreadable is `"unknown"`, which applies. **The deployment's standing decision is
+   stated beside the ROI, never as a veto** (the owner's interim, round 1). Pending the
+   owner: whether any blocking decision of the deployment should veto every scenario
+   of it.
+10. **Under the veto the ROI and the payback are shown, display-only**, with the
+    statement. Alternative: withhold them.
+11. **The banner** where either run is Unknown, refused, card-less or unverified, where a
+    row of the pair fails a check, or where the cited retest no longer verifies.
+12. **A retest is cited by a digest over the record and everything the gate reads**, and
+    verified by the gate's own verdict on the finding's latest record. Alternatives:
+    cite the record's `content_digest`; accept any record whose replay classifies
+    `verified_closed`.
+13. **An observed control effect is all-observed**: every reduction `MYTHOS_OBSERVED`
+    with a verified citation, and the reverse. Alternative: per-reduction citations.
+14. **A residual run is never exposure**: not served by `results/`, the scenario
+    document or the events banner; its report marked `residual_of` and refused by
+    `may_be_totalled`; never receipted (the service and the row refuse it; round 1,
+    MEDIUM-1). Alternative: serve its report too, marked residual.
+15. **The simulate route issues each run's Validity Card, not its chart series**: the
+    ROI reads the grade only. Alternative: issue the series too, as step 6's simulate.
+
+## 29. The live feeds (MVP step 10)
 
 Step 10 adds the four official publishers' adapters, the fetch, the feed path of the
 snapshot store, freshness, the production receipt's authority rule and the
 data-health route. It is built up to its gate: **no live request is made until the
 owner adds the keys and turns on one setting**, and nothing in this step calls a real
-host, in a test or at import (section 28.10).
+host, in a test or at import (section 29.10).
 
 | | |
 |---|---|
 | Code | `engine/feeds.py` (pure: the adapters, the feed registry, the freshness table, the evidence reference); `feeds.py` (the fetch, the outbound transport, freshness, the receipt check, data health); `health_api.py` (the route); `manage.py fetch_financial_source`; `snapshots.register` (the loader's core, shared); the card (`validity_service.py`), the grade (`engine/grade.py`) and the receipt (`receipt_service.py`), each changed as little as works |
-| Migration | `0070_financial_source_fetches.py`: one new table, `FinancialSourceFetch` (step 13 takes 0069) |
+| Migration | `0070_financial_source_fetches.py`: one new table, `FinancialSourceFetch`, after step 13's `0069_remediation_options.py` |
 | Tests | `tests/test_economics_feeds.py`; the outbound-client sites (`tests/test_no_outbound_call_follows_a_redirect_or_reads_the_environment.py`), the canary harness (`tests/test_no_planted_secret_leaves_through_a_sink.py`), and the pins of `tests/test_economics_engine.py` and `tests/test_economics_scenario_records.py` |
-| Fixtures | `tests/fixtures/economics_feeds/`, each format-faithful, NOT a recorded response; replace with a recording (owner) (section 28.9) |
+| Fixtures | `tests/fixtures/economics_feeds/`, each format-faithful, NOT a recorded response; replace with a recording (owner) (section 29.9) |
 
-### 28.1 The feed registry
+### 29.1 The feed registry
 
 One table (`engine/feeds.py`, `REGISTRY`) names every source the fetch reads, its
 adapter, provider, dataset, endpoint, schema version, cadence, the settings name of
@@ -4438,7 +4782,7 @@ Every source's licence class is `unreviewed` until the owner's licensing review 
 provider's terms (section 4.4; FREEZE.md, owner exception 9): until then no run may use
 it (`unreviewed_license`). The review is a one-line change per source in the registry.
 
-### 28.2 The adapters
+### 29.2 The adapters
 
 Each adapter reads its provider's documented response format into the existing
 observation snapshot (`engine/snapshot.py`, `Snapshot`), and records, through the
@@ -4487,7 +4831,7 @@ asked for, so an answer cut at a line boundary is refused as `feed_partial`:
 - BLS: every month from January of the first year asked to the newest (`-` is a month
   with no value).
 
-### 28.3 The response hash and the snapshot store
+### 29.3 The response hash and the snapshot store
 
 The response hash is the SHA-256 of the answer's NORMALISED payload
 (`engine/feeds.py`, `payload_hash`, `NORMALISATION`):
@@ -4513,7 +4857,7 @@ A fetched source is registered as `unverified`, and only the raise path lifts it
 (section 6.1). The loader never records `authoritative`, and a fetched version never
 inherits the tier of the version before it.
 
-### 28.4 Fetching
+### 29.4 Fetching
 
     manage.py fetch_financial_source <source> [--as-of YYYY-MM-DD]
     manage.py fetch_financial_source --list
@@ -4553,7 +4897,7 @@ Every fetch that sent a request is recorded once, append-only
 (`fetch_failed`, `fetch_http_error`, `fetch_conflict` or an adapter's code). A fetch is
 never on a stop path, and nothing a stop reads is written by it.
 
-### 28.5 Freshness
+### 29.5 Freshness
 
 Each source carries a freshness SLA in days, from one table
 (`FRESHNESS_SLA_DAYS`), keyed by publisher and cadence: ECB daily 3, H.10 weekly 10,
@@ -4583,7 +4927,7 @@ cover it, and the older version that does is used. A date after a version's newe
 observation is covered, and only ages it. When no usable version covers the date, the
 source is `missing`. A newer fetch, still `unverified`, waits for a raise. Fetched
 versions never inherit a tier (the owner's decision of 13 Oct 2026, the conservative
-default; section 28.11 has the recommendation). The card, the receipt and the
+default; section 29.11 has the recommendation). The card, the receipt and the
 data-health route all read the same choice.
 
 **Which figures a source feeds.** A parameter rests on a feed source when its
@@ -4616,9 +4960,9 @@ card says `claim: "stale"` where one is blocked or missing (`current` otherwise)
 signed. Nothing is recorded. The sources are read from the run's own inputs as well
 as from the card (review round 1, LOW-3). So a card that recorded none, one stored
 before this step, never lets a run that rests on one skip the checks: such a receipt
-is refused `source_missing`, after the authority check of section 28.6.
+is refused `source_missing`, after the authority check of section 29.6.
 
-### 28.6 The production receipt's authority rule
+### 29.6 The production receipt's authority rule
 
 The owner's decision of 13 Oct 2026: once these official publishers are wired, an FX
 or cost-index source behind a PRODUCTION receipt must be `authoritative`. It is
@@ -4633,7 +4977,7 @@ version holds FX or cost-index observations, and only where the run is a product
 one (`runs_in_production`). A run for a deployment recorded as `dev` or `staging` needs
 no more than the gate.
 
-### 28.7 The data-health route
+### 29.7 The data-health route
 
 `GET /api/assurance/deployments/<uuid>/economics/data-health/`
 (`deployment-economics-data-health`), from `assurance/economics/health_api.py`,
@@ -4661,7 +5005,7 @@ date give the same bytes. It writes nothing and reads nothing a stop or the deci
 reads, and it is in `safety.stops.NOT_STOPS`. It imports the feed module only inside
 its view (`test_a_feed_fault_never_takes_down_a_stop`).
 
-### 28.8 Codes
+### 29.8 Codes
 
 | Code | Refused |
 |---|---|
@@ -4681,14 +5025,14 @@ its view (`test_a_feed_fault_never_takes_down_a_stop`).
 | `feed_empty` | no observation |
 | `fetch_conflict` | another fetch recorded a version of the source at the same moment |
 | `fetch_deadline_exceeded` | the answer was not read whole within `FETCH_DEADLINE_SECONDS` (120) |
-| `source_reference_malformed` | a figure's evidence reads as a citation of a feed source but is not one exactly; it fails closed (section 28.5) |
+| `source_reference_malformed` | a figure's evidence reads as a citation of a feed source but is not one exactly; it fails closed (section 29.5) |
 | `source_stale` | a receipt whose card records a source past twice its SLA |
 | `source_missing` | a receipt whose card records a source missing, or with no version a run may use now |
 | `source_not_authoritative` | a production receipt behind an FX or cost-index source below `authoritative` |
 
 The grade's downgrade is `stale_source` (section 26.2's list gains it).
 
-### 28.9 The fixtures
+### 29.9 The fixtures
 
 The adapters are tested against fixtures in `tests/fixtures/economics_feeds/`. **Each is
 format-faithful, NOT a recorded response; replace with a recording (owner).** They were
@@ -4701,7 +5045,7 @@ differs fails there, loudly, rather than parsing silently. The value tests read 
 fixture's own values with a reader of their own. The README beside them names the
 request each answers and what each assumes.
 
-### 28.10 Safety
+### 29.10 Safety
 
 No fetch, adapter, freshness rule or route here is on a stop, pause, stand-down,
 terminate or revoke path, and nothing a stop reads is written by them:
@@ -4730,7 +5074,7 @@ Nothing calls a real host:
 `FinancialSourceFetch` names no account and no deployment, so removing an operator, a
 stop, never writes one.
 
-### 28.11 What waits on the owner, and decisions the owner may change
+### 29.11 What waits on the owner, and decisions the owner may change
 
 What only the owner's keys or licences stand between this step and live fetching:
 
@@ -4776,6 +5120,6 @@ Decisions this step takes, which the owner may change:
 6. **The SLAs**: ECB 3 and H.10 10 (the brief), FRED and BLS monthly 45 (a month's
    value appears about two weeks after the month ends).
 7. **The version a run uses covers its as-of date** (the lead's decision on review
-   round 1, MEDIUM-2; section 28.5). It replaces the first decision, the latest
+   round 1, MEDIUM-2; section 29.5). It replaces the first decision, the latest
    version that passes the gate whatever the run's date, which read a back-dated run
    as `missing`.

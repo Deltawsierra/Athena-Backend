@@ -1,5 +1,5 @@
 """The live-feed adapters, the feed registry and the freshness table (MVP step 10;
-``docs/economics/spec-v1.md``, section 28).
+``docs/economics/spec-v1.md``, section 29).
 
 Four official publishers, each read from its own documented response format into
 the existing observation-snapshot shape (:class:`.snapshot.Snapshot`):
@@ -478,7 +478,7 @@ def _canonical(document) -> bytes:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-#: What each adapter drops before its payload is hashed (spec, section 28.3).
+#: What each adapter drops before its payload is hashed (spec, section 29.3).
 NORMALISATION: Mapping[str, str] = MappingProxyType(
     {
         "ecb": "nothing: the response's bytes as they came (SDMX-CSV carries no clock)",

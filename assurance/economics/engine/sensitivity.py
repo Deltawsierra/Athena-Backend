@@ -255,9 +255,14 @@ def _gross_at(p: ss._Plan, values: Mapping[str, float]) -> float:
             if c.event != index or not c.estimated or not c.cash:
                 continue
             if c.constant is not None:
-                gross += c.constant
+                value = c.constant
             else:
-                gross += float(np.asarray(c.twin({name: values[source] for name, source in c.reads.items()})).reshape(-1)[0])
+                value = float(np.asarray(c.twin({name: values[source] for name, source in c.reads.items()})).reshape(-1)[0])
+            if c.reduced:
+                # A residual run (spec, section 28): the occurrence as its control
+                # effect leaves it, in expectation at the reductions' values.
+                value *= ss.reduction_at(p, values)
+            gross += value
         totals.append(gross)
     if p.exact_scenario is not None and len(totals) > 1:
         return float(p.exact_scenario[ss.GROSS_CASH])
@@ -668,6 +673,23 @@ def analyse(
         rank(name, drawn, r)
         del drawn
         check_time(f"sensitivity {name}")
+    # A residual run's reductions (spec, section 28): ranked like any parameter, on
+    # their own yearly draws from their own streams, and swung through the factor
+    # they put on each reduced component. A point mass is fixed; a reduction that
+    # changes no cash component is not in the gross cash. None for any other run.
+    reduces_cash = any(c.reduced and c.cash for c in p.components)
+    for r in ss.reductions(p):
+        if not r.drawn:
+            fixed.append({"name": r.name, "value": decimal_text(r.point)})
+            values[r.name] = float(r.point)
+            continue
+        if not reduces_cash:
+            not_in_gross.append(r.name)
+            continue
+        drawn = np.asarray(ss.draw_reduction(r, sim.RunRandom(seed), draws), dtype=np.float64)
+        rank(r.name, drawn, r)
+        del drawn
+        check_time(f"sensitivity {r.name}")
     frequency_name = None
     if annual:
         frequency_name = p.frequency.name

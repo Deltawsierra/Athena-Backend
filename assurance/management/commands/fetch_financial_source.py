@@ -1,5 +1,5 @@
 """Fetch one live feed source into the snapshot store, from the operator's shell
-(MVP step 10; ``docs/economics/spec-v1.md``, section 28):
+(MVP step 10; ``docs/economics/spec-v1.md``, section 29):
 
     manage.py fetch_financial_source <source> [--as-of YYYY-MM-DD]
 

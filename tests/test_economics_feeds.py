@@ -1,6 +1,6 @@
 """Economic Exposure, MVP step 10: the live-feed adapters, the fetch, the snapshot
 store, freshness, the production receipt's authority rule and the data-health route
-(``docs/economics/spec-v1.md``, section 28).
+(``docs/economics/spec-v1.md``, section 29).
 
 Every answer here is a FIXTURE (``tests/fixtures/economics_feeds``), and nothing
 reaches a real host: a socket guard refuses every connection and every name lookup

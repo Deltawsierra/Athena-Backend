@@ -1,4 +1,4 @@
-"""The data-health route (MVP step 10; ``docs/economics/spec-v1.md``, section 28.6).
+"""The data-health route (MVP step 10; ``docs/economics/spec-v1.md``, section 29.7).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
 its own: a fault here leaves this route unserved and nothing else -- not the other
