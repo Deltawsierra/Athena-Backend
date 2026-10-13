@@ -7105,6 +7105,12 @@ run may use NOW, so its records name the newer version, its build document diffe
 it is a NEW version superseding the stale one; its run is not stale for that source
 (`test_a_newer_usable_source_version_stales_the_run_and_a_refresh_reads_it`).
 
+The map's `release` (section 34.1) of a run that read a normalized figure is the release
+that grades it: its engine versions name the rule and its grade record is v4 (section
+36.5), and the entry says so (`"normalized": true`); `assess` compares it with the same
+release read now, so such a run is neither `release_unverifiable` nor `release_changed`
+for having been normalized. Every other run's `release` is as it was.
+
 ### 36.9 Safety
 
 Nothing here is on a stop path. The normalizations read the stored snapshot versions --

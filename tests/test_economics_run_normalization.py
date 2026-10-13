@@ -670,12 +670,17 @@ def test_a_newer_usable_source_version_stales_the_run_and_a_refresh_reads_it(dep
         "as_of": VALUATION,
         "versions": [{"source_key": REF, "tenant": "platform", "version": 1, "snapshot_hash": first.snapshot_hash}],
     }
-    assert "source_superseded" not in {r["code"] for r in continuous_service.assess(result).reasons}
+    # The run rests on the release that grades it (v4), read, so nothing but a moved
+    # source stales it.
+    assert mapped["release"]["digest"] and mapped["release"]["normalized"] is True
+    assert mapped["release"]["record"]["grade"] == grade.version_record(normalized=True)
+    assert continuous_service.assess(result).reasons == []
     # A newer version of the FX and index source: different rates, usable on the as-of date.
     register(REF, "RUN-TEST-REF", fx_rates=[(b, q, d, "1.2" if (b, q) == ("EUR", "USD") and d == EVENT else v)
                                             for b, q, d, v in REF_RATES], points=REF_POINTS)
-    reasons = [r for r in continuous_service.assess(result).reasons if r["code"] == "source_superseded"]
-    assert [(r["dependency"], r["was"], r["now"]) for r in reasons] == [(f"source:{REF}", "1", "2")]
+    reasons = continuous_service.assess(result).reasons
+    assert [(r["code"], r["dependency"], r["was"], r["now"]) for r in reasons] == [
+        ("source_superseded", f"source:{REF}", "1", "2")]
     # The refresh: rebuilt from what the build recorded, naming the same stored policy,
     # reading version 2 now.
     client = APIClient()
@@ -695,7 +700,9 @@ def test_a_newer_usable_source_version_stales_the_run_and_a_refresh_reads_it(dep
     plain = built(Deployment.objects.create(name="usd-only", environment="staging", owner=people["owner"]), people,
                   variables={"margin_per_hour": _entry("money_per_hour", "1100", effective_date=VALUATION)},
                   policy=None)
-    assert "normalization_sources" not in ExposureDependencies.objects.get(simulation=simulated(plain)).dependencies
+    held = ExposureDependencies.objects.get(simulation=simulated(plain)).dependencies
+    assert "normalization_sources" not in held and "normalized" not in held["release"]
+    assert held["release"]["record"]["grade"] == grade.version_record()
 
 
 # ======================================================================
