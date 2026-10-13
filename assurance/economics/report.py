@@ -34,6 +34,10 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   ``excluded_from_totals: true``. Nothing may sum such a result into a total, now or
   later: :func:`may_be_totalled` is the one test a total applies, and it fails
   closed.
+- **One rule, two routes.** :func:`banner_reason` is the rule, and :func:`standing` is
+  the scenario version's latest stored result under it: the report applies the first
+  to its result, and the step-5 events route (``scenario_api``) serves the second
+  beside its deterministic figures, which are not a result and stay.
 
 Nothing here is on a stop path. This module imports nothing probabilistic: the step-8
 and builder modules it reads are imported when a report is built, never at load.
@@ -78,6 +82,9 @@ REPORT_SCHEMA = "mythos.economics.report/v1"
 SCENARIO_SCHEMA = "mythos.economics.scenario/v1"
 #: What a result graded Unknown, refused or not graded shows (the owner-adopted default).
 UNKNOWN_BANNER = "Unknown: not for capital decisions"
+#: The reason a scenario version with no stored result is served with the banner (the
+#: step-5 events route; a report is of a stored result, so it never says this).
+NO_RESULT = "no simulation result is recorded for this scenario version: it is not graded"
 #: The grade that is not for capital decisions.
 UNKNOWN = "Unknown"
 #: The grades a total may sum (an allow-list: anything else is refused).
@@ -243,6 +250,56 @@ def verified_grade(card: FinancialValidityCard | None, result: SimulationResult)
     if card is None or _result_failures(result) or _card_failures(card, result):
         return None
     return card.card["confidence_grade"]
+
+
+def banner_reason(result: SimulationResult | None, grade: str | None, failed: list[str]) -> str | None:
+    """Why ``result`` is not for capital decisions, or ``None`` where it may be totalled:
+    a completed result whose stored rows verified (``failed`` is empty) and a ``grade``
+    on the allow-list :data:`GRADES_FOR_TOTALS`. ``None`` for the result is a scenario
+    version with none stored. It fails closed: a grade the list does not name is a
+    reason. A reason is the one test of the banner (:data:`UNKNOWN_BANNER`) and of
+    ``excluded_from_totals``, in the report and on the step-5 events route."""
+    if result is None:
+        return NO_RESULT
+    if failed:
+        return _unverified(failed)
+    if result.status != SIMULATION_COMPLETED:
+        return f"the run was refused ({result.refusal_code}): it has no figures"
+    if grade is None:
+        return "no Validity Card is recorded for this result: it is not graded"
+    if grade == UNKNOWN:
+        return "graded Unknown: Mythos cannot responsibly quantify this scenario"
+    if grade not in GRADES_FOR_TOTALS:
+        return f"graded {grade}: not a grade a total may sum"
+    return None
+
+
+def standing(scenario: FinancialScenario) -> dict:
+    """The banner rule applied to ``scenario``'s latest stored result, by record order
+    (the result ``results/`` serves without ``?simulation=``): the ``grade`` (the card
+    DOCUMENT's, only where every stored row verified, else ``None``), the ``banner``,
+    ``excluded_from_totals`` and ``banner_reason``. Every row is checked as the report
+    checks it (:func:`stored_row_failures`, the series' too), and a scenario version
+    with no result is not graded. Reads rows, hashes them and runs nothing else."""
+    # The scenario's own runs, as results/ serves them: a residual run under a
+    # remediation option (section 28) is never the scenario's exposure.
+    result = SimulationResult.objects.filter(
+        scenario=scenario, deployment_id=scenario.deployment_id, remediation__isnull=True
+    ).order_by("-id").first()
+    card = charts = None
+    failed: list[str] = []
+    if result is not None:
+        card = FinancialValidityCard.objects.filter(simulation=result).first()
+        charts = SimulationCharts.objects.filter(simulation=result).first()
+        failed = stored_row_failures(result, card, charts, scenario)
+    grade = None if result is None or failed else verified_grade(card, result)
+    reason = banner_reason(result, grade, failed)
+    return {
+        "grade": grade,
+        "banner": None if reason is None else UNKNOWN_BANNER,
+        "excluded_from_totals": reason is not None,
+        "banner_reason": reason,
+    }
 
 
 # ------------------------------------------------------------------ money
@@ -674,17 +731,8 @@ def build_report(result: SimulationResult) -> dict:
     completed = result.status == SIMULATION_COMPLETED
     figures = completed and not failed
     grade = card.card["confidence_grade"] if card is not None else None
-    withheld = None
-    if failed:
-        why = withheld = _unverified(failed)
-    elif not completed:
-        why = f"the run was refused ({result.refusal_code}): it has no figures"
-    elif grade is None:
-        why = "no Validity Card is recorded for this result: it is not graded"
-    elif grade == UNKNOWN:
-        why = "graded Unknown: Mythos cannot responsibly quantify this scenario"
-    else:
-        why = None
+    withheld = _unverified(failed) if failed else None
+    why = banner_reason(result, grade, failed)
     events = _loss_events(scenario, build, shown, figures=figures)
     record = result.record if completed and "result_digest" not in failed else None
     if not completed:
@@ -872,17 +920,20 @@ __all__ = [
     "INTEGRITY_CHECKS",
     "LIMITATIONS",
     "LINES",
+    "NO_RESULT",
     "REPORT_SCHEMA",
     "SCENARIO_SCHEMA",
     "STORED_ROW_UNVERIFIED",
     "UNKNOWN",
     "UNKNOWN_BANNER",
+    "banner_reason",
     "build_report",
     "canonical_bytes",
     "digest_of",
     "may_be_totalled",
     "scenario_document",
     "served_snapshots",
+    "standing",
     "stored_row_failures",
     "verified_grade",
     "verifies",

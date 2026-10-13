@@ -141,6 +141,10 @@ class FXRate:
     source_snapshot_hash: str
     source_key: str = ""
     source_version: int | None = None
+    #: The version of the same source that holds this stored observation, when it is
+    #: not ``source_version``: a raised version reads the rows the loader registered
+    #: under the same snapshot hash, and the provenance names both.
+    observations_version: int | None = None
 
     def __post_init__(self):
         check_money_currency(self.base, "base")
@@ -158,7 +162,7 @@ class FXRate:
         check_snapshot_hash(self.source_snapshot_hash)
 
     def as_provenance(self) -> dict:
-        return {
+        provenance = {
             "provider": self.provider,
             "base": self.base,
             "quote": self.quote,
@@ -170,6 +174,9 @@ class FXRate:
             "source_key": self.source_key,
             "source_version": self.source_version,
         }
+        if self.observations_version is not None:
+            provenance["observations_version"] = self.observations_version
+        return provenance
 
 
 class FXBook:

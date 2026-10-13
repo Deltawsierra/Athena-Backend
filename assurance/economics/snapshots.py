@@ -12,6 +12,16 @@ not written again. Nothing fetches a feed.
 DATA, not real rates or indices, registered with licence class ``open`` and trust
 tier ``unverified``.
 
+A snapshot never states ``authoritative``: that tier is recorded only by a raise
+one admin requested and another approved (``second_person_required``; spec, section
+6.1). A file stating it is refused before anything is written.
+
+A source version's observations are read from the version the loader registered
+under the same tenant, key and snapshot hash (:func:`fx_book`, :func:`index_book`):
+a raised version copies the hash and holds no rows of its own, and nothing copies
+them, which would hold the database's write lock for as long as the copy took and
+delay every stop's write behind it.
+
 Nothing calls this module but the tests and an operator: no route, command or
 signal imports it, and it is on no stop path.
 """
@@ -23,8 +33,9 @@ from datetime import date
 from pathlib import Path
 
 from django.db import transaction
+from django.db.models import Q
 
-from .engine import money
+from .engine import governance, money
 from .engine import snapshot as _snapshot
 from .engine.cost_index import IndexBook
 from .engine.fx import FXBook
@@ -49,6 +60,12 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
     version; one already registered with the file's hash is returned as it is."""
     snapshot = read_snapshot(path)
     source = snapshot.source
+    if governance.needs_second_person(source["trust_tier"]):
+        raise EconomicsRefused(
+            "second_person_required",
+            f"the snapshot states trust tier {source['trust_tier']}: register it at a lower tier and raise it "
+            "with POST /api/assurance/economics/sources/<uuid>/trust-raises/, which a second admin approves",
+        )
     with transaction.atomic():
         existing = (
             FinancialSource._base_manager.filter(
@@ -118,6 +135,30 @@ def _tenant_sources(sources: Iterable[FinancialSource], deployment) -> list[int]
     return ids
 
 
+def _observation_holders(ids: list[int]) -> dict[int, FinancialSource]:
+    """For the source versions ``ids``: ``{the version holding the observations: the
+    version to name}``. A version's observations are the rows of the EARLIEST version
+    of the same tenant, key and snapshot hash -- the one the loader registered, since
+    a raise copies the hash and holds no rows of its own. Two versions handed in that
+    share a holder are read once, named by the later of them. One read, no write."""
+    asked = list(FinancialSource._base_manager.filter(pk__in=ids).order_by("version"))
+    if not asked:
+        return {}
+    shared = Q()
+    for version in asked:
+        shared |= Q(
+            deployment_id=version.deployment_id, source_key=version.source_key, snapshot_hash=version.snapshot_hash
+        )
+    holders: dict[tuple, int] = {}
+    for row in (
+        FinancialSource._base_manager.filter(shared)
+        .order_by("version")
+        .values("pk", "deployment_id", "source_key", "snapshot_hash")
+    ):
+        holders.setdefault((row["deployment_id"], row["source_key"], row["snapshot_hash"]), row["pk"])
+    return {holders[(v.deployment_id, v.source_key, v.snapshot_hash)]: v for v in asked}
+
+
 def fx_book(
     sources: Iterable[FinancialSource], *, deployment, holidays: Mapping[str, Iterable[date]] | None = None
 ) -> FXBook:
@@ -126,15 +167,21 @@ def fx_book(
 
     No model stores a provider's holidays yet: pass them (a snapshot's
     ``holidays``). Without them, a holiday is a day the provider publishes on, so a
-    rate missing on it is unavailable -- never filled in."""
-    ids = _tenant_sources(sources, deployment)
-    rows = FXObservation.objects.filter(source_id__in=ids).select_related("source")
-    return FXBook((row.as_engine() for row in rows), holidays)
+    rate missing on it is unavailable -- never filled in.
+
+    A raised version's rows are the ones the loader registered under its snapshot
+    hash (:func:`_observation_holders`), and each rate names the version handed in
+    as ``source_version`` and the version holding the row as
+    ``observations_version``."""
+    read_as = _observation_holders(_tenant_sources(sources, deployment))
+    rows = FXObservation.objects.filter(source_id__in=read_as).select_related("source")
+    return FXBook((row.as_engine(read_as[row.source_id]) for row in rows), holidays)
 
 
 def index_book(sources: Iterable[FinancialSource], *, deployment) -> IndexBook:
     """The stored cost-index observations of ``sources`` as the engine reads them,
-    for a run of ``deployment``: every source platform-wide or that deployment's own."""
-    ids = _tenant_sources(sources, deployment)
-    rows = CostIndexObservation.objects.filter(source_id__in=ids).select_related("source")
-    return IndexBook(row.as_engine() for row in rows)
+    for a run of ``deployment``: every source platform-wide or that deployment's own,
+    a raised version's read as :func:`fx_book` reads them."""
+    read_as = _observation_holders(_tenant_sources(sources, deployment))
+    rows = CostIndexObservation.objects.filter(source_id__in=read_as).select_related("source")
+    return IndexBook(row.as_engine(read_as[row.source_id]) for row in rows)

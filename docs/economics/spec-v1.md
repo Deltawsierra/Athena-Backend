@@ -17,7 +17,8 @@ how an amount is held, converted and normalized and with what provenance, the
 observation data, how a loss component is computed and with what invariants, and
 what this version does not do. The scenario engine computes deterministic low, base
 and high ranges, and the routes it serves are the customer parameter set's (section
-19) and the scenario builder's (section 24). The distribution catalogue and the seeded
+19), the scenario builder's (section 24), and raising a source's trust tier (section
+6.1). The distribution catalogue and the seeded
 sampler (phase E2, section 23) are pure; MVP step 7b (section 25) wires them to the
 formulas and the loss model through a service that simulates a stored scenario version
 and records the result, and serves no route; and MVP step 8 (section 26) analyses a
@@ -29,7 +30,8 @@ its row's figures from both sides, and the frequency by the rate its count impli
 (sections 19.4 and 25.1); and it serves steps 5, 7b and 8 (section 27): a scenario
 version with its parameters' provenance, a simulation of it under a named policy,
 and the deterministic report JSON of a stored result, with the banner a result graded
-Unknown carries.
+Unknown carries; the step-5 events route carries the same banner (sections 24.8 and
+27.6).
 
 ## Contents
 
@@ -86,9 +88,9 @@ MVP step 13, one remediation option per scenario version, on steps 7b, 8 and 6:
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py`, the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py` and `tests/test_economics_builder.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
 
@@ -100,8 +102,8 @@ with Django and every other part of mythos-core poisoned.
 
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
-parameter set's, the scenario builder's and step 6's (section 27); feeds and their
-adapters; source disagreement.
+parameter set's, the scenario builder's, the trust raises' and step 6's (section
+27); feeds and their adapters; source disagreement.
 Building and verifying the signed Financial Exposure Receipt
 (`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
@@ -298,6 +300,11 @@ A production run never relies on a source still trusted as `unverified`
 the first customer run). A run for a deployment recorded as `dev` or `staging` is not
 a production run, and may.
 
+A tier is raised in the opposite order, weakest to strongest: `unverified` <
+`benchmark` < `licensed_vendor` < `customer` < `authoritative`
+(`governance.TRUST_ORDER`). Only an admin raises one, only upward, and
+`authoritative` only with a second admin's approval (section 6.1).
+
 ## 5. The currency table
 
 `mythos_core.currency` is the one currency table for Economic Exposure
@@ -387,7 +394,8 @@ simulation step (section 25) adds no route: its service is the only writer of a
 simulation result, which step 6's simulate route calls (section 27); step 6's chart
 service is the only writer of a result's chart series.
 The scenario step adds one route module (section 19), the only writer of a
-customer parameter set and its parameters; the builder step adds another (section
+customer parameter set and its parameters, and since 12 Oct 2026 of a trust raise
+and the source version it records (section 6.1), with the operator's command; the builder step adds another (section
 24), the only writer of a built scenario, its parameters, events, components,
 effects, finding links and build record. The permitted writers below are the
 ones the later steps may add, and, for the observations, the snapshot loader an
@@ -395,7 +403,8 @@ operator runs; any other writer is a defect.
 
 | Model | Holds | Permitted writers |
 |---|---|---|
-| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review; an admin may record a reviewed license class as a new version |
+| `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review, never at `authoritative`; an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
+| `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, the channel it came through (`api` or `command`), who requested it and when, who approved it and when, who withdrew it, when and through which channel, and its state (`pending`, `done`, `withdrawn` or `expired`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only, and only the signed-in route approves |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint (the deployment's when the builder built the version, section 24.6; or none, and why, in `system_fingerprint_unavailable`), causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
@@ -450,14 +459,167 @@ and trust tier. Which runs are production runs is decided by
 never the object handed in: a run for a deployment recorded as `dev` or `staging` is
 not one and keeps the gate as it was; a run for a deployment in `production` (the
 default) or `other`, for one that is not recorded, or for no deployment (`None`) is
-one. A version's tier never changes; a higher tier is a new version. No route, command
-or admin action records a source version yet: the only writer is the snapshot loader
-an operator runs, which takes the tier from the snapshot's own document. Who may
-raise a tier, and through what, is still to be decided.
+one. A version's tier never changes; a higher tier is a new version, recorded only by
+an admin's raise (section 6.1). The snapshot loader an operator runs takes the tier
+from the snapshot's own document, except `authoritative`, which it refuses.
 
 `SensitiveOverride.check_in_force()` raises unless two
 different people, neither the requester, have approved it. Whatever would use a
 source or apply an override calls these first.
+
+### 6.1 Raising a source's trust tier
+
+The owner's decision of 12 Oct 2026, after the trust-tier gate: an admin-only action
+raises a tier, it records who raised it and when, and the top tier needs a second
+person. Review round 1 of #155 closed the ways round the second person and decided
+the rest (13 Oct 2026). `FinancialSourceTrustRaise` (`models.py`) holds the rules on
+the record itself, and the routes and the command call its methods, so each refuses
+with the same code.
+
+- **A new version.** A version's tier never changes, so a raise records a NEW version
+  of the same source: the same tenant, key, provider, dataset, URL, licence, snapshot
+  hash, retrieval time, schema version and synthetic flag, at the new tier, with
+  `recorded_by` the admin who completed the raise. It is saved through
+  `FinancialSource`'s own checks, so a synthetic source stays `unverified`
+  (`synthetic_source`), `customer` needs a tenant (`customer_source_without_tenant`),
+  and the check constraints hold. Its version number is pinned to the one after the
+  version raised: a version recorded meanwhile (a snapshot registered between the
+  check and the insert, which PostgreSQL's READ COMMITTED allows) collides with it,
+  and the approval is refused 409 with nothing written. The version raised from
+  stays as it was, and a production run still refuses it (`source_unverified`) while
+  it accepts the new one.
+- **Its observations.** A raised version holds no FX or cost-index rows of its own,
+  and none are copied: a copy would hold the database's write lock for as long as it
+  took, and every stop's write would wait behind it. `snapshots.fx_book` and
+  `snapshots.index_book` read a version's rows from the EARLIEST version of the same
+  tenant, key and snapshot hash, the one the loader registered: one indexed read, no
+  write. Each observation's provenance names the version handed in, the one the gate
+  checked, as `source_version`, and the version holding the row as
+  `observations_version`; the second key appears only where the two differ, so the
+  provenance of a version read as itself is unchanged. Normalised from the raised
+  version, an amount comes out the same as from the version the loader registered.
+- **Only a second admin's approval records `authoritative`.** `FinancialSource`
+  refuses a version at `authoritative` (`second_person_required`) unless it carries
+  a marker only `FinancialSourceTrustRaise.approve()` sets: a plain save, the snapshot
+  loader and any other writer through the model are refused. The loader refuses a
+  file stating `authoritative` before it writes anything, and its message names the
+  raise route. Lower tiers are recorded as their file states them.
+- **Admin only** (`admin_required`): an active account whose role is admin, or a
+  superuser, as every write to the assurance record is. Anonymous is 401; any other
+  signed-in account is 403, before the body is read. A tenant's source is found as its
+  deployment is (the deployment scoping of section 19): 404 for anyone that scoping
+  does not show the tenant, whether or not it exists. A platform-wide source is every
+  signed-in account's to see. Reading the raises needs no more than seeing the source.
+- **Upward only** (`trust_not_raised`): the new tier is above the version's own in
+  the order of section 4.5; the same tier or a lower one is refused. A tier this
+  platform does not know is `code_unrecognised`.
+- **From the latest version only** (`source_superseded`): a raise starts from the
+  latest version of its source (its tenant and key), and an approval is refused if a
+  newer version was recorded since the request, by another raise or the snapshot
+  loader. A message names a version by its key and number, never a database key.
+- **A reason** (`required_field_blank`, `reason_too_long`): text, not blank, at most
+  2000 characters.
+- **One step below the top.** Below `authoritative`, one admin raises in one call:
+  the new version and the record, `done`, its requester its approver, are written in
+  one transaction.
+- **Two people for `authoritative`.** The request is recorded `pending` and no version
+  is written. An admin OTHER than the requester approves it, through the signed-in
+  route only (`second_person_required` for the requester, matched on the account and
+  on the recorded username so a removed requester is still the requester, and for
+  the operator's command, which never approves); and only while the requester is
+  still an active admin (`requester_no_longer_admin` for a requester demoted,
+  deactivated or removed). That records the version and the record moves to `done`.
+  Any active admin may withdraw a pending request, and the record names who did,
+  when and through which channel: cancelling a request for more trust is never harder
+  than granting it. A request that is done, withdrawn or expired is never approved
+  or withdrawn again (`trust_raise_not_pending`; `trust_raise_expired` for an
+  approval of an expired one). No write through the ORM records a raise to
+  `authoritative` as done without that approval: the model inserts it only pending.
+- **A pending request expires** 30 days after its request
+  (`governance.TRUST_RAISE_EXPIRES_AFTER`, the owner's decision of 13 Oct 2026), to
+  the instant, by the service's clock and the request's stored `requested_at` (the
+  service's clock when the request was recorded, whatever the row carried) --
+  never a time a caller sends. Expiry is found lazily, at approve time, with no
+  background job: an approval of an expired request is refused
+  (`trust_raise_expired`), nothing is recorded, and the request moves to `expired`
+  in its one conditional transition, which is kept though the approval is refused.
+  A read shows a request past its time as `expired` even if nobody has tried to
+  approve it, computing it and writing nothing; each record says when it expires
+  (`expires_at`). A withdrawal of an expired request is refused as not pending
+  (`trust_raise_not_pending`) and writes nothing: only an approval moves it.
+- **Atomic and single-use.** An approval locks the raise's row (`select_for_update`)
+  and reads under that lock that it is still pending, that the approver is not the
+  requester, that the requester is still an admin and that its version is still the
+  latest; then it records the version and moves the record with one conditional write
+  (only while it is still pending), all in one transaction. Two concurrent approvals
+  give exactly one version: the second waits for the lock and finds the raise done.
+  On PostgreSQL the row lock does that; SQLite, which the tests run on, ignores
+  `select_for_update` and serialises the whole transaction at BEGIN IMMEDIATE. The
+  transaction is a few reads and three writes.
+- **A busy database.** A write that meets a lock it cannot get ("database is locked",
+  a serialisation failure) is answered 503 with Retry-After (`trust_raise_busy`), as
+  the stops' service-token path answers a busy database, and writes nothing; the
+  command says so and writes nothing.
+- **The record.** One row per raise: the version raised from and (once done) the
+  version recorded, the tiers, the reason, the `channel` it came through (`api` or
+  `command`), `requested_by` and `requested_by_username` with `requested_at`,
+  `approved_by` and `approved_by_username` with `approved_at`, `withdrawn_by` and
+  `withdrawn_by_username` with `withdrawn_at` and `withdrawn_via`, and the state. It
+  is append-only but for its one transition, and the usernames outlive a removed
+  account. Its check constraints hold the state's fields (`done` has a version, an
+  approval time and an approver's name; `pending` and `expired` have none;
+  `withdrawn` has a withdrawal time, a withdrawer's name and a channel), a known
+  channel and an upward
+  pair of tiers; none of them names an account column, so removing an operator, a
+  stop, is never refused by a raise. It waits only for an approval or withdrawal
+  already in flight, for that transaction's few milliseconds: on the raise row's lock
+  and its foreign keys' on PostgreSQL, on the database's write lock on SQLite, as
+  behind any write.
+
+The routes are mounted under `/api/assurance/` with the parameter set's, from
+`assurance/economics/api.py`, guarded as that module is, and none is a stop
+(`safety.stops.NOT_STOPS`):
+
+- `GET  economics/sources/<uuid>/trust-raises/` (`economics-source-trust-raises`):
+  every raise of the source the version `<uuid>` belongs to, newest first, at most
+  200 (`truncated` says if there are more);
+- `POST economics/sources/<uuid>/trust-raises/`: raise that version, from a strict
+  JSON body holding `to_tier` and `reason` and nothing else, at most 64 KiB (413,
+  saying what the route takes): 201, `done` (below the top tier) or `pending`
+  (`authoritative`);
+- `POST economics/trust-raises/<uuid>/approve/` (`economics-trust-raise-approve`):
+  200, `done`;
+- `POST economics/trust-raises/<uuid>/withdraw/` (`economics-trust-raise-withdraw`):
+  200, `withdrawn`.
+
+An approval or a withdrawal takes no body: none, or `{}`; a body that says anything
+is 400, never ignored. A refusal answers its code: 403 for `admin_required` and
+`second_person_required`; 409 for `trust_raise_not_pending`, `source_superseded`,
+`requester_no_longer_admin` and `trust_raise_expired` (and for another version of the
+source recorded at the same moment); 503 for `trust_raise_busy`; 400 for the rest.
+
+The operator's command is the same rules and the same record, recorded with channel
+`command` under the account `--as` names. The operator proves they hold it: the
+command reads that account's password with getpass, at a terminal only -- never
+from its arguments or the environment -- and refuses unless
+`django.contrib.auth.authenticate` accepts it and the account is an active admin.
+It never approves (`second_person_required`, before any password is asked):
+
+    manage.py raise_source_trust request <source version uuid> --to <tier> --reason <why> --as <username>
+    manage.py raise_source_trust withdraw <raise uuid> --as <username>
+
+Not decided here, for the owner:
+
+- lowering a tier (a source found unreliable) has no path, as the decision was raise
+  only; adding one would be a revoke under the SAFETY RULE;
+- re-registering a snapshot whose source was since raised returns the version the
+  loader registered first, still at its own tier, not the raised one (review round
+  1, L2);
+- no code reads `authoritative` differently from the tiers below it: one admin
+  alone makes a source usable by a production run by raising it to `benchmark`, and
+  the second person guards the `authoritative` label (review round 1, L3);
+- a version written past the model -- the base manager, raw SQL, a migration -- is
+  not held to the marker, as no economics record is (section 10).
 
 ## 7. Governance rules and refusal codes
 
@@ -485,9 +647,17 @@ that code (`EconomicsRefused.code`).
 | `spine_reference_malformed` | a reference into SPINE is in SPINE's form (section 8) |
 | `cross_tenant_reference` | a record never points at another deployment's record, and a run never uses another deployment's source |
 | `customer_source_without_tenant` | a platform-wide source is never licensed or trusted as `customer` data |
-| `code_unrecognised` | a verdict, license class or trust tier is one of its codes |
-| `required_field_blank` | a source key, provider, dataset, schema version or scenario title is not blank |
+| `code_unrecognised` | a verdict, license class or trust tier (a raise's too) is one of its codes |
+| `required_field_blank` | a source key, provider, dataset, schema version, scenario title or a raise's reason is not blank |
 | `bulk_create_refused` | records are written one at a time, through the checks above |
+| `admin_required` | only an admin (role admin, or a superuser) requests, approves or withdraws a raise of a source's trust tier (section 6.1) |
+| `requester_no_longer_admin` | a pending raise is approved only while the admin who requested it is still an active admin; any admin may withdraw it |
+| `trust_raise_expired` | a pending raise expires 30 days after its request (`TRUST_RAISE_EXPIRES_AFTER`), by the service's clock; an approval after that is refused, nothing is recorded, and the request moves to `expired`; a withdrawal after that is refused as not pending and writes nothing |
+| `trust_not_raised` | a raise moves a source to a tier above its own, in the order of section 4.5; the same tier or a lower one is refused |
+| `source_superseded` | a raise starts from the latest version of its source, and is approved only while that version is still the latest |
+| `second_person_required` | an `authoritative` version is recorded only by a raise one admin requested and ANOTHER approved through the signed-in route: never by the requester, the operator's command, a snapshot file or any other write through the model |
+| `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending and not expired; below `authoritative` it is done in one step, never pending |
+| `reason_too_long` | a raise's reason is at most 2000 characters |
 
 The rules read what is stored, never what a caller's in-memory object says: the
 authors of a scenario's versions, an override's requester and its approvals are
@@ -837,7 +1007,9 @@ and the same rate read back from its column are written alike. Abridged:
 
 Each step's output is the next step's input, and the last step's output is the
 value. Every rate and index used is in the chain with its provider (or series),
-date, rate type (or vintage), snapshot hash and source version.
+date, rate type (or vintage), snapshot hash and source version; a rate or index a
+raised version read from the version its snapshot was registered as also names that
+version, as `observations_version` (section 6.1).
 
 ### 12.7 Limitations of E1
 
@@ -903,13 +1075,17 @@ hash), a bare `NaN` or `Infinity`, and any other broken document are
 
 `snapshots.register_snapshot(path)` writes, in one transaction, the source version
 and every observation, each through its model's checks; a file already registered
-under its hash is returned, not written again. `snapshots.fx_book(sources,
-deployment=...)` and `snapshots.index_book(sources, deployment=...)` read stored
-observations back into the engine for a run of that deployment: every source must
-be platform-wide or the deployment's own, as stored (`None` is a run for no
-deployment: platform-wide only), and any other is refused
-(`cross_tenant_reference`). A test shows the normalization from the rows equals
-the one from the file.
+under its hash is returned, not written again. A file stating trust tier
+`authoritative` is refused before anything is written (`second_person_required`):
+that tier is recorded only by a second admin's approval of a raise (section 6.1).
+`snapshots.fx_book(sources, deployment=...)` and `snapshots.index_book(sources,
+deployment=...)` read stored observations back into the engine for a run of that
+deployment: every source must be platform-wide or the deployment's own, as stored
+(`None` is a run for no deployment: platform-wide only), and any other is refused
+(`cross_tenant_reference`). Each source version's rows are those of the earliest
+version of the same tenant, key and snapshot hash, so a raised version reads the
+rows its snapshot was registered with (section 6.1). A test shows the normalization
+from the rows equals the one from the file.
 
 Django keeps a decimal on SQLite, this service's database, as a float rounded to
 15 significant digits. So every decimal column holds at most 15 digits -- a rate
@@ -2330,7 +2506,7 @@ GUARDED in a guard of its own (section 2):
 | Route | Name | Does |
 |---|---|---|
 | `POST deployments/<uuid>/economics/scenarios/build/` | `deployment-economics-scenario-build` | builds a scenario draft: 201 with the scenario, its build and its events; 200 with the scenario already built from the same inputs; 409 on a race |
-| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's system fingerprint as built (or none, and why: section 24.6), its review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's system fingerprint as built (or none, and why: section 24.6), its review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals; and the Unknown banner of the version's latest stored result: `grade`, `banner`, `excluded_from_totals` and `banner_reason` (section 24.8's banner paragraph, section 27.6) |
 
 The body:
 
@@ -2359,6 +2535,22 @@ The body:
 - **Author-recorded, and reviewed under section 7**: the draft names the signed-in
   account as its author, so its author never reviews it; another admin or analyst
   does, through `ScenarioReview`.
+- **The Unknown banner** (the follow-up #158's review asked for, LOW-6(b)): the events
+  route follows the report's rule (section 27.6). It reads the scenario version's
+  latest stored result (the one `results/` serves without `?simulation=`), its Validity
+  Card and its series, checks every stored row as the report does
+  (`report.stored_row_failures`), and applies `report.banner_reason`: with no verified
+  grade A to D the response carries `banner: "Unknown: not for capital decisions"` and
+  `excluded_from_totals: true`, and `banner_reason` says why -- no result yet, the run
+  was refused, no card, rows that do not verify, or graded Unknown. A verified grade A
+  to D carries `banner: null`, `excluded_from_totals: false`, the `grade` and no
+  reason. `grade` is the card DOCUMENT's and only where every stored row verified: it
+  is `null` where one does not (a refused run's card is graded Unknown, and says so).
+  **The figures stay**: the events and totals are step 4's deterministic low, base and
+  high, which are not a result, so the banner and the exclusion are added and nothing
+  else in the response changes (`report.standing`; `test_only_the_banner_is_added_to_the_events_response`).
+  The build route's response is the draft just built, which has no result by
+  construction, and carries none of this (section 27.10).
 - **Strict JSON**: exactly the fields at every level, the 64 KiB cap (413 on the
   declared length, and the parser never reads past it), a key twice in one object and
   a bare `NaN` refused by the parser, the strict decimal-string rule for every value.
@@ -2372,7 +2564,11 @@ The body:
   and nothing else: under `tests/economics_broken_builder.py`, the scan's Stop
   answers 202, `deliver_owed_stops` runs its checks and reaches its handler,
   `manage.py check` passes and the parameter-set routes are served
-  (`test_a_builder_fault_never_takes_down_a_stop`).
+  (`test_a_builder_fault_never_takes_down_a_stop`). The events route imports
+  `report` inside its view, never at load: under `tests/economics_broken_report.py`
+  the build route and the events route still resolve, and the events route answers
+  a server error with no figures (it never serves figures without the banner)
+  (`test_a_report_fault_never_takes_down_a_stop`).
 
 The builder's refusal codes (`templates.REFUSALS`, raised as `BuildRefused`, a
 `MoneyRefused`); a code the money or scenario engine already publishes
@@ -4049,6 +4245,16 @@ is refused, and so is one re-digested with an Unknown grade. A total of several
 reports leaves out every one it refuses. No route serves a total yet (section
 27.10).
 
+The step-5 events route follows the same rule (`GET .../scenarios/<uuid>/events/`,
+section 24.8; review round 1, LOW-6(b)). `report.banner_reason(result, grade, failed)`
+is the one rule: the report applies it to its result, and `report.standing(scenario)`
+applies it to the version's latest stored result for the events route, which serves
+`grade`, `banner`, `excluded_from_totals` and `banner_reason` beside its figures.
+A reason -- no result stored (`report.NO_RESULT`), rows that fail a check, a refused
+run, no card, a grade of Unknown, or any grade `GRADES_FOR_TOTALS` does not list --
+is the banner and the exclusion; no reason is a completed result, every row
+verified, graded A to D. The figures there are step 4's, not a result, and stay.
+
 ### 27.7 The scenario document
 
 `report.scenario_document(scenario)`, schema `mythos.economics.scenario/v1`: the
@@ -4100,7 +4306,12 @@ URLconf, and `test_a_broken_probabilistic_engine_never_takes_down_the_scan_stop`
 makes them unimportable before Django loads. A broken `report` module
 (`tests/economics_broken_report.py`) leaves the three routes unserved while the
 parameter-set and builder routes resolve and the scan's Stop answers 202 and is
-saved (`test_a_report_fault_never_takes_down_a_stop`).
+saved (`test_a_report_fault_never_takes_down_a_stop`). The step-5 events route (section
+24.8) reads the same rows and applies the report's rule, imported inside its view: a
+broken `report` leaves it resolving and answering a server error with no figures,
+never figures without the banner, and takes nothing else down. It is in
+`safety.stops.NOT_STOPS` and reads only economics rows of one result: its record, card
+and series.
 
 ### 27.10 What is still not done
 
@@ -4122,11 +4333,13 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
   by its one deadline, but how many a process runs at once, or a scenario holds, is
   not. Open for the testing phase: a per-process cap (503 when busy), so a pool of
   synchronous workers cannot fill with long simulations a stop's request might need.
-- **The step-5 events route** (`.../scenarios/<uuid>/events/`, section 24.8) serves a
-  scenario's deterministic totals with no banner, even where its result is graded
-  Unknown; it says `complete: false` and "at least: the known components only".
-  A follow-up carries the banner there too (review round 1, LOW-6(b)); this step
-  does not change that route.
+- **The step-5 events route carries the banner** (`.../scenarios/<uuid>/events/`,
+  sections 24.8 and 27.6; review round 1, LOW-6(b), done in the follow-up to #158). It
+  still serves step 4's deterministic totals, which are not a result, and says
+  `complete: false` and "at least: the known components only" where a component is
+  unknown. **The build route's response** (`POST .../scenarios/build/`, a draft just
+  built) carries no banner: it has no result by construction, and nothing may total it.
+  A later change may add the standing there too.
 
 ### 27.11 Decisions this step takes, which the owner may change
 
@@ -4177,6 +4390,13 @@ saved (`test_a_report_fault_never_takes_down_a_stop`).
     sum's are its component's low, base and high. Alternative: null every money
     parameter of a refused run. Recommendation: keep, so the refusal can be read and
     the inputs corrected.
+13. **The events route's banner is that of the version's latest stored result**, by
+    record order, as `results/` without `?simulation=` serves it (the follow-up to
+    #158's review, LOW-6(b)), and its `grade` is shown only where every stored row
+    verified. Alternatives: a banner per result (the route would take `?simulation=`);
+    the card's grade whatever its rows (the report shows it beside the banner where
+    only a record or a series fails). Recommendation: keep: the route serves one
+    scenario version's figures, and no grade is shown that the rows do not bear out.
 
 ## 28. One remediation option, its residual run and its economics (MVP step 13)
 
@@ -4190,7 +4410,7 @@ veto, which always wins.
 | | |
 |---|---|
 | Code | `assurance/economics/engine/remediation.py` (pure: the option's form and digest, the economics); `assurance/economics/engine/scenario_simulation.py` (the residual run: `Remediation`, the reduction factor) and `engine/sensitivity.py` (a residual run's reductions ranked and swung); `assurance/economics/remediation_service.py` (the record, the runs, the veto, the citations, the ROI document) and `remediation_api.py` (the three routes); `RemediationOption` and `SimulationResult.remediation` in `models.py` |
-| Migration | `0068_remediation_options.py`: one new table and one new nullable column on `SimulationResult`; nothing backfilled, every stored run unchanged. #155 (the trust tier, in review) is expected to take a 0068 too: whichever merges second renumbers its own and re-points its dependency |
+| Migration | `0069_remediation_options.py`, on #155's `0068_financial_source_trust_raises`: one new table and one new nullable column on `SimulationResult`; nothing backfilled, every stored run unchanged |
 | Tests | `tests/test_economics_remediation.py`; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`), the engine's module and code tables (`tests/test_economics_engine.py`) and a fault plugin (`tests/economics_broken_remediation.py`, `tests/economics_fault_cases.py`) |
 
 ### 28.1 The option
@@ -4383,7 +4603,8 @@ most 64 KiB; 503 while economics cannot read its currency table, recording nothi
 
 **A residual run is never the scenario's exposure.** Step 6's `results/` route serves
 only the version's own runs (its latest is the latest of those, and a residual run's
-uuid is 404 there), and the scenario document lists only those; the ROI route serves the
+uuid is 404 there), the scenario document lists only those, and the events route's
+banner (section 27.11, decision 13) reads the latest of those; the ROI route serves the
 residual run.
 
 ### 28.8 Safety

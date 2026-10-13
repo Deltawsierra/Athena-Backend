@@ -1817,6 +1817,9 @@ SPEC_PHRASES = (
     # Step 8's follow-up: the version records the fingerprint it was built in.
     "the version records the deployment's SPINE system fingerprint as it is when it is built",
     "The fingerprint is NOT in the digest",
+    # The events route follows the report's Unknown banner rule (the follow-up to #158's review).
+    "the events route follows the report's rule (section 27.6)",
+    "The figures stay**: the events and totals are step 4's deterministic low, base and high",
 )
 
 

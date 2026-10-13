@@ -11,9 +11,9 @@
 # account column, and both go with their deployment. No new foreign key to an economics
 # row has a reverse accessor (related_name "+").
 #
-# Numbered 0068, on 0067_simulation_charts (master 08d5329). #155 (the trust tier, in
-# review) is expected to take a 0068 as well: whichever of the two merges second
-# renumbers and re-points its dependency after merging master.
+# Numbered 0069, on #155's 0068_financial_source_trust_raises (merged, master
+# 6a8f8e6): first written as 0068 on 0067_simulation_charts, renumbered and re-pointed
+# when master was merged in, as the second of the two to merge.
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -25,7 +25,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0067_simulation_charts"),
+        ("assurance", "0068_financial_source_trust_raises"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

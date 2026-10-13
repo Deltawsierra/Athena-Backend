@@ -727,6 +727,16 @@ def test_a_residual_run_is_never_served_as_the_scenarios_exposure(deployment, pe
     assert [r["uuid"] for r in document["validity"]["simulations"]] == [simulated["current"]["run"]["uuid"]]
     assert _roi(reader, deployment, scenario, simulated["current"]["run"]["uuid"]).status_code == 404
     assert _roi(reader, deployment, scenario, residual).status_code == 200
+    # The events route's banner (#159) reads the scenario's own latest run too: the
+    # residual run, recorded later, is not it -- even with its card's grade column
+    # edited, which would put the banner on it.
+    FinancialValidityCard._base_manager.filter(simulation__uuid=residual).update(confidence_grade="A")
+    events = reader.get(_base(deployment, scenario) + "events/").json()
+    assert events["banner"] is None and events["excluded_from_totals"] is False, events["banner_reason"]
+    served = reader.get(_base(deployment, scenario) + "results/").json()
+    assert {key: events[key] for key in ("grade", "banner", "excluded_from_totals", "banner_reason")} == {
+        key: served[key] for key in ("grade", "banner", "excluded_from_totals", "banner_reason")
+    }
 
 
 # ======================================================================
