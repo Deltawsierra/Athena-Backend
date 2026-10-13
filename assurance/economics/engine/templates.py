@@ -99,6 +99,10 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "rate_missing": UNAVAILABLE_REASONS["rate_missing"],
         "index_missing": UNAVAILABLE_REASONS["index_missing"],
         "index_primary_unset": UNAVAILABLE_REASONS["index_primary_unset"],
+        "normalization_policy_not_found": (
+            "the normalization policy a build names is not a stored policy of its deployment or of the platform: a "
+            "build names a stored policy by its key, and never states one"
+        ),
         "distribution_not_normalizable": (
             "a figure the build normalizes into its currency states a distribution in its own currency: a "
             "distribution is not rescaled by a conversion, so state the figure in the build's currency at its as-of "

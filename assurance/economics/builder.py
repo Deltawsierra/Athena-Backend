@@ -39,20 +39,22 @@ version, :func:`build`:
    that cannot be computed is recorded as none, with the reason, and never fails
    the build.
 
-A build may state a NORMALIZATION POLICY (``normalization``; spec, section 36): each
-money figure of the parameter-set version it reads that is stated in another currency
-than the build's, or at another date than its as-of date, is then normalized into the
-build's currency at its as-of date (:mod:`assurance.economics.run_normalization`,
-through the normalization route's own service) BEFORE the build's transaction, and
-the build reads the normalized figure, a parameter of the scenario version, with its
-record (``FigureNormalization``). Without a policy a figure in another currency is
-refused (``currency_mismatch``), as before.
+A build may NAME a stored normalization policy (``"normalization": "<key>"``; spec,
+section 36): each money figure of the parameter-set version it reads that is stated in
+another currency than the build's, or at another date than its as-of date, and each
+money attribute of its effects a template reads that is stated at another date, is then
+normalized into the build's currency at its as-of date
+(:mod:`assurance.economics.run_normalization`, through the normalization route's own
+service) BEFORE the build's transaction, and the build reads the normalized figure, a
+parameter of the scenario version, with its record (``FigureNormalization``). Without a
+policy a figure in another currency is refused (``currency_mismatch``), as before.
 
 IDEMPOTENT. A build's identity is the content digest of everything it is built from
 (:func:`build_document`, :func:`build_digest`): the builder, grouping and pack
 versions, the deployment, the parameter-set version and its digest, the currency,
-the as-of date, every effect as resolved and every finding link, and where it states
-one, the normalization policy and the source versions its normalizations read. Building the same
+the as-of date, every effect as resolved and every finding link, and where it names
+one, the stored normalization policy (key, version, digest) and the source versions
+its normalizations read. Building the same
 inputs again returns the scenario already built, and never a second one; two builds
 of the same inputs racing are refused by the database (the digest is unique per
 deployment), and the later writes nothing. The system fingerprint is not in the
@@ -86,7 +88,7 @@ from .engine import loss as engine_loss
 from .engine import money
 from .engine import parameter_set as pset
 from .engine import templates as tpl
-from .engine.parameters import POINTS, Parameter, ParameterRefused, Point
+from .engine.parameters import MONEY_UNITS, POINTS, Parameter, ParameterRefused, Point
 from .models import (
     BuildRows,
     CausalEffect,
@@ -545,7 +547,8 @@ class BuildRequest:
     effects: tuple[EffectRequest, ...]
     links: tuple[LinkInput, ...]
     supersedes: str | None
-    #: The normalization policy the build states (spec, section 36), or ``None``.
+    #: What the request names as its normalization policy (spec, section 36): a stored
+    #: policy's key, resolved in the deployment; ``None`` where it names none.
     normalization: object | None = None
 
 
@@ -651,7 +654,15 @@ def parse_request(body) -> BuildRequest:
         supersedes = _uuid_text(supersedes, "supersedes")
     normalization = None
     if "normalization" in body:
-        normalization = run_normalization.parse_policy(body["normalization"], currency)
+        # A stored policy's key, and nothing else: never a policy, so never the order of
+        # its providers (spec, section 36.1). Resolved in the deployment.
+        normalization = body["normalization"]
+        if not isinstance(normalization, str) or not normalization:
+            raise ParameterRefused(
+                "field_malformed",
+                "normalization names a stored normalization policy by its key: the policy and its providers' order "
+                "are never a build request's to state",
+            )
     return BuildRequest(
         title=title,
         set_key=set_key,
@@ -709,9 +720,24 @@ class Resolved:
     supersedes: FinancialScenario | None
     document: dict
     digest: str
-    #: Each parameter-set figure the build normalized (spec, section 36), by its
-    #: variable's name; ``variables`` reads the normalized figure in its place.
+    #: Each figure the build normalized (spec, section 36), by the native figure's name
+    #: (a variable's, or ``<effect>.<attribute>``); ``variables`` and
+    #: ``planning_effects`` read the normalized figure in its place.
     normalized: Mapping[str, run_normalization.Normalized] = field(default_factory=dict)
+    #: The effects as the build's events and components read them: ``effects`` with each
+    #: normalized attribute in its place (the same objects where none is).
+    planning_effects: tuple[EffectInput, ...] = ()
+    #: The stored normalization policy the build named, and the engine's policy.
+    policy_row: object | None = None
+    policy: object | None = None
+
+    def planned(self) -> tuple[EffectInput, ...]:
+        return self.planning_effects or self.effects
+
+
+def read_attributes(effect: EffectInput) -> set[str]:
+    """The attributes of ``effect`` its template reads."""
+    return set(tpl.readings(tpl.select(effect.effect_type, effect.business_process).template))
 
 
 def read_set_figures(effects: Iterable[EffectInput], content) -> set[str]:
@@ -826,27 +852,59 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     # section 36). Without a policy, one in another currency is refused as before.
     normalized: dict[str, run_normalization.Normalized] = {}
     normalization = None
+    planning = tuple(effects)
+    policy_row = policy = None
     money_rows = [row for row in rows if row.currency]
     if request.normalization is not None or any(row.currency != request.currency for row in money_rows):
         read = run_normalization.read_rows(rows, read_set_figures(effects, content))
         if request.normalization is None:
             run_normalization.check_currency(read, request.currency)
         else:
+            policy_row, policy = run_normalization.resolve_policy(deployment, request.normalization, request.currency)
+            candidates = run_normalization.set_candidates(
+                read, {"set_key": version.set_key, "version": version.version}
+            )
+            for effect in effects:
+                reads = read_attributes(effect)
+                for name, parameter in sorted(effect.attributes.items()):
+                    if name not in reads or parameter.unit not in MONEY_UNITS:
+                        continue
+                    if parameter.currency != request.currency:
+                        # An effect's attribute is the analyst's figure in the build's
+                        # currency: only a parameter-set figure is converted (section 36.1).
+                        raise money.MoneyRefused(
+                            "currency_mismatch",
+                            f"{parameter.name} is in {parameter.currency}: an effect's attribute is stated in the "
+                            f"build's currency, {request.currency}; only a parameter-set figure is converted",
+                        )
+                    candidates.append(
+                        run_normalization.Candidate(parameter, {"effect": effect.key}, effect.distributions.get(name))
+                    )
             normalized = run_normalization.normalize(
-                deployment, read, currency=request.currency, valuation_date=request.as_of,
-                policy=request.normalization, new_id=lambda: str(_uuid.uuid4()),
+                deployment, candidates, currency=request.currency, valuation_date=request.as_of,
+                policy=policy, new_id=lambda: str(_uuid.uuid4()),
             )
             variables = {
                 name: normalized[name].parameter if name in normalized else parameter
                 for name, parameter in variables.items()
             }
-            # The policy and every source version the normalizations read are inputs of
-            # the build: a newer usable version is a new build, never this one returned.
+            planning = tuple(
+                replace(effect, attributes={
+                    name: normalized[parameter.name].parameter if parameter.name in normalized else parameter
+                    for name, parameter in effect.attributes.items()
+                })
+                if any(parameter.name in normalized for parameter in effect.attributes.values()) else effect
+                for effect in effects
+            )
+            # The stored policy and the source versions the normalizations read are
+            # inputs of the build: a refresh after a newer usable version (E6, section
+            # 34.4) rebuilds a NEW version that reads it, never this one returned.
             fields = ("source_key", "tenant", "version", "snapshot_hash")
             read_from = sorted({tuple(s[f] for f in fields) for figure in normalized.values() for s in figure.sources})
             normalization = {
                 "rule": figure_normalization.VERSION,
-                "policy": request.normalization.as_dict(),
+                "policy": policy_row.reference(),
+                "applied": policy.as_dict(),
                 "sources": [dict(zip(fields, source, strict=True)) for source in read_from],
             }
 
@@ -861,7 +919,7 @@ def resolve(deployment, request: BuildRequest) -> Resolved:
     )
     return Resolved(
         request, version, variables, tuple(rows), tuple(effects), supersedes, document, build_digest(document),
-        normalized=normalized,
+        normalized=normalized, planning_effects=planning, policy_row=policy_row, policy=policy,
     )
 
 
@@ -919,7 +977,7 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
     for the ids each row is given; nothing is read or written."""
     request = resolved.request
     plans = price(
-        group(resolved.effects, request.links), resolved.variables, currency=request.currency, as_of=request.as_of
+        group(resolved.planned(), request.links), resolved.variables, currency=request.currency, as_of=request.as_of
     )
     value, unavailable = fingerprint
     scenario = FinancialScenario(
@@ -943,24 +1001,8 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
         inputs=resolved.document,
     )
     parameters: list[FinancialParameter] = []
-    # Each figure the build normalized, as a parameter of the scenario version with the
-    # id its plan cites, and its record (spec, section 36).
-    normalizations: list[FigureNormalization] = []
-    for name, figure in sorted(resolved.normalized.items()):
-        row = FinancialParameter.from_engine(figure.parameter, scenario=scenario)
-        row.uuid = _uuid.UUID(figure.parameter.parameter_id)
-        parameters.append(row)
-        record = figure.record(
-            {"set_key": resolved.parameter_set.set_key, "version": resolved.parameter_set.version},
-            request.normalization.as_dict(),
-        )
-        normalizations.append(
-            FigureNormalization(
-                deployment=deployment, scenario=scenario, native=figure.native, normalized=row, record=record,
-                record_digest=canonical_digest(record),
-            )
-        )
     stored: dict[str, dict[str, FinancialParameter]] = {}
+    attribute_rows: dict[str, FinancialParameter] = {}
     for effect in resolved.effects:
         stored[effect.key] = {}
         for name, parameter in sorted(effect.attributes.items()):
@@ -969,6 +1011,26 @@ def build_rows(deployment, resolved: Resolved, *, author, fingerprint: tuple[str
             )
             parameters.append(row)
             stored[effect.key][name] = row
+            attribute_rows[parameter.name] = row
+    # Each figure the build normalized, as a parameter of the scenario version with the
+    # id its plan cites, and its record (spec, section 36). An effect's attribute is
+    # read as its normalized figure; the attribute as stated stays, read by nothing.
+    normalizations: list[FigureNormalization] = []
+    for name, figure in sorted(resolved.normalized.items()):
+        row = FinancialParameter.from_engine(figure.parameter, scenario=scenario)
+        row.uuid = _uuid.UUID(figure.parameter.parameter_id)
+        parameters.append(row)
+        native = figure.candidate.row if figure.candidate.row is not None else attribute_rows[name]
+        if "effect" in figure.candidate.parent:
+            effect_key, _, attribute = name.partition(".")
+            stored[effect_key][attribute] = row
+        record = figure.record(native.as_engine(), resolved.policy_row.reference(), resolved.policy.as_dict())
+        normalizations.append(
+            FigureNormalization(
+                deployment=deployment, scenario=scenario, native=native, normalized=row, record=record,
+                record_digest=canonical_digest(record),
+            )
+        )
     events: list[LossEvent] = []
     effects: list[CausalEffect] = []
     links: list[EffectFinding] = []
@@ -1121,14 +1183,18 @@ def _source(
         return None
     figure = (normalized or {}).get(str(row.uuid))
     if figure is not None:
-        # A parameter-set figure the build normalized into its currency (spec, section 36).
+        # A figure the build normalized into its currency (spec, section 36): a
+        # parameter-set variable, or an effect's attribute.
+        how = {"native": str(figure.native.uuid), "currency": figure.native.currency, "rule": figure_normalization.VERSION}
+        if figure.native.parameter_set_id is None:
+            effect, _, attribute = figure.native.name.partition(".")
+            return {"from": tpl.SourceKind.EFFECT_ATTRIBUTE.value, "name": attribute, "effect": effect, "normalized": how}
         version = versions.get(figure.native.parameter_set_id)
         return {
             "from": tpl.SourceKind.PARAMETER_SET.value,
             "name": figure.native.name,
             "parameter_set": {"set_key": version.set_key, "version": version.version} if version else None,
-            "normalized": {"native": str(figure.native.uuid), "currency": figure.native.currency,
-                           "rule": figure_normalization.VERSION},
+            "normalized": how,
         }
     if row.parameter_set_id is not None:
         version = versions.get(row.parameter_set_id)
@@ -1168,6 +1234,22 @@ def review_status(scenario: FinancialScenario) -> dict:
     }
 
 
+def _withheld(value, names: Mapping[str, str]):
+    """``value`` with the figures of every parameter ``names`` names withheld: a
+    parameter's low, base and high, and the values a component read of it."""
+    if isinstance(value, list):
+        return [_withheld(item, names) for item in value]
+    if not isinstance(value, dict):
+        return value
+    found = {key: _withheld(item, names) for key, item in value.items()}
+    if found.get("name") in names and {"low", "base", "high"} & set(found):
+        found.update(low=None, base=None, high=None, withheld=names[found["name"]])
+    held = found.get("parameter")
+    if isinstance(held, dict) and held.get("name") in names and isinstance(found.get("values"), dict):
+        found["values"] = dict.fromkeys(found["values"])
+    return found
+
+
 def describe(scenario: FinancialScenario) -> dict:
     """The scenario's events as built: each with its template, grouping key, effects
     (by when they occurred) and the findings enabling them, its components with the
@@ -1190,7 +1272,8 @@ def describe(scenario: FinancialScenario) -> dict:
         version = CustomerParameterSet.objects.get(pk=build_row.parameter_set_id)
         versions[version.pk] = version
         policy = run_normalization.policy_of(build_row)
-    normalized = {str(row.normalized.uuid): row for row in run_normalization.stored(scenario)}
+    figures = run_normalization.stored(scenario)
+    normalized = {str(row.normalized.uuid): row for row in figures}
     currency = build_row.currency if build_row is not None else None
     events = []
     assessments = []
@@ -1311,6 +1394,20 @@ def describe(scenario: FinancialScenario) -> dict:
                 **record,
             }
         )
+    if figures:
+        # A figure normalized from a source that may not be redistributed is shown by
+        # its provenance only, wherever an event would show its values (section 36.4).
+        from .report import withheld_figures
+
+        restricted = withheld_figures({"normalizations": [figure.record for figure in figures]})
+        derived_rows = FinancialParameter.objects.filter(scenario=scenario).exclude(derived_from=[])
+        by_uuid = {str(figure.normalized.uuid): figure.normalized.name for figure in figures}
+        for row in derived_rows:
+            taken = [restricted[by_uuid[u]] for u in row.derived_from if by_uuid.get(u) in restricted]
+            if taken:
+                restricted.setdefault(row.name, taken[0])
+        if restricted:
+            events = _withheld(events, restricted)
     return {
         "scenario": {
             "uuid": str(scenario.uuid),

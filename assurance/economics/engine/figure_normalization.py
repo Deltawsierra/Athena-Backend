@@ -2,15 +2,16 @@
 date when its build is made, and the record that says how (``docs/economics/spec-v1.md``,
 section 36).
 
-A money figure of a customer's parameter-set version that a build reads is stated in
-its own currency as of its own ``effective_date``. Where the build states a
-normalization policy, a figure in another currency than the build's, or stated at
-another date than the build's as-of date (the run's valuation date), is normalized in
-section 12.4's order -- event-date FX into the base currency, the base's cost index to
-the valuation month, valuation-date FX into the reporting currency -- each of its low,
-base and high, and the build reads the NORMALIZED figure (:data:`PREFIX` and the
-variable's name, a parameter of the scenario version) in its place. The native figure
-is never overwritten.
+A money figure a build reads -- a variable of the customer's parameter-set version, or
+an effect's attribute -- is stated in its own currency as of its own ``effective_date``.
+Where the build names a stored normalization policy (:func:`policy_from_document` reads
+one), a parameter-set figure in another currency than the build's, or either kind
+stated at another date than the build's as-of date (the run's valuation date), is
+normalized in section 12.4's order -- event-date FX into the base currency, the base's
+cost index to the valuation month, valuation-date FX into the reporting currency --
+each of its low, base and high, and the build reads the NORMALIZED figure
+(:data:`PREFIX` and the figure's name, a parameter of the scenario version) in its
+place. The native figure is never overwritten.
 
 :func:`record_of` makes the per-figure record: the native figure, the normalized one,
 the policy, each point's normalization record (section 12.6) with its chain, and the
@@ -31,7 +32,7 @@ from collections.abc import Mapping
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from .money import MoneyRefused, compute, decimal_text, parse_decimal
-from .parameters import MONEY_UNITS, POINTS, Parameter
+from .parameters import MONEY_UNITS, POINTS, Parameter, ParameterRefused
 
 #: The rule a build normalizes a figure by; a change to what it records or how it
 #: rounds is a new version.
@@ -50,9 +51,96 @@ ROUNDING = (
     "section 14); the point's record keeps the value at full precision"
 )
 _KEYS = frozenset({
-    "rule", "figure", "native", "normalized", "event_date", "valuation_date", "policy", "points",
+    "rule", "figure", "native", "normalized", "event_date", "valuation_date", "policy", "stored_policy", "points",
     "confidence_downgrades", "conflicts", "primary_unavailable", "sources", "rounding",
 })
+
+# ------------------------------------------------------------ a stored policy
+
+_POLICY_REQUIRED = frozenset({"base_currency", "providers", "index"})
+_POLICY_OPTIONAL = frozenset({
+    "index_max_lag_months", "rate_types", "weekend_holiday_rule", "missing_rate", "max_interpolation_gap_days",
+    "freshness_days",
+})
+_INDEX_FIELDS = frozenset({"series_id", "geography", "category", "base"})
+#: The most FX providers a policy names, and the largest whole-number limit it states.
+MAX_PROVIDERS = 10
+MAX_LIMIT = 9999
+_TEXT_MAX = 200
+
+
+def _object(value, path: str, required: frozenset, optional: frozenset = frozenset()) -> dict:
+    if not isinstance(value, dict):
+        raise ParameterRefused("field_malformed", f"{path} is not an object")
+    unknown = sorted(str(k) for k in value if k not in required | optional)
+    if unknown:
+        raise ParameterRefused("field_unrecognised", f"{path}: {unknown}")
+    missing = sorted(required - set(value))
+    if missing:
+        raise ParameterRefused("field_missing", f"{path}: {missing}")
+    return value
+
+
+def _text(value, path: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > _TEXT_MAX:
+        raise ParameterRefused("field_malformed", f"{path} is text of 1 to {_TEXT_MAX} characters, not padded")
+    return value
+
+
+def _names(value, path: str, most: int) -> tuple[str, ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= most:
+        raise ParameterRefused("field_malformed", f"{path} is a list of 1 to {most} names")
+    names = tuple(_text(item, f"{path}[]") for item in value)
+    if len(set(names)) != len(names):
+        raise ParameterRefused("field_malformed", f"{path} names each once")
+    return names
+
+
+def _whole(value, path: str) -> int:
+    if type(value) is not int or not 0 <= value <= MAX_LIMIT:
+        raise ParameterRefused("field_malformed", f"{path} is a whole number from 0 to {MAX_LIMIT}")
+    return value
+
+
+def policy_from_document(document, reporting_currency: str, path: str = "policy"):
+    """The normalization policy a STORED policy document states (spec, section 36.1),
+    read exactly, for a build in ``reporting_currency``: a
+    :class:`~.normalization.NormalizationPolicy`, or refused with the field's path
+    (``field_malformed``, ``field_unrecognised``, ``field_missing``) or the engine's own
+    code (``policy_invalid``, ``currency_unknown``, ...). The FX providers' order -- which
+    is the primary -- is the document's, never a build request's."""
+    from .cost_index import IndexSelector
+    from .fx import FXPolicy
+    from .normalization import NormalizationPolicy
+
+    body = _object(document, path, _POLICY_REQUIRED, _POLICY_OPTIONAL)
+    index = _object(body["index"], f"{path}.index", _INDEX_FIELDS)
+    rules = {}
+    if "rate_types" in body:
+        rules["rate_types"] = _names(body["rate_types"], f"{path}.rate_types", 4)
+    for name in ("weekend_holiday_rule", "missing_rate"):
+        if name in body:
+            rules[name] = _text(body[name], f"{path}.{name}")
+    for name in ("max_interpolation_gap_days", "freshness_days"):
+        if name in body:
+            rules[name] = _whole(body[name], f"{path}.{name}")
+    lag = {}
+    if "index_max_lag_months" in body:
+        lag["index_max_lag_months"] = _whole(body["index_max_lag_months"], f"{path}.index_max_lag_months")
+    base = body["base_currency"]
+    if not isinstance(base, str):
+        raise ParameterRefused("field_malformed", f"{path}.base_currency is a currency code")
+    return NormalizationPolicy(
+        base,
+        reporting_currency,
+        FXPolicy(_names(body["providers"], f"{path}.providers", MAX_PROVIDERS), **rules),
+        IndexSelector(*(_text(index[name], f"{path}.index.{name}")
+                        for name in ("series_id", "geography", "category", "base")), base),
+        **lag,
+    )
+
+
+# ------------------------------------------------------------ a figure
 
 
 def figure_name(native_name: str) -> str:
@@ -87,16 +175,19 @@ def _union(lists) -> list:
 def record_of(
     *,
     native: Parameter,
-    parameter_set: Mapping,
+    parent: Mapping,
     normalized: Parameter,
     points: Mapping[str, dict],
     policy: Mapping,
+    stored_policy: Mapping,
     sources: list[dict],
 ) -> dict:
-    """The record of one normalized figure. ``points`` is each point's normalization
-    record (``Normalization.as_dict()``), by point; ``sources`` the source versions
-    those records read, each with its key, version, tenant, provider, licence, tier and
-    snapshot hash."""
+    """The record of one normalized figure. ``parent`` says where the native figure
+    is (``{"parameter_set": {"set_key", "version"}}`` or ``{"effect": <key>}``);
+    ``points`` is each point's normalization record (``Normalization.as_dict()``), by
+    point; ``stored_policy`` the stored policy it ran under (key, version, scope,
+    digest); ``sources`` the source versions those records read, each with its key,
+    version, tenant, provider, licence, tier and snapshot hash."""
     ordered = [points[point.value] for point in POINTS]
     base = points["base"]
     return {
@@ -105,7 +196,7 @@ def record_of(
         "native": {
             "parameter": native.parameter_id,
             "name": native.name,
-            "parameter_set": dict(parameter_set),
+            "parent": dict(parent),
             "unit": native.unit.value,
             "currency": native.currency,
             **{point.value: Parameter.text(native.at(point)) for point in POINTS},
@@ -120,6 +211,7 @@ def record_of(
         "event_date": base["event_date"],
         "valuation_date": base["valuation_date"],
         "policy": dict(policy),
+        "stored_policy": dict(stored_policy),
         "points": {point.value: points[point.value] for point in POINTS},
         "confidence_downgrades": _union(record["confidence_downgrades"] for record in ordered),
         "conflicts": _union(record["conflicts"] for record in ordered),
@@ -206,6 +298,8 @@ def record_refusal(record, *, native: Parameter, normalized: Parameter) -> str |
 
 
 __all__ = [
+    "MAX_LIMIT",
+    "MAX_PROVIDERS",
     "PARAMETER_PLACES",
     "PREFIX",
     "ROUNDING",
@@ -213,6 +307,7 @@ __all__ = [
     "figure_name",
     "needs_normalizing",
     "parameter_value",
+    "policy_from_document",
     "record_of",
     "record_refusal",
 ]

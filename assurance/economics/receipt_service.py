@@ -253,11 +253,12 @@ def source_snapshots(scenario: FinancialScenario) -> list[dict]:
     snapshots.append(
         {"snapshot_id": f"scenario-parameters:{scenario.uuid}", "content_hash": canonical_digest(parameters)}
     )
-    normalized = run_normalization.stored(scenario)
+    try:
+        # Each record checked as it is read: its digest, both figures, every chain.
+        normalized = run_normalization.stored(scenario)
+    except EconomicsRefused as refused:
+        raise ReceiptRefused("source_snapshot_mismatch", f"a normalization record: {refused.detail}") from None
     if normalized:
-        for row in normalized:
-            if canonical_digest(row.record) != row.record_digest:
-                raise ReceiptRefused("source_snapshot_mismatch", f"normalization of {row.normalized.name}")
         snapshots.append({
             "snapshot_id": f"scenario-normalizations:{scenario.uuid}",
             "content_hash": canonical_digest([row.record for row in normalized]),

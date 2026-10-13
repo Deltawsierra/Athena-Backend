@@ -1,33 +1,42 @@
 """Normalizing the figures a run reads, when its scenario version is built (MVP steps 3
 and 12 in runs; ``docs/economics/spec-v1.md``, section 36).
 
-A build that states a normalization policy (:func:`parse_policy`: the base currency,
-the FX providers and rules, the base currency's cost index and its lag) normalizes each
-money figure of the parameter-set version that it READS -- a variable a template of its
-events reads, or a term of the version's insurance policy -- and that is stated in
-another currency than the build's or at another date than its as-of date (the run's
-valuation date). :func:`normalize` does it through the very service the normalization
-route uses (:func:`.normalization_service.normalize_for`: FX at the figure's own
-``effective_date``, the cost index to the valuation date, in section 12.4's order,
-over the source versions a run of the deployment may use on that date, section 12.8):
-each of the figure's low, base and high, so a stale, blocked or missing source is
-refused or downgraded exactly as the route does. A normalization the books cannot make
-refuses the build with its reason (``rate_missing``, ``index_missing``,
-``index_primary_unset``): never a number the policy did not allow.
+A build request may NAME a stored normalization policy (``"normalization": "<key>"``,
+:func:`resolve_policy`: a :class:`~assurance.economics.models.FinancialNormalizationPolicy`,
+the deployment's own version of the key before the platform's, the latest): the base
+currency, the FX providers IN ORDER, the rules and the base currency's cost index. The
+request never states a policy itself, so it never chooses which provider is the
+primary. Under the policy :func:`normalize` normalizes each money figure the build READS:
+
+- a parameter-set figure -- a variable a template of its events reads, or a term of the
+  version's insurance policy -- stated in another currency than the build's, or at
+  another date than its as-of date (the run's valuation date);
+- an effect's money attribute a template reads, stated in the build's currency at
+  another date than its as-of date: indexed exactly as a parameter-set figure is. An
+  attribute in another currency is refused, as before (``currency_mismatch``).
+
+Each of its low, base and high goes through the very service the normalization route
+uses (:func:`.normalization_service.normalize_for`: FX at the figure's own
+``effective_date``, the cost index to the valuation date, in section 12.4's order, over
+the source versions a run of the deployment may use on that date, section 12.8), so a
+stale, blocked or missing source is refused or downgraded exactly as the route does. A
+normalization the books cannot make refuses the build with its reason (``rate_missing``,
+``index_missing``, ``index_primary_unset``): never a number the policy did not allow.
 
 The build reads the normalized figure, a scenario parameter named
-:data:`~.engine.figure_normalization.PREFIX` and the variable's name, in its place; the
+:data:`~.engine.figure_normalization.PREFIX` and the figure's name, in its place; the
 native figure is never overwritten. Its record (a
 :class:`~assurance.economics.models.FigureNormalization` row) is written append-only
-with the build, and every run of the version holds it in its canonical inputs
-(:func:`normalization_records`), so its input digest covers it and a replay is exact. A build that
-normalizes nothing -- every figure it reads in its currency at its as-of date, or no
-policy stated -- writes no record, and its runs' inputs are what they were.
+with the build, and checked again on EVERY read (:func:`stored`): a record or a figure
+that no longer holds is refused (``normalization_record_malformed``), never used or
+served. Every run of the version holds the records in its canonical inputs
+(:func:`normalization_records`), so its input digest covers them and a replay is exact.
 
 :func:`policy_of` is the insurance policy a run applies: the version's, each term the
-build normalized read as its normalized figure. :func:`source_dependencies` is the hook
-E6 (#168) reads: every source version a run's normalizations read, each a dependency of
-the run (a newer usable version stales it).
+build normalized read as its normalized figure. :func:`source_dependencies` lists the
+source versions a run's normalizations read, and :func:`moved_sources` which of them a
+run as of the same date would now read at another version: E6 (section 34) records
+the first with the run and stales it on the second (``source_superseded``).
 
 Reads only here; the builder writes. Nothing here is on a stop path, holds a lock or a
 transaction, or reads the network: the books are the stored snapshot versions.
@@ -36,7 +45,7 @@ transaction, or reads the network: the books are the stored snapshot versions.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
@@ -44,108 +53,62 @@ from .engine import figure_normalization as fn
 from .engine import loss as engine_loss
 from .engine.money import Money, MoneyRefused
 from .engine.parameters import MONEY_UNITS, POINTS, Parameter, ParameterRefused
-from .models import FigureNormalization, FinancialParameter
-
-_POLICY_REQUIRED = frozenset({"base_currency", "providers", "index"})
-_POLICY_OPTIONAL = frozenset({
-    "index_max_lag_months", "rate_types", "weekend_holiday_rule", "missing_rate", "max_interpolation_gap_days",
-    "freshness_days",
-})
-_INDEX_FIELDS = frozenset({"series_id", "geography", "category", "base"})
-#: The most FX providers a policy names, and the largest whole-number limit it states.
-MAX_PROVIDERS = 10
-MAX_LIMIT = 9999
-_TEXT_MAX = 200
+from .models import EconomicsRefused, FigureNormalization, FinancialNormalizationPolicy, FinancialParameter
 
 
-def _object(value, path: str, required: frozenset, optional: frozenset = frozenset()) -> dict:
-    if not isinstance(value, dict):
-        raise ParameterRefused("field_malformed", f"{path} is not an object")
-    unknown = sorted(str(k) for k in value if k not in required | optional)
-    if unknown:
-        raise ParameterRefused("field_unrecognised", f"{path}: {unknown}")
-    missing = sorted(required - set(value))
-    if missing:
-        raise ParameterRefused("field_missing", f"{path}: {missing}")
-    return value
+def resolve_policy(deployment, named, reporting_currency: str):
+    """The stored policy a build request names (``named``: its key, a string, and
+    nothing else) for a build of ``deployment`` in ``reporting_currency``, and the
+    engine's policy it gives: ``(row, policy)``. A request that states anything but a
+    key is refused (``field_malformed``): the policy, the providers' order with it, is
+    never the request's; a key no stored policy holds is
+    ``normalization_policy_not_found``."""
+    from .engine import templates as tpl
+
+    if not isinstance(named, str) or not named:
+        raise ParameterRefused(
+            "field_malformed",
+            "normalization names a stored normalization policy by its key: the policy and its providers' order are "
+            "never a build request's to state",
+        )
+    row = FinancialNormalizationPolicy.named(deployment, named)
+    if row is None:
+        raise tpl.BuildRefused("normalization_policy_not_found", named[:100])
+    return row, fn.policy_from_document(row.document, reporting_currency, f"normalization policy {named}")
 
 
-def _text(value, path: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > _TEXT_MAX:
-        raise ParameterRefused("field_malformed", f"{path} is text of 1 to {_TEXT_MAX} characters, not padded")
-    return value
+@dataclass(frozen=True)
+class Candidate:
+    """One money figure a build reads, as stated: its parameter, where it is
+    (``parent``), the distribution it states, and its row where it has one already (a
+    parameter-set variable; an effect's attribute has its row made with the build)."""
 
-
-def _names(value, path: str, most: int) -> tuple[str, ...]:
-    if not isinstance(value, list) or not 1 <= len(value) <= most:
-        raise ParameterRefused("field_malformed", f"{path} is a list of 1 to {most} names")
-    names = tuple(_text(item, f"{path}[]") for item in value)
-    if len(set(names)) != len(names):
-        raise ParameterRefused("field_malformed", f"{path} names each once")
-    return names
-
-
-def _whole(value, path: str) -> int:
-    if type(value) is not int or not 0 <= value <= MAX_LIMIT:
-        raise ParameterRefused("field_malformed", f"{path} is a whole number from 0 to {MAX_LIMIT}")
-    return value
-
-
-def parse_policy(raw, reporting_currency: str):
-    """The normalization policy a build request states (``normalization``), read
-    exactly, for a build in ``reporting_currency``: a
-    :class:`~.engine.normalization.NormalizationPolicy`, or refused with the field's
-    path (``field_malformed``, ``field_unrecognised``, ``field_missing``) or the
-    engine's own code (``policy_invalid``, ``currency_unknown``, ...)."""
-    from .engine.cost_index import IndexSelector
-    from .engine.fx import FXPolicy
-    from .engine.normalization import NormalizationPolicy
-
-    body = _object(raw, "normalization", _POLICY_REQUIRED, _POLICY_OPTIONAL)
-    index = _object(body["index"], "normalization.index", _INDEX_FIELDS)
-    rules = {}
-    if "rate_types" in body:
-        rules["rate_types"] = _names(body["rate_types"], "normalization.rate_types", 4)
-    for name in ("weekend_holiday_rule", "missing_rate"):
-        if name in body:
-            rules[name] = _text(body[name], f"normalization.{name}")
-    for name in ("max_interpolation_gap_days", "freshness_days"):
-        if name in body:
-            rules[name] = _whole(body[name], f"normalization.{name}")
-    lag = {}
-    if "index_max_lag_months" in body:
-        lag["index_max_lag_months"] = _whole(body["index_max_lag_months"], "normalization.index_max_lag_months")
-    base = body["base_currency"]
-    if not isinstance(base, str):
-        raise ParameterRefused("field_malformed", "normalization.base_currency is a currency code")
-    return NormalizationPolicy(
-        base,
-        reporting_currency,
-        FXPolicy(_names(body["providers"], "normalization.providers", MAX_PROVIDERS), **rules),
-        IndexSelector(*(_text(index[name], f"normalization.index.{name}")
-                        for name in ("series_id", "geography", "category", "base")), base),
-        **lag,
-    )
+    native: Parameter
+    parent: Mapping
+    distribution: Mapping | None = None
+    row: FinancialParameter | None = None
 
 
 @dataclass(frozen=True)
 class Normalized:
-    """One figure a build normalizes, before its rows are made: the native row, the
-    normalized figure (its parameter id is the scenario row's to be), each point's
+    """One figure a build normalizes, before its rows are made: the figure as stated,
+    the normalized figure (its parameter id is the scenario row's to be), each point's
     normalization record, and the source versions those records read."""
 
-    native: FinancialParameter
+    candidate: Candidate
     parameter: Parameter
     points: Mapping[str, dict]
-    sources: tuple[dict, ...]
+    sources: tuple[dict, ...] = field(default_factory=tuple)
 
-    def record(self, parameter_set: Mapping, policy: Mapping) -> dict:
+    def record(self, native: Parameter, stored_policy: Mapping, policy: Mapping) -> dict:
+        """The record, naming ``native`` (the figure's row as the engine reads it)."""
         return fn.record_of(
-            native=self.native.as_engine(),
-            parameter_set=parameter_set,
+            native=native,
+            parent=self.candidate.parent,
             normalized=self.parameter,
             points=self.points,
             policy=policy,
+            stored_policy=stored_policy,
             sources=list(self.sources),
         )
 
@@ -175,28 +138,41 @@ def _named_sources(records: Iterable[dict], usable) -> tuple[dict, ...]:
     return tuple(sorted(named, key=lambda s: (s["source_key"], s["tenant"], s["version"])))
 
 
-def normalize(deployment, rows: Iterable[FinancialParameter], *, currency: str, valuation_date: date, policy,
+def set_candidates(rows: Iterable[FinancialParameter], parameter_set: Mapping) -> list[Candidate]:
+    """The parameter-set ``rows`` a build reads, as candidates."""
+    return [Candidate(row.as_engine(), {"parameter_set": dict(parameter_set)}, row.distribution, row) for row in rows]
+
+
+def wants_normalizing(candidate: Candidate, *, currency: str, valuation_date: date) -> bool:
+    """Whether ``candidate`` is normalized under a policy: a parameter-set figure in
+    another currency or at another date; an effect's attribute in the build's currency
+    at another date (one in another currency is refused later, as before)."""
+    native = candidate.native
+    if not fn.needs_normalizing(native, currency=currency, valuation_date=valuation_date):
+        return False
+    return "effect" not in candidate.parent or native.currency == currency
+
+
+def normalize(deployment, candidates: Iterable[Candidate], *, currency: str, valuation_date: date, policy,
               new_id) -> dict[str, Normalized]:
-    """Each of ``rows`` (parameter-set rows the build reads) that is stated in another
-    currency than ``currency`` or at another date than ``valuation_date``, normalized
-    under ``policy`` for a run of ``deployment`` (see the module's rules), by its
-    variable's name. ``new_id`` gives each normalized figure the id its scenario row
-    will have. A figure that states a distribution is refused
-    (``distribution_not_normalizable``); a normalization the books cannot make, with
-    its reason."""
+    """Each of ``candidates`` that :func:`wants_normalizing`, normalized under ``policy``
+    for a run of ``deployment`` (see the module's rules), by its name. ``new_id`` gives
+    each normalized figure the id its scenario row will have. A figure that states a
+    distribution is refused (``distribution_not_normalizable``); a normalization the
+    books cannot make, with its reason."""
     from . import normalization_service
     from .engine import templates as tpl
     from .engine.normalization import UNAVAILABLE
 
     found: dict[str, Normalized] = {}
     usable = None
-    for row in sorted(rows, key=lambda r: r.name):
-        native = row.as_engine()
-        if not fn.needs_normalizing(native, currency=currency, valuation_date=valuation_date):
+    for candidate in sorted(candidates, key=lambda c: c.native.name):
+        native = candidate.native
+        if not wants_normalizing(candidate, currency=currency, valuation_date=valuation_date):
             continue
-        if row.distribution is not None:
+        if candidate.distribution is not None:
             raise tpl.BuildRefused(
-                "distribution_not_normalizable", f"{row.name} states a distribution in {native.currency}"
+                "distribution_not_normalizable", f"{native.name} states a distribution in {native.currency}"
             )
         records: dict[Decimal, dict] = {}
         points = {}
@@ -208,9 +184,7 @@ def normalize(deployment, rows: Iterable[FinancialParameter], *, currency: str, 
                 )
                 if result.status == UNAVAILABLE:
                     gone = result.unavailable
-                    raise tpl.BuildRefused(
-                        gone.reason, f"{row.name} {point.value}, {gone.step}: {gone.detail}"
-                    )
+                    raise tpl.BuildRefused(gone.reason, f"{native.name} {point.value}, {gone.step}: {gone.detail}")
                 records[amount.amount] = result.as_dict()
             points[point.value] = records[amount.amount]
         if usable is None:
@@ -220,7 +194,7 @@ def normalize(deployment, rows: Iterable[FinancialParameter], *, currency: str, 
             for point in POINTS
         }
         parameter = Parameter(
-            name=fn.figure_name(row.name),
+            name=fn.figure_name(native.name),
             unit=native.unit,
             source_type=native.source_type,
             low=values[POINTS[0]],
@@ -231,7 +205,7 @@ def normalize(deployment, rows: Iterable[FinancialParameter], *, currency: str, 
             fresh_until=native.fresh_until,
             parameter_id=new_id(),
         )
-        found[row.name] = Normalized(row, parameter, points, _named_sources(points.values(), usable))
+        found[native.name] = Normalized(candidate, parameter, points, _named_sources(points.values(), usable))
     return found
 
 
@@ -248,7 +222,7 @@ def check_currency(rows: Iterable[FinancialParameter], currency: str) -> None:
         if row.currency and row.currency != currency:
             raise MoneyRefused(
                 "currency_mismatch",
-                f"{row.name} is in {row.currency}; the build reports in {currency} and states no normalization "
+                f"{row.name} is in {row.currency}; the build reports in {currency} and names no normalization "
                 "policy to convert it",
             )
 
@@ -257,14 +231,32 @@ def check_currency(rows: Iterable[FinancialParameter], currency: str) -> None:
 
 
 def stored(scenario) -> list[FigureNormalization]:
-    """The scenario version's normalizations, in figure order."""
+    """The scenario version's normalizations, in figure order, EACH CHECKED AS IT IS
+    READ (``FigureNormalization._check_form``: its digest, both figures as it names
+    them, every chain replayed): a record or a figure changed since it was written --
+    past the model's checks -- is refused (``normalization_record_malformed``), and
+    nothing that reads through here uses or serves it. Every reader of a record, or
+    of the policy a run applies, reads through here."""
     rows = list(FigureNormalization.objects.filter(scenario=scenario).select_related("native", "normalized"))
+    for row in rows:
+        row._check_form(row.native, row.normalized)
     return sorted(rows, key=lambda row: row.normalized.name)
 
 
+def verified(scenario) -> str | None:
+    """Why the scenario version's normalizations do not hold now (the refusal's
+    detail), or ``None``: :func:`stored`'s check, as a value."""
+    try:
+        stored(scenario)
+    except EconomicsRefused as refused:
+        return f"{refused.code}: {refused.detail}"
+    return None
+
+
 def normalization_records(scenario) -> tuple[dict, ...]:
-    """Each figure's normalization record, as stored, in figure order: what a run of
-    the version holds in its inputs (none for a version that normalized nothing)."""
+    """Each figure's normalization record, as stored and checked, in figure order: what
+    a run of the version holds in its inputs (none for a version that normalized
+    nothing)."""
     return tuple(row.record for row in stored(scenario))
 
 
@@ -292,7 +284,8 @@ def substituted(policy, normalized: Mapping[str, Parameter]):
 def policy_of(build):
     """The insurance policy a run of ``build``'s scenario version applies: its
     parameter-set version's, each term the build normalized read as its normalized
-    figure; ``None`` where there is no build or the version states no policy."""
+    figure (each record checked as it is read); ``None`` where there is no build or the
+    version states no policy."""
     from .models import CustomerParameterSet
 
     if build is None:
@@ -305,9 +298,9 @@ def policy_of(build):
 
 
 def source_dependencies(inputs) -> list[dict]:
-    """The hook E6 (#168) reads: every source version a run's normalizations read,
-    from its stored inputs, each once -- a newer usable version of any of them stales
-    the run. Empty for a run that normalized nothing."""
+    """Every source version a run's normalizations read, from its stored inputs, each
+    once: E6 records them with the run (``normalization_sources`` in its dependency
+    map, section 34.1). Empty for a run that normalized nothing."""
     found = {}
     for record in (inputs or {}).get("normalizations") or []:
         for source in record.get("sources") or []:
@@ -316,17 +309,37 @@ def source_dependencies(inputs) -> list[dict]:
     return [found[key] for key in sorted(found)]
 
 
+def moved_sources(deployment, recorded: Iterable[Mapping], as_of: date) -> list[dict]:
+    """Of the source versions a run's normalizations read (``recorded``,
+    :func:`source_dependencies`'s), each that a run of ``deployment`` as of ``as_of``
+    would now read at another version (``feeds.used_version``: a newer usable one, or
+    none a run may use): ``{source_key, tenant, was, now}``. Reads only."""
+    from . import feeds
+
+    moved = []
+    for entry in recorded:
+        own = entry.get("tenant") == "deployment"
+        now = feeds.used_version(entry["source_key"], deployment, as_of, own=own)
+        if now is None or now.version != entry.get("version"):
+            moved.append({"source_key": entry["source_key"], "tenant": entry.get("tenant"),
+                          "was": entry.get("version"), "now": None if now is None else now.version})
+    return moved
+
+
 __all__ = [
-    "MAX_LIMIT",
-    "MAX_PROVIDERS",
+    "Candidate",
     "Normalized",
     "check_currency",
+    "moved_sources",
+    "normalization_records",
     "normalize",
-    "parse_policy",
     "policy_of",
     "read_rows",
-    "normalization_records",
+    "resolve_policy",
+    "set_candidates",
     "source_dependencies",
     "stored",
     "substituted",
+    "verified",
+    "wants_normalizing",
 ]

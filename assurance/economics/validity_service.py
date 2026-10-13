@@ -87,8 +87,33 @@ UNRECORDED = frozenset(
         "memory_exhausted",
         "invariant_broken",
         "card_failed",
+        "stored_row_unverified",
     }
 )
+#: Why a card is refused for a run whose stored inputs no longer give its input digest.
+INPUTS_UNVERIFIED = (
+    "the run's stored inputs no longer give its input digest: nothing the card would read from them -- its figures' "
+    "sources and freshness, its unknowns, the normalized figures' downgrades -- is vouched for, so nothing is graded"
+)
+
+
+class StoredInputsUnverified(ValueError):
+    """A card asked of a run whose stored inputs no longer give its input digest."""
+
+    code = "stored_row_unverified"
+
+    def __init__(self):
+        self.detail = INPUTS_UNVERIFIED
+        super().__init__(f"{self.code}: {self.detail}")
+
+
+def inputs_verified(result: SimulationResult) -> bool:
+    """Whether ``result``'s stored inputs still give its input digest: the one check
+    before a card takes anything from them (the report's ``input_digest`` check)."""
+    try:
+        return canonical_digest(result.inputs) == result.input_digest
+    except (TypeError, ValueError):
+        return False
 
 OBSERVED_STATUS = (
     "in force when the scenario version was built: the builder refuses an observed effect whose signature does "
@@ -412,7 +437,11 @@ def _description(scenario, events, effects, links) -> str:
 def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: dict) -> dict:
     """The Validity Card of ``result``, from the stored result, the scenario
     version's rows, the stored sensitivity analysis and what was read at issue
-    (``issued``). Deterministic: the same arguments give the same card."""
+    (``issued``). Deterministic: the same arguments give the same card. Refused
+    (:class:`StoredInputsUnverified`) unless the stored inputs still give the run's
+    input digest: every field read from them is vouched for, or none is graded."""
+    if not inputs_verified(result):
+        raise StoredInputsUnverified()
     _, grade, money, _, sens, _ = _engine()
     scenario = FinancialScenario.objects.get(pk=result.scenario_id)
     inputs = result.inputs or {}
@@ -740,6 +769,8 @@ def reproduces(card: FinancialValidityCard) -> bool:
     """Whether the stored card is exactly what :func:`build_card` gives from the
     stored result, the stored analysis and the card's own issued section."""
     result = SimulationResult.objects.get(pk=card.simulation_id)
+    if not inputs_verified(result):
+        return False
     rebuilt = build_card(result, sensitivity=card.sensitivity, issued=card.card.get("issued", {}))
     return card_digest(rebuilt) == card_digest(card.card) == card.card_digest
 
@@ -766,6 +797,10 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
     found = FinancialValidityCard.objects.filter(simulation=result).first()
     if found is not None:
         return CardOutcome(found, False)
+    # Before the card takes anything from the stored inputs: they still give the run's
+    # input digest, or nothing is graded (review round 1 of #170, MEDIUM-2).
+    if not inputs_verified(result):
+        return CardOutcome(None, False, StoredInputsUnverified.code, INPUTS_UNVERIFIED)
     try:
         distributions, grade, money, ss, sens, sim = _engine()
     except Exception as error:  # noqa: BLE001 - an import fault of numpy or the engine is a returned refusal
@@ -835,6 +870,9 @@ def _issue(result: SimulationResult, time_budget: float) -> CardOutcome:
 
 
 __all__ = [
+    "INPUTS_UNVERIFIED",
+    "StoredInputsUnverified",
+    "inputs_verified",
     "CARD_SCHEMA",
     "CARD_VERSION",
     "MODEL_ID",

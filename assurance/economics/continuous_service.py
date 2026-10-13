@@ -455,6 +455,12 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
             else _source_entry(now.source(key, as_of, (inputs or {}).get("parameters")))
         )
     digest, record, why = now.release()
+    # The source versions the run's normalized figures read (spec, section 36.8): each a
+    # dependency, compared on the run's as-of date (``source_superseded``). Only a run
+    # that reads a normalized figure has the part, so every other map is as it was.
+    from . import run_normalization
+
+    normalization_sources = run_normalization.source_dependencies(inputs)
     # A run rests on what serves where its scenario rests on the model's composition
     # (an ai_bom claim type) or an effect is on a serving asset.
     route_bound = "ai_bom" in types or any(e.asset in now.serving_routes for e in effects)
@@ -476,6 +482,8 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
         "as_of": None if as_of is None else as_of.isoformat(),
         "sources": sources,
         "release": {"digest": digest, "record": record, "unavailable": why or None},
+        **({"normalization_sources": {"as_of": None if as_of is None else as_of.isoformat(),
+                                       "versions": normalization_sources}} if normalization_sources else {}),
     }
 
 
@@ -760,6 +768,23 @@ def _financial_reasons(recorded: dict, now: Now, parameters=None) -> list[dict]:
                 f"{key} is {today.get('state')} as of the day it was read (section 29.5): its newest observation is "
                 f"past the source's SLA of {today.get('sla_days')} days, or there is none a run may use",
                 was=entry.get("state"), now=today.get("state"),
+            ))
+    # The FX and index versions the run's normalized figures read (section 36.8): a
+    # newer usable version on the run's as-of date -- or none a run may use -- stales it.
+    held = recorded.get("normalization_sources") or {}
+    if held.get("versions"):
+        from . import run_normalization
+
+        for moved in run_normalization.moved_sources(now.deployment, held["versions"],
+                                                     date.fromisoformat(held["as_of"])):
+            whose = "" if moved["tenant"] == "platform" else " (the deployment's own)"
+            found.append(_reason(
+                "source_superseded", f"source:{moved['source_key']}",
+                f"a figure of this run was normalized from version {moved['was']} of {moved['source_key']}{whose}; "
+                f"a run as of {held['as_of']} would now read "
+                + (f"version {moved['now']}" if moved["now"] is not None else "no version a run may use"),
+                was=None if moved["was"] is None else str(moved["was"]),
+                now=None if moved["now"] is None else str(moved["now"]),
             ))
     return found
 
@@ -1174,7 +1199,7 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         if effect["origin"] == "observed":
             entry["observed_effect"] = effect["observed_effect"]
         effects.append(entry)
-    return {
+    body = {
         "title": scenario.title,
         "parameter_set": {"set_key": set_key, "version": version or current.version},
         "currency": build.currency,
@@ -1183,6 +1208,12 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         "findings": [{"finding": f, "effect": e, "role": r} for f, e, r in document["findings"]],
         "supersedes": str(scenario.uuid),
     }
+    named = (document.get("normalization") or {}).get("policy")
+    if isinstance(named, dict) and named.get("key"):
+        # The stored normalization policy it named (section 36): the rebuild names it
+        # again, and reads the source versions a run may use NOW.
+        body["normalization"] = named["key"]
+    return body
 
 
 def lineage(scenario: FinancialScenario) -> list[int]:

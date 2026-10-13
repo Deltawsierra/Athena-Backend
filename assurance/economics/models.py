@@ -170,10 +170,17 @@ ASSURANCE_RECORD_REFUSALS = {
 _REFUSAL_TEXT.update(ASSURANCE_RECORD_REFUSALS)
 NORMALIZATION_RECORD_REFUSALS = {
     "normalization_record_malformed": (
-        "a figure's normalization record (spec, section 36) is the record of normalizing its parameter-set variable "
-        "into its scenario parameter, of the scenario version it is built with: an object with no float, its digest "
-        "the record's, both figures as it names them, and every step of every point's chain its input times the "
-        "factor it records, the last the value the normalized figure holds at a parameter's precision"
+        "a figure's normalization record (spec, section 36) is the record of normalizing its native figure -- a "
+        "variable of the build's parameter-set version, or an effect's attribute of the same scenario version -- "
+        "into its scenario parameter: an object with no float, its digest the record's, both figures as it names "
+        "them, and every step of every point's chain its input times the factor it records, the last the value the "
+        "normalized figure holds at a parameter's precision. It is checked when it is written and again whenever "
+        "it is read, and one that no longer holds is never used or served"
+    ),
+    "normalization_policy_malformed": (
+        "a stored normalization policy version (spec, section 36.1) names a key of 1 to 100 lowercase letters, "
+        "digits, '-' and '_', holds a policy document the engine reads exactly, its digest the document's, and is "
+        "recorded by an admin"
     ),
 }
 _REFUSAL_TEXT.update(NORMALIZATION_RECORD_REFUSALS)
@@ -2781,10 +2788,22 @@ class EffectFinding(_AppendOnly):
         return f"finding {self.finding} {self.role} of effect {self.effect_id}"
 
 
+def _parent_of(row: FinancialParameter, field: str):
+    """``row``'s parent of ``field`` (``scenario`` or ``parameter_set``): its stored id,
+    or the unsaved object a build's row holds; ``None`` where it has none."""
+    held = getattr(row, f"{field}_id")
+    if held is not None:
+        return ("id", held)
+    cached = getattr(FinancialParameter, field).is_cached(row) and getattr(row, field) is not None
+    return ("object", id(getattr(row, field))) if cached else None
+
+
 class FigureNormalization(_AppendOnly):
-    """One figure a scenario build normalized (spec, section 36): the parameter-set
-    variable as stated (``native``), the scenario parameter the build reads in its
-    place (``normalized``: in the build's currency, at its as-of date), and the record
+    """One figure a scenario build normalized (spec, section 36): the native figure as
+    stated (``native``: a variable of the build's parameter-set version, or an effect's
+    attribute, a parameter of the same scenario version), the scenario parameter the
+    build reads in its place (``normalized``: in the build's currency, at its as-of
+    date), and the record
     of how (:func:`~assurance.economics.engine.figure_normalization.record_of`): the
     policy, each point's normalization with its chain, the downgrades, conflicts and
     fallbacks, and the source versions read. Written by the scenario builder only, in
@@ -2812,7 +2831,8 @@ class FigureNormalization(_AppendOnly):
 
     def _check_form(self, native: FinancialParameter, normalized: FinancialParameter) -> None:
         """The checks that read nothing stored: the record, its digest, and the two
-        figures it names, its chains replayed."""
+        figures it names, its chains replayed. Run on write, and on every read
+        (``run_normalization.stored``)."""
         record = self.record
         if not isinstance(record, dict) or _has_float(record):
             raise EconomicsRefused("normalization_record_malformed", "the record is an object with no float")
@@ -2822,8 +2842,19 @@ class FigureNormalization(_AppendOnly):
             raise EconomicsRefused("normalization_record_malformed", "the record is not canonical JSON") from None
         if self.record_digest != digest:
             raise EconomicsRefused("normalization_record_malformed", "the digest is not the record's")
-        if native.parameter_set_id is None or native.scenario_id is not None:
-            raise EconomicsRefused("normalization_record_malformed", "the native figure is a parameter-set variable")
+        native_scenario, native_set = _parent_of(native, "scenario"), _parent_of(native, "parameter_set")
+        normalized_scenario = _parent_of(normalized, "scenario")
+        if (native_scenario is None) == (native_set is None) or native.name.startswith(figure_normalization.PREFIX):
+            raise EconomicsRefused("normalization_record_malformed", "the native figure is a figure as stated")
+        if normalized_scenario is None or (native_scenario is not None and native_scenario != normalized_scenario):
+            raise EconomicsRefused("normalization_record_malformed", "the figures are of another scenario version")
+        held = record.get("native") if isinstance(record.get("native"), dict) else {}
+        parent = held.get("parent")
+        if native_scenario is not None:
+            if parent != {"effect": native.name.partition(".")[0]}:
+                raise EconomicsRefused("normalization_record_malformed", "the record names another parent than its figure's")
+        elif not isinstance(parent, dict) or set(parent) != {"parameter_set"}:
+            raise EconomicsRefused("normalization_record_malformed", "the record names another parent than its figure's")
         refusal = figure_normalization.record_refusal(
             record, native=_engine_refusal(native.as_engine), normalized=_engine_refusal(normalized.as_engine)
         )
@@ -2841,7 +2872,10 @@ class FigureNormalization(_AppendOnly):
         build_set = ScenarioBuild._base_manager.filter(scenario_id=self.scenario_id).values_list(
             "parameter_set_id", flat=True
         )
-        if list(build_set) != [native.parameter_set_id]:
+        if native.scenario_id is not None:
+            if native.scenario_id != self.scenario_id:
+                raise EconomicsRefused("cross_tenant_reference", "the native attribute is another scenario's")
+        elif list(build_set) != [native.parameter_set_id]:
             raise EconomicsRefused("cross_tenant_reference", "the native figure is not of the build's parameter set")
         self._check_form(native, normalized)
         if FigureNormalization._base_manager.filter(scenario_id=self.scenario_id, native_id=self.native_id).exists():
@@ -2849,6 +2883,107 @@ class FigureNormalization(_AppendOnly):
 
     def __str__(self) -> str:
         return f"normalization of parameter {self.native_id} into {self.normalized_id}"
+
+
+#: The form of a stored normalization policy's key.
+_POLICY_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
+
+
+class FinancialNormalizationPolicy(_AppendOnly):
+    """One version of a STORED normalization policy (spec, section 36.1): the base
+    currency, the FX providers IN ORDER (the first with a usable rate is the primary,
+    section 12.8), the rules and the base currency's cost index a build normalizes its
+    figures under. A build request only NAMES one (``"normalization": "<key>"``): the
+    providers' order is never the request's to choose. Platform-wide (no deployment) or
+    one deployment's own, which a build of that deployment reads before the platform's
+    of the same key; versioned per key and tenant, the latest read. Recorded by an
+    admin, append-only; removing the admin nulls the account and keeps the name, as on
+    every economics row (spec, section 2)."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey(
+        "assurance.Deployment", on_delete=models.CASCADE, null=True, blank=True, related_name="+"
+    )
+    policy_key = models.CharField(max_length=100)
+    version = models.PositiveIntegerField()
+    document = models.JSONField()
+    # "sha256:" + 64 hex over the document's canonical JSON.
+    document_digest = models.CharField(max_length=71)
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    recorded_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["policy_key", "version", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["policy_key", "version"],
+                condition=Q(deployment__isnull=True),
+                name="uq_econ_norm_policy_platform_version",
+            ),
+            models.UniqueConstraint(
+                fields=["deployment", "policy_key", "version"],
+                condition=Q(deployment__isnull=False),
+                name="uq_econ_norm_policy_tenant_version",
+            ),
+            models.CheckConstraint(condition=Q(version__gte=1), name="ck_econ_norm_policy_version_positive"),
+        ]
+
+    @classmethod
+    def record(cls, policy_key: str, document, *, by, deployment=None) -> FinancialNormalizationPolicy:
+        """Record the next version of ``policy_key`` (platform-wide, or ``deployment``'s
+        own) holding ``document``, by ``by``, an admin. Refused whole, or written."""
+        row = cls(policy_key=policy_key, document=document, recorded_by=by, deployment=deployment)
+        row.save()
+        return row
+
+    @classmethod
+    def named(cls, deployment, policy_key: str) -> FinancialNormalizationPolicy | None:
+        """The policy a build of ``deployment`` naming ``policy_key`` runs under: the
+        latest version of the deployment's own, else of the platform's; ``None``."""
+        own = cls.objects.filter(deployment=deployment, policy_key=policy_key).order_by("-version").first()
+        if own is not None:
+            return own
+        return cls.objects.filter(deployment__isnull=True, policy_key=policy_key).order_by("-version").first()
+
+    def scope(self) -> str:
+        return "platform" if self.deployment_id is None else "deployment"
+
+    def reference(self) -> dict:
+        """What a build and a record name it by."""
+        return {"key": self.policy_key, "version": self.version, "scope": self.scope(),
+                "digest": self.document_digest}
+
+    def as_engine(self, reporting_currency: str):
+        """The engine's policy for a build in ``reporting_currency``."""
+        return _engine_refusal(lambda: figure_normalization.policy_from_document(
+            self.document, reporting_currency, f"normalization policy {self.policy_key}"))
+
+    def check_new(self) -> None:
+        _refuse(governance.trust_raise_admin_refusal(_is_admin(self.recorded_by)), detail="recorded_by")
+        self.recorded_by_username = _signed_in(self.recorded_by).username
+        if not isinstance(self.policy_key, str) or not _POLICY_KEY.fullmatch(self.policy_key):
+            raise EconomicsRefused("normalization_policy_malformed", "policy_key")
+        if not isinstance(self.document, dict) or _has_float(self.document):
+            raise EconomicsRefused("normalization_policy_malformed", "the document is an object with no float")
+        base = self.document.get("base_currency")
+        # Read as the engine reads it, at its own base currency: a later build reads it
+        # at the build's reporting currency.
+        _engine_refusal(lambda: figure_normalization.policy_from_document(
+            self.document, base if isinstance(base, str) else "", "document"))
+        self.document = json.loads(json.dumps(self.document, sort_keys=True))
+        self.document_digest = canonical_digest(self.document)
+        held = FinancialNormalizationPolicy._base_manager.filter(
+            deployment_id=self.deployment_id, policy_key=self.policy_key
+        ).aggregate(Max("version"))["version__max"]
+        self.version = (held or 0) + 1
+
+    def __str__(self) -> str:
+        return f"normalization policy {self.policy_key} v{self.version} ({self.scope()})"
 
 
 # ---------------------------------------------------------------------------
@@ -3462,7 +3597,10 @@ STALE_REASONS = {
     "contract_terms_changed": (
         "an insurance or contract term of the parameter set the scenario was built from changed in its current version"
     ),
-    "source_superseded": "a feed source the run's figures rest on would now be read at another version",
+    "source_superseded": (
+        "a feed source the run's figures rest on, or a source version its normalized figures were read from "
+        "(section 36), would now be read at another version"
+    ),
     "source_stale": "a feed source the run's figures rest on is stale, blocked or missing as of today (section 29.5)",
     "release_changed": "the engine release (the run's versions and limits, the analysis, the grade or the card) moved",
     "route_moved": (
@@ -4043,7 +4181,9 @@ def check_build_rows(rows: BuildRows) -> None:
     for row in rows.normalizations:
         if row.scenario is not scenario or row.deployment_id != scenario.deployment_id:
             raise EconomicsRefused("cross_tenant_reference", "the normalization is another scenario's")
-        if id(row.normalized) not in normalized_rows or str(row.native.uuid) not in rows.set_parameters:
+        if id(row.normalized) not in normalized_rows or (
+            str(row.native.uuid) not in rows.set_parameters and id(row.native) not in normalized_rows
+        ):
             raise EconomicsRefused("parameter_not_found", "a normalization names a parameter the build does not hold")
         if str(row.native.uuid) in natives:
             raise EconomicsRefused("duplicate_id", f"{row.native.name} normalized twice in one scenario")

@@ -39,8 +39,11 @@ from assurance.economics.engine.snapshot import parse_snapshot
 from assurance.economics.models import (
     CustomerParameterSet,
     EconomicsRefused,
+    FigureNormalization,
+    FinancialNormalizationPolicy,
     FinancialParameter,
     FinancialScenario,
+    ScenarioBuild,
     SimulationResult,
 )
 from assurance.models import Asset, Deployment, Finding
@@ -59,7 +62,9 @@ VALUATION = "2026-09-30"  # the last day of September: its index value is publis
 REF, ALT = "run-test-fx-and-index", "run-test-alt-fx"
 SERIES = {"series_id": "RUN-TEST-CPI-US", "geography": "US",
           "category": "Run-normalization test consumer prices, all items", "base": "2020-03=100"}
+#: The stored normalization policy the builds name (section 36.1), platform-wide.
 POLICY = {"base_currency": "USD", "providers": ["RUN-TEST-REF"], "index": SERIES}
+KEY = "run-test-usd"
 #: The test book: EUR/USD 1.1, USD/JPY 125 (a JPY figure reads it the other way
 #: round: 1/125 = 0.008), KWD/USD 3.2 on the event date; EUR/USD 1.08 the Friday
 #: before a Saturday; the index 100 in February and March 2020 and 125 in September
@@ -86,6 +91,18 @@ def people():
 @pytest.fixture
 def deployment(people):
     return Deployment.objects.create(name="payments-staging", environment="staging", owner=people["owner"])
+
+
+@pytest.fixture(autouse=True)
+def stored_policy(people):
+    """The platform-wide stored policy the builds name by default, recorded by an admin."""
+    return FinancialNormalizationPolicy.record(KEY, POLICY, by=people["admin"])
+
+
+def named(people, document, *, key="run-test-other", deployment=None) -> str:
+    """A stored policy holding ``document`` (a new version of ``key``), by its key."""
+    FinancialNormalizationPolicy.record(key, document, by=people["admin"], deployment=deployment)
+    return key
 
 
 def register(key, provider, *, fx_rates=(), points=(), licence="open", tier="benchmark", deployment=None,
@@ -149,7 +166,7 @@ def world(deployment, author, variables=None, *, frequency=None):
     return asset, finding
 
 
-def body(asset, finding, *, policy=POLICY, as_of=VALUATION, title="Core banking provider outage"):
+def body(asset, finding, *, policy=KEY, as_of=VALUATION, title="Core banking provider outage"):
     effect = {
         "key": "outage", "origin": "hypothetical", "effect_type": "provider_outage",
         "asset": str(asset.uuid), "business_process": "payments",
@@ -170,7 +187,11 @@ def body(asset, finding, *, policy=POLICY, as_of=VALUATION, title="Core banking 
     return document
 
 
-def built(deployment, people, *, variables=None, policy=POLICY, frequency=None):
+def built(deployment, people, *, variables=None, policy=KEY, frequency=None):
+    """A build of the test world naming ``policy``: a stored policy's key, a document
+    to store first (under another key), or ``None`` for none."""
+    if isinstance(policy, dict):
+        policy = named(people, policy)
     asset, finding = world(deployment, people["analyst"], variables, frequency=frequency)
     scenario, created = builder.build(deployment, body(asset, finding, policy=policy), author=people["analyst"])
     assert created
@@ -322,7 +343,7 @@ def test_without_a_policy_a_figure_in_another_currency_is_refused_as_before(depl
     asset, finding = world(deployment, people["analyst"])
     with pytest.raises(MoneyRefused) as refused:
         builder.build(deployment, body(asset, finding, policy=None), author=people["analyst"])
-    assert refused.value.code == "currency_mismatch" and "states no normalization policy" in refused.value.detail
+    assert refused.value.code == "currency_mismatch" and "names no normalization policy" in refused.value.detail
 
 
 def test_a_figure_stating_a_distribution_is_not_normalized(deployment, people):
@@ -362,17 +383,15 @@ def test_an_index_no_policy_provider_holds_and_two_disagree_refuses_index_primar
         (lambda p: p.update(spare=True), "field_unrecognised"),
     ],
 )
-def test_the_policy_is_read_exactly(deployment, people, edit, code):
+def test_a_stored_policy_is_read_exactly_when_it_is_recorded(people, edit, code):
     policy = copy.deepcopy(POLICY)
     edit(policy)
-    asset, finding = world(deployment, people["analyst"])
-    with pytest.raises(MoneyRefused) as refused:
-        builder.build(deployment, body(asset, finding, policy=policy), author=people["analyst"])
+    with pytest.raises(EconomicsRefused) as refused:
+        FinancialNormalizationPolicy.record("run-test-bad", policy, by=people["admin"])
     assert refused.value.code == code
     if code.startswith("field_"):
-        # The policy's own path: a request that may not state a policy at all is refused
-        # at the body ("body: ['normalization']"), never here.
-        assert refused.value.detail.startswith("normalization"), refused.value.detail
+        assert refused.value.detail.startswith("document"), refused.value.detail
+    assert not FinancialNormalizationPolicy.objects.filter(policy_key="run-test-bad").exists()
 
 
 # ======================================================================
@@ -470,7 +489,6 @@ def test_the_records_are_in_the_runs_inputs_and_its_digest_covers_them(deploymen
 
 def test_a_stored_record_replays_and_a_changed_one_is_refused(deployment, people):
     from assurance.economics.engine import figure_normalization as fn
-    from assurance.economics.models import FigureNormalization
 
     books()
     scenario = built(deployment, people)
@@ -566,13 +584,38 @@ def test_a_restricted_sources_values_are_withheld_from_the_bridge_and_the_figure
     assert result.record["scenario"]["gross_cash"]["p50"] == "25500"
 
 
+def test_a_restricted_normalized_figure_is_withheld_wherever_it_would_let_a_reader_derive_the_rate(
+        deployment, people):
+    """Review round 1, LOW-1: beside the native figure the bridge shows, the normalized
+    one would give the rate away. Its values are withheld in the report's parameters
+    and sensitivity, the scenario document and the events route, provenance kept;
+    the native figures and every total stand."""
+    books(licence="licensed")
+    scenario = built(deployment, people)
+    result, card = carded(scenario)
+    served = report.build_report(result)
+    name = "normalized:margin_per_hour"
+    held = served["parameters"][name]
+    assert (held["low"], held["base"], held["high"]) == (None, None, None) and "licensed" in held["withheld"]
+    assert held["currency"] == "USD" and held["evidence_ref"] and held["read_by"]
+    assert served["integrity"]["verified"] is True and "not_reported" not in served["summary"]  # totals stand
+    fixed = {entry["name"]: entry for entry in served["sensitivity"]["fixed"]}
+    assert fixed[name]["value"] is None and "licensed" in fixed[name]["withheld"]
+    assert fixed["outage.outage_hours"]["value"] == "10"
+    document = report.scenario_document(scenario)
+    rows = {row["name"]: row for row in document["parameters"]}
+    assert rows[name]["base"] is None and "licensed" in rows[name]["withheld"]
+    assert rows["margin_per_hour"]["base"] == "800"  # the native figure, as the customer stated it
+    text = json.dumps(builder.describe(scenario))
+    assert '"1100"' not in text and '"12500.5"' not in text and '"250"' not in text
+    assert '"25500"' in text  # the totals stand
+
+
 def _raw(key):
     return key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
 def test_the_receipt_covers_the_bridge(deployment, people):
-    from assurance.economics.models import FigureNormalization
-
     books()
     scenario = built(deployment, people, frequency=FREQUENCY)
     result, _card = carded(scenario)
@@ -610,17 +653,49 @@ def test_each_source_version_a_run_normalized_from_is_a_dependency_for_e6(deploy
     assert run_normalization.source_dependencies({"events": []}) == []
 
 
-def test_a_newer_source_version_is_a_new_build_not_the_old_one(deployment, people):
-    """The source versions a build's normalizations read are inputs of the build: the
-    same request after a newer usable version is a new scenario version."""
-    books()
-    asset, finding = world(deployment, people["analyst"])
-    first, created = builder.build(deployment, body(asset, finding), author=people["analyst"])
-    again, created_again = builder.build(deployment, body(asset, finding), author=people["analyst"])
-    assert created and not created_again and again.pk == first.pk
-    register(REF, "RUN-TEST-REF", fx_rates=[*REF_RATES, ("EUR", "USD", "2026-09-30", "1.17")], points=REF_POINTS)
-    newer, created_newer = builder.build(deployment, body(asset, finding), author=people["analyst"])
-    assert created_newer and newer.pk != first.pk
+def test_a_newer_usable_source_version_stales_the_run_and_a_refresh_reads_it(deployment, people):
+    """Review round 1, MEDIUM-4 (E6, section 34): each source version a run's normalized
+    figures read is a dependency recorded with the run; a newer usable version of it
+    makes the run stale, ``source_superseded``, naming the source and both versions; a
+    refresh rebuilds a NEW version that reads the newer source, and its run is not
+    stale for it. A run that normalized nothing records no such dependency."""
+    from assurance.economics import continuous_service
+    from assurance.economics.models import ExposureDependencies
+
+    first = books()
+    scenario = built(deployment, people)
+    result = simulated(scenario)
+    mapped = ExposureDependencies.objects.get(simulation=result).dependencies
+    assert mapped["normalization_sources"] == {
+        "as_of": VALUATION,
+        "versions": [{"source_key": REF, "tenant": "platform", "version": 1, "snapshot_hash": first.snapshot_hash}],
+    }
+    assert "source_superseded" not in {r["code"] for r in continuous_service.assess(result).reasons}
+    # A newer version of the FX and index source: different rates, usable on the as-of date.
+    register(REF, "RUN-TEST-REF", fx_rates=[(b, q, d, "1.2" if (b, q) == ("EUR", "USD") and d == EVENT else v)
+                                            for b, q, d, v in REF_RATES], points=REF_POINTS)
+    reasons = [r for r in continuous_service.assess(result).reasons if r["code"] == "source_superseded"]
+    assert [(r["dependency"], r["was"], r["now"]) for r in reasons] == [(f"source:{REF}", "1", "2")]
+    # The refresh: rebuilt from what the build recorded, naming the same stored policy,
+    # reading version 2 now.
+    client = APIClient()
+    client.force_authenticate(user=people["analyst"])
+    answer = client.post(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario.uuid}/refresh/",
+                         data=json.dumps({"seed": 36, "policy": "quick_10k", "as_of": VALUATION}),
+                         content_type="application/json")
+    assert answer.status_code == 201, answer.content
+    rebuilt = FinancialScenario.objects.get(uuid=answer.json()["rebuilt"]["scenario"])
+    assert rebuilt.supersedes_id == scenario.pk
+    margin = FigureNormalization.objects.get(scenario=rebuilt, native__name="margin_per_hour")
+    assert margin.record["points"]["base"]["chain"][0]["observations"][0]["source_version"] == 2
+    assert margin.normalized.base == "1200"  # EUR 800 x 1.2 x 1.25
+    fresh = SimulationResult.objects.get(uuid=answer.json()["simulation"]["uuid"])
+    assert "source_superseded" not in {r["code"] for r in continuous_service.assess(fresh).reasons}
+    # A run that normalized nothing records no normalization dependency.
+    plain = built(Deployment.objects.create(name="usd-only", environment="staging", owner=people["owner"]), people,
+                  variables={"margin_per_hour": _entry("money_per_hour", "1100", effective_date=VALUATION)},
+                  policy=None)
+    assert "normalization_sources" not in ExposureDependencies.objects.get(simulation=simulated(plain)).dependencies
 
 
 # ======================================================================
@@ -666,3 +741,188 @@ def test_the_spec_and_the_readme_say_it():
                    "`mythos.economics.run-normalization/v1`"):
         assert needle in text, needle
     assert "section 36" in " ".join(README.read_text(encoding="utf-8").split())
+
+
+# ======================================================================
+# Review round 1: every read checks, the card checks its inputs, effect attributes
+# are indexed, and the provider order is a stored policy's
+# ======================================================================
+
+
+def _strip_disagreement(scenario):
+    """The reviewer's p3a: past the model, the KWD records' downgrades and conflicts
+    removed, the digest left as it was."""
+    for row in FigureNormalization.objects.filter(scenario=scenario, native__name__startswith="insurance_"):
+        edited = copy.deepcopy(row.record)
+        edited["confidence_downgrades"], edited["conflicts"] = [], []
+        for point in edited["points"].values():
+            point["confidence_downgrades"], point["conflicts"] = [], []
+            for step in point["chain"]:
+                step["conflicts"], step["downgrades"] = [], []
+        FigureNormalization._base_manager.filter(pk=row.pk).update(record=edited)
+
+
+def _refused_everywhere(scenario, deployment, people, result=None):
+    """A version whose normalizations no longer hold: nothing reads them. The run is
+    refused (and not recorded), the card refused, the report a refusal, the receipt's
+    sources refused, the events route and the scenario document 409."""
+    runs = SimulationResult.objects.filter(scenario=scenario).count()
+    outcome = simulation_service.simulate_scenario(scenario, seed=99, draws=1_000)
+    assert outcome.result is None and outcome.code == "normalization_record_malformed", (outcome.code, outcome.detail)
+    assert SimulationResult.objects.filter(scenario=scenario).count() == runs
+    if result is not None:
+        card = validity_service.issue_card(result)
+        assert card.card is None and card.code == "normalization_record_malformed", (card.code, card.detail)
+        served = report.build_report(result)
+        assert served["integrity"]["failed"] == ["normalizations"] and "normalizations" in served["integrity"]["checks"]
+        assert served["refusal"]["code"] == report.STORED_ROW_UNVERIFIED and served["excluded_from_totals"] is True
+        assert served["summary"] == {"not_reported": served["refusal"]["detail"]}
+        assert all(event["gross_cash"]["base"] is None for event in served["loss_events"])
+    with pytest.raises(receipt_service.ReceiptRefused) as refused:
+        receipt_service.source_snapshots(scenario)
+    assert refused.value.code == "source_snapshot_mismatch"
+    client = APIClient()
+    client.force_authenticate(user=people["owner"])
+    base = f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario.uuid}/"
+    for url in (base + "events/", base):
+        answer = client.get(url)
+        assert answer.status_code == 409 and answer.json()["code"] == "normalization_record_malformed", answer.content
+
+
+def test_p3a_a_record_changed_past_the_model_is_never_run_graded_or_served(deployment, people):
+    """Review round 1, MEDIUM-1 (the reviewer's p3a): the two-source KWD build, its
+    records' conflicts and downgrades stripped past the model with the digest left
+    stale. Before a run: no run. After one: no card, no figures, no receipt."""
+    books()
+    register(ALT, "RUN-TEST-ALT", fx_rates=[("KWD", "USD", EVENT, "3.25")])
+    two = {**POLICY, "providers": ["RUN-TEST-REF", "RUN-TEST-ALT"]}
+    scenario = built(deployment, people, policy=two)
+    result = simulated(scenario)
+    _strip_disagreement(scenario)
+    _refused_everywhere(scenario, deployment, people, result)
+
+
+def test_p3b_a_normalized_figure_changed_past_the_model_is_never_run_or_served(deployment, people):
+    """Review round 1, MEDIUM-1 (the reviewer's p3b): ``normalized:margin_per_hour`` set
+    to 1 past the model: it no longer is its record's value."""
+    books()
+    scenario = built(deployment, people)
+    result = simulated(scenario)
+    FinancialParameter._base_manager.filter(scenario=scenario, name="normalized:margin_per_hour").update(
+        low="1", base="1", high="1")
+    _refused_everywhere(scenario, deployment, people, result)
+
+
+def test_p3c_a_card_is_never_graded_from_stored_inputs_that_fail_their_digest(deployment, people):
+    """Review round 1, MEDIUM-2 (the reviewer's p3c): the run's stored inputs edited past
+    the model after the run (each record's downgrades emptied). The card is refused,
+    ``stored_row_unverified``, and nothing is recorded -- for every field it reads from
+    the inputs, not only the downgrades."""
+    from assurance.economics.models import FinancialValidityCard
+
+    books()
+    register(ALT, "RUN-TEST-ALT", fx_rates=[("KWD", "USD", EVENT, "3.25")])
+    result = simulated(built(deployment, people, policy={**POLICY, "providers": ["RUN-TEST-REF", "RUN-TEST-ALT"]}))
+    inputs = copy.deepcopy(result.inputs)
+    for record in inputs["normalizations"]:
+        record["confidence_downgrades"] = []
+    SimulationResult._base_manager.filter(pk=result.pk).update(inputs=inputs)
+    result.refresh_from_db()
+    outcome = validity_service.issue_card(result)
+    assert outcome.card is None and outcome.code == "stored_row_unverified", (outcome.code, outcome.detail)
+    assert not FinancialValidityCard.objects.filter(simulation=result).exists()
+    with pytest.raises(validity_service.StoredInputsUnverified):
+        validity_service.build_card(result, sensitivity=None, issued={})
+    # The same holds for a run that normalized nothing: a pre-existing gap, closed.
+    plain = simulated(built(Deployment.objects.create(name="usd", environment="staging", owner=people["owner"]),
+                            people, variables={"margin_per_hour": _entry("money_per_hour", "1100",
+                                                                         effective_date=VALUATION)}, policy=None))
+    edited = copy.deepcopy(plain.inputs)
+    edited["parameters"]["margin_per_hour"]["source_type"] = "OFFICIAL_PUBLIC"
+    SimulationResult._base_manager.filter(pk=plain.pk).update(inputs=edited)
+    plain.refresh_from_db()
+    assert validity_service.issue_card(plain).code == "stored_row_unverified"
+
+
+def test_a_money_attribute_stated_at_another_date_is_indexed_like_a_set_figure(deployment, people):
+    """Review round 1, MEDIUM-3: under a policy a USD effect attribute stated on the
+    event date is indexed to the valuation date exactly as a set figure is, with its
+    own record: a failover fixed cost of USD 5,000 in March 2020 is USD 6,250 (x 1.25),
+    and failover is 6,250 + 8 x 250 = 8,250. Without a policy it is read as stated; one
+    in another currency is refused, policy or none."""
+    books()
+    asset, finding = world(deployment, people["analyst"])
+    dated = body(asset, finding)
+    dated["effects"][0]["attributes"]["recovery_fixed_cost"]["effective_date"] = EVENT
+    scenario, _ = builder.build(deployment, dated, author=people["analyst"])
+    row = FigureNormalization.objects.get(scenario=scenario, native__name="outage.recovery_fixed_cost")
+    assert row.record["native"]["parent"] == {"effect": "outage"}
+    assert (row.normalized.name, row.normalized.base) == ("normalized:outage.recovery_fixed_cost", "6250")
+    step = row.record["points"]["base"]["chain"][0]
+    assert (step["rule"], row.record["points"]["base"]["chain"][1]["ratio"]) == ("same_currency", "1.25")
+    (event,) = builder.describe(scenario)["events"]
+    by_id = {c["component_id"]: c for c in event["components"]}
+    assert by_id["failover-recovery"]["base"] == "8250"
+    assert by_id["failover-recovery"]["sources"]["fixed_cost"]["read"]["normalized"]["native"] == str(row.native.uuid)
+    result = simulated(scenario)
+    assert "normalized:outage.recovery_fixed_cost" in records(result)
+    # The attribute as stated stays, read by nothing; without a policy it is read as stated.
+    plain = copy.deepcopy(dated)
+    del plain["normalization"]
+    plain["title"] = "without a policy"
+    usd = {"margin_per_hour": _entry("money_per_hour", "1100", effective_date=VALUATION),
+           "engineering_hourly_rate": _entry("money_per_hour", "250", effective_date=VALUATION)}
+    other = Deployment.objects.create(name="usd-2", environment="staging", owner=people["owner"])
+    asset2, finding2 = world(other, people["analyst"], usd)
+    plain["effects"][0]["asset"] = str(asset2.uuid)
+    plain["findings"][0]["finding"] = str(finding2.uuid)
+    as_stated, _ = builder.build(other, plain, author=people["analyst"])
+    (event,) = builder.describe(as_stated)["events"]
+    assert {c["component_id"]: c for c in event["components"]}["failover-recovery"]["base"] == "7000"
+    # One in another currency is refused, policy or none.
+    euro = copy.deepcopy(dated)
+    euro["effects"][0]["attributes"]["recovery_fixed_cost"]["currency"] = "EUR"
+    euro["title"] = "a EUR attribute"
+    with pytest.raises(MoneyRefused) as refused:
+        builder.build(deployment, euro, author=people["analyst"])
+    assert refused.value.code == "currency_mismatch"
+
+
+def test_a_request_never_states_or_reorders_a_policy_it_names_a_stored_one(deployment, people):
+    """Review round 1, LOW-2: the providers' order -- which is the primary -- is a stored
+    policy's, never the build request's. A request that states a policy (or a list of
+    providers) is refused; it names a stored policy by its key; a deployment's own
+    version is read before the platform's; only an admin records one."""
+    books()
+    register(ALT, "RUN-TEST-ALT", fx_rates=[("KWD", "USD", EVENT, "3.21")])  # within the tolerance of 3.2
+    asset, finding = world(deployment, people["analyst"])
+    for stated in (POLICY, {**POLICY, "providers": ["RUN-TEST-ALT", "RUN-TEST-REF"]}, ["RUN-TEST-ALT"], 7, ""):
+        with pytest.raises(MoneyRefused) as refused:
+            builder.build(deployment, body(asset, finding, policy=stated), author=people["analyst"])
+        assert refused.value.code == "field_malformed", stated
+    with pytest.raises(MoneyRefused) as refused:
+        builder.build(deployment, body(asset, finding, policy="no-such-policy"), author=people["analyst"])
+    assert refused.value.code == "normalization_policy_not_found"
+    # Through the route too: the body cannot carry the providers.
+    client = APIClient()
+    client.force_authenticate(user=people["analyst"])
+    url = f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/"
+    answer = client.post(url, data=json.dumps(body(asset, finding, policy={"providers": ["RUN-TEST-ALT"]})),
+                         content_type="application/json")
+    assert answer.status_code == 400 and answer.json()["code"] == "field_malformed"
+    # The platform's policy names REF first: REF's 3.2 is used, whatever the request.
+    scenario, _ = builder.build(deployment, body(asset, finding), author=people["analyst"])
+    assert figure(scenario, "insurance_deductible").base == "12500.5"
+    build_policy = ScenarioBuild.objects.get(scenario=scenario).inputs["normalization"]["policy"]
+    assert (build_policy["key"], build_policy["scope"], build_policy["version"]) == (KEY, "platform", 1)
+    # The deployment's own version of the key is read before the platform's.
+    named(people, {**POLICY, "providers": ["RUN-TEST-ALT", "RUN-TEST-REF"]}, key=KEY, deployment=deployment)
+    own, _ = builder.build(deployment, body(asset, finding, title="the deployment's own policy"),
+                           author=people["analyst"])
+    assert figure(own, "insurance_deductible").base == "12539.5640625"  # KWD 3,125.125 x 3.21 x 1.25
+    record = FigureNormalization.objects.get(scenario=own, native__name="insurance_deductible").record
+    assert record["stored_policy"]["scope"] == "deployment"
+    # Only an admin records a policy.
+    with pytest.raises(EconomicsRefused) as refused:
+        FinancialNormalizationPolicy.record("run-test-analyst", POLICY, by=people["analyst"])
+    assert refused.value.code == "admin_required"
