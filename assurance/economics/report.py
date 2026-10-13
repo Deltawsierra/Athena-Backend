@@ -45,7 +45,8 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   asset, finding or observed effect, its parameter set, a feed source, the engine
   release -- or that a check recorded stale, carries :data:`STALE_BANNER`, is
   ``excluded_from_totals`` and names every reason in ``banner_reason`` and
-  ``unknowns`` (``kind: "stale"``), where no other reason already excludes it
+  ``unknowns`` (``kind: "stale"``): the banner stays :data:`UNKNOWN_BANNER` where
+  another reason already excludes it, and ``banner_reason`` then names both
   (:func:`stale_reason`, :mod:`.continuous_service`). Read, never written: a report
   read writes nothing, and the run, its card and its receipt are never altered.
 - **The valuation date and the currency bridge** (``currency_bridge``, schema v2,
@@ -353,15 +354,24 @@ def banner_reason(result: SimulationResult | None, grade: str | None, failed: li
     return None
 
 
+def _with_stale(reason: str | None, stale: str | None) -> str | None:
+    """The ``banner_reason`` of a run excluded for ``reason`` and stale for ``stale``:
+    both where both hold, so no route is silent that a run is stale (review round 1 of
+    #168, L2)."""
+    if stale is None:
+        return reason
+    return stale if reason is None else f"{reason}; {stale}"
+
+
 def standing(scenario: FinancialScenario, now=None) -> dict:
     """The banner rule applied to ``scenario``'s latest stored result, by record order
     (the result ``results/`` serves without ``?simulation=``): the ``grade`` (the card
     DOCUMENT's, only where every stored row verified, else ``None``), the ``banner``,
     ``excluded_from_totals`` and ``banner_reason``. Every row is checked as the report
     checks it (:func:`stored_row_failures`, the series' too), and a scenario version
-    with no result is not graded. A stale run (E6) carries :data:`STALE_BANNER` and is
-    excluded, its reasons named, where nothing else excludes it. Reads rows, hashes
-    them and runs nothing else."""
+    with no result is not graded. A stale run (E6) is excluded and its reasons named
+    in ``banner_reason``, beside any other reason; it carries :data:`STALE_BANNER`
+    where nothing else excludes it. Reads rows, hashes them and runs nothing else."""
     return _standing_of(scenario, latest_exposure_run(scenario), now=now)
 
 
@@ -395,7 +405,7 @@ def _standing_and_freshness(scenario: FinancialScenario, result: SimulationResul
         "grade": grade,
         "banner": UNKNOWN_BANNER if reason is not None else STALE_BANNER if stale is not None else None,
         "excluded_from_totals": reason is not None or stale is not None,
-        "banner_reason": reason if reason is not None else stale,
+        "banner_reason": _with_stale(reason, stale),
     }
     return standing, freshness
 
@@ -919,7 +929,7 @@ def build_report(result: SimulationResult) -> dict:
         "grade": grade,
         "banner": UNKNOWN_BANNER if why is not None else STALE_BANNER if stale is not None else None,
         "excluded_from_totals": why is not None or stale is not None or residual_of is not None,
-        "banner_reason": why if why is not None else stale,
+        "banner_reason": _with_stale(why, stale),
         "residual_of": residual_of,
         "loss_events": events,
         "parameters": _parameters(result.inputs) if "input_digest" not in failed else {

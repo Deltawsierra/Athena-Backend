@@ -147,9 +147,9 @@ ASSURANCE_RECORD_REFUSALS = {
         "publishes, with the dependency it names), the refresh it owes, and the digest of its reasons"
     ),
     "refresh_record_malformed": (
-        "a refresh closure closes its own obligation with a completed exposure run of the deployment that is not the "
-        "stale run, that run's own Validity Card and, where one is named, its own receipt, and one of SPINE's "
-        "outcomes for the financial claim: restored, contradicted, unknown or superseded"
+        "a refresh closure closes its own obligation with a completed exposure run of the stale run's version or one "
+        "superseding it, that is not the stale run, that run's own Validity Card and, where one is named, its own "
+        "receipt, and one of SPINE's outcomes for the financial claim: restored, contradicted, unknown or superseded"
     ),
 }
 _REFUSAL_TEXT.update(ASSURANCE_RECORD_REFUSALS)
@@ -1226,6 +1226,14 @@ class FinancialScenario(_AppendOnly):
     class Meta:
         ordering = ["deployment", "id"]
         indexes = [models.Index(fields=["deployment"], name="assurance_econ_scenario_dep")]
+        # ONE successor per version (E6, spec section 34.4): two versions superseding
+        # one would fork the scenario, and both forks' runs could be totalled. Checked
+        # on save; the database holds the line where two writes race past the check.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supersedes"], condition=Q(supersedes__isnull=False), name="uq_econ_scenario_one_successor"
+            ),
+        ]
 
     @classmethod
     def authors_of(cls, scenario_id) -> list[governance.Person]:
@@ -1269,6 +1277,13 @@ class FinancialScenario(_AppendOnly):
             )
             if list(stored) != [self.deployment_id]:
                 raise EconomicsRefused("cross_tenant_reference", "supersedes")
+            later = FinancialScenario._base_manager.filter(supersedes_id=self.supersedes_id).values_list(
+                "uuid", flat=True
+            ).first()
+            if later is not None:
+                raise EconomicsRefused(
+                    "duplicate_id", f"the version is already superseded by {later}: one successor per version"
+                )
         self.author_username = _signed_in(self.author).username
 
     def __str__(self) -> str:
@@ -3356,6 +3371,10 @@ STALE_REASONS = {
     "source_superseded": "a feed source the run's figures rest on would now be read at another version",
     "source_stale": "a feed source the run's figures rest on is stale, blocked or missing as of today (section 29.5)",
     "release_changed": "the engine release (the run's versions and limits, the analysis, the grade or the card) moved",
+    "route_moved": (
+        "the served route of an asset the scenario rests on moved (SPINE's served-route fingerprint, the route every "
+        "chain outcome is read against): a model, its revision, fallback, quantization, prompt or region changed"
+    ),
     "release_unverifiable": "the engine release could not be read to compare with the run's",
     "scenario_superseded": "a later version of the scenario supersedes the version the run is of",
     "dependencies_unverifiable": "what the run rests on could not be read now to compare with what it was",
@@ -3567,6 +3586,18 @@ class ExposureRefresh(_AppendOnly):
             raise EconomicsRefused("cross_tenant_reference", "the closure's run is another scenario's")
         if run[2] is not None or run[3] != SIMULATION_COMPLETED or self.simulation_id == self.stale_simulation_id:
             raise EconomicsRefused("refresh_record_malformed", "a refresh is a new completed exposure run")
+        stale_scenario = (
+            SimulationResult._base_manager.filter(pk=self.stale_simulation_id).values_list("scenario_id", flat=True)
+            .first()
+        )
+        line, step = [], self.scenario_id
+        while step is not None and step not in line:
+            line.append(step)
+            step = FinancialScenario._base_manager.filter(pk=step).values_list("supersedes_id", flat=True).first()
+        if stale_scenario not in line:
+            raise EconomicsRefused(
+                "refresh_record_malformed", "the new run is not of the stale run's version or one superseding it"
+            )
         card = list(FinancialValidityCard._base_manager.filter(pk=self.card_id).values_list("simulation_id", flat=True))
         if card != [self.simulation_id]:
             raise EconomicsRefused("refresh_record_malformed", "the card is not the new run's")

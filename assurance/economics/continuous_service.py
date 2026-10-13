@@ -56,6 +56,8 @@ from datetime import date
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from assurance.composition import OFF_ROUTE
+
 from .engine import feeds as feed_rules
 from .report import STALE_BANNER
 from .models import (
@@ -98,6 +100,11 @@ TEMPLATE_CLAIMS: dict[str, tuple[str, ...]] = {
 #: Every claim type: what a template the table does not list, or a scenario with no
 #: effect, rests on (the conservative reading).
 ALL_CLAIM_TYPES: tuple[str, ...] = ("ai_bom", "data_boundary", "effective_access")
+#: The salient configuration SPINE's system fingerprint carries and no claim family
+#: reads (``assurance.fingerprint._SALIENT_METADATA_KEYS`` less the access and BOM
+#: facts): followed on its own (``fingerprint_moved``, ``system:unclaimed``) for every
+#: run resting on a model, so a change no claim sees is not a change no run sees.
+UNCLAIMED_KEYS: tuple[str, ...] = ("generation_config", "prompt_config", "region", "system_prompt", "temperature")
 #: The claim statuses that are a pass, for SPINE's outcome on a refresh.
 PASSING = frozenset({"verified", "supported", "partially_verified"})
 STALE_STATUS = "stale"
@@ -114,6 +121,7 @@ TECHNICAL = frozenset(
         "claim_status_moved",
         "claim_established",
         "fingerprint_moved",
+        "route_moved",
         "asset_changed",
         "finding_changed",
         "evidence_changed",
@@ -303,28 +311,82 @@ class Now:
         return self._once("assets", read).get(asset_uuid)
 
     def finding(self, finding_uuid: str) -> dict | None:
+        """A finding's status and severity, whether its evidence has expired by SPINE's
+        own ageing (:func:`assurance.change.is_stale`: not re-observed within
+        ``EVIDENCE_TTL_DAYS``, on SPINE's own clock: a retest is due before it is read
+        as current), and whether the deployment's latest scan no longer reports it
+        (:func:`assurance.change.change_status` ``cleared``: the absence of a signal,
+        never a fix)."""
+        from assurance.change import change_status, is_stale
         from assurance.models import Finding
 
         def read():
+            rows = list(Finding.objects.filter(deployment_id=self.deployment_id).only(
+                "uuid", "status", "severity", "first_seen", "last_seen"
+            ))
+            latest = max((row.last_seen for row in rows if row.last_seen is not None), default=None)
             return {
-                str(row["uuid"]): {"status": row["status"], "severity": row["severity"]}
-                for row in Finding.objects.filter(deployment_id=self.deployment_id).values("uuid", "status", "severity")
+                str(row.uuid): {"status": row.status, "severity": row.severity, "evidence_expired": is_stale(row),
+                                "cleared": change_status(row, latest) == "cleared"}
+                for row in rows
             }
 
         return self._once("findings", read).get(finding_uuid)
 
     def observed(self, outcome_uuid: str) -> dict | None:
+        """An observed effect's row: its status, its evidence digest, and SPINE's
+        reading of the route it was taken against (:func:`assurance.workflow_chains.route_of`:
+        ``current``, ``moved`` or ``unrecorded``; the last two are off-route, not
+        evidence about what serves now)."""
         from assurance.models import WorkflowChainOutcome
+        from assurance.workflow_chains import route_of
 
         def read(key=outcome_uuid):
-            row = (
-                WorkflowChainOutcome.objects.filter(deployment_id=self.deployment_id, uuid=key)
-                .values("status", "evidence_digest")
-                .first()
-            )
-            return None if row is None else {"status": row["status"], "evidence_digest": row["evidence_digest"] or ""}
+            row = WorkflowChainOutcome.objects.filter(deployment_id=self.deployment_id, uuid=key).first()
+            if row is None:
+                return None
+            return {"status": row.status, "evidence_digest": row.evidence_digest or "",
+                    "route": route_of(row, self.serving)}
 
         return self._once(("observed", outcome_uuid), read)
+
+    @property
+    def serving(self) -> str:
+        """The deployment's served-route fingerprint now (SPINE's
+        :func:`assurance.served_route.serving_route_now`, the route every chain outcome
+        is read against, and a part of its system fingerprint)."""
+        from assurance.served_route import serving_route_now
+
+        return self._once("serving", lambda: serving_route_now(self.deployment))
+
+    @property
+    def serving_routes(self) -> dict[str, str]:
+        """Each serving asset's route fingerprint, by the asset's uuid: the assets
+        SPINE gives a served route (``served_route.serves_inference``)."""
+        from assurance.served_route import route_fingerprint, served_route, serves_inference
+
+        return self._once("routes", lambda: {
+            str(a.uuid): route_fingerprint(served_route(a)) for a in self.deployment.assets.all() if serves_inference(a)
+        })
+
+    @property
+    def unclaimed(self) -> dict[str, str]:
+        """The configuration SPINE's system fingerprint carries and no claim reads, by
+        asset: each in-graph asset's salient metadata outside every claim family (its
+        prompt and generation configuration, temperature, region), as a digest, where
+        it has any."""
+        from assurance.graph_refs import in_graph
+
+        def read():
+            found = {}
+            for asset in in_graph(self.deployment.assets.all()):
+                metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+                held = {key: metadata[key] for key in UNCLAIMED_KEYS if metadata.get(key) is not None}
+                if held:
+                    found[str(asset.uuid)] = canonical_digest(held)
+            return found
+
+        return self._once("unclaimed", read)
 
     def parameter_set(self, set_key: str) -> CustomerParameterSet | None:
         return self._once(
@@ -393,6 +455,9 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
             else _source_entry(now.source(key, as_of, (inputs or {}).get("parameters")))
         )
     digest, record, why = now.release()
+    # A run rests on what serves where its scenario rests on the model's composition
+    # (an ai_bom claim type) or an effect is on a serving asset.
+    route_bound = "ai_bom" in types or any(e.asset in now.serving_routes for e in effects)
     return {
         "schema": DEPENDENCIES_SCHEMA,
         "scenario": str(scenario.uuid),
@@ -400,6 +465,9 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
         "claims": {claim_type: now.claims(claim_type) for claim_type in types},
         "inputs": {claim_type: now.input_fingerprints.get(claim_type) for claim_type in types},
         "policy": now.policy,
+        "route_bound": route_bound,
+        "route": {"serving": now.serving, "assets": now.serving_routes},
+        "unclaimed": now.unclaimed,
         "build_system_fingerprint": scenario.system_fingerprint or None,
         "assets": {e.asset: now.asset(e.asset) for e in effects},
         "findings": {link.finding: now.finding(link.finding) for link in links},
@@ -497,16 +565,57 @@ def _claim_reasons(recorded: dict, now: Now) -> list[dict]:
         # one its invalidation acts on), before SPINE's check has run: SPINE decides
         # which claims a change affects, and only a change to one this scenario rests
         # on makes it stale.
-        for identity, current in sorted(held.items()):
-            moved = now.drifted(current, claim_type)
-            if moved:
-                families = ", ".join(CLAIM_INPUTS.get(claim_type, ("the whole system state",)))
-                found.append(_reason(
-                    "fingerprint_moved", f"inputs:{claim_type}",
-                    f"the system state the {claim_type} claim rests on ({families}) moved: {moved}",
-                    was=current["input_fingerprint"] or current["system_fingerprint"],
-                    now=now.input_fingerprints.get(claim_type),
-                ))
+        families = ", ".join(CLAIM_INPUTS.get(claim_type, ("the whole system state",)))
+        why = [moved for moved in (now.drifted(current, claim_type) for _identity, current in sorted(held.items()))
+               if moved]
+        # And the input fingerprint recorded with the run, compared itself (review round 1
+        # of #168, M2): with no claim of the type derived yet, nothing above would see
+        # a change to the inputs the type reads. Per type, so a change to inputs only
+        # another type reads leaves this run current.
+        recorded_inputs = (recorded.get("inputs") or {}).get(claim_type)
+        current_inputs = now.input_fingerprints.get(claim_type)
+        if recorded_inputs != current_inputs:
+            why.append("its inputs are not the ones recorded with the run")
+        if why:
+            found.append(_reason(
+                "fingerprint_moved", f"inputs:{claim_type}",
+                f"the system state the {claim_type} claim type rests on ({families}) moved: {'; '.join(why)}",
+                was=recorded_inputs, now=current_inputs,
+            ))
+    if recorded.get("policy") != now.policy:
+        found.append(_reason(
+            "fingerprint_moved", "policy", "the assurance policy in force is not the one recorded with the run",
+            was=recorded.get("policy"), now=now.policy,
+        ))
+    return found
+
+
+def _route_reasons(recorded: dict, now: Now) -> list[dict]:
+    """The system state outside every claim family that SPINE's system fingerprint
+    carries (review round 1 of #168, H1), for a run resting on what serves (its
+    scenario rests on the model's composition, or an effect is on a serving asset):
+    the served route of every serving asset -- the route every chain outcome is read
+    against -- and the salient configuration no claim reads."""
+    if not recorded.get("route_bound"):
+        return []
+    found = []
+    route = recorded.get("route") or {}
+    before, after = route.get("assets") or {}, now.serving_routes
+    if route.get("serving") != now.serving or before != after:
+        changed = sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
+        found.append(_reason(
+            "route_moved", "route",
+            "the served route moved on " + (", ".join(changed) if changed else "the deployment's serving assets"),
+            was=route.get("serving"), now=now.serving, changed=changed,
+        ))
+    before, after = recorded.get("unclaimed") or {}, now.unclaimed
+    if before != after:
+        changed = sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
+        found.append(_reason(
+            "fingerprint_moved", "system:unclaimed",
+            "configuration no claim reads (prompt, generation, temperature, region) moved on " + ", ".join(changed),
+            changed=changed,
+        ))
     return found
 
 
@@ -522,20 +631,69 @@ def _spine_rows_reasons(recorded: dict, now: Now) -> list[dict]:
             ))
     for finding, held in sorted((recorded.get("findings") or {}).items()):
         current = now.finding(finding)
-        if current != held:
+        dependency = f"finding:{finding}"
+        if current is None or held is None:
+            if current != held:
+                found.append(_reason("finding_changed", dependency, "an enabling finding is gone"
+                                     if current is None else "an enabling finding appeared"))
+            continue
+        if (current["status"], current["severity"]) != (held["status"], held["severity"]):
             found.append(_reason(
-                "finding_changed", f"finding:{finding}",
-                "an enabling finding's status or severity moved" if current else "an enabling finding is gone",
-                was=None if held is None else f"{held['status']}/{held['severity']}",
-                now=None if current is None else f"{current['status']}/{current['severity']}",
+                "finding_changed", dependency, "an enabling finding's status or severity moved",
+                was=f"{held['status']}/{held['severity']}", now=f"{current['status']}/{current['severity']}",
+            ))
+        # SPINE's evidence ageing (review round 1 of #168, L1): a finding not re-observed
+        # within its TTL is due a retest before it is read as current.
+        if held.get("evidence_expired"):
+            found.append(_reason(
+                "finding_changed", dependency,
+                "the enabling finding's evidence had expired when the run was made (SPINE's evidence ageing): a "
+                "retest was due",
+            ))
+        elif current.get("evidence_expired"):
+            found.append(_reason(
+                "finding_changed", dependency,
+                "the enabling finding's evidence expired (SPINE's evidence ageing): a retest is due before it is read "
+                "as current",
+            ))
+        # SPINE's change state: a scan that no longer reports the finding (cleared) is
+        # the absence of a signal, not a fix -- and one that reports it again moves it too.
+        if bool(held.get("cleared")) != bool(current.get("cleared")):
+            found.append(_reason(
+                "finding_changed", dependency,
+                "the deployment's latest scan no longer reports the enabling finding (SPINE's change state cleared: "
+                "the absence of a signal, never a fix)" if current.get("cleared")
+                else "the deployment's latest scan reports the enabling finding again",
+                was="cleared" if held.get("cleared") else "reported",
+                now="cleared" if current.get("cleared") else "reported",
             ))
     for outcome, held in sorted((recorded.get("observed_effects") or {}).items()):
         current = now.observed(outcome)
-        if current != held:
+        dependency = f"observed_effect:{outcome}"
+        if current is None or held is None:
+            if current != held:
+                found.append(_reason("evidence_changed", dependency, "the observed effect is gone"
+                                     if current is None else "the observed effect appeared"))
+            continue
+        if (current["status"], current["evidence_digest"]) != (held["status"], held["evidence_digest"]):
             found.append(_reason(
-                "evidence_changed", f"observed_effect:{outcome}",
+                "evidence_changed", dependency,
                 "the observed effect no longer holds what it held when the run was made",
-                was=None if held is None else held.get("status"), now=None if current is None else current.get("status"),
+                was=held["status"], now=current["status"],
+            ))
+        # SPINE reads an outcome bound to a route that no longer serves as off-route:
+        # not evidence about what serves now (review round 1 of #168, H1).
+        if held.get("route") in OFF_ROUTE:
+            found.append(_reason(
+                "evidence_changed", dependency,
+                "the observed effect was taken against a route that did not serve when the run was made",
+                was=held.get("route"), now=current.get("route"),
+            ))
+        elif current.get("route") in OFF_ROUTE:
+            found.append(_reason(
+                "evidence_changed", dependency,
+                "the observed effect was taken against a route that no longer serves",
+                was=held.get("route"), now=current.get("route"),
             ))
     return found
 
@@ -650,6 +808,7 @@ def live_reasons(result: SimulationResult, *, now: Now | None = None) -> list[di
         else:
             recorded = mapped.dependencies
             found += _claim_reasons(recorded, now)
+            found += _route_reasons(recorded, now)
             found += _spine_rows_reasons(recorded, now)
             found += _financial_reasons(recorded, now, (result.inputs or {}).get("parameters"))
             found += _release_reasons(recorded, now)
@@ -887,8 +1046,11 @@ def check(deployment, *, today: date | None = None) -> dict:
         freshness = assess(result, now=now)
         entry = {"scenario": str(scenario.uuid), "simulation": str(result.uuid), "state": freshness.state,
                  "reasons": [{"code": r["code"], "dependency": r["dependency"]} for r in freshness.reasons]}
-        if freshness.live:
-            row, created = record_staleness(result, freshness.live, scenario=scenario)
+        # A fault reading what holds now reads stale, and is never recorded: a recorded
+        # staleness never lifts, and a transient fault is not a change.
+        lasting = [r for r in freshness.live if r["code"] != "dependencies_unverifiable"]
+        if lasting:
+            row, created = record_staleness(result, lasting, scenario=scenario)
             recorded += created
             entry["obligation"] = str(row.uuid)
         runs.append(entry)
@@ -968,13 +1130,18 @@ def scenario_freshness(scenario: FinancialScenario, result: SimulationResult | N
 
 @dataclass(frozen=True)
 class Prepared:
-    """A refresh ready to run: the stale run, its freshness, its open obligations and
-    the build body that rebuilds its scenario version."""
+    """What a refresh does: ``mode`` ``"refresh"`` -- rebuild the version (``body``),
+    run it, card and receipt it -- or ``"close"`` -- the version's latest run is
+    current and obligations of its line are still open (a refresh whose card or
+    receipt was not issued, or whose run did not stand): issue what is missing for
+    ``stale`` (then the run itself) and close what it can, running nothing. ``stale``
+    is the version's latest exposure run, ``obligations`` the open ones of its line."""
 
-    stale: SimulationResult
-    freshness: Freshness
+    stale: SimulationResult | None
+    freshness: Freshness | None
     obligations: tuple
-    body: dict
+    body: dict | None
+    mode: str = "refresh"
 
 
 def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | None = None) -> dict:
@@ -1039,28 +1206,62 @@ def open_obligations(scenario: FinancialScenario) -> list[ExposureStaleness]:
     ]
 
 
+def latest_of(scenario: FinancialScenario) -> FinancialScenario:
+    """The latest version of ``scenario``'s line: following each version's ONE
+    successor (``uq_econ_scenario_one_successor``) to the version none supersedes."""
+    seen, step = set(), scenario
+    while step.pk not in seen:
+        seen.add(step.pk)
+        later = FinancialScenario.objects.filter(supersedes=step).order_by("id").first()
+        if later is None:
+            return step
+        step = later
+    return step
+
+
 def prepare_refresh(scenario: FinancialScenario, *, as_of: date) -> Prepared:
-    """What a refresh of ``scenario`` re-runs, or why none is made: the version must be
-    the latest (``scenario_superseded``, naming it), have a completed exposure run
-    (``nothing_to_refresh``) that is stale (``exposure_current``: no obligation, and
-    nothing to refresh). A run found stale now and not yet recorded is recorded first,
-    so the obligation the refresh closes exists. Runs nothing."""
-    later = FinancialScenario.objects.filter(supersedes=scenario).order_by("id").first()
-    if later is not None:
-        raise RefreshRefused("scenario_superseded", f"scenario version {later.uuid} supersedes this one: refresh it",
-                             status=409)
-    stale = _latest_completed(scenario)
-    if stale is None or stale.status != SIMULATION_COMPLETED:
-        raise RefreshRefused("nothing_to_refresh", "this scenario version has no completed exposure run to refresh",
-                             status=409)
-    freshness = assess(stale)
+    """What a refresh of ``scenario`` does, or why it does nothing (spec, section 34.4).
+
+    - A version another supersedes is refused (``scenario_superseded``, 409), naming
+      the latest version of its line, which holds its open obligations: refresh that.
+    - Its latest exposure run is stale: the run is recorded stale (if it is not yet),
+      and the version is rebuilt and run (``"refresh"``).
+    - It has no completed exposure run (none, or a refused one), and obligations of its
+      line are open: it is rebuilt and run (a refused run is no dead end; a new
+      parameter-set version may give the engine what it refused).
+    - Its latest run is current and obligations of its line are open (a refresh whose
+      card or receipt was not issued, or whose run did not stand): ``"close"`` -- issue
+      what is missing and close what the run can, running nothing again (review round 1
+      of #168, M1).
+    - Otherwise nothing is open and nothing moved: ``exposure_current`` (409) for a
+      current run, ``nothing_to_refresh`` (409) for none. Runs nothing."""
+    latest = latest_of(scenario)
+    if latest.pk != scenario.pk:
+        held = open_obligations(latest)
+        raise RefreshRefused(
+            "scenario_superseded",
+            f"scenario version {latest.uuid} supersedes this one: refresh it"
+            + (f"; it holds this line's {len(held)} open obligation(s)" if held else ""),
+            status=409,
+        )
+    run = _latest_completed(scenario)
+    held = tuple(open_obligations(scenario))
+    if run is None or run.status != SIMULATION_COMPLETED:
+        if not held:
+            raise RefreshRefused("nothing_to_refresh", "this scenario version has no completed exposure run to "
+                                 "refresh, and no obligation of its line is open", status=409)
+        return Prepared(run, None, held, rebuild_body(scenario, as_of=as_of))
+    freshness = assess(run)
     if not freshness.stale:
+        if held:
+            return Prepared(run, freshness, held, None, mode="close")
         raise RefreshRefused("exposure_current", "its latest exposure run depends on nothing that moved: there is "
                              "no obligation to close, and nothing was run", status=409)
-    if freshness.live:
-        record_staleness(stale, freshness.live, scenario=scenario)
+    lasting = [r for r in freshness.live if r["code"] != "dependencies_unverifiable"]
+    if lasting:
+        record_staleness(run, lasting, scenario=scenario)
     body = rebuild_body(scenario, as_of=as_of)
-    return Prepared(stale, assess(stale), tuple(open_obligations(scenario)), body)
+    return Prepared(run, assess(run), tuple(open_obligations(scenario)), body)
 
 
 def spine_outcome(reasons: list[dict], dependencies: dict | None) -> tuple[str, dict]:
@@ -1098,12 +1299,13 @@ def _new_run_stands(result: SimulationResult) -> str | None:
     return built.get("banner_reason") or "its report is not one a total may sum"
 
 
-def close_obligations(stale_scenario: FinancialScenario, result: SimulationResult, card, receipt, *, author
+def close_obligations(result: SimulationResult, card, receipt, *, author
                       ) -> tuple[list[ExposureRefresh], str | None]:
-    """Close every open obligation of ``stale_scenario`` with ``result`` -- the new
-    run -- its ``card`` and ``receipt`` (or none), once the new run STANDS: ``(closures,
-    None)``; or ``([], why)`` and every obligation left open. Each closure names SPINE's
-    outcome. Every check runs before each transaction, which only inserts."""
+    """Close every open obligation of ``result``'s version and of each version it
+    supersedes with ``result`` -- the new run -- its ``card`` and ``receipt`` (or
+    none), once the new run STANDS: ``(closures, None)``; or ``([], why)`` and every
+    obligation left open. Each closure names SPINE's outcome. Every check runs before
+    each transaction, which only inserts."""
     if card is None:
         return [], "the new run has no Validity Card: it is not graded"
     why = _new_run_stands(result)
@@ -1111,7 +1313,7 @@ def close_obligations(stale_scenario: FinancialScenario, result: SimulationResul
         return [], why
     mapped = ExposureDependencies.objects.filter(simulation=result).first()
     closures = []
-    for obligation in open_obligations(stale_scenario):
+    for obligation in open_obligations(FinancialScenario.objects.get(pk=result.scenario_id)):
         outcome, per = spine_outcome(obligation.reasons, None if mapped is None else mapped.dependencies)
         row = ExposureRefresh(
             deployment_id=result.deployment_id,
@@ -1186,6 +1388,7 @@ __all__ = [
     "STALE_REASONS",
     "TECHNICAL",
     "TEMPLATE_CLAIMS",
+    "UNCLAIMED_KEYS",
     "Freshness",
     "Now",
     "Prepared",
@@ -1197,6 +1400,7 @@ __all__ = [
     "close_obligations",
     "closure_document",
     "current_versions",
+    "latest_of",
     "lineage",
     "live_reasons",
     "open_obligations",

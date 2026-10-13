@@ -5,13 +5,16 @@
 # ExposureDependencies (what one exposure run rests on, captured before it ran),
 # ExposureStaleness (one run found stale, and the refresh it owes: the open
 # obligation) and ExposureRefresh (the refresh that closed one, naming the new run,
-# its card, its receipt and SPINE's outcome). Nothing is backfilled and no existing
-# table changes: a run recorded before this has no map, and reads stale until it is
-# refreshed. Only the closure names an account (the person who asked for the
-# refresh), nulled if the account is removed (a stop); every row goes with its
-# deployment. Numbered 0073 behind #165's 0071 (merged) and #162's 0072 (in the
-# merge queue); it depends on master's latest, 0071, and is re-pointed to 0072 when
-# #162 merges.
+# its card, its receipt and SPINE's outcome); and one constraint on the scenario
+# table: ONE successor per version (a refresh, or any build, never forks a scenario;
+# review round 1 of #168, L3). Nothing is backfilled and no existing column
+# changes: a run recorded before this has no map, and reads stale until it is
+# refreshed. A database already holding two successors of one version refuses the
+# constraint, and that fork is the owner's to settle first. Only the closure names
+# an account (the person who asked for the refresh), nulled if the account is
+# removed (a stop); every row goes with its deployment. Numbered 0073 behind #165's
+# 0071 (merged) and #162's 0072 (in the merge queue); it depends on master's latest,
+# 0071, and is re-pointed to 0072 when #162 merges.
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -235,6 +238,14 @@ class Migration(migrations.Migration):
                     )
                 ),
                 name="ck_econ_refresh_outcome",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="financialscenario",
+            constraint=models.UniqueConstraint(
+                condition=models.Q(("supersedes__isnull", False)),
+                fields=("supersedes",),
+                name="uq_econ_scenario_one_successor",
             ),
         ),
     ]

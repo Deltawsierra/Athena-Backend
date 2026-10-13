@@ -629,39 +629,64 @@ class ScenarioRefreshView(APIView):
         except continuous_service.RefreshRefused as refused:
             return Response({"code": refused.code, "detail": refused.detail, "recorded": False},
                             status=refused.status)
-        try:
-            rebuilt, rebuilt_now = builder.build(deployment, prepared.body, author=request.user)
-        except (EconomicsRefused, MoneyRefused) as refused:
-            raise _refused(refused.code, refused.detail or str(refused)) from None
-        except IntegrityError:
+        def superseded_meanwhile():
+            """Another refresh, or a build, superseded the version at the same moment:
+            one successor per version (the scenario table's constraint)."""
+            later = FinancialScenario.objects.filter(supersedes=found).first()
+            if later is None:
+                return None
             return Response(
-                {"detail": "A build of the same inputs was recorded at the same moment; send the refresh again."},
+                {"code": "scenario_superseded", "recorded": False,
+                 "detail": f"scenario version {later.uuid} superseded this one at the same moment: refresh it"},
                 status=status.HTTP_409_CONFLICT,
             )
-        except _currency.CurrencyTableInvalid:
-            return _table_unavailable()
-        except ProbabilisticEngineUnavailable:
-            return _engine_unavailable()
-        outcome = simulation_service.simulate_scenario(
-            rebuilt, seed=seed, draws=policy["draws"], severe_percentile=policy["severe_percentile"],
-            time_budget=remaining(),
-        )
-        rebuilt_part = {"scenario": str(rebuilt.uuid), "created": rebuilt_now,
-                        "supersedes": None if rebuilt.supersedes_id is None else str(rebuilt.supersedes.uuid)}
-        if outcome.result is None:
-            unavailable = outcome.code in simulation_service.UNRECORDED
-            return Response(
-                {"code": outcome.code, "detail": outcome.detail, "recorded": False, "rebuilt": rebuilt_part},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE if unavailable else status.HTTP_400_BAD_REQUEST,
+
+        closing = prepared.mode == "close"
+        created = False
+        if closing:
+            # The version's latest run is current and obligations of its line are open:
+            # issue what is missing and close what it can. Nothing is run again.
+            rebuilt, rebuilt_part, result = found, None, prepared.stale
+        else:
+            try:
+                rebuilt, rebuilt_now = builder.build(deployment, prepared.body, author=request.user)
+            except (EconomicsRefused, MoneyRefused) as refused:
+                raced = superseded_meanwhile()
+                if raced is not None:
+                    return raced
+                raise _refused(refused.code, refused.detail or str(refused)) from None
+            except IntegrityError:
+                raced = superseded_meanwhile()
+                if raced is not None:
+                    return raced
+                return Response(
+                    {"detail": "A build of the same inputs was recorded at the same moment; send the refresh again."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            except _currency.CurrencyTableInvalid:
+                return _table_unavailable()
+            except ProbabilisticEngineUnavailable:
+                return _engine_unavailable()
+            outcome = simulation_service.simulate_scenario(
+                rebuilt, seed=seed, draws=policy["draws"], severe_percentile=policy["severe_percentile"],
+                time_budget=remaining(),
             )
-        result = outcome.result
-        if result.pk == prepared.stale.pk:
-            return Response(
-                {"code": "refresh_same_run", "recorded": False, "rebuilt": rebuilt_part,
-                 "detail": "the rebuild and the run are the stale run's own (nothing it is built from moved, and the "
-                 "seed is the same): send another seed or as_of"},
-                status=status.HTTP_409_CONFLICT,
-            )
+            rebuilt_part = {"scenario": str(rebuilt.uuid), "created": rebuilt_now,
+                            "supersedes": None if rebuilt.supersedes_id is None else str(rebuilt.supersedes.uuid)}
+            if outcome.result is None:
+                unavailable = outcome.code in simulation_service.UNRECORDED
+                return Response(
+                    {"code": outcome.code, "detail": outcome.detail, "recorded": False, "rebuilt": rebuilt_part},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE if unavailable else status.HTTP_400_BAD_REQUEST,
+                )
+            result, created = outcome.result, outcome.created
+            if prepared.stale is not None and result.pk == prepared.stale.pk:
+                return Response(
+                    {"code": "refresh_same_run", "recorded": False, "rebuilt": rebuilt_part,
+                     "detail": "the rebuild and the run are the latest run's own (nothing it is built from moved, and "
+                     "the seed is the same): send another seed or as_of"},
+                    status=status.HTTP_409_CONFLICT,
+                )
         card = (validity_service.issue_card(result, time_budget=remaining()) if remaining() > 0
                 else validity_service.CardOutcome(None, False, **_overrun("the Validity Card")))
         charts = (charts_service.issue_charts(result, time_budget=remaining()) if remaining() > 0
@@ -687,23 +712,27 @@ class ScenarioRefreshView(APIView):
                 receipt.receipt, receipt, lambda row: {"receipt_id": row.receipt_id, "key_id": row.key_id}
             )
         if result.status != SIMULATION_COMPLETED:
-            closures, why_open = [], f"the new run was refused ({result.refusal_code}): it has no figures"
+            closures, why_open = [], (
+                f"the new run was refused ({result.refusal_code}): it has no figures; record a parameter-set version "
+                f"the engine accepts, then refresh scenario version {rebuilt.uuid}"
+            )
         elif overrun:
             closures, why_open = [], "the request's deadline ran out before the new run was carded"
         else:
             closures, why_open = continuous_service.close_obligations(
-                found, result, card.card, receipt_row, author=request.user
+                result, card.card, receipt_row, author=request.user
             )
-        still_open = [str(row.uuid) for row in continuous_service.open_obligations(found)]
+        still_open = [str(row.uuid) for row in continuous_service.open_obligations(rebuilt)]
         results_url = reverse("deployment-economics-scenario-results", kwargs={"uuid": deployment.uuid,
                                                                               "scenario": rebuilt.uuid})
         served = {
             "deployment": str(deployment.uuid),
             "scenario": str(found.uuid),
-            "stale_simulation": str(prepared.stale.uuid),
+            "mode": prepared.mode,
+            "stale_simulation": None if prepared.stale is None else str(prepared.stale.uuid),
             "refresh": prepared.obligations[-1].refresh if prepared.obligations else None,
             "rebuilt": rebuilt_part,
-            "created": outcome.created,
+            "created": created,
             "policy": {"name": policy_name, "draws": policy["draws"],
                        "severe_percentile": str(policy["severe_percentile"])},
             "simulation": {
@@ -728,13 +757,16 @@ class ScenarioRefreshView(APIView):
             "report": f"{results_url}?simulation={result.uuid}",
         }
         if overrun:
+            again = ("send this refresh again" if closing
+                     else f"send a refresh of scenario version {rebuilt.uuid}, the version this one rebuilt")
             return Response(
                 {**served, "code": "time_over_budget",
                  "detail": f"the request's {REQUEST_BUDGET_SECONDS:g} s ran out: the run is recorded, and what was not "
-                 "issued is recorded nowhere; send the same refresh again to issue it and close the obligations"},
+                 f"issued is recorded nowhere; {again}: it issues what is missing and closes the obligations once the "
+                 "run stands, and nothing is run again"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        return Response(served, status=status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK)
+        return Response(served, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 urlpatterns = [

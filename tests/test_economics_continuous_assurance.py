@@ -153,13 +153,17 @@ def payments_document(*, atv=ATV, atv_evidence=None):
     }
 
 
-def operations_document(*, margin="40000", insurance=False):
+def operations_document(*, margin="40000", insurance=False, margin_range=None):
     """The operations set: the critical service's margin and the engineers' rate,
-    each the customer's point, and the frequency; with ``insurance``, a policy."""
-    variables = {
-        "margin_per_hour": _entry("money_per_hour", margin),
-        "engineering_hourly_rate": _entry("money_per_hour", "150"),
-    }
+    each the customer's point, and the frequency; with ``insurance``, a policy. With
+    ``margin=None`` no margin (the interruption is unknown, so the run grades
+    Unknown); with ``margin_range``, the margin a customer range stating no
+    distribution (the run refuses it)."""
+    variables = {"engineering_hourly_rate": _entry("money_per_hour", "150")}
+    if margin_range is not None:
+        variables["margin_per_hour"] = _entry("money_per_hour", *margin_range)
+    elif margin is not None:
+        variables["margin_per_hour"] = _entry("money_per_hour", margin)
     if insurance:
         variables["insurance_deductible"] = _entry("money", "100000")
         variables["insurance_limit"] = _entry("money", "1000000")
@@ -299,7 +303,9 @@ def test_a_run_records_what_it_depends_on_read_before_it_ran(world):
     agent = Asset.objects.get(deployment=world.deployment, kind="agent")
     assert set(deps["assets"]) == {str(agent.uuid)} and deps["assets"][str(agent.uuid)]
     (finding,) = deps["findings"].values()
-    assert finding == {"status": "open", "severity": "high"}
+    # The outage's finding was recorded after this one, so this one is behind the
+    # deployment's latest last_seen: SPINE's change state reads it as cleared.
+    assert finding == {"status": "open", "severity": "high", "evidence_expired": False, "cleared": True}
     version = CustomerParameterSet.current(world.deployment, PAYMENTS)
     assert deps["parameter_set"] == {"set_key": PAYMENTS, "version": 1, "content_digest": version.content_digest}
     assert deps["release"]["digest"] and deps["release"]["record"]["engine"]["scenario_simulation"]
@@ -368,9 +374,12 @@ def test_a_supersede_stales_only_the_scenario_bound_to_the_claim(world):
     payment, outage = world.run(world.payment), world.run(world.outage)
     _widen_boundary(world.deployment)
     derive_claims(world.deployment)  # SPINE supersedes the boundary claim
-    assert codes(outage) == {"claim_superseded"}
-    (reason,) = freshness(outage).reasons
-    assert reason["now"] == str(_claim(world.deployment, "data_boundary").uuid)
+    # The supersede, and the boundary inputs recorded with the run, which moved with it
+    # (review round 1 of #168, M2): both are named.
+    assert codes(outage) == {"claim_superseded", "fingerprint_moved"}
+    superseded, moved = sorted(freshness(outage).reasons, key=lambda r: r["code"])
+    assert superseded["now"] == str(_claim(world.deployment, "data_boundary").uuid)
+    assert moved["dependency"] == "inputs:data_boundary" and moved["was"] != moved["now"]
     assert current(payment)
 
 
@@ -842,6 +851,291 @@ def test_the_refresh_route_takes_a_run_slot(world, people, monkeypatch):
             slots.release()
     assert response.status_code == 503 and response.json()["code"] == capacity.CODE
     assert FinancialScenario.objects.count() == 2 and not ExposureStaleness.objects.exists()
+
+
+# ======================================================================
+# Review round 1 of #168: the system state no claim reads (H1), recorded inputs
+# compared (M2), an obligation a refresh can always close (M1), finding evidence
+# ageing (L1), the events route says stale too (L2), one successor (L3)
+# ======================================================================
+
+
+def _model(world):
+    return Asset.objects.get(deployment=world.deployment, kind="model")
+
+
+def _set_metadata(asset, **values):
+    asset.metadata = {**asset.metadata, **values}
+    asset.save(update_fields=["metadata"])
+
+
+def test_a_served_route_change_no_claim_reads_stales_the_runs_resting_on_the_model(world, people):
+    """H1. The model's fallback model, quantization and revision move SPINE's served
+    route (its system fingerprint, and the route every chain outcome is read against)
+    and no claim input. Every run resting on the model's composition (``ai_bom``) is
+    stale, ``route_moved``, naming the serving asset; a run resting on neither the
+    model's claims nor a serving asset (a cross-customer scenario on an agent) stays
+    current: section 27's row."""
+    unrelated = stored(world.deployment, people["analyst"], set_key="unrelated")
+    derive_claims(world.deployment)  # the unrelated scenario's agent is in SPINE's claims before any run
+    payment, outage = world.run(world.payment), world.run(world.outage)
+    other = simulation_service.simulate_scenario(unrelated, seed=1, draws=1_000).result
+    assert current(payment) and current(outage) and current(other)
+    gpt = _model(world)
+    _set_metadata(gpt, fallback_model="small-cheap-model", quantization="int4", model_revision="2026-10-01")
+    check_invalidations(world.deployment)
+    assert codes(payment) == {"route_moved"} and codes(outage) == {"route_moved"}
+    (reason,) = freshness(outage).reasons
+    assert reason["dependency"] == "route" and reason["changed"] == [str(gpt.uuid)]
+    assert current(other)
+
+
+def test_a_configuration_change_no_claim_reads_stales_the_runs_resting_on_the_model(world):
+    """H1. The model's temperature and generation config are salient to SPINE (its
+    system fingerprint) and read by no claim: ``fingerprint_moved`` on the unclaimed
+    configuration, for every run resting on the model's composition."""
+    payment, outage = world.run(world.payment), world.run(world.outage)
+    gpt = _model(world)
+    _set_metadata(gpt, temperature=1.5, generation_config={"top_p": "0.99"})
+    check_invalidations(world.deployment)
+    assert codes(payment) == {"fingerprint_moved"}
+    (reason,) = freshness(payment).reasons
+    assert reason["dependency"] == "system:unclaimed" and reason["changed"] == [str(gpt.uuid)]
+    assert codes(outage) == {"fingerprint_moved", "asset_changed"}  # its effect is on the model
+
+
+def test_an_observed_effect_taken_against_a_route_that_no_longer_serves_is_evidence_changed(world, monkeypatch):
+    """H1. SPINE reads a chain outcome bound to an older route as off-route
+    (``ROUTE_MOVED``): not evidence about what serves now. A run built on one is stale
+    once the route moves, ``evidence_changed``."""
+    from assurance.composition import HELD
+    from assurance.models import WorkflowChainOutcome
+    from assurance.served_route import serving_route_now
+
+    row = WorkflowChainOutcome.objects.create(
+        deployment=world.deployment, workflow="refund-over-limit", status=HELD,
+        evidence_digest="sha256:" + "1" * 64, route_fingerprint=serving_route_now(world.deployment),
+    )
+    real = continuous_service.capture
+
+    def with_the_observation(scenario, inputs, *, now=None):
+        captured = real(scenario, inputs, now=now)
+        now = now or continuous_service.Now(scenario.deployment_id)
+        captured["observed_effects"] = {str(row.uuid): now.observed(str(row.uuid))}
+        return captured
+
+    monkeypatch.setattr(continuous_service, "capture", with_the_observation)
+    payment = world.run(world.payment)
+    mapped = ExposureDependencies.objects.get(simulation=payment).dependencies["observed_effects"]
+    assert mapped[str(row.uuid)]["route"] == "current"
+    assert current(payment)
+    _set_metadata(_model(world), model_revision="2026-10-02")
+    assert {"route_moved", "evidence_changed"} == codes(payment)
+    changed = next(r for r in freshness(payment).reasons if r["code"] == "evidence_changed")
+    assert changed["dependency"] == f"observed_effect:{row.uuid}" and changed["now"] == "moved"
+
+
+def test_with_no_claim_derived_an_access_change_stales_the_run_resting_on_access(people):
+    """M2. No claim of a bound type derived yet: the input fingerprint recorded with the
+    run is compared itself. A permission change moves the access inputs: the payment
+    (bound to ``effective_access``) is stale, the outage stays current."""
+    deployment = spine_deployment()
+    world = build_world(deployment, people["analyst"])
+    payment, outage = world.run(world.payment), world.run(world.outage)
+    _grant_permission(deployment)
+    assert codes(payment) == {"fingerprint_moved"}
+    (reason,) = freshness(payment).reasons
+    assert reason["dependency"] == "inputs:effective_access"
+    assert current(outage)
+
+
+def test_a_policy_change_stales_every_run_resting_on_a_claim_type(people, monkeypatch):
+    """M2. The assurance policy recorded with the run is compared too."""
+    from assurance import policy
+
+    deployment = spine_deployment()
+    world = build_world(deployment, people["analyst"])
+    payment = world.run(world.payment)
+    monkeypatch.setattr(policy, "policy_pin", lambda deployment=None: "mythos.assurance.policy/9.9+moved")
+    assert codes(payment) == {"fingerprint_moved"}
+    assert [r["dependency"] for r in freshness(payment).reasons] == ["policy"]
+
+
+def test_an_enabling_findings_evidence_expiring_stales_the_run(world):
+    """L1. SPINE's 90-day evidence ageing (``assurance.change.is_stale``): a finding not
+    re-observed within it is due a retest, and the run it enables is stale."""
+    from django.utils import timezone as dj_timezone
+
+    payment, outage = world.run(world.payment), world.run(world.outage)
+    finding = Finding.objects.get(deployment=world.deployment, fingerprint="fp-approval_check_missing")
+    Finding.objects.filter(pk=finding.pk).update(last_seen=dj_timezone.now() - timedelta(days=120))
+    assert codes(payment) == {"finding_changed"}
+    (reason,) = freshness(payment).reasons
+    assert "expired" in reason["detail"] and reason["dependency"] == f"finding:{finding.uuid}"
+    assert current(outage)
+
+
+def test_a_scan_that_no_longer_reports_the_enabling_finding_stales_the_run(world):
+    """L1. SPINE's change state: the deployment's latest scan no longer reports the
+    enabling finding (``cleared``, the absence of a signal and never a fix), and the run
+    it enables is stale; the run resting on a finding that scan reported is not."""
+    from django.utils import timezone as dj_timezone
+
+    scan = dj_timezone.now() - timedelta(days=2)
+    Finding.objects.filter(deployment=world.deployment).update(last_seen=scan)  # one scan saw both
+    payment, outage = world.run(world.payment), world.run(world.outage)
+    assert current(payment) and current(outage)
+    Finding.objects.filter(deployment=world.deployment, fingerprint="fp-single_provider").update(
+        last_seen=scan + timedelta(days=1))  # a later scan reports only the outage's finding
+    assert codes(payment) == {"finding_changed"}
+    (reason,) = freshness(payment).reasons
+    assert "cleared" in reason["detail"] and (reason["was"], reason["now"]) == ("reported", "cleared")
+    assert current(outage)
+
+
+def test_the_events_route_names_stale_beside_another_reason(world, people):
+    """L2. A run excluded for another reason (no card) and stale says both."""
+    assert simulation_service.simulate_scenario(world.outage, seed=7, draws=2_000).completed  # no card
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    reader = _client(people["viewer"])
+    base = _base(world.deployment)
+    for url in (f"scenarios/{world.outage.uuid}/events/", f"scenarios/{world.outage.uuid}/results/"):
+        body = json.loads(reader.get(base + url).content)
+        assert body["banner"] == report.UNKNOWN_BANNER and body["excluded_from_totals"] is True, url
+        assert body["banner_reason"].startswith("no Validity Card"), url
+        assert "; stale: parameter_set_superseded (parameter_set:bank_operations)" in body["banner_reason"], url
+
+
+def _overrun(monkeypatch):
+    real = validity_service.issue_card
+
+    def overrun(result, **kwargs):
+        return validity_service.CardOutcome(None, False, "time_over_budget", "the deadline ran out")
+
+    monkeypatch.setattr(validity_service, "issue_card", overrun)
+    return real
+
+
+def test_a_refresh_whose_card_overran_is_finished_by_a_refresh_of_the_rebuilt_version(world, people, monkeypatch):
+    """M1. The new run is recorded and its card is not (the deadline ran out): the 503
+    names the rebuilt version, the stale version's refresh names it too, and a refresh
+    of the rebuilt version finishes -- the card issued, nothing run again -- and closes
+    the obligation."""
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    analyst = _client(people["analyst"])
+    real = _overrun(monkeypatch)
+    first = _refresh(analyst, world.deployment, world.outage)
+    assert first.status_code == 503 and first.json()["code"] == "time_over_budget", first.content
+    rebuilt = FinancialScenario.objects.get(uuid=first.json()["rebuilt"]["scenario"])
+    assert str(rebuilt.uuid) in first.json()["detail"] and "send the same refresh again" not in first.json()["detail"]
+    monkeypatch.setattr(validity_service, "issue_card", real)
+    again = _refresh(analyst, world.deployment, world.outage)
+    assert again.status_code == 409 and again.json()["code"] == "scenario_superseded"
+    assert str(rebuilt.uuid) in again.json()["detail"]
+    runs = SimulationResult.objects.count()
+    finish = _refresh(analyst, world.deployment, rebuilt)
+    assert finish.status_code == 200, finish.content
+    body = finish.json()
+    assert body["mode"] == "close" and body["validity_card"]["issued"] is True
+    assert len(body["obligations"]["closed"]) == 1 and body["obligations"]["open"] == []
+    assert SimulationResult.objects.count() == runs  # nothing was run again
+    assert not continuous_service.open_obligations(rebuilt)
+
+
+def test_a_refresh_whose_new_run_is_refused_stays_open_until_a_run_that_stands(world, people):
+    """M1. The rebuilt version's run is refused: the obligation stays open, and a
+    refresh of the rebuilt version is never a dead end -- it runs again, and once a
+    parameter-set version the engine accepts is recorded, the refresh closes it."""
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS,
+                                operations_document(margin_range=("30000", "40000", "50000")),
+                                author=people["analyst"])
+    analyst = _client(people["analyst"])
+    first = _refresh(analyst, world.deployment, world.outage)
+    assert first.status_code == 201, first.content
+    body = first.json()
+    assert body["simulation"]["status"] == "refused" and len(body["obligations"]["open"]) == 1
+    assert "refused" in body["obligations"]["why_open"]
+    rebuilt = FinancialScenario.objects.get(uuid=body["rebuilt"]["scenario"])
+    again = _refresh(analyst, world.deployment, rebuilt, seed=12)
+    assert again.status_code in (200, 201), again.content
+    assert again.json()["obligations"]["open"] and "refused" in again.json()["obligations"]["why_open"]
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    done = _refresh(analyst, world.deployment, rebuilt, seed=13)
+    assert done.status_code == 201, done.content
+    assert len(done.json()["obligations"]["closed"]) == 1 and done.json()["obligations"]["open"] == []
+
+
+def test_a_refresh_whose_new_run_is_graded_unknown_closes_nothing_until_one_that_stands(world, people):
+    """M1. The rebuilt version's run grades Unknown (a cash component has no input): it
+    does not stand, so nothing closes, and a refresh of it finishes what it can and
+    says why; a new set version that gives the input makes it stale, and the refresh
+    then closes every obligation of the line."""
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin=None),
+                                author=people["analyst"])
+    analyst = _client(people["analyst"])
+    first = _refresh(analyst, world.deployment, world.outage)
+    assert first.status_code == 201, first.content
+    assert first.json()["validity_card"]["grade"] is None or first.json()["validity_card"]["grade"] == "Unknown"
+    assert first.json()["obligations"]["why_open"].startswith("graded Unknown")
+    rebuilt = FinancialScenario.objects.get(uuid=first.json()["rebuilt"]["scenario"])
+    again = _refresh(analyst, world.deployment, rebuilt)
+    assert again.status_code == 200 and again.json()["mode"] == "close", again.content
+    assert again.json()["obligations"]["closed"] == [] and again.json()["obligations"]["why_open"].startswith(
+        "graded Unknown")
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    done = _refresh(analyst, world.deployment, rebuilt, seed=13)
+    assert done.status_code == 201, done.content
+    assert len(done.json()["obligations"]["closed"]) == 2 and done.json()["obligations"]["open"] == []
+
+
+def test_two_refreshes_cannot_fork_a_scenario_version(world, people):
+    """L3. One successor per version: a second build superseding the same version is
+    refused, and the database refuses one that raced past the check."""
+    from django.db import IntegrityError, models, transaction
+
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    one = continuous_service.prepare_refresh(world.outage, as_of=date(2026, 10, 6))
+    two = continuous_service.prepare_refresh(world.outage, as_of=date(2026, 10, 7))
+    builder.build(world.deployment, one.body, author=people["analyst"])
+    with pytest.raises(EconomicsRefused) as refused:
+        builder.build(world.deployment, two.body, author=people["admin"])
+    assert refused.value.code == "duplicate_id"
+    raced = FinancialScenario(deployment=world.deployment, title="raced", author=people["admin"],
+                              supersedes=world.outage)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        models.Model.save(raced, force_insert=True)  # past every check, as a race would be
+    assert FinancialScenario.objects.filter(supersedes=world.outage).count() == 1
+
+
+def test_a_closure_names_a_run_of_the_stale_versions_line(world, people):
+    """A closure's new run is of the stale run's version or one superseding it."""
+    outage = world.run(world.outage)
+    payment = world.run(world.payment)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    obligation, _ = continuous_service.record_staleness(outage, continuous_service.live_reasons(outage))
+    row = ExposureRefresh(
+        deployment=world.deployment, staleness=obligation, stale_simulation=outage, scenario=world.payment,
+        simulation=payment, card=payment_card(payment), spine_outcome="superseded", outcome={},
+    )
+    with pytest.raises(EconomicsRefused) as refused:
+        row.check_new()
+    assert refused.value.code == "refresh_record_malformed"
+
+
+def payment_card(result):
+    from assurance.economics.models import FinancialValidityCard
+
+    return FinancialValidityCard.objects.get(simulation=result)
 
 
 # ======================================================================
