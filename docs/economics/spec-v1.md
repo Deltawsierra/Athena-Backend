@@ -31,7 +31,7 @@ its row's figures from both sides, and the frequency by the rate its count impli
 version with its parameters' provenance, a simulation of it under a named policy,
 and the deterministic report JSON of a stored result, with the banner a result graded
 Unknown carries; the step-5 events route carries the same banner (sections 24.8 and
-27.6). E5 (section 30) totals a deployment's scenarios into a portfolio from their
+27.6). E5 (section 31) totals a deployment's scenarios into a portfolio from their
 draws, with correlation groups, a shared loss event counted once a year, every draw
 normalised before it is summed, and each scenario's contribution to the mean and to
 the tail.
@@ -50,6 +50,7 @@ the tail.
 10. [Limitations](#10-limitations)
 11. [Money](#11-money)
 12. [FX, cost indices and normalization](#12-fx-cost-indices-and-normalization)
+    (12.8, MVP step 12: [the primary source, and sources that disagree](#128-the-primary-source-and-sources-that-disagree-mvp-step-12))
 13. [Observation data and the synthetic snapshot](#13-observation-data-and-the-synthetic-snapshot)
 14. [Parameters and units](#14-parameters-and-units)
 15. [The formula catalogue](#15-the-formula-catalogue)
@@ -90,18 +91,22 @@ MVP step 10, built up to its gate (live fetching waits on the owner's keys):
 
 29. [The live feeds (MVP step 10)](#29-the-live-feeds-mvp-step-10)
 
+The reads the dashboard's financial views need (MVP step 14), on step 6's routes:
+
+30. [The read routes the dashboard needs (MVP step 14 support)](#30-the-read-routes-the-dashboard-needs-mvp-step-14-support)
+
 Economic Exposure E5, on step 6's report:
 
-30. [Portfolio aggregation (Economic Exposure E5)](#30-portfolio-aggregation-economic-exposure-e5)
+31. [Portfolio aggregation (Economic Exposure E5)](#31-portfolio-aggregation-economic-exposure-e5)
 
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
-| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_portfolio_results.py` (E5, section 30) |
-| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py` |
+| Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py` |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_portfolio_results.py` (E5, section 31) |
+| Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
 
@@ -114,7 +119,7 @@ with Django and every other part of mythos-core poisoned.
 Out of scope, and added by later steps: running the distributions and the
 sampler of section 23 for a scenario (step 7b); every endpoint but the customer
 parameter set's, the scenario builder's, the trust raises' and step 6's (section
-27); source disagreement. (Feeds and their adapters: step 10, section 29.)
+27). (Feeds and their adapters: step 10, section 29; source disagreement: step 12, section 12.8.)
 Building and verifying the signed Financial Exposure Receipt
 (`mythos_core.exposure_receipt`, pinned since E1) is MVP step 8's (section 26).
 
@@ -965,16 +970,21 @@ done before it; its value is none, never a guess.
 |---|---|
 | `rate_missing` | no provider in the policy has a rate for the day (or its last official rate), and no estimate is allowed or possible |
 | `index_missing` | no value of the series for the month, in any vintage published by the as-of date, within the lag allowed |
+| `index_primary_unset` | several sources publish the series, the policy's providers name none of them, and they disagree by more than the tolerance: no source is chosen between them (section 12.8) |
 
 | Downgrade | When |
 |---|---|
 | `estimated_rate` | a rate was interpolated because the policy allowed it |
 | `stale_rate` | a rate was older than the freshness limit |
 | `stale_index` | the valuation month's index was not published, and an earlier month was used |
+| `source_disagreement` | another usable source quotes a rate or an index value the normalization read more than the tolerance away from it (section 12.8) |
+| `primary_unavailable` | the policy's first provider had no usable rate (or index value), and a later provider's was used (section 12.8) |
 
 Each downgrade lowers a scenario's confidence grade one step
 (`Normalization.graded`, `confidence.downgraded`): A to B, B to C, C to D, never
-below D; `Unknown` stays `Unknown`. The original native amount and currency are
+below D; `Unknown` stays `Unknown`. `source_disagreement` and `primary_unavailable`
+count once for a whole normalization, however many of its steps carry them (section
+12.8). The original native amount and currency are
 never overwritten: the result holds the very `Money` it was given, and the first
 step's input is that object.
 
@@ -995,7 +1005,8 @@ and the same rate read back from its column are written alike. Abridged:
  "display": "1309.52 EUR",
  "arithmetic": "Decimal, 60 significant digits, ROUND_HALF_EVEN",
  "display_rounding": "ROUND_HALF_EVEN to the reporting currency's minor unit, for display only",
- "estimate": false, "stale": false, "confidence_downgrades": [], "unavailable": null,
+ "estimate": false, "stale": false, "confidence_downgrades": [], "conflicts": [], "primary_unavailable": [],
+ "unavailable": null,
  "policy": {"base_currency": "USD", "reporting_currency": "EUR", "fx": {"...": "..."}, "index": {"...": "..."}},
  "chain": [
   {"step": "event_fx", "from": "EUR", "to": "USD", "requested_date": "2020-03-02",
@@ -1037,9 +1048,8 @@ version, as `observations_version` (section 6.1).
   snapshot file (`calendars`), and no model holds them yet: a book built from the
   database without them treats a holiday as a publication day, so a rate missing
   on it is unavailable (the safe direction: never filled in).
-- **No source disagreement.** The first provider in the policy with a rate is
-  used; two providers that disagree are not compared, and nothing surfaces the
-  conflict yet (section 27 of the owner's specification; a later step).
+- **Source disagreement** was not compared in E1; MVP step 12 compares it
+  (section 12.8).
 - **Executable rates are not modelled.** Bid and ask are rate types a policy may
   ask for; nothing chooses the side of a trade.
 - **Monthly indices only.** A series is a value per calendar month; an index is
@@ -1049,6 +1059,115 @@ version, as `observations_version` (section 6.1).
 - **Unit checks are by currency and series.** A cost index is tied to the
   currency its policy says it prices; nothing checks that a geography uses that
   currency.
+
+### 12.8 The primary source, and sources that disagree (MVP step 12)
+
+The lead's decision for step 12 (13 Oct 2026; the owner's specification, section 27:
+"engine should surface conflict, not silently select favorable data"), with the
+refinements of the same day: the primary is the policy's, the record carries the
+disagreement, and a fallback past the primary is never silent. The Minotaur answer key
+that measures it is Minotaur-Engine #79 (`athena-economics-data`), whose field names
+the record uses.
+
+**The primary.** A conversion's PRIMARY is the first provider in the policy's
+`providers` that has a usable rate for the day (section 12.2's order, unchanged). It is
+never chosen by value, and nothing else configures it: no source registry field names
+one. With an empty `providers` list there is nothing to normalize: the policy is
+refused (`policy_invalid`, section 12.2), as it always was.
+
+**Usable.** A normalization for a deployment (`normalization_service.normalize_for`)
+reads only the versions a run of that deployment may use on its valuation date: for
+each source key, platform-wide and the deployment's own, the version section 29.5
+names (`feeds.used_version`: the newest that passes the production gate for the
+deployment, superseded by no raise of the same payload, and covering the date). A
+version the gate refuses, or one that does not cover the date, is not in the books,
+so a provider that has only such a version has no usable rate. Another deployment's
+versions are never read.
+
+**A fallback is never silent** (the section 28 audit, T8). Where the policy's first
+provider has no usable rate -- an outage, a source the gate refuses or that does not
+cover the date, a pair it never quotes, or a day it has no rate for -- and a later
+provider's rate is used, the step names both (`configured_primary` and `provider`),
+the record lists the step under `primary_unavailable` (`step`, `primary`, `used`), and
+the record carries the downgrade `primary_unavailable`.
+
+**Disagreement.** The rate a conversion used is compared with every other provider's
+in the books for the same pair on the same date -- the policy's other providers in its
+order, then any other in name order; within each, the first rate type the policy
+accepts that it has for that day; a rate quoted the other way round is inverted into
+the pair's direction first. Where one differs from it by MORE than the tolerance,
+relative to the rate used (the primary's), the two disagree:
+
+| Kind | Tolerance (`DISAGREEMENT_TOLERANCE`) |
+|---|---|
+| FX, the same pair and date | 0.5% (`engine/fx.py`) |
+| a cost index, the same series and period | 1.0% (`engine/cost_index.py`) |
+
+At or under the tolerance nothing is flagged. Only an observed rate is compared: an
+interpolated estimate (section 12.2) is a rate no source quoted, and is not.
+
+**What a disagreement does.** The primary's rate is used, never the other, and never
+the one that would state the smaller figure. The step lists the conflict, and the
+record lists every step's (`conflicts`), each with:
+
+| Field | Holds |
+|---|---|
+| `kind`, `step` | `fx` or `cost_index`, and the step of section 12.4 |
+| `pair`, `date` | FX: the pair as the primary quotes it (`EUR/USD`) and the rate's date |
+| `series`, `base`, `period` | a cost index: the series, its base and the month |
+| `primary`, `primary_provider`, `primary_value` | the source used: its registry key (or, in a book built without one, its provider), its provider and its value as it quotes it |
+| `secondary`, `secondary_provider`, `secondary_value` | the other source, and its value in the pair's direction (`secondary_quoted` holds it as quoted) |
+| `relative_difference`, `tolerance` | `abs(secondary - primary) / primary`, at 60 significant digits, never relative to the other; and the tolerance it exceeds |
+
+The record carries the downgrade `source_disagreement`. `source_disagreement` and
+`primary_unavailable` each lower a normalization ONE grade step however many of its
+steps carry them (`Normalization.confidence_downgrades` lists each once); the other
+downgrades of section 12.5 count as they always did.
+
+**A cost index.** A book may hold one series from several providers; a step reads both
+its values from ONE of them. The order is the policy's: the providers its `providers`
+names, in its order, then the others in name order. The first it names that holds the
+series is the index's primary, and where it cannot give both values and another
+provider's are used, the step carries `primary_unavailable`. Each other provider's
+value for a month the step read is compared with the one used, at 1.0%. Where the
+policy names none of the providers holding the series, there is no primary: if they
+agree within the tolerance, the first by name is read (which one is immaterial), and if
+they disagree, none is chosen between them and the step is unavailable,
+`index_primary_unset`. An index value now names its provider (`provider`, from its
+source version).
+
+**Worked, Minotaur-Engine #79's cases.** EUR 400,000 on 30 September 2026, in USD that
+day, the ECB quoting EUR/USD 1.1230 and H.10 1.1310, both usable:
+
+| Policy's providers | Used | Figure | Conflict | Downgrades |
+|---|---|---|---|---|
+| ECB, FRB-H10 | the ECB's 1.1230 | 449200.00 USD | H.10 1.1310, 0.008 / 1.1230 = 0.00712377... | `source_disagreement` |
+| ECB, FRB-H10, H.10 at 1.128615 | the ECB's 1.1230 | 449200.00 USD | none: exactly 0.5% | none |
+| FRB-H10, ECB | H.10's 1.1310 | 452400.00 USD | the ECB 1.1230, 0.008 / 1.1310 | `source_disagreement` |
+| ECB, FRB-H10, the ECB with no usable rate | H.10's 1.1310 | 452400.00 USD | none | `primary_unavailable` |
+
+The third row is the favourable secondary: the ECB's rate would state the smaller
+figure, and it is not used.
+
+**Where it shows.** Runs do not normalize their figures yet (section 24.9: a run's
+figures are stated in one reporting currency, and the report says so), so neither
+the report nor the data-health route reads a normalization today, and the record
+carries the disagreement. When runs normalize, the card inherits the record's
+downgrades and conflicts.
+
+**Decisions this step takes, which the owner may change:**
+
+1. **Compared with every usable source.** A rate is compared with every other
+   provider in the books, not only those the policy names, so a policy that leaves a
+   provider out cannot hide its disagreement. Alternative: the policy's providers
+   only.
+2. **The index's order is the policy's `providers`.** The one ordered list a policy
+   has orders the index's sources too, and unnamed index providers follow by name.
+   Alternative: a list of the index's own on its selector.
+3. **A pair the primary never quotes is a fallback.** `primary_unavailable` fires
+   whenever the first provider has no usable rate, a pair it never quotes included:
+   telling an outage from a pair it does not publish would need what the books do not
+   hold once a version is left out. Alternative: order the providers per pair.
 
 ## 13. Observation data and the synthetic snapshot
 
@@ -4035,20 +4154,23 @@ excluded from every total.
 
 | | |
 |---|---|
-| Code | `assurance/economics/report_api.py` (the three routes), `report.py` (the report and the scenario document; imports nothing probabilistic), `charts_service.py` (the series, a thin Django service) and `engine/charts.py` (pure; imports numpy); `SimulationCharts` in `models.py` |
+| Code | `assurance/economics/report_api.py` (the three routes, and section 30's two read routes), `report.py` (the report and the scenario document; imports nothing probabilistic), `charts_service.py` (the series, a thin Django service) and `engine/charts.py` (pure; imports numpy); `SimulationCharts` in `models.py` |
 | Migration | `0067_simulation_charts.py`: one new table, nothing else changed; it depends on #157's `0066_scenario_fingerprint_unavailable.py` (#155, in review, may take a 0067 too: whichever merges second renumbers its own and re-points its dependency) |
-| Tests | `tests/test_economics_report.py`; the safety tests of sections 2, 23.10 and 26.8 extended to the new modules; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_report.py`) |
+| Tests | `tests/test_economics_report.py`, and `tests/test_economics_read_routes.py` for section 30; the safety tests of sections 2, 23.10 and 26.8 extended to the new modules; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_report.py`) |
 
 ### 27.1 The routes
 
 Under `/api/assurance/`, mounted in a guard of their own (section 2): a fault in
-`report_api` or `report` leaves these three routes unserved and nothing else.
+`report_api` or `report` leaves these three routes, and section 30's two read
+routes, unserved and nothing else.
 
 | Method and path | Name | Does |
 |---|---|---|
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/` | `deployment-economics-scenario` | the scenario document (section 27.7) |
 | `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/simulate/` | `deployment-economics-scenario-simulate` | runs, or returns, a simulation (section 27.2) |
 | `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/` | `deployment-economics-scenario-results` | the report of one result: `?simulation=<result uuid>`, else the scenario's latest (section 27.3); never a residual run under a remediation option, which the ROI route serves (section 28.7) |
+| `GET deployments/<uuid>/economics/scenarios/` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time (section 30) |
+| `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed bytes, as stored (section 30) |
 
 Access is the parameter-set routes' (section 19.3): a signed-in account (401
 otherwise); a deployment the caller cannot see, a scenario of another deployment,
@@ -4057,7 +4179,8 @@ and a result of another scenario are 404; only an admin or an analyst simulates
 most 64 KiB: a declared length above it is 413 and the parser never reads past it,
 a duplicated key is 400, a form is 415. While economics cannot read its currency
 table every route answers 503 and records nothing. The report is served as its
-canonical bytes (`application/json`), never re-encoded. A route answers no other
+canonical bytes (`application/json`), never re-encoded, with `Cache-Control:
+no-store` (section 30). A route answers no other
 method (405).
 
 **The simulate request.** `{"seed": <0 to 2^64 - 1>, "policy": <name>, "receipt":
@@ -4122,14 +4245,16 @@ recorded).
 
 ### 27.3 The report
 
-`report.build_report(result)`, schema `mythos.economics.report/v1`, composes ONE
-stored result's report from what is stored and only that: the scenario version's
+`report.build_report(result)`, schema `mythos.economics.report/v2` (v1 and
+`currency_bridge`, section 30; `mythos.economics.report/v1` stays readable,
+`report.REPORT_SCHEMAS`), composes ONE stored result's report from what is stored and
+only that: the scenario version's
 rows, its build, the result, its card and sensitivity analysis, its series and its
 receipt. It runs no simulation, reads no clock and asks no engine. Its keys:
 
 | Key | Holds |
 |---|---|
-| `schema` | `mythos.economics.report/v1` |
+| `schema` | `mythos.economics.report/v2` |
 | `scenario` | uuid, title, deployment, author, when recorded, the version it supersedes, and the scenario's review status as recorded now (`builder.review_status`) |
 | `build` | the build's digest, builder and grouping versions, pack, currency, as-of date and parameter-set version |
 | `simulation` | the result's uuid, status, seed, draws, severe percentile, basis, input digest, result digest, outcomes digest, and when it started, finished and was recorded |
@@ -4137,6 +4262,7 @@ receipt. It runs no simulation, reads no clock and asks no engine. Its keys:
 | `model` | the model release the card records: version token and build digest (section 26.5); null where no card is recorded |
 | `source_snapshots` | the version's source snapshots with their content hashes recomputed, or why not (`source_snapshot_mismatch`) |
 | `currency` | the reporting currency, its minor unit and the rounding (section 27.5) |
+| `currency_bridge` | v2 (section 30): the run's valuation date and where it is read from, the reporting currency, and `conversions`, the normalization record of each figure the run converted -- none: a run converts nothing |
 | `status`, `refusal` | the run's status, and a refused run's code and detail; for a result whose stored rows fail a check, the code `stored_row_unverified` naming the checks (section 27.5) |
 | `integrity` | `verified`, the checks run (`report.INTEGRITY_CHECKS`) and those failed (section 27.5) |
 | `grade`, `banner`, `excluded_from_totals`, `banner_reason` | section 27.6; the grade is the card DOCUMENT's, never the column's |
@@ -4257,8 +4383,9 @@ and `excluded_from_totals: false`.
 
 Nothing may sum an excluded result into a total. `report.may_be_totalled(report)` is
 the one test a total applies, and it **fails closed** (review round 1, LOW-4): true
-only for a report of this schema (`mythos.economics.report/v1`; an ROI document or any
-other is refused), that carries the digest of its own bytes (`verifies`), of a
+only for a report of a schema the report serves or served (`report.REPORT_SCHEMAS`:
+`mythos.economics.report/v2`, and `mythos.economics.report/v1`, read as before; an ROI
+document or any other is refused), that carries the digest of its own bytes (`verifies`), of a
 completed result whose rows verified, `excluded_from_totals` false, graded A, B,
 C or D (`report.GRADES_FOR_TOTALS`, an allow-list), and of a scenario's own run
 (`residual_of` present and null: a residual run under a remediation option is never
@@ -4315,7 +4442,7 @@ request's own, when its one deadline runs out (section 27.1).
 ### 27.9 Safety
 
 None of the three routes is a stop, and none reads or writes anything a stop or the
-decision reads: each is in `safety.stops.NOT_STOPS` (the simulate route: "economics
+decision reads: each is in `safety.stops.NOT_STOPS`, as are section 30's two reads (the simulate route: "economics
 records, append-only; it starts and stops nothing"). The simulate route is in the
 write-route table of `tests/test_every_write_route_keeps_the_decision_current.py`
 as one that cannot move the decision, and every route is a classified sink of the
@@ -4338,7 +4465,7 @@ and series.
 ### 27.10 What is still not done
 
 - **No total across deployments.** `may_be_totalled` is the rule any total applies;
-  E5's portfolio (section 30) totals one deployment's scenarios by it, from their
+  E5's portfolio (section 31) totals one deployment's scenarios by it, from their
   draws.
 - **A range that states no distribution is still refused** (section 25.1): the
   parameter set and the builder now write distributions and the frequency (section
@@ -4348,6 +4475,10 @@ and series.
   engine publishes an `economics-receipt` key (section 26.9); otherwise the report
   says no receipt is recorded.
 - **The report is JSON only**: no PDF, no rendered page, no frontend chart.
+- **No figure is converted, so the currency bridge lists none** (section 30): a
+  run states one reporting currency, and no normalization record is stored for any
+  figure. When a later step normalizes a figure and stores its record, the bridge
+  serves that record as stored.
 - **The scenario document lists every result** of a version, unpaginated.
 - **The live review status** is read when the report is built: a review recorded
   later changes the report's bytes and digest, as it should (the card keeps the
@@ -4657,7 +4788,7 @@ three routes unserved and nothing else (`test_a_remediation_fault_never_takes_do
 |---|---|---|
 | `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/mitigations/` | `deployment-economics-scenario-mitigations` | records the version's one option: 201; the same option again, 200; another, 409 `remediation_option_held` |
 | `POST .../mitigations/<option uuid>/simulate/` | `deployment-economics-mitigation-simulate` | the current run (where missing) and the residual run, `{"seed", "policy"}` as section 27.1's simulate takes them (a `receipt` is `field_unrecognised`: a residual run is not receipted), each with its Validity Card, under ONE 120 s deadline: idempotent, 201 where a run was recorded, 200 where both were; 503 for a run step 7b does not record, 400 for inputs with no identity |
-| `GET .../scenarios/<scenario uuid>/roi/` | `deployment-economics-scenario-roi` | the ROI document (section 28.3), as canonical bytes; 404 where the version has no option or the option no residual run |
+| `GET .../scenarios/<scenario uuid>/roi/` | `deployment-economics-scenario-roi` | the ROI document (section 28.3), as canonical bytes with `Cache-Control: no-store` (section 30); 404 where the version has no option or the option no residual run |
 
 Access is the report routes': a signed-in account; a deployment the caller cannot see,
 or a scenario, option or run of another, is 404; only an admin or an analyst records or
@@ -5132,7 +5263,99 @@ Decisions this step takes, which the owner may change:
    version that passes the gate whatever the run's date, which read a back-dated run
    as `missing`.
 
-## 30. Portfolio aggregation (Economic Exposure E5)
+## 30. The read routes the dashboard needs (MVP step 14 support)
+
+Two GET routes and one key of the report, so that the dashboard's financial views
+(athena-dashboard, MVP step 14) show what the backend serves where they said "not
+served". Both routes are mounted with step 6's in `report_api`, in its guard (section
+27.1), on step 6's conventions:
+
+- access and tenancy are the report's: a signed-in account (401 otherwise), a
+  deployment the caller cannot see is 404, and every role reads;
+- the query is read strictly: only the keys a route names, each once (another key is
+  `field_unrecognised`, a repeated or malformed one `field_malformed`, 400);
+- every answer carries `Cache-Control: no-store`, as step 6's report (`results/`) and
+  step 13's ROI document (`roi/`) now do too: a tenant's figures and signed receipts
+  are never kept by a cache on the way;
+- each route is in `safety.stops.NOT_STOPS`, reads economics rows only, and holds no
+  lock and no transaction, so a Stop is answered while one is held open mid-read
+  (`tests/test_economics_read_routes.py`, `test_a_stop_is_answered_while_a_read_is_held_open`);
+- fired twice, each answers the same bytes and writes nothing.
+
+| Method and path | Name | Does |
+|---|---|---|
+| `GET deployments/<uuid>/economics/scenarios/?page=<n>&page_size=<n>` | `deployment-economics-scenarios` | the deployment's scenario versions, a page at a time |
+| `GET deployments/<uuid>/economics/receipts/<receipt id>/` | `deployment-economics-receipt` | a Financial Exposure Receipt's signed DSSE envelope, as stored |
+
+**The scenario list.** Every scenario version of the deployment, in record order,
+`report_api.SCENARIO_PAGE_SIZE` (25) a page unless `page_size` names another, up to
+`report_api.SCENARIO_PAGE_SIZE_MAX` (100): a larger page is refused
+(`field_malformed`), never cut short. `page` and `page_size` are whole numbers in
+ASCII digits, with no sign and no leading zero, at most nine of them. A page past the
+last is empty. The answer names `count`, `page`, `page_size`, `pages`, `previous` and
+`next`, and each version (`report.scenario_entry`):
+
+| Key | Holds |
+|---|---|
+| `uuid`, `title`, `recorded_at`, `supersedes` | the version; its title is its name, as every economics document calls it |
+| `templates` | each template its causal effects were assigned to, `template_id` and `version`, as the effects record them (section 24.3); none for a version that was not built |
+| `latest_exposure_run` | the version's latest stored run of its own, by record order: the result `results/` serves without `?simulation=` (`report.latest_exposure_run`, through `SimulationResult.objects.exposure_runs()`), with its uuid, status, refusal code and when it was recorded; null where none is stored. A residual run under a remediation option is never listed (section 28) |
+| `grade`, `banner`, `excluded_from_totals`, `banner_reason` | that run's standing under the banner rule, as the events route serves it (`report.standing`, section 27.6); the grade only where every stored row verifies |
+
+**The receipt's signed bytes.** A receipt is named by the receipt id that the report
+(`receipt.receipt_id`) and the scenario document name: a version 4 UUID, dashed in the
+path. The answer is the DSSE envelope the engine signed and the row stores
+(`FinancialExposureReceipt.envelope`), in its one canonical spelling
+(`report.canonical_bytes`: sorted keys, no whitespace, ASCII), so its payload and its
+signature are the stored ones, byte for byte. It is served with:
+
+- `Content-Type: application/json` and `X-Content-Type-Options: nosniff`;
+- `Content-Disposition: attachment; filename="financial-exposure-receipt-<receipt id>.json"`;
+- `X-Content-SHA256`: `sha256:` and the hex SHA-256 of the bytes served.
+
+Nothing is signed, verified or re-encoded: a reader verifies the envelope against the
+engine's published economics-receipt keys (`receipt_service.verify_stored_receipt` is
+the backend's verifier, section 26.6). A receipt of another deployment (the tenant) is
+404 under this one, as is a receipt id that names none. A residual run is never
+receipted (the service and the row refuse one, section 28), and a receipt row of one
+is never served.
+
+**The valuation date and the currency bridge** (`currency_bridge`, the report's v2).
+The report states the run's valuation date: the scenario build's as-of date, which the
+receipt signs as its valuation date (section 26.5); for a version with no build, the
+latest as-of date of the components its stored inputs hold, read only where they still
+give their digest (the receipt's rule too). `valuation_date_from` says which, and
+`not_reported` why there is none. `conversions` is the normalization record (section
+12.6) of each figure the run converted, as stored, and it is empty: a run converts
+nothing (an event, a policy or a component's inputs in another currency are refused,
+`currency_mismatch`, sections 15, 16 and 25), and no normalization record is stored for
+any figure, so none is served and none is computed (`report.NO_CONVERSION`).
+
+The report's bytes change with the key, so its schema moves to
+`mythos.economics.report/v2` the way this repository moves a schema (as
+`observed_effects.EVIDENCE_SCHEMAS` does): v1 stays readable, and
+`report.may_be_totalled` reads both (`report.REPORT_SCHEMAS`). The dashboard reads the
+report by key, never by its schema, so it reads v2 as it read v1. An ROI document
+carries its reports' digests, so its bytes move with theirs; its schema does not, since
+nothing in it changed shape.
+
+Decisions this adds, which the owner may change:
+
+1. **The bridge is in the report**, not on a route of its own: the valuation date is a
+   run's, and the report is the run's document. Alternative: a sibling route, leaving
+   the report at v1. Recommendation: keep.
+2. **A page larger than the cap is refused**, never cut to the cap. Alternative: serve
+   the cap and say so. Recommendation: keep: a strict query is read as written.
+3. **A version's templates are a list**: its events may come from more than one
+   template. Alternative: the first event's. Recommendation: keep.
+4. **The list is every version, in record order**, a superseded one included, naming
+   what it supersedes. Alternative: only each scenario's latest version.
+   Recommendation: keep until the dashboard asks for the other.
+5. **A receipt's bytes are its stored envelope in canonical spelling.** The database's
+   own text of the column is not served: a JSON column need not keep the spelling it
+   was given (PostgreSQL's `jsonb`, for one, reorders keys). Recommendation: keep.
+
+## 31. Portfolio aggregation (Economic Exposure E5)
 
 E5 answers the owner's question "how does this affect the entire AI portfolio?"
 (the owner's specification, lines 69-70 and section 24): one deployment's scenarios
@@ -5152,7 +5375,7 @@ served at `GET deployments/<uuid>/economics/portfolio/` (the owner's
 | Migration | `0071_portfolio_results.py`: two new tables, nothing else changed, on step 10's `0070_financial_source_fetches.py` |
 | Tests | `tests/test_economics_portfolio.py`; the safety tests of sections 2, 23.10, 26.8 and 27.9 extended to the new modules, the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_portfolio.py`) |
 
-### 30.1 What is totalled
+### 31.1 What is totalled
 
 `mythos.economics.portfolio-selection/v1`. For one deployment, every scenario
 version no other version supersedes; of each, its LATEST exposure run, by record
@@ -5166,7 +5389,7 @@ result's report is built
 is the one test: only a report that carries its own digest, of a completed run whose
 every stored row verified, graded A to D, is totalled. Then the run must be annual
 (it states a frequency), its stored rows must still give the inputs it was run on
-(its input digest, recomputed), and its amounts must normalise (section 30.5).
+(its input digest, recomputed), and its amounts must normalise (section 31.5).
 
 **No scenario is dropped silently.** Every scenario version the portfolio does not
 total is listed with its code, the code's meaning and its own reason
@@ -5190,7 +5413,7 @@ Where any is excluded, the report says `complete: false` and reads "at least: th
 included scenarios only". At most `MAX_SCENARIOS` (50) current versions and
 `MAX_GROUPS` (20) groups (`scenarios_over_limit`, 400).
 
-### 30.2 One seed, aligned years: never by summing percentiles
+### 31.2 One seed, aligned years: never by summing percentiles
 
 Every included scenario is drawn AGAIN for the portfolio's own seed and draws (the
 simulation policy's, section 27.2). Each from sub-streams of that one seed keyed by
@@ -5209,7 +5432,7 @@ before, so no stored result, analysis or series changes).
 The portfolio's annual loss in year `y` is the sum, added in one fixed order
 (`portfolio.ordered_sum`), of its scenarios' normalised annual losses in year `y` of
 every event no other is linked to (scenario by scenario, event by event), then of
-each shared loss event's count that year (section 30.4), for two lines: the gross cash, and the retained cash (a scenario with no insurance policy
+each shared loss event's count that year (section 31.4), for two lines: the gross cash, and the retained cash (a scenario with no insurance policy
 retains its gross); the headline is the retained cash where any scenario states a
 policy. P10, P50, P90, the mean, the expected annual loss and severe-but-plausible
 are step 7a's summary of that vector (section 23.5), with its bands. Market value is
@@ -5227,7 +5450,7 @@ run (otherwise `invariant_broken`), the record keeps each scenario's own summary
 over the portfolio's years (`members.<uuid>.own`), and the report shows it beside the
 portfolio's (`scenarios.included[].own`).
 
-### 30.3 Correlation groups
+### 31.3 Correlation groups
 
 `mythos.economics.group-driver/v1` (the decided MVP). A correlation group is an
 AUTHORED RECORD (`CorrelationGroup`; the section-28 audit's T4): a key, the scenario
@@ -5284,19 +5507,19 @@ split (two scenarios at 2 a year, strength 2, 100,000 years): independent, P95
 1,296,239 and 1,757,268; one group of two, 1,590,880 and 2,346,146. So about 65% of
 the P95's rise and 60% of the expected shortfall's is each member's own
 over-dispersion, and the rest is co-movement. That is the decided MVP (decision
-30.10 #2, the owner's).
+31.10 #2, the owner's).
 
 The strength is a recorded parameter: its value, source type and evidence are in
 the group version and in the portfolio's inputs and digest, and shown. A strength
-resting on `EXPERT_ESTIMATE` or `UNKNOWN` lowers the portfolio's grade (section 30.8),
+resting on `EXPERT_ESTIMATE` or `UNKNOWN` lowers the portfolio's grade (section 31.8),
 as an expert figure lowers a scenario's (section 26.2). The groups are an analyst's
 declaration, authored, versioned and digested: a changed group is a new version and
 a new portfolio, never an edit of either (the owner's specification, section 28's
 model manipulation: priors, parameters, correlation groups). A second person's
-approval of a group is not required yet (section 30.11). Copulas are out of scope
-(section 30.11).
+approval of a group is not required yet (section 31.11). Copulas are out of scope
+(section 31.11).
 
-### 30.4 A shared loss event is counted once a year, at the largest loss that year
+### 31.4 A shared loss event is counted once a year, at the largest loss that year
 
 `mythos.economics.portfolio-shared-events/v1` (`portfolio.links_between`,
 `portfolio.shared_events`, `portfolio.counted_sets`): step 5's grouping attributes
@@ -5319,7 +5542,7 @@ events are. The engine checks that the links it is handed are exactly the rule's
 and that they connect the event (`shared_malformed` otherwise).
 
 **Counted once a year, at the largest loss that year** (the lead's interim decision
-on review round 1, HIGH-1, saved for the owner: decision 30.10 #3). Every scenario
+on review round 1, HIGH-1, saved for the owner: decision 31.10 #3). Every scenario
 keeps every one of its events, drawn at its own frequency and with its own figures:
 nothing is taken out of a scenario because another has it. In each simulated year a
 shared loss event is counted ONCE, at the largest total that year of a set of its
@@ -5340,7 +5563,7 @@ first set.
 
 What that holds:
 
-- **The portfolio is at least each included scenario, year by year** (section 30.2).
+- **The portfolio is at least each included scenario, year by year** (section 31.2).
   A scenario's own events are never linked, so they lie within one counted set, and
   the year's count is at least their sum.
 - **Adding a scenario never lowers the portfolio.** Its events add links to its own
@@ -5355,7 +5578,7 @@ What that holds:
   the exact sum; an added scenario can change the order the binary64 sum adds a
   year's losses in, so it can differ in its last place, far below the minor unit. A
   group that applies once two of its scenarios are included changes its members'
-  draws (section 30.3).
+  draws (section 31.3).
 - **No included scenario's tail exceeds the portfolio's** (review round 1,
   MEDIUM-1): the count is the larger loss in each year, never the event larger at
   base. The reviewer's narrow/wide pair is a test
@@ -5374,9 +5597,9 @@ times -- make ONE loss a year in the portfolio, the largest of the five that yea
 at least each one's, and under half of their sum, never five
 (`test_five_findings_on_one_payment_loss_never_quintuple_the_portfolio`). Each of
 the five still draws its own count of the event, so the year's largest is more than
-one scenario's alone (decision 30.10 #3).
+one scenario's alone (decision 31.10 #3).
 
-### 30.5 Currency: normalised before it is summed
+### 31.5 Currency: normalised before it is summed
 
 Owner's specification, line 676: every draw is normalised into the same reporting
 currency at the same valuation-date policy before summation. A request names its
@@ -5407,7 +5630,7 @@ the valuation date -- is excluded, `currency_unnormalisable`, naming the step an
 reason. A downgrade the normalisation carries (an estimated or stale rate or index,
 section 12.5) lowers that scenario's grade one step in the portfolio.
 
-### 30.6 Contributions to the mean and to the tail
+### 31.6 Contributions to the mean and to the tail
 
 The owner's specification, section 24 and lines 694-697: each scenario's
 contribution to mean exposure AND to tail exposure; the biggest mean contributor
@@ -5438,7 +5661,7 @@ may differ from the biggest tail contributor.
 - Where an input's mean is infinite (section 23.5), there is no mean, no
   contribution to it and no expected shortfall; each says why.
 
-### 30.7 The stored result
+### 31.7 The stored result
 
 `PortfolioResult`, append-only like every economics record, with no account column,
 going with its deployment: the seed (as text), the draws and severe percentile, the
@@ -5454,7 +5677,7 @@ shared loss events with their links; the normalisation policy and its sources, e
 with its licence class; the rules; and every version and limit
 (`engine.portfolio.versions()`). Nothing in it is a float, and both digests are
 recomputed on save (`portfolio_record_malformed`, `digest_mismatch`).
-`CorrelationGroup` (section 30.3) is the second table: one authored version of one
+`CorrelationGroup` (section 31.3) is the second table: one authored version of one
 group, append-only, going with its deployment.
 
 **Idempotent on its inputs**: one row per deployment, input digest, seed and draws
@@ -5485,7 +5708,7 @@ in 1.4 s (13 MB traced peak); 10 such scenarios, five in one group, in 5.3 s (19
 4.5 s (17 MB); 2 scenarios of Poisson(1) at 1,000,000 years in 13.9 s (67 MB); 3 such
 at 1,000,000 are refused for the budget.
 
-### 30.8 The routes, the report, the grade and the banner
+### 31.8 The routes, the report, the grade and the banner
 
 Mounted under `/api/assurance/` from `assurance/economics/portfolio_api.py`, in a
 guard of its own (section 2):
@@ -5494,7 +5717,7 @@ guard of its own (section 2):
 |---|---|---|
 | `POST deployments/<uuid>/economics/portfolio/simulate/` | `deployment-economics-portfolio-simulate` | totals the deployment's scenarios, or returns the portfolio recorded for the same inputs: 201 new, 200 recorded |
 | `GET deployments/<uuid>/economics/portfolio/` | `deployment-economics-portfolio` | the portfolio's report: `?result=<uuid>`, else the deployment's latest by record order |
-| `POST deployments/<uuid>/economics/portfolio/groups/` | `deployment-economics-portfolio-groups` | records a version of one of the deployment's correlation groups, authored by the caller (section 30.3): 201 new, 200 the version that states the same group; 409 `group_version_taken` where other versions of its key kept being recorded meanwhile |
+| `POST deployments/<uuid>/economics/portfolio/groups/` | `deployment-economics-portfolio-groups` | records a version of one of the deployment's correlation groups, authored by the caller (section 31.3): 201 new, 200 the version that states the same group; 409 `group_version_taken` where other versions of its key kept being recorded meanwhile |
 | `GET deployments/<uuid>/economics/portfolio/groups/` | `deployment-economics-portfolio-groups` | every version of the deployment's correlation groups, by key and version, each with its author and time |
 
 The request: `{"seed": <0 to 2^64 - 1>, "policy": <name>, "reporting_currency":
@@ -5589,7 +5812,7 @@ times its driver above the largest count mean, 1E9), `portfolio_record_malformed
 `field_missing`, `field_unrecognised` and `field_malformed`, and money's
 `currency_unknown` and `date_malformed`, each with its meaning.
 
-### 30.9 Safety
+### 31.9 Safety
 
 **No transaction or lock is held during the draws** (the SAFETY RULE). Every read
 of the selection is autocommit; the draws run outside any atomic block; the one
@@ -5624,7 +5847,7 @@ a cross-process, non-blocking cap for the economics Monte Carlo routes (an immed
 503 `economics_capacity`, never a wait); this route registers under it once it
 merges. Until then the portfolio adds no lock or wait of its own.
 
-### 30.10 Decisions this step takes, which the owner may change
+### 31.10 Decisions this step takes, which the owner may change
 
 1. **Each scenario's latest result, never an older one in its place**, and only
    where `may_be_totalled` admits its report. Alternative: the latest result that
@@ -5634,10 +5857,10 @@ merges. Until then the portfolio adds no lock or wait of its own.
    decision, saved on review round 1): one common driver of mean 1 and variance `v`
    multiplies each member's annual rate. It also widens each member's own count (the
    mixed rate is over-dispersed), keeping its mean: about 65% of the P95's rise and
-   60% of the expected shortfall's, in the reviewer's measure (section 30.3), is
+   60% of the expected shortfall's, in the reviewer's measure (section 31.3), is
    that over-dispersion, not co-movement. A group names two scenarios at least and
    applies to two included at least. Alternatives: a Gaussian or t copula on the
-   members' annual losses (keeps each marginal exactly; section 30.11); a
+   members' annual losses (keeps each marginal exactly; section 31.11); a
    common-cause event added to the members. Recommendation: keep for the MVP; take a
    copula when a buyer's tail needs the marginals unchanged.
 3. **A shared loss event is counted once per SIMULATED YEAR, at the largest of the
@@ -5698,14 +5921,14 @@ merges. Until then the portfolio adds no lock or wait of its own.
     raw rates (the factor of a one-step conversion IS the rate, so it would leak).
     Recommendation: keep.
 
-### 30.11 What is still not done
+### 31.11 What is still not done
 
 - **Copulas** (the owner's specification, line 205: "copulas or conditional
   simulation in later phases"), and dependence between severities: only frequencies
   move together, through a group's driver.
 - **A customer figure two scenarios read** (one parameter-set variable) is drawn
   apart in each: scenarios in different groups are independent by the MVP's rule.
-- **Groups are declared by an analyst**, authored and versioned (section 30.3), not
+- **Groups are declared by an analyst**, authored and versioned (section 31.3), not
   inferred from SPINE (shared identity, provider, data store, business process,
   region: specification, section 24); the latest portfolio is served by default.
   `LossEvent.correlation_group` (step 4's column, which no writer sets) is not read.
@@ -5714,8 +5937,8 @@ merges. Until then the portfolio adds no lock or wait of its own.
   approval is not wired to a portfolio yet; the source type is the author's own
   statement. The record says who stated it and when.
 - **No cap on simulations at once** until the economics capacity cap merges
-  (section 30.9; the audit's S1).
-- **No licence term or expiry**: a source's licence class is read (section 30.8),
+  (section 31.9; the audit's S1).
+- **No licence term or expiry**: a source's licence class is read (section 31.8),
   but no `licensed_until` is recorded or checked (the audit's T7).
 - **No limit shared across scenarios**: insurance is each scenario's, per event
   occurrence; a yearly aggregate limit is section 25.10's open decision.

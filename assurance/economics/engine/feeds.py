@@ -820,6 +820,7 @@ def _fred(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedR
                 vintage_date=as_of,
                 source_snapshot_hash=digest,
                 source_key=feed.key,
+                provider=feed.provider,
             )
         )
     if not points:
@@ -896,6 +897,7 @@ def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedRe
                 vintage_date=as_of,
                 source_snapshot_hash=digest,
                 source_key=feed.key,
+                provider=feed.provider,
             )
         )
     if not points:

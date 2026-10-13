@@ -179,7 +179,7 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "remediation.py",
         # Step 10's live-feed adapters, registry and freshness table (spec, section 29).
         "feeds.py",
-        # E5's portfolio aggregation (spec, section 30).
+        # E5's portfolio aggregation (spec, section 31).
         "portfolio.py",
     }
     core_importers = set()
@@ -799,7 +799,7 @@ def test_the_economics_routes_are_imported_guarded():
     """Read, not run: assurance/urls.py imports each economics route module -- the
     parameter-set routes, the scenario builder's (section 24), the scenario
     endpoints with the report (section 27), the remediation option with its ROI
-    (section 28), the data-health route (section 29) and the portfolio's (section 30) --
+    (section 28), the data-health route (section 29) and the portfolio's (section 31) --
     inside a try of its own whose handler
     logs and serves none of that module's routes, never re-raising. A fault in one
     leaves the others served."""
@@ -890,7 +890,7 @@ def test_nothing_but_the_models_registration_imports_economics():
     # The scenario step's route module, (section 24) the scenario builder's,
     # (section 27, step 6) the scenario endpoints with the report, (section 28, step
     # 13) the remediation option with its ROI, (section 29, step 10) data health, and
-    # (section 30, E5) the portfolio's.
+    # (section 31, E5) the portfolio's.
     assert [m for m in mounted if m.startswith("assurance.economics")] == [
         "assurance.economics.api",
         "assurance.economics.api.urlpatterns",

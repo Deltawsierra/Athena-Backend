@@ -671,13 +671,16 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario",
         "deployment-economics-scenario-simulate",
         "deployment-economics-scenario-results",
+        # The read routes the dashboard needs (spec, section 30).
+        "deployment-economics-scenarios",
+        "deployment-economics-receipt",
         # The remediation option and its ROI (spec, section 28).
         "deployment-economics-scenario-mitigations",
         "deployment-economics-mitigation-simulate",
         "deployment-economics-scenario-roi",
         # The data-health route (spec, section 29).
         "deployment-economics-data-health",
-        # The portfolio (spec, section 30).
+        # The portfolio (spec, section 31).
         "deployment-economics-portfolio",
         "deployment-economics-portfolio-simulate",
         "deployment-economics-portfolio-groups",
@@ -694,6 +697,8 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["deployment-economics-portfolio"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-simulate"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-groups"]) == {"GET", "POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-scenarios"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-receipt"]) == {"GET"}
 
 
 # ============================================ review round 1 of #146: L3 to L6
