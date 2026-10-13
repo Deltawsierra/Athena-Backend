@@ -6850,17 +6850,19 @@ each, its priority scenarios and its special data; its roadmap row 7 asks for
 holds the packs to one rule of bias and fairness ("Industry packs must not embed
 unsupported geographic or company-size assumptions as penalties"); and its section 29
 asks the customer report to say what the figures rest on. E7 makes the banking pack of
-section 24 one pack of a registry, and adds three: insurance, healthcare and life
-sciences, and AI-heavy SaaS. This is the step's first half; regulated enterprise,
-government and mission, manufacturing and critical infrastructure, and Hermes and
-mobility are its second (section 37.12).
+section 24 one pack of a registry, and adds seven: insurance, healthcare and life
+sciences, and AI-heavy SaaS (sections 37.4 to 37.6, the step's first half), and
+regulated enterprise, government and mission, manufacturing and critical
+infrastructure, and Hermes and mobility (sections 37.13 to 37.16, its second).
 
 Modules: `engine/pack_inputs.py` (each pack's customer-input schema, which the
 parameter set reads, and nothing else: no template), `engine/pack_base.py` (what a
 pack is), `engine/pack_registry.py` (the registry), and one module per industry pack:
-`engine/pack_insurance.py`, `engine/pack_healthcare.py`, `engine/pack_saas.py` (module
-names `pack_inputs`, `pack_base`, `pack_registry`, `pack_insurance`, `pack_healthcare`,
-`pack_saas`). The builder (section 24), the parameter set (section 19), the Validity
+`engine/pack_insurance.py`, `engine/pack_healthcare.py`, `engine/pack_saas.py`,
+`engine/pack_regulated_enterprise.py`, `engine/pack_government.py`,
+`engine/pack_manufacturing.py`, `engine/pack_mobility.py` (module names `pack_inputs`,
+`pack_base`, `pack_registry`, `pack_insurance`, `pack_healthcare`, `pack_saas`,
+`pack_regulated_enterprise`, `pack_government`, `pack_manufacturing`, `pack_mobility`). The builder (section 24), the parameter set (section 19), the Validity
 Card (section 26.3), the report (section 27.3) and the refresh (section 34.4) read the
 pack. Migration `0076_parameter_set_pack` adds one column. Tests:
 `tests/test_economics_packs.py` (no database) and `tests/test_economics_pack_builds.py`.
@@ -6890,6 +6892,10 @@ not only its pack's: one id in two packs is a defect, never one silently kept
 | `mythos.economics.insurance-pack/v1` | `insurance` | 6 | 37.4 |
 | `mythos.economics.healthcare-pack/v1` | `healthcare` | 5 | 37.5 |
 | `mythos.economics.saas-pack/v1` | `saas` | 5 | 37.6 |
+| `mythos.economics.regulated-enterprise-pack/v1` | `regulated-enterprise` | 4 | 37.13 |
+| `mythos.economics.government-pack/v1` | `government` | 4 | 37.14 |
+| `mythos.economics.manufacturing-pack/v1` | `manufacturing` | 4 | 37.15 |
+| `mythos.economics.mobility-pack/v1` | `mobility` | 4 | 37.16 |
 
 **Banking is unchanged.** The banking pack is `engine/templates.py`, as it was: a
 template's pack and caution default to the banking pack's and none, a banking
@@ -7502,8 +7508,19 @@ plausible, not that it happens at the size the figures state; they are ranges fo
 decision support, never a prediction (the owner's section 37, false precision); a
 benchmark among them is a prior, never the customer's truth (section 37, benchmark
 misuse); physical damage is its own heavy-tail component, never folded into the
-operational loss (the owner's section 32); harm to a person is excluded. In this half:
-`healthcare_clinical_workflow_interruption` and `healthcare_gmp_deviation`.
+operational loss (the owner's section 32); harm to a person is excluded. They are
+`healthcare_clinical_workflow_interruption`, `healthcare_gmp_deviation`,
+`government_mission_interruption`, `government_autonomous_agent_effect`, every
+manufacturing template and every Hermes and mobility template. The Hermes fleet's
+downtime is the owner's worked example C (section 32), built as it states it:
+`mobility_fleet_downtime` prices the fleet's lost trips at the affected share and the
+contribution margin, the field recovery per affected vehicle and the operations response
+(`test_fleet_downtime_is_the_specifications_worked_example_c`: 122,325 / 319,050 /
+722,400 at its figures); physical damage is `mobility_vehicle_asset_damage`, a separate
+heavy-tail template, conditional on the damage the evidence supports; and safety and
+legal are excluded, as the example says, until a model is approved (choice 1). A recall's
+cost -- inspecting, updating and returning a vehicle to service -- is priced; a safety
+variable that prices harm is refused.
 
 **Nothing on a stop path.** The packs are pure data, read only by the builder, the
 registry's route, the report, the card and the refresh, none of them a stop. The
@@ -7544,14 +7561,13 @@ a business process or an attribute is that pack's.
 
 ### 37.12 What is not done yet
 
-- **The second half**: regulated enterprise, government and mission, manufacturing and
-  critical infrastructure, and Hermes and mobility (the owner's section 23) follow on
-  this framework; until they are merged a build or a set naming them is
-  `pack_unrecognised`.
 - **Not calibrated.** "Validated" here is every template's known answer, three ways,
   the schemas' refusals and the precedence; no pack is calibrated against realised
   losses (section 10), and a benchmark a customer states (OCR breach data among them)
   is graded as one (section 26.2).
+- **Units an hour are stated per day**: the engine has no per-hour count unit and
+  converts none (section 14), so the manufacturing pack reads `units_per_day`; a
+  customer states its units an hour times its operating hours a day.
 - **A pack template rests on every claim type**: no pack template is in
   `TEMPLATE_CLAIMS` (section 34.1), so a pack scenario reads stale on any bound claim
   type's change, the conservative reading (choice 4).
@@ -7561,6 +7577,451 @@ a business process or an attribute is that pack's.
   (`excess_claims_share`), or an abuse load above the platform's whole spend
   (`abuse_load_share`), cannot be stated; the unit bounds the figure and refuses one
   above it (`ratio_out_of_range`), never caps it silently.
+
+The second half's packs follow, as sections 37.4 to 37.6 state the first's.
+
+### 37.13 Regulated enterprise: `mythos.economics.regulated-enterprise-pack/v1`
+
+Vertical `regulated-enterprise`; module `engine/pack_regulated_enterprise.py`. Loss families priced: `business_interruption`, `contractual`, `direct_financial`, `incident_response`, `legal`, `notification`, `recovery`, `regulatory_compliance`.
+
+| Effect type | Meaning |
+|---|---|
+| `agent_permission_exceeded` | an internal agent acted beyond the permissions its role grants |
+| `document_exposure` | documents or data reached someone inside or outside not entitled to them |
+| `workflow_manipulated` | a business workflow was steered to an outcome its controls forbid: an approval, a payment, a record changed |
+| `vendor_ai_failure` | a vendor's AI service a business process depends on failed or misbehaved |
+
+Business processes: `finance`, `hr`, `legal`, `procurement`, `operations`, `it`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `control_obligation_count` | `count` | yes | control obligations | the control obligations -- regulatory, contractual and policy -- the business processes answer to |
+| `contract_count` | `count` | yes | contracts | customer and partner contracts carrying data or service obligations the processes serve |
+| `process_margin_per_hour` | `money_per_hour` | yes | business processes | the margin the affected business process yields per hour |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation | no |
+| `investigation_hours` | `hours` | hours of forensics or investigation | no |
+| `counsel_hours` | `hours` | hours of external counsel | no |
+| `outage_hours` | `hours` | how long the provider is unavailable | yes |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `repeat_count` | `count` | how many times the unauthorized effect repeats | yes |
+| `loss_per_event` | `money_per_unit` | the amount one unauthorized effect moves or loses | no |
+| `affected_people` | `count` | people whose documents or data the effect reached | yes |
+| `affected_contract_share` | `ratio` | the share of the customer's contracts whose obligations the effect breaches | yes |
+| `response_cost_per_contract` | `money_per_unit` | answering one breached contract's counterparty: the notice, the remedy, the renegotiation | no |
+| `affected_obligation_share` | `ratio` | the share of the customer's control obligations the effect breaches | yes |
+| `compliance_response_per_obligation` | `money_per_unit` | re-establishing one breached obligation: re-testing, re-attestation, the regulator's or auditor's notice (never a predicted penalty) | no |
+| `interruption_hours` | `hours` | how long the business process is interrupted or degraded | yes |
+| `vendors_to_replace` | `count` | critical vendors the failure obliges the customer to exit or replace | no |
+
+#### `regulated_enterprise_document_exposure`, version 1, precedence 1: Document / data exposure
+
+Covers `document_exposure` on any process; `agent_permission_exceeded` on `hr`, `legal`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `notification` | `notification` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `affected_people`; `unit_cost` (+) from the set: `notification_unit_cost`; `fixed_cost` (+) from the set: `notification_fixed_cost` |
+| `contract-obligations` | `contractual` | `share_of_units` v1 | `units` (+) from the pack's inputs: `contract_count`; `affected_share` (+) from the effect: `affected_contract_share`; `amount_per_unit` (+) from the effect: `response_cost_per_contract` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+
+Direction notes:
+
+- the people reached drive notification; the contracts breached drive the counterparties' remedies
+- the breached share is of the customer's own control obligations and contracts, each answered at the effect's stated cost: a count of its own, never a weight by size
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `regulated_enterprise_workflow_manipulation`, version 1, precedence 2: Workflow manipulation
+
+Covers `workflow_manipulated` on any process; `agent_permission_exceeded` on `finance`, `procurement`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `unauthorized-effect` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `repeat_count`; `loss_per_event` (+) from the effect: `loss_per_event`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `process-interruption` | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `interruption_hours`; `value_per_hour` (+) from the pack's inputs: `process_margin_per_hour` |
+| `control-obligations` | `regulatory_compliance` | `share_of_units` v1 | `units` (+) from the pack's inputs: `control_obligation_count`; `affected_share` (+) from the effect: `affected_obligation_share`; `amount_per_unit` (+) from the effect: `compliance_response_per_obligation` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the process is read at the customer's own margin per hour, not its revenue
+- the breached share is of the customer's own control obligations and contracts, each answered at the effect's stated cost: a count of its own, never a weight by size
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `regulated_enterprise_agent_permissions`, version 1, precedence 3: Internal-agent permissions exceeded
+
+Covers `agent_permission_exceeded` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `unauthorized-effect` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `repeat_count`; `loss_per_event` (+) from the effect: `loss_per_event`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `access-review` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `control-obligations` | `regulatory_compliance` | `share_of_units` v1 | `units` (+) from the pack's inputs: `control_obligation_count`; `affected_share` (+) from the effect: `affected_obligation_share`; `amount_per_unit` (+) from the effect: `compliance_response_per_obligation` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the size of one action beyond the agent's permissions is the effect's own, stated with its source; the repeat count is how often it recurs before the permission is restored
+- the breached share is of the customer's own control obligations and contracts, each answered at the effect's stated cost: a count of its own, never a weight by size
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `regulated_enterprise_vendor_ai_failure`, version 1, precedence 4: Vendor AI failure
+
+Covers `vendor_ai_failure` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `process-interruption` | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `outage_hours`; `value_per_hour` (+) from the pack's inputs: `process_margin_per_hour` |
+| `vendor-replacement` | `recovery` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `vendors_to_replace`; `unit_cost` (+) from the set: `vendor_exit_cost`; `fixed_cost` (+) from the effect: `recovery_fixed_cost` |
+| `contract-obligations` | `contractual` | `share_of_units` v1 | `units` (+) from the pack's inputs: `contract_count`; `affected_share` (+) from the effect: `affected_contract_share`; `amount_per_unit` (+) from the effect: `response_cost_per_contract` |
+
+Direction notes:
+
+- the vendor's failure is read at the customer's own margin per hour of the process it serves
+- exiting a vendor is read at the customer's own cost of exiting one (spec, section 19.1)
+- the breached share is of the customer's own control obligations and contracts, each answered at the effect's stated cost: a count of its own, never a weight by size
+
+### 37.14 Government and mission: `mythos.economics.government-pack/v1`
+
+Vertical `government`; module `engine/pack_government.py`. Loss families priced: `business_interruption`, `direct_financial`, `incident_response`, `notification`, `recovery`, `regulatory_compliance`.
+
+| Effect type | Meaning |
+|---|---|
+| `mission_interrupted` | a mission's operation or a public service was interrupted or degraded |
+| `sensitive_data_disclosure` | classified, controlled or personal data reached someone not cleared or entitled to it |
+| `supply_chain_compromised` | a component, model or supplier the mission depends on was compromised |
+| `autonomous_action_unapproved` | an autonomous agent took an action without the approval it needed |
+
+Business processes: `mission_operations`, `citizen_services`, `records`, `procurement`, `logistics`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `mission_cost_per_hour` | `money_per_hour` | yes | mission criticality, downtime | the agency's own cost of one hour of the mission's interruption: the replacement service, overtime, deferred obligations |
+| `response_team_hourly_rate` | `money_per_hour` | yes | response/recovery | the loaded hourly rate of the agency's own response and recovery staff |
+| `oversight_body_count` | `count` | yes | public-sector constraints | the oversight bodies the agency reports an incident to: inspectors general, committees, authorities |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation | no |
+| `investigation_hours` | `hours` | hours of forensics or investigation | no |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service | no |
+| `repeat_count` | `count` | how many times the unauthorized effect repeats | yes |
+| `loss_per_event` | `money_per_unit` | the amount one unauthorized effect moves or loses | no |
+| `affected_people` | `count` | people whose sensitive data the effect reached | yes |
+| `interruption_hours` | `hours` | how long the mission or the service is interrupted | yes |
+| `reporting_cost_per_body` | `money_per_unit` | reporting to and answering one oversight body, as scenario bounds its evidence grounds | no |
+| `affected_components` | `count` | components, models or suppliers the compromise obliges the agency to replace | yes |
+| `replacement_cost_per_component` | `money_per_unit` | replacing and re-qualifying one compromised component, model or supplier | no |
+
+#### `government_sensitive_data_exposure`, version 1, precedence 1: Classified / sensitive data exposure
+
+Covers `sensitive_data_disclosure` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `notification` | `notification` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `affected_people`; `unit_cost` (+) from the set: `notification_unit_cost`; `fixed_cost` (+) from the set: `notification_fixed_cost` |
+| `damage-assessment` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the pack's inputs: `response_team_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `oversight-reporting` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `oversight_body_count`; `cost_per_unit` (+) from the effect: `reporting_cost_per_body` |
+
+Direction notes:
+
+- the damage assessment is the agency's own staff's work, at its own loaded rate
+- each oversight body the agency states it answers is answered once, at the effect's stated cost: a count of its own, never a weight by place
+- harm to national security or to a person is never priced (safety_monetisation_refused): the template prices the response, the recovery and the interruption, and the harm is excluded
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `government_mission_interruption`, version 1, precedence 2: Mission interruption
+
+Covers `mission_interrupted` on any process; `autonomous_action_unapproved` on `mission_operations`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `mission-interruption` | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `interruption_hours`; `value_per_hour` (+) from the pack's inputs: `mission_cost_per_hour` |
+| `mission-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the pack's inputs: `response_team_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `oversight-reporting` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `oversight_body_count`; `cost_per_unit` (+) from the effect: `reporting_cost_per_body` |
+
+Direction notes:
+
+- an hour of the mission's interruption is read at the agency's own cost of one, stated with its source: the replacement service, overtime, deferred obligations
+- each oversight body the agency states it answers is answered once, at the effect's stated cost: a count of its own, never a weight by place
+- harm to national security or to a person is never priced (safety_monetisation_refused): the template prices the response, the recovery and the interruption, and the harm is excluded
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `government_supply_chain_compromise`, version 1, precedence 3: Supply-chain compromise
+
+Covers `supply_chain_compromised` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `component-replacement` | `recovery` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `affected_components`; `unit_cost` (+) from the effect: `replacement_cost_per_component`; `fixed_cost` (+) from the effect: `recovery_fixed_cost` |
+| `investigation` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the pack's inputs: `response_team_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `oversight-reporting` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `oversight_body_count`; `cost_per_unit` (+) from the effect: `reporting_cost_per_body` |
+
+Direction notes:
+
+- each compromised component, model or supplier is replaced and re-qualified at the effect's stated cost
+- each oversight body the agency states it answers is answered once, at the effect's stated cost: a count of its own, never a weight by place
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `government_autonomous_agent_effect`, version 1, precedence 4: Autonomous agent effect
+
+Covers `autonomous_action_unapproved` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `unauthorized-effect` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `repeat_count`; `loss_per_event` (+) from the effect: `loss_per_event`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `mission-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the pack's inputs: `response_team_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `oversight-reporting` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `oversight_body_count`; `cost_per_unit` (+) from the effect: `reporting_cost_per_body` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the size of one unapproved action is the effect's own, stated with its source
+- each oversight body the agency states it answers is answered once, at the effect's stated cost: a count of its own, never a weight by place
+- harm to national security or to a person is never priced (safety_monetisation_refused): the template prices the response, the recovery and the interruption, and the harm is excluded
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+### 37.15 Manufacturing and critical infrastructure: `mythos.economics.manufacturing-pack/v1`
+
+Vertical `manufacturing`; module `engine/pack_manufacturing.py`. Loss families priced: `business_interruption`, `contractual`, `incident_response`, `physical_operational`, `recovery`, `regulatory_compliance`.
+
+| Effect type | Meaning |
+|---|---|
+| `production_interrupted` | a production line or a plant's operation stopped or slowed |
+| `equipment_damaged` | an agent's or a controller's action damaged equipment or a robot |
+| `supply_chain_disrupted` | a supplier, a shipment or a planning system the production depends on failed |
+| `safety_system_compromised` | a safety instrumented system or interlock was bypassed, disabled or tripped by the effect |
+
+Business processes: `production`, `maintenance`, `quality`, `logistics`, `safety_systems`, `it_ot`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `units_per_day` | `count_per_day` | yes | units/hour | units produced per day (units an hour, stated per day: the engine has no per-hour count and converts none) |
+| `margin_per_unit` | `money_per_unit` | yes | units/hour | contribution margin per unit produced |
+| `downtime_cost_per_hour` | `money_per_hour` | yes | downtime cost | the plant's cost of one idle hour beyond the margin lost: idle labour, restart, standing charges |
+| `equipment_count` | `count` | yes | equipment value | production equipment units: lines, robots, controllers |
+| `equipment_value` | `money_per_unit` | yes | equipment value | the replacement value of one equipment unit |
+| `safety_response_cost` | `money` | no: its templates require it | safety response | the customer's own cost of one safety response: shutdown, inspection, recertification (never harm to a person) |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `regulatory_response_cost` | `money` | regulatory response, as scenario bounds its evidence grounds (never a predicted penalty) | no |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service | no |
+| `interruption_hours` | `hours` | how long the production is stopped or slowed | yes |
+| `affected_line_share` | `ratio` | the share of the plant's production the interruption stops | yes |
+| `damaged_equipment_share` | `ratio` | the share of the customer's production equipment the effect damages | yes |
+| `damage_ratio` | `ratio` | the share of a damaged unit's value lost: from a repair to its whole replacement | no |
+| `shutdown_hours` | `hours` | how long the safety stand-down and recertification stop production | yes |
+| `expedite_cost` | `money` | expediting substitute supply, as a range its evidence gives | no |
+| `contract_penalty_cost` | `money` | late-delivery penalties the customer's contracts owe, as a range its evidence gives | no |
+
+#### `manufacturing_safety_system_compromise`, version 1, precedence 1: Safety system compromised
+
+Covers `safety_system_compromised` on any process; `equipment_damaged` on `safety_systems`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `safety-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the pack's inputs: `safety_response_cost` |
+| `production-loss` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `units_per_day`; `hours` (+) from the effect: `shutdown_hours`; `affected_share` (+) from the effect: `affected_line_share`; `amount_per_unit` (+) from the pack's inputs: `margin_per_unit` |
+| `recertification` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+
+Direction notes:
+
+- the safety response is the customer's own cost of one: shutdown, inspection, recertification
+- the production lost is the customer's own units a day, over the hours stopped, at the share of production stopped and its own margin per unit, never its revenue
+- harm to a person is never priced (safety_monetisation_refused): the template prices the response, the equipment and the production, and the harm is excluded
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `manufacturing_equipment_impact`, version 1, precedence 2: Equipment / robotics impact
+
+Covers `equipment_damaged` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `equipment-damage` | `physical_operational` | `share_of_units_value` v1 | `units` (+) from the pack's inputs: `equipment_count`; `affected_share` (+) from the effect: `damaged_equipment_share`; `amount_per_unit` (+) from the pack's inputs: `equipment_value`; `value_share` (+) from the effect: `damage_ratio` |
+| `production-loss` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `units_per_day`; `hours` (+) from the effect: `interruption_hours`; `affected_share` (+) from the effect: `affected_line_share`; `amount_per_unit` (+) from the pack's inputs: `margin_per_unit` |
+| `idle-cost` | `physical_operational` | `interruption` v1 | `interruption_hours` (+) from the effect: `interruption_hours`; `value_per_hour` (+) from the pack's inputs: `downtime_cost_per_hour` |
+
+Direction notes:
+
+- physical damage is its own heavy-tail component, at the customer's own equipment value and the effect's damage ratio, never folded into the production lost
+- the production lost is the customer's own units a day, over the hours stopped, at the share of production stopped and its own margin per unit, never its revenue
+- the idle hours cost the customer's own downtime cost per hour beyond the margin lost
+- harm to a person is never priced (safety_monetisation_refused): the template prices the response, the equipment and the production, and the harm is excluded
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `manufacturing_production_interruption`, version 1, precedence 3: Production interruption
+
+Covers `production_interrupted` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `production-loss` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `units_per_day`; `hours` (+) from the effect: `interruption_hours`; `affected_share` (+) from the effect: `affected_line_share`; `amount_per_unit` (+) from the pack's inputs: `margin_per_unit` |
+| `idle-cost` | `physical_operational` | `interruption` v1 | `interruption_hours` (+) from the effect: `interruption_hours`; `value_per_hour` (+) from the pack's inputs: `downtime_cost_per_hour` |
+| `restart-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+
+Direction notes:
+
+- the hours stopped drive the production lost and the idle cost alike: one parameter, read by both in the same direction
+- the production lost is the customer's own units a day, over the hours stopped, at the share of production stopped and its own margin per unit, never its revenue
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `manufacturing_supply_chain_disruption`, version 1, precedence 4: Supply-chain disruption
+
+Covers `supply_chain_disrupted` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `production-loss` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `units_per_day`; `hours` (+) from the effect: `interruption_hours`; `affected_share` (+) from the effect: `affected_line_share`; `amount_per_unit` (+) from the pack's inputs: `margin_per_unit` |
+| `expedite` | `recovery` | `lump_sum` v1 | `amount` (+) from the effect: `expedite_cost` |
+| `contract-penalties` | `contractual` | `lump_sum` v1 | `amount` (+) from the effect: `contract_penalty_cost` |
+
+Direction notes:
+
+- the production lost is the customer's own units a day, over the hours stopped, at the share of production stopped and its own margin per unit, never its revenue
+- expediting and the contracts' penalties are lump sums, read as their evidence gives them
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+### 37.16 Hermes and mobility: `mythos.economics.mobility-pack/v1`
+
+Vertical `mobility`; module `engine/pack_mobility.py`. Loss families priced: `business_interruption`, `customer_restitution`, `incident_response`, `physical_operational`, `recovery`.
+
+| Effect type | Meaning |
+|---|---|
+| `fleet_immobilised` | vehicles of the fleet were taken out of service by the effect |
+| `route_disrupted` | routing or dispatch was degraded: trips delayed, rerouted or cancelled |
+| `vehicle_or_asset_damaged` | a vehicle or a fleet asset was physically damaged by the effect |
+| `rider_service_interrupted` | the booking, dispatch or rider service was unavailable |
+
+Business processes: `fleet_operations`, `dispatch`, `routing`, `vehicle_systems`, `rider_service`, `maintenance`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `fleet_size` | `count` | yes | fleet size | vehicles in the fleet |
+| `trips_per_day` | `count_per_day` | yes | trips/day | trips the fleet makes per day |
+| `contribution_margin_per_trip` | `money_per_unit` | yes | revenue/trip | revenue per trip less its variable cost (revenue/trip read as margin: revenue lost is not all loss) |
+| `vehicle_asset_cost` | `money_per_unit` | yes | asset cost | the replacement cost of one vehicle or fleet asset |
+| `recall_cost_per_vehicle` | `money_per_unit` | no: its templates require it | safety/recall variables | the cost of recalling one vehicle: inspection, update, return to service (a safety variable that prices harm is refused) |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `outage_hours` | `hours` | how long the provider is unavailable | yes |
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation | no |
+| `investigation_hours` | `hours` | hours of forensics or investigation | no |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service | no |
+| `affected_fleet_share` | `ratio` | the share of the fleet the effect takes out of service | yes |
+| `field_recovery_cost_per_vehicle` | `money_per_unit` | recovering one affected vehicle in the field: a technician, a tow, a reset | no |
+| `operations_response_cost` | `money` | the operations response and incident investigation, as a range its evidence gives | no |
+| `disruption_hours` | `hours` | how long routing or dispatch is disrupted | yes |
+| `disrupted_trip_share` | `ratio` | the share of the trips in the hours disrupted that are delayed, rerouted or cancelled | yes |
+| `compensation_per_trip` | `money_per_unit` | what the customer owes or refunds a rider for one disrupted trip under its terms | no |
+| `damaged_fleet_share` | `ratio` | the share of the fleet the effect physically damages | yes |
+| `damage_ratio` | `ratio` | the share of a damaged vehicle's value lost: from a repair to its whole replacement | no |
+| `recall_share` | `ratio` | the share of the fleet the effect puts under recall | no |
+
+#### `mobility_vehicle_asset_damage`, version 1, precedence 1: Vehicle / asset damage
+
+Covers `vehicle_or_asset_damaged` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `asset-damage` | `physical_operational` | `share_of_units_value` v1 | `units` (+) from the pack's inputs: `fleet_size`; `affected_share` (+) from the effect: `damaged_fleet_share`; `amount_per_unit` (+) from the pack's inputs: `vehicle_asset_cost`; `value_share` (+) from the effect: `damage_ratio` |
+| `incident-investigation` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `recall` | `recovery` | `share_of_units` v1 | `units` (+) from the pack's inputs: `fleet_size`; `affected_share` (+) from the effect: `recall_share`; `amount_per_unit` (+) from the pack's inputs: `recall_cost_per_vehicle` |
+
+Direction notes:
+
+- physical damage is a separate heavy-tail template of its own, never folded into the fleet's downtime (specification, section 32): conditional on the damage the evidence supports
+- a damaged vehicle loses the damage ratio of the customer's own asset cost
+- a recall is priced at the customer's own cost of recalling one vehicle
+- safety and injury are never priced (safety_monetisation_refused): only if the scenario's evidence supports a safety or legal component, and an owner-approved model exists, could it be; it is excluded and listed as such (specification, section 32)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `mobility_fleet_downtime`, version 1, precedence 2: Fleet downtime
+
+Covers `fleet_immobilised` on any process; `rider_service_interrupted` on `dispatch`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `lost-trips` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `trips_per_day`; `hours` (+) from the effect: `outage_hours`; `affected_share` (+) from the effect: `affected_fleet_share`; `amount_per_unit` (+) from the pack's inputs: `contribution_margin_per_trip` |
+| `field-recovery` | `recovery` | `share_of_units` v1 | `units` (+) from the pack's inputs: `fleet_size`; `affected_share` (+) from the effect: `affected_fleet_share`; `amount_per_unit` (+) from the effect: `field_recovery_cost_per_vehicle` |
+| `operations-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `operations_response_cost` |
+
+Direction notes:
+
+- the affected share of the fleet drives the trips lost and the field recovery alike: one parameter, read by both in the same direction
+- the trips lost are the customer's own trips a day, over the hours, at the share reached and its own contribution margin per trip, never its revenue (the specification's worked example C)
+- physical damage is not here: it is mobility_vehicle_asset_damage, a separate heavy-tail template
+- safety and injury are never priced (safety_monetisation_refused): only if the scenario's evidence supports a safety or legal component, and an owner-approved model exists, could it be; it is excluded and listed as such (specification, section 32)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `mobility_route_disruption`, version 1, precedence 3: Route disruption
+
+Covers `route_disrupted` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `lost-trips` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `trips_per_day`; `hours` (+) from the effect: `disruption_hours`; `affected_share` (+) from the effect: `disrupted_trip_share`; `amount_per_unit` (+) from the pack's inputs: `contribution_margin_per_trip` |
+| `rider-compensation` | `customer_restitution` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `trips_per_day`; `hours` (+) from the effect: `disruption_hours`; `affected_share` (+) from the effect: `disrupted_trip_share`; `amount_per_unit` (+) from the effect: `compensation_per_trip` |
+| `operations-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `operations_response_cost` |
+
+Direction notes:
+
+- the disrupted share of the trips drives the margin lost and the riders' compensation alike
+- the trips lost are the customer's own trips a day, over the hours, at the share reached and its own contribution margin per trip, never its revenue (the specification's worked example C)
+- safety and injury are never priced (safety_monetisation_refused): only if the scenario's evidence supports a safety or legal component, and an owner-approved model exists, could it be; it is excluded and listed as such (specification, section 32)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `mobility_service_interruption`, version 1, precedence 4: Rider-service interruption
+
+Covers `rider_service_interrupted` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `lost-trips` | `business_interruption` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `trips_per_day`; `hours` (+) from the effect: `outage_hours`; `affected_share` (+) from the effect: `disrupted_trip_share`; `amount_per_unit` (+) from the pack's inputs: `contribution_margin_per_trip` |
+| `failover-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `rider-compensation` | `customer_restitution` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `trips_per_day`; `hours` (+) from the effect: `outage_hours`; `affected_share` (+) from the effect: `disrupted_trip_share`; `amount_per_unit` (+) from the effect: `compensation_per_trip` |
+
+Direction notes:
+
+- the outage's length drives the trips lost and the riders' compensation alike
+- the trips lost are the customer's own trips a day, over the hours, at the share reached and its own contribution margin per trip, never its revenue (the specification's worked example C)
+- safety and injury are never priced (safety_monetisation_refused): only if the scenario's evidence supports a safety or legal component, and an owner-approved model exists, could it be; it is excluded and listed as such (specification, section 32)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
 
 ### Choices for the owner (E7)
 
@@ -7596,3 +8057,15 @@ each may be changed.
 8. **The SaaS platform outage loses no recurring revenue in its hours** (a subscription
    is paid ahead): its loss is the SLA credits, the recovery and the tenants who leave.
    Alternative: a revenue-at-risk component read at margin per hour.
+9. **Hermes and mobility, as worked example C states it**: a fleet's downtime is its lost
+   trips at the contribution margin, the field recovery and the operations response;
+   physical damage is a separate template; safety and legal are excluded (choice 1); a
+   recall's cost is priced. Alternative: a safety or legal component where the scenario's
+   evidence supports one, once a model is approved.
+10. **Harm to national security is never priced** by the government pack, as harm to a
+    person is not: its templates price the response, the recovery, the oversight
+    reporting and the mission's interruption at the agency's own cost of an hour.
+    Alternative: an owner-approved mission-impact model.
+11. **A safety system compromised is priced by its response, the production it stops and
+    its recertification**, never by the harm it allowed; equipment damaged on the safety
+    systems is that template's (precedence 1), not the equipment template's.
