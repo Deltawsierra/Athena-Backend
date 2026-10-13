@@ -58,8 +58,12 @@ more. Every write is an admin's only, refused 403 (``admin_required``) for anyon
 else, before the body is read; so is an approval by the requester
 (``second_person_required``). A raise whose state or source moved meanwhile is 409
 (``trust_raise_not_pending``, ``source_superseded``, ``requester_no_longer_admin``,
-or another version of the source recorded at the same moment), and every other
-refusal 400 with its code. A write that meets a lock it cannot get ("database is
+``trust_raise_expired``, or another version of the source recorded at the same
+moment), and every other refusal 400 with its code. A pending raise expires 30 days
+after its request, by the service's clock: an approval then is refused
+(``trust_raise_expired``) and moves it to ``expired``, a withdrawal is refused
+(``trust_raise_not_pending``) and writes nothing, and a read shows it ``expired``
+without writing. A write that meets a lock it cannot get ("database is
 locked", a serialisation failure) is 503 with Retry-After (``trust_raise_busy``), as
 the stops' service-token path answers a busy database, and writes nothing. A
 request's body is read as the parameter-set route reads one: strict JSON, at most
@@ -347,6 +351,7 @@ _TRUST_REFUSAL_STATUS = {
     "trust_raise_not_pending": status.HTTP_409_CONFLICT,
     "source_superseded": status.HTTP_409_CONFLICT,
     "requester_no_longer_admin": status.HTTP_409_CONFLICT,
+    "trust_raise_expired": status.HTTP_409_CONFLICT,
 }
 
 #: How long a caller waits before sending a write again that met a lock.

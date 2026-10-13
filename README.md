@@ -447,6 +447,11 @@ source's tier (spec, section 6.1), from the same module:
 - `POST .../trust-raises/<uuid>/withdraw/`: a pending raise withdrawn by any admin,
   who is named on the record.
 
+A pending raise expires 30 days after its request, by the service's clock: an
+approval after that is refused (`trust_raise_expired`) and the request moves to
+`expired`; a withdrawal after that is refused as not pending; a read shows it expired
+without writing.
+
 Only upward, and only from the latest version of the source. Anyone but an admin is
 403 (anonymous 401); a tenant's source is 404 to whoever cannot see that deployment.
 Every raise is one append-only record of who asked, who approved or withdrew, why,

@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from types import MappingProxyType
 
 from .provenance import LicenseClass, TrustTier
@@ -38,6 +39,11 @@ REQUIRED_OVERRIDE_APPROVERS = 2
 
 #: The longest reason a raise of a source's trust tier records, in characters.
 TRUST_RAISE_REASON_MAX = 2000
+
+#: How long a pending raise waits for its second admin (the owner's decision of 13 Oct
+#: 2026): from its request, to the instant. Past it the request is ``expired`` and is
+#: never approved; it is requested again.
+TRUST_RAISE_EXPIRES_AFTER = timedelta(days=30)
 
 #: What each refusal code means, published beside it.
 REFUSALS: Mapping[str, str] = MappingProxyType(
@@ -115,14 +121,18 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "snapshot or any other write"
         ),
         "trust_raise_not_pending": (
-            "the raise is no longer pending: a request is approved or withdrawn once, and a raise that is done or "
-            "withdrawn stays as it is"
+            "the raise is no longer pending: a request is approved or withdrawn once, and a raise that is done, "
+            "withdrawn or expired stays as it is"
         ),
         "requester_no_longer_admin": (
             "the admin who requested this raise is no longer an active admin, or their account is gone: it is "
             "not approved, and any admin may withdraw it"
         ),
         "reason_too_long": f"a raise's reason is at most {TRUST_RAISE_REASON_MAX} characters",
+        "trust_raise_expired": (
+            f"a pending raise expires {TRUST_RAISE_EXPIRES_AFTER.days} days after its request and is never "
+            "approved or withdrawn after that: request it again"
+        ),
     }
 )
 
@@ -350,6 +360,16 @@ def trust_raise_approval_channel_refusal(channel) -> str | None:
     if channel == SIGNED_IN_CHANNEL:
         return None
     return "second_person_required"
+
+
+def trust_raise_expiry_refusal(requested_at, now) -> str | None:
+    """Whether a pending raise requested at ``requested_at`` has expired by ``now``:
+    :data:`TRUST_RAISE_EXPIRES_AFTER` after its request, to the instant. Both are the
+    service's own times (the request's stored ``requested_at`` and its clock), never
+    a time a caller sent."""
+    if now >= requested_at + TRUST_RAISE_EXPIRES_AFTER:
+        return "trust_raise_expired"
+    return None
 
 
 def trust_raise_requester_refusal(requester_is_admin: bool) -> str | None:

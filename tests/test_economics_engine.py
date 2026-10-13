@@ -931,6 +931,10 @@ SPEC_PHRASES = (
     "Any active admin may withdraw a pending request",
     "the EARLIEST version of the same tenant, key and snapshot hash",
     "refuses a version at `authoritative` (`second_person_required`) unless it carries",
+    # The owner's decision of 13 Oct 2026: a pending raise expires.
+    "A pending request expires** 30 days after its request",
+    "Expiry is found lazily, at approve time, with no background job",
+    "computing it and writing nothing",
 )
 
 

@@ -19,7 +19,10 @@ Below ``authoritative`` a request records the new version at once.
 ``POST /api/assurance/economics/trust-raises/<uuid>/approve/``, where the approver is
 the account the request authenticated rather than a name typed at a shell.
 ``approve`` is refused before any password is asked. Any active admin may withdraw a
-pending request. Every refusal is a CommandError naming its code, and writes nothing.
+pending request. A pending request expires 30 days after its request
+(``trust_raise_expired``), and an expired one is not withdrawn
+(``trust_raise_not_pending``). Every refusal is a CommandError naming its code, and
+writes nothing.
 
 It prints the raise's uuid, its state, the source's key and versions, the tiers and
 who requested, approved or withdrew it; never the reason, and never the password. It
@@ -79,7 +82,7 @@ def _signed_in(username: str):
 def _summary(raised: FinancialSourceTrustRaise) -> str:
     source = raised.from_version
     line = (
-        f"raise {raised.uuid}: {raised.state}; source {source.source_key} v{source.version} "
+        f"raise {raised.uuid}: {raised.current_state()}; source {source.source_key} v{source.version} "
         f"{raised.from_tier} -> {raised.to_tier}"
     )
     if raised.to_version_id is not None:

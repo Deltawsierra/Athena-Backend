@@ -1062,3 +1062,163 @@ def test_r1_nits_messages_name_versions_and_what_the_route_takes(people):
     assert _raises().objects.get(uuid=fresh["uuid"]).state == "pending"
     # An empty body, or {}, is no body.
     assert _client(people["bea"]).post(_approve_url(fresh)).status_code == 200
+
+
+# ============================================================ a pending raise expires (owner, 13 Oct)
+#
+# The owner adopted the lead's recommendation on review round 1's open point: a
+# pending raise expires 30 days after its request (one constant). Expiry is found at
+# approve time, lazily: the approval is refused and the request moves to `expired` in
+# its one conditional transition. A read shows it expired without writing, and a
+# withdrawal of it is refused as not pending, writing nothing. Every time is the
+# module's clock (``timezone.now`` as ``assurance.economics.models`` reads it),
+# stopped here at an instant so that each boundary is exact.
+
+
+def _clock_at(monkeypatch, instant):
+    """The economics models' clock stopped at ``instant``: what that module reads as
+    now, and nothing else's."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(econ, "timezone", SimpleNamespace(now=lambda: instant))
+
+
+def _requested_at(raised, instant):
+    """The request recorded at ``instant``: its requested_at moved past the
+    append-only guard, as only a test does."""
+    uuid = raised["uuid"] if isinstance(raised, dict) else raised.uuid
+    assert _raises()._base_manager.filter(uuid=uuid).update(requested_at=instant) == 1
+
+
+def test_r1_expiry_is_30_days_after_the_request_to_the_instant():
+    from datetime import timedelta
+
+    at = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
+    assert governance.TRUST_RAISE_EXPIRES_AFTER == timedelta(days=30)
+    expired = governance.trust_raise_expiry_refusal
+    assert expired(at, at) is None
+    assert expired(at, at + timedelta(days=29, hours=23)) is None
+    assert expired(at, at + timedelta(days=30) - timedelta(microseconds=1)) is None
+    assert expired(at, at + timedelta(days=30)) == "trust_raise_expired"
+    assert expired(at, at + timedelta(days=400)) == "trust_raise_expired"
+    assert "trust_raise_expired" in governance.REFUSALS
+
+
+def test_r1_expiry_an_approval_29_days_23_hours_after_the_request_succeeds(people, monkeypatch):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    source = _source()
+    body = _pending(people, source)
+    now = timezone.now()
+    _requested_at(body, now - timedelta(days=29, hours=23))
+    _clock_at(monkeypatch, now)
+    approved = _post(_client(people["bea"]), _approve_url(body))
+    assert approved.status_code == 200, approved.content
+    assert (approved.json()["state"], approved.json()["approved_by"]) == ("done", "bea")
+    assert _versions() == [(1, "unverified"), (2, "authoritative")]
+    assert approved.json()["expires_at"] == (now + timedelta(hours=1)).isoformat()
+    assert _raises().objects.get().state == "done"
+
+
+def test_r1_expiry_an_approval_at_30_days_is_refused_and_writes_nothing(people, monkeypatch):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    source = _source()
+    body = _pending(people, source)
+    now = timezone.now()
+    _requested_at(body, now - timedelta(days=30))
+    _clock_at(monkeypatch, now)
+    # Neither a non-admin nor a time the caller sends moves anything: the expiry is
+    # read from the service's clock, and an approval takes no body.
+    assert _post(_client(people["ann"]), _approve_url(body)).status_code == 403
+    sent = _post(_client(people["bea"]), _approve_url(body), {"now": (now - timedelta(days=1)).isoformat()})
+    assert sent.status_code == 400, sent.content
+    assert _raises().objects.get().state == "pending"
+    refused = _post(_client(people["bea"]), _approve_url(body))
+    assert refused.status_code == 409, refused.content
+    assert refused.json()["code"] == "trust_raise_expired"
+    assert "request it again" in refused.json()["detail"]
+    # No version, no approver: only the request's one transition, to expired.
+    assert _versions() == [(1, "unverified")]
+    assert not FinancialSource.objects.filter(trust_tier="authoritative").exists()
+    record = _raises().objects.get()
+    assert record.state == "expired"
+    assert (record.to_version, record.approved_by, record.approved_by_username, record.approved_at) == (
+        None, None, "", None,
+    )
+    assert (record.withdrawn_by, record.withdrawn_by_username, record.withdrawn_at) == (None, "", None)
+    # It stays expired: another admin's approval, and a withdrawal, are refused.
+    again = _post(_client(people["cid"]), _approve_url(body))
+    assert again.status_code == 409 and again.json()["code"] == "trust_raise_expired"
+    withdrawn = _post(_client(people["ada"]), _withdraw_url(body))
+    assert withdrawn.status_code == 409 and withdrawn.json()["code"] == "trust_raise_not_pending"
+    assert _versions() == [(1, "unverified")]
+    assert _raises().objects.get().state == "expired"
+    listed = _client(people["vic"]).get(_raise_url(source)).json()["raises"]
+    assert [(r["state"], r["to_version"], r["approved_by"]) for r in listed] == [("expired", None, None)]
+
+
+def test_r1_expiry_a_read_shows_it_expired_and_a_withdrawal_writes_nothing(people, monkeypatch):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    source = _source()
+    body = _pending(people, source)
+    fresh = _pending(people, _source(source_key="ecb-reference"))
+    now = timezone.now()
+    _requested_at(body, now - timedelta(days=30))
+    _requested_at(fresh, now - timedelta(days=29, hours=23))
+    _clock_at(monkeypatch, now)
+    listed = _client(people["vic"]).get(_raise_url(source)).json()["raises"]
+    assert [(r["state"], r["expires_at"]) for r in listed] == [("expired", now.isoformat())]
+    other = _client(people["vic"]).get(_raise_url(_raises().objects.get(uuid=fresh["uuid"]).from_version))
+    assert [r["state"] for r in other.json()["raises"]] == ["pending"]
+    # A read wrote nothing: both are stored pending.
+    assert sorted(_raises().objects.values_list("state", flat=True)) == ["pending", "pending"]
+    # A withdrawal of an expired request is refused as not pending, through the route
+    # and the command, and writes nothing.
+    withdrawn = _post(_client(people["bea"]), _withdraw_url(body))
+    assert withdrawn.status_code == 409, withdrawn.content
+    assert withdrawn.json()["code"] == "trust_raise_not_pending"
+    _typing(monkeypatch, "x")
+    with pytest.raises(CommandError, match="trust_raise_not_pending"):
+        _command("withdraw", body["uuid"], "--as", "cid")
+    stored = _raises().objects.get(uuid=body["uuid"])
+    assert (stored.state, stored.withdrawn_by_username, stored.withdrawn_at, stored.withdrawn_via) == (
+        "pending", "", None, "",
+    )
+    # Only an approval moves it to expired.
+    refused = _post(_client(people["bea"]), _approve_url(body))
+    assert refused.status_code == 409 and refused.json()["code"] == "trust_raise_expired"
+    assert _raises().objects.get(uuid=body["uuid"]).state == "expired"
+    # The one not yet expired is still withdrawn as before.
+    assert _post(_client(people["bea"]), _withdraw_url(fresh)).status_code == 200
+    assert _raises().objects.get(uuid=fresh["uuid"]).state == "withdrawn"
+    assert _versions() == [(1, "unverified")] and _versions("ecb-reference") == [(1, "unverified")]
+
+
+def test_r1_expiry_counts_from_the_service_clock_when_the_request_is_recorded(people, monkeypatch):
+    """A pending request's requested_at, from which it expires, is the service's clock
+    at insert: a row carrying a later time does not postpone its expiry."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    now = timezone.now()
+    _clock_at(monkeypatch, now)
+    later = now + timedelta(days=365)
+    asked = _raises().objects.create(
+        from_version=_source(), to_tier="authoritative", reason=REASON, requested_by=people["ada"], channel="api",
+        requested_at=later,
+    )
+    stored = _raises().objects.get(pk=asked.pk)
+    assert stored.requested_at == now
+    assert stored.expires_at == now + timedelta(days=30)
+    routed = _pending(people, _source(source_key="ecb-reference"), by="bea")
+    assert routed["requested_at"] == now.isoformat()
+    assert routed["expires_at"] == (now + timedelta(days=30)).isoformat()

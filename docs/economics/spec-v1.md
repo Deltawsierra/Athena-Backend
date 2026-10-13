@@ -390,7 +390,7 @@ operator runs; any other writer is a defect.
 | Model | Holds | Permitted writers |
 |---|---|---|
 | `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review, never at `authoritative`; an admin raising its trust tier (section 6.1), which records a new version, every field as the old one's but the tier, `recorded_by` the admin who completed the raise, and is the ONLY writer of an `authoritative` version (a second admin's approval); an admin may record a reviewed license class as a new version |
-| `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, the channel it came through (`api` or `command`), who requested it and when, who approved it and when, who withdrew it, when and through which channel, and its state (`pending`, `done` or `withdrawn`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only, and only the signed-in route approves |
+| `FinancialSourceTrustRaise` (trust raises) | one raise of one source version's trust tier: the version raised from and (once done) the version recorded, the tier from and to, the reason, the channel it came through (`api` or `command`), who requested it and when, who approved it and when, who withdrew it, when and through which channel, and its state (`pending`, `done`, `withdrawn` or `expired`); append-only but for that one transition | the trust-raise routes and `manage.py raise_source_trust` (section 6.1): an admin only, and only the signed-in route approves |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
 | `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint (the deployment's when the builder built the version, section 24.6; or none, and why, in `system_fingerprint_unavailable`), causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
@@ -516,10 +516,22 @@ with the same code.
   deactivated or removed). That records the version and the record moves to `done`.
   Any active admin may withdraw a pending request, and the record names who did,
   when and through which channel: cancelling a request for more trust is never harder
-  than granting it. A request that is done or withdrawn is never approved or
-  withdrawn again (`trust_raise_not_pending`). No write through the ORM records a
-  raise to `authoritative` as done without that approval: the model inserts it only
-  pending.
+  than granting it. A request that is done, withdrawn or expired is never approved
+  or withdrawn again (`trust_raise_not_pending`; `trust_raise_expired` for an
+  approval of an expired one). No write through the ORM records a raise to
+  `authoritative` as done without that approval: the model inserts it only pending.
+- **A pending request expires** 30 days after its request
+  (`governance.TRUST_RAISE_EXPIRES_AFTER`, the owner's decision of 13 Oct 2026), to
+  the instant, by the service's clock and the request's stored `requested_at` (the
+  service's clock when the request was recorded, whatever the row carried) --
+  never a time a caller sends. Expiry is found lazily, at approve time, with no
+  background job: an approval of an expired request is refused
+  (`trust_raise_expired`), nothing is recorded, and the request moves to `expired`
+  in its one conditional transition, which is kept though the approval is refused.
+  A read shows a request past its time as `expired` even if nobody has tried to
+  approve it, computing it and writing nothing; each record says when it expires
+  (`expires_at`). A withdrawal of an expired request is refused as not pending
+  (`trust_raise_not_pending`) and writes nothing: only an approval moves it.
 - **Atomic and single-use.** An approval locks the raise's row (`select_for_update`)
   and reads under that lock that it is still pending, that the approver is not the
   requester, that the requester is still an admin and that its version is still the
@@ -540,8 +552,9 @@ with the same code.
   `withdrawn_by_username` with `withdrawn_at` and `withdrawn_via`, and the state. It
   is append-only but for its one transition, and the usernames outlive a removed
   account. Its check constraints hold the state's fields (`done` has a version, an
-  approval time and an approver's name; `pending` has none; `withdrawn` has a
-  withdrawal time, a withdrawer's name and a channel), a known channel and an upward
+  approval time and an approver's name; `pending` and `expired` have none;
+  `withdrawn` has a withdrawal time, a withdrawer's name and a channel), a known
+  channel and an upward
   pair of tiers; none of them names an account column, so removing an operator, a
   stop, is never refused by a raise. It waits only for an approval or withdrawal
   already in flight, for that transaction's few milliseconds: on the raise row's lock
@@ -566,9 +579,9 @@ The routes are mounted under `/api/assurance/` with the parameter set's, from
 
 An approval or a withdrawal takes no body: none, or `{}`; a body that says anything
 is 400, never ignored. A refusal answers its code: 403 for `admin_required` and
-`second_person_required`; 409 for `trust_raise_not_pending`, `source_superseded` and
-`requester_no_longer_admin` (and for another version of the source recorded at the
-same moment); 503 for `trust_raise_busy`; 400 for the rest.
+`second_person_required`; 409 for `trust_raise_not_pending`, `source_superseded`,
+`requester_no_longer_admin` and `trust_raise_expired` (and for another version of the
+source recorded at the same moment); 503 for `trust_raise_busy`; 400 for the rest.
 
 The operator's command is the same rules and the same record, recorded with channel
 `command` under the account `--as` names. The operator proves they hold it: the
@@ -584,7 +597,6 @@ Not decided here, for the owner:
 
 - lowering a tier (a source found unreliable) has no path, as the decision was raise
   only; adding one would be a revoke under the SAFETY RULE;
-- a pending request never expires (review round 1, M2: no expiry for now);
 - re-registering a snapshot whose source was since raised returns the version the
   loader registered first, still at its own tier, not the raised one (review round
   1, L2);
@@ -625,10 +637,11 @@ that code (`EconomicsRefused.code`).
 | `bulk_create_refused` | records are written one at a time, through the checks above |
 | `admin_required` | only an admin (role admin, or a superuser) requests, approves or withdraws a raise of a source's trust tier (section 6.1) |
 | `requester_no_longer_admin` | a pending raise is approved only while the admin who requested it is still an active admin; any admin may withdraw it |
+| `trust_raise_expired` | a pending raise expires 30 days after its request (`TRUST_RAISE_EXPIRES_AFTER`), by the service's clock; an approval after that is refused, nothing is recorded, and the request moves to `expired`; a withdrawal after that is refused as not pending and writes nothing |
 | `trust_not_raised` | a raise moves a source to a tier above its own, in the order of section 4.5; the same tier or a lower one is refused |
 | `source_superseded` | a raise starts from the latest version of its source, and is approved only while that version is still the latest |
 | `second_person_required` | an `authoritative` version is recorded only by a raise one admin requested and ANOTHER approved through the signed-in route: never by the requester, the operator's command, a snapshot file or any other write through the model |
-| `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending; below `authoritative` it is done in one step, never pending |
+| `trust_raise_not_pending` | a raise is approved or withdrawn once, while pending and not expired; below `authoritative` it is done in one step, never pending |
 | `reason_too_long` | a raise's reason is at most 2000 characters |
 
 The rules read what is stored, never what a caller's in-memory object says: the
