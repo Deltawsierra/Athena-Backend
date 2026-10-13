@@ -8,6 +8,9 @@ under ``tests.economics_broken_builder`` (the scenario builder and its template
 module do not import): ``builder``. And by
 ``tests/test_economics_report.py::test_a_report_fault_never_takes_down_a_stop`` under
 ``tests.economics_broken_report`` (the report does not import): ``report``. And by
+``tests/test_economics_remediation.py::test_a_remediation_fault_never_takes_down_a_stop``
+under ``tests.economics_broken_remediation`` (the remediation step does not import):
+``remediation``. And by
 ``tests/test_economics_portfolio.py::test_a_portfolio_fault_never_takes_down_a_stop``
 under ``tests.economics_broken_portfolio`` (the portfolio does not import):
 ``portfolio``.
@@ -74,6 +77,22 @@ def test_only_economics_is_refused():
     deployment = Deployment.objects.create(name="d")
     assert resolve(f"/api/assurance/deployments/{deployment.uuid}/").view_name == "deployment-detail"
     route = f"/api/assurance/deployments/{deployment.uuid}/economics/parameter-sets/q4/versions/"
+    if FAULT == "remediation":
+        # The remediation option and ROI routes are not served; the parameter-set
+        # routes, the builder's and the scenario endpoints with the report still are.
+        assert "assurance.economics.remediation_api" not in sys.modules
+        assert "assurance.economics.remediation_service" not in sys.modules
+        scenario = "00000000-0000-4000-8000-000000000000"
+        base = f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/"
+        for tail in ("mitigations/", f"mitigations/{scenario}/simulate/", "roi/"):
+            with pytest.raises(Resolver404):
+                resolve(base + tail)
+        assert resolve(base + "simulate/").view_name == "deployment-economics-scenario-simulate"
+        assert resolve(base + "results/").view_name == "deployment-economics-scenario-results"
+        assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
+        built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        assert built.view_name == "deployment-economics-scenario-build"
+        return
     if FAULT == "report":
         # The scenario endpoints and the report are not served; the parameter-set
         # routes and the builder's still are.

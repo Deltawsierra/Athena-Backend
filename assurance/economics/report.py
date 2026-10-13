@@ -69,6 +69,7 @@ from .models import (
     FinancialValidityCard,
     LossComponent,
     LossEvent,
+    RemediationOption,
     ScenarioBuild,
     SimulationCharts,
     SimulationResult,
@@ -144,24 +145,38 @@ def verifies(report: Mapping) -> bool:
     return report.get("digest") == digest_of(report)
 
 
-def may_be_totalled(report: Mapping) -> bool:
-    """Whether a total may sum ``report``'s figures. It fails closed (review round 1,
-    LOW-4): only a report that carries the digest of its own bytes, of a completed
-    result whose stored rows verified, not excluded from totals, and graded A to D
-    (an allow-list). A forged, edited or stale report is refused. A total of several
-    reports applies this to each, and leaves out every one it refuses (the
-    owner-adopted default)."""
+def stands(report: Mapping) -> bool:
+    """Whether ``report`` is a sound account of its run: it carries the digest of its
+    own bytes, of a completed result whose stored rows verified, graded A to D (an
+    allow-list). Says nothing of whether the run is exposure: :func:`may_be_totalled`
+    does. The ROI document reads a residual run's report through this."""
     try:
         genuine = verifies(report)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return False
     return (
         genuine
         and report.get("status") == SIMULATION_COMPLETED
-        and report.get("excluded_from_totals") is False
         and report.get("grade") in GRADES_FOR_TOTALS
         and (report.get("integrity") or {}).get("verified") is True
     )
+
+
+def may_be_totalled(report: Mapping) -> bool:
+    """Whether a total may sum ``report``'s figures. It fails closed (review round 1,
+    LOW-4): only a report of this schema (:data:`REPORT_SCHEMA`: an ROI document or
+    any other is refused) that carries the digest of its own bytes, of a completed
+    result whose stored rows verified, not excluded from totals, graded A to D (an
+    allow-list), and of a scenario's OWN run: ``residual_of`` present and null (a
+    residual run under a remediation option is never exposure, section 28; a report
+    without the key is refused). A forged, edited or stale report is refused. A total
+    of several reports applies this to each, and leaves out every one it refuses (the
+    owner-adopted default)."""
+    if not isinstance(report, Mapping) or report.get("schema") != REPORT_SCHEMA:
+        return False
+    if "residual_of" not in report or report["residual_of"] is not None:
+        return False
+    return stands(report) and report.get("excluded_from_totals") is False
 
 
 # ------------------------------------------------------------------ the stored rows
@@ -281,8 +296,11 @@ def standing(scenario: FinancialScenario) -> dict:
     ``excluded_from_totals`` and ``banner_reason``. Every row is checked as the report
     checks it (:func:`stored_row_failures`, the series' too), and a scenario version
     with no result is not graded. Reads rows, hashes them and runs nothing else."""
-    result = SimulationResult.objects.filter(scenario=scenario, deployment_id=scenario.deployment_id).order_by(
-        "-id").first()
+    # The scenario's own runs, as results/ serves them: a residual run under a
+    # remediation option (section 28) is never the scenario's exposure.
+    result = SimulationResult.objects.exposure_runs().filter(
+        scenario=scenario, deployment_id=scenario.deployment_id
+    ).order_by("-id").first()
     card = charts = None
     failed: list[str] = []
     if result is not None:
@@ -746,6 +764,18 @@ def build_report(result: SimulationResult) -> dict:
         summary = {"not_reported": f"refused: {result.refusal_code}"}
     units = {name: (entry or {}).get("unit") for name, entry in (result.inputs.get("parameters") or {}).items()} \
         if "input_digest" not in failed else {}
+    # A residual run under a remediation option (section 28) is marked at the top
+    # level, and is excluded from every total whatever its grade: it is the scenario
+    # as the option would leave it, never its exposure.
+    residual_of = None
+    if result.remediation_id is not None:
+        option = RemediationOption.objects.filter(pk=result.remediation_id).values_list("uuid", "option_digest").first()
+        residual_of = {
+            "option": None if option is None else str(option[0]),
+            "option_digest": None if option is None else option[1],
+            "statement": "a residual run under a remediation option: the scenario as the option would leave it, "
+            "never its exposure, and excluded from every total",
+        }
     report = {
         "schema": REPORT_SCHEMA,
         "scenario": _scenario_part(scenario, deployment_uuid),
@@ -773,8 +803,9 @@ def build_report(result: SimulationResult) -> dict:
         "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed)},
         "grade": grade,
         "banner": None if why is None else UNKNOWN_BANNER,
-        "excluded_from_totals": why is not None,
+        "excluded_from_totals": why is not None or residual_of is not None,
         "banner_reason": why,
+        "residual_of": residual_of,
         "loss_events": events,
         "parameters": _parameters(result.inputs) if "input_digest" not in failed else {
             "not_reported": f"{STORED_ROW_UNVERIFIED}: the stored inputs no longer give the run's input digest"
@@ -853,7 +884,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
         }
 
     results = []
-    for result in SimulationResult.objects.filter(scenario=scenario).order_by("id"):
+    # The scenario's own runs: a residual run (section 28) is the ROI route's.
+    for result in SimulationResult.objects.exposure_runs().filter(scenario=scenario).order_by("id"):
         card = FinancialValidityCard.objects.filter(simulation=result).first()
         receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
         results.append(
@@ -928,6 +960,7 @@ __all__ = [
     "digest_of",
     "may_be_totalled",
     "scenario_document",
+    "stands",
     "served_snapshots",
     "standing",
     "stored_row_failures",

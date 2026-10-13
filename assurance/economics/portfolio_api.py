@@ -1,5 +1,5 @@
 """The portfolio routes (Economic Exposure E5; ``docs/economics/spec-v1.md``,
-section 28; the owner's specification's ``GET /financial/portfolio``).
+section 29; the owner's specification's ``GET /financial/portfolio``).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
 its own: a fault here leaves these two routes unserved and nothing else -- not the

@@ -1,5 +1,5 @@
 """A portfolio of scenarios aggregated from their draws (Economic Exposure E5;
-``docs/economics/spec-v1.md``, section 28; the owner's specification, section 24).
+``docs/economics/spec-v1.md``, section 29; the owner's specification, section 24).
 
 Customer-level exposure is never the sum of every scenario's P90: shared causes and
 shared consequences make scenarios move together, and the same loss can be counted

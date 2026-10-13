@@ -671,7 +671,11 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-scenario",
         "deployment-economics-scenario-simulate",
         "deployment-economics-scenario-results",
-        # The portfolio (spec, section 28).
+        # The remediation option and its ROI (spec, section 28).
+        "deployment-economics-scenario-mitigations",
+        "deployment-economics-mitigation-simulate",
+        "deployment-economics-scenario-roi",
+        # The portfolio (spec, section 29).
         "deployment-economics-portfolio",
         "deployment-economics-portfolio-simulate",
     }
