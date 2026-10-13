@@ -1461,6 +1461,19 @@ class World:
         signals["scenario_roi"] = self.call(
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/roi/", "deployment-economics-scenario-roi",
         ).status_code
+        # The portfolio (E5): the deployment's scenarios totalled (201: recorded,
+        # completed or refused, every scenario not totalled named with its reason)
+        # and its report read back (200); read_everything reads it again. The
+        # scenarios' titles and every reason it names are searched like every sink.
+        portfolio_url = f"/api/assurance/deployments/{self.deployment.uuid}/economics/portfolio/"
+        signals["portfolio_simulate"] = self.call(
+            docs, "api.answers", admin, "post", portfolio_url + "simulate/", "deployment-economics-portfolio-simulate",
+            data={"seed": 7, "policy": "quick_10k", "reporting_currency": "USD", "valuation_date": "2026-10-06"},
+            format="json",
+        ).status_code
+        signals["portfolio"] = self.call(
+            docs, "api.answers", admin, "get", portfolio_url, "deployment-economics-portfolio",
+        ).status_code
         # The read routes the dashboard needs (spec, section 30): the deployment's
         # scenario versions listed (200), each with its title, which carries the
         # tenant's canaries; and a completed exposure run receipted -- signed by the
@@ -1767,6 +1780,11 @@ ROUTES.update(
         # read with none is refused 400 with its code) and a scenario's precedents.
         "deployment-economics-suggestions": _READ,
         "deployment-economics-scenario-precedents": _READ,
+        # The portfolio (E5): the totals and their report JSON, and the authored
+        # correlation group versions a portfolio names.
+        "deployment-economics-portfolio": _READ,
+        "deployment-economics-portfolio-simulate": _READ,
+        "deployment-economics-portfolio-groups": _READ,
         # Continuous financial assurance (E6, spec section 34): a run's freshness, the
         # deployment's assurance and its check, and a stale scenario's refresh.
         "deployment-economics-scenario-freshness": _READ,
@@ -2196,7 +2214,9 @@ def test_every_path_ran(observed):
         s["records"]["mitigation"],
         s["records"]["mitigation_simulate"],
         s["records"]["scenario_roi"],
-    ) == (400, 201, 200, 201, 503, 200, 201, 201, 200), s["records"]
+        s["records"]["portfolio_simulate"],
+        s["records"]["portfolio"],
+    ) == (400, 201, 200, 201, 503, 200, 201, 201, 200, 201, 200), s["records"]
     # The read routes the dashboard needs: the list read, a receipt issued and its bytes read.
     assert (s["records"]["scenario_list"], s["records"]["receipt_issued"], s["records"]["receipt_bytes"]) == (
         200, (True, None), 200,

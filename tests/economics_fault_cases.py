@@ -11,6 +11,9 @@ module do not import): ``builder``. And by
 ``tests/test_economics_remediation.py::test_a_remediation_fault_never_takes_down_a_stop``
 under ``tests.economics_broken_remediation`` (the remediation step does not import):
 ``remediation``. And by
+``tests/test_economics_portfolio.py::test_a_portfolio_fault_never_takes_down_a_stop``
+under ``tests.economics_broken_portfolio`` (the portfolio does not import):
+``portfolio``. And by
 ``tests/test_economics_feeds.py::test_a_feed_fault_never_takes_down_a_stop`` under
 ``tests.economics_broken_feeds`` (the feed fetch and its freshness rules do not
 import): ``feeds``.
@@ -112,6 +115,11 @@ def test_only_economics_is_refused():
         for tail in ("", "simulate/", "results/"):
             with pytest.raises(Resolver404):
                 resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/{tail}")
+        # The portfolio totals by the report's rule (may_be_totalled), so it is not
+        # served either; nothing else is affected.
+        for tail in ("", "simulate/", "groups/"):
+            with pytest.raises(Resolver404):
+                resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/{tail}")
         # Nor are the read routes the dashboard needs (spec, section 30): the list and
         # a receipt's signed bytes.
         for path in ("scenarios/", f"receipts/{scenario}/"):
@@ -134,6 +142,23 @@ def test_only_economics_is_refused():
         served = client.get(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{made.uuid}/events/")
         assert served.status_code == 500 and "json" not in served["Content-Type"], served.status_code
         assert "assurance.economics.report" not in sys.modules
+        return
+    if FAULT == "portfolio":
+        # The portfolio's two routes are not served; every other economics route is.
+        assert "assurance.economics.portfolio_api" not in sys.modules
+        assert "assurance.economics.portfolio" not in sys.modules
+        assert "assurance.economics.engine.portfolio" not in sys.modules
+        for tail in ("", "simulate/", "groups/"):
+            with pytest.raises(Resolver404):
+                resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/portfolio/{tail}")
+        assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
+        built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        assert built.view_name == "deployment-economics-scenario-build"
+        scenario = "00000000-0000-4000-8000-000000000000"
+        results = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/results/")
+        assert results.view_name == "deployment-economics-scenario-results"
+        health = f"/api/assurance/deployments/{deployment.uuid}/economics/data-health/"
+        assert resolve(health).view_name == "deployment-economics-data-health"
         return
     if FAULT == "feeds":
         # The data routes are served, import the feed module inside their views, and

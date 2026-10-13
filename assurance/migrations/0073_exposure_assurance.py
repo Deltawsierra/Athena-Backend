@@ -13,8 +13,7 @@
 # constraint, and that fork is the owner's to settle first. Only the closure names
 # an account (the person who asked for the refresh), nulled if the account is
 # removed (a stop); every row goes with its deployment. Numbered 0073 behind #165's
-# 0071 (merged) and #162's 0072 (in the merge queue); it depends on master's latest,
-# 0071, and is re-pointed to 0072 when #162 merges.
+# 0071 and #162's 0072 (E5, the portfolio), both merged; it depends on 0072.
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -26,7 +25,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0071_financial_source_records"),
+        ("assurance", "0072_portfolio_results"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

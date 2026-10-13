@@ -113,14 +113,14 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its twenty-four modules: E1's ten, the scenario engine's four
+    # The package and its twenty-seven modules: E1's ten, the scenario engine's four
     # (parameters, formulas, loss and parameter_set), the probabilistic engine's
     # two (distributions and simulation, which import numpy as well), the scenario
     # builder's templates, step 7b's two (twins and scenario_simulation, numpy
     # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
-    # (numpy too), step 13's remediation (no numpy), step 10's feed adapters, and
-    # step 11's catalogs and context rules.
-    assert result.stdout.strip() == "imported 27", result.stdout
+    # (numpy too), step 13's remediation (no numpy), step 10's feed adapters, step 11's
+    # catalogs and context rules, and E5's portfolio (numpy too).
+    assert result.stdout.strip() == "imported 28", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -182,6 +182,8 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         # Step 11's catalog adapters and registry, and its context rules (spec, section 31).
         "catalogs.py",
         "context.py",
+        # E5's portfolio aggregation (spec, section 33).
+        "portfolio.py",
     }
     core_importers = set()
     for path in files:
@@ -692,8 +694,10 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     models.CARD_RECORD_REFUSALS, or (a chart-series row, step 6)
     models.CHARTS_RECORD_REFUSALS, or (a remediation option row, step 13)
     models.REMEDIATION_RECORD_REFUSALS, or (a figure resting on a step-11 source, or a
-    catalog's records row, step 11) models.CONTEXT_RECORD_REFUSALS, or (a dependency map,
-    staleness or refresh row, E6) models.ASSURANCE_RECORD_REFUSALS; every code the money engine raises is in
+    catalog's records row, step 11) models.CONTEXT_RECORD_REFUSALS, or (a portfolio row or
+    a correlation group version, E5) models.PORTFOLIO_RECORD_REFUSALS, or (a dependency
+    map, staleness or refresh row, E6) models.ASSURANCE_RECORD_REFUSALS; every code the
+    money engine raises is in
     money.REFUSALS, and every code the scenario engine raises as its own is in
     parameters.REFUSALS; and every published code is one something gives. A code
     two tables publish means the same in both, and the scenario engine publishes
@@ -703,6 +707,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
         CARD_RECORD_REFUSALS,
         CHARTS_RECORD_REFUSALS,
         CONTEXT_RECORD_REFUSALS,
+        PORTFOLIO_RECORD_REFUSALS,
         REMEDIATION_RECORD_REFUSALS,
         SIMULATION_RECORD_REFUSALS,
     )
@@ -721,7 +726,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     published = (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
-        | set(CONTEXT_RECORD_REFUSALS) | set(ASSURANCE_RECORD_REFUSALS)
+        | set(CONTEXT_RECORD_REFUSALS) | set(PORTFOLIO_RECORD_REFUSALS) | set(ASSURANCE_RECORD_REFUSALS)
     )
     assert not set(SIMULATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
@@ -741,10 +746,15 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
     )
-    assert not set(ASSURANCE_RECORD_REFUSALS) & (
+    assert not set(PORTFOLIO_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
         | set(CONTEXT_RECORD_REFUSALS)
+    )
+    assert not set(ASSURANCE_RECORD_REFUSALS) & (
+        set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
+        | set(CONTEXT_RECORD_REFUSALS) | set(PORTFOLIO_RECORD_REFUSALS)
     )
     assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):
@@ -807,7 +817,8 @@ def test_the_economics_routes_are_imported_guarded():
     """Read, not run: assurance/urls.py imports each economics route module -- the
     parameter-set routes, the scenario builder's (section 24), the scenario
     endpoints with the report (section 27), the remediation option with its ROI
-    (section 28) and the data-health route (section 29) -- inside a try of its own whose handler
+    (section 28), the data-health route (section 29) and the portfolio's (section 33) --
+    inside a try of its own whose handler
     logs and serves none of that module's routes, never re-raising. A fault in one
     leaves the others served."""
     tree = ast.parse((REPO / "assurance" / "urls.py").read_text(encoding="utf-8"))
@@ -823,7 +834,8 @@ def test_the_economics_routes_are_imported_guarded():
         inner.module for node in guarded for inner in node.body if isinstance(inner, ast.ImportFrom)
     )
     assert modules == [
-        "economics.api", "economics.health_api", "economics.remediation_api", "economics.report_api",
+        "economics.api", "economics.health_api", "economics.portfolio_api", "economics.remediation_api",
+        "economics.report_api",
         "economics.scenario_api",
     ], (
         "an economics route module is imported unguarded"
@@ -901,7 +913,8 @@ def test_nothing_but_the_models_registration_imports_economics():
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
     # The scenario step's route module, (section 24) the scenario builder's,
     # (section 27, step 6) the scenario endpoints with the report, (section 28, step
-    # 13) the remediation option with its ROI, and (section 29, step 10) data health.
+    # 13) the remediation option with its ROI, (section 29, step 10) data health, and
+    # (section 33, E5) the portfolio's.
     assert [m for m in mounted if m.startswith("assurance.economics")] == [
         "assurance.economics.api",
         "assurance.economics.api.urlpatterns",
@@ -913,6 +926,8 @@ def test_nothing_but_the_models_registration_imports_economics():
         "assurance.economics.remediation_api.urlpatterns",
         "assurance.economics.health_api",
         "assurance.economics.health_api.urlpatterns",
+        "assurance.economics.portfolio_api",
+        "assurance.economics.portfolio_api.urlpatterns",
     ]
 
 

@@ -631,6 +631,41 @@ def _economics_scenario_simulate():
     )
 
 
+def _economics_portfolio_simulate():
+    from assurance.economics import simulation_service, validity_service
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    scenario = stored(dep, _admin())
+    # A scenario simulated and graded, so the portfolio totals it (draws and all).
+    result = simulation_service.simulate_scenario(scenario, seed=7, draws=2_000).result
+    validity_service.issue_card(result)
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + "economics/portfolio/simulate/",
+        {"seed": 7, "policy": "quick_10k", "reporting_currency": "USD", "valuation_date": "2026-10-06"},
+        format="json",
+    )
+
+
+def _economics_portfolio_groups():
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    author = _admin()
+    first, second = stored(dep, author, set_key="group-a"), stored(dep, author, set_key="group-b")
+    # The set-up's own writes (assets and findings the scenarios rest on) are decision
+    # inputs: the decision is brought up to date before the group is recorded, which
+    # must leave it where it is.
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + "economics/portfolio/groups/",
+        {"group": "provider", "strength": "0.5", "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "one provider",
+         "scenarios": sorted([str(first.uuid), str(second.uuid)])},
+        format="json",
+    )
+
+
 def _economics_trust_raise_approval():
     """Another admin's request to authoritative, approved by the caller's admin."""
     from assurance.economics.models import FinancialSourceTrustRaise
@@ -817,6 +852,16 @@ CANNOT_MOVE = {
         "Validity Cards, all economics records; the decision reads no economics record. With no economics run "
         "slot free it is 503 economics_capacity and writes nothing at all",
         _economics_mitigation_simulate,
+    ),
+    ("PortfolioSimulateView", "post", "post"): (
+        "totals an Economic Exposure portfolio of the deployment's scenarios from their draws, an economics "
+        "record; the decision reads no economics record",
+        _economics_portfolio_simulate,
+    ),
+    ("PortfolioGroupsView", "post", "post"): (
+        "records an authored version of the deployment's correlation group, an economics record; the decision "
+        "reads no economics record",
+        _economics_portfolio_groups,
     ),
     ("AssuranceView", "post", "post"): (
         "records each stale Economic Exposure run of the deployment with the refresh it owes, economics records; "

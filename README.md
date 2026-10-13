@@ -801,6 +801,52 @@ SEC's declared `ECONOMICS_SEC_USER_AGENT`. The fixtures in
 fictitious companies and amounts; the enforcement listings' endpoints and formats are
 assumptions a recording confirms.
 
+### The portfolio
+
+A sixth route module (`assurance/economics/portfolio_api.py`), imported guarded in a
+guard of its own, totals a deployment's scenarios from their draws (Economic Exposure
+E5, `docs/economics/spec-v1.md` section 33):
+
+- `POST /api/assurance/deployments/<uuid>/economics/portfolio/simulate/`:
+  `{"seed": ..., "policy": "quick_10k", "reporting_currency": "USD",
+  "valuation_date": "2026-10-06", "normalization": {...}, "groups": [...]}` takes each
+  current scenario version's latest exposure run that `may_be_totalled` admits (never
+  a remediation option's residual run), lists every other with its reason (Unknown,
+  refused, unverified, not graded, never simulated, not annual, superseded, inputs
+  changed, or a currency that cannot be normalised), draws the included scenarios
+  again on one seed with aligned years, scenarios in one correlation group (two at
+  least, a strength from 0.000001 to 10 with a source type) sharing one Gamma driver
+  of their annual rates, counts a loss event two scenarios share (one SPINE effect, or
+  step 5's key and window) once a year, at the largest of their losses of it that
+  year, normalises every draw into the reporting currency at the valuation date
+  before summing, and records the result (idempotent: the same inputs return it, 200;
+  a new one is 201); an admin or analyst only. Its `groups` name recorded group
+  versions by uuid, never a group stated in the request;
+- `POST /api/assurance/deployments/<uuid>/economics/portfolio/groups/`: records a
+  version of one of the deployment's correlation groups (key, strength, source type,
+  evidence, two scenario versions at least), authored by the caller, an admin or
+  analyst; `GET` lists every version with its author and time;
+- `GET /api/assurance/deployments/<uuid>/economics/portfolio/?result=<uuid>`: the
+  portfolio's report (else the latest), `mythos.economics.portfolio-report/v1`: P10,
+  P50, P90, mean, expected annual loss, severe-but-plausible and the expected
+  shortfall per line, each included scenario's own figures over the same years (the
+  portfolio is at least each), each scenario's contribution to the mean and to the
+  tail (summing to them exactly), the groups, the shared events, every exclusion with
+  its reason, the grade (no higher than the lowest included scenario, lower for an
+  expert's correlation strength; none for a refused portfolio) and the banner.
+
+The report is built from the stored rows only and is deterministic, with its own
+digest; every stored row it rests on, each included scenario's result, card and
+series among them, and the record's binding to its inputs, is checked first, and a
+failure is served as a refusal. A source whose licence forbids redistributing its raw
+data has its rates and index values withheld from the report, its provenance kept. No
+transaction or lock is held during the draws, and the simulate route runs only in a
+free economics run slot (`@capacity.capped`): when none is free it answers 503
+`economics_capacity` with `Retry-After` at once, never waiting.
+Access, tenancy, strict JSON, 64 KiB, the 503 while the currency table cannot be read
+and the one 120 s deadline are step 6's. No route here is a stop, and a fault in this
+module leaves only these three unserved.
+
 ## When a dependency fails
 
 `tests/test_no_fault_makes_a_decision_ready_or_holds_a_stop.py` makes each

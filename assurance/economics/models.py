@@ -135,6 +135,21 @@ CONTEXT_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(CONTEXT_RECORD_REFUSALS)
+#: The codes a stored portfolio result, or a correlation group version, is refused
+#: with on save (spec, section 33).
+PORTFOLIO_RECORD_REFUSALS = {
+    "portfolio_record_malformed": (
+        "a portfolio result names its seed (a whole number from 0 to 2^64 - 1, as text), its draws, its reporting "
+        "currency and valuation date, its digests, and either a completed record of its own inputs, seed and draws "
+        "or a refusal code, never both; no number in it is a float"
+    ),
+    "group_record_malformed": (
+        "a correlation group version names a key of 1 to 60 lowercase letters, digits, '-' and '_', a strength from "
+        "0.000001 to 10 in its one spelling, a source type, its evidence (1 to 500 characters), and 2 to 50 of its "
+        "deployment's scenario versions, in order, each once"
+    ),
+}
+_REFUSAL_TEXT.update(PORTFOLIO_RECORD_REFUSALS)
 #: The codes a continuous-assurance row is refused with on save (spec, section 34):
 #: a run's dependency map, a staleness (a refresh obligation) and its closure.
 ASSURANCE_RECORD_REFUSALS = {
@@ -3624,6 +3639,238 @@ class ExposureRefresh(_AppendOnly):
 
     def __str__(self) -> str:
         return f"refresh of staleness {self.staleness_id}: {self.spine_outcome}"
+
+
+# ---------------------------------------------------------------------------
+# CorrelationGroup -- one authored version of one correlation group (E5)
+# ---------------------------------------------------------------------------
+
+#: A correlation group's key; its strength's floor and ceiling (the portfolio
+#: engine's ``STRENGTH_MIN`` and ``STRENGTH_MAX``, held equal by a test: the engine
+#: imports numpy, so it is not imported here); how many scenario versions it names;
+#: and its evidence's longest.
+GROUP_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,59}")
+GROUP_STRENGTH_MIN = Decimal("0.000001")
+GROUP_STRENGTH_MAX = Decimal(10)
+GROUP_MAX_SCENARIOS = 50
+GROUP_MAX_EVIDENCE = 500
+_SCENARIO_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+class CorrelationGroup(_AppendOnly):
+    """One version of one correlation group of a deployment (spec, section 33.3; the
+    section-28 audit's T4): its key, its STRENGTH (the variance of the group's
+    common driver, as decimal text in its one spelling), the source that strength
+    rests on and its evidence, and the scenario versions in it, recorded by an
+    account at a time. A portfolio names the versions it draws with, by uuid, and
+    records each with its author and time: a group is never supplied anonymously in
+    a portfolio request.
+
+    Append-only like every economics record: a changed group is a new version of its
+    key (1, 2, ...: ``uq_econ_group_version``), never an edit. It names its author as
+    a scenario does: the account, nulled if the account is removed (a stop), and the
+    account's own username, kept. It goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    key = models.CharField(max_length=60)
+    # One more than its key's latest in its deployment, assigned on save.
+    version = models.PositiveIntegerField(editable=False)
+    strength = models.CharField(max_length=32)
+    source_type = models.CharField(max_length=32, choices=[(t, t) for t in _SOURCE_TYPE_CODES])
+    evidence_ref = models.TextField()
+    # The scenario versions' uuids, in order, each once.
+    scenarios = models.JSONField()
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_correlation_groups_authored",
+    )
+    author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "key", "version"]
+        constraints = [
+            models.UniqueConstraint(fields=["deployment", "key", "version"], name="uq_econ_group_version"),
+        ]
+
+    def as_dict(self) -> dict:
+        """The group version as a portfolio's inputs record it."""
+        return {
+            "uuid": str(self.uuid),
+            "group": self.key,
+            "version": self.version,
+            "strength": self.strength,
+            "source_type": self.source_type,
+            "evidence_ref": self.evidence_ref,
+            "scenarios": list(self.scenarios),
+            "author": self.author_username or None,
+            "recorded_at": self.recorded_at.isoformat(),
+        }
+
+    def check_new(self) -> None:
+        deployments = self._meta.get_field("deployment").related_model._base_manager
+        if not deployments.filter(pk=self.deployment_id).exists():
+            raise EconomicsRefused("cross_tenant_reference", "the group's deployment is not recorded")
+        if not isinstance(self.key, str) or not GROUP_KEY.fullmatch(self.key):
+            raise EconomicsRefused("group_record_malformed", f"key {self.key!r}")
+        try:
+            strength = money.parse_decimal(self.strength, "strength")
+        except money.MoneyRefused:
+            strength = None
+        if strength is None or money.decimal_text(strength) != self.strength or not (
+            GROUP_STRENGTH_MIN <= strength <= GROUP_STRENGTH_MAX
+        ):
+            raise EconomicsRefused("group_record_malformed", f"strength {self.strength!r}")
+        if self.source_type not in _SOURCE_TYPE_CODES:
+            raise EconomicsRefused("group_record_malformed", f"source type {self.source_type!r}")
+        if not isinstance(self.evidence_ref, str) or not self.evidence_ref.strip() or len(
+            self.evidence_ref
+        ) > GROUP_MAX_EVIDENCE:
+            raise EconomicsRefused("group_record_malformed", "evidence_ref")
+        named = self.scenarios
+        if (
+            not isinstance(named, list) or not 2 <= len(named) <= GROUP_MAX_SCENARIOS
+            or any(not isinstance(s, str) or not _SCENARIO_UUID.fullmatch(s) for s in named)
+            or named != sorted(set(named))
+        ):
+            raise EconomicsRefused("group_record_malformed", "scenarios")
+        held = FinancialScenario._base_manager.filter(deployment_id=self.deployment_id, uuid__in=named).count()
+        if held != len(named):
+            raise EconomicsRefused("cross_tenant_reference", "a scenario the group names is not its deployment's")
+        latest = CorrelationGroup._base_manager.filter(deployment_id=self.deployment_id, key=self.key).aggregate(
+            latest=Max("version")
+        )["latest"]
+        self.version = (latest or 0) + 1
+        self.author_username = _signed_in(self.author).username
+
+    def __str__(self) -> str:
+        return f"correlation group {self.key} v{self.version}"
+
+
+# ---------------------------------------------------------------------------
+# PortfolioResult -- one deployment's scenarios aggregated from their draws (E5)
+# ---------------------------------------------------------------------------
+
+
+class PortfolioResult(_AppendOnly):
+    """One portfolio of a deployment's scenarios, aggregated from their draws (spec,
+    section 33): the seed and the draws; the canonical inputs -- each scenario
+    included with its stored result's digests, its grade and its normalisation into
+    the reporting currency, each scenario excluded with its reason, the correlation
+    groups with their strengths and sources, the shared events counted once, every
+    version and limit -- and their digest; the record of the figures and its digest,
+    or the refusal's code.
+
+    Append-only like every economics record, and IDEMPOTENT on its inputs: one row
+    per deployment, input digest, seed and draws (``uq_econ_portfolio_inputs``); the
+    same inputs return the row already recorded and never draw a second. Every check
+    runs before the transaction, which only inserts. Nothing in it is a float, and
+    both digests are recomputed on save (``portfolio_record_malformed``,
+    ``digest_mismatch``). No account column: removing an operator, a stop, never
+    writes it, and it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessor: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    # 0 to 2^64 - 1, as text: wider than a signed 64-bit column, and never a double.
+    seed = models.CharField(max_length=20)
+    draws = models.PositiveIntegerField()
+    severe_percentile = models.CharField(max_length=32)
+    reporting_currency = models.CharField(max_length=3)
+    valuation_date = models.DateField()
+    input_digest = models.CharField(max_length=71)
+    result_digest = models.CharField(max_length=71, blank=True)
+    status = models.CharField(max_length=16, choices=[(s, s) for s in SIMULATION_STATUSES])
+    refusal_code = models.CharField(max_length=64, blank=True)
+    refusal_detail = models.TextField(blank=True)
+    # The canonical inputs the input digest is taken over, kept whole.
+    inputs = models.JSONField()
+    # The whole record the result digest is taken over; null for a refusal.
+    record = models.JSONField(null=True, blank=True)
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField()
+    duration_ms = models.PositiveIntegerField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deployment", "input_digest", "seed", "draws"], name="uq_econ_portfolio_inputs"
+            ),
+            models.CheckConstraint(condition=Q(status__in=SIMULATION_STATUSES), name="ck_econ_portfolio_status"),
+            models.CheckConstraint(
+                condition=(Q(status=SIMULATION_COMPLETED) & ~Q(result_digest="") & Q(refusal_code=""))
+                | (Q(status=SIMULATION_REFUSED) & Q(result_digest="") & ~Q(refusal_code="")),
+                name="ck_econ_portfolio_outcome",
+            ),
+        ]
+
+    def check_new(self) -> None:
+        deployments = self._meta.get_field("deployment").related_model._base_manager
+        tenant = list(deployments.filter(pk=self.deployment_id).values_list("uuid", flat=True))
+        if len(tenant) != 1:
+            raise EconomicsRefused("cross_tenant_reference", "the portfolio's deployment is not recorded")
+        if not isinstance(self.seed, str) or not _SEED.fullmatch(self.seed) or int(self.seed) > _MAX_SEED:
+            raise EconomicsRefused("portfolio_record_malformed", f"seed {self.seed!r}")
+        if type(self.draws) is not int or self.draws < 1:
+            raise EconomicsRefused("portfolio_record_malformed", f"draws {self.draws!r}")
+        _require_text(severe_percentile=self.severe_percentile)
+        _engine_refusal(lambda: money.check_reporting_currency(self.reporting_currency, "reporting currency"))
+        if self.valuation_date is None:
+            raise EconomicsRefused("portfolio_record_malformed", "the portfolio has no valuation date")
+        _refuse(governance.snapshot_hash_refusal(self.input_digest), detail="input_digest")
+        for name, document in (("inputs", self.inputs), ("record", self.record)):
+            if _has_float(document):
+                raise EconomicsRefused("portfolio_record_malformed", f"{name} holds a float")
+        if not isinstance(self.inputs, dict) or self.inputs.get("deployment") != str(tenant[0]):
+            raise EconomicsRefused("portfolio_record_malformed", "the inputs name another deployment")
+        held = (self.inputs.get("reporting_currency"), self.inputs.get("valuation_date"),
+                self.inputs.get("severe_percentile"))
+        if held != (self.reporting_currency, self.valuation_date.isoformat(), self.severe_percentile):
+            raise EconomicsRefused("portfolio_record_malformed", "the inputs are not this row's")
+        if canonical_digest(self.inputs) != self.input_digest:
+            raise EconomicsRefused("digest_mismatch", "input_digest")
+        if self.status == SIMULATION_COMPLETED:
+            _refuse(governance.snapshot_hash_refusal(self.result_digest), detail="result_digest")
+            if self.refusal_code or not isinstance(self.record, dict):
+                raise EconomicsRefused("portfolio_record_malformed", "a completed portfolio holds a record, no refusal")
+            if canonical_digest(self.record) != self.result_digest:
+                raise EconomicsRefused("digest_mismatch", "result_digest")
+            named = (self.record.get("input_digest"), self.record.get("seed"), self.record.get("simulations"),
+                     self.record.get("reporting_currency"))
+            if named != (self.input_digest, self.seed, self.draws, self.reporting_currency):
+                raise EconomicsRefused("portfolio_record_malformed", "the record is not this portfolio's")
+        elif self.status == SIMULATION_REFUSED:
+            if not self.refusal_code or self.result_digest or self.record is not None:
+                raise EconomicsRefused("portfolio_record_malformed", "a refused portfolio holds a code and no figures")
+        else:
+            raise EconomicsRefused("portfolio_record_malformed", f"status {self.status!r}")
+        if self.started_at is None or self.finished_at is None or self.finished_at < self.started_at:
+            raise EconomicsRefused("date_inversion", "a portfolio finishes after it starts")
+        if PortfolioResult._base_manager.filter(
+            deployment_id=self.deployment_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
+        ).exists():
+            raise EconomicsRefused("duplicate_id", "a portfolio of the same inputs, seed and draws is recorded")
+        self._portfolio_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this portfolio, whose :meth:`check_new` ran on exactly these values
+        just before, inside the caller's transaction: an INSERT and nothing read (as
+        :meth:`SimulationResult.insert_checked`)."""
+        if not self._state.adding or getattr(self, "_portfolio_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A portfolio result is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"portfolio of deployment {self.deployment_id}, seed {self.seed}, {self.draws} draws: {self.status}"
 
 
 # ---------------------------------------------------------------------------
