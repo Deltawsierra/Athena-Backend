@@ -900,7 +900,9 @@ def test_r1_h2_no_version_is_recorded_authoritative_but_through_a_second_admins_
     """P1: a plain create at authoritative was recorded and the gate accepted it, with
     no raise. P2: so was a snapshot file stating authoritative. Both are refused
     (``second_person_required``); the loader's refusal points to the raise route. A
-    lower tier is still recorded as stated, and approve() still records one."""
+    lower tier a FILE states is not recorded (section 28 hardening, T2a: spec, section
+    35.2); a feed's answer, registered with its registry line's terms, is, and
+    approve() still records one."""
     with pytest.raises(EconomicsRefused) as refused:
         _source(trust_tier="authoritative")
     assert refused.value.code == "second_person_required"
@@ -911,7 +913,13 @@ def test_r1_h2_no_version_is_recorded_authoritative_but_through_a_second_admins_
     assert "the snapshot states trust tier authoritative" in refused.value.detail
     assert "trust-raises" in refused.value.detail
     assert not FinancialSource.objects.exists()
-    stated = snapshots.register_snapshot(_snapshot_copy(tmp_path, trust_tier="benchmark"))
+    # A lower tier a FILE states is not recorded (spec, section 35.2): it registers
+    # unverified, at the registry's licence for its key; the tier comes from a raise.
+    filed = snapshots.register_snapshot(_snapshot_copy(tmp_path, trust_tier="benchmark", source_key="filed-copy"))
+    assert (filed.version, filed.trust_tier, filed.license_class) == (1, "unverified", "unreviewed")
+    # A feed's answer is registered with the terms its reviewed registry line gives
+    # (snapshots.register), here a benchmark at an open licence.
+    stated, _ = snapshots.register(snapshots.read_snapshot(_snapshot_copy(tmp_path, trust_tier="benchmark")))
     assert (stated.version, stated.trust_tier) == (1, "benchmark")
     pending = _pending(people, stated)
     assert _post(_client(people["bea"]), _approve_url(pending)).status_code == 200
@@ -933,7 +941,9 @@ def test_r1_h3_a_raised_version_reads_the_observations_its_snapshot_registered(p
     from assurance.economics.engine.money import Money
     from assurance.economics.engine.normalization import NormalizationPolicy, normalize
 
-    v1 = snapshots.register_snapshot(_snapshot_copy(tmp_path))
+    # Registered with the terms a reviewed registry line gives (an open licence): a
+    # snapshot FILE's own statement is not read (spec, section 35.2).
+    v1, _ = snapshots.register(snapshots.read_snapshot(_snapshot_copy(tmp_path)))
     counts = (v1.fx_observations.count(), v1.cost_index_observations.count())
     assert counts == (18, 7)
     assert _ask(_client(people["ada"]), v1, "benchmark").status_code == 201
@@ -1085,9 +1095,14 @@ def _clock_at(monkeypatch, instant):
 
 def _requested_at(raised, instant):
     """The request recorded at ``instant``: its requested_at moved past the
-    append-only guard, as only a test does."""
+    append-only guard, as only a test does. The fixtures' accounts held their roles
+    then too, as they did when the request was really made: a role granted after
+    the request is not a second person's (spec, section 35.6)."""
+    from datetime import timedelta
+
     uuid = raised["uuid"] if isinstance(raised, dict) else raised.uuid
     assert _raises()._base_manager.filter(uuid=uuid).update(requested_at=instant) == 1
+    User.objects.filter(role_granted_at__gte=instant).update(role_granted_at=instant - timedelta(minutes=1))
 
 
 def test_r1_expiry_is_30_days_after_the_request_to_the_instant():

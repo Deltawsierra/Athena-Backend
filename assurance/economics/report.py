@@ -52,6 +52,8 @@ and builder modules it reads are imported when a report is built, never at load.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 from collections.abc import Mapping
@@ -127,7 +129,10 @@ STORED_ROW_UNVERIFIED = "stored_row_unverified"
 RESULT_CHECKS = ("input_digest", "result_digest")
 CARD_CHECKS = ("card_digest", "card_grade", "card_result", "sensitivity_digest")
 CHARTS_CHECKS = ("charts_digest", "charts_result")
-INTEGRITY_CHECKS = RESULT_CHECKS + CARD_CHECKS + CHARTS_CHECKS
+#: Where a receipt is recorded for the result (section 28 hardening, T5; spec,
+#: section 35): the signed document binds the stored rows (:func:`receipt_binds`).
+RECEIPT_CHECKS = ("receipt_binding",)
+INTEGRITY_CHECKS = RESULT_CHECKS + CARD_CHECKS + CHARTS_CHECKS + RECEIPT_CHECKS
 #: A line's figures, as the report names them (the run's record names the expected
 #: annual loss ``expected_annual_exposure``).
 FIGURES = ("p10", "p50", "p90", "mean", "expected_annual_loss", "severe_plausible")
@@ -276,23 +281,94 @@ def _charts_failures(row: SimulationCharts | None, result: SimulationResult, sce
     return failed
 
 
+def receipt_binds(
+    receipt: FinancialExposureReceipt, card: FinancialValidityCard | None, result: SimulationResult,
+    scenario: FinancialScenario,
+) -> bool:
+    """Whether the receipt recorded for ``result`` binds the stored rows it is served
+    with (section 28 hardening, T5; spec, section 35). Plain hashing and comparison:
+    no keyring, no engine, no signature check (``receipt_service.verify_stored_receipt``
+    checks the signature). The stored document is exactly the payload its envelope
+    carries; it names this result's scenario and tenant, and ``card``, by the digest
+    the card's row records (whose own document gives it: ``card_digest``); its seed,
+    draws and parameter-set digest are the result's; and its six figures are the
+    result's record's, at the currency's minor unit. A record rewritten past the
+    ORM with its digest, and the card's reproduction with the card's digest, no
+    longer match what was signed: the result is served as a refusal
+    (``stored_row_unverified``), never as a number."""
+    from .receipt_service import ReceiptRefused, receipt_figures
+
+    try:
+        document = receipt.document
+        payload = json.loads(base64.b64decode(receipt.envelope["payload"], validate=True).decode("utf-8"))
+        if not isinstance(document, dict) or payload != document:
+            return False
+        if card is None or (receipt.simulation_id, receipt.card_id, receipt.scenario_id, receipt.deployment_id) != (
+            result.pk, card.pk, result.scenario_id, result.deployment_id
+        ):
+            return False
+        tenant = Deployment.objects.filter(pk=result.deployment_id).values_list("uuid", flat=True).first()
+        if (document.get("scenario_id"), document.get("tenant_id")) != (str(scenario.uuid), str(tenant)):
+            return False
+        if (document.get("validity_card") or {}).get("digest") != card.card_digest:
+            return False
+        signed = document.get("simulation") or {}
+        if (signed.get("seed"), signed.get("draws"), signed.get("parameter_set_digest")) != (
+            int(result.seed), result.draws, result.input_digest
+        ):
+            return False
+        figures = receipt_figures(result)
+        held = document.get("result") or {}
+        if held.get("reporting_currency") != result.record.get("reporting_currency"):
+            return False
+        return {name: (held.get(name) or {}).get("amount") for name in figures} == figures
+    except (ReceiptRefused, KeyError, TypeError, ValueError, AttributeError, ArithmeticError, binascii.Error):
+        return False
+
+
+def _receipt_failures(receipt, card, result: SimulationResult, scenario: FinancialScenario) -> list[str]:
+    if receipt is None:
+        return []
+    return [] if receipt_binds(receipt, card, result, scenario) else ["receipt_binding"]
+
+
+#: :func:`stored_row_failures` reads the result's receipt itself unless one is passed.
+_READ_IT = object()
+
+
 def stored_row_failures(
     result: SimulationResult,
     card: FinancialValidityCard | None,
     charts: SimulationCharts | None,
     scenario: FinancialScenario,
+    receipt=_READ_IT,
 ) -> list[str]:
     """The checks of :data:`INTEGRITY_CHECKS` that the stored rows of ``result`` fail,
-    in order (none: every row is as recorded). Plain hashing: no engine, no numpy."""
-    return _result_failures(result) + _card_failures(card, result) + _charts_failures(charts, result, scenario)
+    in order (none: every row is as recorded). Plain hashing: no engine, no numpy.
+    ``receipt``: the result's recorded receipt, or ``None`` for none; read here when
+    not passed."""
+    if receipt is _READ_IT:
+        receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
+    return (
+        _result_failures(result)
+        + _card_failures(card, result)
+        + _charts_failures(charts, result, scenario)
+        + _receipt_failures(receipt, card, result, scenario)
+    )
 
 
 def verified_grade(card: FinancialValidityCard | None, result: SimulationResult) -> str | None:
     """The grade of ``card``, from its DOCUMENT, where the card and ``result`` verify
-    (:func:`stored_row_failures`); ``None`` otherwise: a card that fails a check counts
-    as no card."""
+    (:func:`stored_row_failures`), and where a receipt is recorded for the result, it
+    binds them (:func:`receipt_binds`); ``None`` otherwise: a card that fails a check
+    counts as no card."""
     if card is None or _result_failures(result) or _card_failures(card, result):
         return None
+    receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
+    if receipt is not None:
+        scenario = FinancialScenario.objects.filter(pk=result.scenario_id).first()
+        if scenario is None or not receipt_binds(receipt, card, result, scenario):
+            return None
     return card.card["confidence_grade"]
 
 
@@ -805,8 +881,10 @@ def build_report(result: SimulationResult) -> dict:
     receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
     charts = SimulationCharts.objects.filter(simulation=result).first()
     # Every stored row checked before it is served (review round 1, MEDIUM-1).
-    failed = stored_row_failures(result, card, charts, scenario)
-    card_unverified = card is not None and any(check in CARD_CHECKS for check in failed)
+    failed = stored_row_failures(result, card, charts, scenario, receipt)
+    # A receipt that no longer binds the rows leaves the card unverified too: the
+    # card, the record, or both, are not what was signed.
+    card_unverified = card is not None and any(check in CARD_CHECKS + RECEIPT_CHECKS for check in failed)
     if card_unverified:
         card = None  # a card that fails a check counts as no card
     if any(check in CHARTS_CHECKS for check in failed):
@@ -1065,6 +1143,7 @@ __all__ = [
     "NO_RESULT",
     "REPORT_SCHEMA",
     "REPORT_SCHEMAS",
+    "RECEIPT_CHECKS",
     "REPORT_SCHEMA_V1",
     "SCENARIO_SCHEMA",
     "STORED_ROW_UNVERIFIED",
@@ -1080,6 +1159,7 @@ __all__ = [
     "may_be_totalled",
     "scenario_document",
     "scenario_entry",
+    "receipt_binds",
     "stands",
     "served_snapshots",
     "standing",

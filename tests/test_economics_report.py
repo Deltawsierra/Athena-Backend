@@ -71,6 +71,7 @@ from assurance.economics.models import (
     canonical_digest,
 )
 from assurance.models import Asset, Deployment, Finding
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_scenarios import _entry
 
 pytestmark = pytest.mark.django_db
@@ -376,6 +377,8 @@ def test_a_receipt_asked_for_is_signed_and_referenced(deployment, people, monkey
     monkeypatch.setattr(receipt_service, "engine_keyring", lambda: ring)
     monkeypatch.setattr(receipt_service, "engine_signer", lambda document: core.sign_receipt(document, key))
     scenario = stored(deployment, people["analyst"])
+    # The human review a signed receipt needs (spec, section 35.4).
+    approve_for_receipt(scenario, people["admin"])
     response = _simulate(_client(people["analyst"]), deployment, scenario, {"seed": 7, "policy": QUICK,
                                                                            "receipt": True})
     assert response.status_code == 201, response.content

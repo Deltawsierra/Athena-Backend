@@ -45,6 +45,11 @@ TRUST_RAISE_REASON_MAX = 2000
 #: never approved; it is requested again.
 TRUST_RAISE_EXPIRES_AFTER = timedelta(days=30)
 
+#: How long a sensitive override counts once it is in force (spec, section 35): from
+#: its request, to the instant. Past it the override is ``override_expired`` and
+#: counts for nothing; it is requested again.
+OVERRIDE_EXPIRES_AFTER = timedelta(days=30)
+
 #: What each refusal code means, published beside it.
 REFUSALS: Mapping[str, str] = MappingProxyType(
     {
@@ -137,6 +142,22 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "source_not_authoritative": (
             "an FX or cost-index source behind a production run's receipt is trusted as authoritative (the official "
             "publisher, raised by two admins): a lower tier may feed a run, never a production receipt"
+        ),
+        # Section 28 hardening (spec, section 35).
+        "approver_role_not_independent": (
+            "the approver's role was granted by the person who asked for this (the requester, or an author of the "
+            "scenario), by the approver themselves, or after it was asked for: a second person is someone who held "
+            "the role independently before the request"
+        ),
+        "override_expired": (
+            f"an override is in force for {OVERRIDE_EXPIRES_AFTER.days} days from its request and no longer: "
+            "request it again"
+        ),
+        "override_revoked": "the override was revoked: it is not in force, and a revocation is never undone",
+        "snapshot_rows_mismatch": (
+            "a source version's stored observation rows no longer give the digests recorded when it was "
+            "registered (a row rewritten, added or removed past the records' rules): the version is demoted, and "
+            "no run uses it"
         ),
     }
 )
@@ -258,6 +279,54 @@ def override_refusal(requester: Person, approved_by: Iterable[Person]) -> str | 
             distinct.append(person)
     if len(distinct) < REQUIRED_OVERRIDE_APPROVERS:
         return "override_needs_two_approvers"
+    return None
+
+
+def override_in_force_refusal(
+    requester: Person, approved_by: Iterable[Person], *, requested_at, revoked: bool, now
+) -> str | None:
+    """Whether an override counts NOW (spec, section 35): ``None`` only while it is in
+    force. A revocation is final (``override_revoked``); an override counts for
+    :data:`OVERRIDE_EXPIRES_AFTER` from its request and no longer, to the instant,
+    by the service's own clock (``override_expired``; an override with no request
+    time counts for nothing); and it needs its two approvers
+    (:func:`override_refusal`)."""
+    if revoked is not False:
+        return "override_revoked"
+    if requested_at is None or now >= requested_at + OVERRIDE_EXPIRES_AFTER:
+        return "override_expired"
+    return override_refusal(requester, approved_by)
+
+
+#: Who granted an account the role it holds, and when, as the account's stored row
+#: records it (``accounts.CustomUser.role_granted_at`` / ``role_granted_by``): a
+#: promotion records it, a demotion never does.
+@dataclass(frozen=True)
+class RoleGrant:
+    at: object = None
+    by: Person | None = None
+
+
+def role_grant_refusal(
+    grant: RoleGrant | None, *, asked_by: Iterable[Person], approver: Person, asked_at
+) -> str | None:
+    """Whether an approver whose role was granted as ``grant`` records may approve
+    something ``asked_by`` asked for at ``asked_at`` (the T9b rule, spec section 35).
+
+    Refused (``approver_role_not_independent``) where the grant was made by one of
+    ``asked_by`` or by the approver themselves (matched on the account and the
+    username, as every separation rule here), or at or after ``asked_at``: a second
+    person held the role independently before the request. An account whose grant
+    is not recorded (``grant`` is ``None``, or records no instant) held its role
+    before grants were recorded, and is not refused by this rule. It reads only who
+    APPROVES: a demotion, a deactivation or a removal is never refused by it."""
+    if grant is None or grant.at is None:
+        return None
+    by = grant.by or Person()
+    if by.named and (same_person(by, approver) or any(same_person(by, person) for person in asked_by)):
+        return "approver_role_not_independent"
+    if asked_at is not None and grant.at >= asked_at:
+        return "approver_role_not_independent"
     return None
 
 
@@ -400,6 +469,19 @@ def trust_raise_requester_refusal(requester_is_admin: bool) -> str | None:
 
 
 _SNAPSHOT_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def observation_rows_refusal(rows_hold_their_digests: bool, found: str, recorded: Iterable[str]) -> str | None:
+    """Whether a source version's stored observation rows are as it was registered
+    with (section 28 hardening, T2c; spec, section 35.3): each row gives its own
+    digest (``rows_hold_their_digests``), and ``found``, the digest of the rows read
+    now, is every digest the version and its holder ``recorded`` (an empty one
+    records nothing). Otherwise ``snapshot_rows_mismatch``: the version is demoted."""
+    if rows_hold_their_digests is not True:
+        return "snapshot_rows_mismatch"
+    if any(digest and digest != found for digest in recorded):
+        return "snapshot_rows_mismatch"
+    return None
 
 
 def snapshot_hash_refusal(value: str) -> str | None:

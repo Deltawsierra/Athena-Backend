@@ -554,6 +554,24 @@ release it was made under, refusing a tampered card, result, source snapshot,
 signature or row with its code. Neither raises, and nothing Django loads at start imports
 either; step 6's simulate route (below) calls both.
 
+### Before a receipt: a review, overrides in force, and rows bound to it
+
+Section 28's hardening (spec-v1, section 35). A receipt is signed only once the
+scenario version's latest review is approved by a person who authored no version of
+it (`scenario_not_reviewed`; `POST .../scenarios/<uuid>/reviews/`), ON unless the
+environment variable `ATHENA_ECONOMICS_RECEIPT_REVIEW` is exactly `off`; and only once
+every material change of its customer parameter-set version against the version
+before it (a figure moved 2x or more, added, removed, a distribution changed) is named
+by a sensitive override in force: two approvers other than the requester, not expired
+(30 days), not revoked (`material_change_unapproved`; `.../overrides/`, and
+`.../economics/overrides/<uuid>/approve/` and `revoke/`, a revoke that is never
+refused). An approver an author or requester promoted, who promoted themselves, or who
+was promoted after the request, is refused (`approver_role_not_independent`), and a
+demotion is never refused. Where a receipt is recorded, every served path checks that
+its signed document still binds the stored rows (`receipt_binding`), and a snapshot
+file registers `unverified` at the feed registry's licence whatever it states; a
+rewritten observation row demotes its version (`snapshot_rows_mismatch`).
+
 ### The scenario endpoints and the report
 
 A third route module (`assurance/economics/report_api.py`), imported guarded in a
@@ -603,7 +621,8 @@ route (above) applies the same rule to the version's latest result. One 120 s de
 bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
-records nothing. None of the five is a stop, and a fault in this module leaves only
+records nothing. None of its routes (the review and override routes above
+included) is a stop, and a fault in this module leaves only
 these routes unserved. A residual run under a remediation option (below) is never the
 scenario's exposure: `results/`, the scenario list and the scenario document serve only
 its own runs. The list and the receipt read their query strictly (an unknown key is

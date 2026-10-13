@@ -40,6 +40,8 @@ import hashlib
 import json
 import re
 import uuid
+from datetime import datetime
+from datetime import timezone as dt_timezone
 from decimal import Context as DecimalContext
 from decimal import Decimal, DecimalException
 
@@ -289,6 +291,24 @@ def _require_text(**fields) -> None:
         _refuse(governance.required_text_refusal(value), detail=name)
 
 
+def _role_grant(account_id) -> governance.RoleGrant | None:
+    """Who granted the account ``account_id`` the role it holds, and when, read from
+    the account's STORED row (``accounts.CustomUser.role_granted_*``; spec, section
+    35), never from an object in hand. ``None`` for no account."""
+    if account_id is None:
+        return None
+    accounts = ScenarioReview._meta.get_field("reviewer").related_model
+    row = (
+        accounts._base_manager.filter(pk=account_id)
+        .values_list("role_granted_at", "role_granted_by_account", "role_granted_by_username")
+        .first()
+    )
+    if row is None:
+        return None
+    at, by_id, by_username = row
+    return governance.RoleGrant(at=at, by=governance.Person(id=by_id, username=by_username or ""))
+
+
 # ---------------------------------------------------------------------------
 # FinancialSource -- one version of one data source a figure rests on
 # ---------------------------------------------------------------------------
@@ -385,7 +405,9 @@ class FinancialSource(_AppendOnly):
     was registered with (``snapshots.fx_book``). No version is recorded at
     ``authoritative`` without the marker that approval sets
     (``second_person_required``): not a plain save, and not the snapshot loader,
-    which refuses a file stating it and records any lower tier as stated.
+    which refuses a file stating it, and registers any other file that is not
+    synthetic at ``unverified`` and at the licence class the feed registry gives its
+    key, whatever the file states (spec, section 35.2).
 
     ``synthetic`` marks made-up test data, such as the committed fixture snapshot
     (set by :func:`assurance.economics.snapshots.register_snapshot` from the
@@ -421,6 +443,13 @@ class FinancialSource(_AppendOnly):
     schema_version = models.CharField(max_length=64)
     # Made-up test data: never used by a production run, never trusted above unverified.
     synthetic = models.BooleanField(default=False)
+    # "sha256:" + 64 hex over the sorted row digests of the observations the loader
+    # registered with this snapshot (:func:`observation_rows_digest`; spec, section 35):
+    # a row rewritten, added or removed past the records' rules no longer gives it,
+    # and the version is demoted (``snapshot_rows_mismatch``). A raise copies it. Empty
+    # on a version no loader registered (one written directly): its rows are still
+    # each checked against their own digest.
+    observations_digest = models.CharField(max_length=71, blank=True, default="")
     recorded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -485,6 +514,8 @@ class FinancialSource(_AppendOnly):
                 "POST /api/assurance/economics/trust-raises/<uuid>/approve/",
             )
         _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
+        if self.observations_digest:
+            _refuse(governance.snapshot_hash_refusal(self.observations_digest), detail="observations_digest")
         if self.version is None:
             earlier = FinancialSource._base_manager.filter(
                 deployment_id=self.deployment_id, source_key=self.source_key
@@ -512,8 +543,14 @@ class FinancialSource(_AppendOnly):
         refused (``cross_tenant_reference``), as :func:`snapshots._tenant_sources`
         refuses one. A run that :func:`runs_in_production` also never relies on a
         version still trusted as ``unverified`` (``source_unverified``): only a new
-        version at a tier above it is usable."""
-        return self._refusal(self._stored_for_the_gate(), deployment)
+        version at a tier above it is usable. A version whose stored observation rows
+        no longer give the digests recorded when it was registered is demoted
+        (``snapshot_rows_mismatch``; spec, section 35), whatever its tier."""
+        refusal = self._refusal(self._stored_for_the_gate(), deployment)
+        if refusal is not None:
+            return refusal
+        rows = observation_rows_refusal([self.pk])
+        return None if rows is None else rows[0]
 
     @staticmethod
     def _refusal(stored: tuple | None, deployment) -> str | None:
@@ -540,6 +577,12 @@ class FinancialSource(_AppendOnly):
         else:
             detail = f"source {stored[4]} v{stored[5]}, trust tier {stored[3]}"
         _refuse(self._refusal(stored, deployment), SourceNotUsableForProduction, detail)
+        # Demoted when its stored rows no longer give the digests recorded at
+        # registration (spec, section 35): read from the rows, never stored, so the
+        # demotion is never refused or held back by anything.
+        rows = observation_rows_refusal([self.pk])
+        if rows is not None:
+            raise SourceNotUsableForProduction(*rows)
 
     def __str__(self) -> str:
         return f"{self.source_key} v{self.version} ({self.license_class})"
@@ -620,7 +663,7 @@ def _stored_source(pk) -> dict | None:
         FinancialSource._base_manager.filter(pk=pk)
         .values(
             "pk", "deployment_id", "source_key", "version", "provider", "dataset", "url", "license_class",
-            "trust_tier", "retrieved_at", "snapshot_hash", "schema_version", "synthetic",
+            "trust_tier", "retrieved_at", "snapshot_hash", "schema_version", "synthetic", "observations_digest",
         )
         .first()
     )
@@ -685,6 +728,7 @@ def _raised_version(stored: dict, to_tier: str, by, *, second_admin: bool = Fals
         snapshot_hash=stored["snapshot_hash"],
         schema_version=stored["schema_version"],
         synthetic=stored["synthetic"],
+        observations_digest=stored["observations_digest"],
         recorded_by=by,
     )
     if second_admin:
@@ -983,6 +1027,14 @@ class FinancialSourceTrustRaise(_AppendOnly):
         one transition to ``done``."""
         requester = governance.Person(id=row.requested_by_id, username=row.requested_by_username)
         _refuse(governance.trust_raise_approval_refusal(requester, approver))
+        # The second admin is someone who held the role independently: not promoted by
+        # the requester or by themselves, nor after the request (T9b; spec, section 35).
+        _refuse(
+            governance.role_grant_refusal(
+                _role_grant(getattr(by, "pk", None)), asked_by=[requester], approver=approver,
+                asked_at=row.requested_at,
+            )
+        )
         _refuse(governance.trust_raise_requester_refusal(_requester_is_admin(row)))
         stored = _stored_source(row.from_version_id)
         if stored is None:
@@ -1316,6 +1368,22 @@ class ScenarioReview(_AppendOnly):
         self.reviewer_username = reviewer.username
         authors = FinancialScenario.authors_of(self.scenario_id)
         _refuse(governance.review_refusal(authors, reviewer), SeparationOfDutiesRefused)
+        if self.verdict == ReviewVerdict.APPROVED:
+            # An APPROVAL is refused from someone an author promoted, who promoted
+            # themselves, or who was promoted after the version was recorded (T9b;
+            # spec, section 35). Returning a scenario takes approval away and is
+            # never refused by it.
+            versions = FinancialScenario._base_manager.filter(pk=self.scenario_id)
+            recorded = versions.values_list("recorded_at", flat=True).first()
+            _refuse(
+                governance.role_grant_refusal(
+                    _role_grant(self.reviewer_id), asked_by=authors, approver=reviewer, asked_at=recorded
+                ),
+                SeparationOfDutiesRefused,
+            )
+        # When it was written is the service's clock, never a time the caller put on
+        # the row: the latest review is the one that stands.
+        self.reviewed_at = timezone.now()
 
     def __str__(self) -> str:
         return f"{self.verdict} review of scenario {self.scenario_id}"
@@ -1335,6 +1403,13 @@ class SensitiveOverride(_AppendOnly):
     different people, neither of them the requester, have approved it
     (:meth:`approval_refusal`, ``override_needs_two_approvers``), and that is read
     from the stored rows each time it is asked, never stored.
+
+    And it counts only WHILE in force (section 28 hardening, T1/T4; spec, section
+    35): for :data:`~assurance.economics.engine.governance.OVERRIDE_EXPIRES_AFTER`
+    from its request, by the service's clock (``override_expired``), and never once
+    it is revoked (``override_revoked``; :class:`OverrideRevocation`, which nothing
+    refuses). Its ``requested_at`` is the service's clock at insert, never a time the
+    caller put on the row, which could postpone its expiry.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -1377,10 +1452,35 @@ class SensitiveOverride(_AppendOnly):
     def approvers(self) -> list[governance.Person]:
         return self.approvers_of(self.pk)
 
+    @classmethod
+    def standing_refusal(cls, override_id, now=None) -> str | None:
+        """``None`` when the override ``override_id`` is in force at ``now`` (the
+        service's clock); otherwise why not: revoked, expired, or short of its two
+        approvers. Read from the stored rows."""
+        requested_at = cls._base_manager.filter(pk=override_id).values_list("requested_at", flat=True).first()
+        return governance.override_in_force_refusal(
+            cls.requester_of(override_id),
+            cls.approvers_of(override_id),
+            requested_at=requested_at,
+            revoked=OverrideRevocation._base_manager.filter(override_id=override_id).exists(),
+            now=now or timezone.now(),
+        )
+
     def approval_refusal(self) -> str | None:
         """``None`` when the override is in force; otherwise why it is not. Read
         from the stored rows, never from this instance's fields."""
-        return governance.override_refusal(self.requester_of(self.pk), self.approvers_of(self.pk))
+        return self.standing_refusal(self.pk)
+
+    @property
+    def expires_at(self):
+        """When the override stops counting, approved or not: its request time and
+        :data:`~assurance.economics.engine.governance.OVERRIDE_EXPIRES_AFTER`."""
+        return self.requested_at + governance.OVERRIDE_EXPIRES_AFTER
+
+    def revoke(self, *, by, reason: str = "") -> OverrideRevocation:
+        """Revoke this override as ``by``. Never refused (:class:`OverrideRevocation`):
+        it takes approval away, and nothing may hold a revoke back."""
+        return OverrideRevocation.objects.create(override_id=self.pk, revoked_by=by, reason=reason or "")
 
     @property
     def in_force(self) -> bool:
@@ -1398,6 +1498,8 @@ class SensitiveOverride(_AppendOnly):
             governance.override_request_refusal(requester, self.subject, self.reason),
             SeparationOfDutiesRefused,
         )
+        # Its expiry counts from here, by the service's clock (spec, section 35).
+        self.requested_at = timezone.now()
 
     def __str__(self) -> str:
         return f"sensitive override of {self.subject} on scenario {self.scenario_id}"
@@ -1435,17 +1537,69 @@ class OverrideApproval(_AppendOnly):
     def check_new(self) -> None:
         approver = _signed_in(self.approver)
         self.approver_username = approver.username
+        requester = SensitiveOverride.requester_of(self.override_id)
         _refuse(
-            governance.approval_refusal(
-                SensitiveOverride.requester_of(self.override_id),
-                SensitiveOverride.approvers_of(self.override_id),
-                approver,
+            governance.approval_refusal(requester, SensitiveOverride.approvers_of(self.override_id), approver),
+            SeparationOfDutiesRefused,
+        )
+        # A revoked or expired override is approved no more (spec, section 35).
+        standing = SensitiveOverride.standing_refusal(self.override_id)
+        if standing in ("override_revoked", "override_expired"):
+            raise SeparationOfDutiesRefused(standing)
+        # An approver promoted by the requester, by themselves, or after the request,
+        # is not a second person (T9b).
+        requested_at = (
+            SensitiveOverride._base_manager.filter(pk=self.override_id).values_list("requested_at", flat=True).first()
+        )
+        _refuse(
+            governance.role_grant_refusal(
+                _role_grant(self.approver_id), asked_by=[requester], approver=approver, asked_at=requested_at
             ),
             SeparationOfDutiesRefused,
         )
+        self.approved_at = timezone.now()
 
     def __str__(self) -> str:
         return f"approval of override {self.override_id}"
+
+
+class OverrideRevocation(_AppendOnly):
+    """One revocation of one sensitive override (section 28 hardening, T1/T4; spec,
+    section 35): from it on, the override is not in force (``override_revoked``), and
+    never again.
+
+    A revocation is a REVOKE, and is NEVER refused: not for who records it (the
+    route lets anyone revoke who may write economics records; the record names the
+    account, or nobody), not for the override's state (one not yet in force, one
+    expired, one already revoked: each revocation is recorded), and not by a second
+    person, an expiry or a lock: its check reads nothing, and it is one insert. Two
+    revocations racing are both recorded; the first one counts."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    override = models.ForeignKey(SensitiveOverride, on_delete=models.CASCADE, related_name="revocations")
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_override_revocations",
+    )
+    revoked_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    reason = models.TextField(blank=True, default="")
+    revoked_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["override", "id"]
+
+    def check_new(self) -> None:
+        # Nothing is refused here: the revoker is named as the account says, and the
+        # time is the service's clock.
+        self.revoked_by_username = _signed_in(self.revoked_by).username
+        self.revoked_at = timezone.now()
+
+    def __str__(self) -> str:
+        return f"revocation of override {self.override_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -1525,6 +1679,10 @@ class FXObservation(_AppendOnly):
     effective_date = models.DateField()
     # "sha256:" + 64 hex: the snapshot the rate was read from, equal to its source's.
     source_snapshot_hash = models.CharField(max_length=71)
+    # "sha256:" + 64 hex over the row's own stored fields (:meth:`computed_digest`),
+    # written on save and checked on every read (spec, section 35): a row rewritten
+    # past the records' rules no longer gives it (``snapshot_rows_mismatch``).
+    row_digest = models.CharField(max_length=71, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1562,6 +1720,23 @@ class FXObservation(_AppendOnly):
             observations_version=held_by,
         )
 
+    def computed_digest(self) -> str:
+        """The digest of the row's stored fields, as they read back from the column:
+        the rate at the column's places, the instant in UTC (spec, section 35)."""
+        return canonical_digest(
+            {
+                "kind": "fx",
+                "base": self.base_currency,
+                "quote": self.quote_currency,
+                "rate": _column_decimal(self.rate, RATE_PLACES),
+                "rate_type": self.rate_type,
+                "provider": self.provider,
+                "observed_at": _column_instant(self.observed_at),
+                "effective_date": _column_date(self.effective_date),
+                "source_snapshot_hash": self.source_snapshot_hash,
+            }
+        )
+
     def check_new(self) -> None:
         _engine_refusal(self.as_engine)
         if not _fits(self.rate, RATE_DIGITS, RATE_PLACES):
@@ -1569,6 +1744,7 @@ class FXObservation(_AppendOnly):
         stored = FinancialSource._base_manager.filter(pk=self.source_id).values_list("snapshot_hash", flat=True)
         if list(stored) != [self.source_snapshot_hash]:
             raise EconomicsRefused("snapshot_hash_mismatch")
+        self.row_digest = self.computed_digest()
 
     def __str__(self) -> str:
         return f"{self.base_currency}/{self.quote_currency} {self.rate} {self.rate_type} on {self.effective_date}"
@@ -1599,6 +1775,8 @@ class CostIndexObservation(_AppendOnly):
     period = models.CharField(max_length=7)
     value = models.DecimalField(max_digits=INDEX_DIGITS, decimal_places=INDEX_PLACES)
     vintage_date = models.DateField()
+    # The row's own digest, as an FX observation's (spec, section 35).
+    row_digest = models.CharField(max_length=71, blank=True, default="", editable=False)
     recorded_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1630,6 +1808,22 @@ class CostIndexObservation(_AppendOnly):
             provider=source.provider if source else "",
         )
 
+    def computed_digest(self) -> str:
+        """The digest of the row's stored fields, as they read back from the column
+        (spec, section 35)."""
+        return canonical_digest(
+            {
+                "kind": "cost_index",
+                "series_id": self.series_id,
+                "geography": self.geography,
+                "category": self.category,
+                "base": self.base,
+                "period": self.period,
+                "value": _column_decimal(self.value, INDEX_PLACES),
+                "vintage_date": _column_date(self.vintage_date),
+            }
+        )
+
     def check_new(self) -> None:
         _engine_refusal(self.as_engine)
         if not _fits(self.value, INDEX_DIGITS, INDEX_PLACES):
@@ -1641,9 +1835,92 @@ class CostIndexObservation(_AppendOnly):
         )
         if other:
             raise EconomicsRefused("index_series_mismatch", self.series_id)
+        self.row_digest = self.computed_digest()
 
     def __str__(self) -> str:
         return f"{self.series_id} {self.period} = {self.value} (vintage {self.vintage_date})"
+
+
+def _column_decimal(value, places: int) -> str:
+    """A decimal column's value as it reads back: at the column's places, in plain
+    notation."""
+    return format(Decimal(value).quantize(Decimal(1).scaleb(-places)), "f")
+
+
+def _column_instant(value) -> str:
+    """An instant as it reads back: in UTC, ISO 8601."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.astimezone(dt_timezone.utc).isoformat()
+
+
+def _column_date(value) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def observation_rows_digest(row_digests) -> str:
+    """The digest a source version records over its observation rows (spec, section
+    35): ``sha256:`` over the canonical JSON of their row digests, sorted. A version
+    that holds none records the digest of none."""
+    return canonical_digest(sorted(row_digests))
+
+
+def observation_rows_refusal(version_ids) -> tuple[str, str] | None:
+    """``("snapshot_rows_mismatch", detail)`` where a stored observation row of the
+    source versions ``version_ids`` no longer gives its own digest, or the rows the
+    version reads (its own, or for a raised version those of the version of the same
+    tenant, key and snapshot hash the loader registered) no longer give the digest
+    recorded at registration on the version or on that holder -- a row rewritten,
+    added or removed past the records' rules (spec, section 35). ``None`` when every
+    row is as registered. Reads the rows; writes nothing, holds no lock."""
+    ids = [getattr(version, "pk", version) for version in version_ids]
+    asked = list(
+        FinancialSource._base_manager.filter(pk__in=ids).values(
+            "pk", "deployment_id", "source_key", "version", "snapshot_hash", "observations_digest"
+        )
+    )
+    if not asked:
+        return None
+    shared = Q()
+    for version in asked:
+        shared |= Q(
+            deployment_id=version["deployment_id"], source_key=version["source_key"],
+            snapshot_hash=version["snapshot_hash"],
+        )
+    holders: dict[tuple, dict] = {}
+    for row in FinancialSource._base_manager.filter(shared).order_by("version").values(
+        "pk", "deployment_id", "source_key", "version", "snapshot_hash", "observations_digest"
+    ):
+        holders.setdefault((row["deployment_id"], row["source_key"], row["snapshot_hash"]), row)
+    holder_ids = {holder["pk"] for holder in holders.values()}
+    digests: dict[int, list[str]] = {pk: [] for pk in holder_ids}
+    try:
+        for model in (FXObservation, CostIndexObservation):
+            for row in model._base_manager.filter(source_id__in=holder_ids).order_by("id"):
+                computed = row.computed_digest()
+                refused = governance.observation_rows_refusal(row.row_digest == computed, "", ())
+                if refused is not None:
+                    holder = next(h for h in holders.values() if h["pk"] == row.source_id)
+                    return refused, (
+                        f"source {holder['source_key']} v{holder['version']}: a {model._meta.verbose_name} no longer "
+                        "gives its own digest"
+                    )
+                digests[row.source_id].append(computed)
+    except (ArithmeticError, TypeError, ValueError, AttributeError) as unreadable:
+        refused = governance.observation_rows_refusal(False, "", ())
+        return refused, f"an observation row cannot be read back: {type(unreadable).__name__}"
+    for version in asked:
+        holder = holders[(version["deployment_id"], version["source_key"], version["snapshot_hash"])]
+        found = observation_rows_digest(digests[holder["pk"]])
+        refused = governance.observation_rows_refusal(
+            True, found, (holder["observations_digest"], version["observations_digest"])
+        )
+        if refused is not None:
+            return refused, (
+                f"source {version['source_key']} v{version['version']}: its observation rows no longer give the "
+                "digest recorded when it was registered"
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------

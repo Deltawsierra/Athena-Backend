@@ -89,6 +89,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # A promotion records who granted it and when (spec, section 35, T9b): an
+        # approval made later reads it. A demotion records nothing and is never
+        # refused: it is a revoke.
+        user.grant_role_as(request.user)
         user.role = new_role
         user.save(update_fields=["role"])
 

@@ -36,7 +36,7 @@ class CustomUserAdmin(UserAdmin):
             )
         }),
         ("Important dates", {
-            "fields": ("last_login", "date_joined"),
+            "fields": ("last_login", "date_joined", "role_granted_at", "role_granted_by_username"),
         }),
     )
 
@@ -58,5 +58,11 @@ class CustomUserAdmin(UserAdmin):
     search_fields = ("username", "email")
     ordering = ("username",)
 
-    readonly_fields = ("last_login", "date_joined")
+    readonly_fields = ("last_login", "date_joined", "role_granted_at", "role_granted_by_username")
+
+    def save_model(self, request, obj, form, change):
+        # A promotion made here names the signed-in admin who made it (spec, section
+        # 35, T9b); a demotion records nothing and is never refused.
+        obj.grant_role_as(request.user)
+        super().save_model(request, obj, form, change)
 

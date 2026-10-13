@@ -50,6 +50,7 @@ from assurance.economics.models import (
     card_digest,
 )
 from assurance.models import Asset, Deployment, Finding
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_scenarios import _entry
 
 pytestmark = pytest.mark.django_db
@@ -200,6 +201,9 @@ def carded(deployment, people, **kwargs):
     result = simulated(stored(deployment, people["analyst"], **kwargs))
     outcome = validity_service.issue_card(result)
     assert outcome.card is not None, (outcome.code, outcome.detail)
+    # The human review a signed receipt needs (spec, section 35.4), after the card is
+    # issued, as a colleague reviews the version through the route.
+    approve_for_receipt(result, people["admin"])
     return result, outcome.card
 
 
@@ -1293,6 +1297,7 @@ def test_a_built_scenario_binds_the_fingerprint_it_was_built_in_after_the_deploy
     assert now not in json.dumps(card.card) and now not in json.dumps(card.sensitivity)
     assert "deployment_at_issue" not in json.dumps(card.card)
     assert validity_service.reproduces(card)
+    approve_for_receipt(scenario, people["admin"])  # the review a receipt needs (spec, section 35.4)
     outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
     assert outcome.receipt is not None, (outcome.code, outcome.detail)
     assert outcome.receipt.document["system_fingerprint"] == at_build
@@ -1333,6 +1338,7 @@ def test_a_fingerprint_the_builder_could_not_compute_is_none_and_the_card_says_w
     field = validity_service.issue_card(result).card.card["fields"]["system_fingerprint"]
     assert field["value"] is None and field["binding"] is None
     assert field["statement"] == f"unavailable: {at_build}; and the deployment's could not be read either: {reason}"
+    approve_for_receipt(scenario, people["admin"])  # the review a receipt needs (spec, section 35.4)
     outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
     assert outcome.receipt is None and outcome.code == "system_fingerprint_unavailable"
 

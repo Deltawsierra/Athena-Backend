@@ -674,6 +674,11 @@ def test_no_economics_route_is_a_stop():
         # The read routes the dashboard needs (spec, section 30).
         "deployment-economics-scenarios",
         "deployment-economics-receipt",
+        # The review and override routes a signed receipt needs (spec, section 35).
+        "deployment-economics-scenario-reviews",
+        "deployment-economics-scenario-overrides",
+        "deployment-economics-override-approve",
+        "deployment-economics-override-revoke",
         # The remediation option and its ROI (spec, section 28).
         "deployment-economics-scenario-mitigations",
         "deployment-economics-mitigation-simulate",
@@ -705,6 +710,10 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-groups"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenarios"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-receipt"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-scenario-reviews"]) == {"GET", "POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-scenario-overrides"]) == {"GET", "POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-override-approve"]) == {"POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-override-revoke"]) == {"POST"}
 
 
 # ============================================ review round 1 of #146: L3 to L6
