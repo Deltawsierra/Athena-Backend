@@ -125,6 +125,10 @@ CONTEXT_RECORD_REFUSALS = {
         "variable of a parameter-set version a signed-in person records, for a variable that source may prefill "
         "(spec, section 31.5); never a scenario parameter, another source type, or a version no person recorded"
     ),
+    "prefill_version_unknown": (
+        "a figure accepted from a prefill names the source version it was accepted from, by number and snapshot "
+        "hash, and no stored version of that source is that one: the evidence is never taken on trust"
+    ),
     "catalog_record_malformed": (
         "a source version's records row holds the records of a step-11 source of its kind, each in its stored "
         "spelling, as many as it says and its digest theirs, one row per version"
@@ -1778,14 +1782,19 @@ class FinancialSourceRecords(_AppendOnly):
             raise EconomicsRefused("catalog_record_malformed", "the records are not in their stored spelling")
         if self.record_count != len(entries) or self.records_digest != catalogs.records_digest(entries):
             raise EconomicsRefused("catalog_record_malformed", "the count or digest is not the records'")
-        self._prepared = self.records_digest
+        self._prepared = self._prepared_as()
+
+    def _prepared_as(self) -> tuple:
+        """What :meth:`prepare` checked: the very list, its length, its count and digest
+        fields. The registering path prepares a row and saves it with nothing between."""
+        return (id(self.records), len(self.records), self.record_count, self.records_digest)
 
     def check_new(self) -> None:
         from .engine import catalogs
 
-        if getattr(self, "_prepared", None) != self.records_digest or (
-            catalogs.records_digest(self.records) != self.records_digest
-        ):
+        # Prepared just before, outside the transaction (review round 1, LOW-3): the
+        # records are not serialised or digested again here. Any other row is.
+        if getattr(self, "_prepared", None) != self._prepared_as():
             self.prepare()
         stored = FinancialSource._base_manager.filter(pk=self.source_id).values_list("source_key", flat=True).first()
         feed = catalogs.known(stored) if stored is not None else None
@@ -1836,6 +1845,21 @@ def _citation_refusal(evidence_ref, *, name, source_type, in_parameter_set) -> t
     from .engine import context
 
     return context.citation_refusal(evidence_ref, name=name, source_type=source_type, in_parameter_set=in_parameter_set)
+
+
+def _require_accepted_version(evidence_ref, name) -> None:
+    """A figure resting on a prefill names the version it was accepted from, and that is
+    a stored platform-wide version of the source, by number AND snapshot hash
+    (``prefill_version_unknown``; review round 1, MEDIUM-4). One read."""
+    if not _rests_on_prefill(evidence_ref):
+        return
+    from .engine import context
+
+    named = context.accepted_version(evidence_ref)
+    if named is None or not FinancialSource._base_manager.filter(
+        deployment__isnull=True, source_key=named[0], version=named[1], snapshot_hash=named[2]
+    ).exists():
+        raise EconomicsRefused("prefill_version_unknown", f"{name}: {evidence_ref[:120]}")
 
 
 def _rests_on_prefill(evidence_ref) -> bool:
@@ -1979,6 +2003,8 @@ class CustomerParameterSet(_AppendOnly):
         # accepted (spec, section 31.5): a version no signed-in account records holds none.
         if version.author_id is None and any(_rests_on_prefill(row.evidence_ref) for row in rows):
             raise EconomicsRefused("prefill_not_accepted", "a version no signed-in person records")
+        for row in rows:
+            _require_accepted_version(row.evidence_ref, row.name)
         for row in (version, *rows):
             row._mark_checked()
 
@@ -2253,8 +2279,11 @@ class FinancialParameter(_AppendOnly):
         # Step 11's context rules (spec, section 31.5): no figure names an enforcement
         # listing or a filing watch, and one resting on a cloud price or an EDGAR fact
         # is an accepted EXPERT_ESTIMATE variable of a parameter set.
+        in_scenario = self.scenario_id is not None or (
+            FinancialParameter.scenario.is_cached(self) and self.scenario is not None
+        )
         refusal = _citation_refusal(
-            self.evidence_ref, name=self.name, source_type=self.source_type, in_parameter_set=self.scenario_id is None
+            self.evidence_ref, name=self.name, source_type=self.source_type, in_parameter_set=not in_scenario
         )
         if refusal is not None:
             code, detail = refusal
@@ -2279,6 +2308,7 @@ class FinancialParameter(_AppendOnly):
                 pk=self.parameter_set_id, author__isnull=False
             ).exists():
                 raise EconomicsRefused("prefill_not_accepted", "a version no signed-in person records")
+            _require_accepted_version(self.evidence_ref, self.name)
             sealed = CustomerParameterSet._base_manager.filter(pk=self.parameter_set_id).values_list(
                 "variable_count", flat=True
             )

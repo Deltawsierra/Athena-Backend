@@ -173,19 +173,19 @@ def _nothing_kept():
 def reviewed(monkeypatch):
     """The registry with ``keys``' licence reviewed (``open``), as the owner's
     licensing review would record it: until then every source is ``unreviewed``."""
-    opened: set[str] = set()
+    opened: dict[str, str] = {}
     original = catalogs.known
 
     def known(key):
         found = original(key)
         if found is not None and key in opened:
-            return dataclasses.replace(found, license_class="open")
+            return dataclasses.replace(found, license_class=opened[key])
         return found
 
     monkeypatch.setattr(catalogs, "known", known)
 
-    def review(*keys):
-        opened.update(keys)
+    def review(*keys, license_class="open"):
+        opened.update(dict.fromkeys(keys, license_class))
 
     return review
 
@@ -1490,14 +1490,16 @@ def test_data_health_lists_the_catalogs_with_what_each_may_do(reviewed, staging,
     _fetch(FACTS)
     _fetch(CFPB)
     _fetch(OCC, [b"not,the,header\r\n"])
+    gcp, _ = _fetch(GCP)  # stored, its licence unreviewed: no run may use it
     entry = {**_entry("money_per_unit", "100", source_type="EXPERT_ESTIMATE"),
-             "evidence_ref": f"financial-source:{GCP} v1"}
+             "evidence_ref": f"financial-source:{GCP} v1 {gcp.version.snapshot_hash} accepted suggestion: a test"}
     CustomerParameterSet.record(staging, "q4", {"variables": {"vendor_exit_cost": entry}}, author=people["analyst"])
     answer = _client(people["owner"]).get(f"/api/assurance/deployments/{staging.uuid}/economics/data-health/")
     assert answer.status_code == 200
     body = json.loads(answer.content)
     listed = {s["source_key"]: s for s in body["catalog_sources"]}
     assert set(listed) == {*catalogs.CATALOG_REGISTRY, FACTS}
+    assert listed[GCP]["gate"] == "unreviewed_license"
     assert (listed[AWS]["state"], listed[AWS]["age_days"], listed[AWS]["effect"]) == (
         "stale", 10, feeds.EFFECTS["stale"])
     assert (listed[FACTS]["state"], listed[FACTS]["age_state"], listed[FACTS]["effect"]) == (
@@ -1526,6 +1528,7 @@ def test_the_spec_names_every_code_route_and_source():
         "deployment-economics-suggestions", "deployment-economics-scenario-precedents",
         *catalogs.CATALOG_REGISTRY, "sec-edgar-submissions-cik", "ECONOMICS_GCP_BILLING_API_KEY",
         "ECONOMICS_SEC_USER_AGENT", "informational", "catalog_sources", "0071_financial_source_records",
+        "accepted version",
     ]
     for code in codes:
         assert f"`{code}" in text, code
@@ -1537,3 +1540,317 @@ def test_the_spec_names_every_code_route_and_source():
         "a suggestion, not a parameter",
     ):
         assert phrase in text, phrase
+
+
+# ====================================================================
+# Review round 1 of #165
+# ====================================================================
+
+
+def _bytes_edit(key, old: bytes, new: bytes, page: int = 0, count: int = 1):
+    answers = pages_of(key)
+    assert answers[page].count(old) >= count, (key, old)
+    answers[page] = answers[page].replace(old, new, -1 if count == -1 else count)
+    return answers
+
+
+def _utf16_with_entity(raw: bytes, title: bytes, amplified: bool = False) -> bytes:
+    """``raw`` (an XML document in UTF-8) re-encoded as UTF-16, declaring an internal
+    DTD whose entity replaces ``title``'s text; ``amplified``: a nested expansion."""
+    text = raw.decode("utf-8")
+    declaration = text[: text.index("?>") + 2]
+    entities = '<!ENTITY e "EXPANDED-BY-AN-ENTITY">'
+    if amplified:
+        entities = '<!ENTITY a "AAAAAAAAAA"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">' \
+                   '<!ENTITY e "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">'
+    root = text[len(declaration):].lstrip().split()[0].lstrip("<")
+    body = text[len(declaration):].replace(title.decode(), "&e;", 1)
+    return (f'<?xml version="1.0" encoding="UTF-16"?>\n<!DOCTYPE {root} [{entities}]>' + body).encode("utf-16")
+
+
+ROUND_1 = {
+    # MEDIUM-1: an exponent no context holds, and one that would write a million digits.
+    "m1-an-exponent-past-every-context": (
+        AZURE, lambda: _bytes_edit(AZURE, b'"retailPrice": 25.0', b'"retailPrice": 1e9999999'), "feed_value_malformed"),
+    "m1-exponents-that-would-amplify": (
+        GCP, lambda: _bytes_edit(GCP, b'"displayQuantity": 1,', b'"displayQuantity": 1e999999,', count=-1),
+        "feed_value_malformed"),
+    "m1-a-whole-number-too-long": (
+        AZURE, lambda: _bytes_edit(AZURE, b'"Count": 2', b'"Count": ' + b"9" * 60), "feed_value_malformed"),
+    # MEDIUM-2: a UTF-16 document declaring an entity, plain and nested.
+    "m2-a-utf16-entity": (
+        CFPB, lambda: [_utf16_with_entity(pages_of(CFPB)[0], b"Fixture Lending Company One, LLC")], "feed_malformed"),
+    "m2-a-utf16-entity-amplified": (
+        SEC, lambda: [_utf16_with_entity(pages_of(SEC)[0], b"Fixture Trader Two", amplified=True)], "feed_malformed"),
+    # LOW-1: names that hide, reverse or blank themselves.
+    "l1-a-right-to-left-override": (
+        CFPB, lambda: _bytes_edit(CFPB, b"<title>Fixture Servicing Corporation",
+                                  "<title>‮Fixture Servicing Corporation".encode()), "feed_value_malformed"),
+    "l1-a-zero-width-only-respondent": (
+        FTC, lambda: _bytes_edit(FTC, b"<title>Fixture Data Brokers, Inc., In the Matter of</title>",
+                                 "<title>​</title>".encode()), "feed_value_malformed"),
+    "l1-a-zero-width-joiner": (
+        SEC, lambda: _bytes_edit(SEC, b"<title>Fixture Trader Two", "<title>Fixture‍Trader Two".encode()),
+        "feed_value_malformed"),
+    "l1-a-nul-in-a-name": (
+        AZURE, lambda: _bytes_edit(AZURE, b'"meterName": "VM Replicated to Azure"',
+                                   b'"meterName": "VM Replicated\\u0000 to Azure"'), "feed_value_malformed"),
+    # LOW-2: a revenue in another currency, and a price in the other JSON type.
+    "l2-a-revenue-in-eur": (FACTS, lambda: [_json_edit(pages_of(FACTS)[0], lambda d: d["facts"]["us-gaap"][
+        "Revenues"]["units"].update(EUR=[dict(d["facts"]["us-gaap"]["Revenues"]["units"]["USD"][0])]))],
+        "feed_mismatch"),
+    "l2-an-azure-price-as-text": (
+        AZURE, lambda: _bytes_edit(AZURE, b'"retailPrice": 25.0', b'"retailPrice": "25.0"'), "feed_value_malformed"),
+    "l2-an-aws-price-as-a-number": (AWS, lambda: _aws(lambda d: _first_term(d).update(
+        pricePerUnit={"USD": Decimal("0.023")})), "feed_value_malformed"),
+    # LOW-6: the rest of the untrusted-input list.
+    "l6-nan": (AZURE, lambda: _bytes_edit(AZURE, b'"retailPrice": 25.0', b'"retailPrice": NaN'), "feed_malformed"),
+    "l6-infinity": (GCP, lambda: _bytes_edit(GCP, b'"currencyConversionRate": 1', b'"currencyConversionRate": Infinity'),
+                    "feed_malformed"),
+    "l6-a-negative-price": (
+        AZURE, lambda: _bytes_edit(AZURE, b'"retailPrice": 25.0', b'"retailPrice": -25.0'), "feed_value_malformed"),
+    "l6-deep-nesting": (FACTS, lambda: [b"[" * 100_000 + b"]" * 100_000], "feed_malformed"),
+    "l6-the-same-item-on-two-pages": (AZURE, lambda: _azure(lambda d: d["Items"].__setitem__(0, json.loads(
+        pages_of(AZURE)[0], parse_float=Decimal)["Items"][0]), 1), "feed_mismatch"),
+    # NIT: a product naming no region, and a count that is a bool.
+    "nit-an-aws-product-with-no-region": (AWS, lambda: _aws(lambda d: d["products"]["FIXTURESKUPUT0003"][
+        "attributes"].pop("regionCode")), "feed_mismatch"),
+    "nit-an-azure-count-that-is-a-bool": (
+        AZURE, lambda: _bytes_edit(AZURE, b'"Count": 1', b'"Count": true', page=1), "feed_partial"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ROUND_1))
+def test_r1_an_untrusted_answer_is_refused_with_a_code_and_nothing_kept(case):
+    """Every case is refused with its code through the fetch, which never raises, and
+    nothing is kept but the fetch's record of the code."""
+    key, answers, code = ROUND_1[case]
+    outcome, _ = _fetch(key, answers())
+    assert (outcome.outcome, outcome.code) == ("refused", code), (outcome.code, outcome.meaning)
+    assert _nothing_kept()
+    (row,) = FinancialSourceFetch.objects.all()
+    assert (row.source_key, row.outcome, row.code) == (key, "refused", code)
+
+
+def test_r1_m1_a_number_is_bounded_before_anything_is_hashed():
+    """Each refused in the parser, before the payload hash writes a digit: no Overflow,
+    and no million-character canonical text."""
+    for token in (b"1e9999999", b"1e999999", b"-1e-999999", b"1" + b"0" * 70, b"0." + b"0" * 70 + b"1"):
+        with pytest.raises(engine.FeedRefused) as refused:
+            catalogs.payload_hash(catalogs.source(AZURE), [b'{"x": ' + token + b"}"])
+        assert refused.value.code == "feed_value_malformed", token
+    assert catalogs._json(b'{"x": 2.8759101014016e15, "y": 0.0000050000}')["x"] == Decimal("2.8759101014016e15")
+
+
+def _filing():
+    return catalogs.newest_periodic_filing(_parse(SUBMISSIONS).records, TODAY)
+
+
+def test_r1_m2_an_xbrl_instance_declaring_an_entity_is_refused_in_any_encoding():
+    raw = pages_of(SEGMENTS)[0]
+    for document in (_utf16_with_entity(raw, b"FIXTURE EXAMPLE CORP"),
+                     raw.replace(b"<xbrli:xbrl ", b'<!DOCTYPE xbrli:xbrl [<!ENTITY e "x">]>\n<xbrli:xbrl ', 1),
+                     raw.decode().encode("utf-16-le"),
+                     raw.replace(b"<xbrli:xbrl ", b'<!DOCTYPE x SYSTEM "file:///etc/hostname">\n<xbrli:xbrl ', 1)):
+        with pytest.raises(engine.FeedRefused) as refused:
+            _parse(SEGMENTS, [document], filing=_filing())
+        assert refused.value.code == "feed_malformed"
+    # The same instance in UTF-16 with no declaration is read as the UTF-8 one is.
+    plain = raw.decode().replace('encoding="utf-8"', 'encoding="UTF-16"').encode("utf-16")
+    assert _parse(SEGMENTS, [plain], filing=_filing()).records == _parse(SEGMENTS, filing=_filing()).records
+
+
+def test_r1_l2_an_xbrl_revenue_in_another_currency_is_refused():
+    raw = pages_of(SEGMENTS)[0].replace(
+        b'<xbrli:unit id="shares">', b'<xbrli:unit id="eur"><xbrli:measure>iso4217:EUR</xbrli:measure></xbrli:unit>'
+                                     b'<xbrli:unit id="shares">', 1)
+    raw = raw.replace(b'contextRef="c-3" unitRef="usd"', b'contextRef="c-3" unitRef="eur"', 1)
+    with pytest.raises(engine.FeedRefused) as refused:
+        _parse(SEGMENTS, [raw], filing=_filing())
+    assert refused.value.code == "feed_mismatch"
+    twice = pages_of(SEGMENTS)[0].replace(b">111300000<", b">111300000<", 1).replace(
+        b'<us-gaap:OperatingIncomeLoss', b'<us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="c-3" '
+        b'unitRef="usd" decimals="-6">111300001</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>\n'
+        b'  <us-gaap:OperatingIncomeLoss', 1)
+    with pytest.raises(engine.FeedRefused) as refused:
+        _parse(SEGMENTS, [twice], filing=_filing())
+    assert refused.value.code == "feed_mismatch"  # a period stated twice, differently
+
+
+@pytest.mark.parametrize("document", ["x.htm?y=1", "x.htm#f", "%2e%2e%2fx.htm", "../x.htm", "x.html", ""])
+def test_r1_nit_a_primary_document_names_exactly_one_file(document):
+    filing = dataclasses.replace(_filing(), primary_document=document)
+    with pytest.raises(engine.FeedRefused) as refused:
+        catalogs.request_for(catalogs.source(SEGMENTS), as_of=TODAY, explicit=False, today=TODAY, filing=filing)
+    assert refused.value.code == "filing_unknown"
+    assert catalogs.newest_periodic_filing([filing], TODAY) is None
+
+
+# ---- MEDIUM-3: only a licence that allows redistribution serves raw values
+
+
+@pytest.mark.parametrize("license_class", ["open", "restricted", "licensed"])
+def test_r1_m3_only_a_redistributable_licence_serves_raw_values(reviewed, staging, people, license_class):
+    reviewed(AWS, OCC, license_class=license_class)
+    aws, _ = _fetch(AWS)
+    _fetch(OCC)
+    scenario = _scenario(staging, people["analyst"], as_of=TODAY)
+    viewer = _client(people["owner"])
+    query = f"?source={AWS}&target=vendor_exit_cost&quantity=1&observation={AWS_STORAGE[0]}"
+    suggestion = json.loads(_suggestions(viewer, staging, query).content)
+    listed = json.loads(_precedents(viewer, staging, scenario).content)
+    raw_values = ("0.023", "1250000", "300000", "Fixture National Bank", "$0.023 per GB")
+    if license_class == "open":
+        assert suggestion["entry"]["base"] == "0.02" and suggestion["rests_on"][0]["usd_price"] == "0.023"
+        assert any(e["stated_amounts"]["civil_money_penalty"] == "1250000" for e in listed["precedents"])
+        return
+    # Provenance only: where it is from and when, never what it holds.
+    assert (suggestion["status"], suggestion["code"]) == ("withheld", "licence_restricts_redistribution")
+    assert set(suggestion) == {"deployment", "status", "code", "meaning", "target", "version"}
+    assert suggestion["version"]["snapshot_hash"] == aws.version.snapshot_hash
+    assert suggestion["version"]["license_class"] == license_class
+    assert len(listed["precedents"]) == 4
+    for entry in listed["precedents"]:
+        assert set(entry) == {"agency", "date", "citation", "source", "withheld"}
+        assert set(entry["citation"]) == {"url"} and entry["withheld"] == "licence_restricts_redistribution"
+    assert listed["sources"][0]["withheld"] == "licence_restricts_redistribution"
+    body = json.dumps([suggestion, listed])
+    assert not any(value in body for value in raw_values), [v for v in raw_values if v in body]
+
+
+# ---- MEDIUM-4: a prefill figure is aged from the version it was accepted from
+
+
+def test_r1_m4_a_figure_from_v1_is_aged_from_v1_not_the_newest(reviewed, staging, people):
+    """The reviewer's case: accepted from AWS v1 (retrieved 13 Oct); v2 fetched on 28 Oct
+    with a changed price. A run as of 28 Oct reads the figure's own version, v1, 15
+    days old: blocked under the 7-day SLA, the claim stale, the receipt refused."""
+    reviewed(AWS)
+    _fetch(AWS)
+    entry = _suggest(staging, source=AWS, target="vendor_exit_cost", observation=AWS_STORAGE,
+                     quantity="5000")["entry"]
+    later = TODAY + timedelta(days=15)
+    scenario = _scenario(staging, people["analyst"], as_of=later, variables={"vendor_exit_cost": entry},
+                         recovery_cost="vendor_exit_cost")
+    newer, _ = _fetch(AWS, _bytes_edit(AWS, b'"USD": "0.0230000000"', b'"USD": "0.0240000000"'),
+                      now=NOW + timedelta(days=15))
+    assert (newer.outcome, newer.version.version) == ("recorded", 2)
+    result = simulated(scenario, draws=2_000)
+    card = validity_service.issue_card(result).card
+    (source,) = card.card["fields"]["data_freshness"]["sources"]
+    assert (source["state"], source["age_days"], source["age_basis"]) == ("blocked", 15, "accepted version")
+    assert [(f["figure"], f["version"]) for f in source["accepted"]] == [("vendor_exit_cost", 1)]
+    assert card.card["freshness"]["claim"] == "stale"
+    receipt = _issue(result)
+    assert (receipt.receipt, receipt.code) == (None, "source_stale")
+
+
+def test_r1_m4_evidence_naming_no_stored_version_is_refused(reviewed, staging, people):
+    reviewed(AWS)
+    fetched, _ = _fetch(AWS)
+    entry = _suggest(staging, source=AWS, target="vendor_exit_cost", observation=AWS_STORAGE[0],
+                     quantity="1")["entry"]
+    digest = fetched.version.snapshot_hash
+    for evidence, code in (
+        (entry["evidence_ref"].replace(" v1 ", " v99 "), "prefill_version_unknown"),
+        (entry["evidence_ref"].replace(digest, "sha256:" + "0" * 64), "prefill_version_unknown"),
+        (f"financial-source:{AWS} a price I read", "prefill_not_accepted"),
+    ):
+        with pytest.raises(EconomicsRefused) as refused:
+            CustomerParameterSet.record(staging, "q4", {"variables": {"vendor_exit_cost": {
+                **entry, "evidence_ref": evidence}}}, author=people["analyst"])
+        assert refused.value.code == code, evidence
+    assert not CustomerParameterSet.objects.exists()
+
+
+def test_r1_m4_an_accepted_edgar_figure_is_gated_by_step_10s_rules(reviewed, staging):
+    """EDGAR's freshness stays informational for its listing; a figure accepted from it
+    is aged from its version and gated: stale past 1 day, blocked past 2."""
+    reviewed(FACTS, SUBMISSIONS)
+    _fetch(SUBMISSIONS)
+    _fetch(FACTS)
+    entry = _suggest(staging, source=FACTS, target="annual_revenue")["entry"]
+    figure = {"annual_revenue": {"source_type": "EXPERT_ESTIMATE", "evidence_ref": entry["evidence_ref"]}}
+    for days, state in ((1, "fresh"), (2, "stale"), (3, "blocked")):
+        held = feeds.states_for([FACTS], deployment=staging, as_of=TODAY + timedelta(days=days), parameters=figure)
+        assert held[FACTS]["state"] == state, days
+    assert feeds.source_state(FACTS, deployment=staging, as_of=TODAY + timedelta(days=3))["state"] == "informational"
+
+
+# ---- LOW-3, LOW-4, LOW-5
+
+
+def test_r1_l3_the_records_are_not_digested_inside_the_registering_transaction(monkeypatch):
+    depth = len(connection.savepoint_ids)
+    seen = []
+    digest = catalogs.records_digest
+
+    def watched(entries):
+        seen.append(len(connection.savepoint_ids))
+        return digest(entries)
+
+    monkeypatch.setattr(catalogs, "records_digest", watched)
+    outcome, _ = _fetch(AWS)
+    assert outcome.outcome == "recorded" and seen and set(seen) == {depth}
+
+
+def test_r1_l4_a_build_row_is_read_as_a_scenario_row_before_it_is_stored(reviewed, staging, people):
+    reviewed(AWS)
+    _fetch(AWS)
+    entry = _suggest(staging, source=AWS, target="vendor_exit_cost", observation=AWS_STORAGE[0],
+                     quantity="1")["entry"]
+    unsaved = FinancialScenario(deployment=staging, title="a build", author=people["analyst"])
+    row = FinancialParameter(scenario=unsaved, name="vendor_exit_cost", unit="money_per_unit", currency="USD",
+                             source_type="EXPERT_ESTIMATE", low="1", base="1", high="1",
+                             evidence_ref=entry["evidence_ref"], effective_date=TODAY)
+    with pytest.raises(EconomicsRefused) as refused:
+        row._check_form()
+    assert refused.value.code == "prefill_not_accepted"
+
+
+def test_r1_l5_a_prefill_written_past_the_model_fails_closed(reviewed, staging, people):
+    reviewed(AWS)
+    _fetch(AWS)
+    entry = _suggest(staging, source=AWS, target="vendor_exit_cost", observation=AWS_STORAGE[0],
+                     quantity="1")["entry"]
+    scenario = _scenario(staging, people["analyst"], as_of=TODAY)
+    amount = FinancialParameter.objects.get(scenario=scenario, name="exposure.regulatory_response_cost")
+    FinancialParameter._base_manager.filter(pk=amount.pk).update(evidence_ref=entry["evidence_ref"])
+    result = simulated(scenario, draws=2_000)
+    card = validity_service.issue_card(result).card
+    held = card.card["issued"]["feed_sources"][AWS]
+    assert (held["state"], held["reason"]) == ("missing", "prefill_not_accepted")
+    assert card.card["freshness"]["claim"] == "stale"
+    receipt = _issue(result)
+    assert (receipt.receipt, receipt.code) == (None, "prefill_not_accepted")
+
+
+# ---- NIT: the no-loss-path test walks every economics module
+
+
+#: The only economics modules that may import the catalogs, the context rules or the
+#: context service, and what each may import.
+CONTEXT_IMPORTERS = {
+    "catalogs": {"engine/context.py", "feeds.py", "snapshots.py", "models.py", "context_service.py"},
+    "context": {"feeds.py", "models.py", "context_service.py"},
+    "context_service": {"health_api.py"},
+}
+
+
+def test_r1_nit_no_economics_module_but_these_reads_the_context_path():
+    found = {name: set() for name in CONTEXT_IMPORTERS}
+    for path in sorted(ECONOMICS.rglob("*.py")):
+        relative = path.relative_to(ECONOMICS).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] in ("engine", "economics", ""):
+                names = {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = {node.module.split(".")[-1]} & set(CONTEXT_IMPORTERS)
+            elif isinstance(node, ast.Import):
+                names = {alias.name.split(".")[-1] for alias in node.names}
+            else:
+                continue
+            for name in names & set(CONTEXT_IMPORTERS):
+                found[name].add(relative)
+    assert found == CONTEXT_IMPORTERS

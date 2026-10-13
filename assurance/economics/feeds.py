@@ -83,6 +83,7 @@ from safety import outbound
 
 from . import snapshots
 from .engine import catalogs, cost_index, governance, money
+from .engine import context as context_rules
 from .engine import feeds as engine
 from .models import (
     FETCH_RECORDED,
@@ -327,7 +328,7 @@ def _hash_or_blank(feed, raw: bytes) -> str:
 def _catalog_hash_or_blank(feed, pages) -> str:
     try:
         return catalogs.payload_hash(feed, pages)
-    except (engine.FeedRefused, TypeError):
+    except (engine.FeedRefused, TypeError, ArithmeticError, RecursionError):
         return ""
 
 
@@ -378,15 +379,25 @@ def _fetch_catalog(feed, key, *, as_of, explicit, today, now, transport) -> Fetc
             request = catalogs.next_request(feed, request, raw)
         except engine.FeedRefused as refused:
             return _record_refusal(feed, as_of, refused.code)
+        except (ArithmeticError, RecursionError):
+            # A number no Decimal context holds, or nesting past the parser's depth: a
+            # value not in its documented form, refused and recorded, never raised
+            # (review round 1, MEDIUM-1).
+            return _record_refusal(feed, as_of, "feed_value_malformed")
     try:
         snapshot = catalogs.parse(feed, pages, as_of=as_of, retrieved_at=now, requests=sent, filing=filing)
     except engine.FeedRefused as refused:
         return _record_refusal(feed, as_of, refused.code, _catalog_hash_or_blank(feed, pages))
     except money.MoneyRefused as refused:
         return _record_refusal(feed, as_of, refused.code, _catalog_hash_or_blank(feed, pages))
+    except (ArithmeticError, RecursionError):
+        return _record_refusal(feed, as_of, "feed_value_malformed", _catalog_hash_or_blank(feed, pages))
     try:
+        # Read whole, serialised and digested HERE, with no transaction open (review
+        # round 1, LOW-3): the transaction below only writes.
+        held = snapshots.records_row(snapshot)
         with transaction.atomic():
-            version, created = snapshots.register(snapshot)
+            version, created = snapshots.register(snapshot, records=held)
             row = FinancialSourceFetch(
                 source_key=feed.key,
                 as_of=as_of,
@@ -595,13 +606,96 @@ def source_state(key: str, *, deployment, as_of: date) -> dict:
 INFORMATIONAL = "informational"
 
 
-def states_for(keys, *, deployment, as_of: date | None) -> dict[str, dict]:
+#: How bad a state is, for the worst of several figures' accepted versions.
+_SEVERITY = {engine.FRESH: 0, engine.STALE: 1, engine.BLOCKED: 2, engine.MISSING: 3}
+
+
+def _cited_by(key: str, parameters) -> list[tuple[str, object, str]]:
+    """``(name, source type, evidence)`` of every run input whose evidence cites ``key``."""
+    return [
+        (name, (held or {}).get("source_type"), (held or {}).get("evidence_ref"))
+        for name, held in sorted((parameters or {}).items())
+        if engine.feed_reference((held or {}).get("evidence_ref")) == key
+    ]
+
+
+def _accepted_refusal(key: str, name: str, source_type, evidence, deployment) -> tuple[str, str, object]:
+    """For one figure resting on prefill source ``key``: ``(code, detail, version)``. The
+    code is ``None`` when the figure is an accepted prefill naming a stored version a
+    run of ``deployment`` may use, with that version; otherwise why not: the person
+    rule (``prefill_not_accepted``, failing closed a figure written past the model;
+    review round 1, LOW-5), a version that is not stored (``prefill_version_unknown``),
+    or the gate's refusal of the version it names."""
+    refusal = context_rules.citation_refusal(evidence, name=name, source_type=source_type, in_parameter_set=True)
+    if refusal is not None:
+        return refusal[0], refusal[1], None
+    _key, number, digest = context_rules.accepted_version(evidence)
+    version = _platform_versions(key).filter(version=number, snapshot_hash=digest).first()
+    if version is None:
+        return "prefill_version_unknown", f"{name}: {key} v{number} {digest} is not a stored version", None
+    gate = version.production_use_refusal(deployment)
+    if gate is not None:
+        return gate, f"{name}: {key} v{number}, trust tier {version.trust_tier}", version
+    return None, "", version
+
+
+def prefill_state(key: str, *, deployment, as_of: date, parameters) -> dict:
+    """The freshness of the figures that rest on prefill source ``key`` (review round 1,
+    MEDIUM-4; the lead's decision): each is aged from the version it was ACCEPTED from
+    (its evidence names it), never the newest, by step 10's rules -- ``fresh``,
+    ``stale``, ``blocked`` -- against the source's SLA, EDGAR's included. A figure that
+    is not an accepted prefill, names no stored version, names one the gate refuses, or
+    one retrieved after ``as_of``, is ``missing``. The source's state is the worst of
+    its figures'."""
+    feed = known_source(key)
+    figures = []
+    for name, source_type, evidence in _cited_by(key, parameters):
+        code, detail, version = _accepted_refusal(key, name, source_type, evidence, deployment)
+        entry = {"figure": name, "version": version.version if version else None,
+                 "snapshot_hash": version.snapshot_hash if version else None, "age_days": None,
+                 "state": engine.MISSING}
+        if code is not None:
+            entry["reason"] = code
+        else:
+            age = catalogs.ages_from_retrieval(version.retrieved_at, as_of)
+            if age is None:
+                entry["reason"] = "accepted_after_as_of"
+            else:
+                entry.update(age_days=age, state=engine.freshness_state(age, feed.sla_days),
+                             retrieved_at=version.retrieved_at.isoformat())
+        figures.append(entry)
+    worst = max(figures, key=lambda f: (_SEVERITY[f["state"]], f["age_days"] or 0), default=None)
+    return {
+        "source_key": key,
+        "in_registry": True,
+        "provider": feed.provider,
+        "dataset": feed.dataset,
+        "kind": feed.kind,
+        "cadence": feed.cadence,
+        "sla_days": feed.sla_days,
+        "as_of": as_of.isoformat(),
+        "use": feed.use,
+        "freshness": catalogs.GATING,
+        "age_basis": "accepted version",
+        "accepted": figures,
+        "age_days": worst["age_days"] if worst else None,
+        "state": worst["state"] if worst else engine.MISSING,
+        **({"reason": worst["reason"]} if worst and "reason" in worst else {}),
+        **({} if worst else {"reason": "no figure names the version it was accepted from"}),
+    }
+
+
+def states_for(keys, *, deployment, as_of: date | None, parameters=None) -> dict[str, dict]:
     """:func:`source_state` of each of ``keys``; with no as-of date to read them at,
-    each is ``missing`` and says it was not evaluated."""
+    each is ``missing`` and says it was not evaluated. A prefill source is read by
+    :func:`prefill_state`, from the run's own inputs (``parameters``): each figure aged
+    from the version it was accepted from."""
     states = {}
     for key in sorted(set(keys)):
         feed = known_source(key)
-        if feed is not None and feed.use == catalogs.CONTEXT:
+        if feed is not None and feed.use == catalogs.PREFILL and parameters is not None and as_of is not None:
+            states[key] = prefill_state(key, deployment=deployment, as_of=as_of, parameters=parameters)
+        elif feed is not None and feed.use == catalogs.CONTEXT:
             # A figure never rests on a context source (spec, section 31.5): one that
             # cites it anyway -- written past the model's check -- fails closed.
             states[key] = {"source_key": key, "state": engine.MISSING, "as_of": as_of.isoformat() if as_of else None,
@@ -617,7 +711,7 @@ def states_for(keys, *, deployment, as_of: date | None) -> dict[str, dict]:
 # --------------------------------------------------------- production receipts
 
 
-def receipt_refusal(keys, deployment, as_of: date | None) -> tuple[str, str] | None:
+def receipt_refusal(keys, deployment, as_of: date | None, parameters=None) -> tuple[str, str] | None:
     """Why a receipt for a run of ``deployment`` dated ``as_of`` resting on the feed
     sources ``keys`` may not be issued now, as ``(code, detail)``, or ``None``. A
     near-miss citation is ``source_reference_malformed`` and a key the registry does
@@ -626,7 +720,12 @@ def receipt_refusal(keys, deployment, as_of: date | None) -> tuple[str, str] | N
     (the gate's refusal of the latest version, or ``source_missing``); and in a
     PRODUCTION run, one holding FX or cost-index observations must be trusted as
     ``authoritative`` (``source_not_authoritative``; the owner's decision of 13 Oct
-    2026). A run that is not a production one needs no more than the gate."""
+    2026). A run that is not a production one needs no more than the gate.
+
+    A prefill source (step 11) is read from the run's own inputs (``parameters``):
+    every figure resting on it must be an accepted prefill (``prefill_not_accepted``)
+    naming a stored version (``prefill_version_unknown``) that the gate takes now; the
+    newest version is never read for it (review round 1, MEDIUM-4, LOW-5)."""
     production = runs_in_production(deployment)
     for key in sorted(set(keys)):
         if key == engine.MALFORMED_REFERENCE:
@@ -638,6 +737,12 @@ def receipt_refusal(keys, deployment, as_of: date | None) -> tuple[str, str] | N
             return "context_only_source", f"a figure rests on {key}, which is context only"
         if as_of is None:
             return "source_missing", f"{key}: the run has no as-of date to read it at"
+        if feed.use == catalogs.PREFILL and parameters is not None:
+            for name, source_type, evidence in _cited_by(key, parameters):
+                code, detail, _version = _accepted_refusal(key, name, source_type, evidence, deployment)
+                if code is not None:
+                    return code, detail
+            continue
         used = used_version(key, deployment, as_of)
         if used is None:
             latest = _platform_versions(key).order_by("-version").first()
@@ -881,6 +986,7 @@ __all__ = [
     "data_through",
     "fetch",
     "known_source",
+    "prefill_state",
     "live_feeds_enabled",
     "provider_key",
     "receipt_refusal",

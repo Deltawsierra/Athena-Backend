@@ -5430,8 +5430,13 @@ dimensioned fact: the newest periodic report (10-K or 10-Q) in inline XBRL that 
 stored filing watch lists on or before the as-of date, its instance named as EDGAR
 extracts it (`<primary document>_htm.xml`). A fact on `us-gaap:StatementBusinessSegmentsAxis`
 is a segment's; one on no axis is the company's; one on another axis (a product, a
-geography) is not read. No document type or entity declaration is read in any XML
-answer (`feed_malformed`).
+geography) is not read, and a revenue fact in any unit but USD is refused
+(`feed_mismatch`), as a companyfacts revenue or operating income in another unit is.
+An XML answer (an instance, an RSS listing) that declares a document type or any
+entity, in ANY encoding (UTF-16 included), is refused (`feed_malformed`): expat reads it
+first, with handlers that refuse at the first declaration and read no parameter or
+external entity, before the tree is built (review round 1, MEDIUM-2; no dependency is
+added).
 
 **Fail safe.** As step 10's, every adapter reads all of an answer or none of it, with
 step 10's codes (`feed_malformed`, `feed_mismatch`, `feed_partial`,
@@ -5440,7 +5445,23 @@ step 10's codes (`feed_malformed`, `feed_mismatch`, `feed_partial`,
 may hold. A paginated answer is refused whole: a malformed item on its last page
 keeps nothing of its first. A next-page link to another host, path or query is
 `feed_mismatch`, and never followed. JSON numbers are read as `Decimal` from their
-own text: a price is never a float.
+own text: a price is never a float. A number is bounded BEFORE any arithmetic, digest
+or hash (review round 1, MEDIUM-1): one written in more than 64 characters, or with
+more than 40 digits or an exponent past 30 (`1e999999`, `1e9999999`), is refused
+(`feed_value_malformed`), and no Decimal overflow or nesting past the parser's depth is
+ever raised: the fetch records its code and keeps nothing. Where untrusted text is read
+(review round 1, LOWs and NITs):
+
+- NaN, Infinity and a negative price or tier are refused, as is an item twice;
+- a price is written as its provider documents it: Azure's as a JSON number (a string
+  is `feed_value_malformed`), AWS's as a decimal string; Azure's `Count` is an integer,
+  never a boolean;
+- an AWS product with no `regionCode`, or another region's, is `feed_mismatch`;
+- a filing's primary document is one file name (`[A-Za-z0-9._-]+.htm`: no `?`, `#`, `%`
+  or path);
+- a name or other text holding a control, format, private-use or unassigned character
+  (a right-to-left override, a zero-width space or joiner, NUL) is refused, as is one
+  that is blank once read.
 
 ### 31.3 The response hash and the store
 
@@ -5455,8 +5476,9 @@ own text: a price is never a float.
 A fetch is registered by `snapshots.register`, as step 10's: a new platform-wide
 version at `unverified`, append-only, deduplicated over every version of the source on
 its normalised payload hash, with its records as ONE `FinancialSourceRecords` row,
-checked whole BEFORE the registering transaction opens, so the transaction holds two
-inserts and no loop. A raised version reads the records of the version the fetch
+read, serialised, counted and digested whole BEFORE the fetch's transaction opens
+(`snapshots.records_row`), so the transaction holds two inserts and no loop, and the
+row is not digested again inside it (review round 1, LOW-3). A raised version reads the records of the version the fetch
 registered (`snapshots.records_of`).
 
 ### 31.4 Fetching
@@ -5497,9 +5519,24 @@ registry's (32 MiB for a catalog, across all its pages).
 - **The person rule.** A figure resting on a cloud price or an EDGAR fact
   (`financial-source:<key>` of a prefill source) is held, at every writer, to what an
   accepted suggestion is: an `EXPERT_ESTIMATE` variable of a parameter-set version that
-  a signed-in person records, for a variable that source may prefill. Anything else
-  is `prefill_not_accepted`: another source type, another variable, a scenario
-  parameter, or a version no person records (no author).
+  a signed-in person records, for a variable that source may prefill, whose evidence
+  names the version it was accepted from (`financial-source:<key> v<version>
+  sha256:<hash>`). Anything else is `prefill_not_accepted`: another source type,
+  another variable, a scenario parameter (a scenario build's rows included, read as the
+  scenario's before it is stored), evidence naming no version, or a version no person
+  records (no author). Evidence naming a version that is not stored, by number and hash,
+  is `prefill_version_unknown`. A figure written past the model that rests on a prefill
+  source anyway fails closed, as a context one does: the card records the source
+  missing (`prefill_not_accepted`) and its receipt is refused (review round 1, LOW-5).
+- **Only a redistributable licence serves values** (review round 1, MEDIUM-3: the
+  lead's interim decision, saved for the owner). A source whose licence class is `open`
+  or `customer` serves its values to a viewer. One that is `licensed` or `restricted`
+  serves PROVENANCE only: a suggestion answers `withheld`
+  (`licence_restricts_redistribution`) with the source, version, snapshot hash,
+  licence class and dates, and no figure; a precedent listing names the agency, the
+  date and the citation's URL of each record, with the source and its snapshot hash,
+  and no respondent, amount or text. An `unreviewed` licence serves nothing, as
+  before.
 - **Context is never a figure.** A figure whose evidence cites OR NAMES an
   enforcement listing, a filing watch or segment revenue, in any case, is refused
   (`context_only_source`), at the model (`FinancialParameter`), so at the parameter-set
@@ -5521,19 +5558,23 @@ registry's (32 MiB for a catalog, across all its pages).
   only: a regulator's published action, listed as precedent with its citation. It is
   never a fine or penalty figure, never a prediction of one, and never summed into a
   loss". A source whose licence nobody has reviewed is named under `withheld`, and
-  none of its records listed.
+  none of its records listed; a `licensed` or `restricted` one's are listed as
+  provenance only (above).
 
 ### 31.6 Freshness
 
-A catalog's age runs from the day the version a run uses was RETRIEVED (UTC): its prices
-and records carry no date that says how current the listing is. A version covers a
-date once it was retrieved. Against the SLA (`CATALOG_SLA_DAYS`: cloud 7, EDGAR 1,
+A catalog's age runs from the day a version was RETRIEVED (UTC): its prices and
+records carry no date that says how current the listing is. A version covers a date
+once it was retrieved. A figure's age is the age of the version it was ACCEPTED from,
+the one its evidence names, NEVER the newest (review round 1, MEDIUM-4: the lead's
+decision; `age_basis`: `accepted version`): a figure accepted from v1 is as old as v1
+however many versions follow. Against the SLA (`CATALOG_SLA_DAYS`: cloud 7, EDGAR 1,
 enforcement 7; step 10's table is unchanged):
 
 | Source | State | What it does |
 |---|---|---|
-| cloud price (gating) | `fresh`, `stale`, `blocked`, `missing`, as step 10's | a figure resting on it is lowered, its claim made stale and its receipt refused as section 29.5 says |
-| EDGAR (informational) | `informational`, with `age_state` (what the age would be) | shown; it never lowers a grade, makes a claim stale or stops a receipt. With no version a run may use it is `missing`, and a figure resting on it is refused its receipt |
+| a prefill source a figure rests on (a cloud price, EDGAR companyfacts) | gating: `fresh`, `stale`, `blocked`, `missing`, as step 10's, each figure from its accepted version and the source the worst of them | a figure resting on it is lowered, its claim made stale and its receipt refused as section 29.5 says, EDGAR's included. A figure that is not an accepted prefill, or names a version not stored, one the gate refuses, or one retrieved after the run's as-of date, is `missing` |
+| data health's listing of a source (no figure to read) | the newest usable version's, as step 10's: cloud gating; EDGAR `informational`, with `age_state` (what the age would be) | shown |
 | enforcement, a filing watch, segment revenue (context) | `informational`, with `age_state` | shown; a figure never rests on it, so it stops nothing |
 
 The step-10 production authority rule (`source_not_authoritative`) reads FX and
@@ -5569,7 +5610,9 @@ deployment the caller cannot see is 404, a viewer reads.
 | `feed_over_limit` | an answer of more pages or records than one version may hold |
 | `filing_unknown` | a segment fetch with no stored filing watch naming a periodic inline-XBRL filing: nothing sent or written |
 | `context_only_source` | a figure resting on or naming an enforcement listing, a filing watch or segment revenue; a receipt behind one |
-| `prefill_not_accepted` | a figure resting on a cloud price or an EDGAR fact that is not a person's accepted `EXPERT_ESTIMATE` of a variable that source prefills |
+| `prefill_not_accepted` | a figure resting on a cloud price or an EDGAR fact that is not a person's accepted `EXPERT_ESTIMATE` of a variable that source prefills, naming the version it was accepted from; a card or receipt behind one written past the model |
+| `prefill_version_unknown` | an accepted prefill whose evidence names a version, by number and hash, that is not stored |
+| `licence_restricts_redistribution` | a suggestion's figure, or a precedent's amounts and text, from a `licensed` or `restricted` source: provenance only is served |
 | `catalog_record_malformed` | a records row that is not its source's records in their stored spelling, count and digest |
 | `suggestion_target_unrecognised` | a variable the source does not prefill |
 | `suggestion_source_unrecognised` | a source that prefills nothing |
@@ -5628,9 +5671,13 @@ Decisions this step takes, which the owner may change:
    at the cost of a loop of inserts inside the transaction.
 2. **A catalog's age runs from its retrieval.** Alternative: from its prices' or
    records' newest date, which would read a price unchanged for a year as a year old.
-3. **EDGAR's freshness is informational**, figures included: a 1-day SLA acted on would
-   refuse every receipt resting on a 10-K figure the day after its fetch.
-   Alternative: a gating SLA for companyfacts of about a quarter.
+3. **EDGAR's freshness gates an accepted figure** (review round 1, MEDIUM-4: the lead's
+   decision, replacing this step's first choice of informational): once a figure
+   rests on companyfacts, step 10's stale and blocked rules apply to it at the 1-day
+   SLA, from the version it was accepted from, so a receipt resting on a 10-K figure
+   is refused once that version is older than the blocked threshold. Data health's
+   listing of an EDGAR source is still informational. Alternative: a gating SLA for
+   companyfacts of about a quarter.
 4. **The prefill targets**: a cloud price suggests `remediation_license_cost_per_year`
    or `vendor_exit_cost`; EDGAR suggests `annual_revenue` or `operating_margin`, from
    the three newest fiscal years. A scenario parameter never rests on a prefill source.
@@ -5639,3 +5686,12 @@ Decisions this step takes, which the owner may change:
    31.5), and the cap of 100.
 7. **No amount is read from an RSS item**: an RSS enforcement record's amounts are
    none. Alternative: each agency's own structured listing, once a recording shows one.
+8. **Only `open` and `customer` licences serve values** (review round 1, MEDIUM-3: the
+   lead's INTERIM decision, saved for the owner): `licensed` and `restricted` serve
+   provenance only. The owner's licensing review may name a class or a source whose
+   terms allow more.
+9. **A prefill figure is aged from the version it was accepted from** (review round 1,
+   MEDIUM-4: the lead's decision). Alternative: the newest version, which would read
+   a figure as fresh when the figure itself was taken from a stale listing.
+10. **The number bound**: at most 64 characters, 40 digits and an exponent of 30 for
+    any JSON number an adapter reads. Alternative: a bound per field.

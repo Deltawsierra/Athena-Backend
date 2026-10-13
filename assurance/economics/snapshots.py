@@ -73,14 +73,18 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
     return version
 
 
-def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None) -> tuple[FinancialSource, bool]:
+def register(
+    snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None, records=None
+) -> tuple[FinancialSource, bool]:
     """Register ``snapshot`` -- a committed file's, or a live feed's answer parsed by
     its adapter (:mod:`assurance.economics.engine.feeds`, whose snapshot hash is the
     answer's normalised payload hash) -- as a source version of ``deployment``
     (``None``: platform-wide), with every observation it holds, in one transaction.
     Returns ``(version, created)``: a snapshot already registered under its hash, for
     the same tenant and key, is the version that holds it, and nothing is written.
-    A snapshot stating ``authoritative`` is refused before anything is written."""
+    A snapshot stating ``authoritative`` is refused before anything is written.
+    ``records``: the snapshot's records row as :func:`records_row` prepared it, where
+    the caller holds a transaction of its own (the fetch: review round 1, LOW-3)."""
     source = snapshot.source
     if governance.needs_second_person(source["trust_tier"]):
         raise EconomicsRefused(
@@ -88,9 +92,10 @@ def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None)
             f"the snapshot states trust tier {source['trust_tier']}: register it at a lower tier and raise it "
             "with POST /api/assurance/economics/sources/<uuid>/trust-raises/, which a second admin approves",
         )
-    # A catalog's records (step 11) are one row, checked whole HERE, before the
-    # transaction: inside it, two inserts and no loop over the records.
-    held = _records_row(snapshot) if getattr(snapshot, "records", ()) else None
+    # A catalog's records (step 11) are one row, checked whole before ANY
+    # transaction (the caller's, when it passes the row): inside it, two inserts and
+    # no loop over the records, no serialising and no digest.
+    held = records if records is not None else records_row(snapshot)
     with transaction.atomic():
         existing = (
             FinancialSource._base_manager.filter(
@@ -144,11 +149,14 @@ def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None)
     return registered, True
 
 
-def _records_row(snapshot: _snapshot.Snapshot) -> FinancialSourceRecords:
+def records_row(snapshot: _snapshot.Snapshot) -> FinancialSourceRecords | None:
     """The unsaved records row of ``snapshot``'s records, checked whole
-    (:meth:`FinancialSourceRecords.prepare`): never inside a transaction."""
+    (:meth:`FinancialSourceRecords.prepare`): never inside a transaction. ``None``
+    for a snapshot that holds no records."""
     from .engine import catalogs
 
+    if not getattr(snapshot, "records", ()):
+        return None
     entries = catalogs.records_json(snapshot.records)
     row = FinancialSourceRecords(
         kind=snapshot.record_kind,

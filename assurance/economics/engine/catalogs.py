@@ -52,7 +52,9 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -116,9 +118,28 @@ FORMAT_ASSUMED = "endpoint and format assumed: confirm with a recording (owner)"
 # --------------------------------------------------------------------- records
 
 
+#: The Unicode categories no text a record keeps may hold (review round 1, LOW-1): a
+#: control (NUL), a format character (a right-to-left override, a zero-width space or
+#: joiner), a private-use or an unassigned code point. Each can hide, reverse or blank a
+#: name as a reader sees it.
+REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cn"})
+
+
+def _plain_text(value, what: str, *, blank_ok: bool = False) -> str:
+    """``value`` itself: text holding no character of :data:`REFUSED_CATEGORIES`, and
+    not blank unless ``blank_ok``."""
+    if not isinstance(value, str):
+        raise FeedRefused("feed_value_malformed", f"{what} is not text")
+    hidden = sorted({f"U+{ord(c):04X}" for c in value if unicodedata.category(c) in REFUSED_CATEGORIES})
+    if hidden:
+        raise FeedRefused("feed_value_malformed", f"{what} holds a control or format character {hidden[:3]}")
+    if not blank_ok and not value.strip():
+        raise FeedRefused("feed_value_malformed", f"{what} is blank")
+    return value
+
+
 def _blank_or_text(value, what: str) -> None:
-    if not isinstance(value, str) or not value.strip():
-        raise FeedRefused("feed_value_malformed", f"{what} is blank or not text")
+    _plain_text(value, what)
 
 
 def _plain_date(value, what: str) -> date:
@@ -227,6 +248,8 @@ class CompanyFact:
         for name, value in (("entity", self.entity), ("concept", self.concept), ("unit", self.unit),
                             ("form", self.form)):
             _blank_or_text(value, name)
+        if self.unit != "USD":
+            raise FeedRefused("feed_mismatch", f"{self.concept} is in {self.unit}, not USD")
         if not isinstance(self.accession, str) or not _ACCESSION.fullmatch(self.accession):
             raise FeedRefused("feed_value_malformed", f"accession {self.accession!r}")
         _plain_date(self.period_start, "period_start")
@@ -237,8 +260,7 @@ class CompanyFact:
         _decimal(self.value, f"{self.concept} value", signed=True)
         for name, value in (("fiscal_year", self.fiscal_year), ("fiscal_period", self.fiscal_period),
                             ("segment_axis", self.segment_axis), ("segment_member", self.segment_member)):
-            if not isinstance(value, str):
-                raise FeedRefused("feed_value_malformed", f"{name} is not text")
+            _plain_text(value, name, blank_ok=True)
         if bool(self.segment_axis) != bool(self.segment_member):
             raise FeedRefused("feed_value_malformed", "a segment names both its axis and its member, or neither")
 
@@ -294,8 +316,7 @@ class CompanyFiling:
         _plain_date(self.filing_date, "filing_date")
         if self.report_date is not None:
             _plain_date(self.report_date, "report_date")
-        if not isinstance(self.primary_document, str):
-            raise FeedRefused("feed_value_malformed", f"primary document {self.primary_document!r}")
+        _plain_text(self.primary_document, "primary document", blank_ok=True)
         if type(self.inline_xbrl) is not bool:
             raise FeedRefused("feed_value_malformed", "inline_xbrl is true or false")
 
@@ -333,11 +354,12 @@ class CompanyEntity:
         if not isinstance(self.cik, str) or not _CIK.fullmatch(self.cik):
             raise FeedRefused("feed_value_malformed", f"cik {self.cik!r} is not ten digits")
         _blank_or_text(self.name, "name")
-        if not isinstance(self.entity_type, str):
-            raise FeedRefused("feed_value_malformed", "entity_type is not text")
+        _plain_text(self.entity_type, "entity_type", blank_ok=True)
         for name, values in (("tickers", self.tickers), ("exchanges", self.exchanges)):
-            if not isinstance(values, tuple) or not all(isinstance(v, str) and v.strip() for v in values):
+            if not isinstance(values, tuple):
                 raise FeedRefused("feed_value_malformed", f"{name} is a list of names")
+            for value in values:
+                _plain_text(value, name)
 
     @property
     def identity(self) -> str:
@@ -917,10 +939,15 @@ def edgar_cik(key: str) -> str | None:
 # -------------------------------------------------------------------- requests
 
 
+_PRIMARY_HTM = re.compile(r"[A-Za-z0-9._-]+\.htm")
+
+
 def _instance_name(primary_document: str) -> str:
     """The XBRL instance EDGAR extracts from an inline-XBRL primary document:
-    ``aapl-20250927.htm`` gives ``aapl-20250927_htm.xml``."""
-    if not primary_document.endswith(".htm") or "/" in primary_document:
+    ``aapl-20250927.htm`` gives ``aapl-20250927_htm.xml``. A name with anything but
+    letters, digits, ``.``, ``_`` and ``-`` (a ``/``, ``?``, ``#`` or ``%``) is refused:
+    the request names exactly one file."""
+    if not isinstance(primary_document, str) or not _PRIMARY_HTM.fullmatch(primary_document):
         raise FeedRefused("filing_unknown", f"primary document {primary_document!r} is not an inline-XBRL .htm")
     return primary_document[: -len(".htm")] + "_htm.xml"
 
@@ -1029,22 +1056,45 @@ def _json(raw: bytes):
         raise FeedRefused("feed_malformed", f"{name} is not JSON")
 
     def number(text):
+        if len(text) > MAX_NUMBER_TEXT:
+            raise FeedRefused("feed_value_malformed", f"a number {len(text)} characters long")
         try:
             value = Decimal(text)
-        except InvalidOperation:
-            raise FeedRefused("feed_malformed", f"the number {text!r}") from None
+        except (InvalidOperation, ArithmeticError):
+            raise FeedRefused("feed_malformed", f"the number {text[:40]!r}") from None
         if not value.is_finite():
-            raise FeedRefused("feed_malformed", f"the number {text!r} is not finite")
-        return value
+            raise FeedRefused("feed_malformed", f"the number {text[:40]!r} is not finite")
+        return _bounded(value, text)
+
+    def whole(text):
+        if len(text.lstrip("-")) > MAX_NUMBER_DIGITS:
+            raise FeedRefused("feed_value_malformed", f"a whole number {len(text)} digits long")
+        return int(text)
 
     if not isinstance(raw, bytes):
         raise TypeError("a response is read from its bytes")
     try:
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant, parse_float=number,
+                          parse_int=whole)
     except FeedRefused:
         raise
-    except (ValueError, UnicodeError, RecursionError):
+    except (ValueError, UnicodeError, RecursionError, ArithmeticError):
         raise FeedRefused("feed_malformed", "not UTF-8 JSON") from None
+
+
+#: The bounds on a JSON number (review round 1, MEDIUM-1): its significant digits, the
+#: size of its exponent (as ``Decimal.adjusted``), and the length of its text. Every
+#: figure a catalog states fits far inside them; an exponent past them would overflow,
+#: or write a million digits, when the payload is hashed.
+MAX_NUMBER_DIGITS = 40
+MAX_NUMBER_EXPONENT = 30
+MAX_NUMBER_TEXT = 64
+
+
+def _bounded(value: Decimal, text: str) -> Decimal:
+    if len(value.as_tuple().digits) > MAX_NUMBER_DIGITS or abs(value.adjusted()) > MAX_NUMBER_EXPONENT:
+        raise FeedRefused("feed_value_malformed", f"the number {text[:40]!r} is out of a figure's range")
+    return value
 
 
 def _canonical(document) -> bytes:
@@ -1077,20 +1127,22 @@ def _text(value, what: str) -> str:
     return value
 
 
-def _number(value, what: str) -> Decimal:
-    """A JSON number (or a decimal string) as a ``Decimal``."""
-    if isinstance(value, bool):
-        raise FeedRefused("feed_value_malformed", f"{what} is not a number")
-    if isinstance(value, int):
-        return Decimal(value)
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, str):
+def _number(value, what: str, *, written_as: str = "number") -> Decimal:
+    """A value as a ``Decimal``, in the type its format writes it in (review round 1,
+    LOW-2): ``number``, a JSON number (Azure, GCP, EDGAR); ``text``, a decimal string
+    (AWS). The other type is ``feed_value_malformed``, never taken."""
+    if written_as == "text":
+        if not isinstance(value, str):
+            raise FeedRefused("feed_value_malformed", f"{what} is not a decimal string")
+        if len(value) > MAX_NUMBER_TEXT:
+            raise FeedRefused("feed_value_malformed", f"{what} is {len(value)} characters long")
         try:
-            return parse_decimal(value, what)
+            return _bounded(parse_decimal(value, what), value)
         except MoneyRefused:
-            raise FeedRefused("feed_value_malformed", f"{what} {value!r} is not a plain decimal") from None
-    raise FeedRefused("feed_value_malformed", f"{what} is not a number")
+            raise FeedRefused("feed_value_malformed", f"{what} {value[:40]!r} is not a plain decimal") from None
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+        raise FeedRefused("feed_value_malformed", f"{what} is not a JSON number")
+    return Decimal(value) if isinstance(value, int) else value
 
 
 _INSTANT = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})")
@@ -1134,8 +1186,10 @@ def _aws(feed: FeedSource, pages, as_of, requests, filing) -> list:
             raise FeedRefused("feed_malformed", f"product {sku} names itself and holds its attributes")
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in attributes.items()):
             raise FeedRefused("feed_malformed", f"product {sku}'s attributes are text")
-        if attributes.get("regionCode", config["region"]) != config["region"]:
-            raise FeedRefused("feed_mismatch", f"product {sku} is in {attributes['regionCode']}, not {config['region']}")
+        if attributes.get("regionCode") != config["region"]:
+            raise FeedRefused(
+                "feed_mismatch", f"product {sku} is in {attributes.get('regionCode')!r}, not {config['region']}"
+            )
         families[sku] = product.get("productFamily", "")
     for term_type, offers in terms.items():
         if not isinstance(offers, dict) or not all(isinstance(v, dict) for v in offers.values()):
@@ -1158,8 +1212,10 @@ def _aws(feed: FeedSource, pages, as_of, requests, filing) -> list:
                 price = dimension["pricePerUnit"]
                 if not isinstance(price, dict) or "USD" not in price:
                     raise FeedRefused("feed_mismatch", f"rate {rate_code} states no USD price")
-                begin = _number(dimension["beginRange"], f"rate {rate_code} beginRange")
-                if dimension["endRange"] != "Inf" and _number(dimension["endRange"], f"rate {rate_code} endRange") < begin:
+                begin = _number(dimension["beginRange"], f"rate {rate_code} beginRange", written_as="text")
+                if dimension["endRange"] != "Inf" and _number(
+                    dimension["endRange"], f"rate {rate_code} endRange", written_as="text"
+                ) < begin:
                     raise FeedRefused("feed_value_malformed", f"rate {rate_code} ends before it begins")
                 prices.append(
                     PriceObservation(
@@ -1168,7 +1224,7 @@ def _aws(feed: FeedSource, pages, as_of, requests, filing) -> list:
                         observation_id=rate_code,
                         region=config["region"],
                         unit=_text(dimension["unit"], f"rate {rate_code} unit"),
-                        usd_price=_number(price["USD"], f"rate {rate_code} USD"),
+                        usd_price=_number(price["USD"], f"rate {rate_code} USD", written_as="text"),
                         effective_date=effective,
                         tier_start=begin,
                         product=" ".join(filter(None, (document["offerCode"], families[sku]))),
@@ -1200,7 +1256,7 @@ def _azure(feed: FeedSource, pages, as_of, requests, filing) -> list:
         if (page["BillingCurrency"], page["CustomerEntityType"]) != ("USD", "Retail"):
             raise FeedRefused("feed_mismatch", f"page {number} is not retail prices in USD")
         items = page["Items"]
-        if not isinstance(items, list) or not isinstance(page["Count"], int) or page["Count"] != len(items):
+        if not isinstance(items, list) or type(page["Count"]) is not int or page["Count"] != len(items):
             raise FeedRefused("feed_partial", f"page {number} says {page['Count']} items and holds {len(items)}")
         last = number == len(pages)
         if (page["NextPageLink"] is None) != last:
@@ -1428,9 +1484,13 @@ def _edgar_companyfacts(feed: FeedSource, pages, as_of, requests, filing) -> lis
                         raise FeedRefused("feed_value_malformed", f"{concept} fy {fact['fy']!r}")
                     if not (fact["fp"] is None or isinstance(fact["fp"], str)):
                         raise FeedRefused("feed_value_malformed", f"{concept} fp {fact['fp']!r}")
-                    if (
-                        taxonomy != "us-gaap" or concept not in wanted or unit != "USD" or start is None
-                    ):
+                    if taxonomy != "us-gaap" or concept not in wanted:
+                        continue
+                    if unit != "USD":
+                        # Never skipped: a revenue part in another currency would leave a
+                        # period's figure silently short (review round 1, LOW-2).
+                        raise FeedRefused("feed_mismatch", f"us-gaap:{concept} is reported in {unit}, not USD")
+                    if start is None:
                         continue
                     records.append(
                         CompanyFact(
@@ -1467,8 +1527,7 @@ def _xml(raw: bytes):
     since the QNames read here are resolved document-wide."""
     if not isinstance(raw, bytes):
         raise TypeError("a response is read from its bytes")
-    if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
-        raise FeedRefused("feed_malformed", "a document type or an entity declaration")
+    _no_declarations(raw)
     prefixes: dict[str, str] = {}
     root = None
     try:
@@ -1484,6 +1543,31 @@ def _xml(raw: bytes):
     if root is None:
         raise FeedRefused("feed_malformed", "no element")
     return root, prefixes
+
+
+def _no_declarations(raw: bytes) -> None:
+    """Refuse an XML answer that declares a document type or an entity, in whatever
+    encoding it is written (review round 1, MEDIUM-2): expat reads the document --
+    UTF-16 included -- with handlers that raise on a DOCTYPE, an entity declaration
+    or an external entity reference, and with parameter entities never parsed, so
+    nothing is ever expanded. The tree is built only after this pass."""
+
+    def refuse(*_args):
+        raise FeedRefused("feed_malformed", "a document type or an entity declaration")
+
+    def external(*_args):
+        refuse()
+
+    parser = expat.ParserCreate()
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartDoctypeDeclHandler = refuse
+    parser.EntityDeclHandler = refuse
+    parser.UnparsedEntityDeclHandler = refuse
+    parser.ExternalEntityRefHandler = external
+    try:
+        parser.Parse(raw, True)
+    except expat.ExpatError:
+        raise FeedRefused("feed_malformed", "not well-formed XML") from None
 
 
 def _qname(text, prefixes: dict[str, str], what: str) -> tuple[str, str]:
@@ -1562,7 +1646,9 @@ def _edgar_instance(feed: FeedSource, pages, as_of, requests, filing) -> list:
         if context not in contexts or unit not in units:
             raise FeedRefused("feed_malformed", f"{local} names a context or unit the instance does not hold")
         dates, members = contexts[context]
-        if not units[unit] or dates is None:
+        if not units[unit]:
+            raise FeedRefused("feed_mismatch", f"{local} in {context} is not in USD")
+        if dates is None:
             continue
         if members and (len(members) != 1 or members[0] is None or members[0][0] != (uri, SEGMENT_AXIS)):
             continue  # another axis (a product, a geography): not segment revenue
@@ -1874,7 +1960,7 @@ def newest_periodic_filing(records, as_of: date) -> CompanyFiling | None:
     candidates = [
         r for r in records
         if r.TYPE == CompanyFiling.TYPE and r.form in PERIODIC_FORMS and r.inline_xbrl and r.filing_date <= as_of
-        and r.primary_document.endswith(".htm")
+        and _PRIMARY_HTM.fullmatch(r.primary_document)
     ]
     if not candidates:
         return None

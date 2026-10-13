@@ -15,6 +15,13 @@
 Each reads the NEWEST platform-wide version of a source whose licence has been
 reviewed (``governance.production_use_refusal`` on its licence class and synthetic
 flag); a source with none is named, with the gate's code, and read no further.
+
+Only a version whose licence class allows redistribution (``open``; ``customer``)
+has its raw values served to a viewer (review round 1, MEDIUM-3: the lead's interim
+decision, held for the owner). A ``restricted`` or ``licensed`` one serves its
+provenance only, with ``licence_restricts_redistribution``: the source, version,
+snapshot hash and date; for an enforcement record, the agency, date and citation URL;
+never a price, an amount, a figure derived from them, a respondent or a record's text.
 Both read only: no write, no transaction, no lock, and no request to any provider.
 Neither is on a stop path; the routes that serve them import this module inside the
 view (``health_api.py``).
@@ -85,6 +92,14 @@ def _version(version: FinancialSource, today: date, sla: int) -> dict:
     }
 
 
+def _provenance(version: FinancialSource, today: date, sla: int) -> dict:
+    """A version as a source whose licence restricts redistribution is shown: where it
+    is from and when, never what it holds."""
+    shown = _version(version, today, sla)
+    return {name: shown[name] for name in ("key", "version", "snapshot_hash", "license_class", "retrieved_at",
+                                           "age_days", "sla_days", "age_state")}
+
+
 def _one(query: dict, name: str, *, required: bool = True) -> str | None:
     values = query.get(name, [])
     if len(values) > 1 or (required and not values):
@@ -107,8 +122,19 @@ def suggest(deployment, query: dict[str, list[str]], *, now: datetime | None = N
     version, why = reviewed_version(feed.key)
     if version is None:
         raise Refused(why, f"{feed.key}: no version whose licence has been reviewed")
-    records = snapshots.records_of(version)
     today = _utc_date(now or timezone.now())
+    if not rules.serves_values(version.license_class):
+        # Provenance only: no figure derived from the raw values either, since a
+        # quantity of one, or a known quantity, gives the raw price back.
+        return {
+            "deployment": str(deployment.uuid),
+            "status": "withheld",
+            "code": "licence_restricts_redistribution",
+            "meaning": rules.REFUSALS["licence_restricts_redistribution"],
+            "target": target,
+            "version": _provenance(version, today, feed.sla_days),
+        }
+    records = snapshots.records_of(version)
     try:
         if feed.kind == catalogs.CLOUD_PRICE:
             wanted = query.get("observation", [])
@@ -165,12 +191,23 @@ def precedents(deployment, scenario, *, now: datetime | None = None) -> dict:
         if version is None:
             withheld.append({"key": key, "because": why})
             continue
-        sources.append(_version(version, today, feed.sla_days))
-        listed.extend(
-            rules.precedent_entry(record, source_key=key, version=version.version)
-            for record in snapshots.records_of(version)
-            if record.TYPE == catalogs.EnforcementRecord.TYPE
-        )
+        serves = rules.serves_values(version.license_class)
+        sources.append({**_version(version, today, feed.sla_days),
+                        **({} if serves else {"withheld": "licence_restricts_redistribution"})})
+        for record in snapshots.records_of(version):
+            if record.TYPE != catalogs.EnforcementRecord.TYPE:
+                continue
+            entry = rules.precedent_entry(record, source_key=key, version=version.version)
+            if not serves:
+                # Provenance only: the agency, the date and where the action is cited.
+                entry = {
+                    "agency": entry["agency"],
+                    "date": entry["date"],
+                    "citation": {"url": entry["citation"]["url"]},
+                    "source": {**entry["source"], "snapshot_hash": version.snapshot_hash},
+                    "withheld": "licence_restricts_redistribution",
+                }
+            listed.append(entry)
     listed.sort(key=lambda entry: (entry["date"], entry["source"]["key"], entry["citation"]["url"]), reverse=True)
     return {
         "deployment": str(deployment.uuid),

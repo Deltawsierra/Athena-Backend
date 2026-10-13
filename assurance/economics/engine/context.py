@@ -75,8 +75,43 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "the figures make no parameter: a negative operating margin, or no complete annual period"
         ),
         "suggestion_malformed": "the suggestion route's query names one source, one target and what it rests on",
+        # Review round 1 of #165 (MEDIUM-3, MEDIUM-4; the lead's decisions).
+        "licence_restricts_redistribution": (
+            "the source's licence class does not allow its raw values to be redistributed (restricted, licensed): "
+            "its provenance is served -- source, version, snapshot hash, date, and for an enforcement record the "
+            "agency, date and citation -- never a value, an amount or its text"
+        ),
+        "prefill_version_unknown": (
+            "a figure accepted from a prefill names the source version it was accepted from, by number and snapshot "
+            "hash, and no stored version of that source is that one: the evidence is never taken on trust"
+        ),
     }
 )
+
+#: The licence classes whose raw values may be served to a viewer: ``open`` (its terms
+#: allow redistributing it) and ``customer`` (the customer's own data). ``restricted``
+#: and ``licensed`` serve provenance only (the lead's interim decision, held for the
+#: owner); ``unreviewed`` serves nothing.
+SERVES_VALUES = frozenset({"open", "customer"})
+
+
+def serves_values(license_class) -> bool:
+    """Whether a version of ``license_class`` may have its raw values served to a viewer."""
+    return license_class in SERVES_VALUES
+
+
+#: The accepted version a prefill figure names: ``financial-source:<key> v<n> sha256:<hex>``,
+#: as a suggestion's entry writes it.
+_ACCEPTED = re.compile(r"financial-source:([a-z0-9][a-z0-9-]*) v([1-9][0-9]{0,8}) (sha256:[0-9a-f]{64})(?:\s|$)")
+
+
+def accepted_version(evidence_ref) -> tuple[str, int, str] | None:
+    """``(key, version, snapshot hash)`` of the version a prefill figure's evidence names
+    it was accepted from, or ``None`` where it names none in that form."""
+    match = _ACCEPTED.match(evidence_ref) if isinstance(evidence_ref, str) else None
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2)), match.group(3)
 
 #: What a suggestion is, said wherever one is shown.
 SUGGESTION_STATEMENT = (
@@ -169,6 +204,11 @@ def citation_refusal(evidence_ref, *, name: str, source_type, in_parameter_set: 
         return "prefill_not_accepted", f"{name} may not rest on {feed.key}: it prefills {sorted(targets)} only"
     if str(getattr(source_type, "value", source_type)) != SourceType.EXPERT_ESTIMATE.value:
         return "prefill_not_accepted", f"{name} rests on {feed.key} as {source_type}, not as an accepted EXPERT_ESTIMATE"
+    named = accepted_version(text)
+    if named is None or named[0] != feed.key:
+        return "prefill_not_accepted", (
+            f"{name} cites {feed.key} without the version it was accepted from (v<n> sha256:<hash>)"
+        )
     return None
 
 
