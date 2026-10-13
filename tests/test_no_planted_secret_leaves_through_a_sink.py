@@ -1420,6 +1420,22 @@ class World:
             docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/simulate/",
             "deployment-economics-scenario-simulate", data={"seed": 7, "policy": "quick_10k"}, format="json",
         ).status_code
+        # The same route with every one of the deployment's economics run slots held
+        # (assurance.economics.capacity): answered 503 economics_capacity at once,
+        # before the body is read. Its answer is searched like every other, with a
+        # canary in the body it was sent.
+        from assurance.economics import capacity
+
+        slots, _why = capacity.acquire(str(self.deployment.uuid))
+        try:
+            signals["scenario_simulate_at_capacity"] = self.call(
+                docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/simulate/",
+                "deployment-economics-scenario-simulate",
+                data={"seed": 8, "policy": "quick_10k", "note": f"busy {CANARY['request.body']}"}, format="json",
+            ).status_code
+        finally:
+            if slots is not None:
+                slots.release()
         signals["scenario_results"] = self.call(
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/results/",
             "deployment-economics-scenario-results",
@@ -1728,6 +1744,10 @@ ROUTES.update(
         # scenario versions, and a Financial Exposure Receipt's signed bytes.
         "deployment-economics-scenarios": _READ,
         "deployment-economics-receipt": "api.receipts",
+        # Step 11's context routes: a prefill suggestion (it takes its query, and a
+        # read with none is refused 400 with its code) and a scenario's precedents.
+        "deployment-economics-suggestions": _READ,
+        "deployment-economics-scenario-precedents": _READ,
         # The portfolio (E5): the totals and their report JSON, and the authored
         # correlation group versions a portfolio names.
         "deployment-economics-portfolio": _READ,
@@ -1776,6 +1796,7 @@ def _readable_urls(world):
                 "deployment-economics-scenario-events",
                 "deployment-economics-scenario-results",
                 "deployment-economics-scenario-roi",
+                "deployment-economics-scenario-precedents",
             ):
                 from assurance.economics.models import FinancialScenario
 
@@ -2033,6 +2054,12 @@ _WRITES = re.compile(
 FILE_WRITERS: dict[str, str] = {
     "pentest/models.py": "files: the scan's PDF report (upload_to pentest_reports/, under MEDIA_ROOT), "
     "written by pentest.utils.save_pdf_to_scan through the scan's FileField",
+    # Not under MEDIA_ROOT, so not read by the files search: each slot file is created
+    # empty and never written to, and is named by a slot's index or a digest of a
+    # deployment's uuid (tests/test_economics_run_cap.py, test_a_slot_file_carries_nothing).
+    "assurance/economics/capacity.py": "files: the economics run slots, empty lock files in "
+    "ATHENA_ECONOMICS_SLOT_DIR (run-<i>.lock, tenant-<sha256 of a deployment uuid>-<i>.lock), never written to; "
+    "they carry no byte of any request",
 }
 
 
@@ -2143,13 +2170,14 @@ def test_every_path_ran(observed):
         s["records"]["scenario_build"],
         s["records"]["scenario_events"],
         s["records"]["scenario_simulate"],
+        s["records"]["scenario_simulate_at_capacity"],
         s["records"]["scenario_results"],
         s["records"]["mitigation"],
         s["records"]["mitigation_simulate"],
         s["records"]["scenario_roi"],
         s["records"]["portfolio_simulate"],
         s["records"]["portfolio"],
-    ) == (400, 201, 200, 201, 200, 201, 201, 200, 201, 200), s["records"]
+    ) == (400, 201, 200, 201, 503, 200, 201, 201, 200, 201, 200), s["records"]
     # The read routes the dashboard needs: the list read, a receipt issued and its bytes read.
     assert (s["records"]["scenario_list"], s["records"]["receipt_issued"], s["records"]["receipt_bytes"]) == (
         200, (True, None), 200,

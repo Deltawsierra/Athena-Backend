@@ -95,6 +95,10 @@ The reads the dashboard's financial views need (MVP step 14), on step 6's routes
 
 30. [The read routes the dashboard needs (MVP step 14 support)](#30-the-read-routes-the-dashboard-needs-mvp-step-14-support)
 
+MVP step 11, on step 10's framework, context only (live fetching waits on the owner's keys):
+
+31. [The cloud price catalogs, SEC EDGAR and enforcement (MVP step 11)](#31-the-cloud-price-catalogs-sec-edgar-and-enforcement-mvp-step-11)
+
 Economic Exposure E5, on step 6's report:
 
 33. [Portfolio aggregation (Economic Exposure E5)](#33-portfolio-aggregation-economic-exposure-e5)
@@ -105,7 +109,7 @@ Economic Exposure E5, on step 6's report:
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
 | Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0072_portfolio_results.py` (E5, section 33) |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33) |
 | Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
@@ -429,6 +433,7 @@ operator runs; any other writer is a defect.
 | `FXObservation` (E1) | one exchange rate read from a source version's snapshot: base, quote, rate (`Decimal`), rate type, provider, `observed_at`, effective date, the source snapshot hash; linked to its `FinancialSource` | `assurance/economics/snapshots.py` `register_snapshot`, run by an operator on a committed snapshot; and `snapshots.register`, through which the feed fetch registers a fetched answer (step 10, section 29) |
 | `CostIndexObservation` (E1) | one published value of one cost-index series: series id, geography, category, base (`2020-03=100`), period, value (`Decimal`), vintage date; linked to its `FinancialSource` | the same |
 | `FinancialSourceFetch` (step 10) | one fetch of one platform-wide feed source: its key, as-of date, when, and its outcome -- `recorded`, `unchanged` (the version that holds the payload named) or `refused` with its code only; the payload hash; no account, no deployment | `assurance/economics/feeds.py` `fetch`, run by `manage.py fetch_financial_source` (section 29) |
+| `FinancialSourceRecords` (step 11) | the records one step-11 source version holds (cloud prices, a company's facts or filing watch, enforcement records), as one list in their stored spelling, with their kind, count and digest; one row per version | `snapshots.register`, through which the feed fetch registers a catalog's answer (section 31); read by `snapshots.records_of` only |
 | `CustomerParameterSet` (scenarios) | one version of one deployment's customer parameter set: `set_key`, `version` (assigned on save), the excluded insurance families, `variable_count`, `content_digest`, its author | the parameter-set API (section 19): an admin or analyst of the deployment, the roles that author a scenario; a viewer reads, never writes |
 | `FinancialParameter` (scenarios) | one parameter: name, unit, `source_type`, low, base and high (decimal strings), currency, evidence reference, effective date, `fresh_until`, for a derived one, `derived_from` (the parameters it was taken across, section 24.5), and the distribution it states, if any (section 25.1); linked to exactly one scenario or one parameter-set version | a set version's parameters: the parameter-set API, with their version and only then; a scenario's: the scenario builder (section 24) |
 | `LossEvent` (scenarios) | one causal loss event of a scenario: key, currency, SPINE effect, business process, trigger, correlation group | the scenario builder (section 24), through its build route |
@@ -4534,10 +4539,10 @@ and series.
 - **The live review status** is read when the report is built: a review recorded
   later changes the report's bytes and digest, as it should (the card keeps the
   status at issue).
-- **No cap on simulations at once** (review round 1, LOW-5): one request is bounded
-  by its one deadline, but how many a process runs at once, or a scenario holds, is
-  not. Open for the testing phase: a per-process cap (503 when busy), so a pool of
-  synchronous workers cannot fill with long simulations a stop's request might need.
+- **The cap on simulations at once is done** (review round 1, LOW-5; the section 28
+  threat-model audit, S1): how many runs a host makes at once, and a deployment, is
+  capped across worker processes without waiting, and a run with no slot free is 503
+  `economics_capacity` at once (section 32).
 - **The step-5 events route carries the banner** (`.../scenarios/<uuid>/events/`,
   sections 24.8 and 27.6; review round 1, LOW-6(b), done in the follow-up to #158). It
   still serves step 4's deterministic totals, which are not a result, and says
@@ -5406,6 +5411,455 @@ Decisions this adds, which the owner may change:
    own text of the column is not served: a JSON column need not keep the spelling it
    was given (PostgreSQL's `jsonb`, for one, reorders keys). Recommendation: keep.
 
+## 31. The cloud price catalogs, SEC EDGAR and enforcement (MVP step 11)
+
+Step 11 adds three families of source to step 10's framework (section 29): the cloud
+price catalogs, SEC EDGAR and the regulators' enforcement listings. Each is fetched,
+stored, aged and listed in data health as step 10's sources are, and each is CONTEXT
+ONLY, as section 10 of the owner's specification says each is FOR: a cloud price is
+evidence for a recovery, rebuild, hosting or control cost; a public company's filings
+for its revenue and margin; a regulator's enforcement for "scenario range context;
+never automatic penalty prediction". It is built on fixtures: **no live request is
+made until the owner adds the keys and turns on step 10's one setting**, and nothing
+in this step calls a real host, in a test or at import.
+
+| | |
+|---|---|
+| Code | `engine/catalogs.py` (pure: the adapters, the registry, the records, the SLA table); `engine/context.py` (pure: the context rules, the suggestions, the precedent entry); `feeds.py` (the fetch, freshness, the receipt check and data health, extended); `context_service.py` (the suggestion and the precedent listing); `health_api.py` (two more routes); `snapshots.register` and `snapshots.records_of`; `models.py` (`FinancialSourceRecords`, the citation rule on `FinancialParameter`, the person rule on `CustomerParameterSet`) |
+| Migration | `0071_financial_source_records.py`: one new table, `FinancialSourceRecords`, after `0070_financial_source_fetches.py` (this step merges before #162, whose migration moves to 0072) |
+| Tests | `tests/test_economics_catalogs.py`; the pins of `tests/test_economics_engine.py`, `tests/test_economics_scenario_records.py`, the canary harness and `tests/economics_no_network_cases.py` |
+| Fixtures | `tests/fixtures/economics_catalogs/`, each format-faithful, NOT a recorded response; replace with a recording (owner) (section 31.10) |
+
+### 31.1 The sources
+
+One table (`engine/catalogs.py`, `CATALOG_REGISTRY`) names every static source, and
+EDGAR's are one per company, `sec-edgar-<family>-cik<CIK>` (`sec-edgar-submissions-cik<CIK>`,
+`sec-edgar-companyfacts-cik<CIK>`, `sec-edgar-segments-cik<CIK>`, the CIK ten digits).
+Each says what a figure may do with it (`use`: `prefill` or `context`), how its
+freshness acts (`gating` or `informational`) and which provider terms the owner's
+licensing review reads (`licence_terms`):
+
+| Key | Provider and format | Records | Use | SLA | Key setting |
+|---|---|---|---|---|---|
+| `aws-price-list-s3-us-east-1` | AWS Price List bulk offer file, Amazon S3, us-east-1 | cloud prices | prefill, gating | 7 days | none |
+| `azure-retail-prices-site-recovery-eastus` | Azure Retail Prices API, JSON pages, Azure Site Recovery, eastus | cloud prices | prefill, gating | 7 days | none |
+| `gcp-billing-catalog-cloud-storage` | Google Cloud Billing Catalog API, SKU pages, Cloud Storage in us-central1 and us-east1 | cloud prices | prefill, gating | 7 days | `ECONOMICS_GCP_BILLING_API_KEY` (query) |
+| `sec-edgar-submissions-cik<CIK>` | SEC EDGAR submissions JSON | the company and its recent filings: a filing watch | context, informational | 1 day | `ECONOMICS_SEC_USER_AGENT` (header) |
+| `sec-edgar-companyfacts-cik<CIK>` | SEC EDGAR XBRL companyfacts JSON | revenue and operating income by period | prefill, informational | 1 day | the same |
+| `sec-edgar-segments-cik<CIK>` | the newest periodic filing's XBRL instance | segment revenue by period | context, informational | 1 day | the same |
+| `cfpb-enforcement-actions` | CFPB enforcement actions, RSS 2.0 | enforcement records | context | 7 days | none |
+| `ftc-privacy-security-cases` | FTC cases, privacy and security, RSS 2.0 | the same | context | 7 days | none |
+| `sec-litigation-releases` | SEC litigation releases, RSS 2.0 | the same | context | 7 days | none |
+| `hhs-ocr-hipaa-enforcement` | HHS OCR HIPAA enforcement, RSS 2.0 | the same | context | 7 days | none |
+| `occ-enforcement-actions` | OCC enforcement action search, CSV export | the same | context | 7 days | none |
+| `fdic-enforcement-orders` | FDIC enforcement decisions and orders, CSV export | the same | context | 7 days | none |
+| `frb-enforcement-actions` | Federal Reserve enforcement actions, CSV export | the same | context | 7 days | none |
+
+Every licence class is `unreviewed` until the owner's review (section 4.4): no run may
+use a version, no suggestion reads one and no precedent lists one until then. The
+enforcement listings' datasets say "endpoint and format assumed: confirm with a
+recording (owner)": the builder knew of no documented, machine-readable enforcement
+listing with stated penalty fields, and could read none (section 31.12).
+
+### 31.2 The adapters
+
+Each reads its provider's published format into RECORDS (`engine/catalogs.py`), held by
+the source version, never into the FX or cost-index observations a run reads:
+
+- a **cloud price** (`PriceObservation`): provider, SKU, region, unit (the provider's
+  own spelling), the USD price per unit, the date it is effective from, and the usage
+  tier it starts at. AWS: every on-demand price dimension; Azure: every item, across
+  every page; GCP: every tiered rate of a SKU offered in a region asked, its price
+  `units` plus `nanos` billionths;
+- a **company fact** (`CompanyFact`): the XBRL concept, the period, the value in USD, and
+  the form, filing date and accession number of the filing that reported it, the
+  fiscal year and period; and, for segment revenue, the segment's axis and member;
+- a **filing watch**: the company (its name, entity type, tickers and exchanges) and
+  every recent filing (form, filing date, report date, accession number, primary
+  document, whether it is inline XBRL);
+- an **enforcement record** (`EnforcementRecord`): agency, date, respondent, category,
+  the civil money penalty, restitution and settlement amounts the listing STATES in a
+  field of its own, and the citation's URL and text. An amount is never read out of
+  prose: an RSS item states none, so its amounts are none. The respondent is an RSS
+  item's title where the agency titles its actions by respondent (CFPB, FTC, SEC) and
+  none for HHS OCR, whose titles are prose; a CSV export's is its column.
+
+Segment revenue is read from a filing's XBRL instance because `companyfacts` holds no
+dimensioned fact: the newest periodic report (10-K or 10-Q) in inline XBRL that the
+stored filing watch lists on or before the as-of date, its instance named as EDGAR
+extracts it (`<primary document>_htm.xml`). A fact on `us-gaap:StatementBusinessSegmentsAxis`
+is a segment's; one on no axis is the company's; one on another axis (a product, a
+geography) is not read, and a revenue fact in any unit but USD is refused
+(`feed_mismatch`), as a companyfacts revenue or operating income in another unit is.
+An XML answer (an instance, an RSS listing) that declares a document type or any
+entity, in ANY encoding (UTF-16 included), is refused (`feed_malformed`): expat reads it
+first, with handlers that refuse at the first declaration and read no parameter or
+external entity, before the tree is built (review round 1, MEDIUM-2; no dependency is
+added).
+
+**Fail safe.** As step 10's, every adapter reads all of an answer or none of it, with
+step 10's codes (`feed_malformed`, `feed_mismatch`, `feed_partial`,
+`feed_value_malformed`, `feed_empty`, `response_too_large`) and one more:
+`feed_over_limit`, an answer of more pages (20) or records (5,000) than one version
+may hold. A paginated answer is refused whole: a malformed item on its last page
+keeps nothing of its first. A next-page link to another host, path or query is
+`feed_mismatch`, and never followed. JSON numbers are read as `Decimal` from their
+own text: a price is never a float. A number is bounded BEFORE any arithmetic, digest
+or hash (review round 1, MEDIUM-1): one written in more than 64 characters, or with
+more than 40 digits or an exponent past 30 (`1e999999`, `1e9999999`), is refused
+(`feed_value_malformed`), and no Decimal overflow or nesting past the parser's depth is
+ever raised: the fetch records its code and keeps nothing. Where untrusted text is read
+(review round 1, LOWs and NITs):
+
+- NaN, Infinity and a negative price or tier are refused, as is an item twice;
+- a price is written as its provider documents it: Azure's as a JSON number (a string
+  is `feed_value_malformed`), AWS's as a decimal string; Azure's `Count` is an integer,
+  never a boolean;
+- an AWS product with no `regionCode`, or another region's, is `feed_mismatch`;
+- a filing's primary document is one file name (`[A-Za-z0-9._-]+.htm`: no `?`, `#`, `%`
+  or path);
+- a name or other text holding a control, format, private-use or unassigned character
+  (a right-to-left override, a zero-width space or joiner, NUL) is refused, as is one
+  that is blank once read.
+
+### 31.3 The response hash and the store
+
+| Adapter | What is normalised |
+|---|---|
+| AWS, EDGAR submissions and companyfacts | nothing dropped: the JSON re-serialised canonically |
+| Azure | nothing dropped: every page re-serialised canonically, in order |
+| GCP | each page's `nextPageToken` (an opaque cursor) dropped, then every page re-serialised canonically |
+| an XBRL instance, a CSV export | nothing: the bytes as they came |
+| RSS | the channel's own elements (its `lastBuildDate`, which moves on every build) dropped; each item's title, link, date, guid, description and categories re-serialised canonically |
+
+A fetch is registered by `snapshots.register`, as step 10's: a new platform-wide
+version at `unverified`, append-only, deduplicated over every version of the source on
+its normalised payload hash, with its records as ONE `FinancialSourceRecords` row,
+read, serialised, counted and digested whole BEFORE the fetch's transaction opens
+(`snapshots.records_row`), so the transaction holds two inserts and no loop, and the
+row is not digested again inside it (review round 1, LOW-3). A raised version reads the records of the version the fetch
+registered (`snapshots.records_of`).
+
+### 31.4 Fetching
+
+`manage.py fetch_financial_source <key>` fetches step 11's sources too (`--list`
+prints them). Step 10's rules hold: nothing is sent or written without the key where
+one is needed (`source_key_missing`: the GCP key in `ECONOMICS_GCP_BILLING_API_KEY`, sent
+in the query; SEC's fair-access policy asks every request to declare its sender, so
+the owner's contact goes in `ECONOMICS_SEC_USER_AGENT`, sent as the `User-Agent` header,
+withheld as a key is), without the switch, or for a date other than today
+(`as_of_unsupported`: every step-11 provider serves its current listing only). A
+segment source sends nothing until a filing watch of the same company names a
+periodic inline-XBRL filing (`filing_unknown`).
+
+Every page of a paginated catalog is asked and read whole, one request at a time,
+BEFORE anything is parsed or written, so no transaction is open while a request is in
+flight; a page that fails refuses the whole answer, and the fetch's record names its
+code. The answer is then parsed all or nothing and registered. The size cap is the
+registry's (32 MiB for a catalog, across all its pages).
+
+### 31.5 Context only
+
+- **A prefill is a suggestion a person accepts.** A cloud price may suggest a cost
+  variable of the parameter set (`remediation_license_cost_per_year`, `vendor_exit_cost`)
+  and an EDGAR fact a listed company's `annual_revenue` or `operating_margin`. The
+  suggestion (`engine/context.py`, `Suggestion`; the suggestion route, section 31.8)
+  is a suggestion, not a parameter: it writes nothing. It gives the low, base and
+  high and the parameter-set entry a person records to accept it: an
+  `EXPERT_ESTIMATE` whose evidence names the snapshot version
+  (`financial-source:<key> v<version> <hash> accepted suggestion: ...`). A cloud cost
+  is the quantity the person states, times the lowest, median and highest of the
+  prices they pick (one to ten, of one unit), to the cent. An EDGAR figure reads the
+  newest three fiscal years the company filed a 10-K for, each figure as last filed
+  (a restatement replaces the first): the newest is the base, the lowest and highest
+  the low and the high; the margin is operating income over revenue, to four places,
+  and a negative one is refused (no parameter is negative). EDGAR prefills a PUBLIC
+  company only: its filing watch names a ticker on an exchange (`suggestion_not_public`).
+- **The person rule.** A figure resting on a cloud price or an EDGAR fact
+  (`financial-source:<key>` of a prefill source) is held, at every writer, to what an
+  accepted suggestion is: an `EXPERT_ESTIMATE` variable of a parameter-set version that
+  a signed-in person records, for a variable that source may prefill, whose evidence
+  names the version it was accepted from (`financial-source:<key> v<version>
+  sha256:<hash>`). Anything else is `prefill_not_accepted`: another source type,
+  another variable, a scenario parameter (a scenario build's rows included, read as the
+  scenario's before it is stored), evidence naming no version, or a version no person
+  records (no author). Evidence naming a version that is not stored, by number and hash,
+  is `prefill_version_unknown`. A figure written past the model that rests on a prefill
+  source anyway fails closed, as a context one does: the card records the source
+  missing (`prefill_not_accepted`) and its receipt is refused (review round 1, LOW-5).
+- **Only a redistributable licence serves values** (review round 1, MEDIUM-3: the
+  lead's interim decision, saved for the owner). A source whose licence class is `open`
+  or `customer` serves its values to a viewer. One that is `licensed` or `restricted`
+  serves PROVENANCE only: a suggestion answers `withheld`
+  (`licence_restricts_redistribution`) with the source, version, snapshot hash,
+  licence class and dates, and no figure; a precedent listing names the agency, the
+  date and the citation's URL of each record, with the source and its snapshot hash,
+  and no respondent, amount or text. An `unreviewed` licence serves nothing, as
+  before.
+- **Context is never a figure.** A figure whose evidence cites OR NAMES an
+  enforcement listing, a filing watch or segment revenue, in any case, is refused
+  (`context_only_source`), at the model (`FinancialParameter`), so at the parameter-set
+  route, the scenario builder and every other writer through the ORM. A loss
+  component computes only from the figures it cites, so no code path writes an
+  enforcement amount into a loss component. A figure written past the model that
+  rests on one anyway fails closed: the card records the source missing
+  (`context_only_source`), its claim is stale, and its receipt is refused
+  (`context_only_source`). No module on the path to a loss, a run, a card, a receipt
+  or a report imports the catalogs, the context rules or the context service, or names
+  an enforcement record (`test_no_loss_path_module_reads_an_enforcement_record`).
+- **Precedent is listed, with its citation.** A scenario version lists the records of
+  every enforcement source that gives precedent for one of its components' loss
+  families (each source names its families: CFPB legal, regulatory and restitution;
+  FTC and HHS OCR legal, regulatory and notification; SEC legal and regulatory; OCC
+  and the Fed regulatory; FDIC regulatory and restitution), newest first, at most 100,
+  each with its agency, date, respondent, category, citation, and its amounts AS TEXT,
+  "stated by the listing, not a figure of this scenario". The listing says: "context
+  only: a regulator's published action, listed as precedent with its citation. It is
+  never a fine or penalty figure, never a prediction of one, and never summed into a
+  loss". A source whose licence nobody has reviewed is named under `withheld`, and
+  none of its records listed; a `licensed` or `restricted` one's are listed as
+  provenance only (above).
+
+### 31.6 Freshness
+
+A catalog's age runs from the day a version was RETRIEVED (UTC): its prices and
+records carry no date that says how current the listing is. A version covers a date
+once it was retrieved. A figure's age is the age of the version it was ACCEPTED from,
+the one its evidence names, NEVER the newest (review round 1, MEDIUM-4: the lead's
+decision; `age_basis`: `accepted version`): a figure accepted from v1 is as old as v1
+however many versions follow. Against the SLA (`CATALOG_SLA_DAYS`: cloud 7, EDGAR 1,
+enforcement 7; step 10's table is unchanged):
+
+| Source | State | What it does |
+|---|---|---|
+| a prefill source a figure rests on (a cloud price, EDGAR companyfacts) | gating: `fresh`, `stale`, `blocked`, `missing`, as step 10's, each figure from its accepted version and the source the worst of them | a figure resting on it is lowered, its claim made stale and its receipt refused as section 29.5 says, EDGAR's included. A figure that is not an accepted prefill, or names a version not stored, one the gate refuses, or one retrieved after the run's as-of date, is `missing` |
+| data health's listing of a source (no figure to read) | the newest usable version's, as step 10's: cloud gating; EDGAR `informational`, with `age_state` (what the age would be) | shown |
+| enforcement, a filing watch, segment revenue (context) | `informational`, with `age_state` | shown; a figure never rests on it, so it stops nothing |
+
+The step-10 production authority rule (`source_not_authoritative`) reads FX and
+cost-index sources only, as decided; a catalog is not one.
+
+### 31.7 Data health
+
+The data-health route (section 29.7) lists step 11's sources under `catalog_sources`,
+with `catalog_freshness_sla_days`: every static source and every EDGAR company source
+a version or a fetch has been recorded for, each with its state (and `age_state`), its
+use and freshness, its licence terms, its last fetch failure (its code), what its state
+does (`effect`), and, for a prefill source that is blocked or missing, the Unknowns it
+causes. Step 10's `sources` list is unchanged.
+
+### 31.8 The routes
+
+Both in `assurance/economics/health_api.py`, the data-health route's guarded module,
+each importing the context service only inside its view; both in
+`safety.stops.NOT_STOPS`; both write nothing. Access is step 6's: a signed-in account, a
+deployment the caller cannot see is 404, a viewer reads.
+
+- `GET /api/assurance/deployments/<uuid>/economics/suggestions/?source=<key>&target=<variable>[&observation=<id>...&quantity=<decimal>]`
+  (`deployment-economics-suggestions`): a suggestion, canonical JSON; a refusal is 400
+  with its code and meaning. Any other query field is `suggestion_malformed`.
+- `GET /api/assurance/deployments/<uuid>/economics/scenarios/<scenario>/precedents/`
+  (`deployment-economics-scenario-precedents`): the scenario version's precedents,
+  canonical JSON; no query parameter (400 for any).
+
+### 31.9 Codes
+
+| Code | Refused |
+|---|---|
+| `feed_over_limit` | an answer of more pages or records than one version may hold |
+| `filing_unknown` | a segment fetch with no stored filing watch naming a periodic inline-XBRL filing: nothing sent or written |
+| `context_only_source` | a figure resting on or naming an enforcement listing, a filing watch or segment revenue; a receipt behind one |
+| `prefill_not_accepted` | a figure resting on a cloud price or an EDGAR fact that is not a person's accepted `EXPERT_ESTIMATE` of a variable that source prefills, naming the version it was accepted from; a card or receipt behind one written past the model |
+| `prefill_version_unknown` | an accepted prefill whose evidence names a version, by number and hash, that is not stored |
+| `licence_restricts_redistribution` | a suggestion's figure, or a precedent's amounts and text, from a `licensed` or `restricted` source: provenance only is served |
+| `catalog_record_malformed` | a records row that is not its source's records in their stored spelling, count and digest |
+| `suggestion_target_unrecognised` | a variable the source does not prefill |
+| `suggestion_source_unrecognised` | a source that prefills nothing |
+| `suggestion_observation_missing` | a price the suggestion names that the version does not hold |
+| `suggestion_units_differ` | prices of more than one unit |
+| `suggestion_quantity_malformed` | a quantity that is not a plain positive decimal |
+| `suggestion_not_public` | an EDGAR suggestion for a company its filing watch does not show listed |
+| `suggestion_out_of_range` | figures that make no parameter: a negative margin, no complete year |
+| `suggestion_malformed` | a query that names a field twice, misses one, or names another |
+
+A suggestion with no reviewed version answers the gate's code (`unreviewed_license`,
+`synthetic_source`) or `source_missing`.
+
+### 31.10 The fixtures
+
+The adapters are tested against fixtures in `tests/fixtures/economics_catalogs/`.
+**Each is format-faithful, NOT a recorded response; replace with a recording (owner).**
+Every company, respondent and amount in them is fictitious. Each adapter has a
+structure test that pins its fixture's format, so a recording that differs fails there,
+loudly; the value tests read each fixture's own values with a reader of their own. The
+README beside them names the request each answers, what each assumes, and how sure the
+builder was: well known for AWS, Azure, GCP and EDGAR; ASSUMED for the enforcement
+listings.
+
+### 31.11 Safety
+
+No fetch, suggestion, precedent listing or freshness rule here is on a stop, pause,
+stand-down, terminate or revoke path, and nothing a stop reads is written by them:
+the command is loaded only when an operator runs it; the routes' module is mounted
+guarded and imports the context service and the feed module only inside its views;
+the model imports the context rules only for evidence that could name a step-11 source.
+No transaction is open while a request is in flight (a test watches every send), and
+registering a version writes two rows, its records checked before the transaction
+opens. Every test runs under step 10's socket guard, and a fresh pytest whose sockets
+refuse everything imports the new modules and resolves the new routes.
+
+### 31.12 What waits on the owner, and decisions the owner may change
+
+What only the owner's keys, licences or recordings stand between this step and live use:
+
+1. **The keys**: `ECONOMICS_GCP_BILLING_API_KEY` (the Cloud Billing Catalog API) and
+   `ECONOMICS_SEC_USER_AGENT` (SEC's declared sender, e.g. a company name and a contact
+   address), each a settings line; and step 10's switch.
+2. **The licences**: each source's licence class, `unreviewed` until the owner reads the
+   terms its registry entry names (`licence_terms`).
+3. **The recordings**: each fixture replaced by a recording of the request its README
+   names. The enforcement listings' endpoints and formats are assumptions; the
+   recordings decide them, and a CSV export's columns are its registry entry's `header`.
+4. **Raises**: none is needed for a catalog's receipt (section 31.6), but a production
+   run uses a version above `unverified` only (the gate).
+
+Decisions this step takes, which the owner may change:
+
+1. **Records are one row per version**, not a table per record type: registering a
+   catalog holds the write lock for two inserts. Alternative: typed tables, queryable,
+   at the cost of a loop of inserts inside the transaction.
+2. **A catalog's age runs from its retrieval.** Alternative: from its prices' or
+   records' newest date, which would read a price unchanged for a year as a year old.
+3. **EDGAR's freshness gates an accepted figure** (review round 1, MEDIUM-4: the lead's
+   decision, replacing this step's first choice of informational): once a figure
+   rests on companyfacts, step 10's stale and blocked rules apply to it at the 1-day
+   SLA, from the version it was accepted from, so a receipt resting on a 10-K figure
+   is refused once that version is older than the blocked threshold. Data health's
+   listing of an EDGAR source is still informational. Alternative: a gating SLA for
+   companyfacts of about a quarter.
+4. **The prefill targets**: a cloud price suggests `remediation_license_cost_per_year`
+   or `vendor_exit_cost`; EDGAR suggests `annual_revenue` or `operating_margin`, from
+   the three newest fiscal years. A scenario parameter never rests on a prefill source.
+5. **Public means listed**: a ticker on an exchange in the company's filing watch.
+6. **The precedent families** each enforcement source gives precedent for (section
+   31.5), and the cap of 100.
+7. **No amount is read from an RSS item**: an RSS enforcement record's amounts are
+   none. Alternative: each agency's own structured listing, once a recording shows one.
+8. **Only `open` and `customer` licences serve values** (review round 1, MEDIUM-3: the
+   lead's INTERIM decision, saved for the owner): `licensed` and `restricted` serve
+   provenance only. The owner's licensing review may name a class or a source whose
+   terms allow more.
+9. **A prefill figure is aged from the version it was accepted from** (review round 1,
+   MEDIUM-4: the lead's decision). Alternative: the newest version, which would read
+   a figure as fresh when the figure itself was taken from a stale listing.
+10. **The number bound**: at most 64 characters, 40 digits and an exponent of 30 for
+    any JSON number an adapter reads. Alternative: a bound per field.
+
+## 32. Economics runs at once: the cap (SAFETY RULE)
+
+The SAFETY RULE: nothing may block, delay or drop a stop, a pause, a stand-down, a
+terminate, a revoke or a scan's Stop. Every simulate route runs its Monte Carlo
+synchronously, in the worker that serves it, for up to its one 120 s deadline (section
+27.1). Nothing bounded how many ran at once, so one analyst, or a stolen analyst token,
+could fill every worker with long runs, and a scan's Stop then waited for a free worker
+(the section 28 threat-model audit, finding S1, HIGH).
+
+| | |
+|---|---|
+| Code | `assurance/economics/capacity.py`; `@capacity.capped` on `report_api.ScenarioSimulateView.post`, `remediation_api.MitigationSimulateView.post` and (E5, section 33.9) `portfolio_api.PortfolioSimulateView.post` |
+| Tests | `tests/test_economics_run_cap.py`; the canary harness's records path (a simulate at capacity) |
+
+### 32.1 What takes a slot
+
+Every handler that runs a Monte Carlo, or the sensitivity analysis a Validity Card is:
+the scenario simulate route and the remediation option's simulate route (its two runs
+share one slot), and E5's portfolio simulate route (section 33.9). A route registers
+with ONE line, `@capacity.capped` on its handler, and
+`test_every_handler_that_runs_a_monte_carlo_takes_a_slot` walks the URLconf and fails
+on a handler that calls a run (`simulate_scenario`, `simulate_option`,
+`simulate_portfolio`, `issue_card`, `issue_charts`, `issue_receipt`) and is not
+capped. No management command runs a Monte Carlo.
+
+Before a slot is touched the deployment is looked up as the handler looks it up (404
+for one the caller cannot see: a tenant's runs are never disclosed to another), and a
+caller who may not write goes straight to the handler, which refuses them (403) and
+runs nothing. Then one of the deployment's slots and one of the host's are taken, both
+WITHOUT WAITING. When either is not free the request is answered at once:
+
+```
+503 Service Unavailable
+Retry-After: 30
+{"code": "economics_capacity", "detail": "...: nothing was run or recorded; send the same request again after 30 s", "recorded": false}
+```
+
+Nothing runs and nothing is recorded; nothing queues. The answer carries nothing from
+the request. A request that would only return a stored result is refused the same way
+while every slot is held.
+
+### 32.2 The slots
+
+A slot is an exclusive `flock` (`LOCK_EX | LOCK_NB`) on one small file in the slot
+directory, which every worker on the host shares: `run-<i>.lock` for the host's
+slots, `tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's.
+
+- **No slot leaks.** The kernel releases a flock when the last descriptor of its open
+  file closes, so a worker that dies by any means (SIGKILL, the OOM killer, gunicorn's
+  timeout) gives its slots back at once. A database lease with an expiry was the
+  alternative: it leaks a dead worker's slot until it expires, and it would put a
+  database read in front of the cap. The cap reads no database.
+- **Every exit gives the slot back**: the handler's answer, a refusal, an exception,
+  and `SystemExit` (gunicorn's abort of a timed-out worker) release it in a `finally`;
+  a client that disconnects is the same (the handler runs to its end, bounded by its
+  deadline). The descriptors are close-on-exec, and released with `LOCK_UN`, so a child
+  process never keeps one.
+- **Per host.** The cap protects the host's worker pool, so it is per host; a deployment
+  of several machines has a cap on each. The directory must be local to the host.
+- **Fails closed.** Slot files that cannot be opened refuse the run, 503
+  `economics_capacity` ("cannot be read"); a run is never made uncapped.
+
+### 32.3 The caps
+
+Each read from the environment by its literal name; no Django setting is read.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ATHENA_ECONOMICS_RUN_CAP` | `max(1, WEB_CONCURRENCY - 2)` | runs the host makes at once; `0` refuses every run |
+| `WEB_CONCURRENCY` | `1` (gunicorn's own default) | gunicorn's worker count, which gunicorn itself reads |
+| `ATHENA_ECONOMICS_RUN_CAP_PER_TENANT` | `1` | runs one deployment makes at once |
+| `ATHENA_ECONOMICS_SLOT_DIR` | `<system temp dir>/athena-economics-slots` | where the slot files are |
+
+The default global cap leaves at least two workers free for everything else, every
+stop included, wherever the host runs three workers or more. Below three it is 1, the
+least that still lets economics run: one run can then take the only spare worker. A
+server that also runs threads per worker (`gunicorn --threads`) serves
+`workers x threads` requests at once; set `ATHENA_ECONOMICS_RUN_CAP` to that less two.
+This repository holds no Procfile, gunicorn configuration, Dockerfile or Fly
+configuration, so the worker count is taken from the environment, never assumed.
+
+### 32.4 Safety
+
+No stop takes a slot or reads the cap. `test_no_stop_route_takes_a_slot` walks the
+URLconf and fails on a capped handler of any route in `safety.stops.EXEMPT_ROUTES`;
+`test_with_every_slot_held_a_run_is_refused_at_once_and_every_stop_is_answered_in_its_bound`
+holds every slot with slow runs (a test seam holds each open) and drives every stop
+the stop tripwire drives -- a scan's Stop, a pause, a stand-down, a terminate, a revoke,
+a contradiction, the kill switch off, an engagement's authority withdrawn, a demotion, a
+removal, the stop lane's reads, the engine's poll and the refresh -- through
+`config.wsgi.application`, each within the tripwire's `STOP_LATENCY_BOUND` (0.25 s).
+The two simulate routes stay in `safety.stops.NOT_STOPS` and the write-route table's
+routes that cannot move the decision; at capacity they write nothing at all.
+
+### 32.5 Decisions this step takes, which the owner may change
+
+1. **flock slots, per host**, over database leases. Recommendation: keep.
+2. **The per-tenant cap is per deployment**, the tenant boundary (`assurance.models`).
+   An analyst sees every deployment, so one analyst can still hold every host slot
+   through several deployments; the host cap is what keeps the stop's workers free.
+   Alternative: also cap per account.
+3. **`Retry-After: 30`**, a quarter of the 120 s deadline.
+4. **Stop routes on their own worker pool** is an operations change, not code; the cap
+   does not need it.
+
 ## 33. Portfolio aggregation (Economic Exposure E5)
 
 E5 answers the owner's question "how does this affect the entire AI portfolio?"
@@ -5423,7 +5877,7 @@ served at `GET deployments/<uuid>/economics/portfolio/` (the owner's
 | | |
 |---|---|
 | Code | `assurance/economics/engine/portfolio.py` (pure; imports numpy), `assurance/economics/portfolio.py` (the thin Django service and the report; imports nothing probabilistic at load), `assurance/economics/portfolio_api.py` (the three routes); `PortfolioResult` and `CorrelationGroup` in `models.py`; one keyword-only change to step 7b's `scenario_simulation._sample` (below) |
-| Migration | `0072_portfolio_results.py`: two new tables, nothing else changed, on step 10's `0070_financial_source_fetches.py`: numbered 0072 as step 11 (#165) takes 0071, and re-pointed to it when #165 merges |
+| Migration | `0072_portfolio_results.py`: two new tables, nothing else changed, on step 11's `0071_financial_source_records.py` |
 | Tests | `tests/test_economics_portfolio.py`; the safety tests of sections 2, 23.10, 26.8 and 27.9 extended to the new modules, the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_portfolio.py`) |
 
 ### 33.1 What is totalled
@@ -5895,13 +6349,17 @@ other economics route resolves and the scan's Stop answers 202 and is saved
 (`test_a_portfolio_fault_never_takes_down_a_stop`). The portfolio totals by the
 report's rule, so a broken report leaves the portfolio's routes unserved too.
 
-**No cap on simulations at once yet** (the section-28 audit's S1, HIGH): the
-portfolio's simulate route, like step 6's and step 13's, runs its draws in the
-request, bounded by the one 120 s deadline but not in number. A separate change
-(#166, spec section 32) adds a cross-process, non-blocking cap for the economics
-Monte Carlo routes (an immediate 503 `economics_capacity`, never a wait); the
-portfolio's simulate route carries its `@capacity.capped` once that merges. Until
-then the portfolio adds no lock or wait of its own.
+**The portfolio's draws run only in a free economics run slot** (the section-28
+audit's S1, HIGH; section 32). The simulate route runs its draws in the request,
+bounded by the one 120 s deadline, so `PortfolioSimulateView.post` carries
+`@capacity.capped`, as step 6's and step 13's simulate routes do: the deployment is
+looked up first (404, 403 for a viewer, before any slot is touched); then one of the
+deployment's slots and one of the host's are taken WITHOUT WAITING, or the request is
+answered at once, 503 `economics_capacity` with `Retry-After`, and nothing is drawn or
+recorded; the slots are given back in a `finally`. The group routes and the report
+run no Monte Carlo and take no slot. With every slot held, the scan's Stop is answered
+202 and saved (`test_a_portfolio_at_capacity_is_refused_at_once_and_never_holds_a_stop`).
+The portfolio adds no lock or wait of its own.
 
 ### 33.10 Decisions this step takes, which the owner may change
 
@@ -5992,8 +6450,6 @@ then the portfolio adds no lock or wait of its own.
   strength and membership are a sensitive change, and `SensitiveOverride`'s dual
   approval is not wired to a portfolio yet; the source type is the author's own
   statement. The record says who stated it and when.
-- **No cap on simulations at once** until the economics capacity cap merges
-  (section 33.9; the audit's S1).
 - **No licence term or expiry**: a source's licence class is read (section 33.8),
   but no `licensed_until` is recorded or checked (the audit's T7).
 - **No limit shared across scenarios**: insurance is each scenario's, per event

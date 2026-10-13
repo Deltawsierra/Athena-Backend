@@ -1,0 +1,19 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>HIPAA Resolution Agreements and Civil Money Penalties | HHS.gov</title>
+    <link>https://www.hhs.gov/hipaa/for-professionals/compliance-enforcement/agreements/</link>
+    <description>HHS Office for Civil Rights enforcement announcements</description>
+    <language>en-us</language>
+    <lastBuildDate>Tue, 13 Oct 2026 06:00:00 -0400</lastBuildDate>
+    <item>
+      <title>HHS Office for Civil Rights Settles HIPAA Investigation with a Fixture Health System</title>
+      <link>https://www.hhs.gov/hipaa/for-professionals/compliance-enforcement/agreements/fixture-health-system/index.html</link>
+      <description>A fixture: a resolution agreement and corrective action plan.</description>
+      <pubDate>Wed, 07 Oct 2026 09:00:00 -0400</pubDate>
+      <guid isPermaLink="true">https://www.hhs.gov/hipaa/for-professionals/compliance-enforcement/agreements/fixture-health-system/index.html</guid>
+      <category>Resolution Agreement</category>
+    </item>
+  </channel>
+</rss>

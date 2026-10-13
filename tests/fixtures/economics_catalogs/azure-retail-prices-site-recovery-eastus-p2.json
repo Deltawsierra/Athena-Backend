@@ -1,0 +1,33 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "BillingCurrency": "USD",
+  "CustomerEntityId": "Default",
+  "CustomerEntityType": "Retail",
+  "Items": [
+    {
+      "currencyCode": "USD",
+      "tierMinimumUnits": 0.0,
+      "retailPrice": 0.0,
+      "unitPrice": 0.0,
+      "armRegionName": "eastus",
+      "location": "US East",
+      "effectiveStartDate": "2026-07-01T00:00:00Z",
+      "meterId": "0b2f8a6c-1d3e-4f50-9a7b-000000000003",
+      "meterName": "VM Replicated to Azure Free",
+      "productId": "DZH318Z0BQ3F",
+      "skuId": "DZH318Z0BQ3F/0003",
+      "availabilityId": null,
+      "productName": "Azure Site Recovery",
+      "skuName": "VM Replicated to Azure Free",
+      "serviceName": "Azure Site Recovery",
+      "serviceId": "DZH31JZ8Q3B8",
+      "serviceFamily": "Management and Governance",
+      "unitOfMeasure": "1/Day",
+      "type": "Consumption",
+      "isPrimaryMeterRegion": true,
+      "armSkuName": ""
+    }
+  ],
+  "NextPageLink": null,
+  "Count": 1
+}

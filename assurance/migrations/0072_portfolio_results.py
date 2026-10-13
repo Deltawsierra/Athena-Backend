@@ -14,9 +14,7 @@
 # existing table changes, nothing is backfilled. No foreign key to a deployment has
 # a reverse accessor (related_name "+").
 #
-# Numbered 0072: step 11 (#165) takes 0071 and merges first; this depends on #161's
-# 0070_financial_source_fetches until then, and is re-pointed to #165's 0071 when
-# master is merged after it.
+# Numbered 0072 on step 11's 0071_financial_source_records (#165, merged first).
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -28,7 +26,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0070_financial_source_fetches"),
+        ("assurance", "0071_financial_source_records"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

@@ -528,7 +528,8 @@ NOT_STOPS = {
     "deployment-economics-scenario-simulate": {
         "POST": "runs or returns a simulation of an Economic Exposure scenario version and issues its Validity "
         "Card, chart series and, where asked, its receipt: economics records, append-only; it starts and stops "
-        "nothing",
+        "nothing. It runs only in a free economics run slot, taken without waiting (assurance.economics."
+        "capacity), and is answered 503 economics_capacity at once when none is free; no stop takes a slot",
     },
     "deployment-economics-scenario-results": _get(),
     # The read routes the dashboard needs (assurance.economics.report_api, spec section
@@ -546,12 +547,18 @@ NOT_STOPS = {
     },
     "deployment-economics-mitigation-simulate": {
         "POST": "runs or returns a scenario version's current run and a remediation option's residual run and "
-        "issues their Validity Cards: economics records, append-only; it starts and stops nothing",
+        "issues their Validity Cards: economics records, append-only; it starts and stops nothing. It runs only "
+        "in a free economics run slot, taken without waiting (assurance.economics.capacity), and is answered 503 "
+        "economics_capacity at once when none is free; no stop takes a slot",
     },
     "deployment-economics-scenario-roi": _get(),
     # The data-health route (assurance.economics.health_api, step 10): feed sources'
     # freshness read. Economics records only, and it writes nothing.
     "deployment-economics-data-health": _get(),
+    # Step 11's context routes (assurance.economics.health_api): a prefill suggestion
+    # and a scenario's enforcement precedents. Economics reads only; they write nothing.
+    "deployment-economics-suggestions": _get(),
+    "deployment-economics-scenario-precedents": _get(),
     # The normalization route (assurance.economics.health_api, step 12): one amount
     # normalized for a deployment over the source versions a run of it may use. Reads
     # economics rows only, holds no lock and no transaction, and writes nothing.

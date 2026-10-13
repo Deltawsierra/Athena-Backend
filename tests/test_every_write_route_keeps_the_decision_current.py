@@ -802,7 +802,8 @@ CANNOT_MOVE = {
     ),
     ("ScenarioSimulateView", "post", "post"): (
         "simulates an Economic Exposure scenario version and issues its Validity Card and chart series, all "
-        "economics records; the decision reads no economics record",
+        "economics records; the decision reads no economics record. With no economics run slot free it is "
+        "503 economics_capacity and writes nothing at all",
         _economics_scenario_simulate,
     ),
     ("MitigationsView", "post", "post"): (
@@ -812,7 +813,8 @@ CANNOT_MOVE = {
     ),
     ("MitigationSimulateView", "post", "post"): (
         "simulates a scenario version's current run and a remediation option's residual run and issues their "
-        "Validity Cards, all economics records; the decision reads no economics record",
+        "Validity Cards, all economics records; the decision reads no economics record. With no economics run "
+        "slot free it is 503 economics_capacity and writes nothing at all",
         _economics_mitigation_simulate,
     ),
     ("PortfolioSimulateView", "post", "post"): (

@@ -32,8 +32,9 @@ portfolio the engine cannot make now (it will not import, the deadline, memory) 
 
 No route here is a stop, and none reads or writes anything a stop or the decision
 reads: each is in ``safety.stops.NOT_STOPS``. The draws hold no transaction
-and no lock. This module imports the engine only inside a view: nothing Django loads
-at start imports it, or numpy.
+and no lock, and run only in a free economics run slot (``@capacity.capped``: taken
+without waiting, else 503 ``economics_capacity`` at once). This module imports the
+engine only inside a view: nothing Django loads at start imports it, or numpy.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from rest_framework.exceptions import PermissionDenied, UnsupportedMediaType, Va
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import portfolio, report
+from . import capacity, portfolio, report
 from .api import MAX_BODY_BYTES, BodyTooLarge, StrictJSONParser, _deployment, _may_write, _table_unavailable
 from .engine import currency as _currency
 from .models import SIMULATION_COMPLETED
@@ -88,6 +89,9 @@ class PortfolioSimulateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [StrictJSONParser]
 
+    # The draws run in this request: only in a free economics run slot, taken without
+    # waiting, else 503 economics_capacity at once (the SAFETY RULE; spec 32 and 33.9).
+    @capacity.capped
     def post(self, request, uuid):
         deployment = _deployment(request, uuid)
         if not _may_write(request.user):

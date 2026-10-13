@@ -1,0 +1,165 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+{
+  "cik": "9999999",
+  "entityType": "operating",
+  "sic": "7372",
+  "sicDescription": "Services-Prepackaged Software",
+  "ownerOrg": "06 Technology",
+  "insiderTransactionForOwnerExists": 0,
+  "insiderTransactionForIssuerExists": 1,
+  "name": "FIXTURE EXAMPLE CORP",
+  "tickers": [
+    "FXMP"
+  ],
+  "exchanges": [
+    "Nasdaq"
+  ],
+  "ein": "000000000",
+  "lei": null,
+  "description": "",
+  "website": "",
+  "investorWebsite": "",
+  "category": "Large accelerated filer",
+  "fiscalYearEnd": "0927",
+  "stateOfIncorporation": "DE",
+  "stateOfIncorporationDescription": "DE",
+  "addresses": {
+    "mailing": {
+      "street1": "1 FIXTURE WAY",
+      "street2": null,
+      "city": "EXAMPLE",
+      "stateOrCountry": "CA",
+      "zipCode": "00000",
+      "stateOrCountryDescription": "CA",
+      "isForeignLocation": 0,
+      "foreignStateTerritory": null,
+      "country": null,
+      "countryCode": null
+    },
+    "business": {
+      "street1": "1 FIXTURE WAY",
+      "street2": null,
+      "city": "EXAMPLE",
+      "stateOrCountry": "CA",
+      "zipCode": "00000",
+      "stateOrCountryDescription": "CA",
+      "isForeignLocation": 0,
+      "foreignStateTerritory": null,
+      "country": null,
+      "countryCode": null
+    }
+  },
+  "phone": "000-000-0000",
+  "flags": "",
+  "formerNames": [],
+  "filings": {
+    "recent": {
+      "accessionNumber": [
+        "0009999999-26-000041",
+        "0009999999-26-000033",
+        "0009999999-26-000019",
+        "0009999999-25-000102",
+        "0009999999-25-000088"
+      ],
+      "filingDate": [
+        "2026-10-06",
+        "2026-08-01",
+        "2026-05-01",
+        "2025-11-07",
+        "2025-09-15"
+      ],
+      "reportDate": [
+        "2026-10-01",
+        "2026-06-27",
+        "2026-03-28",
+        "2025-09-27",
+        ""
+      ],
+      "acceptanceDateTime": [
+        "2026-10-06T16:05:12.000Z",
+        "2026-08-01T16:30:05.000Z",
+        "2026-05-01T16:30:44.000Z",
+        "2025-11-07T16:31:02.000Z",
+        "2025-09-15T09:00:00.000Z"
+      ],
+      "act": [
+        "34",
+        "34",
+        "34",
+        "34",
+        ""
+      ],
+      "form": [
+        "8-K",
+        "10-Q",
+        "10-Q",
+        "10-K",
+        "4"
+      ],
+      "fileNumber": [
+        "001-99999",
+        "001-99999",
+        "001-99999",
+        "001-99999",
+        ""
+      ],
+      "filmNumber": [
+        "261234567",
+        "261112222",
+        "261000111",
+        "251555666",
+        ""
+      ],
+      "items": [
+        "2.02,9.01",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "size": [
+        254321,
+        4123456,
+        4012345,
+        9876543,
+        4567
+      ],
+      "isXBRL": [
+        1,
+        1,
+        1,
+        1,
+        0
+      ],
+      "isInlineXBRL": [
+        1,
+        1,
+        1,
+        1,
+        0
+      ],
+      "primaryDocument": [
+        "exmp-20261001.htm",
+        "exmp-20260627.htm",
+        "exmp-20260328.htm",
+        "exmp-20250927.htm",
+        "xslF345X05/wk-form4_1757900000.xml"
+      ],
+      "primaryDocDescription": [
+        "8-K",
+        "10-Q",
+        "10-Q",
+        "10-K",
+        "FORM 4"
+      ],
+      "core_type": [
+        "8-K",
+        "10-Q",
+        "10-Q",
+        "10-K",
+        "4"
+      ]
+    },
+    "files": []
+  }
+}

@@ -110,6 +110,31 @@ REMEDIATION_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(REMEDIATION_RECORD_REFUSALS)
+#: The codes the context rules of step 11's sources refuse a figure or a records row
+#: with (spec, section 31.5). Spelled here, as the engine's ``context.REFUSALS``
+#: spells the first two (``tests/test_economics_catalogs.py`` pins them equal): that
+#: module is not on Django's load path.
+CONTEXT_RECORD_REFUSALS = {
+    "context_only_source": (
+        "an enforcement record, a filing watch or segment revenue is context only (spec, section 31.5): a figure "
+        "never rests on one, names one in its evidence or takes an amount from one, so no enforcement amount is "
+        "ever a fine or penalty figure or reaches a loss"
+    ),
+    "prefill_not_accepted": (
+        "a figure resting on a cloud price or an EDGAR fact is a person's accepted suggestion: an EXPERT_ESTIMATE "
+        "variable of a parameter-set version a signed-in person records, for a variable that source may prefill "
+        "(spec, section 31.5); never a scenario parameter, another source type, or a version no person recorded"
+    ),
+    "prefill_version_unknown": (
+        "a figure accepted from a prefill names the source version it was accepted from, by number and snapshot "
+        "hash, and no stored version of that source is that one: the evidence is never taken on trust"
+    ),
+    "catalog_record_malformed": (
+        "a source version's records row holds the records of a step-11 source of its kind, each in its stored "
+        "spelling, as many as it says and its digest theirs, one row per version"
+    ),
+}
+_REFUSAL_TEXT.update(CONTEXT_RECORD_REFUSALS)
 #: The codes a stored portfolio result, or a correlation group version, is refused
 #: with on save (spec, section 33).
 PORTFOLIO_RECORD_REFUSALS = {
@@ -1707,6 +1732,106 @@ class FinancialSourceFetch(_AppendOnly):
 
 
 # ---------------------------------------------------------------------------
+# FinancialSourceRecords -- the records a step-11 source version holds (MVP step 11)
+# ---------------------------------------------------------------------------
+
+#: The kinds of record a step-11 source holds (``engine/catalogs.py``, ``KINDS``,
+#: spelled here: that module is not on Django's load path; the tests pin them equal).
+CATALOG_KINDS = ("cloud_price", "company_fact", "filing_watch", "enforcement")
+
+
+class FinancialSourceRecords(_AppendOnly):
+    """The records one version of a step-11 source holds (spec, section 31): a cloud
+    catalog's prices, a company's facts or filing watch, or a regulator's enforcement
+    records, as one list in their stored spelling (``engine/catalogs.py``,
+    ``records_json``), with their count and digest.
+
+    One row per version that the fetch registered with records, written in the same
+    transaction as the version. It is ONE row however many records the version
+    holds, checked whole before the transaction (:meth:`prepare`), so registering a
+    catalog holds the database's write lock for two inserts, never for a check or a
+    loop. A raised version holds none of its own and reads its holder's, as
+    observations are read (``snapshots.records_of``).
+
+    CONTEXT AND PREFILL ONLY: no run reads it, and no loss component, parameter or
+    report cites it; a figure only cites a prefill source's version as a person's
+    accepted evidence (spec, section 31.5). It names no account and no deployment of
+    its own; it goes with its source version. Append-only."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    source = models.OneToOneField(FinancialSource, on_delete=models.CASCADE, related_name="+")
+    kind = models.CharField(max_length=32, choices=[(k, k) for k in CATALOG_KINDS])
+    schema_version = models.CharField(max_length=64, default="mythos.economics.catalog-records/v1")
+    records = models.JSONField()
+    record_count = models.PositiveIntegerField()
+    # "sha256:" + 64 hex over the records' canonical JSON.
+    records_digest = models.CharField(max_length=71)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["source", "id"]
+        verbose_name = "financial source records"
+        verbose_name_plural = "financial source records"
+        constraints = [
+            models.CheckConstraint(condition=Q(kind__in=CATALOG_KINDS), name="ck_econ_records_kind"),
+            models.CheckConstraint(condition=Q(record_count__gte=1), name="ck_econ_records_not_empty"),
+        ]
+
+    def prepare(self) -> None:
+        """Every check that reads nothing stored, run BEFORE the registering
+        transaction: the records read whole as their kind, in their stored spelling,
+        counted and digested. :meth:`check_new` then reads only the source row."""
+        from .engine import catalogs
+
+        if self.schema_version != catalogs.RECORDS_SCHEMA:
+            raise EconomicsRefused("catalog_record_malformed", f"schema {self.schema_version!r}")
+        if self.kind not in CATALOG_KINDS:
+            raise EconomicsRefused("catalog_record_malformed", f"kind {self.kind!r}")
+        try:
+            held = catalogs.read_records(self.kind, self.records)
+        except catalogs.FeedRefused as refused:
+            raise EconomicsRefused("catalog_record_malformed", f"{refused.code}: {refused.detail}") from None
+        entries = catalogs.records_json(held)
+        if entries != self.records:
+            raise EconomicsRefused("catalog_record_malformed", "the records are not in their stored spelling")
+        if self.record_count != len(entries) or self.records_digest != catalogs.records_digest(entries):
+            raise EconomicsRefused("catalog_record_malformed", "the count or digest is not the records'")
+        self._prepared = self._prepared_as()
+
+    def _prepared_as(self) -> tuple:
+        """What :meth:`prepare` checked: the very list, its length, its count and digest
+        fields. The registering path prepares a row and saves it with nothing between."""
+        return (id(self.records), len(self.records), self.record_count, self.records_digest)
+
+    def check_new(self) -> None:
+        from .engine import catalogs
+
+        # Prepared just before, outside the transaction (review round 1, LOW-3): the
+        # records are not serialised or digested again here. Any other row is.
+        if getattr(self, "_prepared", None) != self._prepared_as():
+            self.prepare()
+        stored = FinancialSource._base_manager.filter(pk=self.source_id).values_list("source_key", flat=True).first()
+        feed = catalogs.known(stored) if stored is not None else None
+        if feed is None or feed.kind != self.kind:
+            raise EconomicsRefused("catalog_record_malformed", f"source {stored!r} is not a step-11 {self.kind} source")
+        if FinancialSourceRecords._base_manager.filter(source_id=self.source_id).exists():
+            raise EconomicsRefused("duplicate_id", "a version holds one records row")
+
+    def as_engine(self) -> tuple:
+        """The records as the engine reads them."""
+        from .engine import catalogs
+
+        try:
+            return catalogs.read_records(self.kind, self.records)
+        except catalogs.FeedRefused as refused:
+            raise EconomicsRefused("catalog_record_malformed", f"{refused.code}: {refused.detail}") from None
+
+    def __str__(self) -> str:
+        return f"{self.record_count} {self.kind} record(s) of source {self.source_id}"
+
+
+# ---------------------------------------------------------------------------
 # CustomerParameterSet, FinancialParameter, LossEvent, LossComponent: the
 # scenario parameters, loss events and components (spec, sections 14 to 20)
 # ---------------------------------------------------------------------------
@@ -1724,6 +1849,47 @@ def _key(value, field: str) -> None:
     _refuse(governance.required_text_refusal(value), detail=field)
     if len(value) > _KEY_MAX:
         raise EconomicsRefused("field_malformed", f"{field} is longer than {_KEY_MAX}")
+
+
+def _citation_refusal(evidence_ref, *, name, source_type, in_parameter_set) -> tuple[str, str] | None:
+    """Step 11's citation rule (``engine/context.py``, ``citation_refusal``), read
+    only for evidence that could name a step-11 source: the context rules' module is
+    imported then, never at Django's start."""
+    if not isinstance(evidence_ref, str) or not _MAY_NAME_A_CATALOG.search(evidence_ref):
+        return None
+    from .engine import context
+
+    return context.citation_refusal(evidence_ref, name=name, source_type=source_type, in_parameter_set=in_parameter_set)
+
+
+def _require_accepted_version(evidence_ref, name) -> None:
+    """A figure resting on a prefill names the version it was accepted from, and that is
+    a stored platform-wide version of the source, by number AND snapshot hash
+    (``prefill_version_unknown``; review round 1, MEDIUM-4). One read."""
+    if not _rests_on_prefill(evidence_ref):
+        return
+    from .engine import context
+
+    named = context.accepted_version(evidence_ref)
+    if named is None or not FinancialSource._base_manager.filter(
+        deployment__isnull=True, source_key=named[0], version=named[1], snapshot_hash=named[2]
+    ).exists():
+        raise EconomicsRefused("prefill_version_unknown", f"{name}: {evidence_ref[:120]}")
+
+
+def _rests_on_prefill(evidence_ref) -> bool:
+    if not isinstance(evidence_ref, str) or not _MAY_NAME_A_CATALOG.search(evidence_ref):
+        return False
+    from .engine import context
+
+    return context.rests_on_prefill(evidence_ref)
+
+
+#: Evidence that could name a step-11 source: a feed citation, or a step-11 key's
+#: own words. Anything else cannot, and is never read further.
+_MAY_NAME_A_CATALOG = re.compile(
+    r"source|enforcement|edgar|litigation|hipaa|privacy|price-list|retail-prices|billing-catalog", re.IGNORECASE
+)
 
 
 class CustomerParameterSet(_AppendOnly):
@@ -1848,6 +2014,12 @@ class CustomerParameterSet(_AppendOnly):
             if row.derived_from:
                 raise EconomicsRefused("parameter_not_found", f"{row.name} is derived from a parameter of another parent")
             names.add(row.name)
+        # A figure resting on a cloud price or an EDGAR fact is a suggestion a PERSON
+        # accepted (spec, section 31.5): a version no signed-in account records holds none.
+        if version.author_id is None and any(_rests_on_prefill(row.evidence_ref) for row in rows):
+            raise EconomicsRefused("prefill_not_accepted", "a version no signed-in person records")
+        for row in rows:
+            _require_accepted_version(row.evidence_ref, row.name)
         for row in (version, *rows):
             row._mark_checked()
 
@@ -2119,6 +2291,20 @@ class FinancialParameter(_AppendOnly):
         if len(set(derived)) != len(derived) or str(self.uuid) in derived:
             raise EconomicsRefused("duplicate_id", f"{self.name} derived_from names a parameter twice, or itself")
         engine = _engine_refusal(self.as_engine)
+        # Step 11's context rules (spec, section 31.5): no figure names an enforcement
+        # listing or a filing watch, and one resting on a cloud price or an EDGAR fact
+        # is an accepted EXPERT_ESTIMATE variable of a parameter set.
+        in_scenario = self.scenario_id is not None or (
+            FinancialParameter.scenario.is_cached(self) and self.scenario is not None
+        )
+        refusal = _citation_refusal(
+            self.evidence_ref, name=self.name, source_type=self.source_type, in_parameter_set=not in_scenario
+        )
+        if refusal is not None:
+            code, detail = refusal
+            if code == "context_only_source":
+                raise EconomicsRefused("context_only_source", detail)
+            raise EconomicsRefused("prefill_not_accepted", detail)
         # Stored in the one spelling: "1.10" and "1.1" are one value, written once.
         self.low, self.base, self.high = (parameters.Parameter.text(engine.at(p)) for p in parameters.POINTS)
         if self.distribution is not None:
@@ -2133,6 +2319,11 @@ class FinancialParameter(_AppendOnly):
             expected = _engine_refusal(lambda: pset.variable_unit(self.name))
             if engine.unit is not expected:
                 raise EconomicsRefused("unit_mismatch", f"the parameter set's {self.name} is {expected}")
+            if _rests_on_prefill(self.evidence_ref) and not CustomerParameterSet._base_manager.filter(
+                pk=self.parameter_set_id, author__isnull=False
+            ).exists():
+                raise EconomicsRefused("prefill_not_accepted", "a version no signed-in person records")
+            _require_accepted_version(self.evidence_ref, self.name)
             sealed = CustomerParameterSet._base_manager.filter(pk=self.parameter_set_id).values_list(
                 "variable_count", flat=True
             )
