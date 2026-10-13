@@ -152,6 +152,24 @@ PORTFOLIO_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(PORTFOLIO_RECORD_REFUSALS)
+#: The codes a continuous-assurance row is refused with on save (spec, section 34):
+#: a run's dependency map, a staleness (a refresh obligation) and its closure.
+ASSURANCE_RECORD_REFUSALS = {
+    "dependencies_record_malformed": (
+        "a dependency map row holds the map of its own completed exposure run (never a residual run): an object "
+        "of its schema naming that run's scenario, with no float in it and its digest the map's"
+    ),
+    "staleness_record_malformed": (
+        "a staleness row names its own completed exposure run, at least one reason (each a code this service "
+        "publishes, with the dependency it names), the refresh it owes, and the digest of its reasons"
+    ),
+    "refresh_record_malformed": (
+        "a refresh closure closes its own obligation with a completed exposure run of the stale run's version or one "
+        "superseding it, that is not the stale run, that run's own Validity Card and, where one is named, its own "
+        "receipt, and one of SPINE's outcomes for the financial claim: restored, contradicted, unknown or superseded"
+    ),
+}
+_REFUSAL_TEXT.update(ASSURANCE_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -1271,6 +1289,14 @@ class FinancialScenario(_AppendOnly):
     class Meta:
         ordering = ["deployment", "id"]
         indexes = [models.Index(fields=["deployment"], name="assurance_econ_scenario_dep")]
+        # ONE successor per version (E6, spec section 34.4): two versions superseding
+        # one would fork the scenario, and both forks' runs could be totalled. Checked
+        # on save; the database holds the line where two writes race past the check.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supersedes"], condition=Q(supersedes__isnull=False), name="uq_econ_scenario_one_successor"
+            ),
+        ]
 
     @classmethod
     def authors_of(cls, scenario_id) -> list[governance.Person]:
@@ -1314,6 +1340,13 @@ class FinancialScenario(_AppendOnly):
             )
             if list(stored) != [self.deployment_id]:
                 raise EconomicsRefused("cross_tenant_reference", "supersedes")
+            later = FinancialScenario._base_manager.filter(supersedes_id=self.supersedes_id).values_list(
+                "uuid", flat=True
+            ).first()
+            if later is not None:
+                raise EconomicsRefused(
+                    "duplicate_id", f"the version is already superseded by {later}: one successor per version"
+                )
         self.author_username = _signed_in(self.author).username
 
     def __str__(self) -> str:
@@ -3589,6 +3622,296 @@ class RemediationOption(_AppendOnly):
 
     def __str__(self) -> str:
         return f"remediation option {self.title}"
+
+
+# ---------------------------------------------------------------------------
+# Continuous financial assurance (E6): a run's dependency map, a staleness and the
+# refresh that closes it (spec, section 34)
+# ---------------------------------------------------------------------------
+
+#: The schema of a run's dependency map (spec, section 34.1).
+DEPENDENCIES_SCHEMA = "mythos.economics.exposure-dependencies/v1"
+#: Why an exposure run is stale, each with what it means (spec, section 34.2). The
+#: service decides them; a staleness row names only these.
+STALE_REASONS = {
+    "dependencies_unrecorded": (
+        "no dependency map was recorded with the run (it was made before continuous assurance, or the map could "
+        "not be read when it ran): what it rests on cannot be shown unchanged"
+    ),
+    "claim_superseded": "SPINE superseded or closed the claim version the run was bound to",
+    "claim_invalidated": (
+        "SPINE invalidated a claim the run rests on: the claim is stale or a retest of it is open, now or when the "
+        "run was made"
+    ),
+    "claim_status_moved": "the status of a claim the run rests on moved since the run",
+    "claim_established": "SPINE established a claim the scenario rests on after the run, which the run never read",
+    "fingerprint_moved": (
+        "the system state the scenario rests on moved: the input fingerprint of a claim type it is bound to, or the "
+        "assurance policy, is not the one recorded with the run"
+    ),
+    "asset_changed": "an asset an effect of the scenario is bound to changed, left the graph or is gone",
+    "finding_changed": "a finding that enables an effect of the scenario changed its status or severity, or is gone",
+    "evidence_changed": "an observed effect the scenario was built on no longer holds the observation it held",
+    "parameter_set_superseded": "a newer version of the customer parameter set the scenario was built from is current",
+    "contract_terms_changed": (
+        "an insurance or contract term of the parameter set the scenario was built from changed in its current version"
+    ),
+    "source_superseded": "a feed source the run's figures rest on would now be read at another version",
+    "source_stale": "a feed source the run's figures rest on is stale, blocked or missing as of today (section 29.5)",
+    "release_changed": "the engine release (the run's versions and limits, the analysis, the grade or the card) moved",
+    "route_moved": (
+        "the served route of an asset the scenario rests on moved (SPINE's served-route fingerprint, the route every "
+        "chain outcome is read against): a model, its revision, fallback, quantization, prompt or region changed"
+    ),
+    "release_unverifiable": "the engine release could not be read to compare with the run's",
+    "scenario_superseded": "a later version of the scenario supersedes the version the run is of",
+    "dependencies_unverifiable": "what the run rests on could not be read now to compare with what it was",
+}
+#: SPINE's outcome for the financial claim a refresh closes (the owner's
+#: specification, section 25): the claim it rests on restored, contradicted or left
+#: Unknown, or -- where nothing technical moved -- the figures superseded.
+SPINE_OUTCOMES = ("restored", "contradicted", "unknown", "superseded")
+
+
+def _exposure_run(simulation_id) -> tuple | None:
+    """``(deployment_id, scenario_id, remediation_id, status)`` of a stored run, as
+    stored, or ``None``."""
+    found = list(
+        SimulationResult._base_manager.filter(pk=simulation_id).values_list(
+            "deployment_id", "scenario_id", "remediation_id", "status"
+        )
+    )
+    return found[0] if found else None
+
+
+class ExposureDependencies(_AppendOnly):
+    """What ONE exposure run depends on, captured from the stored rows and SPINE
+    before the run and recorded with it (spec, section 34.1): the claims of each type
+    the scenario's templates rest on (each version, status and retest), the input
+    fingerprint of each such type and the assurance policy, each effect's asset, each
+    enabling finding, each observed effect, the parameter-set version and its digest,
+    each feed source's version and state at the run's as-of date, and the engine
+    release. A later read compares it with what holds now; a run with none is stale
+    (``dependencies_unrecorded``).
+
+    Append-only, ONE per run (a one-to-one key), never for a residual run under a
+    remediation option (never exposure) nor a refused one (no figures). No account
+    column; it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    simulation = models.OneToOneField(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    schema = models.CharField(max_length=100)
+    dependencies = models.JSONField()
+    dependencies_digest = models.CharField(max_length=71)
+    # When the map was read: before the run, so a change during it reads as a change.
+    captured_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+
+    def check_new(self) -> None:
+        run = _exposure_run(self.simulation_id)
+        if run is None or run[:2] != (self.deployment_id, self.scenario_id):
+            raise EconomicsRefused("cross_tenant_reference", "the map's run is another scenario's")
+        if run[2] is not None or run[3] != SIMULATION_COMPLETED:
+            raise EconomicsRefused("dependencies_record_malformed", "a map is of a completed exposure run only")
+        if self.schema != DEPENDENCIES_SCHEMA:
+            raise EconomicsRefused("dependencies_record_malformed", f"schema is {DEPENDENCIES_SCHEMA}")
+        scenario = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("uuid", flat=True)
+        document = self.dependencies
+        if not isinstance(document, dict) or [str(u) for u in scenario] != [document.get("scenario")]:
+            raise EconomicsRefused("dependencies_record_malformed", "the map names another scenario")
+        if _has_float(document):
+            raise EconomicsRefused("dependencies_record_malformed", "the map holds a float")
+        if canonical_digest(document) != self.dependencies_digest:
+            raise EconomicsRefused("dependencies_record_malformed", "dependencies_digest is not the map's")
+        if self.captured_at is None:
+            raise EconomicsRefused("dependencies_record_malformed", "the map says when it was read")
+        if ExposureDependencies._base_manager.filter(simulation_id=self.simulation_id).exists():
+            raise EconomicsRefused("duplicate_id", "a dependency map of this run is recorded")
+        self._map_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this map, checked just before on exactly these values: an INSERT and
+        nothing read (as :meth:`SimulationResult.insert_checked`)."""
+        if not self._state.adding or getattr(self, "_map_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A dependency map is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"dependency map of simulation {self.simulation_id}"
+
+
+class ExposureStaleness(_AppendOnly):
+    """ONE exposure run found stale, and the refresh it owes: the open refresh
+    obligation (spec, section 34.2 and 34.3). The reasons name each dependency that
+    moved and how; ``refresh`` names exactly what to refresh -- the scenario, the
+    parameters, the sources and the claims SPINE must give its outcome on -- and
+    nothing else. Recorded when a check finds the run stale; the same reasons are
+    never recorded twice for one run (``uq_econ_staleness_reasons``), and a run with
+    one is stale for good: it is closed only by a refresh that stands
+    (:class:`ExposureRefresh`), which supersedes the run, never by its dependencies
+    moving back.
+
+    Append-only, no account column (the machine finds a run stale, as SPINE's own
+    invalidation does); it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    simulation = models.ForeignKey(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    reasons = models.JSONField()
+    reasons_digest = models.CharField(max_length=71)
+    refresh = models.JSONField()
+    detected_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["simulation", "reasons_digest"], name="uq_econ_staleness_reasons"),
+        ]
+
+    def check_new(self) -> None:
+        run = _exposure_run(self.simulation_id)
+        if run is None or run[:2] != (self.deployment_id, self.scenario_id):
+            raise EconomicsRefused("cross_tenant_reference", "the staleness's run is another scenario's")
+        if run[2] is not None or run[3] != SIMULATION_COMPLETED:
+            raise EconomicsRefused("staleness_record_malformed", "only a completed exposure run is stale")
+        reasons = self.reasons
+        if not isinstance(reasons, list) or not reasons:
+            raise EconomicsRefused("staleness_record_malformed", "a staleness names at least one reason")
+        for reason in reasons:
+            if (
+                not isinstance(reason, dict)
+                or reason.get("code") not in STALE_REASONS
+                or not isinstance(reason.get("dependency"), str)
+                or not reason["dependency"]
+            ):
+                raise EconomicsRefused("staleness_record_malformed", "each reason is a published code and a dependency")
+        if not isinstance(self.refresh, dict) or not self.refresh:
+            raise EconomicsRefused("staleness_record_malformed", "a staleness names the refresh it owes")
+        if _has_float(reasons) or _has_float(self.refresh):
+            raise EconomicsRefused("staleness_record_malformed", "a float in the reasons or the refresh")
+        if canonical_digest(reasons) != self.reasons_digest:
+            raise EconomicsRefused("staleness_record_malformed", "reasons_digest is not the reasons'")
+        if ExposureStaleness._base_manager.filter(
+            simulation_id=self.simulation_id, reasons_digest=self.reasons_digest
+        ).exists():
+            raise EconomicsRefused("duplicate_id", "the same reasons are recorded for this run")
+        self._staleness_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this staleness, checked just before on exactly these values."""
+        if not self._state.adding or getattr(self, "_staleness_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A staleness is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"staleness of simulation {self.simulation_id}"
+
+
+class ExposureRefresh(_AppendOnly):
+    """The refresh that closed ONE refresh obligation (spec, section 34.4): the new
+    exposure run that supersedes the stale one -- of the rebuilt scenario version --
+    its Validity Card, its receipt where one was signed, and SPINE's outcome for the
+    financial claim. Recorded only once the new run STANDS (its report may be
+    totalled: completed, every stored row verified, graded A to D, and not stale
+    itself); a run that does not leaves the obligation open. Nothing is rewritten:
+    the stale run, its card and its receipt stay as they were, and this row is what
+    says a later one supersedes them.
+
+    Append-only, ONE per obligation (a one-to-one key). It names the person who asked
+    for the refresh as a scenario names its author: the account, nulled if the
+    account is removed (a stop), and the account's own username, kept. It goes with
+    its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    staleness = models.OneToOneField(ExposureStaleness, on_delete=models.CASCADE, related_name="+")
+    stale_simulation = models.ForeignKey(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    simulation = models.ForeignKey(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    card = models.ForeignKey(FinancialValidityCard, on_delete=models.CASCADE, related_name="+")
+    receipt = models.ForeignKey(
+        FinancialExposureReceipt, on_delete=models.CASCADE, null=True, blank=True, related_name="+"
+    )
+    spine_outcome = models.CharField(max_length=16, choices=[(o, o) for o in SPINE_OUTCOMES])
+    # What SPINE says of each claim the new run rests on, as read when it closed.
+    outcome = models.JSONField()
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_refreshes_authored",
+    )
+    author_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    closed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["deployment", "id"]
+        constraints = [
+            models.CheckConstraint(condition=Q(spine_outcome__in=SPINE_OUTCOMES), name="ck_econ_refresh_outcome"),
+        ]
+
+    def check_new(self) -> None:
+        stale = list(
+            ExposureStaleness._base_manager.filter(pk=self.staleness_id).values_list("deployment_id", "simulation_id")
+        )
+        if stale != [(self.deployment_id, self.stale_simulation_id)]:
+            raise EconomicsRefused("refresh_record_malformed", "the closure is not its obligation's")
+        run = _exposure_run(self.simulation_id)
+        if run is None or run[:2] != (self.deployment_id, self.scenario_id):
+            raise EconomicsRefused("cross_tenant_reference", "the closure's run is another scenario's")
+        if run[2] is not None or run[3] != SIMULATION_COMPLETED or self.simulation_id == self.stale_simulation_id:
+            raise EconomicsRefused("refresh_record_malformed", "a refresh is a new completed exposure run")
+        stale_scenario = (
+            SimulationResult._base_manager.filter(pk=self.stale_simulation_id).values_list("scenario_id", flat=True)
+            .first()
+        )
+        line, step = [], self.scenario_id
+        while step is not None and step not in line:
+            line.append(step)
+            step = FinancialScenario._base_manager.filter(pk=step).values_list("supersedes_id", flat=True).first()
+        if stale_scenario not in line:
+            raise EconomicsRefused(
+                "refresh_record_malformed", "the new run is not of the stale run's version or one superseding it"
+            )
+        card = list(FinancialValidityCard._base_manager.filter(pk=self.card_id).values_list("simulation_id", flat=True))
+        if card != [self.simulation_id]:
+            raise EconomicsRefused("refresh_record_malformed", "the card is not the new run's")
+        if self.receipt_id is not None:
+            receipt = list(
+                FinancialExposureReceipt._base_manager.filter(pk=self.receipt_id).values_list("simulation_id", flat=True)
+            )
+            if receipt != [self.simulation_id]:
+                raise EconomicsRefused("refresh_record_malformed", "the receipt is not the new run's")
+        if self.spine_outcome not in SPINE_OUTCOMES:
+            raise EconomicsRefused("refresh_record_malformed", f"spine_outcome is one of {list(SPINE_OUTCOMES)}")
+        if not isinstance(self.outcome, dict) or _has_float(self.outcome):
+            raise EconomicsRefused("refresh_record_malformed", "the outcome is an object with no float")
+        if ExposureRefresh._base_manager.filter(staleness_id=self.staleness_id).exists():
+            raise EconomicsRefused("duplicate_id", "this obligation is closed")
+        self.author_username = _signed_in(self.author).username
+        self._refresh_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this closure, checked just before on exactly these values."""
+        if not self._state.adding or getattr(self, "_refresh_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A refresh closure is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"refresh of staleness {self.staleness_id}: {self.spine_outcome}"
 
 
 # ---------------------------------------------------------------------------

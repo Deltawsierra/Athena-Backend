@@ -2,7 +2,7 @@
 section 27).
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
-its own: a fault here leaves these five routes unserved and nothing else -- not the
+its own: a fault here leaves these eight routes unserved and nothing else -- not the
 parameter-set or builder routes, not the URLconf, not a stop
 (``tests/test_economics_report.py``, ``test_a_report_fault_never_takes_down_a_stop``).
 
@@ -47,6 +47,32 @@ malformed one ``field_malformed``):
   form. A receipt of another deployment (tenant) is 404, and so is one of a residual
   run (none exists). Nothing is signed, verified or re-encoded: the reader verifies the
   envelope against the engine's published economics-receipt keys.
+
+Continuous financial assurance (E6, section 34), on the same conventions:
+
+- ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/freshness/``: one
+  run's freshness in full (``?simulation=<uuid>``, else the version's latest exposure
+  run): what it was recorded as depending on, current or stale and why, its refresh
+  obligations and what superseded it, and what a refresh must refresh now. Every role
+  reads; it writes nothing.
+- ``GET deployments/<uuid>/economics/assurance/``: every current scenario version's
+  latest exposure run, current or stale, and every open refresh obligation. ``POST``
+  (admin or analyst) runs the check: each stale current run is recorded with the
+  refresh it owes. It runs no Monte Carlo and takes no run slot; it holds no
+  transaction while it reads, and inserts each row in a short one of its own.
+- ``POST deployments/<uuid>/economics/scenarios/<scenario uuid>/refresh/``: the one
+  way a stale run is recomputed, and only when an analyst asks: the stale version is
+  rebuilt from its parameter set's current version as of ``as_of`` (today, UTC,
+  unless the body names one), superseding it; the rebuilt version is run under the
+  body's seed and policy, carded, charted and, where ``"receipt": true``, receipted;
+  and the version's open obligations close only when the new run stands. A Monte
+  Carlo route: capped (:mod:`.capacity`), one deadline, as the simulate route. A
+  version with nothing stale is 409 ``exposure_current`` and runs nothing.
+
+The receipt route says whether the receipt's run is current, in headers beside the
+bytes it serves unchanged (``X-Exposure-Freshness``, ``X-Exposure-Stale-Reasons``,
+``X-Exposure-Superseded-By-Run``, ``X-Exposure-Superseded-By-Receipt``); the report,
+the list and the events route say it in their banner (:mod:`.report`).
 
 The review and override routes a signed receipt needs (section 28 hardening, T9a and
 T1/T4; spec, section 35), each answered ``no-store``:
@@ -120,6 +146,7 @@ from .api import (
 )
 from .engine import currency as _currency
 from .engine import parameter_set as pset
+from .engine.money import MoneyRefused
 from .engine.parameters import ParameterRefused
 from .models import (
     SIMULATION_COMPLETED,
@@ -166,6 +193,9 @@ NO_STORE = "no-store"
 
 _SIMULATE_REQUIRED = frozenset({"seed"})
 _SIMULATE_OPTIONAL = frozenset({"policy", "receipt"})
+#: A refresh's body: a simulate request's, and the as-of date the version is rebuilt
+#: at (E6, section 34.4).
+_REFRESH_OPTIONAL = frozenset({"as_of"})
 
 
 def _refused(code: str, detail: str) -> ValidationError:
@@ -202,6 +232,24 @@ def parse_simulate(body) -> tuple[int, str, bool]:
     if not isinstance(receipt, bool):
         raise _refused("field_malformed", "receipt is true or false")
     return seed, policy, receipt
+
+
+def parse_refresh(body, today) -> tuple[int, str, bool, object]:
+    """``(seed, policy, receipt, as_of)`` read exactly from a refresh request: a
+    simulate request's fields (:func:`parse_simulate`) and ``as_of``, a ``YYYY-MM-DD``
+    date no later than ``today`` (default ``today``)."""
+    if not isinstance(body, dict):
+        raise _refused("field_malformed", "body is not an object")
+    as_of = today
+    if "as_of" in body:
+        try:
+            as_of = pset._date(body["as_of"], "as_of")
+        except MoneyRefused as refused:
+            raise _refused(refused.code, refused.detail) from None
+        if as_of > today:
+            raise _refused("field_malformed", "as_of is a date no later than today (UTC)")
+    seed, policy, receipt = parse_simulate({key: value for key, value in body.items() if key not in _REFRESH_OPTIONAL})
+    return seed, policy, receipt, as_of
 
 
 def _scenario(deployment, scenario_uuid) -> FinancialScenario:
@@ -449,6 +497,10 @@ class ScenarioListView(APIView):
         start = (page - 1) * size
         rows = list(versions.select_related("supersedes").order_by("id")[start:start + size])
         templates = report.templates_of(rows)
+        from . import continuous_service
+
+        # What holds now, read once for the page (E6): each entry's freshness reads it.
+        now = continuous_service.Now(deployment.pk)
         pages = -(-count // size)
         response = Response(
             {
@@ -459,10 +511,10 @@ class ScenarioListView(APIView):
                 "pages": pages,
                 "previous": page - 1 if page > 1 else None,
                 "next": page + 1 if page < pages else None,
-                "scenarios": [report.scenario_entry(row, templates.get(row.pk, [])) for row in rows],
+                "scenarios": [report.scenario_entry(row, templates.get(row.pk, []), now=now) for row in rows],
                 "statement": "every scenario version of the deployment, in record order; each with its latest "
                 "exposure run (a residual run under a remediation option is never one) and that run's standing under "
-                "the report's banner rule",
+                "the report's banner rule, current or stale",
             }
         )
         response["Cache-Control"] = NO_STORE
@@ -496,7 +548,282 @@ class ReceiptView(APIView):
         response["Content-Disposition"] = f'attachment; filename="financial-exposure-receipt-{row.receipt_id}.json"'
         response["X-Content-SHA256"] = "sha256:" + hashlib.sha256(body).hexdigest()
         response["Cache-Control"] = NO_STORE
+        # Whether its run is current (E6): beside the signed bytes, never in them.
+        from . import continuous_service
+
+        for name, value in continuous_service.receipt_headers(row).items():
+            response[name] = value
         return response
+
+
+# ------------------------------------------------------------------ continuous financial assurance (E6)
+
+#: The receipt refusals that wait on a person (spec, section 35: the review gate and
+#: the override gate). A refresh whose receipt one of them holds back leaves the
+#: obligations open, for the receipt that will close them.
+_RECEIPT_GATES = frozenset({"scenario_not_reviewed", "material_change_unapproved"})
+
+
+class ScenarioFreshnessView(APIView):
+    """One run's freshness in full: its dependency map, its state and reasons, its
+    obligations and what superseded it."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        found = _scenario(deployment, scenario)
+        query = _strict_query(request, ("simulation",))
+        from . import continuous_service
+
+        result = None
+        if "simulation" in query:
+            try:
+                wanted = _uuid.UUID(query["simulation"])
+            except ValueError:
+                raise _refused("field_malformed", "simulation is a result's uuid") from None
+            result = get_object_or_404(
+                SimulationResult.objects.exposure_runs().filter(scenario=found, deployment=deployment), uuid=wanted
+            )
+        try:
+            served = continuous_service.scenario_freshness(found, result)
+        except _currency.CurrencyTableInvalid:
+            return _table_unavailable()
+        response = Response({"deployment": str(deployment.uuid), **served})
+        response["Cache-Control"] = NO_STORE
+        return response
+
+
+class AssuranceView(APIView):
+    """The deployment's exposure, current or stale (GET), and the check that records
+    each stale run with the refresh it owes (POST). Runs no Monte Carlo."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        _strict_query(request, ())
+        from . import continuous_service
+
+        try:
+            served = continuous_service.overview(deployment)
+        except _currency.CurrencyTableInvalid:
+            return _table_unavailable()
+        response = Response(served)
+        response["Cache-Control"] = NO_STORE
+        return response
+
+    def post(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        if not _may_write(request.user):
+            raise PermissionDenied("Checking the deployment's exposure requires an admin or analyst role.")
+        _strict_query(request, ())
+        from . import continuous_service
+
+        try:
+            served = continuous_service.check(deployment)
+        except _currency.CurrencyTableInvalid:
+            return _table_unavailable()
+        response = Response({"deployment": str(deployment.uuid), **served})
+        response["Cache-Control"] = NO_STORE
+        return response
+
+
+class ScenarioRefreshView(APIView):
+    """Refresh a stale scenario version: rebuild, run, card and receipt it, and close
+    its obligations once the new run stands."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [StrictJSONParser]
+
+    @capacity.capped
+    def post(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        if not _may_write(request.user):
+            raise PermissionDenied("Refreshing a scenario requires an admin or analyst role.")
+        found = _scenario(deployment, scenario)
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise ValidationError({"detail": "Content-Length is not a number"}) from None
+        if declared > MAX_BODY_BYTES:
+            raise BodyTooLarge()
+        body = request.data
+        if isinstance(body, QueryDict):
+            raise UnsupportedMediaType(request.content_type)
+        from django.db import IntegrityError
+
+        from . import builder, charts_service, continuous_service, receipt_service, simulation_service, validity_service
+        from .api import _engine_unavailable
+        from .engine.parameter_set import ProbabilisticEngineUnavailable
+        from .models import EconomicsRefused
+
+        seed, policy_name, want_receipt, as_of = parse_refresh(body, continuous_service._today())
+        policy = SIMULATION_POLICIES[policy_name]
+        deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
+
+        def remaining() -> float:
+            return deadline - time.monotonic()
+
+        try:
+            _currency.require_pinned()
+        except _currency.CurrencyTableInvalid:
+            return _table_unavailable()
+        try:
+            prepared = continuous_service.prepare_refresh(found, as_of=as_of)
+        except continuous_service.RefreshRefused as refused:
+            return Response({"code": refused.code, "detail": refused.detail, "recorded": False},
+                            status=refused.status)
+
+        def superseded_meanwhile():
+            """Another refresh, or a build, superseded the version at the same moment:
+            one successor per version (the scenario table's constraint)."""
+            later = FinancialScenario.objects.filter(supersedes=found).first()
+            if later is None:
+                return None
+            return Response(
+                {"code": "scenario_superseded", "recorded": False,
+                 "detail": f"scenario version {later.uuid} superseded this one at the same moment: refresh it"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        closing = prepared.mode == "close"
+        created = False
+        if closing:
+            # The version's latest run is current and obligations of its line are open:
+            # issue what is missing and close what it can. Nothing is run again.
+            rebuilt, rebuilt_part, result = found, None, prepared.stale
+        else:
+            try:
+                rebuilt, rebuilt_now = builder.build(deployment, prepared.body, author=request.user)
+            except (EconomicsRefused, MoneyRefused) as refused:
+                raced = superseded_meanwhile()
+                if raced is not None:
+                    return raced
+                raise _refused(refused.code, refused.detail or str(refused)) from None
+            except IntegrityError:
+                raced = superseded_meanwhile()
+                if raced is not None:
+                    return raced
+                return Response(
+                    {"detail": "A build of the same inputs was recorded at the same moment; send the refresh again."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            except _currency.CurrencyTableInvalid:
+                return _table_unavailable()
+            except ProbabilisticEngineUnavailable:
+                return _engine_unavailable()
+            outcome = simulation_service.simulate_scenario(
+                rebuilt, seed=seed, draws=policy["draws"], severe_percentile=policy["severe_percentile"],
+                time_budget=remaining(),
+            )
+            rebuilt_part = {"scenario": str(rebuilt.uuid), "created": rebuilt_now,
+                            "supersedes": None if rebuilt.supersedes_id is None else str(rebuilt.supersedes.uuid)}
+            if outcome.result is None:
+                unavailable = outcome.code in simulation_service.UNRECORDED
+                return Response(
+                    {"code": outcome.code, "detail": outcome.detail, "recorded": False, "rebuilt": rebuilt_part},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE if unavailable else status.HTTP_400_BAD_REQUEST,
+                )
+            result, created = outcome.result, outcome.created
+            if prepared.stale is not None and result.pk == prepared.stale.pk:
+                return Response(
+                    {"code": "refresh_same_run", "recorded": False, "rebuilt": rebuilt_part,
+                     "detail": "the rebuild and the run are the latest run's own (nothing it is built from moved, and "
+                     "the seed is the same): send another seed or as_of"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+        card = (validity_service.issue_card(result, time_budget=remaining()) if remaining() > 0
+                else validity_service.CardOutcome(None, False, **_overrun("the Validity Card")))
+        charts = (charts_service.issue_charts(result, time_budget=remaining()) if remaining() > 0
+                  else charts_service.ChartsOutcome(None, False, **_overrun("the chart series")))
+        overrun = "time_over_budget" in (card.code, charts.code)
+        receipt_row = None
+        if not want_receipt:
+            receipt_part = {"issued": False, "code": None, "detail": "not asked: send \"receipt\": true to sign one"}
+        elif result.status != SIMULATION_COMPLETED:
+            receipt_part = {"issued": False, "code": "result_not_completed",
+                            "detail": "a refused run has no figures to sign"}
+        elif overrun:
+            receipt_part = {"issued": False, **_overrun("the receipt")}
+        else:
+            keyring, why = _engine_keyring()
+            receipt = (
+                receipt_service.issue_receipt(result, keyring=keyring)
+                if keyring is not None
+                else receipt_service.ReceiptOutcome(None, False, "keyring_unavailable", why)
+            )
+            receipt_row = receipt.receipt
+            receipt_part = _issued(
+                receipt.receipt, receipt, lambda row: {"receipt_id": row.receipt_id, "key_id": row.key_id}
+            )
+        if result.status != SIMULATION_COMPLETED:
+            closures, why_open = [], (
+                f"the new run was refused ({result.refusal_code}): it has no figures; record a parameter-set version "
+                f"the engine accepts, then refresh scenario version {rebuilt.uuid}"
+            )
+        elif overrun:
+            closures, why_open = [], "the request's deadline ran out before the new run was carded"
+        elif want_receipt and receipt_row is None and receipt_part.get("code") in _RECEIPT_GATES:
+            # The receipt asked for waits on a person (spec, section 35): the rebuilt
+            # version is reviewed, and any material change approved, first. The
+            # obligations stay open so the receipt that supersedes the old one is the
+            # one they close with; the same refresh of the rebuilt version then issues
+            # it and closes them, running nothing again.
+            closures, why_open = [], (
+                f"the receipt waits on {receipt_part['code']}: approve scenario version {rebuilt.uuid} (POST its "
+                "reviews/, and an override in force for each material change), then send the refresh of that version "
+                "again: it issues the receipt and closes the obligations, and nothing is run again"
+            )
+        else:
+            closures, why_open = continuous_service.close_obligations(
+                result, card.card, receipt_row, author=request.user
+            )
+        still_open = [str(row.uuid) for row in continuous_service.open_obligations(rebuilt)]
+        results_url = reverse("deployment-economics-scenario-results", kwargs={"uuid": deployment.uuid,
+                                                                              "scenario": rebuilt.uuid})
+        served = {
+            "deployment": str(deployment.uuid),
+            "scenario": str(found.uuid),
+            "mode": prepared.mode,
+            "stale_simulation": None if prepared.stale is None else str(prepared.stale.uuid),
+            "refresh": prepared.obligations[-1].refresh if prepared.obligations else None,
+            "rebuilt": rebuilt_part,
+            "created": created,
+            "policy": {"name": policy_name, "draws": policy["draws"],
+                       "severe_percentile": str(policy["severe_percentile"])},
+            "simulation": {
+                "uuid": str(result.uuid),
+                "status": result.status,
+                "seed": result.seed,
+                "draws": result.draws,
+                "input_digest": result.input_digest,
+                "result_digest": result.result_digest or None,
+                "refusal": None if not result.refusal_code
+                else {"code": result.refusal_code, "detail": result.refusal_detail},
+            },
+            "validity_card": _issued(card.card, card, lambda row: {"grade": report.verified_grade(row, result),
+                                                                   "digest": row.card_digest}),
+            "charts": _issued(charts.charts, charts, lambda row: {"digest": row.charts_digest}),
+            "receipt": receipt_part,
+            "obligations": {
+                "closed": [continuous_service.closure_document(row) for row in closures],
+                "open": still_open,
+                "why_open": None if not still_open else why_open,
+            },
+            "report": f"{results_url}?simulation={result.uuid}",
+        }
+        if overrun:
+            again = ("send this refresh again" if closing
+                     else f"send a refresh of scenario version {rebuilt.uuid}, the version this one rebuilt")
+            return Response(
+                {**served, "code": "time_over_budget",
+                 "detail": f"the request's {REQUEST_BUDGET_SECONDS:g} s ran out: the run is recorded, and what was not "
+                 f"issued is recorded nowhere; {again}: it issues what is missing and closes the obligations once the "
+                 "run stands, and nothing is run again"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(served, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 # ------------------------------------------------------------------ the review and override routes (section 35)
@@ -775,6 +1102,22 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/results/",
         ScenarioResultsView.as_view(),
         name="deployment-economics-scenario-results",
+    ),
+    # Continuous financial assurance (E6, section 34).
+    path(
+        "deployments/<uuid:uuid>/economics/assurance/",
+        AssuranceView.as_view(),
+        name="deployment-economics-assurance",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/freshness/",
+        ScenarioFreshnessView.as_view(),
+        name="deployment-economics-scenario-freshness",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/refresh/",
+        ScenarioRefreshView.as_view(),
+        name="deployment-economics-scenario-refresh",
     ),
     path(
         "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/reviews/",

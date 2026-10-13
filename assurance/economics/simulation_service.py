@@ -26,6 +26,14 @@ states or, failing that, a parameter of its own), runs it, and records the run a
   included, comes back as a :class:`SimulationOutcome` naming its code.
 - **Bounded**: in draws and values by the engine's limits, and in time by
   :data:`TIME_BUDGET_SECONDS`, checked between the run's stages.
+- **Its dependencies recorded** (E6, spec section 34.1): before an exposure run is
+  made, what it depends on is read (:func:`assurance.economics.continuous_service.capture`:
+  SPINE's claims and input fingerprints, the assets, findings and observed effects
+  of its effects, its parameter-set version, its feed sources and the engine
+  release), and recorded with the run once it completes, so a later read can say
+  whether it is still current. A map that cannot be read or recorded never fails
+  the run: the run then reads stale (``dependencies_unrecorded``). A residual run
+  under a remediation option is never exposure and has none.
 
 Nothing here is on a stop path, and nothing Django loads at start imports this
 module or the engine; it imports the engine (and numpy) only when it is called.
@@ -34,6 +42,7 @@ No route serves it in this step: step 6 serves reports and scenario endpoints.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -52,6 +61,8 @@ from .models import (
     ScenarioBuild,
     SimulationResult,
 )
+
+logger = logging.getLogger(__name__)
 
 #: The longest a run may take, checked between its stages.
 TIME_BUDGET_SECONDS = 120.0
@@ -283,6 +294,9 @@ def _simulate(scenario, seed, draws, severe_percentile, time_budget, remediation
     found = _existing(scenario, input_digest, seed, draws)
     if found is not None:
         return SimulationOutcome(found, False, found.refusal_code or None, found.refusal_detail)
+    # What the run depends on, read BEFORE it runs: a change during the run then reads
+    # as a change (E6). Never a residual run's: it is never exposure.
+    captured = None if remediation is not None else _capture(scenario, inputs)
 
     started_at = timezone.now()
     clock = time.monotonic()
@@ -337,7 +351,35 @@ def _simulate(scenario, seed, draws, severe_percentile, time_budget, remediation
         if found is None:
             raise
         return SimulationOutcome(found, False, found.refusal_code or None, found.refusal_detail)
+    if captured is not None:
+        _record_dependencies(row, captured)
     return SimulationOutcome(row, True, row.refusal_code or None, row.refusal_detail)
+
+
+def _capture(scenario, inputs) -> tuple[dict, object] | None:
+    """``(map, when it was read)`` of what a run of ``scenario`` on ``inputs``
+    depends on, or ``None`` where it cannot be read: the run is then made and reads
+    stale. Never raises."""
+    try:
+        from . import continuous_service
+
+        captured_at = timezone.now()
+        return continuous_service.capture(scenario, inputs), captured_at
+    except Exception:  # noqa: BLE001 - a map that cannot be read never fails a run; the run reads stale
+        logger.exception("the dependency map of a run of scenario %s could not be read", scenario.pk)
+        return None
+
+
+def _record_dependencies(row: SimulationResult, captured: tuple[dict, object]) -> None:
+    """Record ``captured`` as ``row``'s dependency map. Never raises: a map that is
+    not recorded leaves the run reading stale, never failed."""
+    document, captured_at = captured
+    try:
+        from . import continuous_service
+
+        continuous_service.record_dependencies(row, document, captured_at=captured_at)
+    except Exception:  # noqa: BLE001 - a map that cannot be recorded never fails a run; the run reads stale
+        logger.exception("the dependency map of simulation %s could not be recorded", row.pk)
 
 
 __all__ = [

@@ -694,6 +694,10 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-portfolio",
         "deployment-economics-portfolio-simulate",
         "deployment-economics-portfolio-groups",
+        # Continuous financial assurance (spec, section 34).
+        "deployment-economics-scenario-freshness",
+        "deployment-economics-assurance",
+        "deployment-economics-scenario-refresh",
     }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
@@ -710,6 +714,9 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-groups"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenarios"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-receipt"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-scenario-freshness"]) == {"GET"}
+    assert set(stops.NOT_STOPS["deployment-economics-assurance"]) == {"GET", "POST"}
+    assert set(stops.NOT_STOPS["deployment-economics-scenario-refresh"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenario-reviews"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenario-overrides"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-override-approve"]) == {"POST"}

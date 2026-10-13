@@ -258,11 +258,14 @@ def _entry(body, scenario):
 
 def test_the_list_names_each_versions_latest_exposure_run_and_its_standing(deployment, people):
     analyst = _client(people["analyst"])
+    # The three versions are recorded before any run (E6, spec section 34: a run made
+    # before another version's asset and finding were added rests on a graph that has
+    # since moved, and reads stale).
     graded = stored(deployment, people["analyst"])
-    assert _simulate(analyst, deployment, graded).status_code == 201
     unknown = stored(deployment, people["analyst"], unknown=True, set_key="q2")
-    assert _simulate(analyst, deployment, unknown).status_code == 201
     unrun = stored(deployment, people["analyst"], set_key="q3")
+    assert _simulate(analyst, deployment, graded).status_code == 201
+    assert _simulate(analyst, deployment, unknown).status_code == 201
     response = _list(_client(people["owner"]), deployment)
     assert response.status_code == 200, response.content
     assert response["Cache-Control"] == "no-store"

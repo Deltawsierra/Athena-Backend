@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from assurance.economics import builder, portfolio, portfolio_api, report, simulation_service, snapshots, validity_service
@@ -118,6 +119,38 @@ def _parameter(scenario, name, unit, low, base=None, high=None, *, source="CUSTO
     )
 
 
+#: How many assets and findings one scan records for a deployment (:func:`_scanned`).
+SCANNED = 16
+
+
+def _scanned(deployment) -> tuple[str, Finding]:
+    """An agent asset and a finding for one more scenario of ``deployment``, from those
+    one scan recorded before the deployment's first run: E6 (spec, section 34) reads a
+    run as stale where SPINE's graph moved after it -- an asset added moves every claim
+    type's inputs, and a finding a later scan does not report reads ``cleared`` -- so
+    the scenarios' assets and findings are recorded at once, at one time, and each
+    scenario takes the next one no scenario uses yet."""
+    pool = Asset.objects.filter(deployment=deployment, identifier__startswith="agent://scan-").order_by("id")
+    if not pool.exists():
+        scan = timezone.now()
+        for index in range(SCANNED):
+            Asset.objects.create(deployment=deployment, kind="agent", name="payments-agent",
+                                 identifier=f"agent://scan-{index:02d}-{uuid.uuid4().hex[:6]}")
+            Finding.objects.create(deployment=deployment, fingerprint=f"fp-scan-{index:02d}", first_seen=scan,
+                                   last_seen=scan, finding_type="approval_missing", title="approval missing",
+                                   severity="high")
+    used_assets = set(CausalEffect.objects.filter(scenario__deployment=deployment).values_list("asset", flat=True))
+    used_findings = set(
+        EffectFinding.objects.filter(effect__scenario__deployment=deployment).values_list("finding", flat=True)
+    )
+    asset = next(str(row.uuid) for row in pool if str(row.uuid) not in used_assets)
+    finding = next(
+        row for row in Finding.objects.filter(deployment=deployment, fingerprint__startswith="fp-scan-").order_by("id")
+        if str(row.uuid) not in used_findings
+    )
+    return asset, finding
+
+
 def made(deployment, author, *, title="Payment agent", currency="USD", as_of=AS_OF, rate="2", amount=SMALL,
          spine=None, asset=None, occurred_at=WHEN, hypothetical=False, frequency=True, unknown=False, refused=False,
          policy=False, supersedes=None, frequency_source="INDUSTRY_BENCHMARK"):
@@ -152,9 +185,9 @@ def made(deployment, author, *, title="Payment agent", currency="USD", as_of=AS_
     LossComponent.objects.create(loss_event=event, component_key="loss", family="incident_response",
                                  formula_id="lump_sum", formula_version=1, as_of=as_of,
                                  cited_parameters={} if unknown else {"amount": str(loss.uuid)})
+    scanned, finding = _scanned(deployment)
     if asset is None:
-        asset = str(Asset.objects.create(deployment=deployment, kind="agent", name="payments-agent",
-                                         identifier=f"agent://pay-{uuid.uuid4().hex[:6]}").uuid)
+        asset = scanned
     observed = {} if hypothetical else {
         "observed_effect": str(uuid.uuid4()), "observation": "sha256:" + uuid.uuid4().hex * 2,
         "spine_effect": spine or "sha256:" + uuid.uuid4().hex * 2, "occurred_at": occurred_at,
@@ -164,8 +197,6 @@ def made(deployment, author, *, title="Payment agent", currency="USD", as_of=AS_
         effect_type="funds_transfer_altered", asset=asset, business_process="payments",
         template_id="payment_agent_misuse", template_version=1, in_scope_of=[["payment_agent_misuse", 1]], **observed,
     )
-    finding = Finding.objects.create(deployment=deployment, fingerprint=f"fp-{uuid.uuid4().hex[:8]}",
-                                     finding_type="approval_missing", title="approval missing", severity="high")
     EffectFinding.objects.create(effect=effect, finding=str(finding.uuid), role="prerequisite")
     inputs = {"fixture": str(scenario.uuid), "label": LABEL}
     ScenarioBuild.objects.create(

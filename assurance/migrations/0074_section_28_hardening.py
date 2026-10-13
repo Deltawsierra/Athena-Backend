@@ -12,8 +12,8 @@
 #   never refused. A new table; it names the revoker as every economics record names
 #   a person, nulled if the account is removed.
 #
-# No existing column changes. Numbered 0074: #168's 0073 is ahead of it in the merge
-# queue; until that merges it depends on master's latest, 0072_portfolio_results.
+# No existing column changes. Numbered 0074 on #168's 0073_exposure_assurance (E6,
+# merged first).
 
 import django.db.models.deletion
 import django.utils.timezone
@@ -96,7 +96,7 @@ def give_the_stored_rows_their_digests(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0072_portfolio_results"),
+        ("assurance", "0073_exposure_assurance"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

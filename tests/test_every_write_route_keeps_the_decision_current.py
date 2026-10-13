@@ -800,6 +800,42 @@ def _economics_mitigation_simulate():
     )
 
 
+def _economics_stale_outage():
+    """A provider-outage scenario built and run on a scanned deployment, then made
+    stale by a new version of its parameter set (Economic Exposure E6)."""
+    from assurance.economics import builder, simulation_service, validity_service
+    from assurance.economics.models import CustomerParameterSet
+    from tests.test_economics_continuous_assurance import OPERATIONS, operations_document, outage_body
+
+    dep = _scanned()
+    author = _admin()
+    model = Asset.objects.create(deployment=dep, kind="model", name="gpt", identifier="gpt")
+    finding = Finding.objects.create(deployment=dep, fingerprint="fp-outage", finding_type="single_provider",
+                                     title="single provider", severity="high")
+    CustomerParameterSet.record(dep, OPERATIONS, operations_document(), author=author)
+    scenario, _ = builder.build(dep, outage_body(model, finding), author=author)
+    run = simulation_service.simulate_scenario(scenario, seed=7, draws=2_000).result
+    validity_service.issue_card(run)
+    CustomerParameterSet.record(dep, OPERATIONS, operations_document(margin="45000"), author=author)
+    # The set-up's own writes (an asset and a finding the scenario rests on) are
+    # decision inputs: the decision is brought up to date first.
+    recompute_decision(dep)
+    return dep, scenario
+
+
+def _economics_assurance_check():
+    dep, _scenario = _economics_stale_outage()
+    return dep, lambda c: c.post(_base(dep) + "economics/assurance/", {}, format="json")
+
+
+def _economics_scenario_refresh():
+    dep, scenario = _economics_stale_outage()
+    return dep, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/refresh/",
+        {"seed": 11, "policy": "quick_10k", "as_of": "2026-10-06"}, format="json",
+    )
+
+
 CANNOT_MOVE = {
     ("DeploymentViewSet", "check", "post"): (
         "reads every stream across the portfolio; it writes nothing but the reconcile "
@@ -895,6 +931,18 @@ CANNOT_MOVE = {
         "records an authored version of the deployment's correlation group, an economics record; the decision "
         "reads no economics record",
         _economics_portfolio_groups,
+    ),
+    ("AssuranceView", "post", "post"): (
+        "records each stale Economic Exposure run of the deployment with the refresh it owes, economics records; "
+        "it reads SPINE's claims and writes none of them, and runs no Monte Carlo; the decision reads no economics "
+        "record",
+        _economics_assurance_check,
+    ),
+    ("ScenarioRefreshView", "post", "post"): (
+        "rebuilds and simulates a stale Economic Exposure scenario version, issues its Validity Card and chart "
+        "series, and closes its refresh obligations, all economics records; the decision reads no economics "
+        "record. With no economics run slot free it is 503 economics_capacity and writes nothing at all",
+        _economics_scenario_refresh,
     ),
     # The review and override routes a signed receipt needs (spec, section 35).
     ("ScenarioReviewsView", "post", "post"): (

@@ -1134,8 +1134,11 @@ def test_the_events_route_reads_the_scenarios_latest_result(deployment, people):
 
 def test_a_scenario_never_borrows_another_scenarios_result(deployment, people):
     """A result of another scenario version of the same deployment grades nothing here."""
-    simulated, _ = _simulated(deployment, people)
+    # The other version is recorded first (E6, spec section 34: a run made before
+    # another version's asset and finding were added rests on a graph that has since
+    # moved, and reads stale).
     fresh = stored(deployment, people["analyst"], set_key="q2")
+    simulated, _ = _simulated(deployment, people)
     reader = _client(people["owner"])
     assert _events(reader, deployment, simulated).json()["banner"] is None
     _banner(_events(reader, deployment, fresh).json(), report.NO_RESULT)
