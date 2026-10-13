@@ -1536,6 +1536,22 @@ class World:
             docs, "api.answers", self.client(self.admin), "get",
             f"/api/assurance/deployments/{dep.uuid}/economics/data-health/", "deployment-economics-data-health",
         ).status_code
+        # The normalization route (MVP step 12): an amount normalized for the
+        # deployment over the sources a run of it may use; what it answers is searched
+        # like every other sink.
+        from urllib.parse import urlencode
+
+        normalization = urlencode({
+            "amount": "400000", "currency": "EUR", "event_date": "2026-09-30", "valuation_date": "2026-09-30",
+            "base_currency": "USD", "reporting_currency": "USD", "providers": "ECB,FRB-H10",
+            "index_series_id": "CPIAUCSL", "index_geography": "US",
+            "index_category": "consumer prices, all items", "index_base": "1982-1984=100",
+        })
+        signals["normalization"] = self.call(
+            docs, "api.answers", self.client(self.admin), "get",
+            f"/api/assurance/deployments/{dep.uuid}/economics/normalization/?{normalization}",
+            "deployment-economics-normalization",
+        ).status_code
 
     def read_everything(self, docs, signals):
         admin = self.client(self.admin)
@@ -1693,6 +1709,8 @@ ROUTES.update(
         "deployment-economics-scenario-roi": _READ,
         # The data-health route (MVP step 10): each feed source's state for a deployment.
         "deployment-economics-data-health": _READ,
+        # The normalization route (MVP step 12): one amount normalized for a deployment.
+        "deployment-economics-normalization": _READ,
         # The read routes the dashboard needs (spec, section 30): a deployment's
         # scenario versions, and a Financial Exposure Receipt's signed bytes.
         "deployment-economics-scenarios": _READ,
@@ -2127,6 +2145,7 @@ def test_every_path_ran(observed):
     assert s["feeds"]["bls_refused"] is True and s["feeds"]["no_key_refused"] is True, s["feeds"]
     assert s["feeds"]["provider_got_key"] is True and s["feeds"]["bls_posted"] is True, s["feeds"]
     assert s["feeds"]["data_health"] == 200, s["feeds"]
+    assert s["feeds"]["normalization"] == 200, s["feeds"]
     # urllib3's request-line record was searched: the channel is live, not vacuous.
     assert s["feeds"]["client_request_line"] is True, s["feeds"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
