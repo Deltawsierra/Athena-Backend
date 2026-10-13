@@ -292,21 +292,17 @@ def _require_text(**fields) -> None:
 
 
 def _role_grant(account_id) -> governance.RoleGrant | None:
-    """Who granted the account ``account_id`` the role it holds, and when, read from
-    the account's STORED row (``accounts.CustomUser.role_granted_*``; spec, section
-    35), never from an object in hand. ``None`` for no account."""
-    if account_id is None:
+    """Who granted the account ``account_id`` the role it holds, and when: its latest
+    recorded promotion (``accounts.RoleGrant``; spec, section 35.6), read from the
+    stored rows, never from an object in hand. ``None`` for no account, or one given
+    its role before grants were recorded."""
+    from accounts.models import RoleGrant
+
+    grant = RoleGrant.latest_for(account_id)
+    if grant is None:
         return None
-    accounts = ScenarioReview._meta.get_field("reviewer").related_model
-    row = (
-        accounts._base_manager.filter(pk=account_id)
-        .values_list("role_granted_at", "role_granted_by_account", "role_granted_by_username")
-        .first()
-    )
-    if row is None:
-        return None
-    at, by_id, by_username = row
-    return governance.RoleGrant(at=at, by=governance.Person(id=by_id, username=by_username or ""))
+    by = governance.Person(id=grant.granted_by_pk, username=grant.granted_by_username or "")
+    return governance.RoleGrant(at=grant.granted_at, by=by)
 
 
 # ---------------------------------------------------------------------------

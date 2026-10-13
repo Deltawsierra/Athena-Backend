@@ -6620,15 +6620,18 @@ and listed beside the trust raise's withdrawal as named like a stop but not one)
 
 One admin's `set_role` made any account an admin, and that account then approved the
 admin's own `authoritative` raise (the audit's T8c). Now a promotion records who
-granted it and when (`accounts.CustomUser.role_granted_at`,
-`role_granted_by_account`, `role_granted_by_username`): `set_role` and the admin site
+granted it and when, as a row of its own (`accounts.RoleGrant`, migration
+`accounts/0002_role_grants`): `set_role` (`CustomUser.change_role`) and the admin site
 name the signed-in admin; `create_user` and `createsuperuser` name nobody. Only a
-PROMOTION writes them -- a new account above viewer, a higher role, the superuser
+PROMOTION writes one -- a new account above viewer, a higher role, the superuser
 flag set. A demotion, a deactivation or a removal writes nothing and is never
-refused: each is a revoke. The granter is named by id and username, not a foreign
-key, so removing an operator writes nothing to the accounts they promoted.
+refused: each is a revoke, and `set_role`'s demotion is the one UPDATE it always
+was. The account table is unchanged, so loading an account (every request does,
+stops included) reads nothing new; accounts are named by id and username, not a
+foreign key, so removing an operator neither cascades to the grants nor writes
+anything.
 
-An approval reads the approver's grant from the stored row
+An approval reads the approver's latest grant from the stored rows
 (`governance.role_grant_refusal`) and refuses `approver_role_not_independent` where it
 was granted by the person who asked (a raise's or an override's requester, a
 scenario's authors), by the approver themselves, or at or after the request (the
@@ -6641,8 +6644,9 @@ grant, and the rule does not refuse it.
 ### 35.7 The SAFETY RULE
 
 Nothing here sits on a stop path. `set_role` is a stop route (a demotion is a revoke):
-it now names the granter on the same single update, reads nothing more, and refuses
-nothing. The new routes are economics records only, in `safety.stops.NOT_STOPS`. The
+a demotion is the same single UPDATE as before, reads nothing more and refuses
+nothing; only a promotion (not a stop) inserts a grant after its update. No column
+is added to the account table, which every request reads. The new routes are economics records only, in `safety.stops.NOT_STOPS`. The
 gates read rows and hold no lock or transaction; the row digests are computed outside
 the snapshot loader's transaction, which still only inserts. A revocation and a
 demotion are never refused.

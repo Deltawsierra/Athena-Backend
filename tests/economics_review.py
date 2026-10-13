@@ -14,6 +14,7 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
+from accounts.models import RoleGrant
 from assurance.economics.engine import governance
 from assurance.economics.models import FinancialScenario, ScenarioReview
 
@@ -34,7 +35,8 @@ def colleague_of(scenario):
         Q(role__in=("admin", "analyst")) | Q(is_superuser=True), is_active=True
     ).order_by("pk"):
         person = governance.Person(id=account.pk, username=account.get_username())
-        held_before = account.role_granted_at is None or account.role_granted_at < version.recorded_at
+        grant = RoleGrant.latest_for(account.pk)
+        held_before = grant is None or grant.granted_at < version.recorded_at
         if held_before and not any(governance.same_person(author, person) for author in authors):
             return account
     raise AssertionError("the fixtures hold no admin or analyst who could review this scenario version")

@@ -1100,9 +1100,11 @@ def _requested_at(raised, instant):
     the request is not a second person's (spec, section 35.6)."""
     from datetime import timedelta
 
+    from accounts.models import RoleGrant
+
     uuid = raised["uuid"] if isinstance(raised, dict) else raised.uuid
     assert _raises()._base_manager.filter(uuid=uuid).update(requested_at=instant) == 1
-    User.objects.filter(role_granted_at__gte=instant).update(role_granted_at=instant - timedelta(minutes=1))
+    RoleGrant.objects.filter(granted_at__gte=instant).update(granted_at=instant - timedelta(minutes=1))
 
 
 def test_r1_expiry_is_30_days_after_the_request_to_the_instant():

@@ -298,9 +298,9 @@ def override_in_force_refusal(
     return override_refusal(requester, approved_by)
 
 
-#: Who granted an account the role it holds, and when, as the account's stored row
-#: records it (``accounts.CustomUser.role_granted_at`` / ``role_granted_by``): a
-#: promotion records it, a demotion never does.
+#: Who granted an account the role it holds, and when, as the stored grants
+#: record it (``accounts.RoleGrant``, its latest): a promotion records one, a
+#: demotion never does.
 @dataclass(frozen=True)
 class RoleGrant:
     at: object = None

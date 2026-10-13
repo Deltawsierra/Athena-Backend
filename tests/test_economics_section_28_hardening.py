@@ -586,7 +586,8 @@ def test_t9b_an_admin_the_requester_promoted_cannot_approve_their_raise(people):
     source = _source_at()
     raise_uuid = _ask_authoritative(_client(people["admin"]), source)
     mal = _promote(people["admin"], people["sock"])
-    assert (mal.role_granted_by_username, mal.role_granted_by_account) == ("ada", people["admin"].pk)
+    grant = _grants().latest_for(mal.pk)
+    assert (grant.role, grant.granted_by_username, grant.granted_by_pk) == ("admin", "ada", people["admin"].pk)
     approved = _post(_client(mal), f"/api/assurance/economics/trust-raises/{raise_uuid}/approve/")
     assert approved.status_code == 403 and approved.json()["code"] == "approver_role_not_independent", approved.content
     assert econ.FinancialSourceTrustRaise.objects.get().state == "pending"
@@ -605,14 +606,19 @@ def test_t9b_an_admin_promoted_after_the_request_by_anyone_is_refused(people):
 
 
 def test_t9b_a_demotion_is_never_refused_and_records_no_grant(people):
-    before = User.objects.get(pk=people["admin2"].pk)
+    grants = _grants().objects.count()
     demoted = _promote(people["admin"], people["admin2"], role="viewer")
     assert demoted.role == "viewer"
-    assert (demoted.role_granted_at, demoted.role_granted_by_username) == (
-        before.role_granted_at, before.role_granted_by_username
-    )
     # Its own demotion, too.
     assert _promote(people["admin"], people["admin"], role="analyst").role == "analyst"
+    assert _grants().objects.count() == grants
+    # The account table is as it was: a grant is a row of its own, never a column an
+    # account load (every request's, stops included) reads.
+    assert not [f.name for f in User._meta.concrete_fields if "grant" in f.name]
+
+
+def _grants():
+    return importlib.import_module("accounts.models").RoleGrant
 
 
 def test_t9b_a_reviewer_or_override_approver_an_author_promoted_is_refused(deployment, people, keys):
