@@ -147,6 +147,11 @@ NAMED_LIKE_A_STOP_BUT_NOT = {
     # owner's decision of 12 Oct 2026): the request has not taken effect, and
     # nothing running, no engine and no authority depends on it.
     "economics-trust-raise-withdraw",
+    # Revokes a sensitive override of an economics input (spec, section 35.5): it
+    # takes away an approval a FUTURE receipt would rest on, and stops no running
+    # work, no engine, no scan and no authority to act. It is never refused by any
+    # rule (one insert, nothing read), so nothing holds it back.
+    "deployment-economics-override-revoke",
     "deployment-dispatch-attempts",
     "failsafe:audit",
     "finding-remediation-transition",

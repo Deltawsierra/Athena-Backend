@@ -667,14 +667,83 @@ def _economics_portfolio_groups():
 
 
 def _economics_trust_raise_approval():
-    """Another admin's request to authoritative, approved by the caller's admin."""
+    """Another admin's request to authoritative, approved by a second admin who held
+    the role before the request (spec, section 35.6: an admin promoted after it is
+    not a second person)."""
     from assurance.economics.models import FinancialSourceTrustRaise
 
     dep = _scanned()
+    approver = _admin()
     pending = FinancialSourceTrustRaise.request(
         _economics_tenant_source(dep), "authoritative", "the official publisher", by=_admin(), channel="api"
     )
-    return dep, lambda c: c.post(f"/api/assurance/economics/trust-raises/{pending.uuid}/approve/", {}, format="json")
+    return dep, _as(approver, lambda c: c.post(
+        f"/api/assurance/economics/trust-raises/{pending.uuid}/approve/", {}, format="json"
+    ))
+
+
+def _as(user, write):
+    """``write`` made by ``user``'s client, whatever client the test hands it."""
+
+    def made(_another_admin):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return write(client)
+
+    return made
+
+
+def _economics_reviewed_scenario():
+    """A scenario version as rows, authored by one admin, and a second admin who held
+    the role before it was recorded (spec, section 35.4)."""
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    reviewer = _admin()
+    scenario = stored(dep, _admin())
+    # The set-up's own writes (an asset and a finding the scenario rests on) are
+    # decision inputs: the decision is brought up to date before the write.
+    recompute_decision(dep)
+    return dep, scenario, reviewer
+
+
+def _economics_review():
+    dep, scenario, reviewer = _economics_reviewed_scenario()
+    return dep, _as(reviewer, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/reviews/", {"verdict": "approved"}, format="json"
+    ))
+
+
+def _economics_override():
+    dep, scenario, _reviewer = _economics_reviewed_scenario()
+    return dep, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/overrides/",
+        {"subject": "parameter-set:bank_prod_2026q4:v2:notification_unit_cost", "reason": "customer confirmed"},
+        format="json",
+    )
+
+
+def _economics_override_requested():
+    from assurance.economics.models import SensitiveOverride
+
+    dep, scenario, approver = _economics_reviewed_scenario()
+    override = SensitiveOverride.objects.create(
+        scenario=scenario, subject="parameter-set:bank_prod_2026q4:v2:notification_unit_cost",
+        reason="customer confirmed", requested_by=_admin(),
+    )
+    return dep, override, approver
+
+
+def _economics_override_approval():
+    dep, override, approver = _economics_override_requested()
+    return dep, _as(approver, lambda c: c.post(
+        _base(dep) + f"economics/overrides/{override.uuid}/approve/", {}, format="json"
+    ))
+
+
+def _economics_override_revocation():
+    dep, override, _approver = _economics_override_requested()
+    return dep, lambda c: c.post(_base(dep) + f"economics/overrides/{override.uuid}/revoke/", {}, format="json")
 
 
 def _economics_trust_raise_withdrawal():
@@ -874,6 +943,26 @@ CANNOT_MOVE = {
         "series, and closes its refresh obligations, all economics records; the decision reads no economics "
         "record. With no economics run slot free it is 503 economics_capacity and writes nothing at all",
         _economics_scenario_refresh,
+    ),
+    # The review and override routes a signed receipt needs (spec, section 35).
+    ("ScenarioReviewsView", "post", "post"): (
+        "records a person's review of an Economic Exposure scenario version, an economics record; the decision "
+        "reads no economics record",
+        _economics_review,
+    ),
+    ("ScenarioOverridesView", "post", "post"): (
+        "requests a sensitive override of a scenario version's input, an economics record; the decision reads "
+        "no economics record",
+        _economics_override,
+    ),
+    ("OverrideApproveView", "post", "post"): (
+        "approves a sensitive override, an economics record; the decision reads no economics record",
+        _economics_override_approval,
+    ),
+    ("OverrideRevokeView", "post", "post"): (
+        "revokes a sensitive override, an economics record, never refused; the decision reads no economics "
+        "record",
+        _economics_override_revocation,
     ),
 }
 

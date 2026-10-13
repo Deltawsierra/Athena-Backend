@@ -1274,6 +1274,12 @@ and every observation, each through its model's checks; a file already registere
 under its hash is returned, not written again. A file stating trust tier
 `authoritative` is refused before anything is written (`second_person_required`):
 that tier is recorded only by a second admin's approval of a raise (section 6.1).
+A file that is not synthetic earns no licence or trust it states (section 35.2): it
+is registered at the licence class of its source key's line in the feed registry
+(`unreviewed` for a key the registry does not hold) and at `unverified`, whatever the
+file says. Each observation row records the digest of its own stored fields, and the
+version the digest of its rows; a row rewritten, added or removed past the ORM
+demotes the version (`snapshot_rows_mismatch`, section 35.3).
 `snapshots.fx_book(sources, deployment=...)` and `snapshots.index_book(sources,
 deployment=...)` read stored observations back into the engine for a run of that
 deployment: every source must be platform-wide or the deployment's own, as stored
@@ -4410,6 +4416,7 @@ what it serves, so it must not serve a row that is no longer as recorded. In ord
 | `sensitivity_digest` | the stored analysis gives the digest the card signs, and the column holds it |
 | `charts_digest` | the series give their digest, of their schema |
 | `charts_result` | the series are the result's: their row's result, scenario and deployment, and the scenario, seed, draws, input digest and outcomes digest they name |
+| `receipt_binding` | where a receipt is recorded for the result, its signed document binds the stored rows: it is exactly its envelope's payload, it names the result's scenario, tenant and card (by the digest the card's row records), and its seed, draws, parameter-set digest and six figures are the result's (section 35.1) |
 
 A result whose rows fail any check is served as a refusal: `refusal.code`
 `stored_row_unverified` naming the checks, no figure (every amount null, `summary`,
@@ -6824,3 +6831,214 @@ Where the specification leaves a choice open this step takes the conservative on
 19. **A transient read fault is never recorded**: it reads stale on every read while it
     lasts (`dependencies_unverifiable`), and the check records no obligation for it.
     Alternative: record it, as an obligation only a refresh closes.
+
+## 35. Section 28 hardening: receipts bound to their rows, trust earned, a review before a receipt
+
+The remaining MEDIUM findings of the audit of section 28's threat model (13 Oct
+2026): T5 (the audit's probe T4a), T2a and T2c, T9a with T1/T4's in-force overrides,
+and T9b. Done elsewhere: S1 (section 32), T7 and T4's correlation groups (section
+33), T8 (#164). Not here: T6 (an owner question: the dashboard's read credential) and
+T10 (an owner key: a signer-only engine credential). The migrations are
+`assurance/0074_section_28_hardening` and `accounts/0002_role_grants`.
+
+### 35.1 The stored report is bound to its receipt (T5)
+
+The audit rewrote, past the ORM, a result's record (its gross P50) with its digest
+recomputed, and the card's reproduction with the card's digest: the report served it
+as `integrity.verified: true`, and `report.may_be_totalled` admitted it. The receipt
+was signed over the true figures, but no served path read it.
+
+Now, where a receipt is recorded for a result, `report.stored_row_failures` runs a
+ninth check, `receipt_binding` (`report.receipt_binds`): plain hashing and
+comparison, no keyring and no engine. The stored document is exactly the payload its
+envelope carries; it names the result's scenario and tenant and the card, by the
+digest the card's row records (and the card's document gives that digest, the
+`card_digest` check); its seed, draws and parameter-set digest are the result's; and
+its six figures are the result's record's at the currency's minor unit
+(`receipt_service.receipt_figures`). The card's reproduction names the result digest
+the record gives, so the signed document binds the record through the card as well
+as by its figures. A failure is served as every failed check is (section 27.5):
+`stored_row_unverified`, no figure, the card counted as no card, the banner and
+`excluded_from_totals: true`. The same rule is read everywhere a result is served,
+carded or receipted:
+
+| Where | What a broken binding does |
+|---|---|
+| the report (`results/`), the scenario list, the events route's standing, a portfolio's member re-check | `stored_row_unverified`, never a number; `may_be_totalled` refuses it |
+| `report.verified_grade` (the scenario document, the simulate response) | no grade |
+| `validity_service.issue_card` | the card recorded is not returned (`stored_row_unverified`); a NEW card is never made from a record that no longer gives its digest |
+| `receipt_service.issue_receipt` | a recorded receipt is returned only where it verifies (as before); a new one is never signed over rows that fail a check (`stored_row_unverified`) |
+
+The signature itself is checked by `receipt_service.verify_stored_receipt`, as before;
+every tamper it refused it still refuses. What plain hashing cannot see: a record and
+card rewritten together BEFORE any receipt was recorded, with every digest recomputed
+(nothing signed binds them yet). A card is made from the run's own re-drawn outcomes
+(section 26), so its draws are checked; its summary figures are the record's.
+
+### 35.2 A snapshot file earns no trust it states (T2a)
+
+`snapshots.register_snapshot` read the licence class and trust tier from the file
+itself, which nothing signs: a crafted file stating `licensed` and `licensed_vendor`
+was production-usable, and a run read its EUR/USD of 0.01. Now
+(`snapshots.registered_terms`) a file that is not synthetic is registered at the
+licence class of its source key's line in the feed registry (step 10's and step
+11's; `unreviewed` for a key they do not hold) and at trust tier `unverified`,
+whatever it states, as a live feed's fetched versions always were. Licence then comes
+only from the reviewed registry, and trust only from an admin's raise (section 6.1).
+A file stating `authoritative` is still refused (`second_person_required`). A
+synthetic file keeps the licence it states: it is never used by a production run
+(`synthetic_source`) and never trusted above `unverified`.
+
+### 35.3 A rewritten observation row demotes its version (T2c)
+
+An `FXObservation` or `CostIndexObservation` row rewritten past the ORM was served
+under its version's original snapshot hash. Now each row records `row_digest`, the
+digest of its own stored fields (the rate or value at its column's places, the
+instant in UTC), written on save; and each source version records
+`observations_digest`, the digest of the sorted row digests of the snapshot it was
+registered with (`models.observation_rows_digest`), which a raise copies. On every
+read -- `snapshots.fx_book`, `snapshots.index_book`, the production gate
+(`FinancialSource.production_use_refusal`, `check_usable_for_production`) and a feed's
+`used_version` -- `models.observation_rows_refusal` recomputes them over the rows the
+version reads (its own, or a raised version's holder's): a row rewritten, added or
+removed, or a row's digest rewritten with it, is `snapshot_rows_mismatch`, and the
+version is DEMOTED: refused for production with that code, and passed over by
+`used_version`. The demotion is read from the rows, never stored, so nothing can
+refuse or hold it back. A version written directly (not by the loader) records no
+`observations_digest`; its rows are still each checked. The migration gives the rows
+and versions already stored their digests from the rows as they stand.
+
+### 35.4 A review before a receipt (T9a)
+
+The specification asks for "human review before external delivery", and nothing
+gated on the review a scenario version records (the audit's T8a: one analyst went
+from rows to a signed receipt over a `draft` card). Now `receipt_service.issue_receipt`
+refuses `scenario_not_reviewed` unless the LATEST review of the run's scenario
+version (`review_service.latest_review`) is `approved` by a person who authored no
+version of it, read from the rows when the receipt is asked for. The check runs
+before the card's analysis, and before anything is signed or recorded; the run, its
+card and its series are recorded as before, and the same simulate request sent again
+after the review issues the receipt.
+
+The gate is ON by default. The owner has not decided whether a production receipt
+needs a review; the lead recommends it does. It is switched only by the environment
+variable `ATHENA_ECONOMICS_RECEIPT_REVIEW`, read in code (`review_service.review_gate`)
+and in no settings module: `off`, exactly, turns it off; `required`, unset, or any
+other value keeps it on. It applies to every receipt, a `dev` or `staging`
+deployment's included: a receipt carries the same signature and states no
+environment.
+
+The routes a client calls (each answered `no-store`; access as section 27's: a
+deployment the caller cannot see is 404, and only an admin or an analyst writes):
+
+| Route | Name | What it does |
+|---|---|---|
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/reviews/` | `deployment-economics-scenario-reviews` | the version's reviews, its review status, and `receipt_gate`: `review` (`required` or `off`), `review_refusal`, `override_refusal`, the `sensitive_changes` with whether an override in force names each, and `satisfied` |
+| `POST` the same, `{"verdict": "approved" \| "returned", "note": "..."}` | | a review by the signed-in admin or analyst: 201 with the review and the gate. 403 `author_reviews_own_scenario` (an author of any version), 403 `approver_role_not_independent` (an approval from someone an author promoted, who promoted themselves, or who was promoted after the version was recorded; section 35.6), 403 for a viewer, 400 for any other verdict or field |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/overrides/` | `deployment-economics-scenario-overrides` | the gate, and every override of the version with its approvals, revocations, `expires_at`, `in_force` and `not_in_force_because` |
+| `POST` the same, `{"subject": "...", "reason": "..."}` | | an override request (pending): 201 |
+| `POST deployments/<uuid>/economics/overrides/<override uuid>/approve/`, no body or `{}` | `deployment-economics-override-approve` | one approval: 200. 403 `requester_approves_own_override`, `approver_already_approved`, `approver_role_not_independent`; 409 `override_revoked`, `override_expired` |
+| `POST deployments/<uuid>/economics/overrides/<override uuid>/revoke/`, no body, `{}` or `{"reason": "..."}` | `deployment-economics-override-revoke` | a revocation: 200, NEVER refused by any rule (section 35.5) |
+
+A drive that asks for receipts (Minotaur's `athena-economics` and
+`athena-economics-data`) therefore: holds a second admin or analyst account that
+authored no version of the scenario and held its role before the version was
+recorded, not granted by an author; posts `{"verdict": "approved"}` to the version's
+`reviews/` with it after the build; and then asks for the receipt. The review is
+recorded once per version: a new version (a new build, or one that supersedes it)
+is reviewed again.
+
+**A refresh (section 34) and the gates.** A refresh rebuilds a stale version into a
+NEW one, which nobody has reviewed yet: a receipt asked for in the same request is
+refused (`scenario_not_reviewed`, or `material_change_unapproved` where the new
+parameter-set version moved materially), and the obligations it would close stay
+open, with `why_open` saying so, so the receipt that supersedes the old one is the
+one they close with. Once a colleague approves the rebuilt version (and an override
+in force names each material change), the same refresh of the REBUILT version
+(section 34's `close` mode) issues the receipt and closes the obligations, running
+nothing again. A refresh that asks for no receipt closes them as before.
+
+### 35.5 An override counts only while it is in force (T1/T4)
+
+`SensitiveOverride` and its two-approver rule existed with no caller (the audit's
+T3c): one analyst cut a version's transactions and value 1000-fold (T1b) or the
+frequency prior four-fold (T3a), and the receipt signed it. Now:
+
+- **What is sensitive** (`review_service.sensitive_changes`): between the customer
+  parameter-set version the run's build names and the version before it of the same
+  set, a variable added or removed; its unit or currency changed; its low, base or
+  high moved by a factor of 2 (`review_service.MATERIAL_FACTOR`) or more either way,
+  to or from zero, or across zero; its stated distribution changed in kind, or a
+  parameter of it moved by that factor; or the set's insurance exclusions changed.
+  Each is named by an override subject, `parameter-set:<set_key>:v<n>:<variable>`. A
+  first version has nothing to compare, and needs none.
+- **The gate**: `issue_receipt` refuses `material_change_unapproved` (after the
+  review gate, before the card's analysis) unless an override IN FORCE on the run's
+  scenario version names each change's subject exactly.
+- **In force** (`governance.override_in_force_refusal`, read from the rows at the
+  moment it is asked, never stored): two approvals from two different people, neither
+  the requester (`override_needs_two_approvers`); not expired, `requested_at` plus
+  `governance.OVERRIDE_EXPIRES_AFTER` (30 days) by the service's clock, which
+  `requested_at` is set from at insert (`override_expired`); and not revoked
+  (`override_revoked`). A revoked or expired override is approved no more.
+- **A revocation is a revoke**: `OverrideRevocation`, one insert whose check reads
+  nothing and refuses nothing -- not for its state (pending, expired, already
+  revoked), not by a second person, an expiry or a lock. Any admin or analyst who may
+  see the deployment revokes; the record names who and when. It is final.
+
+The route `deployment-economics-override-revoke` stops no running work, engine,
+scan or authority to act, so it is not in the stop set (`safety.stops.NOT_STOPS`,
+and listed beside the trust raise's withdrawal as named like a stop but not one).
+
+### 35.6 An approver promoted for it is not a second person (T9b)
+
+One admin's `set_role` made any account an admin, and that account then approved the
+admin's own `authoritative` raise (the audit's T8c). Now a promotion records who
+granted it and when, as a row of its own (`accounts.RoleGrant`, migration
+`accounts/0002_role_grants`): `set_role` (`CustomUser.change_role`) and the admin site
+name the signed-in admin; `create_user` and `createsuperuser` name nobody. Only a
+PROMOTION writes one -- a new account above viewer, a higher role, the superuser
+flag set. A demotion, a deactivation or a removal writes nothing and is never
+refused: each is a revoke, and `set_role`'s demotion is the one UPDATE it always
+was. The account table is unchanged, so loading an account (every request does,
+stops included) reads nothing new; accounts are named by id and username, not a
+foreign key, so removing an operator neither cascades to the grants nor writes
+anything.
+
+An approval reads the approver's latest grant from the stored rows
+(`governance.role_grant_refusal`) and refuses `approver_role_not_independent` where it
+was granted by the person who asked (a raise's or an override's requester, a
+scenario's authors), by the approver themselves, or at or after the request (the
+raise's or override's `requested_at`, the scenario version's `recorded_at`). It applies
+to a trust raise's approval (403 on the trust-raise route), an override's approval,
+and a review's APPROVAL; a review that returns a scenario takes approval away and is
+never refused by it. An account given its role before grants were recorded has no
+grant, and the rule does not refuse it.
+
+### 35.7 The SAFETY RULE
+
+Nothing here sits on a stop path. `set_role` is a stop route (a demotion is a revoke):
+a demotion is the same single UPDATE as before, reads nothing more and refuses
+nothing; only a promotion (not a stop) inserts a grant after its update. No column
+is added to the account table, which every request reads. The new routes are economics records only, in `safety.stops.NOT_STOPS`. The
+gates read rows and hold no lock or transaction; the row digests are computed outside
+the snapshot loader's transaction, which still only inserts. A revocation and a
+demotion are never refused.
+
+### 35.8 What is still not done
+
+- **A record and card rewritten together before any receipt** with every digest
+  recomputed are not caught by plain hashing (section 35.1). Signing the card when it
+  is issued, or re-running the summary from the re-drawn outcomes, would close it.
+- **A whole source version rewritten past the ORM** with every row digest and the
+  version's digest recomputed is not caught: nothing signs a snapshot file.
+- **No demote route**: a version found unreliable for a reason other than its rows
+  (spec, section 6.1) still has no path down (the audit's T2 fix 3).
+- **A sensitive change is read against the set's previous version only**, never
+  against a template default or a benchmark, and only for the customer parameter set:
+  a scenario's own parameters come from the builder.
+- **Who may review is not limited by role at the gate**: the route takes an admin's
+  or an analyst's review; a review written directly through the model by another
+  account (no route does) is read like one.
+- **The owner's decision** on whether a production receipt needs a review is pending:
+  the gate is on by default (section 35.4).

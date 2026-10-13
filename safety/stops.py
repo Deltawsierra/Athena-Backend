@@ -555,6 +555,33 @@ NOT_STOPS = {
         "taken without waiting (assurance.economics.capacity), and is answered 503 economics_capacity at once when "
         "none is free; no stop takes a slot",
     },
+    # The review and override routes a signed receipt needs (assurance.economics.
+    # report_api, spec section 35): economics records, append-only. A receipt is
+    # refused until a person other than the scenario's authors approves it, and until
+    # every material change of its inputs is approved by an override in force. None
+    # starts or stops work, an engine or an authority to act; nothing a stop or the
+    # decision reads.
+    "deployment-economics-scenario-reviews": {
+        "GET": _READ,
+        "POST": "records a person's review of an Economic Exposure scenario version: economics records, "
+        "append-only; it starts and stops nothing",
+    },
+    "deployment-economics-scenario-overrides": {
+        "GET": _READ,
+        "POST": "requests a sensitive override of a scenario version's input: economics records, append-only; it "
+        "starts and stops nothing",
+    },
+    "deployment-economics-override-approve": {
+        "POST": "approves a sensitive override: economics records, append-only; it starts and stops nothing",
+    },
+    # Revoking an override takes away an approval a FUTURE receipt would rest on: it
+    # stops no running work, engine, scan or authority to act, and is not in the stop
+    # set. It is never refused by any rule (no second person, no state, no expiry,
+    # no lock: one insert), so nothing holds it back.
+    "deployment-economics-override-revoke": {
+        "POST": "revokes a sensitive override of an economics input, never refused: economics records, "
+        "append-only; it starts and stops no work, engine or authority",
+    },
     # The remediation option and its ROI (assurance.economics.remediation_api, step
     # 13): one option recorded, its current and residual runs simulated, its
     # economics read. Economics records only.

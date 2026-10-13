@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import CustomUser
+from .models import CustomUser, RoleGrant, rank
 
 
 @admin.register(CustomUser)
@@ -59,4 +59,13 @@ class CustomUserAdmin(UserAdmin):
     ordering = ("username",)
 
     readonly_fields = ("last_login", "date_joined")
+
+    def save_model(self, request, obj, form, change):
+        # A promotion made here names the signed-in admin who made it (spec-v1,
+        # section 35.6, T9b); a demotion records nothing and is never refused.
+        before = rank(form.initial.get("role"), form.initial.get("is_superuser")) if change else 0
+        obj.grant_role_as(request.user)
+        super().save_model(request, obj, form, change)
+        if change and rank(obj.role, obj.is_superuser) > before:
+            RoleGrant.record(obj, request.user)
 
