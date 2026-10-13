@@ -410,7 +410,14 @@ a deployment-scoped, versioned parameter set (section 19):
 - `GET .../parameter-sets/<set_key>/versions/`: every version, newest first;
 - `POST .../parameter-sets/<set_key>/versions/`: the next version, append-only,
   from a document of the schema's thirty variables, each with its unit; an admin
-  or analyst only, attributed to the caller.
+  or analyst only, attributed to the caller. Each entry may state the distribution
+  it draws from in a simulation, and the document the scenario's frequency (events
+  a year, with its count distribution): each is held to its own low, base and high
+  before anything is written (from both sides, a count on any other row included;
+  the frequency, whose figures are values of its rate, by the rate its count
+  implies, a fixed rate only as a Poisson of it), and a contradiction is refused
+  naming the variable and the test it failed (section 19.4). A build re-checks the
+  distributions of the version it names, under the rule then in force.
 
 A deployment the caller cannot see is 404. The body is strict JSON of at most 64
 KiB (413 otherwise): an unknown field, a JSON number where a decimal string
@@ -418,7 +425,10 @@ belongs, and a key twice in one object are refused with the engine's code. None 
 these routes is a stop, and `assurance/urls.py` imports their module guarded: if it
 fails to import, its routes are logged and not served, and every stop and the
 system checks load without them. While economics cannot read mythos-core's
-currency table, the write answers 503; nothing at import reads the table.
+currency table, the write answers 503; nothing at import reads the table. A version
+that states a distribution is 503 too while the probabilistic engine (numpy) will
+not import; one that states none never imports it. Every check runs before the
+version's transaction, which only inserts.
 
 ### Raising a source's trust tier
 
@@ -452,9 +462,10 @@ templates (section 24):
 
 - `POST /api/assurance/deployments/<uuid>/economics/scenarios/build/`: a scenario
   draft from the effects, findings and parameter-set version the body names; an
-  admin or analyst only, the draft authored by the caller. The same inputs return
-  the scenario already built (200), never a second; a build raced by the same build
-  is 409 and writes nothing;
+  admin or analyst only, the draft authored by the caller. An effect's attribute may
+  state its distribution, held to its figures as a parameter set's is. The same
+  inputs return the scenario already built (200), never a second; a build raced by
+  the same build is 409 and writes nothing;
 - `GET .../economics/scenarios/<scenario uuid>/events/`: its review status and its
   events, each with its effects, findings, components and where every input came
   from.
@@ -482,9 +493,16 @@ else; neither is a stop.
 
 `assurance/economics/simulation_service.py` simulates a stored scenario version
 (section 25): every parameter draws from the distribution it states (one that holds
-its own low, base and high), or a point mass, or an expert's PERT, or, where the
+its own low, base and high: a continuous one from both sides, its base between its P5
+and P95, its median between the low and the high, and at least half its mass between
+them, never on a fixed row, a count on any row but the frequency included; the
+frequency, whose figures are values of its rate, by the rate its count implies: its
+exact mean, and the implied rate's median and half its mass between the low and the
+high, a fixed rate only as a Poisson of it), or a point mass, or an expert's
+PERT, or, where the
 builder joined several effects' figures, from each of theirs taking the larger loss,
-or is refused; every parameter is drawn once per simulated year; every formula runs as
+or is refused; the frequency is the one the parameter-set version states; every
+parameter is drawn once per simulated year; every formula runs as
 a vectorised twin proven equal to it, and what nothing uncertain reaches is step 4's
 Decimal figure; insurance applies per event; and the run is recorded once per scenario
 version, input digest, seed and draws as a `SimulationResult`, with every version and

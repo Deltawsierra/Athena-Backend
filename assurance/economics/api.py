@@ -9,7 +9,13 @@ Mounted under ``/api/assurance/`` by :mod:`assurance.urls`
   version, newest first, without their figures.
 - ``POST deployments/<uuid>/economics/parameter-sets/<set_key>/versions/``: record
   the next version (append-only), from a document of the schema's variables
-  (:mod:`assurance.economics.engine.parameter_set`). 201 with the version.
+  (:mod:`assurance.economics.engine.parameter_set`). 201 with the version. Each
+  entry may state the distribution it draws from in a simulation, and the document
+  the scenario's frequency (spec, section 19.2): each is held to the simulation's
+  own range test of its row's figures before anything is written (from both sides;
+  the frequency by the rate its count implies), and refused with
+  that test's code (``distribution_contradicts_range``, naming the variable and the
+  test, or ``distribution_on_fixed_row``).
 
 Access follows the assurance API's own rules (:mod:`assurance.views`): a signed-in
 account; a deployment the caller cannot see is 404, whether or not it exists
@@ -24,7 +30,9 @@ past it): a key that appears twice in one object, a bare ``NaN`` or ``Infinity``
 and a JSON number where a decimal string belongs are refused; so is any field the
 schema does not hold. A refusal is 400 with the engine's code and the field's
 path. While economics cannot read its currency table, what needs the table is
-refused 503 and nothing is recorded.
+refused 503 and nothing is recorded; so is a document that states a distribution
+while the probabilistic engine (numpy) will not import. A document that states
+none never imports it.
 
 Raising a financial source's trust tier (the owner's decision of 12 Oct 2026;
 :class:`~assurance.economics.models.FinancialSourceTrustRaise`):
@@ -93,9 +101,10 @@ from .models import (
 VERSION_LIST_LIMIT = 200
 
 #: The largest body a version is posted in. A full version -- thirty variables and
-#: a sublimit for every family -- is about 15 KiB; a body over this is refused
-#: (413) on its declared Content-Length before anything reads it, and the parser
-#: reads no more than this however long the body turns out to be.
+#: a sublimit for every family -- is about 15 KiB, and about 33 KiB with every entry
+#: and the frequency stating a splice, the largest stated distribution; a body over
+#: this is refused (413) on its declared Content-Length before anything reads it,
+#: and the parser reads no more than this however long the body turns out to be.
 MAX_BODY_BYTES = 64 * 1024
 
 
@@ -175,6 +184,15 @@ def _table_unavailable() -> Response:
     nothing. Nothing outside economics is refused for it."""
     return Response(
         {"detail": "Economic Exposure cannot read its currency table now; nothing was recorded or computed."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def _engine_unavailable() -> Response:
+    """The probabilistic engine (numpy) will not import, so a stated distribution
+    cannot be checked: refused 503, and nothing recorded."""
+    return Response(
+        {"detail": "Economic Exposure cannot check a stated distribution now; nothing was recorded."},
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 
@@ -273,6 +291,8 @@ class ParameterSetVersionsView(APIView):
             )
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
+        except pset.ProbabilisticEngineUnavailable:
+            return _engine_unavailable()
         return Response({"deployment": str(deployment.uuid), **served}, status=status.HTTP_201_CREATED)
 
 

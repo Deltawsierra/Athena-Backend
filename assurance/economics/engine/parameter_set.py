@@ -21,21 +21,35 @@ path in the refusal's detail:
   (``Money.parse``): a JSON number is ``not_decimal``;
 - every variable states its ``source_type``, its evidence and the date it holds
   from, and may state the last date it is fresh;
+- every entry may state the distribution it draws from in a simulation (step
+  7a's catalogue, read exactly by :func:`stated_distribution` and kept in its one
+  spelling), and the document may state the scenario's ``frequency``: a count of
+  events a year that always states its count distribution (spec, section 19.2).
+  Whether a distribution holds its entry's figures is checked when the version is
+  recorded, by the simulation's own test (``scenario_simulation.check_stated``),
+  the same test a run applies;
 - the result is a set of :class:`.parameters.Parameter`, so every rule a
   parameter holds (a range, no negative, a ratio at most 1) holds here too.
 
 A version's identity is :meth:`ParameterSetContent.digest`: ``sha256:`` and the
 SHA-256 of its canonical JSON (sorted keys, the one decimal spelling), the same
-whether it is read from the request or back from its stored rows.
+whether it is read from the request or back from its stored rows. A version that
+states no distribution and no frequency has the canonical document, and so the
+digest, it had before either could be stated.
+
+Only a document that states a distribution imports the probabilistic engine (and
+numpy), and only when it is read: nothing Django loads at start does (spec,
+section 23.10).
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from types import MappingProxyType
@@ -54,6 +68,15 @@ SUBLIMIT_PREFIX = "insurance_sublimit:"
 
 #: The longest evidence reference a variable may carry (its column's width).
 EVIDENCE_REF_MAX = 500
+
+#: The scenario's frequency: events a year, a count, stored as a parameter of this
+#: name (``scenario_simulation.FREQUENCY_PARAMETER``, spelled here so this module
+#: never imports the probabilistic engine to name it).
+FREQUENCY = "frequency"
+
+#: The module that reads a stated distribution: imported only for a document that
+#: states one.
+_PROBABILISTIC_ENGINE = "assurance.economics.engine.scenario_simulation"
 
 _SET_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -127,9 +150,29 @@ def _variables() -> tuple[Variable, ...]:
 VARIABLES: Mapping[str, Variable] = MappingProxyType({v.name: v for v in _variables()})
 
 _ENTRY_REQUIRED = frozenset({"unit", "low", "base", "high", "source_type", "evidence_ref", "effective_date"})
-_ENTRY_OPTIONAL = frozenset({"currency", "fresh_until"})
+_ENTRY_OPTIONAL = frozenset({"currency", "fresh_until", "distribution"})
 _DOCUMENT_REQUIRED = frozenset({"variables"})
-_DOCUMENT_OPTIONAL = frozenset({"insurance_sublimits", "insurance_exclusions"})
+_DOCUMENT_OPTIONAL = frozenset({"insurance_sublimits", "insurance_exclusions", FREQUENCY})
+
+
+class StatedDistributionRefused(ParameterRefused):
+    """A stated distribution the probabilistic engine refuses, with that engine's
+    code and meaning, carried with the refusal so that this module never imports
+    the engine to name them. A :class:`.parameters.ParameterRefused`, so one
+    ``except`` still catches every refusal of the engine."""
+
+    def __init__(self, code: str, meaning: str, detail: str = ""):
+        self.code = code
+        self.meaning = meaning
+        self.detail = detail
+        suffix = f" ({detail})" if detail else ""
+        ValueError.__init__(self, f"{code}: {meaning}{suffix}")
+
+
+class ProbabilisticEngineUnavailable(RuntimeError):
+    """The probabilistic engine (or numpy) will not import, so a stated
+    distribution cannot be read now. Nothing is recorded; a document that states
+    no distribution never needs the engine."""
 
 
 def check_set_key(value) -> str:
@@ -209,6 +252,36 @@ def _parameter(name: str, unit: Unit, entry, path: str) -> Parameter:
     )
 
 
+def probabilistic_engine(path: str):
+    """The probabilistic engine (``scenario_simulation``, and numpy with it), imported
+    now, or :class:`ProbabilisticEngineUnavailable`: ANY fault importing it, as a run
+    maps any to ``engine_unavailable`` (review round 1, NIT-2). Only the fault's type is
+    kept: its message may name a path or a library."""
+    try:
+        return importlib.import_module(_PROBABILISTIC_ENGINE)
+    except Exception as error:  # noqa: BLE001 - any import fault of numpy or the engine is a returned 503
+        raise ProbabilisticEngineUnavailable(
+            f"{path}: the probabilistic engine will not import ({type(error).__name__})"
+        ) from None
+
+
+def stated_distribution(entry, path: str) -> dict | None:
+    """The distribution ``entry`` states, in its one stored spelling (read exactly by
+    ``scenario_simulation.parse_stated``: a catalogue id and version, native
+    parameters as decimal strings), or ``None`` where it states none. A malformed
+    one is refused with the engine's code (:class:`StatedDistributionRefused`).
+    Whether it holds the entry's own figures is the record's check, the run's test."""
+    if not isinstance(entry, dict) or "distribution" not in entry:
+        return None
+    engine = probabilistic_engine(f"{path}.distribution")
+    try:
+        stated = engine.parse_stated(entry["distribution"], f"{path}.distribution")
+    except engine.ScenarioSimulationRefused as refused:
+        raise StatedDistributionRefused(refused.code, engine.REFUSALS[refused.code], refused.detail) from None
+    # The stored form, deep-copied: nothing the caller holds reaches the content.
+    return json.loads(json.dumps(stated.as_json()))
+
+
 def _money_is_not_observed(parameter: Parameter, path: str) -> Parameter:
     """``parameter``, a figure of the parameter set, or ``observed_source_not_observable``
     when it is money (a lump sum, or per unit, hour or year) resting on
@@ -230,16 +303,23 @@ def _cash_family(value, path: str) -> str:
 @dataclass(frozen=True)
 class ParameterSetContent:
     """One version's content: its variables, its sublimits by family, and its
-    excluded families, sorted."""
+    excluded families, sorted; the distributions its parameters state, by the
+    parameter's name, in their stored spelling; and the scenario's frequency, if it
+    states one (a count of events a year, which always states its distribution)."""
 
     variables: Mapping[str, Parameter]
     sublimits: Mapping[str, Parameter]
     exclusions: tuple[str, ...]
+    distributions: Mapping[str, dict] = field(default_factory=dict)
+    frequency: Parameter | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "variables", MappingProxyType(dict(sorted(self.variables.items()))))
         object.__setattr__(self, "sublimits", MappingProxyType(dict(sorted(self.sublimits.items()))))
         object.__setattr__(self, "exclusions", tuple(sorted(self.exclusions)))
+        object.__setattr__(
+            self, "distributions", MappingProxyType({k: v for k, v in sorted(dict(self.distributions).items())})
+        )
         if not self.variables:
             raise ParameterRefused("field_missing", "variables: a version holds at least one variable")
         for name, parameter in self.variables.items():
@@ -256,14 +336,31 @@ class ParameterSetContent:
             raise ParameterRefused("duplicate_id", "insurance_exclusions names a family twice")
         for family in self.exclusions:
             _cash_family(family, "insurance_exclusions")
+        frequency = self.frequency
+        if frequency is not None:
+            if frequency.name != FREQUENCY or frequency.unit is not Unit.COUNT:
+                raise ParameterRefused("unit_mismatch", f"the frequency is a count of events a year, named {FREQUENCY}")
+            if FREQUENCY not in self.distributions:
+                raise ParameterRefused(
+                    "field_missing", f"{FREQUENCY}: ['distribution']: a frequency states its count distribution"
+                )
+        named = {p.name for p in self.parameters()}
+        for name, stated in self.distributions.items():
+            if name not in named:
+                raise ParameterRefused(
+                    "field_unrecognised", f"a distribution for {name!r}, which the version does not hold"
+                )
+            if not isinstance(stated, dict):
+                raise ParameterRefused("field_malformed", f"{name}.distribution is not an object")
         # The policy's terms are one currency, or the set is refused now rather than
         # when a scenario first reads it.
         self.insurance_policy()
 
     def parameters(self) -> list[Parameter]:
-        """Every parameter of the version, variables then sublimits: the rows it is
-        stored as."""
-        return [*self.variables.values(), *self.sublimits.values()]
+        """Every parameter of the version, variables, then sublimits, then the
+        frequency: the rows it is stored as."""
+        frequency = [self.frequency] if self.frequency is not None else []
+        return [*self.variables.values(), *self.sublimits.values(), *frequency]
 
     def as_dict(self) -> dict:
         """The canonical document: what the digest is taken over."""
@@ -273,14 +370,21 @@ class ParameterSetContent:
             del row["name"], row["parameter_id"]
             if row["currency"] is None:
                 del row["currency"]
+            # Only where one is stated: a version that states none keeps the
+            # canonical document, and the digest, it had before one could be.
+            if parameter.name in self.distributions:
+                row["distribution"] = self.distributions[parameter.name]
             return row
 
-        return {
+        document = {
             "schema": SCHEMA_VERSION,
             "variables": {name: entry(p) for name, p in self.variables.items()},
             "insurance_sublimits": {family: entry(p) for family, p in self.sublimits.items()},
             "insurance_exclusions": list(self.exclusions),
         }
+        if self.frequency is not None:
+            document[FREQUENCY] = entry(self.frequency)
+        return document
 
     def digest(self) -> str:
         canonical = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -309,12 +413,21 @@ def parse_document(document) -> ParameterSetContent:
     raw = document["variables"]
     if not isinstance(raw, dict):
         raise ParameterRefused("field_malformed", "variables is not an object")
+    distributions: dict[str, dict] = {}
+
+    def read(name: str, unit: Unit, entry, path: str) -> Parameter:
+        parameter = _parameter(name, unit, entry, path)
+        stated = stated_distribution(entry, path)
+        if stated is not None:
+            distributions[name] = stated
+        return parameter
+
     variables: dict[str, Parameter] = {}
     for name in raw:
         if name not in VARIABLES:
             raise ParameterRefused("field_unrecognised", f"variables: [{str(name)!r}]")
         variables[name] = _money_is_not_observed(
-            _parameter(name, VARIABLES[name].unit, raw[name], f"variables.{name}"), f"variables.{name}"
+            read(name, VARIABLES[name].unit, raw[name], f"variables.{name}"), f"variables.{name}"
         )
     sublimits: dict[str, Parameter] = {}
     raw = document.get("insurance_sublimits", {})
@@ -323,7 +436,7 @@ def parse_document(document) -> ParameterSetContent:
     for family in raw:
         _cash_family(family, "insurance_sublimits")
         sublimits[family] = _money_is_not_observed(
-            _parameter(SUBLIMIT_PREFIX + family, Unit.MONEY, raw[family], f"insurance_sublimits.{family}"),
+            read(SUBLIMIT_PREFIX + family, Unit.MONEY, raw[family], f"insurance_sublimits.{family}"),
             f"insurance_sublimits.{family}",
         )
     exclusions = document.get("insurance_exclusions", [])
@@ -331,15 +444,31 @@ def parse_document(document) -> ParameterSetContent:
         raise ParameterRefused("field_malformed", "insurance_exclusions is not a list")
     for position, family in enumerate(exclusions):
         _cash_family(family, f"insurance_exclusions[{position}]")
-    return ParameterSetContent(variables, sublimits, tuple(exclusions))
+    frequency = None
+    if FREQUENCY in document:
+        entry = document[FREQUENCY]
+        if isinstance(entry, dict) and "distribution" not in entry:
+            # Nothing defaults: a PERT is not a count (spec, section 25.1).
+            raise ParameterRefused(
+                "field_missing", f"{FREQUENCY}: ['distribution']: a frequency states its count distribution"
+            )
+        frequency = read(FREQUENCY, Unit.COUNT, entry, FREQUENCY)
+    return ParameterSetContent(variables, sublimits, tuple(exclusions), distributions, frequency)
 
 
-def content_of(parameters, exclusions) -> ParameterSetContent:
-    """A version's content read back from its stored ``parameters`` and
-    ``exclusions``."""
+def content_of(parameters, exclusions, distributions=None) -> ParameterSetContent:
+    """A version's content read back from its stored ``parameters``, ``exclusions``
+    and the ``distributions`` its rows state, by name (each in its stored
+    spelling)."""
     variables: dict[str, Parameter] = {}
     sublimits: dict[str, Parameter] = {}
+    frequency = None
     for parameter in parameters:
+        if parameter.name == FREQUENCY:
+            if frequency is not None:
+                raise ParameterRefused("duplicate_id", parameter.name)
+            frequency = parameter
+            continue
         target, key = (
             (sublimits, parameter.name[len(SUBLIMIT_PREFIX):])
             if parameter.name.startswith(SUBLIMIT_PREFIX)
@@ -348,15 +477,18 @@ def content_of(parameters, exclusions) -> ParameterSetContent:
         if key in target:
             raise ParameterRefused("duplicate_id", parameter.name)
         target[key] = parameter
-    return ParameterSetContent(variables, sublimits, tuple(exclusions))
+    return ParameterSetContent(variables, sublimits, tuple(exclusions), dict(distributions or {}), frequency)
 
 
 def variable_unit(name: str) -> Unit:
-    """The unit a stored set parameter of ``name`` must have: its variable's, or
-    money for a sublimit; ``field_unrecognised`` for any other name."""
+    """The unit a stored set parameter of ``name`` must have: its variable's, money
+    for a sublimit, or a count for the frequency; ``field_unrecognised`` for any
+    other name."""
     if name.startswith(SUBLIMIT_PREFIX):
         _cash_family(name[len(SUBLIMIT_PREFIX):], "sublimit")
         return Unit.MONEY
+    if name == FREQUENCY:
+        return Unit.COUNT
     variable = VARIABLES.get(name)
     if variable is None:
         raise ParameterRefused("field_unrecognised", f"{name!r} is not a parameter-set variable")
