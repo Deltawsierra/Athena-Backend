@@ -5,7 +5,9 @@ or ``tests.economics_missing_core`` (mythos-core's currency module does not
 import). ``ECONOMICS_FAULT`` says which: ``api`` or ``core``. And by
 ``tests/test_economics_builder.py::test_a_builder_fault_never_takes_down_a_stop``
 under ``tests.economics_broken_builder`` (the scenario builder and its template
-module do not import): ``builder``.
+module do not import): ``builder``. And by
+``tests/test_economics_report.py::test_a_report_fault_never_takes_down_a_stop`` under
+``tests.economics_broken_report`` (the report does not import): ``report``.
 
 The safety rule (``docs/economics/spec-v1.md``, section 2): an economics fault
 never blocks a stop. Under either fault Django loads, the scan's Stop is answered
@@ -69,6 +71,19 @@ def test_only_economics_is_refused():
     deployment = Deployment.objects.create(name="d")
     assert resolve(f"/api/assurance/deployments/{deployment.uuid}/").view_name == "deployment-detail"
     route = f"/api/assurance/deployments/{deployment.uuid}/economics/parameter-sets/q4/versions/"
+    if FAULT == "report":
+        # The scenario endpoints and the report are not served; the parameter-set
+        # routes and the builder's still are.
+        assert "assurance.economics.report_api" not in sys.modules
+        assert "assurance.economics.report" not in sys.modules
+        scenario = "00000000-0000-4000-8000-000000000000"
+        for tail in ("", "simulate/", "results/"):
+            with pytest.raises(Resolver404):
+                resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario}/{tail}")
+        assert resolve(route).view_name == "deployment-economics-parameter-set-versions"
+        built = resolve(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/")
+        assert built.view_name == "deployment-economics-scenario-build"
+        return
     if FAULT == "builder":
         # The builder's routes are not served; the parameter-set routes still are.
         assert "assurance.economics.scenario_api" not in sys.modules

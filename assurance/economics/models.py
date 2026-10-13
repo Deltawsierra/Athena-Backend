@@ -87,6 +87,15 @@ CARD_RECORD_REFUSALS = {
     ),
 }
 _REFUSAL_TEXT.update(CARD_RECORD_REFUSALS)
+#: The code a stored chart series is refused with on save (spec, section 27.4).
+CHARTS_RECORD_REFUSALS = {
+    "charts_record_malformed": (
+        "a chart-series row holds the series of its own completed simulation result: an object naming that "
+        "result's scenario, seed, draws, input digest and outcomes digest, with no float in it and its digest the "
+        "series'"
+    ),
+}
+_REFUSAL_TEXT.update(CHARTS_RECORD_REFUSALS)
 
 
 class EconomicsRewriteRefused(ValueError):
@@ -2787,6 +2796,76 @@ class FinancialExposureReceipt(_AppendOnly):
 
     def __str__(self) -> str:
         return f"exposure receipt {self.receipt_id} of simulation {self.simulation_id}"
+
+
+# ---------------------------------------------------------------------------
+# SimulationCharts -- one simulation result's chart-ready series (step 6)
+# ---------------------------------------------------------------------------
+
+
+class SimulationCharts(_AppendOnly):
+    """The chart-ready series of ONE completed simulation result (spec, section
+    27.4): for each line of the scenario, the exceedance curve at fixed
+    probabilities and a histogram, made on the run's own draws
+    (``engine.charts.series``), so the report never runs a simulation to draw them.
+
+    Append-only like every economics record, and IDEMPOTENT: one series per result
+    (a one-to-one key). Nothing in it is a float, and its digest is recomputed on
+    save (``charts_record_malformed``). No account column, so removing an operator
+    never writes it; it goes with its deployment."""
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    # No reverse accessors: see CustomerParameterSet.deployment.
+    deployment = models.ForeignKey("assurance.Deployment", on_delete=models.CASCADE, related_name="+")
+    scenario = models.ForeignKey(FinancialScenario, on_delete=models.CASCADE, related_name="+")
+    simulation = models.OneToOneField(SimulationResult, on_delete=models.CASCADE, related_name="+")
+    schema = models.CharField(max_length=100)
+    charts = models.JSONField()
+    charts_digest = models.CharField(max_length=71)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["scenario", "id"]
+
+    def check_new(self) -> None:
+        simulation = list(
+            SimulationResult._base_manager.filter(pk=self.simulation_id).values_list(
+                "scenario_id", "deployment_id", "status", "seed", "draws", "input_digest", "record"
+            )
+        )
+        if len(simulation) != 1 or simulation[0][:2] != (self.scenario_id, self.deployment_id):
+            raise EconomicsRefused("cross_tenant_reference", "the series' simulation is another scenario's")
+        _, _, status, seed, draws, input_digest, record = simulation[0]
+        if status != SIMULATION_COMPLETED or not isinstance(record, dict):
+            raise EconomicsRefused("charts_record_malformed", "a refused run has no draws to chart")
+        scenario = FinancialScenario._base_manager.filter(pk=self.scenario_id).values_list("uuid", flat=True)
+        charts = self.charts
+        if not isinstance(charts, dict) or charts.get("schema") != self.schema:
+            raise EconomicsRefused("charts_record_malformed", "the series is not an object of its schema")
+        named = (charts.get("scenario_id"), charts.get("seed"), charts.get("draws"), charts.get("input_digest"),
+                 charts.get("outcomes_sha256"))
+        if named != (*[str(u) for u in scenario], seed, draws, input_digest, record.get("outcomes_sha256")):
+            raise EconomicsRefused("charts_record_malformed", "the series is not this result's")
+        _require_text(schema=self.schema)
+        if _has_float(charts):
+            raise EconomicsRefused("charts_record_malformed", "the series holds a float")
+        if canonical_digest(charts) != self.charts_digest:
+            raise EconomicsRefused("charts_record_malformed", "charts_digest is not the series'")
+        if SimulationCharts._base_manager.filter(simulation_id=self.simulation_id).exists():
+            raise EconomicsRefused("duplicate_id", "a series of this simulation result is recorded")
+        self._charts_checked = _checked_state(self)
+
+    def insert_checked(self) -> None:
+        """Insert this series, whose :meth:`check_new` ran on exactly these values just
+        before, inside the caller's transaction: an INSERT and nothing read (as
+        :meth:`SimulationResult.insert_checked`)."""
+        if not self._state.adding or getattr(self, "_charts_checked", None) != _checked_state(self):
+            raise EconomicsRewriteRefused("A chart series is checked whole, then inserted unchanged.")
+        self._insert_as_checked()
+
+    def __str__(self) -> str:
+        return f"chart series of simulation {self.simulation_id}"
 
 
 # ---------------------------------------------------------------------------

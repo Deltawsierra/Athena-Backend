@@ -21,7 +21,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0066_scenario_fingerprint_unavailable"),
+        ("assurance", "0067_simulation_charts"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

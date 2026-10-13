@@ -616,6 +616,21 @@ def _economics_trust_raise():
     )
 
 
+def _economics_scenario_simulate():
+    from tests.test_economics_report import stored
+
+    dep = _scanned()
+    scenario = stored(dep, _admin())
+    # The set-up's own writes (an asset and a finding the scenario rests on) are
+    # decision inputs: the decision is brought up to date before the simulation,
+    # which must leave it where it is.
+    recompute_decision(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + f"economics/scenarios/{scenario.uuid}/simulate/", {"seed": 7, "policy": "quick_10k"},
+        format="json",
+    )
+
+
 def _economics_trust_raise_approval():
     """Another admin's request to authoritative, approved by the caller's admin."""
     from assurance.economics.models import FinancialSourceTrustRaise
@@ -719,6 +734,11 @@ CANNOT_MOVE = {
         "withdraws a pending raise of a financial source's trust tier (Economic Exposure); the decision reads "
         "no economics record",
         _economics_trust_raise_withdrawal,
+    ),
+    ("ScenarioSimulateView", "post", "post"): (
+        "simulates an Economic Exposure scenario version and issues its Validity Card and chart series, all "
+        "economics records; the decision reads no economics record",
+        _economics_scenario_simulate,
     ),
 }
 

@@ -5,7 +5,8 @@ It makes numpy and the probabilistic engine's modules
 (``assurance.economics.engine.distributions``, ``.simulation``, step 7b's
 ``.scenario_simulation`` and ``.twins``, and ``assurance.economics.simulation_service``;
 step 8's ``.sensitivity`` and ``.grade``, ``assurance.economics.validity_service`` and
-``.receipt_service``, and ``mythos_core.exposure_receipt``) unimportable, as an
+``.receipt_service``, and ``mythos_core.exposure_receipt``; step 6's ``.charts`` and
+``assurance.economics.charts_service``) unimportable, as an
 import-time fault in any of them would, before pytest-django loads Django.
 The scan's Stop must still resolve, answer and be saved. It is never loaded by
 the suite itself: its name does not match ``test_*.py``.
@@ -27,6 +28,8 @@ POISONED = (
     "assurance.economics.validity_service",
     "assurance.economics.receipt_service",
     "mythos_core.exposure_receipt",
+    "assurance.economics.engine.charts",
+    "assurance.economics.charts_service",
 )
 
 

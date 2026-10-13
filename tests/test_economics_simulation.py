@@ -656,7 +656,9 @@ def test_django_and_the_urlconf_never_import_the_probabilistic_engine():
                  # Step 8: the sensitivity analysis, the grade, the card and the receipt.
                  "assurance.economics.engine.sensitivity", "assurance.economics.engine.grade",
                  "assurance.economics.validity_service", "assurance.economics.receipt_service",
-                 "mythos_core.exposure_receipt")
+                 "mythos_core.exposure_receipt",
+                 # Step 6: the chart series and their service.
+                 "assurance.economics.engine.charts", "assurance.economics.charts_service")
         print(json.dumps(sorted(m for m in sys.modules if any(m == n or m.startswith(n + ".") for n in names))))
         print(json.dumps("assurance.economics.engine.money" in sys.modules))
         """

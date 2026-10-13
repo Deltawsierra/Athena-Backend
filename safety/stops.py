@@ -522,6 +522,15 @@ NOT_STOPS = {
         "POST": "withdraws a pending raise of a financial source's trust tier: economics records; it starts and "
         "stops nothing",
     },
+    # The scenario endpoints and the report (assurance.economics.report_api, step 6):
+    # a scenario read, simulated and reported. Economics records only.
+    "deployment-economics-scenario": _get(),
+    "deployment-economics-scenario-simulate": {
+        "POST": "runs or returns a simulation of an Economic Exposure scenario version and issues its Validity "
+        "Card, chart series and, where asked, its receipt: economics records, append-only; it starts and stops "
+        "nothing",
+    },
+    "deployment-economics-scenario-results": _get(),
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

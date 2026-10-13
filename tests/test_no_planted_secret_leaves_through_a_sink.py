@@ -1379,6 +1379,19 @@ class World:
             .values_list("state", "channel", "withdrawn_via")
         )
         signals["trust_raise"] = trust
+        # The scenario endpoints and the report (MVP step 6): the scenario simulated
+        # (201: a result is recorded, completed or refused) and its report read back
+        # (200); read_everything then reads the scenario and its report again. What
+        # they answer -- the scenario's title, its parameters' provenance, the report --
+        # is searched like every other sink.
+        signals["scenario_simulate"] = self.call(
+            docs, "api.answers", admin, "post", scenarios + f"{scenario_uuid}/simulate/",
+            "deployment-economics-scenario-simulate", data={"seed": 7, "policy": "quick_10k"}, format="json",
+        ).status_code
+        signals["scenario_results"] = self.call(
+            docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/results/",
+            "deployment-economics-scenario-results",
+        ).status_code
 
     def read_everything(self, docs, signals):
         admin = self.client(self.admin)
@@ -1524,6 +1537,11 @@ ROUTES.update(
         "economics-source-trust-raises reads it",
         "economics-trust-raise-withdraw": _DOCS + "withdraws a pending raise; answers the raise, as "
         "economics-source-trust-raises reads it",
+        # The scenario endpoints (MVP step 6): a scenario version with its parameters'
+        # provenance, a simulation's summary, and its report JSON.
+        "deployment-economics-scenario": _READ,
+        "deployment-economics-scenario-simulate": _READ,
+        "deployment-economics-scenario-results": _READ,
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1562,7 +1580,11 @@ def _readable_urls(world):
                 from tests.test_spine_authority_chain import WF
 
                 options = [{**o, "workflow": WF} for o in options]
-            if name == "deployment-economics-scenario-events":
+            if name in (
+                "deployment-economics-scenario",
+                "deployment-economics-scenario-events",
+                "deployment-economics-scenario-results",
+            ):
                 from assurance.economics.models import FinancialScenario
 
                 options = [
@@ -1919,7 +1941,9 @@ def test_every_path_ran(observed):
         s["records"]["scenario_build_refused"],
         s["records"]["scenario_build"],
         s["records"]["scenario_events"],
-    ) == (400, 201, 200), s["records"]
+        s["records"]["scenario_simulate"],
+        s["records"]["scenario_results"],
+    ) == (400, 201, 200, 201, 200), s["records"]
     assert s["records"]["trust_raise"] == {
         "one_step": 201, "asked": 201, "approved": 200, "withdrawable": 201, "withdrawn": 200,
         "command_approve_refused": True,
