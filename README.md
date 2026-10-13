@@ -812,8 +812,8 @@ E5, `docs/economics/spec-v1.md` section 33):
   "valuation_date": "2026-10-06", "normalization": {...}, "groups": [...]}` takes each
   current scenario version's latest exposure run that `may_be_totalled` admits (never
   a remediation option's residual run), lists every other with its reason (Unknown,
-  refused, unverified, not graded, never simulated, not annual, superseded, inputs
-  changed, or a currency that cannot be normalised), draws the included scenarios
+  refused, unverified, not graded, stale (E6), never simulated, not annual, superseded,
+  inputs changed, or a currency that cannot be normalised), draws the included scenarios
   again on one seed with aligned years, scenarios in one correlation group (two at
   least, a strength from 0.000001 to 10 with a source type) sharing one Gamma driver
   of their annual rates, counts a loss event two scenarios share (one SPINE effect, or
@@ -833,7 +833,10 @@ E5, `docs/economics/spec-v1.md` section 33):
   portfolio is at least each), each scenario's contribution to the mean and to the
   tail (summing to them exactly), the groups, the shared events, every exclusion with
   its reason, the grade (no higher than the lowest included scenario, lower for an
-  expert's correlation strength; none for a refused portfolio) and the banner.
+  expert's correlation strength; none for a refused portfolio) and the banner. A
+  stored portfolio whose included scenario has gone stale since it was totalled reads
+  stale (`banner` "Stale: ...", `excluded_from_totals: true`, `banner_reason` naming
+  each stale scenario and why): its total is never read as current.
 
 The report is built from the stored rows only and is deterministic, with its own
 digest; every stored row it rests on, each included scenario's result, card and

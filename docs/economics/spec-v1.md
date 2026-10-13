@@ -5913,6 +5913,7 @@ total is listed with its code, the code's meaning and its own reason
 | `refused` | its latest run was refused: it has no figures |
 | `no_card` | its latest result has no Validity Card: it is not graded |
 | `unknown` | its latest result is graded Unknown: not for capital decisions |
+| `stale` | its latest result is stale (E6, section 34.2): something it rests on changed since it ran; the reason is the report's `banner_reason`, naming every stale reason |
 | `not_totalled` | `report.may_be_totalled` refuses its latest result's report for another reason |
 | `no_annual_loss` | its run states no frequency: a draw is one occurrence, not a simulated year, so it has no annual loss to sum |
 | `inputs_changed` | its stored rows no longer give the inputs its latest result was run on |
@@ -6289,7 +6290,12 @@ simulate response's `grade` is null.
 27.6's rule): a refused portfolio, one whose rows fail a check, and one with no
 grade carry `banner: "Unknown: not for capital decisions"` and
 `excluded_from_totals: true`, with the reason; a portfolio graded A to D carries
-neither.
+neither. **A stored portfolio is read against its members' freshness now** (E6,
+section 34.2; `portfolio.stale_members`): where an included scenario's result has gone
+stale since it was totalled, the report carries `report.STALE_BANNER` (or keeps the
+Unknown banner where another reason applies), `excluded_from_totals: true`, and a
+`banner_reason` naming each stale scenario and its reasons; the stored row is not
+rewritten, and a portfolio totalled again leaves the stale scenario out as `stale`.
 
 **Raw data a licence forbids redistributing never reaches a reader** (the
 section-28 audit's T7; `portfolio.served_normalization`). The inputs keep each
@@ -6480,9 +6486,9 @@ outcome for the financial claim.
 
 | | |
 |---|---|
-| Code | `assurance/economics/continuous_service.py` (the map, the assessment, the check, the refresh's rebuild and closure); `ExposureDependencies`, `ExposureStaleness` and `ExposureRefresh` in `models.py`; the capture in `simulation_service.py`; the reads in `report.py`; three routes and the receipt route's headers in `report_api.py`; `manage.py check_financial_assurance` |
+| Code | `assurance/economics/continuous_service.py` (the map, the assessment, the check, the refresh's rebuild and closure); `ExposureDependencies`, `ExposureStaleness` and `ExposureRefresh` in `models.py`; the capture in `simulation_service.py`; the reads in `report.py`; three routes and the receipt route's headers in `report_api.py`; the stale exclusion and a stored portfolio's staleness in `portfolio.py` (E5); `manage.py check_financial_assurance` |
 | Migration | `0073_exposure_assurance.py`: three new tables and one constraint on the scenario table (`uq_econ_scenario_one_successor`: one successor per version, section 34.4); no existing column changed. Numbered behind #165's `0071_financial_source_records.py` and #162's `0072_portfolio_results.py` (E5), both merged; it depends on 0072 |
-| Tests | `tests/test_economics_continuous_assurance.py`; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_economics_run_cap.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and the import tests (`tests/test_economics_engine.py`, `tests/test_economics_simulation.py`) extended to them |
+| Tests | `tests/test_economics_continuous_assurance.py`; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_economics_run_cap.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and the import tests (`tests/test_economics_engine.py`, `tests/test_economics_simulation.py`) extended to them; `tests/test_economics_portfolio.py`'s fixture records each scenario's asset and finding in one scan before the first run (an asset added later moves SPINE's access inputs, so a run made before it would read stale) |
 
 ### 34.1 The dependency map
 
@@ -6582,9 +6588,11 @@ run is never totalled as current:
   (`receipt_service.verify_stored_receipt`): nothing it signed was changed;
 - the ROI route reads the current run's report through `may_be_totalled`, so a stale
   current run is its banner reason;
-- a portfolio (E5, section 33) excludes a stale member: `continuous_service.portfolio_exclusion`
-  names it (`{"code": "stale", ...}`), and until E5 merges its report is already
-  refused by `may_be_totalled`, which every total applies.
+- a portfolio (E5, section 33) never totals a stale member: one being totalled leaves
+  it out as `stale` (`portfolio.EXCLUSIONS`), its report's `banner_reason` naming the
+  reasons; and a stored portfolio whose member has gone stale since reads stale
+  (`report.STALE_BANNER`, `excluded_from_totals`, a `banner_reason` naming each stale
+  member through `continuous_service.portfolio_exclusion`), its row unchanged.
 
 ### 34.3 The refresh obligation
 
@@ -6703,9 +6711,9 @@ inside functions and views; nothing Django loads at start imports it.
 
 ### 34.7 What is still not done
 
-- **The portfolio (E5)**: until #162 merges, a stale member is left out of a total by
-  `may_be_totalled`, as `not_totalled`; once it merges the portfolio names the
-  exclusion `stale` with its reasons through `continuous_service.portfolio_exclusion`.
+- **A stale portfolio is not re-totalled by itself**: it reads stale until someone
+  totals the portfolio again (after refreshing the stale scenario); nothing records a
+  portfolio obligation.
 - **A pre-E6 run reads stale** (`dependencies_unrecorded`) until it is refreshed: no map
   is backfilled. **Owner note:** at the deploy, every exposure run recorded before it
   goes stale at once and is excluded from every total, portfolio and ROI until it is

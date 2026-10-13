@@ -1346,12 +1346,13 @@ def closure_document(row: ExposureRefresh) -> dict:
 # ------------------------------------------------------------------ hooks for other reads
 
 
-def portfolio_exclusion(result: SimulationResult) -> dict | None:
-    """The hook a portfolio total applies to each member (E5, spec section 33): where
-    the member's run is stale, the exclusion ``{"code": "stale", "reason": ...,
-    "reasons": [...]}``, else ``None``. Until E5 merges, a stale member is already left
-    out of every total: its report is excluded (``report.may_be_totalled``)."""
-    freshness = safe_assess(result)
+def portfolio_exclusion(result: SimulationResult, *, now: Now | None = None) -> dict | None:
+    """What a portfolio (E5, spec section 33) says of a member: where its run is stale,
+    ``{"code": "stale", "reason": ..., "reasons": [...]}``, else ``None``. A stored
+    portfolio reads each member through it (``portfolio.stale_members``); a portfolio
+    being totalled leaves a stale member out through its report
+    (``report.may_be_totalled``), as ``stale``."""
+    freshness = safe_assess(result, now=now)
     if freshness is None or not freshness.stale:
         return None
     return {"code": "stale", "reason": freshness.banner_reason(),

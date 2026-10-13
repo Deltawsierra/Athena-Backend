@@ -53,6 +53,7 @@ from assurance.economics import (
     capacity,
     charts_service,
     continuous_service,
+    portfolio,
     receipt_service,
     report,
     report_api,
@@ -574,9 +575,54 @@ def test_the_portfolio_hook_names_a_stale_member(world, people):
     assert excluded["code"] == "stale"
     assert excluded["reasons"] == [{"code": "parameter_set_superseded", "dependency": "parameter_set:bank_operations"}]
     assert continuous_service.portfolio_exclusion(payment) is None
-    # Before E5 merges a total already leaves it out: its report is excluded.
+    # A portfolio being totalled leaves it out through its report, as stale.
     assert report.may_be_totalled(report.build_report(outage)) is False
     assert report.may_be_totalled(report.build_report(payment)) is True
+
+
+def _portfolio(client, deployment):
+    return _post(client, _base(deployment) + "portfolio/simulate/",
+                 {"seed": 2026, "policy": QUICK, "reporting_currency": "USD", "valuation_date": AS_OF})
+
+
+def test_a_portfolio_never_totals_a_stale_member_and_names_it(world, people):
+    """E5 (section 33) with E6: a portfolio totalled after a member went stale leaves
+    it out as ``stale``, its reasons named, and totals the member that is current."""
+    world.run(world.payment)
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    answer = _portfolio(_client(people["analyst"]), world.deployment)
+    assert answer.status_code == 201, answer.content
+    body = answer.json()
+    assert body["included"] == [str(world.payment.uuid)]
+    (excluded,) = body["excluded"]
+    assert (excluded["scenario"], excluded["code"]) == (str(world.outage.uuid), "stale")
+    assert "parameter_set_superseded (parameter_set:bank_operations)" in excluded["reason"]
+    assert "stale" in portfolio.EXCLUSIONS
+
+
+def test_a_stored_portfolio_reads_stale_once_a_member_goes_stale(world, people):
+    """A portfolio totalled while both members were current is stored; once one goes
+    stale, every read of that stored portfolio says it is stale and names the member
+    and why -- its total is never read as current -- and the row is not rewritten."""
+    world.run(world.payment)
+    world.run(world.outage)
+    totalled = _portfolio(_client(people["analyst"]), world.deployment)
+    assert totalled.status_code == 201 and len(totalled.json()["included"]) == 2, totalled.content
+    reader = _client(people["viewer"])
+    url = _base(world.deployment) + "portfolio/"
+    before = json.loads(reader.get(url).content)
+    assert before["banner"] is None and before["excluded_from_totals"] is False and before["banner_reason"] is None
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    after = json.loads(reader.get(url).content)
+    assert after["banner"] == report.STALE_BANNER and after["excluded_from_totals"] is True
+    assert after["banner_reason"].startswith("stale: an included scenario's result is stale")
+    assert f"{world.outage.uuid} (Model provider outage): parameter_set_superseded" in after["banner_reason"]
+    assert str(world.payment.uuid) not in after["banner_reason"]
+    assert after["portfolio"] == before["portfolio"] and after["summary"] == before["summary"]
+    assert reader.get(url).content == reader.get(url).content
 
 
 def test_the_reads_fired_twice_give_the_same_bytes_and_write_nothing(world, people):
