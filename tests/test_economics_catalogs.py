@@ -603,13 +603,19 @@ def test_more_pages_than_a_source_is_read_across_are_refused(monkeypatch):
     assert (outcome.code, len(transport.sent)) == ("feed_over_limit", 1) and _nothing_kept()
 
 
-def test_a_page_that_says_more_follows_but_is_last_is_partial():
+@pytest.mark.parametrize("key", [AZURE, GCP])
+def test_a_page_that_says_more_follows_but_is_last_is_partial(key):
+    """An answer cut after a page that names a next one is partial: each adapter reads
+    its own pages' links, whatever the fetch did."""
+    feed = catalogs.source(key)
+    request = catalogs.request_for(feed, as_of=TODAY, explicit=False, today=TODAY)
     with pytest.raises(engine.FeedRefused) as refused:
-        feed = catalogs.source(AZURE)
-        first = pages_of(AZURE)[0]
-        request = catalogs.request_for(feed, as_of=TODAY, explicit=False, today=TODAY)
-        catalogs.parse(feed, [first], as_of=TODAY, retrieved_at=NOW, requests=[request])
+        catalogs.parse(feed, pages_of(key)[:1], as_of=TODAY, retrieved_at=NOW, requests=[request])
     assert refused.value.code == "feed_partial"
+    # And the last page alone, asked as the first, names none it should.
+    last = pages_of(key)[-1]
+    snapshot = catalogs.parse(feed, [last], as_of=TODAY, retrieved_at=NOW, requests=[request])
+    assert snapshot.records
 
 
 def test_more_records_than_a_version_holds_are_refused(monkeypatch):
