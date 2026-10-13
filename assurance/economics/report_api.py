@@ -27,7 +27,7 @@ parameter-set or builder routes, not the URLconf, not a stop
 - ``GET deployments/<uuid>/economics/scenarios/<scenario uuid>/results/``: the report
   JSON of one result (``?simulation=<uuid>``, else the scenario's latest), as
   canonical bytes carrying their own digest (:mod:`assurance.economics.report`), with
-  the run's valuation date and its currency bridge (schema v2).
+  the run's valuation date and its currency bridge (schema v2), answered ``no-store``.
 
 The read routes the dashboard needs (section 30), each answered ``no-store``, its
 query read strictly (an unknown key is ``field_unrecognised``, a repeated or
@@ -116,8 +116,9 @@ SCENARIO_PAGE_SIZE_MAX = 100
 #: The most digits a page number or a page size may be written with: a longer one is
 #: refused before it is read as a number.
 MAX_QUERY_DIGITS = 9
-#: What every answer of the read routes the dashboard needs carries (section 30):
-#: a tenant's figures and signed receipts are never kept by a cache on the way.
+#: What every answer of the read routes the dashboard needs carries (section 30), and
+#: the report and the ROI document too: a tenant's figures and signed receipts are
+#: never kept by a cache on the way.
 NO_STORE = "no-store"
 
 _SIMULATE_REQUIRED = frozenset({"seed"})
@@ -351,7 +352,7 @@ class ScenarioResultsView(APIView):
             body = report.canonical_bytes(report.build_report(result))
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
-        return HttpResponse(body, content_type="application/json")
+        return HttpResponse(body, content_type="application/json", headers={"Cache-Control": NO_STORE})
 
 
 # ------------------------------------------------------------------ the read routes the dashboard needs

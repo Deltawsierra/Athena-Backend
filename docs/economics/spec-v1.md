@@ -4057,7 +4057,8 @@ and a result of another scenario are 404; only an admin or an analyst simulates
 most 64 KiB: a declared length above it is 413 and the parser never reads past it,
 a duplicated key is 400, a form is 415. While economics cannot read its currency
 table every route answers 503 and records nothing. The report is served as its
-canonical bytes (`application/json`), never re-encoded. A route answers no other
+canonical bytes (`application/json`), never re-encoded, with `Cache-Control:
+no-store` (section 30). A route answers no other
 method (405).
 
 **The simulate request.** `{"seed": <0 to 2^64 - 1>, "policy": <name>, "receipt":
@@ -4355,8 +4356,6 @@ and series.
   run states one reporting currency, and no normalization record is stored for any
   figure. When a later step normalizes a figure and stores its record, the bridge
   serves that record as stored.
-- **`results/` and `roi/` do not send `no-store`**: section 30's two reads do. The
-  dashboard's server sends `no-store` on every economics answer it relays.
 - **The scenario document lists every result** of a version, unpaginated.
 - **The live review status** is read when the report is built: a review recorded
   later changes the report's bytes and digest, as it should (the card keeps the
@@ -4666,7 +4665,7 @@ three routes unserved and nothing else (`test_a_remediation_fault_never_takes_do
 |---|---|---|
 | `POST deployments/<uuid>/economics/scenarios/<scenario uuid>/mitigations/` | `deployment-economics-scenario-mitigations` | records the version's one option: 201; the same option again, 200; another, 409 `remediation_option_held` |
 | `POST .../mitigations/<option uuid>/simulate/` | `deployment-economics-mitigation-simulate` | the current run (where missing) and the residual run, `{"seed", "policy"}` as section 27.1's simulate takes them (a `receipt` is `field_unrecognised`: a residual run is not receipted), each with its Validity Card, under ONE 120 s deadline: idempotent, 201 where a run was recorded, 200 where both were; 503 for a run step 7b does not record, 400 for inputs with no identity |
-| `GET .../scenarios/<scenario uuid>/roi/` | `deployment-economics-scenario-roi` | the ROI document (section 28.3), as canonical bytes; 404 where the version has no option or the option no residual run |
+| `GET .../scenarios/<scenario uuid>/roi/` | `deployment-economics-scenario-roi` | the ROI document (section 28.3), as canonical bytes with `Cache-Control: no-store` (section 30); 404 where the version has no option or the option no residual run |
 
 Access is the report routes': a signed-in account; a deployment the caller cannot see,
 or a scenario, option or run of another, is 404; only an admin or an analyst records or
@@ -5152,7 +5151,9 @@ served". Both routes are mounted with step 6's in `report_api`, in its guard (se
   deployment the caller cannot see is 404, and every role reads;
 - the query is read strictly: only the keys a route names, each once (another key is
   `field_unrecognised`, a repeated or malformed one `field_malformed`, 400);
-- every answer carries `Cache-Control: no-store`;
+- every answer carries `Cache-Control: no-store`, as step 6's report (`results/`) and
+  step 13's ROI document (`roi/`) now do too: a tenant's figures and signed receipts
+  are never kept by a cache on the way;
 - each route is in `safety.stops.NOT_STOPS`, reads economics rows only, and holds no
   lock and no transaction, so a Stop is answered while one is held open mid-read
   (`tests/test_economics_read_routes.py`, `test_a_stop_is_answered_while_a_read_is_held_open`);

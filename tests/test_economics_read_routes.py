@@ -11,6 +11,7 @@ section 30), on step 6's conventions.
 - the report (``results/``) states the run's valuation date and the normalization
   record of each figure the run converted (none: a run converts nothing), under
   ``mythos.economics.report/v2``; ``may_be_totalled`` reads v2 and v1 alike;
+- the report and the ROI document are answered ``no-store`` too;
 - each route reads its query strictly, is no stop, writes nothing when fired twice
   and answers ``no-store``; a Stop is answered while each is held open mid-read.
 
@@ -432,6 +433,19 @@ def test_without_a_build_the_valuation_date_is_the_latest_as_of_its_inputs_hold(
     bridge = _report(_client(people["owner"]), deployment, scenario).json()["currency_bridge"]
     assert bridge["valuation_date"] is None and bridge["valuation_date_from"] is None
     assert bridge["not_reported"].startswith(report.STORED_ROW_UNVERIFIED)
+
+
+def test_the_report_and_the_roi_are_answered_no_store(deployment, people):
+    """Step 6's report and step 13's ROI document carry a tenant's figures: like the
+    read routes here, neither is kept by a cache on the way."""
+    scenario, _, _ = proposed(deployment, people)
+    owner = _client(people["owner"])
+    report_answer = _report(owner, deployment, scenario)
+    roi_answer = owner.get(_base(deployment) + f"scenarios/{scenario.uuid}/roi/")
+    for answer in (report_answer, roi_answer):
+        assert answer.status_code == 200, answer.content
+        assert answer["Cache-Control"] == "no-store"
+        assert answer["Content-Type"] == "application/json"
 
 
 # ======================================================================

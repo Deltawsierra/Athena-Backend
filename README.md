@@ -607,7 +607,8 @@ records nothing. None of the five is a stop, and a fault in this module leaves o
 these routes unserved. A residual run under a remediation option (below) is never the
 scenario's exposure: `results/`, the scenario list and the scenario document serve only
 its own runs. The list and the receipt read their query strictly (an unknown key is
-400), answer `Cache-Control: no-store`, and hold no lock or transaction, so a Stop is
+400), answer `Cache-Control: no-store` (as `results/` and the ROI route now do too),
+and hold no lock or transaction, so a Stop is
 answered while one is held open.
 
 ### The remediation option and its ROI
