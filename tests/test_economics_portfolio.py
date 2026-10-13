@@ -118,7 +118,12 @@ def made(deployment, author, *, title="Payment agent", currency="USD", as_of=AS_
         variables["insurance_waiting_period_hours"] = _entry("hours", "0")
     pset = CustomerParameterSet.record(deployment, f"set-{uuid.uuid4().hex[:10]}", {"variables": variables},
                                        author=author)
-    scenario = FinancialScenario.objects.create(deployment=deployment, title=title, author=author,
+    # The portfolio keys each scenario's sub-streams by its uuid: a fixed one (by the
+    # deployment's name, how many scenarios it holds, and the title) makes every run of
+    # a test draw the same years.
+    held = FinancialScenario.objects.filter(deployment=deployment).count()
+    fixed = uuid.uuid5(uuid.NAMESPACE_URL, f"mythos-e5-test/{deployment.name}/{held}/{title}")
+    scenario = FinancialScenario.objects.create(uuid=fixed, deployment=deployment, title=title, author=author,
                                                 system_fingerprint="ab" * 32, supersedes=supersedes)
     figures, distribution = amount
     loss = _parameter(scenario, "pay.loss", "money", *figures, distribution=None if refused else distribution,
