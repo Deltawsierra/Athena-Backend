@@ -331,11 +331,20 @@ class Now:
             ("set", set_key), lambda: CustomerParameterSet.current(self.deployment_id, set_key)
         )
 
-    def source(self, key: str, as_of: date) -> dict:
+    def source(self, key: str, as_of: date, parameters=None) -> dict:
+        """The state of feed source ``key`` for a run on ``as_of`` whose figures are
+        ``parameters`` (its canonical inputs'), as the card reads it
+        (``feeds.states_for``: a prefill source aged from the version each figure was
+        accepted from, a context source failing closed)."""
         from . import feeds
 
+        # Kept by what the state is read from: the figures that cite the source.
+        cited = None if parameters is None else {
+            name: parameters[name] for name in feed_rules.referenced_keys(parameters).get(key, [])
+        }
         return self._once(
-            ("source", key, as_of), lambda: feeds.source_state(key, deployment=self.deployment_id, as_of=as_of)
+            ("source", key, as_of, None if cited is None else canonical_digest(cited)),
+            lambda: feeds.states_for([key], deployment=self.deployment_id, as_of=as_of, parameters=parameters)[key],
         )
 
     def release(self) -> tuple[str | None, dict | None, str]:
@@ -381,7 +390,7 @@ def capture(scenario: FinancialScenario, inputs, *, now: Now | None = None) -> d
         sources[key] = (
             {"as_of": None, "used_version": None, "version": None, "state": feed_rules.MISSING}
             if as_of is None
-            else _source_entry(now.source(key, as_of))
+            else _source_entry(now.source(key, as_of, (inputs or {}).get("parameters")))
         )
     digest, record, why = now.release()
     return {
@@ -548,7 +557,7 @@ def _set_rows(deployment_id, set_key: str, version: int) -> dict[str, dict]:
     return rows
 
 
-def _financial_reasons(recorded: dict, now: Now) -> list[dict]:
+def _financial_reasons(recorded: dict, now: Now, parameters=None) -> list[dict]:
     found = []
     held = recorded.get("parameter_set")
     if held is not None:
@@ -577,7 +586,7 @@ def _financial_reasons(recorded: dict, now: Now) -> list[dict]:
                 ))
     for key, entry in sorted((recorded.get("sources") or {}).items()):
         if entry.get("as_of"):
-            then = _source_entry(now.source(key, date.fromisoformat(entry["as_of"])))
+            then = _source_entry(now.source(key, date.fromisoformat(entry["as_of"]), parameters))
             if then["used_version"] != entry.get("used_version"):
                 found.append(_reason(
                     "source_superseded", f"source:{key}",
@@ -586,7 +595,7 @@ def _financial_reasons(recorded: dict, now: Now) -> list[dict]:
                     was=None if entry.get("version") is None else str(entry["version"]),
                     now=None if then["version"] is None else str(then["version"]),
                 ))
-        today = now.source(key, now.today)
+        today = now.source(key, now.today, parameters)
         if today.get("state") in feed_rules.DOWNGRADING:
             found.append(_reason(
                 "source_stale", f"source:{key}",
@@ -642,7 +651,7 @@ def live_reasons(result: SimulationResult, *, now: Now | None = None) -> list[di
             recorded = mapped.dependencies
             found += _claim_reasons(recorded, now)
             found += _spine_rows_reasons(recorded, now)
-            found += _financial_reasons(recorded, now)
+            found += _financial_reasons(recorded, now, (result.inputs or {}).get("parameters"))
             found += _release_reasons(recorded, now)
         later = FinancialScenario.objects.filter(supersedes_id=result.scenario_id).order_by("id").first()
         if later is not None:

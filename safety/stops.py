@@ -572,6 +572,10 @@ NOT_STOPS = {
     # The data-health route (assurance.economics.health_api, step 10): feed sources'
     # freshness read. Economics records only, and it writes nothing.
     "deployment-economics-data-health": _get(),
+    # Step 11's context routes (assurance.economics.health_api): a prefill suggestion
+    # and a scenario's enforcement precedents. Economics reads only; they write nothing.
+    "deployment-economics-suggestions": _get(),
+    "deployment-economics-scenario-precedents": _get(),
     # The normalization route (assurance.economics.health_api, step 12): one amount
     # normalized for a deployment over the source versions a run of it may use. Reads
     # economics rows only, holds no lock and no transaction, and writes nothing.

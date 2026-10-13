@@ -1763,6 +1763,10 @@ ROUTES.update(
         # scenario versions, and a Financial Exposure Receipt's signed bytes.
         "deployment-economics-scenarios": _READ,
         "deployment-economics-receipt": "api.receipts",
+        # Step 11's context routes: a prefill suggestion (it takes its query, and a
+        # read with none is refused 400 with its code) and a scenario's precedents.
+        "deployment-economics-suggestions": _READ,
+        "deployment-economics-scenario-precedents": _READ,
         # Continuous financial assurance (E6, spec section 34): a run's freshness, the
         # deployment's assurance and its check, and a stale scenario's refresh.
         "deployment-economics-scenario-freshness": _READ,
@@ -1811,6 +1815,7 @@ def _readable_urls(world):
                 "deployment-economics-scenario-events",
                 "deployment-economics-scenario-results",
                 "deployment-economics-scenario-roi",
+                "deployment-economics-scenario-precedents",
                 "deployment-economics-scenario-freshness",
             ):
                 from assurance.economics.models import FinancialScenario

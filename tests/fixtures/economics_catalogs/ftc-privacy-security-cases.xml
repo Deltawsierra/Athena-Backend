@@ -1,0 +1,20 @@
+# format-faithful, NOT a recorded response; replace with a recording (owner)
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Cases and Proceedings: Privacy and Security | Federal Trade Commission</title>
+    <link>https://www.ftc.gov/legal-library/browse/cases-proceedings</link>
+    <description>Privacy and security cases</description>
+    <language>en-us</language>
+    <lastBuildDate>Tue, 13 Oct 2026 06:00:00 -0400</lastBuildDate>
+    <item>
+      <title>Fixture Data Brokers, Inc., In the Matter of</title>
+      <link>https://www.ftc.gov/legal-library/browse/cases-proceedings/fixture-data-brokers-inc-matter</link>
+      <description>A fixture: an administrative complaint and consent order about data security.</description>
+      <pubDate>Mon, 05 Oct 2026 12:00:00 -0400</pubDate>
+      <guid isPermaLink="true">https://www.ftc.gov/legal-library/browse/cases-proceedings/fixture-data-brokers-inc-matter</guid>
+      <category>Privacy and Security</category>
+      <category>Data Security</category>
+    </item>
+  </channel>
+</rss>

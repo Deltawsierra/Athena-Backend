@@ -374,7 +374,8 @@ def issued_context(result: SimulationResult, scenario: FinancialScenario) -> dic
         build = ScenarioBuild.objects.filter(scenario=scenario).first()
         as_of = _as_of(result.inputs or {}, build)
         context["feed_sources"] = feeds.states_for(
-            keys, deployment=scenario.deployment_id, as_of=date.fromisoformat(as_of) if as_of else None
+            keys, deployment=scenario.deployment_id, as_of=date.fromisoformat(as_of) if as_of else None,
+            parameters=(result.inputs or {}).get("parameters"),
         )
     return context
 

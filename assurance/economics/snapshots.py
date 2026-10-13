@@ -27,6 +27,14 @@ Nothing calls this module but the tests, an operator, and (MVP step 10) the feed
 fetch an operator runs (:mod:`assurance.economics.feeds`, ``manage.py
 fetch_financial_source``), which registers a feed's parsed answer through
 :func:`register`: no route or signal imports it, and it is on no stop path.
+
+MVP step 11 (spec, section 31): a catalog's answer -- cloud prices, a company's
+facts or filing watch, enforcement records -- is registered the same way, its
+records as ONE :class:`~assurance.economics.models.FinancialSourceRecords` row of the
+new version, checked whole before the transaction opens; :func:`records_of` reads
+them back (a raised version reads its holder's). The step-11 context and prefill
+readers read records through :func:`records_of` only (the precedent route, the
+suggestion route, and the EDGAR segment fetch, which reads a stored filing watch).
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ from .engine import governance, money
 from .engine import snapshot as _snapshot
 from .engine.cost_index import IndexBook
 from .engine.fx import FXBook
-from .models import CostIndexObservation, EconomicsRefused, FinancialSource, FXObservation
+from .models import CostIndexObservation, EconomicsRefused, FinancialSource, FinancialSourceRecords, FXObservation
 
 #: The committed synthetic snapshot. Its hash is pinned by the tests and the spec.
 SYNTHETIC_SNAPSHOT = Path(__file__).resolve().parent / "snapshots" / "synthetic-fx-and-cost-index-v1.json"
@@ -65,14 +73,18 @@ def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recor
     return version
 
 
-def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None) -> tuple[FinancialSource, bool]:
+def register(
+    snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None, records=None
+) -> tuple[FinancialSource, bool]:
     """Register ``snapshot`` -- a committed file's, or a live feed's answer parsed by
     its adapter (:mod:`assurance.economics.engine.feeds`, whose snapshot hash is the
     answer's normalised payload hash) -- as a source version of ``deployment``
     (``None``: platform-wide), with every observation it holds, in one transaction.
     Returns ``(version, created)``: a snapshot already registered under its hash, for
     the same tenant and key, is the version that holds it, and nothing is written.
-    A snapshot stating ``authoritative`` is refused before anything is written."""
+    A snapshot stating ``authoritative`` is refused before anything is written.
+    ``records``: the snapshot's records row as :func:`records_row` prepared it, where
+    the caller holds a transaction of its own (the fetch: review round 1, LOW-3)."""
     source = snapshot.source
     if governance.needs_second_person(source["trust_tier"]):
         raise EconomicsRefused(
@@ -80,6 +92,10 @@ def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None)
             f"the snapshot states trust tier {source['trust_tier']}: register it at a lower tier and raise it "
             "with POST /api/assurance/economics/sources/<uuid>/trust-raises/, which a second admin approves",
         )
+    # A catalog's records (step 11) are one row, checked whole before ANY
+    # transaction (the caller's, when it passes the row): inside it, two inserts and
+    # no loop over the records, no serialising and no digest.
+    held = records if records is not None else records_row(snapshot)
     with transaction.atomic():
         existing = (
             FinancialSource._base_manager.filter(
@@ -127,7 +143,46 @@ def register(snapshot: _snapshot.Snapshot, *, deployment=None, recorded_by=None)
                 value=point.value,
                 vintage_date=point.vintage_date,
             )
+        if held is not None:
+            held.source = registered
+            held.save()
     return registered, True
+
+
+def records_row(snapshot: _snapshot.Snapshot) -> FinancialSourceRecords | None:
+    """The unsaved records row of ``snapshot``'s records, checked whole
+    (:meth:`FinancialSourceRecords.prepare`): never inside a transaction. ``None``
+    for a snapshot that holds no records."""
+    from .engine import catalogs
+
+    if not getattr(snapshot, "records", ()):
+        return None
+    entries = catalogs.records_json(snapshot.records)
+    row = FinancialSourceRecords(
+        kind=snapshot.record_kind,
+        schema_version=catalogs.RECORDS_SCHEMA,
+        records=entries,
+        record_count=len(entries),
+        records_digest=catalogs.records_digest(entries),
+    )
+    row.prepare()
+    return row
+
+
+def records_of(version: FinancialSource) -> tuple:
+    """The records ``version`` holds, as the engine reads them: those of the version
+    of the same tenant, key and snapshot hash that the fetch registered (a raised
+    version holds none of its own). ``()`` for a version that holds none. One read."""
+    holder = (
+        FinancialSource._base_manager.filter(
+            deployment_id=version.deployment_id, source_key=version.source_key, snapshot_hash=version.snapshot_hash
+        )
+        .order_by("version")
+        .values_list("pk", flat=True)
+        .first()
+    )
+    row = FinancialSourceRecords._base_manager.filter(source_id=holder).first()
+    return () if row is None else row.as_engine()
 
 
 def _tenant_sources(sources: Iterable[FinancialSource], deployment) -> list[int]:

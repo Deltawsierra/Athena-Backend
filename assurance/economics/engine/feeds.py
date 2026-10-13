@@ -113,6 +113,16 @@ FEED_REFUSALS: Mapping[str, str] = MappingProxyType(
             "a figure's evidence reads as a citation of a feed source but is not one exactly "
             "('financial-source:<key>' at its start, once): it fails closed, never escaping the feed rules"
         ),
+        # MVP step 11 (spec, section 31): the cloud price catalogs, SEC EDGAR and the
+        # regulators' enforcement listings.
+        "feed_over_limit": (
+            "the answer holds more pages or records than one source version may hold (catalogs.MAX_PAGES, "
+            "catalogs.MAX_RECORDS): the source is narrowed in the registry, and nothing of the answer is kept"
+        ),
+        "filing_unknown": (
+            "no stored filing watch of the company names a periodic inline-XBRL filing (10-K or 10-Q) on or before "
+            "the as-of date, so no filing's XBRL instance can be asked for: nothing was sent or written"
+        ),
     }
 )
 
@@ -172,9 +182,28 @@ class FeedSource:
     #: provider's terms (FREEZE.md, owner exception 9): no production run may use it.
     license_class: str = LicenseClass.UNREVIEWED.value
     config: Mapping = field(default_factory=lambda: MappingProxyType({}))
+    #: What a figure may do with the source (MVP step 11; spec, section 31): ``figure``
+    #: (step 10's FX and cost-index sources, read by a run), ``prefill`` (a person's
+    #: accepted estimate may cite it as evidence) or ``context`` (never a figure).
+    use: str = "figure"
+    #: ``gating``: step 10's stale and blocked rules act on a figure resting on it;
+    #: ``informational``: its age is shown and never lowers a grade or stops a receipt.
+    freshness: str = "gating"
+    #: ``observation``: the age runs from its newest observation's date (step 10);
+    #: ``retrieval``: from the date the version a run uses was fetched (a catalog,
+    #: whose prices or records carry no date that says how current the listing is).
+    age_basis: str = "observation"
+    #: The SLA in days, where the source's own table gives it (step 11's
+    #: ``catalogs.CATALOG_SLA_DAYS``); otherwise :data:`FRESHNESS_SLA_DAYS`.
+    sla_override: int | None = None
+    #: The provider's terms the owner's licensing review reads before the licence
+    #: class leaves ``unreviewed`` (step 11's sources say which, as text).
+    licence_terms: str = ""
 
     @property
     def sla_days(self) -> int:
+        if self.sla_override is not None:
+            return self.sla_override
         return FRESHNESS_SLA_DAYS[(self.provider, self.cadence)]
 
     @property
@@ -376,6 +405,9 @@ class FeedRequest:
     body: Mapping | None = None
     key_in: str = ""
     key_name: str = ""
+    #: The largest answer this request may be given, in bytes (a catalog's offer file
+    #: is larger than a statistics series; step 11's registry says how large).
+    max_bytes: int = MAX_RESPONSE_BYTES
 
     @property
     def recorded_url(self) -> str:

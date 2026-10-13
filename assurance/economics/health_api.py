@@ -1,8 +1,10 @@
 """The data routes: data health (MVP step 10; ``docs/economics/spec-v1.md``, section
-29.7) and one normalization for a deployment (MVP step 12; section 12.9).
+29.7), one normalization for a deployment (MVP step 12; section 12.9), and step
+11's two context routes (section 31.8): a prefill suggestion and a scenario's
+enforcement precedents.
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of
-its own: a fault here leaves these two routes unserved and nothing else -- not the
+its own: a fault here leaves these four routes unserved and nothing else -- not the
 other economics routes, not the URLconf, not a stop.
 
 - ``GET deployments/<uuid>/economics/data-health/``: every feed source a run of the
@@ -12,6 +14,16 @@ other economics routes, not the URLconf, not a stop.
   code only) and the Unknowns it causes -- the deployment's current parameters that
   name it, where it is blocked or missing.
 
+- ``GET deployments/<uuid>/economics/suggestions/?source=&target=[&observation=...&quantity=]``
+  (MVP step 11): a cloud cost, or a public company's revenue or operating margin,
+  as a SUGGESTION for one parameter-set variable
+  (:func:`assurance.economics.context_service.suggest`). It writes nothing: a person
+  accepts it by recording its entry in a parameter-set version. A refusal is 400
+  with its code.
+- ``GET deployments/<uuid>/economics/scenarios/<scenario>/precedents/`` (MVP step 11):
+  the enforcement records the scenario version lists as precedent, each with its
+  citation; context only, never a figure
+  (:func:`assurance.economics.context_service.precedents`).
 - ``GET deployments/<uuid>/economics/normalization/?<query>``: one amount, recorded
   on its event date, normalized for a run of the deployment as of its valuation date
   (:func:`assurance.economics.normalization_service.normalize_for`, section 12.8): the
@@ -29,20 +41,22 @@ other economics routes, not the URLconf, not a stop.
 
 Access is the parameter-set routes' (:mod:`assurance.economics.api`): a signed-in
 account, and a deployment the caller cannot see is 404 whether or not it exists; a
-viewer reads. Data health takes no query parameter (400 for any, never ignored); the
-normalization route reads its query strictly, as the read routes the dashboard needs
+viewer reads. Data health and the precedents route take no query parameter (400 for
+any, never ignored); the suggestion route reads its own fields and refuses any other
+(``suggestion_malformed``); the normalization route reads its query strictly, as the read routes the dashboard needs
 do (section 30): only the keys it names, each once (``field_unrecognised``,
 ``field_malformed``), every required one present (``field_missing``). Each answers
 canonical JSON: the same stored rows on the same date give the same bytes. The
 normalization is answered ``no-store``, as every figure of a tenant's is, and while
-economics cannot read its currency table it is 503 and computes nothing. Neither
-writes anything.
+economics cannot read its currency table it is 503 and computes nothing. None of the
+four writes anything.
 
-None of it is a stop, and neither route reads or writes anything a stop or the
-decision reads: each is in ``safety.stops.NOT_STOPS``, and neither holds a lock or a
+None of it is a stop, and no route reads or writes anything a stop or the decision
+reads: each is in ``safety.stops.NOT_STOPS``, and none holds a lock or a
 transaction. The module does nothing at import but define its views, and imports the
-feed module (and through it the outbound client), the normalization service and the
-engine only inside them: nothing Django loads at start imports them.
+feed module (and through it the outbound client), the normalization service, the
+engine and the context service only inside them: nothing Django loads at start
+imports them.
 """
 
 from __future__ import annotations
@@ -52,12 +66,14 @@ import re
 from datetime import date
 
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from django.urls import path
 from rest_framework import permissions
 from rest_framework.exceptions import ValidationError
 from rest_framework.views import APIView
 
 from .api import _deployment, _table_unavailable
+from .models import FinancialScenario
 
 #: The query keys a normalization is asked with, every one of them required: the
 #: amount and its currency, its two dates, the base and reporting currencies, the FX
@@ -118,6 +134,48 @@ class DataHealthView(APIView):
         from . import feeds
 
         return HttpResponse(canonical_bytes(feeds.data_health(deployment)), content_type="application/json")
+
+
+def _scenario(deployment, scenario_uuid) -> FinancialScenario:
+    """The deployment's own scenario version, or 404 (another deployment's is never found)."""
+    return get_object_or_404(FinancialScenario.objects.filter(deployment=deployment), uuid=scenario_uuid)
+
+
+def _strict_answer(document, status: int = 200) -> HttpResponse:
+    return HttpResponse(canonical_bytes(document), content_type="application/json", status=status)
+
+
+class SuggestionView(APIView):
+    """A prefill suggestion for one parameter-set variable (MVP step 11): read only."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, uuid):
+        deployment = _deployment(request, uuid)
+        query = {name: request.query_params.getlist(name) for name in request.query_params}
+        from . import context_service
+
+        try:
+            answer = context_service.suggest(deployment, query)
+        except context_service.Refused as refused:
+            return _strict_answer({"code": refused.code, "detail": refused.detail, "meaning": refused.meaning}, 400)
+        return _strict_answer(answer)
+
+
+class PrecedentsView(APIView):
+    """The enforcement records one scenario version lists as precedent (MVP step 11):
+    context only, read only."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, uuid, scenario):
+        deployment = _deployment(request, uuid)
+        found = _scenario(deployment, scenario)
+        if request.query_params:
+            raise ValidationError({"code": "field_malformed", "detail": "the precedents route takes no query parameter"})
+        from . import context_service
+
+        return _strict_answer(context_service.precedents(deployment, found))
 
 
 def _refused(code: str, detail: str) -> ValidationError:
@@ -248,6 +306,16 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/data-health/",
         DataHealthView.as_view(),
         name="deployment-economics-data-health",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/suggestions/",
+        SuggestionView.as_view(),
+        name="deployment-economics-suggestions",
+    ),
+    path(
+        "deployments/<uuid:uuid>/economics/scenarios/<uuid:scenario>/precedents/",
+        PrecedentsView.as_view(),
+        name="deployment-economics-scenario-precedents",
     ),
     path(
         "deployments/<uuid:uuid>/economics/normalization/",
