@@ -72,6 +72,7 @@ from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine.formulas import MARKET_VALUE
 from .engine.money import Money
+from .engine.pack_inputs import SCHEMAS as INDUSTRY_PACKS
 from .engine.parameters import MONEY_UNITS, POINTS
 from .models import (
     CARD_GRADES,
@@ -940,11 +941,35 @@ def build_report(result: SimulationResult) -> dict:
         "sensitivity": _sensitivity(card, shown, units, withheld),
         "validity_card": _card(card, unverified=card_unverified),
         "receipt": _receipt(receipt),
-        "limitations": list(LIMITATIONS),
+        "limitations": list(LIMITATIONS) + pack_limitations(build, scenario),
         "unknowns": _unknowns(result, events, failed) + stale_unknowns,
     }
     report["digest"] = digest_of(report)
     return report
+
+
+def pack_limitations(build: ScenarioBuild | None, scenario: FinancialScenario) -> list[str]:
+    """What an industry pack's scenario is read with, after the report's own
+    limitations (E7, spec section 37): the pack it was built under, the cautions of
+    the templates its effects were assigned to, and what the pack never prices. None
+    for a banking build (or a pack the registry does not hold): its report is the
+    report it was before E7."""
+    if build is None or build.pack not in INDUSTRY_PACKS:
+        return []
+    from .engine import pack_registry  # an industry pack's report only: never at load
+
+    pack = pack_registry.PACKS[build.pack]
+    statements = [
+        (
+            f"built under the industry pack {build.pack}: its templates, its customer-input schema and every figure "
+            "they read are recorded with the build; the pack is not calibrated against realised losses"
+        )
+    ]
+    for effect in CausalEffect.objects.filter(scenario=scenario).order_by("effect_key", "id"):
+        chosen = pack_registry.template(effect.template_id, effect.template_version)
+        statements.extend(c for c in (chosen.cautions if chosen else ()) if c not in statements)
+    statements.extend(e for e in pack.excluded if e not in statements)
+    return statements
 
 
 # ------------------------------------------------------------------ the scenario

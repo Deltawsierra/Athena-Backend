@@ -1012,6 +1012,38 @@ ONE_TERM_LEVELS = {
         "sha256:541d90864581238615dcfe6f691530ccfd0b9651c05fbb854962c01b3734e4ff"),
     "lump_sum": (("lump_sum", "legal", {"amount": ("money", ("100000", "250000", "600000"), E)}),
         "sha256:a584670005b034ee7d80258f11c5b24e557117a2fa5106bc5d1c3111935b803a"),
+    # The industry packs' formulas (E7, spec section 37), each of ONE term: they did not
+    # exist at #153's head, so each digest is the one E7's head makes, split by the same
+    # rule as every one-term formula above.
+    "throughput_loss": (("throughput_loss", "business_interruption", {
+        "units_per_day": ("count_per_day", ("30000",), C), "hours": ("hours", ("2", "6", "18"), E),
+        "affected_share": ("ratio", ("0.01", "0.03", "0.08"), E), "amount_per_unit": ("money_per_unit", ("18",), C)}),
+        "sha256:f2704ab9016ca320d8cdc29e81d5abba207bfffd547ae4371103ae5a3085c1b2"),
+    "share_of_units": (("share_of_units", "notification", {
+        "units": ("count", ("200000",), C), "affected_share": ("ratio", ("0.01", "0.05", "0.2"), E),
+        "amount_per_unit": ("money_per_unit", ("4",), C)}),
+        "sha256:066c13ba4899f4192fd3c82d9a4ea9cecdeb0db5945c9e14481241defc4c4d47"),
+    "share_of_units_value": (("share_of_units_value", "direct_financial", {
+        "units": ("count", ("50000",), C), "affected_share": ("ratio", ("0.01", "0.02", "0.05"), E),
+        "amount_per_unit": ("money_per_unit", ("1200",), C), "value_share": ("ratio", ("0.05", "0.1", "0.2"), E)}),
+        "sha256:1f2396ccb384bcc0b4fe5d16940d0ae07319e662b2a6a8bfba7e9a4593b2ed2c"),
+    "excess_over_expected": (("excess_over_expected", "direct_financial", {
+        "units": ("count", ("50000",), C), "affected_share": ("ratio", ("0.005", "0.01", "0.02"), E),
+        "amount_per_unit": ("money_per_unit", ("1200",), C), "expected_ratio": ("ratio", ("0.65",), C),
+        "excess_share": ("ratio", ("0.1", "0.3", "0.6"), E)}),
+        "sha256:72c95ba1f721bc53a04d26488d6077fbf6c0b1dd3445a79c24653a5b5c2fbff8"),
+    "per_unit_response": (("per_unit_response", "regulatory_compliance", {
+        "units": ("count", ("3",), C), "cost_per_unit": ("money_per_unit", ("20000", "40000", "90000"), E)}),
+        "sha256:a2cc1cc6cdce495da0aa6eb933e822cd987a386f11310461d5b118c2f89d2851"),
+    "churned_share_margin": (("churned_share_margin", "customer_loss", {
+        "units": ("count", ("2000",), C), "affected_share": ("ratio", ("0.05", "0.1", "0.2"), E),
+        "churn_rate": ("ratio", ("0.05",), C), "margin_per_unit_per_year": ("money_per_unit", ("30000",), C),
+        "recovery_years": ("years", ("1", "2", "3"), E)}),
+        "sha256:9c8e0904e399defb6ee3caacd41d3145099165df0e5a57c93e46575cc0b47bb7"),
+    "share_of_spend": (("share_of_spend", "direct_financial", {
+        "hours": ("hours", ("2", "8", "24"), E), "spend_per_hour": ("money_per_hour", ("400",), C),
+        "added_share": ("ratio", ("0.2", "0.5", "1"), E)}),
+        "sha256:70e2b413495061ae3fed5ea66c085424d9615964c09f61317dbffa9e57ac6e2d"),
 }
 
 

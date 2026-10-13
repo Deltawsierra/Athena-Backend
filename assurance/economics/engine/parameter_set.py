@@ -54,6 +54,7 @@ from datetime import date
 from enum import StrEnum
 from types import MappingProxyType
 
+from . import pack_inputs as packs
 from .formulas import CASH_FAMILIES
 from .loss import InsurancePolicy
 from .money import Money, MoneyRefused, parse_decimal
@@ -152,7 +153,7 @@ VARIABLES: Mapping[str, Variable] = MappingProxyType({v.name: v for v in _variab
 _ENTRY_REQUIRED = frozenset({"unit", "low", "base", "high", "source_type", "evidence_ref", "effective_date"})
 _ENTRY_OPTIONAL = frozenset({"currency", "fresh_until", "distribution"})
 _DOCUMENT_REQUIRED = frozenset({"variables"})
-_DOCUMENT_OPTIONAL = frozenset({"insurance_sublimits", "insurance_exclusions", FREQUENCY})
+_DOCUMENT_OPTIONAL = frozenset({"insurance_sublimits", "insurance_exclusions", FREQUENCY, "pack", "pack_inputs"})
 
 
 class StatedDistributionRefused(ParameterRefused):
@@ -312,10 +313,17 @@ class ParameterSetContent:
     exclusions: tuple[str, ...]
     distributions: Mapping[str, dict] = field(default_factory=dict)
     frequency: Parameter | None = None
+    #: The industry pack the version answers (E7, spec section 37): ``""`` for the
+    #: banking pack, whose schema is the thirty variables, as every version recorded
+    #: before E7 is; and the pack's inputs, by input name, each a parameter named
+    #: :data:`.pack_inputs.PACK_INPUT_PREFIX` and its name.
+    pack: str = ""
+    pack_inputs: Mapping[str, Parameter] = field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(self, "variables", MappingProxyType(dict(sorted(self.variables.items()))))
         object.__setattr__(self, "sublimits", MappingProxyType(dict(sorted(self.sublimits.items()))))
+        object.__setattr__(self, "pack_inputs", MappingProxyType(dict(sorted(dict(self.pack_inputs).items()))))
         object.__setattr__(self, "exclusions", tuple(sorted(self.exclusions)))
         object.__setattr__(
             self, "distributions", MappingProxyType({k: v for k, v in sorted(dict(self.distributions).items())})
@@ -336,6 +344,7 @@ class ParameterSetContent:
             raise ParameterRefused("duplicate_id", "insurance_exclusions names a family twice")
         for family in self.exclusions:
             _cash_family(family, "insurance_exclusions")
+        self._check_pack()
         frequency = self.frequency
         if frequency is not None:
             if frequency.name != FREQUENCY or frequency.unit is not Unit.COUNT:
@@ -356,11 +365,36 @@ class ParameterSetContent:
         # when a scenario first reads it.
         self.insurance_policy()
 
+    def _check_pack(self) -> None:
+        """The pack's inputs as its schema gives them (spec, section 37): only a
+        version that names a pack holds any (``field_unrecognised``); each is an input
+        of its schema (``pack_input_unrecognised``), named for it and in its unit
+        (``unit_mismatch``); none names harm to a person
+        (``safety_monetisation_refused``); and every input the pack requires is
+        stated (``pack_input_missing``): never defaulted, never read as zero."""
+        if not self.pack:
+            if self.pack_inputs:
+                raise ParameterRefused("field_unrecognised", "pack_inputs: a version that names no pack holds none")
+            return
+        schema = packs.schema(self.pack)
+        for name, parameter in self.pack_inputs.items():
+            packs.refuse_harm(name, "pack_inputs")
+            entry = schema.inputs.get(name)
+            if entry is None:
+                raise ParameterRefused("pack_input_unrecognised", f"pack_inputs: [{name!r}] is not an input of {self.pack}")
+            if parameter.name != packs.PACK_INPUT_PREFIX + name or parameter.unit is not entry.unit:
+                raise ParameterRefused(
+                    "unit_mismatch", f"the {self.pack} input {name} is {entry.unit}, named {packs.PACK_INPUT_PREFIX}{name}"
+                )
+        missing = [name for name in schema.required if name not in self.pack_inputs]
+        if missing:
+            raise ParameterRefused("pack_input_missing", f"pack_inputs: {missing} (required by {self.pack})")
+
     def parameters(self) -> list[Parameter]:
-        """Every parameter of the version, variables, then sublimits, then the
-        frequency: the rows it is stored as."""
+        """Every parameter of the version, variables, then sublimits, then the pack's
+        inputs, then the frequency: the rows it is stored as."""
         frequency = [self.frequency] if self.frequency is not None else []
-        return [*self.variables.values(), *self.sublimits.values(), *frequency]
+        return [*self.variables.values(), *self.sublimits.values(), *self.pack_inputs.values(), *frequency]
 
     def as_dict(self) -> dict:
         """The canonical document: what the digest is taken over."""
@@ -384,6 +418,11 @@ class ParameterSetContent:
         }
         if self.frequency is not None:
             document[FREQUENCY] = entry(self.frequency)
+        # Only where a pack is named: a banking version keeps the canonical document,
+        # and the digest, it had before a pack could be named.
+        if self.pack:
+            document["pack"] = self.pack
+            document["pack_inputs"] = {name: entry(p) for name, p in self.pack_inputs.items()}
         return document
 
     def digest(self) -> str:
@@ -453,15 +492,35 @@ def parse_document(document) -> ParameterSetContent:
                 "field_missing", f"{FREQUENCY}: ['distribution']: a frequency states its count distribution"
             )
         frequency = read(FREQUENCY, Unit.COUNT, entry, FREQUENCY)
-    return ParameterSetContent(variables, sublimits, tuple(exclusions), distributions, frequency)
+    # The industry pack the version answers, and its inputs (spec, section 37).
+    pack = ""
+    inputs: dict[str, Parameter] = {}
+    if "pack" in document:
+        schema = packs.schema(document["pack"])
+        pack = schema.pack_id
+        raw = document.get("pack_inputs", {})
+        if not isinstance(raw, dict):
+            raise ParameterRefused("field_malformed", "pack_inputs is not an object")
+        for name in raw:
+            packs.refuse_harm(name, "pack_inputs")
+            entry = schema.inputs.get(name) if isinstance(name, str) else None
+            if entry is None:
+                raise ParameterRefused("pack_input_unrecognised", f"pack_inputs: [{str(name)!r}] is not an input of {pack}")
+            inputs[name] = _money_is_not_observed(
+                read(packs.PACK_INPUT_PREFIX + name, entry.unit, raw[name], f"pack_inputs.{name}"), f"pack_inputs.{name}"
+            )
+    elif "pack_inputs" in document:
+        raise ParameterRefused("field_unrecognised", "pack_inputs: a version that names no pack holds none")
+    return ParameterSetContent(variables, sublimits, tuple(exclusions), distributions, frequency, pack, inputs)
 
 
-def content_of(parameters, exclusions, distributions=None) -> ParameterSetContent:
+def content_of(parameters, exclusions, distributions=None, pack: str = "") -> ParameterSetContent:
     """A version's content read back from its stored ``parameters``, ``exclusions``
     and the ``distributions`` its rows state, by name (each in its stored
-    spelling)."""
+    spelling), for the industry pack it names (``pack``; ``""`` for banking)."""
     variables: dict[str, Parameter] = {}
     sublimits: dict[str, Parameter] = {}
+    inputs: dict[str, Parameter] = {}
     frequency = None
     for parameter in parameters:
         if parameter.name == FREQUENCY:
@@ -469,26 +528,33 @@ def content_of(parameters, exclusions, distributions=None) -> ParameterSetConten
                 raise ParameterRefused("duplicate_id", parameter.name)
             frequency = parameter
             continue
-        target, key = (
-            (sublimits, parameter.name[len(SUBLIMIT_PREFIX):])
-            if parameter.name.startswith(SUBLIMIT_PREFIX)
-            else (variables, parameter.name)
-        )
+        if parameter.name.startswith(SUBLIMIT_PREFIX):
+            target, key = sublimits, parameter.name[len(SUBLIMIT_PREFIX):]
+        elif parameter.name.startswith(packs.PACK_INPUT_PREFIX):
+            target, key = inputs, parameter.name[len(packs.PACK_INPUT_PREFIX):]
+        else:
+            target, key = variables, parameter.name
         if key in target:
             raise ParameterRefused("duplicate_id", parameter.name)
         target[key] = parameter
-    return ParameterSetContent(variables, sublimits, tuple(exclusions), dict(distributions or {}), frequency)
+    return ParameterSetContent(
+        variables, sublimits, tuple(exclusions), dict(distributions or {}), frequency, pack, inputs
+    )
 
 
-def variable_unit(name: str) -> Unit:
+def variable_unit(name: str, pack: str = "") -> Unit:
     """The unit a stored set parameter of ``name`` must have: its variable's, money
-    for a sublimit, or a count for the frequency; ``field_unrecognised`` for any
-    other name."""
+    for a sublimit, a count for the frequency, or, for a version of the industry pack
+    ``pack``, its input's; ``field_unrecognised`` for any other name (an input on a
+    version that names no pack included), ``pack_input_unrecognised`` for an input
+    the pack does not hold."""
     if name.startswith(SUBLIMIT_PREFIX):
         _cash_family(name[len(SUBLIMIT_PREFIX):], "sublimit")
         return Unit.MONEY
     if name == FREQUENCY:
         return Unit.COUNT
+    if name.startswith(packs.PACK_INPUT_PREFIX) and pack:
+        return packs.input_unit(pack, name[len(packs.PACK_INPUT_PREFIX):])
     variable = VARIABLES.get(name)
     if variable is None:
         raise ParameterRefused("field_unrecognised", f"{name!r} is not a parameter-set variable")

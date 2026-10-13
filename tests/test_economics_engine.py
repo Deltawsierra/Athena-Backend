@@ -119,8 +119,10 @@ def test_the_engine_imports_with_django_poisoned():
     # builder's templates, step 7b's two (twins and scenario_simulation, numpy
     # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
     # (numpy too), step 13's remediation (no numpy), step 10's feed adapters, step 11's
-    # catalogs and context rules, and E5's portfolio (numpy too).
-    assert result.stdout.strip() == "imported 28", result.stdout
+    # catalogs and context rules, and E5's portfolio (numpy too); and E7's six (the
+    # industry packs: their input schemas, base, registry and the insurance,
+    # healthcare and SaaS packs; no numpy).
+    assert result.stdout.strip() == "imported 34", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -184,6 +186,13 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "context.py",
         # E5's portfolio aggregation (spec, section 33).
         "portfolio.py",
+        # E7's industry packs (spec, section 37).
+        "pack_inputs.py",
+        "pack_base.py",
+        "pack_registry.py",
+        "pack_insurance.py",
+        "pack_healthcare.py",
+        "pack_saas.py",
     }
     core_importers = set()
     for path in files:

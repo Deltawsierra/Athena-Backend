@@ -158,6 +158,53 @@ def _twins() -> tuple[Twin, ...]:
             # market_capitalisation x price_decline
             lambda v: v["market_capitalisation"] * v["price_decline"],
         ),
+        # The industry packs' formulas (E7, spec section 37). A twin added for a new
+        # formula leaves every earlier twin's arithmetic as it was: TWINS_VERSION is
+        # unchanged, so no recorded run reads another twin.
+        Twin(
+            "throughput_loss",
+            1,
+            # units_per_day / 24 x hours x affected_share x amount_per_unit
+            lambda v: v["amount_per_unit"] * ((v["units_per_day"] / 24.0) * v["hours"] * v["affected_share"]),
+        ),
+        Twin(
+            "share_of_units",
+            1,
+            # units x affected_share x amount_per_unit
+            lambda v: v["amount_per_unit"] * (v["units"] * v["affected_share"]),
+        ),
+        Twin(
+            "share_of_units_value",
+            1,
+            # units x affected_share x amount_per_unit x value_share
+            lambda v: v["amount_per_unit"] * (v["units"] * v["affected_share"] * v["value_share"]),
+        ),
+        Twin(
+            "excess_over_expected",
+            1,
+            # units x affected_share x amount_per_unit x expected_ratio x excess_share
+            lambda v: v["amount_per_unit"]
+            * (v["units"] * v["affected_share"] * v["expected_ratio"] * v["excess_share"]),
+        ),
+        Twin(
+            "per_unit_response",
+            1,
+            # units x cost_per_unit
+            lambda v: v["cost_per_unit"] * v["units"],
+        ),
+        Twin(
+            "churned_share_margin",
+            1,
+            # units x affected_share x churn_rate x margin_per_unit_per_year x recovery_years
+            lambda v: v["margin_per_unit_per_year"]
+            * (v["units"] * v["affected_share"] * v["churn_rate"] * v["recovery_years"]),
+        ),
+        Twin(
+            "share_of_spend",
+            1,
+            # hours x spend_per_hour x added_share
+            lambda v: v["spend_per_hour"] * (v["hours"] * v["added_share"]),
+        ),
     )
 
 

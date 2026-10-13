@@ -505,6 +505,9 @@ NOT_STOPS = {
         "records, append-only; it starts and stops nothing",
     },
     "deployment-economics-scenario-events": _get(),
+    # The industry-pack registry (assurance.economics.scenario_api, E7, spec section
+    # 37): static economics data, the same for every caller. It reads no row.
+    "economics-packs": _get(),
     # Raising a financial source's trust tier (assurance.economics.api; the owner's
     # decision of 12 Oct 2026): economics records, admin only. Nothing a stop or the
     # decision reads. Withdrawing a pending raise withdraws a request for more trust
