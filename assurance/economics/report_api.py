@@ -629,6 +629,7 @@ class ScenarioRefreshView(APIView):
         except continuous_service.RefreshRefused as refused:
             return Response({"code": refused.code, "detail": refused.detail, "recorded": False},
                             status=refused.status)
+
         def superseded_meanwhile():
             """Another refresh, or a build, superseded the version at the same moment:
             one successor per version (the scenario table's constraint)."""

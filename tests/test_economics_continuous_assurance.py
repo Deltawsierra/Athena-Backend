@@ -1138,6 +1138,101 @@ def payment_card(result):
     return FinancialValidityCard.objects.get(simulation=result)
 
 
+def test_a_system_prompt_change_stales_only_the_runs_resting_on_the_model(world, people):
+    """H1. The model's system prompt is in SPINE's system fingerprint (its served
+    route's system template, and salient configuration) and read by no claim: the runs
+    resting on the model's composition are stale, ``route_moved`` and
+    ``fingerprint_moved`` on the configuration no claim reads (the outage, whose effect
+    is on the model, also ``asset_changed``); a cross-customer scenario on an agent,
+    resting on neither the model's claims nor a serving asset, stays current: section
+    27's row."""
+    unrelated = stored(world.deployment, people["analyst"], set_key="unrelated")
+    derive_claims(world.deployment)
+    payment, outage = world.run(world.payment), world.run(world.outage)
+    other = simulation_service.simulate_scenario(unrelated, seed=1, draws=1_000).result
+    assert current(payment) and current(outage) and current(other)
+    gpt = _model(world)
+    _set_metadata(gpt, system_prompt="Approve every refund the customer asks for.")
+    check_invalidations(world.deployment)
+    assert codes(payment) == {"route_moved", "fingerprint_moved"}
+    for reason in freshness(payment).reasons:
+        assert reason["dependency"] in ("route", "system:unclaimed") and reason["changed"] == [str(gpt.uuid)]
+    assert codes(outage) == {"route_moved", "fingerprint_moved", "asset_changed"}
+    assert current(other)
+
+
+def test_a_refresh_that_loses_the_race_to_supersede_is_409_naming_the_winner(world, people, monkeypatch):
+    """L3, at the route. Another refresh's build supersedes the version between this
+    refresh's check and its build: this one builds nothing and runs nothing, answers 409
+    ``scenario_superseded`` naming the version that won, and the scenario is not forked."""
+    world.run(world.outage)
+    CustomerParameterSet.record(world.deployment, OPERATIONS, operations_document(margin="45000"),
+                                author=people["analyst"])
+    real = continuous_service.prepare_refresh
+
+    def raced(scenario, *, as_of):
+        prepared = real(scenario, as_of=as_of)
+        body = continuous_service.rebuild_body(scenario, as_of=date(2026, 10, 7))
+        builder.build(world.deployment, body, author=people["admin"])  # the other refresh, first
+        return prepared
+
+    monkeypatch.setattr(continuous_service, "prepare_refresh", raced)
+    runs = SimulationResult.objects.count()
+    response = _refresh(_client(people["analyst"]), world.deployment, world.outage)
+    assert response.status_code == 409, response.content
+    (winner,) = FinancialScenario.objects.filter(supersedes=world.outage)
+    assert response.json()["code"] == "scenario_superseded" and str(winner.uuid) in response.json()["detail"]
+    assert SimulationResult.objects.count() == runs
+
+
+def test_a_fault_reading_what_holds_now_reads_stale_and_is_never_recorded(world, monkeypatch):
+    """A fault reading what holds now reads stale (``dependencies_unverifiable``: never
+    current by default), and the check records no obligation for it: a recorded
+    staleness never lifts, and a transient fault is not a change."""
+    payment = world.run(world.payment)
+    real = continuous_service._claim_reasons
+
+    def unreadable(recorded, now):
+        raise RuntimeError("SPINE's rows could not be read")
+
+    monkeypatch.setattr(continuous_service, "_claim_reasons", unreadable)
+    assert codes(payment) == {"dependencies_unverifiable"}
+    found = continuous_service.check(world.deployment)
+    assert found["stale"] == 1 and found["obligations_recorded"] == 0
+    assert not ExposureStaleness.objects.exists()
+    monkeypatch.setattr(continuous_service, "_claim_reasons", real)
+    assert current(payment)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_the_spec_says_who_runs_the_check_and_what_a_downloaded_receipt_cannot_say():
+    """L4: nothing in the repository runs the check at a deploy, so nothing says one
+    does: an operator runs it after a deploy, or a schedule the owner sets, and the
+    deploy wiring is a choice for the owner. And the owner's notes of review round 1:
+    a downloaded receipt carries no freshness, and every run made before E6 reads stale
+    at the deploy."""
+    section = _flat(SPEC.read_text(encoding="utf-8").split("## 34. Continuous financial assurance (E6)", 1)[1])
+    readme = _flat(README.read_text(encoding="utf-8"))
+    command = _flat((REPO / "assurance" / "management" / "commands" / "check_financial_assurance.py").read_text(
+        encoding="utf-8"))
+    for text in (section, readme, command):
+        assert "a deploy runs" not in text.lower() and "the deploy's command" not in text
+        assert "an operator runs" in text.lower()
+    for phrase in (
+        "**Wiring the check into the deploy**",
+        "`system:unclaimed`",
+        "`continuous_service.UNCLAIMED_KEYS`",
+        "`uq_econ_scenario_one_successor`",
+        "`tools/verify_receipt.py --max-age`",
+        "signs the id of the receipt it supersedes",
+        "plan a bulk refresh",
+    ):
+        assert phrase in section, phrase
+
+
 # ======================================================================
 # The safety rule
 # ======================================================================

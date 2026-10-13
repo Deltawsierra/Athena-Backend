@@ -6,8 +6,10 @@ financial assurance; ``docs/economics/spec-v1.md``, section 34):
 For each deployment (or the one named), every current scenario version's latest
 completed exposure run is read against what it was recorded as depending on
 (:func:`assurance.economics.continuous_service.check`), and each stale one is recorded
-with the refresh it owes, once per set of reasons. A deploy runs it, so a change of
-the engine release is recorded as soon as it is live.
+with the refresh it owes, once per set of reasons. An operator runs it after a deploy,
+or on a schedule the owner sets: nothing in this repository runs it (spec, section 34,
+choice 15). Every read detects a change of the engine release regardless; this records
+it, with the refresh it owes.
 
 It RECOMPUTES NOTHING: no Monte Carlo is run here or by anything it calls, and it
 takes no economics run slot. A refresh is made only when an analyst asks for it, on
