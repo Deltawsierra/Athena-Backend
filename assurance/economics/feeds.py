@@ -50,6 +50,7 @@ anything it writes.
 from __future__ import annotations
 
 import contextlib
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from datetime import timezone as dt_timezone
@@ -57,7 +58,7 @@ from datetime import timezone as dt_timezone
 import requests
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Max, Q
+from django.db.models import Max, Min, Q
 from django.utils import timezone
 
 from safety import outbound
@@ -80,8 +81,12 @@ from .models import (
     runs_in_production,
 )
 
-#: The connect and read timeouts of one fetch, in seconds.
+#: The connect and read timeouts of one fetch, in seconds: each socket operation's.
 TIMEOUT = (5.0, 30.0)
+#: The wall-clock budget of one fetch's whole answer, in seconds (review round 1,
+#: NIT-1): a provider that drips its answer a byte at a time inside the read timeout
+#: is cut off here (``fetch_deadline_exceeded``), never read for hours.
+FETCH_DEADLINE_SECONDS = 120.0
 #: The most parameters the data-health route lists as one source's Unknowns.
 UNKNOWNS_LIMIT = 200
 _HEADERS = {"Accept": "text/csv, application/json", "User-Agent": "athena-backend economic-exposure feed"}
@@ -136,6 +141,7 @@ class OutboundTransport:
     :class:`TransportFailed` with a code."""
 
     def send(self, request: engine.FeedRequest, key: str) -> bytes:
+        deadline = time.monotonic() + FETCH_DEADLINE_SECONDS
         proxy = _feed_proxy()
         withheld = tuple(v for v in (key, *outbound.logins_in(proxy)) if v)
         kwargs = {
@@ -163,10 +169,14 @@ class OutboundTransport:
             if response.status_code != 200:
                 raise TransportFailed("fetch_http_error")
             content = b""
+            if time.monotonic() > deadline:
+                raise TransportFailed("fetch_deadline_exceeded")
             for chunk in response.iter_content(64 * 1024):
                 content += chunk
                 if len(content) > engine.MAX_RESPONSE_BYTES:
                     raise TransportFailed("response_too_large")
+                if time.monotonic() > deadline:
+                    raise TransportFailed("fetch_deadline_exceeded")
             return content
         except requests.RequestException:
             raise TransportFailed("fetch_failed") from None
@@ -229,7 +239,10 @@ def fetch(source_key: str, *, as_of: date | None = None, transport=None, now: da
     explicit = as_of is not None
     as_of = as_of if explicit else today
     try:
-        request = engine.request_for(feed, as_of=as_of, explicit=explicit, today=today, base_url=base_url(feed))
+        request = engine.request_for(
+            feed, as_of=as_of, explicit=explicit, today=today, base_url=base_url(feed),
+            provider_today=engine.us_eastern_date(now),
+        )
     except engine.FeedRefused as refused:
         return _refused_before_sending(feed.key, refused.code)
     try:
@@ -237,7 +250,7 @@ def fetch(source_key: str, *, as_of: date | None = None, transport=None, now: da
     except TransportFailed as failed:
         return _record_refusal(feed, as_of, failed.code)
     try:
-        snapshot = engine.parse(feed, raw, as_of=as_of, retrieved_at=now, url=request.recorded_url)
+        snapshot = engine.parse(feed, raw, as_of=as_of, retrieved_at=now, request=request)
     except engine.FeedRefused as refused:
         return _record_refusal(feed, as_of, refused.code, _hash_or_blank(feed, raw))
     except money.MoneyRefused as refused:
@@ -277,12 +290,58 @@ def _platform_versions(key: str):
     return FinancialSource.objects.filter(deployment__isnull=True, source_key=key)
 
 
-def used_version(key: str, deployment) -> FinancialSource | None:
-    """The latest platform-wide version of ``key`` a production run for
-    ``deployment`` may use (the production gate's own query), or ``None``."""
-    return FinancialSource.objects.usable_for_production(deployment).filter(
-        deployment__isnull=True, source_key=key
-    ).order_by("-version").first()
+def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int, date]]:
+    """For the platform-wide versions of ``key``: ``{snapshot hash: the version
+    holding its rows}`` (the earliest of that hash: a raised version holds none of its
+    own), ``{snapshot hash: its newest version number}`` (a raise of the same payload
+    supersedes the version it was raised from), and ``{holder: the date of its earliest
+    observation}`` (an FX rate's date, or an index month's last day). Three reads."""
+    holders: dict[str, int] = {}
+    newest: dict[str, int] = {}
+    for row in (
+        FinancialSource._base_manager.filter(deployment__isnull=True, source_key=key)
+        .order_by("version")
+        .values("pk", "version", "snapshot_hash")
+    ):
+        holders.setdefault(row["snapshot_hash"], row["pk"])
+        newest[row["snapshot_hash"]] = row["version"]
+    ids = list(holders.values())
+    starts: dict[int, date] = {
+        row["source_id"]: row["first"]
+        for row in FXObservation.objects.filter(source_id__in=ids).values("source_id").annotate(first=Min("effective_date"))
+    }
+    for row in (
+        CostIndexObservation.objects.filter(source_id__in=ids).values("source_id").annotate(first=Min("period"))
+    ):
+        starts.setdefault(row["source_id"], cost_index.period_end(row["first"]))
+    return holders, newest, starts
+
+
+def used_version(key: str, deployment, as_of: date) -> FinancialSource | None:
+    """The version of ``key`` a run of ``deployment`` dated ``as_of`` uses (the lead's
+    decision on review round 1, MEDIUM-2): the NEWEST platform-wide version that is
+    usable -- it passes the production gate for that deployment
+    (``usable_for_production``) and no raise of the same payload supersedes it -- and
+    whose coverage includes ``as_of``: it holds an observation dated on or before it.
+    A version whose observations all fall after ``as_of`` does not cover it, and an
+    older one that does is used instead; a date after a version's newest observation
+    is covered, and only ages it (stale, blocked). None covers it: ``None``, and the
+    source is ``missing``."""
+    usable = list(
+        FinancialSource.objects.usable_for_production(deployment)
+        .filter(deployment__isnull=True, source_key=key)
+        .order_by("-version")
+    )
+    if not usable:
+        return None
+    holders, newest, starts = _coverage_starts(key)
+    for version in usable:
+        if newest.get(version.snapshot_hash) != version.version:
+            continue
+        start = starts.get(holders.get(version.snapshot_hash))
+        if start is not None and start <= as_of:
+            return version
+    return None
 
 
 def _holder(version: FinancialSource) -> int:
@@ -358,12 +417,17 @@ def source_state(key: str, *, deployment, as_of: date) -> dict:
         "state": engine.MISSING,
     }
     if feed is None:
+        state["reason"] = (
+            "source_reference_malformed" if key == engine.MALFORMED_REFERENCE else "source_missing"
+        )
         return state
     latest = _platform_versions(key).order_by("-version").first()
-    used = used_version(key, deployment)
+    used = used_version(key, deployment, as_of)
     state["latest_version"] = _version(latest)
     state["used_version"] = _version(used)
     if latest is not None and (used is None or used.pk != latest.pk):
+        # Why the newest version is not the one used: the gate's refusal of it, or
+        # (None) that it does not cover the as-of date.
         state["gate"] = latest.production_use_refusal(deployment)
     if used is None:
         return state
@@ -391,25 +455,34 @@ def states_for(keys, *, deployment, as_of: date | None) -> dict[str, dict]:
 # --------------------------------------------------------- production receipts
 
 
-def receipt_refusal(keys, deployment) -> tuple[str, str] | None:
-    """Why a receipt for a run of ``deployment`` resting on the feed sources ``keys``
-    may not be issued now, as ``(code, detail)``, or ``None``. For each source, the
-    version a run uses now must exist (the gate's refusal of the latest version, or
-    ``source_missing``); and in a PRODUCTION run, one holding FX or cost-index
-    observations must be trusted as ``authoritative`` (``source_not_authoritative``;
-    the owner's decision of 13 Oct 2026). A run that is not a production one needs no
-    more than the gate."""
+def receipt_refusal(keys, deployment, as_of: date | None) -> tuple[str, str] | None:
+    """Why a receipt for a run of ``deployment`` dated ``as_of`` resting on the feed
+    sources ``keys`` may not be issued now, as ``(code, detail)``, or ``None``. A
+    near-miss citation is ``source_reference_malformed`` and a key the registry does
+    not hold ``source_missing``. For each source, the version the run uses now
+    (:func:`used_version`: the newest usable version covering ``as_of``) must exist
+    (the gate's refusal of the latest version, or ``source_missing``); and in a
+    PRODUCTION run, one holding FX or cost-index observations must be trusted as
+    ``authoritative`` (``source_not_authoritative``; the owner's decision of 13 Oct
+    2026). A run that is not a production one needs no more than the gate."""
     production = runs_in_production(deployment)
     for key in sorted(set(keys)):
+        if key == engine.MALFORMED_REFERENCE:
+            return "source_reference_malformed", "a figure's evidence cites a feed source in a form that is not one"
         if key not in engine.REGISTRY:
             return "source_missing", f"{key} is not in the feed registry"
-        used = used_version(key, deployment)
+        if as_of is None:
+            return "source_missing", f"{key}: the run has no as-of date to read it at"
+        used = used_version(key, deployment, as_of)
         if used is None:
             latest = _platform_versions(key).order_by("-version").first()
             if latest is None:
                 return "source_missing", f"{key} has no version"
             code = latest.production_use_refusal(deployment) or "source_missing"
-            return code, f"source {key} v{latest.version}, trust tier {latest.trust_tier}: no version a run may use"
+            return code, (
+                f"source {key} v{latest.version}, trust tier {latest.trust_tier}: no version a run may use covers "
+                f"{as_of.isoformat()}"
+            )
         if production:
             _newest, kind = data_through(used, date.max)
             if kind in (engine.FX, engine.COST_INDEX):
@@ -483,6 +556,37 @@ def _unknowns(key: str, deployment, because: str, parents) -> tuple[list[dict], 
     return found[:UNKNOWNS_LIMIT], len(found) > UNKNOWNS_LIMIT
 
 
+def _stray_citations(deployment, parents) -> tuple[list[dict], bool]:
+    """The deployment's current parameters whose evidence cites a feed source the
+    registry does not hold (``source_missing``), or cites one in a form that is not a
+    citation (``source_reference_malformed``; review round 1, NIT-3): each fails
+    closed, and a receipt resting on it is refused with that code."""
+    sets, scenarios = parents
+    names, scenario_names = dict(sets), dict(scenarios)
+    rows = (
+        FinancialParameter.objects.filter(
+            Q(parameter_set_id__in=list(names)) | Q(scenario_id__in=list(scenario_names)),
+            evidence_ref__icontains="source",
+        )
+        .order_by("id")
+        .values_list("name", "evidence_ref", "parameter_set_id", "scenario_id")
+    )
+    found = []
+    for name, evidence_ref, set_id, scenario_id in rows:
+        key = engine.feed_reference(evidence_ref)
+        if key is None or key in engine.REGISTRY:
+            continue
+        malformed = key == engine.MALFORMED_REFERENCE
+        found.append({
+            "parameter": name,
+            "in": names[set_id] if set_id is not None else scenario_names[scenario_id],
+            "cites": None if malformed else key,
+            "because": "source_reference_malformed" if malformed else "source_missing",
+        })
+    found.sort(key=lambda item: (item["in"], item["parameter"]))
+    return found[:UNKNOWNS_LIMIT], len(found) > UNKNOWNS_LIMIT
+
+
 #: What a source in each state does to the figures it feeds.
 EFFECTS = {
     engine.FRESH: "none",
@@ -520,10 +624,15 @@ def data_health(deployment, *, now: datetime | None = None) -> dict:
                 "unknowns_truncated": truncated,
             }
         )
+    stray, stray_truncated = _stray_citations(deployment, parents)
     return {
         "deployment": str(deployment.uuid),
         "as_of": as_of.isoformat(),
         "production_run": runs_in_production(deployment),
+        # Figures citing no registry source, or citing one in a form that is not a
+        # citation: each fails closed (review round 1, NIT-3).
+        "unregistered_citations": stray,
+        "unregistered_citations_truncated": stray_truncated,
         "freshness_sla_days": {
             f"{provider} {cadence}": days for (provider, cadence), days in sorted(engine.FRESHNESS_SLA_DAYS.items())
         },

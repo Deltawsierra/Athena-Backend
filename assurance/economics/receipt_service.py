@@ -148,6 +148,10 @@ REFUSALS = {
         "an FX or cost-index source behind a production run's receipt is trusted as authoritative (the owner's "
         "decision of 13 Oct 2026): a lower tier may feed the run and its card, never its production receipt"
     ),
+    "source_reference_malformed": (
+        "a figure's evidence reads as a citation of a feed source but is not one exactly ('financial-source:<key>' "
+        "at its start, once): it fails closed, and nothing is signed"
+    ),
 }
 
 
@@ -510,24 +514,37 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
 def feed_refusal(result: SimulationResult, card: FinancialValidityCard) -> tuple[str, str] | None:
     """Why the feed sources ``result``'s figures rest on (spec, section 28) stop its
     receipt, as ``(code, detail)``, or ``None``. Read before anything is built or
-    signed, and nothing is recorded when it refuses:
+    signed, and nothing is recorded when it refuses. The sources are read from the
+    RUN's own inputs (each figure's ``evidence_ref``), and from the card as well, so a
+    card that recorded no feed sources -- one stored before step 10 -- never lets a
+    run that rests on one skip these checks (review round 1, LOW-3):
 
-    - NOW, for the sources the card names: the version a run of the deployment uses
-      must exist (the gate's refusal of the latest version, or ``source_missing``),
+    - NOW, for every source the run or its card names, at the run's as-of date: the
+      version the run uses must exist (the gate's refusal of the latest version, or
+      ``source_missing``; a near-miss citation is ``source_reference_malformed``),
       and in a production run one holding FX or cost-index observations must be
       ``authoritative`` (``source_not_authoritative``; the owner's decision of 13 Oct
       2026). The production gate itself is unchanged: a lower tier feeds the run;
-    - AS THE CARD SAYS: a source it records blocked (``source_stale``) or missing
-      (``source_missing``) at the run's as-of date: the card's claim is stale, and it
-      is never signed as current."""
-    held = (card.card.get("issued") or {}).get("feed_sources") or {}
-    if not held:
-        return None
-    from . import feeds
+    - AS THE CARD SAYS: a source it does not record (``source_missing``), or records
+      blocked (``source_stale``) or missing (``source_missing``) at the run's as-of
+      date: the card's claim is stale, and it is never signed as current."""
+    from .engine import feeds as feed_rules
 
-    refused = feeds.receipt_refusal(held, result.deployment_id)
+    inputs = result.inputs or {}
+    fed = feed_rules.referenced_keys(inputs.get("parameters"))
+    held = (card.card.get("issued") or {}).get("feed_sources") or {}
+    if not fed and not held:
+        return None
+    from . import feeds, validity_service
+
+    build = ScenarioBuild.objects.filter(scenario_id=result.scenario_id).first()
+    as_of = validity_service._as_of(inputs, build)
+    refused = feeds.receipt_refusal(set(fed) | set(held), result.deployment_id, date.fromisoformat(as_of) if as_of else None)
     if refused is not None:
         return refused
+    unrecorded = sorted(set(fed) - set(held))
+    if unrecorded:
+        return "source_missing", f"the card records no state of {unrecorded}, which the run's figures rest on"
     for key in sorted(held):
         state = held[key].get("state")
         if state == "blocked":

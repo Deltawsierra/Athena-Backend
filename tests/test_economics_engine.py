@@ -967,7 +967,7 @@ SPEC_PHRASES = (
     "computing it and writing nothing",
     # MVP step 10 (section 28): the live feeds, freshness and the production receipt.
     "informational average, not a transaction price",
-    "A run uses the latest version of the key that passes the gate",
+    "A run uses the newest usable version whose coverage includes its as-of date",
     "source_not_authoritative",
 )
 

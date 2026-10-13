@@ -24,7 +24,6 @@ import os
 import socket
 import subprocess
 import sys
-import textwrap
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -306,9 +305,7 @@ def test_every_fixture_is_named_in_the_readme_with_its_status():
 def _parse(key, raw=None, as_of=TODAY):
     feed = engine.REGISTRY[key]
     request = engine.request_for(feed, as_of=as_of, explicit=False, today=as_of)
-    return engine.parse(
-        feed, fixture(FILES[key]) if raw is None else raw, as_of=as_of, retrieved_at=NOW, url=request.recorded_url
-    )
+    return engine.parse(feed, fixture(FILES[key]) if raw is None else raw, as_of=as_of, retrieved_at=NOW, request=request)
 
 
 def test_the_ecb_answer_parses_to_its_values():
@@ -753,53 +750,42 @@ def test_a_fetch_failure_is_recorded_by_its_code_alone():
 
 
 def test_the_socket_guard_refuses_anything_but_loopback(guard):
+    """Aimed only at addresses no provider answers on (review round 1, LOW-4): a
+    TEST-NET address and a ``.invalid`` name, so a guard that regressed could reach no
+    publisher."""
     with pytest.raises(NetworkRefused):
         socket.create_connection(("192.0.2.10", 443), timeout=1)
     with pytest.raises(NetworkRefused):
-        socket.getaddrinfo("api.stlouisfed.org", 443)
-    assert guard == ["192.0.2.10", "api.stlouisfed.org"]
+        socket.getaddrinfo("fred.invalid", 443)
+    assert guard == ["192.0.2.10", "fred.invalid"]
 
 
-def test_the_real_transport_reaches_no_real_host(guard):
+def test_the_real_transport_is_stopped_by_the_guard(guard, monkeypatch):
     """With the keys set and live fetching on, the real outbound transport tries the
-    provider's host -- and the guard refuses it: the fetch is ``fetch_failed``,
-    recorded by its code, nothing else is written, and nothing left the machine."""
+    host it is pointed at -- here ``fred.invalid``, never a provider's (LOW-4) -- and
+    the guard refuses it: the fetch is ``fetch_failed``, recorded by its code, and
+    nothing else is written."""
+    monkeypatch.setattr(feeds, "base_url", lambda feed: "https://fred.invalid")
     with override_settings(**LIVE, ECONOMICS_FEED_PROXY=""):
         outcome = feeds.fetch(FRED, now=NOW)
     assert (outcome.code, outcome.row.code) == ("fetch_failed", "fetch_failed")
-    assert guard and set(guard) <= {"api.stlouisfed.org"}
+    assert guard and set(guard) == {"fred.invalid"}
     assert _nothing_written()
 
 
 def test_importing_the_feed_modules_reaches_no_host():
-    """A fresh interpreter whose sockets refuse to connect or look a name up: Django
-    loads, and the feed modules, the data-health route and the fetch command import,
-    with no attempt at the network."""
-    script = textwrap.dedent(
-        """
-        import socket
-        tried = []
-        def refuse(*args, **kwargs):
-            tried.append(repr(args[:2]))
-            raise OSError("no network at import")
-        socket.socket.connect = refuse
-        socket.socket.connect_ex = refuse
-        socket.getaddrinfo = refuse
-        socket.create_connection = refuse
-        import django
-        django.setup()
-        from django.urls import reverse
-        import assurance.economics.engine.feeds, assurance.economics.feeds, assurance.economics.health_api
-        import assurance.management.commands.fetch_financial_source
-        reverse("deployment-economics-data-health", kwargs={"uuid": "11111111-2222-4333-8444-555555555555"})
-        assert tried == [], tried
-        print("no network")
-        """
-    )
+    """A fresh pytest whose sockets refuse everything before Django loads
+    (``tests/economics_no_network.py``): Django loads through the repository's
+    pytest.ini, and the feed modules, the data-health route and the fetch command
+    import, with no attempt at the network (``tests/economics_no_network_cases.py``)."""
     env = dict(os.environ, DJANGO_SECRET_KEY=os.environ.get("DJANGO_SECRET_KEY", "ci-secret-key-not-used-outside-ci"))
-    result = subprocess.run([sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True,
-                            timeout=120, check=False)
-    assert result.returncode == 0 and result.stdout.strip() == "no network", result.stderr[-3000:]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "tests.economics_no_network",
+         "-q", "tests/economics_no_network_cases.py"],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
+    )
+    assert result.returncode == 0, (result.stdout[-3000:], result.stderr[-2000:])
+    assert "1 passed" in result.stdout, result.stdout[-2000:]
 
 
 # ====================================================================
@@ -898,8 +884,8 @@ def _scenario(deployment, author, *, as_of, evidence, title="Cross-customer expo
     builds one): a lump-sum regulatory figure whose evidence is ``evidence`` and a
     notification cost, at ``as_of``. SYNTHETIC / ILLUSTRATIVE."""
     variables = {
-        "notification_unit_cost": _entry("money_per_unit", "2"),
-        "notification_fixed_cost": _entry("money", "40000"),
+        "notification_unit_cost": _entry("money_per_unit", "2", effective_date="2026-09-01"),
+        "notification_fixed_cost": _entry("money", "40000", effective_date="2026-09-01"),
     }
     pset = CustomerParameterSet.record(deployment, "bank_prod_2026q4", {"variables": variables}, author=author)
     scenario = FinancialScenario.objects.create(deployment=deployment, title=title, author=author,
@@ -1088,9 +1074,9 @@ def test_the_authority_rule_reads_what_a_source_holds(reviewed, deployment, peop
     fetched, _ = _fetch(FRED)
     FinancialSourceTrustRaise.request(fetched.version, "licensed_vendor", "FRED redistributes it",
                                       by=people["admin"], channel="api")
-    code, detail = feeds.receipt_refusal([FRED], deployment)
+    code, detail = feeds.receipt_refusal([FRED], deployment, TODAY)
     assert code == "source_not_authoritative" and "licensed_vendor" in detail
-    assert feeds.receipt_refusal([FRED], Deployment.objects.create(name="dev", environment="dev")) is None
+    assert feeds.receipt_refusal([FRED], Deployment.objects.create(name="dev", environment="dev"), TODAY) is None
 
 
 def test_the_rule_is_published_and_a_production_gate_rule():
@@ -1212,7 +1198,7 @@ def test_the_spec_names_every_feed_code_and_the_rules():
     for phrase in (
         "informational average, not a transaction price",
         "format-faithful, NOT a recorded response; replace with a recording (owner)",
-        "A run uses the latest version of the key that passes the gate",
+        "A run uses the newest usable version whose coverage includes its as-of date",
         "never inherit",
         "`responseTime`",
     ):
@@ -1245,3 +1231,328 @@ def test_a_feed_fault_never_takes_down_a_stop():
     )
     assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
     assert "4 passed" in result.stdout, result.stdout[-2000:]
+
+
+# ====================================================================
+# Review round 1 of #161
+# ====================================================================
+
+
+class _Provider:
+    """A loopback provider for the real transport: answers every request with
+    ``body``, 200."""
+
+    def __init__(self, body: bytes):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _any(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = _any
+
+            def log_message(self, *_args):
+                return None
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_m1_the_fred_key_reaches_no_http_client_log_record(caplog, monkeypatch):
+    """MEDIUM-1: urllib3 records each request line at DEBUG, query and all, and FRED's
+    key is in the query. The real transport fetches FRED from a loopback provider with
+    the HTTP client's loggers at DEBUG: its request line is recorded -- the method,
+    host and path -- and neither the key nor the query appears in any record, nor in
+    what a handler formats from it."""
+    import logging
+
+    provider = _Provider(fixture(FILES[FRED]))
+    monkeypatch.setattr(feeds, "base_url", lambda feed: provider.base)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="urllib3"), override_settings(**LIVE, ECONOMICS_FEED_PROXY=""):
+            outcome = feeds.fetch(FRED, now=NOW)
+    finally:
+        provider.close()
+    assert outcome.outcome == "recorded", outcome
+    lines = [record.getMessage() for record in caplog.records if record.name.startswith("urllib3")]
+    request_lines = [line for line in lines if "/fred/series/observations" in line]
+    assert request_lines, f"no request line was recorded: {lines}"
+    said = caplog.text + "\n".join(lines)
+    assert FRED_KEY not in said and "api_key" not in said and "realtime_start" not in said
+    assert all("?[withheld]" in line for line in request_lines)
+
+
+def test_m1_the_client_record_filter_never_drops_or_raises():
+    import logging
+
+    from safety import outbound
+
+    for name in outbound.CLIENT_LOGGERS:
+        assert any(isinstance(f, outbound._ClientRecordFilter) for f in logging.getLogger(name).filters), name
+    record = logging.LogRecord(
+        "urllib3.connectionpool", logging.DEBUG, __file__, 1, '%s "%s %s" %s', ("http://h:1", "GET",
+                                                                                "/p/SECRETPATH?api_key=QK1", 200), None,
+    )
+    token = outbound._IN_FLIGHT.set(("SECRETPATH",))
+    try:
+        assert outbound._CLIENT_FILTER.filter(record) is True
+    finally:
+        outbound._IN_FLIGHT.reset(token)
+    assert record.getMessage() == 'http://h:1 "GET /p/[withheld]?[withheld]" 200'
+
+    class Unprintable:
+        def __str__(self):
+            raise RuntimeError("cannot be written")
+
+    broken = logging.LogRecord("urllib3.util.retry", logging.DEBUG, __file__, 1, "%s", (Unprintable(),), None)
+    assert outbound._CLIENT_FILTER.filter(broken) is True
+    assert broken.getMessage() == "[withheld] (an HTTP client record)"
+
+
+def _ecb_shifted(days: int) -> bytes:
+    """The ECB fixture with every observation moved ``days`` earlier (whole weeks, so
+    each stays a weekday)."""
+    rows = _rows(fixture(FILES[ECB]))
+    at = rows[0].index("TIME_PERIOD")
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\r\n")
+    writer.writerow(rows[0])
+    for row in rows[1:]:
+        row = list(row)
+        row[at] = (date.fromisoformat(row[at]) - timedelta(days=days)).isoformat()
+        writer.writerow(row)
+    return out.getvalue().encode()
+
+
+def test_m2_a_back_dated_run_uses_the_older_version_that_covers_its_date(reviewed, staging, people):
+    """MEDIUM-2 (the lead's decision): a run uses the newest usable version whose
+    coverage includes its as-of date. ECB v1, fetched as of 15 Sep, holds that date;
+    v2, today's, holds nothing before 30 Sep. A run as of 15 Sep uses v1, fresh; a
+    run as of today uses v2; a date before both is missing."""
+    reviewed(ECB)
+    v1, _ = _fetch(ECB, _ecb_shifted(28), as_of=date(2026, 9, 15))
+    v2, _ = _fetch(ECB)
+    assert (v1.outcome, v2.outcome, v1.version.version, v2.version.version) == ("recorded", "recorded", 1, 2)
+    back = feeds.source_state(ECB, deployment=staging, as_of=date(2026, 9, 15))
+    assert (back["used_version"]["version"], back["state"], back["age_days"]) == (1, "fresh", 0)
+    assert back["latest_version"]["version"] == 2 and back["gate"] is None  # usable, but not covering that date
+    now = feeds.source_state(ECB, deployment=staging, as_of=TODAY)
+    assert (now["used_version"]["version"], now["state"]) == (2, "fresh")
+    assert feeds.source_state(ECB, deployment=staging, as_of=date(2026, 8, 1))["state"] == "missing"
+    # The receipt check reads the same choice.
+    assert feeds.receipt_refusal([ECB], staging, date(2026, 9, 15)) is None
+    assert feeds.receipt_refusal([ECB], staging, date(2026, 8, 1))[0] == "source_missing"
+
+
+def test_m2_a_raise_supersedes_the_version_it_was_raised_from(reviewed, staging, people):
+    reviewed(ECB)
+    fetched, _ = _fetch(ECB)
+    raised = FinancialSourceTrustRaise.request(fetched.version, "benchmark", "the publisher",
+                                               by=people["admin"], channel="api").to_version
+    seen = feeds.source_state(ECB, deployment=staging, as_of=TODAY)
+    assert seen["used_version"]["version"] == raised.version == 2
+
+
+def test_m2_a_back_dated_card_and_receipt_read_the_covering_version(reviewed, deployment, people, keys):
+    """The card and the production receipt of a run as of 15 Sep read v1 (raised to
+    authoritative), not today's v2 (unverified): fresh, and the receipt is issued."""
+    reviewed(ECB)
+    v1, _ = _fetch(ECB, _ecb_shifted(28), as_of=date(2026, 9, 15))
+    pending = FinancialSourceTrustRaise.request(v1.version, "authoritative", "the publisher",
+                                                by=people["admin"], channel="api")
+    pending.approve(by=people["second"], channel="api")
+    _fetch(ECB)  # v3, today's: unverified, and it does not cover 15 Sep
+    result, card = _carded(deployment, people, as_of=date(2026, 9, 15), evidence=FED_BY_ECB)
+    state = card.card["issued"]["feed_sources"][ECB]
+    assert (state["used_version"]["version"], state["used_version"]["trust_tier"], state["state"]) == (
+        2, "authoritative", "fresh")
+    issued = _receipt(result, keys)
+    assert issued.code is None and issued.receipt is not None, (issued.code, issued.detail)
+
+
+def _drop_last_lines(raw: bytes, count: int) -> bytes:
+    lines = raw.rstrip(b"\r\n").split(b"\r\n")
+    return b"\r\n".join(lines[:-count]) + b"\r\n"
+
+
+def _bls_without_a_month(document):
+    del document["Results"]["series"][0]["data"][5]
+
+
+def _fred_without_a_month(document):
+    del document["observations"][4]
+    document["count"] -= 1
+
+
+LINE_CUTS = {
+    "ecb-three-lines": (ECB, lambda: _drop_last_lines(fixture(FILES[ECB]), 3)),
+    "ecb-one-line": (ECB, lambda: _drop_last_lines(fixture(FILES[ECB]), 1)),
+    "h10-four-lines": (H10, lambda: _drop_last_lines(fixture(FILES[H10]), 4)),
+    "fred-a-month-gone": (FRED, lambda: _json_edit(FRED, _fred_without_a_month)),
+    "bls-a-month-gone": (PPI, lambda: _json_edit(PPI, _bls_without_a_month)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(LINE_CUTS))
+def test_l1_an_answer_cut_at_a_line_boundary_is_refused_as_partial(case):
+    """LOW-1: the count and the range asked are checked, so an answer cut at a line
+    boundary (or a month missing, its count adjusted to match) is refused whole."""
+    key, make = LINE_CUTS[case]
+    outcome, _ = _fetch(key, make())
+    assert (outcome.outcome, outcome.code) == ("refused", "feed_partial"), outcome
+    assert _nothing_written()
+
+
+NEAR_MISSES = (
+    f" financial-source:{ECB}",
+    f"Financial-Source:{ECB}",
+    f"FINANCIAL-SOURCE:{ECB} the rates",
+    f"financial-source:{ECB},",
+    f"financial-source:{ECB}.",
+    f"financial-source: {ECB}",
+    f"financial_source:{ECB}",
+    f"financial source:{ECB}",
+    f"see financial-source:{ECB}",
+    f"financial-source:{ECB.upper()}",
+    f"financial-source:{ECB} and financial-source:{FRED}",
+)
+
+
+@pytest.mark.parametrize("evidence", NEAR_MISSES)
+def test_l2_a_near_miss_citation_fails_closed(evidence):
+    assert engine.feed_reference(evidence) == engine.MALFORMED_REFERENCE
+    assert engine.referenced_keys({"x": {"evidence_ref": evidence}}) == {engine.MALFORMED_REFERENCE: ["x"]}
+
+
+def test_l2_exact_citations_and_plain_text_are_read_as_before():
+    assert engine.feed_reference(f"financial-source:{ECB}") == ECB
+    assert engine.feed_reference(f"financial-source:{ECB} the rates, as published") == ECB
+    assert engine.feed_reference("financial-source:no-such-feed") == "no-such-feed"
+    for text in ("a regulator's published schedule", "the CFO's source: the ledger", "", None):
+        assert engine.feed_reference(text) is None
+
+
+def test_l2_a_near_miss_lowers_the_figure_and_refuses_the_receipt(reviewed, staging, people, keys):
+    reviewed(ECB)
+    _fetch(ECB)
+    result, card = _carded(staging, people, as_of=TODAY, evidence=f"Financial-Source:{ECB} the rates")
+    assert card.card["freshness"]["claim"] == "stale"
+    assert g.STALE_SOURCE in [d["rule"] for d in card.card["fields"]["confidence_grade"]["downgrades"]]
+    state = card.card["issued"]["feed_sources"][engine.MALFORMED_REFERENCE]
+    assert (state["state"], state["reason"]) == ("missing", "source_reference_malformed")
+    refused = _receipt(result, keys)
+    assert (refused.receipt, refused.code) == (None, "source_reference_malformed")
+
+
+def test_l3_a_card_that_recorded_no_feed_sources_never_skips_the_receipt_checks(reviewed, deployment, people, keys,
+                                                                                monkeypatch):
+    """LOW-3: a card stored before step 10 recorded no feed sources. The receipt reads
+    the sources from the run's own inputs: in a production run on a benchmark FX
+    source it is refused (``source_not_authoritative``), and after the authoritative
+    raise still refused, as the card records no state of the source
+    (``source_missing``)."""
+    reviewed(ECB)
+    fetched, _ = _fetch(ECB)
+    benchmark = FinancialSourceTrustRaise.request(fetched.version, "benchmark", "the publisher",
+                                                  by=people["admin"], channel="api").to_version
+    real = validity_service.issued_context
+
+    def before_step_10(result, scenario):
+        context = real(result, scenario)
+        context.pop("feed_sources", None)
+        return context
+
+    monkeypatch.setattr(validity_service, "issued_context", before_step_10)
+    result, card = _carded(deployment, people, as_of=TODAY, evidence=FED_BY_ECB)
+    assert "feed_sources" not in card.card["issued"]
+    assert _receipt(result, keys).code == "source_not_authoritative"
+    FinancialSourceTrustRaise.request(benchmark, "authoritative", "the publisher", by=people["admin"],
+                                      channel="api").approve(by=people["second"], channel="api")
+    refused = _receipt(result, keys)
+    assert (refused.receipt, refused.code) == (None, "source_missing") and "records no state" in refused.detail
+
+
+def test_nit1_a_dripping_answer_is_cut_off_at_the_fetch_deadline(monkeypatch):
+    clock = iter([0.0, 1.0, 2.0, feeds.FETCH_DEADLINE_SECONDS + 3.0])
+    monkeypatch.setattr(feeds.time, "monotonic", lambda: next(clock))
+
+    class Dripping:
+        status_code = 200
+
+        def iter_content(self, _size):
+            yield b"{"
+            yield b"}"
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(feeds.outbound, "get", lambda url, **kwargs: Dripping())
+    request = engine.request_for(engine.REGISTRY[ECB], as_of=TODAY, explicit=False, today=TODAY)
+    with pytest.raises(feeds.TransportFailed) as failed:
+        feeds.OutboundTransport().send(request, "")
+    assert failed.value.code == "fetch_deadline_exceeded"
+
+
+def test_nit2_bls_today_is_today_in_washington_too():
+    """At 23:30 in New York on 13 Oct the UTC date is the 14th: an as-of date of the
+    13th is BLS's own today, and accepted; the 12th is a past vintage, refused."""
+    late = datetime(2026, 10, 14, 3, 30, tzinfo=timezone.utc)
+    assert engine.us_eastern_date(late) == date(2026, 10, 13)
+    assert engine.us_eastern_date(datetime(2026, 12, 14, 3, 30, tzinfo=timezone.utc)) == date(2026, 12, 13)
+    feed = engine.REGISTRY[PPI]
+    accepted = engine.request_for(feed, as_of=date(2026, 10, 13), explicit=True, today=late.date(),
+                                  provider_today=engine.us_eastern_date(late))
+    assert accepted.body["endyear"] == "2026"
+    with pytest.raises(engine.FeedRefused) as refused:
+        engine.request_for(feed, as_of=date(2026, 10, 12), explicit=True, today=late.date(),
+                           provider_today=engine.us_eastern_date(late))
+    assert refused.value.code == "as_of_unsupported"
+
+
+def test_nit3_data_health_shows_citations_outside_the_registry(staging, people, monkeypatch):
+    monkeypatch.setattr(feeds.timezone, "now", lambda: NOW)
+    CustomerParameterSet.record(
+        staging, "rates", {"variables": {
+            "notification_fixed_cost": _entry("money", "40000", evidence_ref="financial-source:no-such-feed typo"),
+            "notification_unit_cost": _entry("money_per_unit", "2", evidence_ref=f"Financial-Source:{ECB}"),
+        }}, author=people["analyst"],
+    )
+    body = json.loads(_health(_client(people["owner"]), staging).content)
+    assert body["unregistered_citations"] == [
+        {"parameter": "notification_fixed_cost", "in": "parameter-set:rates:v1", "cites": "no-such-feed",
+         "because": "source_missing"},
+        {"parameter": "notification_unit_cost", "in": "parameter-set:rates:v1", "cites": None,
+         "because": "source_reference_malformed"},
+    ]
+    assert body["unregistered_citations_truncated"] is False
+
+
+def test_nit4_a_payload_seen_before_is_the_version_that_holds_it(reviewed, staging):
+    """Deduplication is over every version of the source: A, B, then A again is
+    recorded v1, recorded v2 and unchanged v1; the latest version stays v2, and a run
+    as of today uses it."""
+    reviewed(ECB)
+    raw = fixture(FILES[ECB])
+    other = raw.replace(f",{_rows(raw)[1][7]},".encode(), b",0.99999,", 1)
+    a, _ = _fetch(ECB, raw)
+    b, _ = _fetch(ECB, other)
+    again, _ = _fetch(ECB, raw)
+    assert [(o.outcome, o.version.version) for o in (a, b, again)] == [("recorded", 1), ("recorded", 2),
+                                                                       ("unchanged", 1)]
+    assert feeds.source_state(ECB, deployment=staging, as_of=TODAY)["used_version"]["version"] == 2

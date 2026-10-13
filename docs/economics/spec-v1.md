@@ -4474,6 +4474,19 @@ so is one the observation contract refuses (the money engine's code, such as
 `observation_duplicate`). An answer over 4 MiB is not read (`response_too_large`).
 Nothing of a refused answer is written but the fetch's own record of its code.
 
+**As asked** (review round 1, LOW-1). Each adapter checks the count and the range it
+asked for, so an answer cut at a line boundary is refused as `feed_partial`:
+
+- ECB: exactly `lastNObservations` rates of each currency, all three on the same days;
+- H.10: exactly `lastobs` business days, or, as of a date, every weekday of the
+  window asked (`ND` for a day with no rate). The weekday listing and the unit row
+  are this adapter's reading of the DDP format, and fail closed until the owner's
+  recording confirms them (LOW-5);
+- FRED: every month from the `observation_start` asked, with no gap (`.` is a month
+  with no value);
+- BLS: every month from January of the first year asked to the newest (`-` is a month
+  with no value).
+
 ### 28.3 The response hash and the snapshot store
 
 The response hash is the SHA-256 of the answer's NORMALISED payload
@@ -4491,7 +4504,10 @@ checks, and the committed-file loader (`register_snapshot`) now calls it too. Ev
 fetch whose payload is new records a NEW platform-wide version, append-only; a fetch
 whose payload hash is already recorded for the source writes no version
 (deduplicated by response hash) and names the version that holds it. A changed value
-is a new version; a changed timestamp is not.
+is a new version; a changed timestamp is not. Deduplication is over every version of
+the source: a payload seen before (A, then B, then A again) is the version that holds
+it (v1), and the latest version stays v2 (review round 1, NIT-4). This is benign for
+these feeds, whose windows only move forward.
 
 A fetched source is registered as `unverified`, and only the raise path lifts it
 (section 6.1). The loader never records `authoritative`, and a fetched version never
@@ -4516,10 +4532,21 @@ inherits the tier of the version before it.
 Then it sends one request through the platform's outbound client (`safety.outbound`):
 no redirect is followed, nothing is taken from the environment (no `.netrc`, no
 proxy), the connect and read timeouts are 5 and 30 seconds, and its proxy, if a
-deployment needs one, is `ECONOMICS_FEED_PROXY`, passed explicitly. The FRED key goes
-in the query (`api_key`) and the BLS key in the JSON body (`registrationkey`). Each is
-withheld from any error, never printed, logged or recorded, and the source version
-records the URL without it.
+deployment needs one, is `ECONOMICS_FEED_PROXY`, passed explicitly. The whole answer
+must be read within 120 seconds (`FETCH_DEADLINE_SECONDS`), or the fetch is cut off
+(`fetch_deadline_exceeded`; review round 1, NIT-1). The FRED key goes in the query
+(`api_key`) and the BLS key in the JSON body (`registrationkey`). Each is withheld from
+any error, never printed, logged or recorded, and the source version records the URL
+without it.
+
+The HTTP client's own log records are covered too (review round 1, MEDIUM-1). urllib3
+records every request line at DEBUG, query and all. A filter that `safety.outbound`
+puts on each of urllib3's loggers withholds every query string in those records, and
+every value the call in flight withholds. So the FRED key reaches no log record
+whatever the deployment's LOGGING keeps.
+
+BLS is asked for today only. Today is today in UTC or in Washington, BLS's own date,
+so `--as-of` at 23:30 in New York still names that day (review round 1, NIT-2).
 
 Every fetch that sent a request is recorded once, append-only
 (`FinancialSourceFetch`): `recorded`, `unchanged` or `refused` with its code only
@@ -4541,17 +4568,37 @@ index value's month's last day) to that date. Its state:
 | `blocked` | age past twice the SLA | the same, and the Validity Card's claim is stale and a receipt is refused (`source_stale`) |
 | `missing` | no version a run may use, no observation by the date, or a key the registry does not hold | the same, and a receipt is refused (`source_missing`) |
 
-**The version a run uses.** A run uses the latest version of the key that passes the
-gate (`FinancialSource.objects.usable_for_production` for the run's deployment: a
-reviewed licence, not synthetic, and in a production run above `unverified`). A
-newer fetch, still `unverified`, waits for a raise, and freshness then marks the run
-stale if the version that passes the gate is old. Fetched versions never inherit a
-tier (the owner's decision of 13 Oct 2026, the conservative default; section 28.11
-has the recommendation).
+**The version a run uses** (the lead's decision on review round 1, MEDIUM-2, which
+replaces the first one). A run uses the newest usable version whose coverage includes
+its as-of date. Usable means:
+
+- it passes the gate (`FinancialSource.objects.usable_for_production` for the run's
+  deployment: a reviewed licence, not synthetic, and in a production run above
+  `unverified`);
+- no raise of the same payload supersedes it.
+
+Covering the as-of date means the version holds an observation dated on or before it.
+A newer version whose observations all fall after a back-dated run's date does not
+cover it, and the older version that does is used. A date after a version's newest
+observation is covered, and only ages it. When no usable version covers the date, the
+source is `missing`. A newer fetch, still `unverified`, waits for a raise. Fetched
+versions never inherit a tier (the owner's decision of 13 Oct 2026, the conservative
+default; section 28.11 has the recommendation). The card, the receipt and the
+data-health route all read the same choice.
 
 **Which figures a source feeds.** A parameter rests on a feed source when its
-`evidence_ref` names one: `financial-source:<key>`, then the end or a space and any
-text. A reference to a key the registry does not hold fails closed, as `missing`.
+`evidence_ref` names one: `financial-source:<key>` at its very start, then the end or a
+space and any text, once. A reference to a key the registry does not hold fails closed,
+as `missing`. A near miss also fails closed (review round 1, LOW-2), as `missing` with
+the code `source_reference_malformed`, and never escapes the feed rules. A near miss
+is anything else that reads as a citation:
+
+- text or a space before it;
+- another case;
+- a space or an underscore for the hyphen;
+- a space after the colon;
+- punctuation after the key;
+- a second citation.
 
 **The card and the grade.** When a card is issued, the state of each source the run's
 figures name is read at the run's as-of date and kept in the card's `issued` section,
@@ -4566,7 +4613,10 @@ card says `claim: "stale"` where one is blocked or missing (`current` otherwise)
 
 **The receipt.** A receipt whose card records a source blocked is refused
 (`source_stale`), and one missing (`source_missing`), before anything is built or
-signed. Nothing is recorded.
+signed. Nothing is recorded. The sources are read from the run's own inputs as well
+as from the card (review round 1, LOW-3). So a card that recorded none, one stored
+before this step, never lets a run that rests on one skip the checks: such a receipt
+is refused `source_missing`, after the authority check of section 28.6.
 
 ### 28.6 The production receipt's authority rule
 
@@ -4599,6 +4649,11 @@ deployment can read, on today's date (UTC), with:
   supersedes) that name it, with the code that stops them, at most 200
   (`unknowns_truncated`).
 
+Beside the sources, `unregistered_citations` lists the deployment's current parameters
+whose evidence cites a key the registry does not hold (`source_missing`) or cites one
+in a form that is not a citation (`source_reference_malformed`). Each fails closed, and
+this is where a receipt's refusal for one is explained (review round 1, NIT-3).
+
 The route follows step 6's conventions: a signed-in account; a deployment the caller
 cannot see is 404 whether or not it exists; a viewer reads. It takes no query
 parameter (400 for any) and answers canonical JSON: the same stored rows on the same
@@ -4625,6 +4680,8 @@ its view (`test_a_feed_fault_never_takes_down_a_stop`).
 | `feed_value_malformed` | a date, period or value not in the documented form |
 | `feed_empty` | no observation |
 | `fetch_conflict` | another fetch recorded a version of the source at the same moment |
+| `fetch_deadline_exceeded` | the answer was not read whole within `FETCH_DEADLINE_SECONDS` (120) |
+| `source_reference_malformed` | a figure's evidence reads as a citation of a feed source but is not one exactly; it fails closed (section 28.5) |
 | `source_stale` | a receipt whose card records a source past twice its SLA |
 | `source_missing` | a receipt whose card records a source missing, or with no version a run may use now |
 | `source_not_authoritative` | a production receipt behind an FX or cost-index source below `authoritative` |
@@ -4661,10 +4718,14 @@ terminate or revoke path, and nothing a stop reads is written by them:
 Nothing calls a real host:
 
 - every test in `tests/test_economics_feeds.py` runs under a socket guard that refuses
-  every connection and name lookup that is not loopback, and one test drives the real
-  transport into it (`test_the_real_transport_reaches_no_real_host`);
-- a fresh interpreter whose sockets refuse everything loads Django and imports the feed
-  modules, the route and the command (`test_importing_the_feed_modules_reaches_no_host`).
+  every connection and name lookup that is not loopback;
+- one test drives the real transport into the guard
+  (`test_the_real_transport_is_stopped_by_the_guard`). It, and the guard's own test,
+  aim only at a `.invalid` name and a TEST-NET address, never at a provider's host, so
+  a guard that regressed could reach no publisher (review round 1, LOW-4);
+- a fresh pytest whose sockets refuse everything before Django loads
+  (`tests/economics_no_network.py`) imports the feed modules, the route and the
+  command (`test_importing_the_feed_modules_reaches_no_host`).
 
 `FinancialSourceFetch` names no account and no deployment, so removing an operator, a
 stop, never writes one.
@@ -4681,8 +4742,14 @@ What only the owner's keys or licences stand between this step and live fetching
    the owner's review of ECB's, the Fed's, FRED's (and each FRED series' own
    copyright) and BLS's terms.
 4. **The recordings**: each fixture replaced by a recording of the request its README
-   names (FRED and BLS v2 with the keys). The H.10 package id, the DDP unit spellings
-   and the PPI final-demand base (`2009-11=100`) are to be confirmed by them.
+   names (FRED and BLS v2 with the keys). They confirm:
+   - the H.10 package id;
+   - the DDP unit spellings and the `Currency:` row (review round 1, LOW-5: the
+     reviewer recalls the unit row as `Currency:_Per_EUR`, with the `Currency:` row
+     naming the numerator; the adapter fails closed, `feed_mismatch`, until a
+     recording shows which, and then the convention is read from both rows);
+   - the DDP's listing of every weekday of an as-of window;
+   - the PPI final-demand base (`2009-11=100`).
 5. **The raises**: a fetched version reaches a production receipt only once two admins
    raise it to `authoritative`.
 
@@ -4695,7 +4762,8 @@ Decisions this step takes, which the owner may change:
    raise before a production receipt may rest on it.
 2. **One step per line.** A stale source lowers a line's grade one step, once, however
    many figures it feeds, as every downgrade does (section 12.5); it names them all.
-   Alternative: one step per figure it feeds.
+   Alternative: one step per figure it feeds, the brief's literal wording. Kept as
+   built and held for the owner's decision (review round 1, LOW-6).
 3. **The age is measured on the data's dates, whatever vintage holds them**, so a run
    as of a date before the fetch still sees how far the series reached. Alternative:
    count only observations of a vintage published by the as-of date: stricter, and it
@@ -4707,3 +4775,7 @@ Decisions this step takes, which the owner may change:
    tenant's own snapshot under a registry key is not.
 6. **The SLAs**: ECB 3 and H.10 10 (the brief), FRED and BLS monthly 45 (a month's
    value appears about two weeks after the month ends).
+7. **The version a run uses covers its as-of date** (the lead's decision on review
+   round 1, MEDIUM-2; section 28.5). It replaces the first decision, the latest
+   version that passes the gate whatever the run's date, which read a back-dated run
+   as `missing`.

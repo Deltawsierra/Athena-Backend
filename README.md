@@ -613,8 +613,11 @@ past twice its SLA makes the Validity Card's claim stale and refuses the receipt
 `authoritative` (`source_not_authoritative`). `GET
 /api/assurance/deployments/<uuid>/economics/data-health/` lists each feed's latest
 version, age, SLA, state, last fetch failure (its code) and the Unknowns it causes.
-The adapters are tested against format-faithful fixtures, not recorded responses, in
-`tests/fixtures/economics_feeds/`, under a socket guard; none of it is a stop.
+A run uses the newest usable version of a source whose observations cover its as-of
+date. The HTTP client's own log records (urllib3's request lines) withhold every query
+string, so the FRED key reaches no log. The adapters are tested against format-faithful
+fixtures, not recorded responses, in `tests/fixtures/economics_feeds/`, under a socket
+guard; none of it is a stop.
 
 ## When a dependency fails
 

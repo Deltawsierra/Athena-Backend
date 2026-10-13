@@ -66,7 +66,7 @@ from types import MappingProxyType
 from urllib.parse import urlencode
 
 from .cost_index import IndexPoint, period_end
-from .fx import FXRate
+from .fx import FXBook, FXRate
 from .money import MoneyRefused, parse_decimal
 from .provenance import LicenseClass, TrustTier
 from .snapshot import Snapshot
@@ -105,6 +105,14 @@ FEED_REFUSALS: Mapping[str, str] = MappingProxyType(
         "feed_value_malformed": "a date, period or value in the answer is not in the provider's documented form",
         "feed_empty": "the answer holds no observation",
         "fetch_conflict": "another fetch of the same source recorded a version at the same moment: nothing was written",
+        "fetch_deadline_exceeded": (
+            "the answer was not read whole within the fetch's own deadline (FETCH_DEADLINE_SECONDS): a provider that "
+            "drips its answer is cut off, and nothing of it is kept"
+        ),
+        "source_reference_malformed": (
+            "a figure's evidence reads as a citation of a feed source but is not one exactly "
+            "('financial-source:<key>' at its start, once): it fails closed, never escaping the feed rules"
+        ),
     }
 )
 
@@ -313,16 +321,33 @@ def freshness_state(age_days: int | None, sla_days: int) -> str:
 #: prefix, the registry key, then the end or a space and anything at all.
 EVIDENCE_PREFIX = "financial-source:"
 _EVIDENCE = re.compile(r"financial-source:([a-z0-9][a-z0-9-]*)(?:\s|$)")
+#: Anything that reads as a citation of a feed source, whatever its case, spacing or
+#: separator: ``Financial-Source:``, ``financial source :``, ``financial_source:``.
+_NEAR_MISS = re.compile(r"financial[\s_-]*source\s*:", re.IGNORECASE)
+#: What a near-miss citation is read as (review round 1, LOW-2): never a registry
+#: key, so the figure fails closed -- ``missing``, the grade lowered, the card's
+#: claim stale and its receipt refused (``source_reference_malformed``) -- rather
+#: than escaping every feed rule.
+MALFORMED_REFERENCE = "!malformed-reference"
 
 
 def feed_reference(evidence_ref) -> str | None:
-    """The source key ``evidence_ref`` names (``financial-source:<key>``, then the end
-    or a space), or None where it names none. A key the registry does not hold is
-    returned too: a reference to it fails closed (``missing``), never silently."""
+    """The source key ``evidence_ref`` names, or None where it cites none. A
+    citation is exactly ``financial-source:<key>`` at the very start, then the end or
+    a space, and the text cites a feed source once. Anything else that reads as a
+    citation -- leading text or space, another case, a separator other than ``-``,
+    punctuation after the key, a second citation -- is :data:`MALFORMED_REFERENCE`.
+    A key the registry does not hold is returned too, and fails closed as
+    ``missing``. Neither ever escapes the feed rules."""
     if not isinstance(evidence_ref, str):
         return None
+    citations = _NEAR_MISS.findall(evidence_ref)
+    if not citations:
+        return None
     match = _EVIDENCE.match(evidence_ref)
-    return match.group(1) if match else None
+    if match is None or len(citations) != 1:
+        return MALFORMED_REFERENCE
+    return match.group(1)
 
 
 def referenced_keys(parameters) -> dict[str, list[str]]:
@@ -357,11 +382,21 @@ class FeedRequest:
         return self.url + ("?" + urlencode(self.params) if self.params else "")
 
 
-def request_for(feed: FeedSource, *, as_of: date, explicit: bool, today: date, base_url: str | None = None) -> FeedRequest:
+def request_for(
+    feed: FeedSource,
+    *,
+    as_of: date,
+    explicit: bool,
+    today: date,
+    base_url: str | None = None,
+    provider_today: date | None = None,
+) -> FeedRequest:
     """The request for ``feed`` as known on ``as_of``. ``explicit``: the operator
     named the date (``--as-of``); otherwise it is today, and the request asks for
     the latest observations, so a fetch with nothing new answers the same payload.
-    ``base_url`` replaces the registry's (a test's loopback service)."""
+    ``today`` is the UTC date; ``provider_today`` the provider's own (BLS: Washington,
+    :func:`us_eastern_date`), which an as-of date may name too. ``base_url`` replaces
+    the registry's (a test's loopback service)."""
     if as_of > today:
         raise FeedRefused("as_of_in_future", f"{as_of} is after {today}")
     url = (base_url if base_url is not None else feed.base_url) + feed.path
@@ -393,7 +428,10 @@ def request_for(feed: FeedSource, *, as_of: date, explicit: bool, today: date, b
         )
         return FeedRequest("GET", url, params, key_in="query", key_name="api_key")
     if feed.adapter == "bls":
-        if as_of != today:
+        # BLS serves the values current now. Today is today in UTC or in Washington,
+        # BLS's own date (review round 1, NIT-2: at 23:30 in New York the UTC date is
+        # already tomorrow); any earlier date is a past vintage BLS cannot give.
+        if as_of not in {today, provider_today or today}:
             raise FeedRefused("as_of_unsupported", f"BLS serves current values only, not those known on {as_of}")
         body = MappingProxyType(
             {
@@ -497,6 +535,16 @@ def ecb_fixing_time(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, 14, 15, tzinfo=offset)
 
 
+def us_eastern_date(instant: datetime) -> date:
+    """The date in Washington (BLS's, the Fed's) at ``instant``: UTC-4 from the second
+    Sunday of March to the first Sunday of November, UTC-5 otherwise (switching at
+    the day's start, which is close enough for a date)."""
+    utc = instant.astimezone(timezone.utc)
+    standard = (utc - timedelta(hours=5)).date()
+    summer = _nth_sunday(standard.year, 3, 2) <= standard < _nth_sunday(standard.year, 11, 1)
+    return (utc - timedelta(hours=4)).date() if summer else standard
+
+
 def h10_noon(day: date) -> datetime:
     """Noon in New York on ``day`` (EST, UTC-5; EDT, UTC-4 from the second Sunday of
     March to the first Sunday of November): the H.10 noon buying rate's instant."""
@@ -550,7 +598,7 @@ ECB_COLUMNS = ("KEY", "FREQ", "CURRENCY", "CURRENCY_DENOM", "EXR_TYPE", "EXR_SUF
                "OBS_STATUS", "UNIT_MULT")
 
 
-def _ecb(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[FXRate]:
+def _ecb(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedRequest) -> list[FXRate]:
     rows = _csv(raw)
     header, lines = rows[0], rows[1:]
     if len(set(header)) != len(header):
@@ -601,6 +649,17 @@ def _ecb(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[FXRate]
         raise FeedRefused("feed_empty", "no observation")
     if seen != wanted:
         raise FeedRefused("feed_partial", f"no rate for {sorted(wanted - seen)}")
+    # A day held twice is the observation contract's to refuse, before it is counted.
+    FXBook(rates)
+    # As asked (review round 1, LOW-1): the last N observations of each currency, all
+    # published on the same days, so an answer cut at a line boundary is refused too.
+    days = {currency: sorted(r.effective_date for r in rates if r.quote == currency) for currency in wanted}
+    asked = int(_param(request, "lastNObservations"))
+    short = sorted(currency for currency, dates in days.items() if len(dates) != asked)
+    if short or len({tuple(dates) for dates in days.values()}) != 1:
+        raise FeedRefused(
+            "feed_partial", f"{asked} observations of each currency on the same days were asked; {short or 'days differ'}"
+        )
     return rates
 
 
@@ -611,7 +670,7 @@ H10_HEADINGS = ("Series Description", "Unit:", "Multiplier:", "Currency:", "Uniq
 H10_NO_DATA = "ND"
 
 
-def _h10(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[FXRate]:
+def _h10(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedRequest) -> list[FXRate]:
     rows = _csv(raw)
     if len(rows) < len(H10_HEADINGS):
         raise FeedRefused("feed_partial", "fewer heading lines than the DDP writes")
@@ -667,7 +726,37 @@ def _h10(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[FXRate]
             )
     if not rates:
         raise FeedRefused("feed_empty", "no observation")
+    # As asked (review round 1, LOW-1): the last N business days, or every weekday of
+    # the window asked for (a day with no rate is ND), so a cut answer is refused.
+    FXBook(rates)
+    days = [_day(line[0], "date") for line in lines]
+    if len(set(days)) != len(days) or days != sorted(days):
+        raise FeedRefused("feed_mismatch", "a business day is listed twice or out of order")
+    window = (_param(request, "from"), _param(request, "to"))
+    if all(window):
+        start, end = (datetime.strptime(value, "%m/%d/%Y").date() for value in window)
+        expected = [start + timedelta(days=n) for n in range((end - start).days + 1)]
+        expected = [day for day in expected if day.weekday() < 5]
+        if days != expected:
+            raise FeedRefused("feed_partial", f"every weekday from {start} to {end} was asked; {len(days)} lines came")
+    elif len(days) != int(_param(request, "lastobs")):
+        raise FeedRefused("feed_partial", f"the last {_param(request, 'lastobs')} business days were asked; {len(days)} came")
     return rates
+
+
+def _param(request: FeedRequest, name: str) -> str:
+    """The value ``request`` asked ``name`` with ("" where it did not ask it)."""
+    return next((value for key, value in request.params if key == name), "")
+
+
+def _months(first: str, last: str) -> list[str]:
+    """Every month from ``first`` to ``last``, both ``YYYY-MM``, in order."""
+    year, month = int(first[:4]), int(first[5:7])
+    found = []
+    while f"{year:04d}-{month:02d}" <= last:
+        found.append(f"{year:04d}-{month:02d}")
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return found
 
 
 # --------------------------------------------------------------------- JSON
@@ -685,7 +774,7 @@ FRED_OBSERVATION_FIELDS = frozenset({"realtime_start", "realtime_end", "date", "
 FRED_MISSING = "."
 
 
-def _fred(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[IndexPoint]:
+def _fred(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedRequest) -> list[IndexPoint]:
     document = _strict_json(raw)
     if isinstance(document, dict) and "error_code" in document:
         raise FeedRefused("feed_provider_error", f"FRED error_code {document.get('error_code')!r}")
@@ -735,6 +824,11 @@ def _fred(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[IndexP
         )
     if not points:
         raise FeedRefused("feed_empty", "no observation with a value")
+    # As asked (review round 1, LOW-1): every month from the start asked, none
+    # skipped (FRED writes "." for a month with no value).
+    start = _param(request, "observation_start")
+    if document["observation_start"] != start or sorted(periods) != _months(start[:7], max(periods)):
+        raise FeedRefused("feed_partial", f"every month from {start} was asked, without a gap")
     return points
 
 
@@ -751,7 +845,7 @@ _BLS_PERIOD = re.compile(r"M(0[1-9]|1[0-3])")
 _YEAR = re.compile(r"[0-9]{4}")
 
 
-def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[IndexPoint]:
+def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedRequest) -> list[IndexPoint]:
     document = _strict_json(raw)
     if not isinstance(document, dict) or set(document) != BLS_FIELDS:
         raise FeedRefused("feed_malformed", f"the BLS answer has exactly the fields {sorted(BLS_FIELDS)}")
@@ -781,12 +875,14 @@ def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[IndexPo
             raise FeedRefused("feed_value_malformed", f"value {number}: year {year!r}, period {month!r}")
         if year not in years:
             raise FeedRefused("feed_mismatch", f"value {number}: year {year} was not asked for")
-        if month == BLS_ANNUAL or entry["value"] == BLS_MISSING:
+        if month == BLS_ANNUAL:
             continue
         period = f"{year}-{month[1:]}"
         if period in periods:
             raise FeedRefused("feed_mismatch", f"the month {period} is listed twice")
         periods.add(period)
+        if entry["value"] == BLS_MISSING:
+            continue
         if period_end(period) > as_of:
             raise FeedRefused("feed_mismatch", f"value {number}: {period} has not ended on {as_of}")
         points.append(
@@ -804,6 +900,11 @@ def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[IndexPo
         )
     if not points:
         raise FeedRefused("feed_empty", "no monthly value")
+    # As asked (review round 1, LOW-1): every month from January of the first year
+    # asked to the newest, none skipped (BLS writes "-" for a month with no value).
+    first = f"{request.body['startyear']}-01"
+    if sorted(periods) != _months(first, max(periods)):
+        raise FeedRefused("feed_partial", f"every month from {first} was asked, without a gap")
     return points
 
 
@@ -812,10 +913,12 @@ def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str) -> list[IndexPo
 _ADAPTERS = {"ecb": _ecb, "h10": _h10, "fred": _fred, "bls": _bls}
 
 
-def parse(feed: FeedSource, raw: bytes, *, as_of: date, retrieved_at: datetime, url: str) -> Snapshot:
-    """``raw``, ``feed``'s answer for ``as_of``, as an observation snapshot: the
-    source version it is registered as (trust tier ``unverified``, the registry's
-    licence class, retrieved at ``retrieved_at`` from ``url``), and every observation,
+def parse(feed: FeedSource, raw: bytes, *, as_of: date, retrieved_at: datetime, request: FeedRequest) -> Snapshot:
+    """``raw``, ``feed``'s answer to ``request`` for ``as_of``, as an observation
+    snapshot: the source version it is registered as (trust tier ``unverified``, the
+    registry's licence class, retrieved at ``retrieved_at`` from the request's
+    recorded URL, which carries no key), and every observation it holds -- as many as
+    were asked, over the range asked --
     each carrying the payload's hash. Raises :class:`FeedRefused` (or the money
     engine's :class:`.money.MoneyRefused` for a value the observation contract
     refuses) on any broken rule: nothing is half-read."""
@@ -824,7 +927,7 @@ def parse(feed: FeedSource, raw: bytes, *, as_of: date, retrieved_at: datetime, 
     if len(raw) > MAX_RESPONSE_BYTES:
         raise FeedRefused("response_too_large", f"{len(raw)} bytes")
     digest = payload_hash(feed, raw)
-    observations = _ADAPTERS[feed.adapter](feed, raw, as_of, digest)
+    observations = _ADAPTERS[feed.adapter](feed, raw, as_of, digest, request)
     rates = tuple(o for o in observations if isinstance(o, FXRate))
     points = tuple(o for o in observations if isinstance(o, IndexPoint))
     snapshot = Snapshot(
@@ -836,7 +939,7 @@ def parse(feed: FeedSource, raw: bytes, *, as_of: date, retrieved_at: datetime, 
                 "source_key": feed.key,
                 "provider": feed.provider,
                 "dataset": feed.dataset,
-                "url": url,
+                "url": request.recorded_url,
                 "license_class": feed.license_class,
                 # A fetched source is never trusted above unverified by its fetch: a
                 # person raises it (spec, section 6.1).
@@ -865,6 +968,7 @@ __all__ = [
     "FRESH",
     "FRESHNESS_SLA_DAYS",
     "FX",
+    "MALFORMED_REFERENCE",
     "MAX_RESPONSE_BYTES",
     "MISSING",
     "NORMALISATION",
@@ -884,4 +988,5 @@ __all__ = [
     "referenced_keys",
     "request_for",
     "source",
+    "us_eastern_date",
 ]

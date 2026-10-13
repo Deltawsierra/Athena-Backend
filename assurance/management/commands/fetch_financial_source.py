@@ -44,7 +44,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("source", nargs="?", help="a key of the feed registry")
-        parser.add_argument("--as-of", dest="as_of", help="the date the values are as known on (YYYY-MM-DD)")
+        parser.add_argument(
+            "--as-of",
+            dest="as_of",
+            help=(
+                "the date the values are as known on (YYYY-MM-DD; default today, UTC). FRED reads that date's "
+                "vintage; ECB and H.10 the rates through it; BLS serves current values only, so only today, in UTC "
+                "or in Washington"
+            ),
+        )
         parser.add_argument("--list", action="store_true", help="print the feed registry's keys and stop")
 
     def handle(self, *args, **options):

@@ -34,8 +34,13 @@ What the files assume about each format, and so what a recording checks:
   day. A day with no rate is `ND`. The euro and the pound are quoted in US dollars
   per unit (`RXI$US_N.B.EU`, unit `USD:_Per_EUR`; `RXI$US_N.B.UK`, unit
   `USD:_Per_GBP`), and the yen per US dollar (`RXI_N.B.JA`, `JPY:_Per_USD`). The
-  unit spellings are the ones least certain without a recording. The DDP package id
-  in the request is the H.10 package's, to be confirmed by the owner's recording.
+  unit spellings are the ones least certain without a recording: the reviewer of #161
+  recalls the unit row as `Currency:_Per_EUR`, with the `Currency:` row naming the
+  numerator. Until a recording shows which, the adapter fails closed
+  (`feed_mismatch`); then it reads the convention from both rows. The DDP package id
+  in the request is the H.10 package's, and an as-of request is assumed to list every
+  weekday of its window (`ND` for a holiday). Both are to be confirmed by the owner's
+  recording.
 - FRED: the 13 documented top-level fields. Every observation carries the requested
   real-time window, and a month with no value is `.` (October 2025 here, as in the
   documented example's form).

@@ -521,6 +521,11 @@ class _Tee:
 
 _FORMAT = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s")
 _HARNESS_LOGGERS = ("urllib3", "asyncio", "faker")
+#: The HTTP client's logger: its records are searched on the paths that set
+#: ``World.client_records`` (the feeds path), as its own filters leave them for a
+#: handler (safety.outbound's ``_ClientRecordFilter``). Everywhere else it is the
+#: harness's, as before.
+_CLIENT_LOGGER = "urllib3"
 
 
 def _record_line(record: logging.LogRecord) -> str:
@@ -580,6 +585,8 @@ class World:
     paths: list[PathRun] = field(default_factory=list)
     called: set[tuple[str, str]] = field(default_factory=set)
     timed: list[Timed] = field(default_factory=list)
+    #: Whether urllib3's records are searched too (the feeds path).
+    client_records: bool = False
 
     # -- set-up ----------------------------------------------------------------
 
@@ -671,8 +678,14 @@ class World:
         lines = self.lines
         original = logging.Logger.handle
 
+        world = self
+
         def handle(logger, record):
-            if record.name.split(".", 1)[0] not in _HARNESS_LOGGERS:
+            root = record.name.split(".", 1)[0]
+            if root not in _HARNESS_LOGGERS:
+                lines.write(_record_line(record))
+            elif root == _CLIENT_LOGGER and world.client_records and logger.filter(record):
+                # As a handler receives it: after the logger's own filters.
                 lines.write(_record_line(record))
             return original(logger, record)
 
@@ -1438,15 +1451,20 @@ class World:
             return 404, {"detail": f"no {method} {path}"}
 
         fake = Fake("feeds", provider)
+        # urllib3's own records of these requests are searched too: FRED's key is in
+        # the query of the request line it records at DEBUG.
+        self.client_records = True
         try:
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr(economics_feeds, "base_url", lambda feed: fake.base)
                 self.command(docs, "fetch_financial_source", "fred-cpiaucsl")
+                signals["client_request_line"] = "/fred/series/observations?" in "".join(self.lines._parts)
                 with _in_mode(fake, "echo"):
                     refused, _ = self.command(docs, "fetch_financial_source", "bls-ppi-final-demand", raises=True)
                 with override_settings(ECONOMICS_BLS_API_KEY=""):
                     missing, _ = self.command(docs, "fetch_financial_source", "bls-ahe-total-private", raises=True)
         finally:
+            self.client_records = False
             fake.close()
         from assurance.economics.models import FinancialSourceFetch
 
@@ -2031,6 +2049,8 @@ def test_every_path_ran(observed):
     assert s["feeds"]["bls_refused"] is True and s["feeds"]["no_key_refused"] is True, s["feeds"]
     assert s["feeds"]["provider_got_key"] is True and s["feeds"]["bls_posted"] is True, s["feeds"]
     assert s["feeds"]["data_health"] == 200, s["feeds"]
+    # urllib3's request-line record was searched: the channel is live, not vacuous.
+    assert s["feeds"]["client_request_line"] is True, s["feeds"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 
 
