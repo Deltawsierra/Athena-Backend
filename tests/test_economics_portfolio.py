@@ -32,6 +32,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -1343,6 +1344,59 @@ def test_no_transaction_or_lock_is_held_during_the_draws(monkeypatch):
     assert response.status_code == 201, response.content
     assert probes and [p[0] for p in probes].count("scenario") == 4  # two scenarios, sampled twice
     assert all(in_atomic is False and autocommit is True for _, in_atomic, autocommit in probes), probes
+
+
+def test_a_portfolio_at_capacity_is_refused_at_once_and_never_holds_a_stop(deployment, people, monkeypatch):
+    """THE SAFETY RULE with the economics run cap (spec 32 and 33.9; the audit's S1):
+    with the deployment's slot and the host's only slot held, the portfolio POST is
+    answered at once, 503 ``economics_capacity`` with ``Retry-After``: nothing is drawn
+    or recorded. A stranger is still 404 and a viewer 403 before any slot; the group
+    route and the report take none; and the scan's Stop is answered 202 and saved
+    meanwhile. Given back, the same POST totals (201)."""
+    from assurance.economics import capacity
+    from pentest.models import PentestScan
+
+    monkeypatch.setenv("ATHENA_ECONOMICS_RUN_CAP", "1")
+    monkeypatch.setenv("ATHENA_ECONOMICS_RUN_CAP_PER_TENANT", "1")
+    made_and_simulated(deployment, people["analyst"])
+    _totalled(deployment, people, seed=1)
+    drawn = []
+    real = portfolio.simulate_portfolio
+
+    def counted(*args, **kwargs):
+        drawn.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(portfolio, "simulate_portfolio", counted)
+    analyst = _client(people["analyst"])
+    slots, why = capacity.acquire(str(deployment.uuid))
+    assert slots is not None, why
+    try:
+        began = time.perf_counter()
+        busy = _post(analyst, deployment)
+        took = time.perf_counter() - began
+        assert busy.status_code == 503, busy.content
+        assert busy.json()["code"] == capacity.CODE and busy.json()["recorded"] is False
+        assert busy["Retry-After"] == str(capacity.RETRY_AFTER_SECONDS) and took < 0.5, took
+        other = Deployment.objects.create(name="another-tenant", owner=people["owner"])
+        assert _post(analyst, other).json()["code"] == capacity.CODE  # the host's one slot is held
+        assert _post(_client(people["other"]), deployment).status_code == 404
+        assert _post(_client(people["owner"]), deployment).status_code == 403
+        assert drawn == [] and PortfolioResult.objects.count() == 1
+        reader = _client(people["owner"])
+        assert reader.get(_url(deployment) + "groups/").status_code == 200
+        assert _document(reader, deployment).status_code == 200
+        # A stop never waits on a slot: the scan's Stop is answered and saved.
+        scan = PentestScan.objects.create(user=people["analyst"], target_url="https://offline.invalid/",
+                                          consent=True, status=PentestScan.STATUS_PENDING)
+        stop = analyst.post(f"/api/pentest/scans/{scan.uuid}/stop/", {}, format="json")
+        assert stop.status_code == 202 and stop.json()["stop_saved"] is True, stop.content
+        scan.refresh_from_db()
+        assert scan.stop_requested_at is not None
+    finally:
+        slots.release()
+    assert _post(analyst, deployment).status_code == 201 and len(drawn) == 1
+    assert PortfolioResult.objects.count() == 2
 
 
 def test_a_portfolio_fault_never_takes_down_a_stop():
