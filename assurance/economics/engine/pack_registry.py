@@ -46,7 +46,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from . import pack_healthcare, pack_insurance, pack_saas
+from . import (
+    pack_government,
+    pack_healthcare,
+    pack_insurance,
+    pack_manufacturing,
+    pack_mobility,
+    pack_regulated_enterprise,
+    pack_saas,
+)
 from . import pack_inputs as schemas
 from . import templates as tpl
 from .pack_base import HARM_EXCLUDED, PHYSICAL_WORLD_CAUTION, Pack
@@ -66,7 +74,16 @@ def _banking() -> Pack:
 
 
 def _packs() -> tuple[Pack, ...]:
-    return (_banking(), pack_insurance.PACK, pack_healthcare.PACK, pack_saas.PACK)
+    return (
+        _banking(),
+        pack_insurance.PACK,
+        pack_healthcare.PACK,
+        pack_saas.PACK,
+        pack_regulated_enterprise.PACK,
+        pack_government.PACK,
+        pack_manufacturing.PACK,
+        pack_mobility.PACK,
+    )
 
 
 def _index(packs: tuple[Pack, ...]) -> tuple[Mapping[str, Pack], Mapping[tuple[str, int], tpl.Template]]:

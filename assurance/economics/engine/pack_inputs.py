@@ -233,6 +233,118 @@ def _schemas() -> tuple[PackSchema, ...]:
                 "cloud_spend_per_hour", U.MONEY_PER_HOUR, "the platform's cloud spend per hour", True, "cloud spend"
             ),
         ),
+        _schema(
+            "mythos.economics.regulated-enterprise-pack/v1",
+            "regulated-enterprise",
+            PackInput(
+                "control_obligation_count",
+                U.COUNT,
+                "the control obligations -- regulatory, contractual and policy -- the business processes answer to",
+                True,
+                "control obligations",
+            ),
+            PackInput(
+                "contract_count",
+                U.COUNT,
+                "customer and partner contracts carrying data or service obligations the processes serve",
+                True,
+                "contracts",
+            ),
+            PackInput(
+                "process_margin_per_hour",
+                U.MONEY_PER_HOUR,
+                "the margin the affected business process yields per hour",
+                True,
+                "business processes",
+            ),
+        ),
+        _schema(
+            "mythos.economics.government-pack/v1",
+            "government",
+            PackInput(
+                "mission_cost_per_hour",
+                U.MONEY_PER_HOUR,
+                "the agency's own cost of one hour of the mission's interruption: the replacement service, overtime, "
+                "deferred obligations",
+                True,
+                "mission criticality, downtime",
+            ),
+            PackInput(
+                "response_team_hourly_rate",
+                U.MONEY_PER_HOUR,
+                "the loaded hourly rate of the agency's own response and recovery staff",
+                True,
+                "response/recovery",
+            ),
+            PackInput(
+                "oversight_body_count",
+                U.COUNT,
+                "the oversight bodies the agency reports an incident to: inspectors general, committees, authorities",
+                True,
+                "public-sector constraints",
+            ),
+        ),
+        _schema(
+            "mythos.economics.manufacturing-pack/v1",
+            "manufacturing",
+            PackInput(
+                "units_per_day",
+                U.COUNT_PER_DAY,
+                "units produced per day (units an hour, stated per day: the engine has no per-hour count and converts "
+                "none)",
+                True,
+                "units/hour",
+            ),
+            PackInput("margin_per_unit", U.MONEY_PER_UNIT, "contribution margin per unit produced", True, "units/hour"),
+            PackInput(
+                "downtime_cost_per_hour",
+                U.MONEY_PER_HOUR,
+                "the plant's cost of one idle hour beyond the margin lost: idle labour, restart, standing charges",
+                True,
+                "downtime cost",
+            ),
+            PackInput(
+                "equipment_count", U.COUNT, "production equipment units: lines, robots, controllers", True,
+                "equipment value",
+            ),
+            PackInput(
+                "equipment_value", U.MONEY_PER_UNIT, "the replacement value of one equipment unit", True,
+                "equipment value",
+            ),
+            PackInput(
+                "safety_response_cost",
+                U.MONEY,
+                "the customer's own cost of one safety response: shutdown, inspection, recertification (never harm to "
+                "a person)",
+                False,
+                "safety response",
+            ),
+        ),
+        _schema(
+            "mythos.economics.mobility-pack/v1",
+            "mobility",
+            PackInput("fleet_size", U.COUNT, "vehicles in the fleet", True, "fleet size"),
+            PackInput("trips_per_day", U.COUNT_PER_DAY, "trips the fleet makes per day", True, "trips/day"),
+            PackInput(
+                "contribution_margin_per_trip",
+                U.MONEY_PER_UNIT,
+                "revenue per trip less its variable cost (revenue/trip read as margin: revenue lost is not all loss)",
+                True,
+                "revenue/trip",
+            ),
+            PackInput(
+                "vehicle_asset_cost", U.MONEY_PER_UNIT, "the replacement cost of one vehicle or fleet asset", True,
+                "asset cost",
+            ),
+            PackInput(
+                "recall_cost_per_vehicle",
+                U.MONEY_PER_UNIT,
+                "the cost of recalling one vehicle: inspection, update, return to service (a safety variable that "
+                "prices harm is refused)",
+                False,
+                "safety/recall variables",
+            ),
+        ),
     )
 
 

@@ -54,10 +54,12 @@ fixtures and the tests all read the same codes:
   enforcement record is precedent with its citation, never a figure;
 - :mod:`.pack_inputs`, :mod:`.pack_base`, :mod:`.pack_registry` and the industry
   packs (E7, spec section 37: :mod:`.pack_insurance`, :mod:`.pack_healthcare`,
-  :mod:`.pack_saas`): each vertical's scenario library and customer-input schema
-  beside the banking pack. :mod:`.pack_inputs` is the schema alone, which the
-  parameter set reads; the registry and the packs import the templates, and only the
-  builder and the route modules imported GUARDED import them.
+  :mod:`.pack_saas`, :mod:`.pack_regulated_enterprise`, :mod:`.pack_government`,
+  :mod:`.pack_manufacturing`, :mod:`.pack_mobility`): each vertical's scenario
+  library and customer-input schema beside the banking pack. :mod:`.pack_inputs` is
+  the schema alone, which the parameter set reads; the registry and the packs import
+  the templates, and only the builder and the route modules imported GUARDED import
+  them.
 
 No module in this package may import Django, the REST framework, any part of
 mythos-core but :mod:`mythos_core.currency`, or any other part of
