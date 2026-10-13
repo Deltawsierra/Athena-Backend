@@ -549,9 +549,13 @@ class FinancialScenario(_AppendOnly):
     assurance claim binds to a system state, ``causal_effect`` as the receipt names
     an effect (``sha256:`` + hex), both checked against
     :data:`~assurance.economics.engine.governance.REFERENCE_FORMS` -- for their form
-    only -- and blank until known. A revised scenario is a new row that
-    ``supersedes`` this one, in the same deployment; the versions it supersedes,
-    transitively, are all its versions for the review rule.
+    only -- and blank until known. The scenario builder records the deployment's
+    system fingerprint when it builds a version (spec, section 24.6); where it could
+    not compute one it records none, and why, in ``system_fingerprint_unavailable``
+    -- never both. A version with neither was recorded before the builder recorded
+    one, or by another writer. A revised scenario is a new row that ``supersedes``
+    this one, in the same deployment; the versions it supersedes, transitively, are
+    all its versions for the review rule.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -561,6 +565,9 @@ class FinancialScenario(_AppendOnly):
     )
     title = models.CharField(max_length=255)
     system_fingerprint = models.CharField(max_length=64, blank=True)
+    # Why the builder recorded no system fingerprint (blank where it recorded one, or
+    # where the version was recorded before the builder recorded any).
+    system_fingerprint_unavailable = models.TextField(blank=True, default="")
     causal_effect = models.CharField(max_length=71, blank=True)
     supersedes = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="superseded_by"
@@ -608,6 +615,12 @@ class FinancialScenario(_AppendOnly):
                 governance.spine_reference_refusal("system_fingerprint", self.system_fingerprint),
                 detail="system_fingerprint",
             )
+            if self.system_fingerprint_unavailable:
+                raise EconomicsRefused(
+                    "field_malformed",
+                    "system_fingerprint_unavailable: a version records its system fingerprint or why it has none, "
+                    "never both",
+                )
         if self.causal_effect:
             _refuse(governance.spine_reference_refusal("effect", self.causal_effect), detail="causal_effect")
         if self.supersedes_id is not None:
@@ -1997,7 +2010,8 @@ class FinancialValidityCard(_AppendOnly):
     sensitivity analysis made on the run's own draws, or saying it has no data;
     the confidence grade with its reason; and what was read when the card was
     issued (the review status, the inventory entry, the findings' status, the
-    deployment's system fingerprint), kept as issued.
+    deployment's system fingerprint where the scenario version records none), kept
+    as issued.
 
     Append-only like every economics record, and IDEMPOTENT: one card per
     simulation result (a one-to-one key). The sensitivity analysis is stored with

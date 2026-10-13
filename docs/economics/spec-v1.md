@@ -83,7 +83,7 @@ MVP step 6, serving steps 5, 7b and 8:
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
 | Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set routes in `api.py`, the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0067_simulation_charts.py` (step 6) |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6) |
 | Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py` and `tests/test_economics_builder.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); no live feed |
@@ -393,7 +393,7 @@ operator runs; any other writer is a defect.
 |---|---|---|
 | `FinancialSource` | one version of one source: `source_key`, `version` (assigned on save), provider, dataset, URL, license class, trust tier, retrieval time, snapshot hash, schema version; `deployment` empty for a platform-wide source, set for one customer's own | the fixture-snapshot loader an operator runs (MVP), and later the feed adapters, each after its licensing review; an admin may record a reviewed license class as a new version |
 | `ModelInventoryEntry` | one model release: model id, version, `revision` (assigned on save), owner, intended use, limitations, retirement date | an admin, as the model-risk owner; never the engine |
-| `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint, causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
+| `FinancialScenario` | a scenario's identity and authorship: deployment, title, system fingerprint (the deployment's when the builder built the version, section 24.6; or none, and why, in `system_fingerprint_unavailable`), causal effect, the scenario it supersedes, its author | the scenario builder, and an admin or analyst of the deployment |
 | `ScenarioReview` | one review of one scenario version: reviewer, verdict (`approved` or `returned`), note | an admin or analyst who authored no version of the scenario |
 | `SensitiveOverride` | a request to override a parameter or value: subject, reason, requester | an admin or analyst |
 | `OverrideApproval` | one approval of one override: approver | an admin, other than the requester; one approval per person |
@@ -2270,7 +2270,27 @@ the draft and are not in it. `ScenarioBuild` holds the digest, unique per deploy
   a transaction's first write, a stop's write waits for the inserts alone;
 - any changed input -- an attribute's value or source, a finding or its role, the
   parameter-set version -- is a different digest and a new scenario
-  (`test_the_digest_changes_with_every_input`).
+  (`test_the_digest_changes_with_every_input`);
+- **the version records the deployment's SPINE system fingerprint as it is when it
+  is built** (`assurance.fingerprint.compute_system_fingerprint`, in the
+  `system_fingerprint` form of section 8: 64 lowercase hex;
+  `builder.current_system_fingerprint`), read before the transaction, and the routes
+  show it. One that cannot be computed, or is not in that form, is recorded as none,
+  with the reason in fixed words (`system_fingerprint_unavailable`: "the system
+  fingerprint could not be computed (<the fault's type>)", or "... is not in SPINE's
+  form (64 lowercase hex)"): never one made up, and never a failed build
+  (`test_a_fingerprint_that_cannot_be_had_is_recorded_as_none_with_the_reason`). The
+  reason is shown on the card, which is the customer's, so a fault is named by its
+  type alone -- its message can carry a SQL fragment, a path or a value -- and a value
+  not in the form is never echoed (the lead's review of #157;
+  `test_a_faults_message_is_never_recorded_or_shown`). The card's reading of the
+  deployment's fingerprint at issue goes through the same words. A
+  version records one or the other, never both (`field_malformed`). The fingerprint
+  is NOT in the digest: it is the state the version was built in, observed, not
+  something it is built from, so a rebuild of the same inputs after the deployment
+  changed returns the version with the fingerprint it recorded, and writes nothing
+  (`test_a_build_records_the_deployments_system_fingerprint`). What the build writes
+  from its inputs is unchanged, so the builder stays `v2`.
 
 A finding found later, which enables an effect already built, is a new build of the
 inputs with it (superseding the earlier scenario, `supersedes`): its event has the
@@ -2306,7 +2326,7 @@ GUARDED in a guard of its own (section 2):
 | Route | Name | Does |
 |---|---|---|
 | `POST deployments/<uuid>/economics/scenarios/build/` | `deployment-economics-scenario-build` | builds a scenario draft: 201 with the scenario, its build and its events; 200 with the scenario already built from the same inputs; 409 on a race |
-| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
+| `GET deployments/<uuid>/economics/scenarios/<scenario uuid>/events/` | `deployment-economics-scenario-events` | the scenario's system fingerprint as built (or none, and why: section 24.6), its review status (`draft` until a review is recorded, then the latest verdict, with every review), and its events, each with its template, grouping key, effects (every effect taking part, by when they occurred; from grouping v2 on, a hypothetical effect is listed in every event of its key, `joined: true` where its row is in another, the event that prices it, and its figures are read only there) and the findings enabling them, its components with their formula and, for every input, the template's source and the parameter read (the set's variable, with its version, the effect's attribute, or the event's larger-loss value with every effect attribute it was taken across), the gross cash loss, the loss net of the set's insurance where the set states a policy, and the market-value line apart; and the scenario's totals |
 
 The body:
 
@@ -2500,9 +2520,10 @@ and the rest) is raised as that engine's:
   build recorded under grouping `v1` reads as it was built: its digest names `v1`, and
   its events list a hypothetical effect only in the one event it is recorded in.
 - **Not modelled**: loan or underwriting agent error and model drift, the other two
-  banking families; a system fingerprint on the built scenario; claims and authority
-  edges as graph nodes (they are read, not linked); controls and mitigations
-  (section 21 of the owner's specification, a later step).
+  banking families; claims and authority edges as graph nodes (they are read, not
+  linked); controls and mitigations (section 21 of the owner's specification, a later
+  step). The system fingerprint on the built scenario, listed here before, is
+  recorded since step 8's follow-up (section 24.6).
 
 Decisions this version takes, which the owner may change (each with the alternative
 not taken):
@@ -3097,14 +3118,15 @@ calls these services.
 | | |
 |---|---|
 | Code | `assurance/economics/engine/sensitivity.py` and `engine/grade.py` (pure; the analysis imports numpy, the grade does not); `assurance/economics/validity_service.py` (the card) and `receipt_service.py` (the receipt), thin Django services; `FinancialValidityCard` and `FinancialExposureReceipt` in `models.py`; `CyberEngineClient.sign_exposure_receipt` |
-| Migration | `0065_financial_validity_cards_and_receipts.py`: two new tables, nothing else changed |
+| Migration | `0065_financial_validity_cards_and_receipts.py`: two new tables, nothing else changed; the follow-up's `0066_scenario_fingerprint_unavailable.py`: one column on `FinancialScenario` (section 24.6) |
 | Tests | `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; the safety tests of sections 2 and 23.10 extended to the four new modules and `mythos_core.exposure_receipt`; `tests/test_firing_twice_makes_one_effect.py` (the engine's signing call) |
 | mythos-core | `b1f6e9d`: `mythos_core.exposure_receipt`, `mythos.financial-exposure-receipt/v1` (Mythos-Core#49) |
 
 ### 26.1 Sensitivity
 
-`engine/sensitivity.py`, method `mythos.economics.sensitivity` version 1
-(`sensitivity.version_record()`, in every record). Made on the run's OWN draws:
+`engine/sensitivity.py`, method `mythos.economics.sensitivity` version 2
+(`sensitivity.version_record()`, in every record; version 1 was #153's, which split a
+sum inside a formula by elasticity: decision 8). Made on the run's OWN draws:
 `sensitivity.analyse` reloads the scenario version as step 7b read it, and refuses
 unless its canonical inputs give the run's input digest (`inputs_changed`) and its
 draws, made again from the same seed and sub-streams, give the run's outcomes
@@ -3153,15 +3175,35 @@ very draws the run evaluated.
   RANGED alike, so the shares depend on the bases only:
   - **The gross cash** is the sum of its known cash components. Each component
     carries exactly its base over the total (step 4's Decimal figure at base), split
-    among its OWN inputs in proportion to their elasticity of the component at base
-    (by its formula twin, a central difference of `LEVEL_STEP`, 0.1%, either side).
-    Each factor of a product has elasticity one, so a product of k factors gives each
-    1/k of it; an input that lowers the loss (a recovery rate r, read as 1 - r) is
-    moved through that complement, one factor like any other -- never r / (1 - r),
-    which let a customer recovery of 0.99 swamp an expert lump three times its product
-    (the round-2 finding). A sum inside a formula (fixed + rate x hours) splits by
-    elasticity likewise; a cap (`capped_credit`) goes to the cap where it binds, to the
-    product where it does not, a third each at the kink. An input read twice adds both.
+    among its OWN inputs:
+    - **by its additive terms first, where its formula is a sum** (step 8's
+      follow-up; `Formula.terms`: `fixed_plus_hours` is `fixed_cost` + `hourly_rate`
+      x `hours`, `per_affected_plus_fixed` is `affected` x `unit_cost` +
+      `fixed_cost`, and every other formula of the catalogue is one term). Each term
+      carries its base over the component's, exactly, from the bases only -- a term's
+      base is the product of its factors' bases, a recovery's through 1 - r -- and
+      then each term is split among its own factors: each factor of a product has
+      elasticity one in it, so a product of k factors gives each 1/k of the term. A
+      factor of two terms gets the sum of its parts. So a fixed amount F beside a
+      product P carries exactly F / (F + P) of the component, as it would as a
+      component of its own; #153 split the whole sum by elasticity, which gave it
+      F / (F + 2P) beside a two-factor product (decision 8). The piece lists its
+      `terms`, each with its inputs, `base` and `weight` in the component;
+    - **in proportion to their elasticity of the component at base, where its
+      formula is one term** (by its formula twin, a central difference of
+      `LEVEL_STEP`, 0.1%, either side), exactly as #153 did. Each factor of a product
+      has elasticity one, so a product of k factors gives each 1/k of it; an input
+      that lowers the loss (a recovery rate r, read as 1 - r) is moved through that
+      complement, one factor like any other -- never r / (1 - r), which let a
+      customer recovery of 0.99 swamp an expert lump three times its product (the
+      round-2 finding). A cap (`capped_credit`) goes to the cap where it binds, to the
+      product where it does not, a third each at the kink.
+
+    An input read twice adds both. Every formula of the catalogue declares its terms,
+    and each declaration is proven against the formula itself: a sum is exactly the
+    sum of its terms' products at random points, and zeroing one factor removes
+    exactly its term; one term is not a sum, since zeroing any one of its factors
+    zeroes the whole (`test_every_formula_declares_its_additive_terms_and_they_are_its_own`).
   - **The frequency.** With a frequency the headline is frequency x severity: the
     frequency carries one half, and the severity's decomposition the other, however
     many factors the severity's formulas have.
@@ -3193,7 +3235,9 @@ the level: `gross_cash` and `retained_cash` (null without a policy), each with i
 (each a component or a retained piece -- `uncovered`, `uncovered_by_waiting_period`,
 `sublimit_excess`, `deductible`, `beyond_limit` -- with its `base`, `share` and
 `split`, a component's `inputs` with each input's `elasticity`, `complement` and
-`weight`), and for every figure the line reads its `base`, `source_type`, `share`,
+`weight` (its part of the component), and, for a formula that is a sum, its `terms`
+with each one's `inputs`, `base` and `weight`), and for every figure the line reads
+its `base`, `source_type`, `share`,
 `fixed`, `frequency`, `policy_term`, `derived_from` and `supplied_by`.
 Nothing in it is a float; its digest is the canonical JSON's SHA-256, and the card
 names it.
@@ -3220,7 +3264,15 @@ carries the retained line's severity half (retained D, gross A, headline D); an
 expert limit of 950,000 under 1M, 0.5 x 95/195 (retained C); the retained pieces sum
 to step 4's Decimal retained cash to the last digit, with a sublimit (and at its
 kink), an exclusion, a waiting period above zero and at zero, and a deductible above
-the covered cash.
+the covered cash. Additive terms (step 8's follow-up): a fixed amount equal to the
+product beside it carries one half of its component in `fixed_plus_hours` and in
+`per_affected_plus_fixed` (one third by #153's elasticity), each factor of the
+product a quarter; an expert fixed amount of 75% of its component, the component 8%
+of the level, carries 0.06 and grades C, where #153 gave it 0.048 and A; a factor of
+two terms gets the sum of its parts (a + a x b at 2 and 3: 5/8); and every cash
+formula of one term gives the level record #153's head (b89624f) gave, both lines,
+byte for byte (its SHA-256, pinned per formula, with a frequency and a policy whose
+limit the gross passes, and `capped_credit` bound, unbound and at its kink).
 
 Measured on the build machine (4 cores, numpy 2.3.3), on the largest template
 (section 25.8's: 16 ranked parameters): 100,000 draws in 0.25 s (median of three;
@@ -3327,7 +3379,7 @@ No value is made up.
 |---|---|---|
 | Scenario ID / description | `scenario` | the scenario version's uuid and title; each loss event's trigger, business process, SPINE effect and template (`LossEvent`, `CausalEffect`); a plain-English description made from them ("Cross-customer exposure. 1 causal loss event(s): cross_customer_disclosure on customer_service, priced by cross_customer_data_exposure v1, enabled by 1 finding(s).") |
 | Model version | `model_version` | the release token and build digest (section 26.5) and the RELEASE RECORD they are taken over (`release`: the run's `versions`, every version and limit, section 25.6; the sensitivity method; the grade's version record; the card's schema), which verification reads (section 26.6); the inventory entry an admin registered for `economic-exposure` at that token (`issued`), or "no model inventory entry registers ..." |
-| System fingerprint | `system_fingerprint` | the scenario version's own `system_fingerprint` where it was recorded (`binding: scenario`); otherwise the deployment's SPINE fingerprint (`assurance.fingerprint.compute_system_fingerprint`) read when the card was issued (`binding: deployment_at_issue`, and the statement says it is not the build's); otherwise `value: null` and "unavailable", with the reason |
+| System fingerprint | `system_fingerprint` | the scenario version's own `system_fingerprint` where it was recorded (`binding: scenario`) -- the builder records the deployment's when it builds the version (section 24.6), so a card binds the BUILD's state, and the deployment's then is not read (`issued.deployment_system_fingerprint` is null) and appears nowhere on the card, however the deployment has changed since; otherwise the deployment's SPINE fingerprint (`assurance.fingerprint.compute_system_fingerprint`) read when the card was issued (`binding: deployment_at_issue`, and the statement says it is not the build's, and, where the builder recorded why it had none, that reason); otherwise `value: null` and "unavailable", with the reasons. A version recorded before the builder recorded fingerprints reads exactly as before (`test_an_older_version_with_no_fingerprint_keeps_the_fallback_unchanged`) |
 | Technical evidence | `technical_evidence` | each observed effect (its SPINE row's uuid, observation digest, SPINE effect, time; status: in force when the scenario was built, which the builder requires), each hypothetical effect, and each enabling finding with its role and its status and severity when the card was issued (`issued`) |
 | Customer-specific share | `customer_specific_share` | the evidence mix's `customer` share of the line the headline grade is (`line`), its weighting (`level`), and every customer figure that line reads with its level share and, beside it, its importance |
 | Benchmark-derived share | `benchmark_derived_share` | the `benchmark` share, likewise |
@@ -3584,8 +3636,10 @@ why, as a code, and never raises out of a service.
   annual exposure, which such a run does not have (section 25.5), and none is
   estimated. Since step 6 a parameter-set version states the frequency (section
   19.4); only a scenario built from a version that states one can be receipted.
-- **No system fingerprint at build.** The builder records none (section 24.9); a card
-  reads the deployment's at issue and says so, and a receipt binds that.
+- **A version built before the builder recorded fingerprints has none** (step 8's
+  follow-up records it at build, section 24.6): its card still reads the deployment's
+  at issue and says so, and a receipt binds that. Nothing refuses a receipt for such
+  a version yet (decision 10).
 - **No calibration**: "Last calibrated: never; no calibration set exists". Interval
   coverage (the owner's section 26) needs realised outcomes, which no record holds.
 - **No source snapshot is a `FinancialSource`.** Parameters name their evidence as
@@ -3657,23 +3711,41 @@ why, as a code, and never raises out of a service.
    absolute elasticity of the WHOLE gross, normalised, which let a product's factors
    each count their component's whole share and a recovery r count r / (1 - r) of it,
    so an expert lump of 75% to 95% of the level graded A beside a customer recovery of
-   0.99 (round 2). Both are removed. Within a formula that is a sum (`fixed_plus_hours`,
-   `per_affected_plus_fixed`) the split is by elasticity too, so a fixed amount beside a
-   two-factor product carries F / (F + 2P) of the component, between its base share and
-   half of it. Alternatives: weigh by importance; by the share of the mean; split a sum
-   inside a formula by its terms' bases first (Aumann-Shapley attribution, which also
-   moves smoothly across a cap's kink); give the frequency a share by its own
-   uncertainty. Recommendation: keep; take the attribution by terms if the owner wants
-   a sum inside a formula weighed exactly as a sum of components.
+   0.99 (round 2). Both are removed. **Within a formula that is a sum
+   (`fixed_plus_hours`, `per_affected_plus_fixed`) the split is by its additive terms
+   first** (step 8's follow-up, the lead's call; sensitivity version 2): each term
+   carries its base over the component's, then each term is split among its own
+   factors by elasticity -- 1/k each of a product of k, a recovery through 1 - r -- and
+   a factor of two terms gets the sum of its parts. #153 split the whole sum by
+   elasticity, so a fixed amount F beside a two-factor product P carried F / (F + 2P)
+   of the component, not F / (F + P): an expert fixed amount was under-weighted and
+   graded better than it should (an expert F of 75% of a component that is 8% of the
+   level read 0.048, A; it reads 0.06, C). A sum inside a formula is now weighed
+   exactly as the same terms would be as components of their own; every formula of one
+   term is split as before, byte for byte. Alternatives: weigh by importance; by the
+   share of the mean; give the frequency a share by its own uncertainty; and, the one
+   remaining for the split inside a component, **Aumann-Shapley attribution** (each
+   input's integral of its marginal contribution along the straight path from zero to
+   the base case). For this catalogue it gives the same shares -- a sum of products
+   term by term, 1/k to each factor of a product of k; a cap to the cap where it binds
+   and to the product where it does not -- and differs only at a cap's exact kink,
+   where it is not defined and the elasticity split gives a third each. It needs no
+   declared terms, being defined the same way for any formula, at the price of an
+   integral per component. Recommendation: keep the attribution by terms (exact, from
+   the bases, declared beside each formula and proven against it); take Aumann-Shapley
+   if a formula that is neither a sum of products nor a cap joins the catalogue.
 9. **The receipt's `parameter_set_digest` is the run's input digest** (every
    parameter the run read, and every version), not the customer parameter-set
    version's content digest, which is among the receipt's `sources`. Alternative:
    the parameter-set version's content digest. Recommendation: keep: the input
    digest is the one that replays the run.
 10. **The system fingerprint** is the scenario's where recorded, else the
-    deployment's read when the card is issued, labelled so. Alternative: refuse the
-    receipt until the builder records a fingerprint at build. Recommendation: have
-    the builder record one (a builder change), then refuse a scenario without one.
+    deployment's read when the card is issued, labelled so. The builder records one
+    at build since step 8's follow-up (section 24.6; the lead's call), so a card of a
+    version built since binds the build's state; one it could not compute is none,
+    with the reason, and the card falls back as before, naming that reason.
+    Alternative: refuse the receipt for a version that records none. Recommendation:
+    refuse it once every version a receipt is wanted for has been built since.
 11. **The receipt is signed by the engine** on its route
     `/api/economics/exposure-receipt/sign` (athena-engine #88), in the
     `economics-receipt` role: the backend holds no key, as for assurance receipts. A
@@ -3684,7 +3756,7 @@ why, as a code, and never raises out of a service.
     Alternative: a backend-held `economics-receipt` key. Recommendation: keep.
 12. **One card and one receipt per simulation result**, made once and kept: the
     review status, inventory entry, findings' status and the deployment's fingerprint
-    are as read at issue. Alternative: a new card per issue, superseding the last.
+    (read only where the scenario version records none) are as read at issue. Alternative: a new card per issue, superseding the last.
     Recommendation: keep, and let step 6 show the live review status beside the card.
 13. **A receipt that cannot be built or signed is not recorded** (unlike step 7b's
     recorded refusals): nothing was signed, and a later issue may succeed.
@@ -3745,7 +3817,7 @@ excluded from every total.
 | | |
 |---|---|
 | Code | `assurance/economics/report_api.py` (the three routes), `report.py` (the report and the scenario document; imports nothing probabilistic), `charts_service.py` (the series, a thin Django service) and `engine/charts.py` (pure; imports numpy); `SimulationCharts` in `models.py` |
-| Migration | `0067_simulation_charts.py`: one new table, nothing else changed (0066 is the trust tier's, #155, in review; whichever merges second renumbers its own and re-points its dependency) |
+| Migration | `0067_simulation_charts.py`: one new table, nothing else changed; it depends on #157's `0066_scenario_fingerprint_unavailable.py` (#155, in review, may take a 0067 too: whichever merges second renumbers its own and re-points its dependency) |
 | Tests | `tests/test_economics_report.py`; the safety tests of sections 2, 23.10 and 26.8 extended to the new modules; the route tables (`tests/test_economics_scenario_records.py`, `tests/test_every_write_route_keeps_the_decision_current.py`, `tests/test_no_planted_secret_leaves_through_a_sink.py`) and a fault plugin (`tests/economics_broken_report.py`) |
 
 ### 27.1 The routes

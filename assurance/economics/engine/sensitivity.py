@@ -30,8 +30,10 @@ the same plan as step 7b's :func:`.scenario_simulation.run` -- and both stated
 - **The level** (:func:`level_shares`): each figure's share of the result's
   LEVEL, which the grade weighs by, for the gross cash and, under a policy, the
   retained cash -- an ADDITIVE decomposition at base (:data:`LEVEL`): each known cash
-  component carries its base over the total, split among its own inputs by their
-  elasticity of it at base (a product's factors equally, a recovery through its
+  component carries its base over the total; one whose formula is a sum is split
+  first by its additive terms, each its base over the component's, and each term
+  among its own factors equally; one of a single term is split among its inputs by
+  their elasticity of it at base (a product's factors equally, a recovery through its
   complement ``1 - rate`` as one factor); a frequency carries one half; the retained
   cash's pieces (uncovered, over a sublimit, kept by the deductible, past the limit)
   read the policy's terms. Fixed or ranged alike, from bases only.
@@ -71,7 +73,11 @@ from .taxonomy import LossFamily
 
 SCHEMA = "mythos.economics.sensitivity/v1"
 METHOD_ID = "mythos.economics.sensitivity"
-VERSION = 1
+#: 2: the level splits a component whose formula is a sum by its additive terms
+#: first (spec 26.1; 26.10, decision 8). 1 (#153) split it by elasticity across
+#: the whole sum, which gave a fixed amount F beside a two-factor product P the share
+#: F / (F + 2P), not F / (F + P). Every formula of one term is split as in 1.
+VERSION = 2
 RANKING = (
     "Spearman rank correlation of each uncertain parameter's draws with the scenario's gross cash loss (per year "
     "with a frequency, per occurrence otherwise), ties at their mean rank; importance is the squared correlation "
@@ -84,10 +90,14 @@ SWING = (
 )
 LEVEL = (
     "an ADDITIVE decomposition of the base case (every parameter at its base). The base-case gross cash is the sum "
-    "of its known cash components; each carries its base over the total, split among its own inputs in proportion "
-    "to their elasticity of the component at base (a central difference of LEVEL_STEP either side: each factor of a "
-    "product one, the complement 1 - rate of a recovery one factor like any other). With a frequency, a year is "
-    "frequency x severity: the frequency carries one half and the severity's decomposition the other. Under a "
+    "of its known cash components; each carries its base over the total. A component whose formula is a sum of "
+    "terms (fixed_cost + hourly_rate x hours) is split first by its terms, each carrying its base over the "
+    "component's (the product of its factors' bases, a recovery through its complement 1 - rate), and each term "
+    "among its own factors equally (each factor of a product has elasticity one); an input of two terms adds both "
+    "parts. A component whose formula is one term (a product, a cap, a lump sum) is split among its own inputs in "
+    "proportion to their elasticity of the component at base (a central difference of LEVEL_STEP either side: each "
+    "factor of a product one, the complement 1 - rate of a recovery one factor like any other). With a frequency, a "
+    "year is frequency x severity: the frequency carries one half and the severity's decomposition the other. Under a "
     "policy the base-case retained cash is decomposed the same way, per event, into the cash the policy leaves "
     "uncovered, each family's excess over its sublimit, what the deductible keeps and what passes the limit, each "
     "split among what it reads in proportion to its elasticity at base, the policy's terms among them; the "
@@ -286,13 +296,51 @@ def _mix(*parts: tuple[Fraction, Mapping[str, Fraction]]) -> dict[str, Fraction]
     return mixed
 
 
+def _by_terms(p: ss._Plan, c, complements: Mapping[str, bool]) -> tuple[dict[str, Fraction], list[dict]]:
+    """A formula that is a SUM of terms (:attr:`.formulas.Formula.terms`), split
+    among its inputs: each additive term carries its base over the component's (the
+    sum of the terms' bases), exactly, from the bases only -- a term's base is the
+    product of its factors' bases, a recovery rate's through its complement
+    ``1 - rate`` -- and each of a term's k factors carries 1/k of the term, its
+    elasticity of a product being one like every other factor's. An input that is a
+    factor of two terms adds both parts. Each input's part of the component, and a row
+    per term."""
+    terms = c.component.formula.terms
+
+    def factor(name: str) -> Fraction:
+        base = Fraction(_base(p.resolved[c.reads[name]].parameter.base))
+        return 1 - base if complements[name] else base
+
+    bases = []
+    for term in terms:
+        product = Fraction(1)
+        for name in term:
+            product *= factor(name)
+        bases.append(product)
+    whole = sum(bases, Fraction(0))
+    parts = dict.fromkeys(c.reads, Fraction(0))
+    rows = []
+    for term, base in zip(terms, bases, strict=True):
+        weight = Fraction(0) if whole == 0 else base / whole
+        for name in term:
+            parts[name] += weight / len(term)
+        rows.append({"inputs": list(term), "base": _exact_text(base), "weight": _text(weight)})
+    return parts, rows
+
+
 def _component(p: ss._Plan, c) -> dict:
     """One known cash component at base: its exact base value (step 4's Decimal
-    figure) and how it splits among its own inputs -- in proportion to each input's
-    elasticity of the component at base, by its twin, a central difference of
-    :data:`LEVEL_STEP` either side. An input that lowers the loss (a recovery rate,
-    read as ``1 - rate``) is moved through that complement: one factor like any
-    other, never ``r / (1 - r)`` of the product. An input read twice adds both."""
+    figure) and how it splits among its own inputs.
+
+    A formula that is a SUM (``fixed_cost + hourly_rate x hours``) is split first by
+    its additive terms, each carrying its base over the component's, and then each
+    term among its own factors (:func:`_by_terms`): a fixed amount beside a product
+    carries exactly its base share. A formula of one term (a product, a cap, a lump
+    sum) is split in proportion to each input's elasticity of the component at base,
+    by its twin, a central difference of :data:`LEVEL_STEP` either side. An input that
+    lowers the loss (a recovery rate, read as ``1 - rate``) is moved through that
+    complement: one factor like any other, never ``r / (1 - r)`` of the product. An
+    input read twice adds both."""
     where = f"{p.si.events[c.event].loss_event_id}/{c.component.component_id}"
     value = Fraction(c.component.base.amount)
     if value < 0:
@@ -319,24 +367,29 @@ def _component(p: ss._Plan, c) -> dict:
             swings[name] = abs(at({**values, name: up}) - at({**values, name: down}))
         complements[name] = complement
     total = sum((Fraction(swing) for swing in swings.values()), Fraction(0))
+    terms = None
+    if len(c.component.formula.terms) > 1:
+        parts, terms = _by_terms(p, c, complements)
+    else:
+        parts = {name: Fraction(0) if total == 0 else Fraction(swing) / total for name, swing in swings.items()}
     split: dict[str, Fraction] = {}
     if value != 0:
-        if total == 0:
+        if terms is None and total == 0:
             raise _NoLevel(f"no input of the component {where} moves it at base")
-        for name, swing in swings.items():
+        for name, part in parts.items():
             source = c.reads[name]
-            split[source] = split.get(source, Fraction(0)) + Fraction(swing) / total
+            split[source] = split.get(source, Fraction(0)) + part
     inputs = [
         {
             "input": name,
             "parameter": c.reads[name],
             "complement": complements[name],
             "elasticity": dist.float_text(swings[name] / (2.0 * LEVEL_STEP * level)) if level else "0",
-            "weight": _text(Fraction(0) if total == 0 else Fraction(swings[name]) / total),
+            "weight": _text(parts[name]),
         }
         for name in sorted(c.reads)
     ]
-    return {
+    piece = {
         "piece": where,
         "kind": "component",
         "event": c.event,
@@ -345,6 +398,9 @@ def _component(p: ss._Plan, c) -> dict:
         "split": split,
         "inputs": inputs,
     }
+    if terms is not None:
+        piece["terms"] = terms
+    return piece
 
 
 def _retained_pieces(p: ss._Plan, components: list[dict]) -> tuple[list[dict], Fraction]:
@@ -455,6 +511,8 @@ def _line(p: ss._Plan, line: str, pieces: list[dict], total: Fraction, reads: li
             }
             if "inputs" in piece:
                 row["inputs"] = piece["inputs"]
+            if "terms" in piece:
+                row["terms"] = piece["terms"]
             rows.append(row)
         if frequency is not None:
             shares[frequency.name] = Fraction(1, 2)

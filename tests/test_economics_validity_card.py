@@ -1213,6 +1213,181 @@ def test_a_result_digest_mismatch_names_what_it_compared(deployment, people, key
     assert check.code == "result_digest_mismatch" and "result.record" in check.reason
 
 
+# ======================================================================
+# A system fingerprint recorded at build (the follow-up to #153)
+# ======================================================================
+
+
+def _now_fingerprint(deployment) -> str:
+    from assurance.fingerprint import compute_system_fingerprint
+
+    return compute_system_fingerprint(Deployment.objects.get(pk=deployment.pk))
+
+
+def _payments_body(deployment, author) -> dict:
+    """A build request for section 30's payment agent: one hypothetical effect and the
+    finding enabling it, from a customer parameter set recorded here. SYNTHETIC /
+    ILLUSTRATIVE."""
+    variables = {
+        "transactions_per_day": _entry("count_per_day", "18000"),
+        "average_transaction_value": _entry("money_per_unit", "25000"),
+        "recovery_rate": _entry("ratio", "0.825"),
+    }
+    CustomerParameterSet.record(deployment, "payments_2026q4", {"variables": variables}, author=author)
+    asset = Asset.objects.create(deployment=deployment, kind="agent", name="payments-agent",
+                                 identifier=f"agent://payments-{uuid.uuid4().hex[:6]}")
+    finding = Finding.objects.create(deployment=deployment, fingerprint=f"fp-{uuid.uuid4().hex[:8]}",
+                                     finding_type="approval_check_missing", title="approval check", severity="high")
+
+    def attribute(unit, *figures):
+        return _entry(unit, *figures, source_type="EXPERT_ESTIMATE", evidence_ref=f"{LABEL}: made up")
+
+    return {
+        "title": "Payment agent: destination changed after approval",
+        "parameter_set": {"set_key": "payments_2026q4", "version": 1}, "currency": "USD", "as_of": AS_OF.isoformat(),
+        "effects": [{"key": "redirect", "origin": "hypothetical", "effect_type": "funds_transfer_altered",
+                     "asset": str(asset.uuid), "business_process": "payments", "attributes": {
+                         "success_rate": attribute("ratio", "0.35"),
+                         "exploitable_window_hours": attribute("hours", "0.5", "1.25", "2.0"),
+                         "incident_response_cost": attribute("money", "80000", "165000", "250000"),
+                         "legal_response_cost": attribute("money", "150000", "825000", "1500000")}}],
+        "findings": [{"finding": str(finding.uuid), "effect": "redirect", "role": "prerequisite"}],
+    }
+
+
+def built(deployment, author):
+    """A scenario version BUILT by the builder (spec, section 24) from
+    :func:`_payments_body`. A receipt needs a frequency, and the body's parameter set
+    states none, so the scenario's is added after the build, as the fixtures above
+    state theirs. SYNTHETIC / ILLUSTRATIVE."""
+    scenario, created = builder.build(deployment, _payments_body(deployment, author), author=author)
+    assert created
+    _parameter(scenario, ss.FREQUENCY_PARAMETER, "count", "1", "2", "4", source="CUSTOMER_PROVIDED",
+               distribution=POISSON)
+    return FinancialScenario.objects.get(pk=scenario.pk)
+
+
+def test_a_built_scenario_binds_the_fingerprint_it_was_built_in_after_the_deployment_changes(deployment, people, keys):
+    """The builder records the deployment's system fingerprint on the version it
+    builds. The deployment then changes (a tool joins its graph): the card binds the
+    BUILD's fingerprint (``binding: scenario``) and says nothing of the deployment's
+    current one -- it is not read, and is nowhere on the card -- and the receipt binds
+    the build's value, against which its check passes."""
+    scenario = built(deployment, people["analyst"])
+    at_build = _now_fingerprint(deployment)  # nothing in the deployment has changed since the build
+    assert scenario.system_fingerprint == at_build
+    assert scenario.system_fingerprint_unavailable == ""
+    Asset.objects.create(deployment=deployment, kind="tool", name="wire-api", identifier="tool://wire-api")
+    now = _now_fingerprint(deployment)
+    assert now != at_build
+    result = simulated(scenario)
+    issued = validity_service.issue_card(result)
+    assert issued.card is not None, (issued.code, issued.detail)
+    card = issued.card
+    assert card.card["fields"]["system_fingerprint"] == {
+        "value": at_build,
+        "binding": "scenario",
+        "statement": "the SPINE system fingerprint the scenario version was bound to when it was recorded",
+    }
+    assert card.card["issued"]["deployment_system_fingerprint"] is None
+    assert now not in json.dumps(card.card) and now not in json.dumps(card.sensitivity)
+    assert "deployment_at_issue" not in json.dumps(card.card)
+    assert validity_service.reproduces(card)
+    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
+    assert outcome.receipt is not None, (outcome.code, outcome.detail)
+    assert outcome.receipt.document["system_fingerprint"] == at_build
+    check = receipt_service.verify_stored_receipt(outcome.receipt, keys["ring"])
+    assert check.verified and check.code == core.AUTHENTIC and check.notes == (), check
+
+
+def test_a_fingerprint_the_builder_could_not_compute_is_none_and_the_card_says_why(deployment, people, keys,
+                                                                                    monkeypatch):
+    """A fingerprint the builder could not compute is recorded as none, with the
+    reason in fixed words (the fault's type), and the build stands. Its card reads the
+    deployment's at issue, as for an older version, and says why the build has none;
+    where that cannot be read either, the card says both and the receipt has nothing
+    to bind."""
+    import assurance.fingerprint as fingerprint
+
+    real = fingerprint.compute_system_fingerprint
+    reason = "the system fingerprint could not be computed (RuntimeError)"
+
+    def unreadable(_deployment):
+        raise RuntimeError("the asset graph could not be read")
+
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", unreadable)
+    scenario = built(deployment, people["analyst"])
+    assert scenario.system_fingerprint == ""
+    assert scenario.system_fingerprint_unavailable == reason
+    at_build = f"the builder recorded no system fingerprint when it built the scenario version: {reason}"
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", real)
+    field = validity_service.issue_card(simulated(scenario)).card.card["fields"]["system_fingerprint"]
+    assert field == {
+        "value": _now_fingerprint(deployment),
+        "binding": "deployment_at_issue",
+        "statement": f"{at_build}; this is the deployment's SPINE fingerprint when the card was issued, not when the "
+                     "scenario was built",
+    }
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", unreadable)
+    result = simulated(scenario, seed=8)
+    field = validity_service.issue_card(result).card.card["fields"]["system_fingerprint"]
+    assert field["value"] is None and field["binding"] is None
+    assert field["statement"] == f"unavailable: {at_build}; and the deployment's could not be read either: {reason}"
+    outcome = receipt_service.issue_receipt(result, signer=_signer(keys["receipt"]), keyring=keys["ring"])
+    assert outcome.receipt is None and outcome.code == "system_fingerprint_unavailable"
+
+
+MARKER = "marker-5e1f0c9a"
+
+
+def test_a_faults_message_is_never_recorded_or_shown(deployment, people, monkeypatch):
+    """The lead's review of #157: a fault computing the fingerprint is recorded and
+    shown by its type alone, in fixed words. Its message can carry a SQL fragment, a
+    path or a value, and the card is the customer's: here a marker in both appears
+    nowhere in the version, the build route's answer or the card, at build or at
+    issue."""
+    from django.db.utils import OperationalError
+
+    import assurance.fingerprint as fingerprint
+
+    def leaky(_deployment):
+        raise OperationalError(f"no such table: {MARKER} (SELECT * FROM /var/lib/{MARKER}/db.sqlite3)")
+
+    monkeypatch.setattr(fingerprint, "compute_system_fingerprint", leaky)
+    client = APIClient()
+    client.force_authenticate(user=people["analyst"])
+    response = client.post(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/build/",
+                           data=json.dumps(_payments_body(deployment, people["analyst"])),
+                           content_type="application/json")
+    assert response.status_code == 201, response.content
+    assert MARKER not in response.content.decode("utf-8")
+    scenario = FinancialScenario.objects.get(uuid=response.json()["scenario"]["uuid"])
+    assert scenario.system_fingerprint == ""
+    assert scenario.system_fingerprint_unavailable == "the system fingerprint could not be computed (OperationalError)"
+    assert MARKER not in json.dumps(FinancialScenario.objects.filter(pk=scenario.pk).values().get(), default=str)
+    card = validity_service.issue_card(simulated(scenario)).card
+    assert MARKER not in json.dumps(card.card) and MARKER not in json.dumps(card.sensitivity)
+    field = card.card["fields"]["system_fingerprint"]
+    assert field["value"] is None and field["statement"].count("(OperationalError)") == 2, field
+    assert card.card["issued"]["deployment_system_fingerprint"] == {
+        "value": None, "unavailable": "the system fingerprint could not be computed (OperationalError)"}
+
+
+def test_an_older_version_with_no_fingerprint_keeps_the_fallback_unchanged(deployment, people):
+    """A version that records neither a fingerprint nor why it has none -- recorded
+    before the builder recorded one -- reads exactly as it did at #153: the
+    deployment's fingerprint at issue, in the same words."""
+    _, card = carded(deployment, people, fingerprint="")
+    now = _now_fingerprint(deployment)
+    assert card.card["issued"]["deployment_system_fingerprint"] == {"value": now, "unavailable": None}
+    assert card.card["fields"]["system_fingerprint"] == {
+        "value": now,
+        "binding": "deployment_at_issue",
+        "statement": "the scenario version records no system fingerprint (the builder records none yet, spec section "
+                     "24.9); this is the deployment's SPINE fingerprint when the card was issued, not when the scenario "
+                     "was built",
+    }
+
 
 # ======================================================================
 # The codes and the spec
@@ -1276,6 +1451,10 @@ SPEC_PHRASES = (
     "**Two lines, and the headline grade is the lower of the two**",
     "18. **Under a policy both lines are graded, and the headline grade is the lower**",
     "19. **A frequency whose base is zero has no level**",
+    # Step 8's follow-up: additive terms inside one formula, and the fingerprint at build.
+    "**by its additive terms first, where its formula is a sum**",
+    "**Aumann-Shapley attribution**",
+    "test_an_older_version_with_no_fingerprint_keeps_the_fallback_unchanged",
 )
 
 

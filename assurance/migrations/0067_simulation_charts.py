@@ -9,8 +9,8 @@
 # operator never writes it, and it goes with its deployment. No foreign key has a
 # reverse accessor (related_name "+").
 #
-# Numbered 0067 because #155 (the trust tier, in review) takes 0066 on top of #153's
-# 0065. It depends on 0065 while #155 is unmerged; whichever of the two merges second
+# Numbered 0067, on #157's 0066_scenario_fingerprint_unavailable (merged). #155 (the
+# trust tier, in review) may take a 0067 as well: whichever of the two merges second
 # renumbers and re-points its dependency after merging master.
 
 import django.db.models.deletion
@@ -22,7 +22,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("assurance", "0065_financial_validity_cards_and_receipts"),
+        ("assurance", "0066_scenario_fingerprint_unavailable"),
     ]
 
     operations = [
