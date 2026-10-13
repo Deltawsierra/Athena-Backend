@@ -441,8 +441,7 @@ def precedent_entry(record: catalogs.EnforcementRecord, *, source_key: str, vers
         "category": record.category,
         "stated_amounts": {
             "currency": record.currency,
-            **{name: None if getattr(record, name) is None else decimal_text(getattr(record, name))
-               for name in catalogs.EnforcementRecord.AMOUNTS},
+            **{name: None if value is None else decimal_text(value) for name, value in record.amounts().items()},
             "as": "stated by the listing, not a figure of this scenario",
         },
         "citation": {"url": record.citation_url, "text": record.citation_text},

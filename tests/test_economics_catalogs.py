@@ -796,6 +796,7 @@ def test_the_outbound_transport_puts_a_header_key_in_its_header(monkeypatch):
     request = catalogs.request_for(catalogs.source(SUBMISSIONS), as_of=TODAY, explicit=False, today=TODAY)
     assert feeds.OutboundTransport().send(request, SEC_AGENT) == b"{}"
     assert seen["headers"]["User-Agent"] == SEC_AGENT and SEC_AGENT in seen["also_withhold"]
+    assert "application/rss+xml" in seen["headers"]["Accept"] and "application/json" in seen["headers"]["Accept"]
     assert seen["params"] == [] and SEC_AGENT not in seen["url"]
 
 

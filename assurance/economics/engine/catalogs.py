@@ -168,8 +168,11 @@ class PriceObservation:
     TYPE = "price"
 
     def __post_init__(self):
-        for name in ("provider", "sku", "observation_id", "region", "unit", "product", "description"):
-            _blank_or_text(getattr(self, name), name)
+        for name, value in (
+            ("provider", self.provider), ("sku", self.sku), ("observation_id", self.observation_id),
+            ("region", self.region), ("unit", self.unit), ("product", self.product), ("description", self.description),
+        ):
+            _blank_or_text(value, name)
         _decimal(self.usd_price, f"{self.observation_id} usd_price")
         _decimal(self.tier_start, f"{self.observation_id} tier_start")
         _plain_date(self.effective_date, f"{self.observation_id} effective_date")
@@ -221,8 +224,9 @@ class CompanyFact:
     def __post_init__(self):
         if not isinstance(self.cik, str) or not _CIK.fullmatch(self.cik):
             raise FeedRefused("feed_value_malformed", f"cik {self.cik!r} is not ten digits")
-        for name in ("entity", "concept", "unit", "form"):
-            _blank_or_text(getattr(self, name), name)
+        for name, value in (("entity", self.entity), ("concept", self.concept), ("unit", self.unit),
+                            ("form", self.form)):
+            _blank_or_text(value, name)
         if not isinstance(self.accession, str) or not _ACCESSION.fullmatch(self.accession):
             raise FeedRefused("feed_value_malformed", f"accession {self.accession!r}")
         _plain_date(self.period_start, "period_start")
@@ -231,8 +235,9 @@ class CompanyFact:
         if self.period_end < self.period_start:
             raise FeedRefused("feed_value_malformed", f"{self.concept} ends {self.period_end} before it starts")
         _decimal(self.value, f"{self.concept} value", signed=True)
-        for name in ("fiscal_year", "fiscal_period", "segment_axis", "segment_member"):
-            if not isinstance(getattr(self, name), str):
+        for name, value in (("fiscal_year", self.fiscal_year), ("fiscal_period", self.fiscal_period),
+                            ("segment_axis", self.segment_axis), ("segment_member", self.segment_member)):
+            if not isinstance(value, str):
                 raise FeedRefused("feed_value_malformed", f"{name} is not text")
         if bool(self.segment_axis) != bool(self.segment_member):
             raise FeedRefused("feed_value_malformed", "a segment names both its axis and its member, or neither")
@@ -330,8 +335,7 @@ class CompanyEntity:
         _blank_or_text(self.name, "name")
         if not isinstance(self.entity_type, str):
             raise FeedRefused("feed_value_malformed", "entity_type is not text")
-        for name in ("tickers", "exchanges"):
-            values = getattr(self, name)
+        for name, values in (("tickers", self.tickers), ("exchanges", self.exchanges)):
             if not isinstance(values, tuple) or not all(isinstance(v, str) and v.strip() for v in values):
                 raise FeedRefused("feed_value_malformed", f"{name} is a list of names")
 
@@ -382,13 +386,13 @@ class EnforcementRecord:
     AMOUNTS = ("civil_money_penalty", "restitution", "settlement")
 
     def __post_init__(self):
-        for name in ("agency", "record_id", "category", "citation_text"):
-            _blank_or_text(getattr(self, name), name)
+        for name, value in (("agency", self.agency), ("record_id", self.record_id), ("category", self.category),
+                            ("citation_text", self.citation_text)):
+            _blank_or_text(value, name)
         _plain_date(self.action_date, "action_date")
         if self.respondent is not None:
             _blank_or_text(self.respondent, "respondent")
-        for name in self.AMOUNTS:
-            value = getattr(self, name)
+        for name, value in self.amounts().items():
             if value is not None:
                 _decimal(value, name)
         _https_url(self.citation_url, "citation_url")
@@ -398,6 +402,14 @@ class EnforcementRecord:
     @property
     def identity(self) -> str:
         return self.record_id
+
+    def amounts(self) -> dict[str, Decimal | None]:
+        """The amounts the listing stated, by name (``None``: not stated in a field)."""
+        return {
+            "civil_money_penalty": self.civil_money_penalty,
+            "restitution": self.restitution,
+            "settlement": self.settlement,
+        }
 
     def as_record(self) -> dict:
         record = {
@@ -411,8 +423,7 @@ class EnforcementRecord:
             "citation_text": self.citation_text,
             "currency": self.currency,
         }
-        for name in self.AMOUNTS:
-            value = getattr(self, name)
+        for name, value in self.amounts().items():
             record[name] = None if value is None else decimal_text(value)
         return record
 

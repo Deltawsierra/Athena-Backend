@@ -108,7 +108,11 @@ TIMEOUT = (5.0, 30.0)
 FETCH_DEADLINE_SECONDS = 120.0
 #: The most parameters the data-health route lists as one source's Unknowns.
 UNKNOWNS_LIMIT = 200
-_HEADERS = {"Accept": "text/csv, application/json", "User-Agent": "athena-backend economic-exposure feed"}
+#: The step-11 catalogs answer XML too (an RSS listing, an XBRL instance).
+_HEADERS = {
+    "Accept": "text/csv, application/json, application/xml, application/rss+xml, text/xml",
+    "User-Agent": "athena-backend economic-exposure feed",
+}
 
 
 # ------------------------------------------------------------------ settings
