@@ -22,7 +22,9 @@ fixtures and the tests all read the same codes:
   and the conversion with its provenance;
 - :mod:`.cost_index` (E1): cost-index observations and the indexing step;
 - :mod:`.normalization` (E1): native amount, event-date FX, cost index,
-  valuation-date FX, in that order, with the provenance chain;
+  valuation-date FX, in that order, with the provenance chain; since MVP step 12 the
+  policy's primary source, a fallback past it and the sources that disagree with it
+  (section 12.8);
 - :mod:`.snapshot` (E1): reading a committed observation snapshot and its hash;
 - :mod:`.parameters` (scenarios): a parameter's low, base and high, its unit, its
   source type and evidence, and the scenario engine's refusal codes;

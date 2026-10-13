@@ -4,7 +4,7 @@
 
 They were written by hand, from each provider's format as the builder knew it, because
 no request to a provider or its documentation could be made while MVP step 11 was built
-(`docs/economics/spec-v1.md`, section 30). The first line of each file says so, and the
+(`docs/economics/spec-v1.md`, section 31). The first line of each file says so, and the
 tests take that line off before an adapter reads the file. A recording that replaces a
 file needs no change to the tests: each adapter has a structure test that pins the
 format its fixture is written in, so a recording that differs fails there, loudly,

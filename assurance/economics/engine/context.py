@@ -1,5 +1,5 @@
 """What step 11's sources may do, and what they never do (MVP step 11;
-``docs/economics/spec-v1.md``, section 30.5).
+``docs/economics/spec-v1.md``, section 31.5).
 
 The specification (section 10) says what each family is FOR: a cloud price catalog
 is evidence for a recovery, rebuild, hosting or control cost; a public company's
@@ -51,14 +51,14 @@ from .provenance import SourceType
 REFUSALS: Mapping[str, str] = MappingProxyType(
     {
         "context_only_source": (
-            "an enforcement record, a filing watch or segment revenue is context only (spec, section 30.5): a figure "
+            "an enforcement record, a filing watch or segment revenue is context only (spec, section 31.5): a figure "
             "never rests on one, names one in its evidence or takes an amount from one, so no enforcement amount is "
             "ever a fine or penalty figure or reaches a loss"
         ),
         "prefill_not_accepted": (
             "a figure resting on a cloud price or an EDGAR fact is a person's accepted suggestion: an EXPERT_ESTIMATE "
             "variable of a parameter-set version a signed-in person records, for a variable that source may prefill "
-            "(spec, section 30.5); never a scenario parameter, another source type, or a version no person recorded"
+            "(spec, section 31.5); never a scenario parameter, another source type, or a version no person recorded"
         ),
         "suggestion_target_unrecognised": "the variable is not one this source may prefill",
         "suggestion_source_unrecognised": "the source is not a step-11 source that may prefill a figure",

@@ -19,7 +19,7 @@ the parameter-set, builder or report routes, not the URLconf, not a stop
   import) is 503 and records nothing.
 - ``GET .../scenarios/<scenario uuid>/roi/``: the ROI document of the version's
   option (``?simulation=<residual run uuid>``, else its latest), canonical bytes
-  carrying their own digest, from stored rows only.
+  carrying their own digest, from stored rows only, answered ``no-store``.
 
 Access is the report routes': a signed-in account; a deployment the caller cannot
 see, or a scenario, option or run of another, is 404; only an admin or an analyst
@@ -54,7 +54,7 @@ from .engine import remediation as engine_remediation
 from .engine.money import MoneyRefused
 from .engine.parameters import ParameterRefused
 from .models import EconomicsRefused, FinancialScenario, RemediationOption, SimulationResult
-from .report_api import REQUEST_BUDGET_SECONDS, SIMULATION_POLICIES, parse_simulate
+from .report_api import NO_STORE, REQUEST_BUDGET_SECONDS, SIMULATION_POLICIES, parse_simulate
 
 
 def _refused(code: str, detail: str) -> ValidationError:
@@ -251,7 +251,8 @@ class RoiView(APIView):
                 {"detail": "The scenario has no remediation option with a residual run: record one and simulate it."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        return HttpResponse(report.canonical_bytes(document), content_type="application/json")
+        return HttpResponse(report.canonical_bytes(document), content_type="application/json",
+                            headers={"Cache-Control": NO_STORE})
 
 
 urlpatterns = [

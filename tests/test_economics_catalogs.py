@@ -1,6 +1,6 @@
 """Economic Exposure, MVP step 11: the cloud price catalogs, SEC EDGAR and the
 regulators' enforcement listings, on fixtures (``docs/economics/spec-v1.md``,
-section 30).
+section 31).
 
 Every answer here is a FIXTURE (``tests/fixtures/economics_catalogs``): format-faithful,
 NOT a recorded response; replace each with a recording (owner). Every company,
@@ -1525,12 +1525,12 @@ def test_the_spec_names_every_code_route_and_source():
         "feed_over_limit", "filing_unknown", *rules.REFUSALS, "catalog_record_malformed",
         "deployment-economics-suggestions", "deployment-economics-scenario-precedents",
         *catalogs.CATALOG_REGISTRY, "sec-edgar-submissions-cik", "ECONOMICS_GCP_BILLING_API_KEY",
-        "ECONOMICS_SEC_USER_AGENT", "informational", "catalog_sources", "0072_financial_source_records",
+        "ECONOMICS_SEC_USER_AGENT", "informational", "catalog_sources", "0071_financial_source_records",
     ]
     for code in codes:
         assert f"`{code}" in text, code
     for phrase in (
-        "## 30. The cloud price catalogs, SEC EDGAR and enforcement (MVP step 11)",
+        "## 31. The cloud price catalogs, SEC EDGAR and enforcement (MVP step 11)",
         "never automatic penalty prediction",
         "format-faithful, NOT a recorded response; replace with a recording (owner)",
         "no transaction is open while a request is in flight",

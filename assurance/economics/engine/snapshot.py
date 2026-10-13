@@ -192,6 +192,7 @@ def parse_snapshot(data: bytes) -> Snapshot:
             vintage_date=_date(entry["vintage_date"], "vintage_date"),
             source_snapshot_hash=digest,
             source_key=key,
+            provider=source["provider"],
         )
         for entry in (_object(raw, _INDEX, "a cost-index observation") for raw in document["cost_index"])
     )

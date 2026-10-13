@@ -1,5 +1,5 @@
 """The data-health route (MVP step 10; ``docs/economics/spec-v1.md``, section 29.7),
-and step 11's two context routes (section 30.8): a prefill suggestion and a
+and step 11's two context routes (section 31.8): a prefill suggestion and a
 scenario's enforcement precedents.
 
 Mounted under ``/api/assurance/`` by :mod:`assurance.urls`, GUARDED, in a guard of

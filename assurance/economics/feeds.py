@@ -46,7 +46,7 @@ A parameter rests on a feed source when its ``evidence_ref`` names one,
 ``financial-source:<key>``. Nothing here is on a stop path, and no stop reads
 anything it writes.
 
-**MVP step 11** (spec, section 30) adds the cloud price catalogs, SEC EDGAR and the
+**MVP step 11** (spec, section 31) adds the cloud price catalogs, SEC EDGAR and the
 regulators' enforcement listings (:mod:`assurance.economics.engine.catalogs`) to the
 same fetch, store, freshness and data health:
 
@@ -344,7 +344,7 @@ def _filing_to_read(feed: engine.FeedSource, as_of: date) -> catalogs.CompanyFil
 
 
 def _fetch_catalog(feed, key, *, as_of, explicit, today, now, transport) -> FetchOutcome:
-    """A step-11 fetch (spec, section 30.4): every page asked and read whole, one
+    """A step-11 fetch (spec, section 31.4): every page asked and read whole, one
     request at a time and with no transaction open, BEFORE anything is parsed; then
     parsed all or nothing and registered as step 10's fetch registers."""
     filing = None
@@ -412,8 +412,9 @@ def _platform_versions(key: str):
     return FinancialSource.objects.filter(deployment__isnull=True, source_key=key)
 
 
-def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int, date]]:
-    """For the platform-wide versions of ``key``: ``{snapshot hash: the version
+def _coverage_starts(key: str, tenant=None) -> tuple[dict[str, int], dict[str, int], dict[int, date]]:
+    """For the platform-wide versions of ``key`` (or ``tenant``'s own, where one is
+    given): ``{snapshot hash: the version
     holding its rows}`` (the earliest of that hash: a raised version holds none of its
     own), ``{snapshot hash: its newest version number}`` (a raise of the same payload
     supersedes the version it was raised from), and ``{holder: the date of its earliest
@@ -421,7 +422,7 @@ def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int
     holders: dict[str, int] = {}
     newest: dict[str, int] = {}
     for row in (
-        FinancialSource._base_manager.filter(deployment__isnull=True, source_key=key)
+        FinancialSource._base_manager.filter(_scope(tenant), source_key=key)
         .order_by("version")
         .values("pk", "version", "snapshot_hash")
     ):
@@ -439,7 +440,12 @@ def _coverage_starts(key: str) -> tuple[dict[str, int], dict[str, int], dict[int
     return holders, newest, starts
 
 
-def used_version(key: str, deployment, as_of: date) -> FinancialSource | None:
+def _scope(tenant) -> Q:
+    """Platform-wide versions, or ``tenant``'s own."""
+    return Q(deployment__isnull=True) if tenant is None else Q(deployment=tenant)
+
+
+def used_version(key: str, deployment, as_of: date, *, own: bool = False) -> FinancialSource | None:
     """The version of ``key`` a run of ``deployment`` dated ``as_of`` uses (the lead's
     decision on review round 1, MEDIUM-2): the NEWEST platform-wide version that is
     usable -- it passes the production gate for that deployment
@@ -448,21 +454,25 @@ def used_version(key: str, deployment, as_of: date) -> FinancialSource | None:
     A version whose observations all fall after ``as_of`` does not cover it, and an
     older one that does is used instead; a date after a version's newest observation
     is covered, and only ages it (stale, blocked). None covers it: ``None``, and the
-    source is ``missing``."""
+    source is ``missing``. With ``own``, the same rule over ``deployment``'s own
+    versions of ``key`` (a normalization reads them, section 12.8)."""
+    tenant = deployment if own else None
+    if own and deployment is None:
+        return None
     usable = list(
         FinancialSource.objects.usable_for_production(deployment)
-        .filter(deployment__isnull=True, source_key=key)
+        .filter(_scope(tenant), source_key=key)
         .order_by("-version")
     )
     if not usable:
         return None
-    holders, newest, starts = _coverage_starts(key)
+    holders, newest, starts = _coverage_starts(key, tenant)
     feed = known_source(key)
     for version in usable:
         if newest.get(version.snapshot_hash) != version.version:
             continue
         if feed is not None and feed.age_basis == catalogs.RETRIEVAL:
-            # A catalog covers a date once it was retrieved (spec, section 30.6).
+            # A catalog covers a date once it was retrieved (spec, section 31.6).
             if catalogs.ages_from_retrieval(version.retrieved_at, as_of) is not None:
                 return version
             continue
@@ -573,7 +583,7 @@ def source_state(key: str, *, deployment, as_of: date) -> dict:
     age = (as_of - newest).days
     state.update(data_through=newest.isoformat(), age_days=age, state=engine.freshness_state(age, feed.sla_days))
     if feed.freshness == catalogs.INFORMATIONAL:
-        # Shown, never acted on (spec, section 30.6): no downgrade, no stale claim, no
+        # Shown, never acted on (spec, section 31.6): no downgrade, no stale claim, no
         # refused receipt for its age. A source with no version a run may use is
         # still missing.
         state.update(age_state=state["state"], state=INFORMATIONAL)
@@ -592,7 +602,7 @@ def states_for(keys, *, deployment, as_of: date | None) -> dict[str, dict]:
     for key in sorted(set(keys)):
         feed = known_source(key)
         if feed is not None and feed.use == catalogs.CONTEXT:
-            # A figure never rests on a context source (spec, section 30.5): one that
+            # A figure never rests on a context source (spec, section 31.5): one that
             # cites it anyway -- written past the model's check -- fails closed.
             states[key] = {"source_key": key, "state": engine.MISSING, "as_of": as_of.isoformat() if as_of else None,
                            "reason": "context_only_source"}
@@ -757,7 +767,7 @@ EFFECTS = {
 }
 
 
-#: What a step-11 context source does, whatever its state (spec, section 30.6).
+#: What a step-11 context source does, whatever its state (spec, section 31.6).
 CONTEXT_EFFECT = (
     "context only: it shows its age, and never lowers a grade, makes a claim stale or stops a receipt; a figure "
     "never rests on it"
@@ -847,7 +857,7 @@ def data_health(deployment, *, now: datetime | None = None) -> dict:
             f"{provider} {cadence}": days for (provider, cadence), days in sorted(engine.FRESHNESS_SLA_DAYS.items())
         },
         "sources": sources,
-        # MVP step 11 (spec, section 30.7): the cloud price catalogs, SEC EDGAR and
+        # MVP step 11 (spec, section 31.7): the cloud price catalogs, SEC EDGAR and
         # the enforcement listings, each with what it may do and how its age acts.
         "catalog_freshness_sla_days": {
             f"{provider} {cadence}": days for (provider, cadence), days in sorted(catalogs.CATALOG_SLA_DAYS.items())

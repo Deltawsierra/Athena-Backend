@@ -230,8 +230,43 @@ UNAVAILABLE_REASONS: Mapping[str, str] = MappingProxyType(
             "no value of the cost-index series for the period, in any vintage published by the as-of date, "
             "within the lag the policy allows"
         ),
+        "index_primary_unset": (
+            "more than one source publishes the cost-index series, the policy's providers name none of them, and "
+            "they disagree by more than the tolerance: no source is chosen between them (spec-v1 section 12.8)"
+        ),
     }
 )
+
+#: The downgrades about WHICH source a figure rests on (MVP step 12; spec-v1 section
+#: 12.8). Each lowers a normalization one step however many of its steps carry it.
+SOURCE_DISAGREEMENT = "source_disagreement"
+PRIMARY_UNAVAILABLE = "primary_unavailable"
+ONCE_PER_NORMALIZATION = frozenset({SOURCE_DISAGREEMENT, PRIMARY_UNAVAILABLE})
+
+
+def relative_difference(primary: Decimal, other: Decimal) -> Decimal:
+    """``|other - primary| / primary`` at the engine's precision: a difference is
+    always taken relative to the PRIMARY source's value, never the other's."""
+    return compute(lambda: abs(other - primary) / primary)
+
+
+def frozen_record(value):
+    """``value`` (a dict, list or scalar) held read-only, so a frozen step's record
+    of a conflict cannot be changed after it is made."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: frozen_record(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(frozen_record(item) for item in value)
+    return value
+
+
+def plain_record(value):
+    """A record made by :func:`frozen_record`, as plain JSON values again."""
+    if isinstance(value, Mapping):
+        return {key: plain_record(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [plain_record(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)

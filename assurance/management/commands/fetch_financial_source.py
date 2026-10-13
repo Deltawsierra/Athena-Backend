@@ -17,7 +17,7 @@ a refusal is a CommandError naming its code. It never prints, logs or records a 
 nor the answer's text. It is on no stop path, reads nothing a stop reads, and no
 first-party module imports it.
 
-MVP step 11 (spec, section 30): it fetches step 11's sources the same way -- the AWS,
+MVP step 11 (spec, section 31): it fetches step 11's sources the same way -- the AWS,
 Azure and GCP price catalogs, a company's SEC EDGAR filing watch, facts and segment
 revenue (``sec-edgar-<submissions|companyfacts|segments>-cik<CIK>``), and the
 regulators' enforcement listings -- each as known today only, every page of a

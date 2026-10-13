@@ -28,7 +28,7 @@ fetch an operator runs (:mod:`assurance.economics.feeds`, ``manage.py
 fetch_financial_source``), which registers a feed's parsed answer through
 :func:`register`: no route or signal imports it, and it is on no stop path.
 
-MVP step 11 (spec, section 30): a catalog's answer -- cloud prices, a company's
+MVP step 11 (spec, section 31): a catalog's answer -- cloud prices, a company's
 facts or filing watch, enforcement records -- is registered the same way, its
 records as ONE :class:`~assurance.economics.models.FinancialSourceRecords` row of the
 new version, checked whole before the transaction opens; :func:`records_of` reads

@@ -111,19 +111,19 @@ REMEDIATION_RECORD_REFUSALS = {
 }
 _REFUSAL_TEXT.update(REMEDIATION_RECORD_REFUSALS)
 #: The codes the context rules of step 11's sources refuse a figure or a records row
-#: with (spec, section 30.5). Spelled here, as the engine's ``context.REFUSALS``
+#: with (spec, section 31.5). Spelled here, as the engine's ``context.REFUSALS``
 #: spells the first two (``tests/test_economics_catalogs.py`` pins them equal): that
 #: module is not on Django's load path.
 CONTEXT_RECORD_REFUSALS = {
     "context_only_source": (
-        "an enforcement record, a filing watch or segment revenue is context only (spec, section 30.5): a figure "
+        "an enforcement record, a filing watch or segment revenue is context only (spec, section 31.5): a figure "
         "never rests on one, names one in its evidence or takes an amount from one, so no enforcement amount is "
         "ever a fine or penalty figure or reaches a loss"
     ),
     "prefill_not_accepted": (
         "a figure resting on a cloud price or an EDGAR fact is a person's accepted suggestion: an EXPERT_ESTIMATE "
         "variable of a parameter-set version a signed-in person records, for a variable that source may prefill "
-        "(spec, section 30.5); never a scenario parameter, another source type, or a version no person recorded"
+        "(spec, section 31.5); never a scenario parameter, another source type, or a version no person recorded"
     ),
     "catalog_record_malformed": (
         "a source version's records row holds the records of a step-11 source of its kind, each in its stored "
@@ -1608,6 +1608,7 @@ class CostIndexObservation(_AppendOnly):
             source_key=named.source_key if named else "",
             source_version=named.version if named else None,
             observations_version=held_by,
+            provider=source.provider if source else "",
         )
 
     def check_new(self) -> None:
@@ -1721,7 +1722,7 @@ CATALOG_KINDS = ("cloud_price", "company_fact", "filing_watch", "enforcement")
 
 
 class FinancialSourceRecords(_AppendOnly):
-    """The records one version of a step-11 source holds (spec, section 30): a cloud
+    """The records one version of a step-11 source holds (spec, section 31): a cloud
     catalog's prices, a company's facts or filing watch, or a regulator's enforcement
     records, as one list in their stored spelling (``engine/catalogs.py``,
     ``records_json``), with their count and digest.
@@ -1735,7 +1736,7 @@ class FinancialSourceRecords(_AppendOnly):
 
     CONTEXT AND PREFILL ONLY: no run reads it, and no loss component, parameter or
     report cites it; a figure only cites a prefill source's version as a person's
-    accepted evidence (spec, section 30.5). It names no account and no deployment of
+    accepted evidence (spec, section 31.5). It names no account and no deployment of
     its own; it goes with its source version. Append-only."""
 
     id = models.BigAutoField(primary_key=True)
@@ -1975,7 +1976,7 @@ class CustomerParameterSet(_AppendOnly):
                 raise EconomicsRefused("parameter_not_found", f"{row.name} is derived from a parameter of another parent")
             names.add(row.name)
         # A figure resting on a cloud price or an EDGAR fact is a suggestion a PERSON
-        # accepted (spec, section 30.5): a version no signed-in account records holds none.
+        # accepted (spec, section 31.5): a version no signed-in account records holds none.
         if version.author_id is None and any(_rests_on_prefill(row.evidence_ref) for row in rows):
             raise EconomicsRefused("prefill_not_accepted", "a version no signed-in person records")
         for row in (version, *rows):
@@ -2249,7 +2250,7 @@ class FinancialParameter(_AppendOnly):
         if len(set(derived)) != len(derived) or str(self.uuid) in derived:
             raise EconomicsRefused("duplicate_id", f"{self.name} derived_from names a parameter twice, or itself")
         engine = _engine_refusal(self.as_engine)
-        # Step 11's context rules (spec, section 30.5): no figure names an enforcement
+        # Step 11's context rules (spec, section 31.5): no figure names an enforcement
         # listing or a filing watch, and one resting on a cloud price or an EDGAR fact
         # is an accepted EXPERT_ESTIMATE variable of a parameter set.
         refusal = _citation_refusal(

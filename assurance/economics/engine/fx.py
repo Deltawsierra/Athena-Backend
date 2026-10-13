@@ -32,6 +32,15 @@ section 12):
 - **Stale.** A rate more than ``freshness_days`` older (or, interpolated, further)
   than the day it is used for is flagged ``stale`` and carries a downgrade
   (``stale_rate``).
+- **The primary, and sources that disagree** (MVP step 12; ``docs/economics/spec-v1.md``,
+  section 12.8). The policy's first provider is the PRIMARY. Where it has no rate and a
+  later provider's is used, the step says so and carries ``primary_unavailable``: a
+  fallback is never silent. The rate used is compared with every other provider's in
+  the book for the same pair on the same date (the book holds only sources a run may
+  use): one more than :data:`DISAGREEMENT_TOLERANCE` away from it, relative to it, is a
+  conflict the step lists with both sources and both values, and the step carries
+  ``source_disagreement``. The rate used is still the policy's: never the other, and
+  never the one that gives the smaller figure.
 - **The original is never overwritten.** The step holds the amount it was given and
   the new amount, and the observations it read.
 
@@ -51,6 +60,8 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from .money import (
+    PRIMARY_UNAVAILABLE,
+    SOURCE_DISAGREEMENT,
     Money,
     MoneyRefused,
     Unavailable,
@@ -62,6 +73,9 @@ from .money import (
     check_text,
     compute,
     decimal_text,
+    frozen_record,
+    plain_record,
+    relative_difference,
 )
 
 
@@ -118,6 +132,11 @@ STALE_RATE = "stale_rate"
 
 #: A round trip through one rate is within this, relative to the amount.
 ROUND_TRIP_TOLERANCE = Decimal("1E-50")
+
+#: How far another usable source's rate for the same pair and date may be from the
+#: rate used, relative to it, before the two disagree (the lead's decision for MVP step
+#: 12, 13 Oct 2026). At or under it nothing is flagged.
+DISAGREEMENT_TOLERANCE = Decimal("0.005")
 
 #: The longest run of non-publication days the weekend or holiday rule walks back
 #: over; a calendar that closes a provider for longer finds no last official rate.
@@ -224,6 +243,11 @@ class FXBook:
             return inverse, INVERTED
         return None
 
+    def quoting(self, frm: str, to: str) -> list[str]:
+        """Every provider holding any rate between the two codes, either way round, in
+        name order."""
+        return sorted({provider for (provider, _, base, quote) in self._series if {base, quote} == {frm, to}})
+
     def dates(self, provider: str, rate_type: str, base: str, quote: str) -> list[date]:
         """Every date with a ``base``/``quote`` rate of that provider and type, in order."""
         return sorted(self._series.get((provider, rate_type, base, quote), {}))
@@ -319,13 +343,32 @@ class FXStep:
     age_days: int = 0
     stale: bool = False
     estimate: bool = False
+    #: The policy's first provider: the PRIMARY (spec-v1 section 12.8).
+    configured_primary: str | None = None
+    #: Every other source in the book whose rate for the same pair and date is more
+    #: than :data:`DISAGREEMENT_TOLERANCE` from the rate used, relative to it.
+    conflicts: tuple = ()
 
     status = "converted"
 
     @property
+    def primary_unavailable(self) -> bool:
+        """Whether a later provider's rate was used: the primary had none."""
+        return self.provider is not None and self.configured_primary is not None and (
+            self.provider != self.configured_primary
+        )
+
+    @property
     def downgrades(self) -> tuple[str, ...]:
         return tuple(
-            reason for reason, applies in ((ESTIMATED_RATE, self.estimate), (STALE_RATE, self.stale)) if applies
+            reason
+            for reason, applies in (
+                (ESTIMATED_RATE, self.estimate),
+                (STALE_RATE, self.stale),
+                (SOURCE_DISAGREEMENT, bool(self.conflicts)),
+                (PRIMARY_UNAVAILABLE, self.primary_unavailable),
+            )
+            if applies
         )
 
     def as_dict(self) -> dict:
@@ -347,7 +390,10 @@ class FXStep:
             "age_days": self.age_days,
             "stale": self.stale,
             "estimate": self.estimate,
+            "configured_primary": self.configured_primary,
+            "primary_unavailable": self.primary_unavailable,
             "downgrades": list(self.downgrades),
+            "conflicts": plain_record(self.conflicts),
             "observations": [observation.as_provenance() for observation in self.observations],
             "input": self.input.as_dict(),
             "output": self.output.as_dict(),
@@ -416,6 +462,65 @@ def _find(frm: str, to: str, day: date, book: FXBook, policy: FXPolicy) -> _Foun
     return None
 
 
+def _source(rate: FXRate) -> str:
+    """How a conflict names a rate's source: its registry key, or where a book was
+    built without one, its provider."""
+    return rate.source_key or rate.provider
+
+
+def _conflicts(found: _Found, book: FXBook, policy: FXPolicy, step: str) -> tuple:
+    """Every other provider in ``book`` -- the policy's in its order, then any other in
+    name order -- whose rate for the pair and date the step used is more than
+    :data:`DISAGREEMENT_TOLERANCE` from it, relative to it. Within each provider, the
+    first rate type the policy accepts that it has for that day. Only an OBSERVED rate
+    is compared: an interpolated estimate is a rate of no source (section 12.8)."""
+    if found.rule not in (EXACT, LAST_OFFICIAL_RATE):
+        return ()
+    (primary,) = found.observations
+    base, quote, day = primary.base, primary.quote, found.rate_date
+    others = [p for p in policy.providers if p != found.provider]
+    others += [p for p in book.quoting(base, quote) if p != found.provider and p not in others]
+    conflicts = []
+    for provider in others:
+        for rate_type in policy.rate_types:
+            hit = book.observed(provider, rate_type, base, quote, day)
+            if hit is None:
+                continue
+            other, direction = hit
+            # The other source's rate in the pair's direction, as the primary quotes it.
+            value = other.rate if direction == DIRECT else compute(lambda o=other: Decimal(1) / o.rate)
+            difference = relative_difference(primary.rate, value)
+            if difference > DISAGREEMENT_TOLERANCE:
+                conflicts.append(
+                    frozen_record(
+                        {
+                            "kind": "fx",
+                            "step": step,
+                            "pair": f"{base}/{quote}",
+                            "date": day.isoformat(),
+                            "primary": _source(primary),
+                            "primary_provider": primary.provider,
+                            "primary_rate_type": primary.rate_type,
+                            "primary_value": decimal_text(primary.rate),
+                            "secondary": _source(other),
+                            "secondary_provider": other.provider,
+                            "secondary_rate_type": other.rate_type,
+                            "secondary_value": decimal_text(value),
+                            "secondary_quoted": {
+                                "base": other.base,
+                                "quote": other.quote,
+                                "rate": decimal_text(other.rate),
+                                "direction": direction,
+                            },
+                            "relative_difference": decimal_text(difference),
+                            "tolerance": decimal_text(DISAGREEMENT_TOLERANCE),
+                        }
+                    )
+                )
+            break
+    return tuple(conflicts)
+
+
 def convert(amount: Money, to: str, on: date, book: FXBook, policy: FXPolicy, *, step: str = "fx") -> FXStep | Unavailable:
     """``amount`` in currency ``to``, at the rate for ``on``, under ``policy``: an
     :class:`FXStep` with its provenance, or an explicit :class:`Unavailable`
@@ -459,4 +564,6 @@ def convert(amount: Money, to: str, on: date, book: FXBook, policy: FXPolicy, *,
         age_days=age,
         stale=age > policy.freshness_days,
         estimate=found.rule == LINEAR_INTERPOLATION,
+        configured_primary=policy.providers[0],
+        conflicts=_conflicts(found, book, policy, step),
     )

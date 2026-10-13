@@ -1,5 +1,5 @@
 """Step 11's two readers of catalog records, both CONTEXT ONLY (MVP step 11;
-``docs/economics/spec-v1.md``, section 30.5):
+``docs/economics/spec-v1.md``, section 31.5):
 
 - :func:`suggest`: a cloud cost, or a public company's revenue or operating margin,
   as a SUGGESTION for one parameter-set variable (``engine/context.py``,

@@ -45,6 +45,10 @@ distributions, the seeded sampler and the simulation of a stored scenario versio
   fetch_financial_source``; :mod:`assurance.economics.health_api` is the data-health
   route, mounted by :mod:`assurance.urls` in a guard of its own, which imports the
   feed module only inside its view.
+- :mod:`assurance.economics.normalization_service` normalizes an amount for a
+  deployment from the source versions a run of it may use, the policy's primary first
+  and every disagreeing source listed (MVP step 12, spec section 12.8). No route serves
+  it, and nothing on Django's load path imports it.
 - MVP step 11 adds the cloud price catalogs, SEC EDGAR and the regulators'
   enforcement listings to the same fetch and store, and
   :mod:`assurance.economics.context_service`, the two CONTEXT ONLY readers of their

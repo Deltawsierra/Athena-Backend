@@ -1,5 +1,5 @@
 """The cloud price catalogs, SEC EDGAR and the regulators' enforcement listings
-(MVP step 11; ``docs/economics/spec-v1.md``, section 30).
+(MVP step 11; ``docs/economics/spec-v1.md``, section 31).
 
 Step 10's feed framework, extended to three more families of source, each read
 from its provider's published format into a list of RECORDS that a source version
@@ -25,7 +25,7 @@ observations a run reads:
   own (never read out of prose: ``None`` where it states none), and the citation's
   URL and text.
 
-What each may do is the source's ``use`` (spec, section 30.5): a cloud price or an
+What each may do is the source's ``use`` (spec, section 31.5): a cloud price or an
 EDGAR fact may PREFILL a parameter only as a suggestion a person accepts
 (:mod:`.context`); a filing watch, segment revenue and every enforcement record are
 CONTEXT, never a figure. Enforcement amounts are never a fine or penalty figure
@@ -367,7 +367,7 @@ class EnforcementRecord:
     restitution, a settlement; ``None``: not stated there -- never read out of
     prose), and the citation's URL and text.
 
-    CONTEXT ONLY (spec, section 30.5): never a fine or penalty figure, never summed
+    CONTEXT ONLY (spec, section 31.5): never a fine or penalty figure, never summed
     into a loss."""
 
     agency: str
@@ -1749,7 +1749,7 @@ def _enforcement_csv(feed: FeedSource, pages, as_of, requests, filing) -> list:
 # ----------------------------------------------------------------- the payload
 
 
-#: What each adapter's payload hash normalises (spec, section 30.3).
+#: What each adapter's payload hash normalises (spec, section 31.3).
 NORMALISATION: Mapping[str, str] = MappingProxyType(
     {
         "aws": "nothing dropped: the offer file's JSON re-serialised canonically (sorted keys, no whitespace)",

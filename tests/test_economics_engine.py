@@ -179,7 +179,7 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "remediation.py",
         # Step 10's live-feed adapters, registry and freshness table (spec, section 29).
         "feeds.py",
-        # Step 11's catalog adapters and registry, and its context rules (spec, section 30).
+        # Step 11's catalog adapters and registry, and its context rules (spec, section 31).
         "catalogs.py",
         "context.py",
     }
@@ -995,7 +995,7 @@ SPEC_PHRASES = (
     "informational average, not a transaction price",
     "A run uses the newest usable version whose coverage includes its as-of date",
     "source_not_authoritative",
-    # MVP step 11 (section 30): the catalogs, EDGAR and enforcement, context only.
+    # MVP step 11 (section 31): the catalogs, EDGAR and enforcement, context only.
     "never automatic penalty prediction",
     "no code path writes an enforcement amount into a loss component",
     "a suggestion, not a parameter",

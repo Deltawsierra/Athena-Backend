@@ -113,7 +113,7 @@ FEED_REFUSALS: Mapping[str, str] = MappingProxyType(
             "a figure's evidence reads as a citation of a feed source but is not one exactly "
             "('financial-source:<key>' at its start, once): it fails closed, never escaping the feed rules"
         ),
-        # MVP step 11 (spec, section 30): the cloud price catalogs, SEC EDGAR and the
+        # MVP step 11 (spec, section 31): the cloud price catalogs, SEC EDGAR and the
         # regulators' enforcement listings.
         "feed_over_limit": (
             "the answer holds more pages or records than one source version may hold (catalogs.MAX_PAGES, "
@@ -182,7 +182,7 @@ class FeedSource:
     #: provider's terms (FREEZE.md, owner exception 9): no production run may use it.
     license_class: str = LicenseClass.UNREVIEWED.value
     config: Mapping = field(default_factory=lambda: MappingProxyType({}))
-    #: What a figure may do with the source (MVP step 11; spec, section 30): ``figure``
+    #: What a figure may do with the source (MVP step 11; spec, section 31): ``figure``
     #: (step 10's FX and cost-index sources, read by a run), ``prefill`` (a person's
     #: accepted estimate may cite it as evidence) or ``context`` (never a figure).
     use: str = "figure"
@@ -852,6 +852,7 @@ def _fred(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedR
                 vintage_date=as_of,
                 source_snapshot_hash=digest,
                 source_key=feed.key,
+                provider=feed.provider,
             )
         )
     if not points:
@@ -928,6 +929,7 @@ def _bls(feed: FeedSource, raw: bytes, as_of: date, digest: str, request: FeedRe
                 vintage_date=as_of,
                 source_snapshot_hash=digest,
                 source_key=feed.key,
+                provider=feed.provider,
             )
         )
     if not points:
