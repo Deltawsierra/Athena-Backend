@@ -201,6 +201,21 @@ def _sqlite_wal(django_db_setup, django_db_blocker):
                 cursor.execute("PRAGMA journal_mode=WAL")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _economics_run_slots(tmp_path_factory):
+    """A directory of this run's own for the economics run slots
+    (``assurance.economics.capacity``), so two test runs on one machine never hold
+    each other's slots. A nested pytest inherits it."""
+    directory = tmp_path_factory.mktemp("economics-run-slots")
+    before = os.environ.get("ATHENA_ECONOMICS_SLOT_DIR")
+    os.environ["ATHENA_ECONOMICS_SLOT_DIR"] = str(directory)
+    yield directory
+    if before is None:
+        os.environ.pop("ATHENA_ECONOMICS_SLOT_DIR", None)
+    else:
+        os.environ["ATHENA_ECONOMICS_SLOT_DIR"] = before
+
+
 @pytest.fixture
 def engine_keyring(tmp_path, monkeypatch):
     """Configure an outcome keyring that trusts :data:`tests.signed_chains.ENGINE_KEYS`,

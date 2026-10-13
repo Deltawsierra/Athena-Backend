@@ -655,6 +655,31 @@ report is marked `residual_of`, `may_be_totalled` refuses it (and anything that 
 report, the ROI document included), and it is never receipted. None of the three routes is a stop, and a fault in this module leaves only
 these routes unserved.
 
+### Economics runs at once: the cap
+
+A simulate request runs its Monte Carlo in the worker that serves it, for up to 120 s,
+so the two simulate routes (and any later Monte Carlo route, which registers with one
+line, `@capacity.capped`) run only in a free slot (`assurance/economics/capacity.py`;
+spec, section 32). A slot is an exclusive `flock` on a small file every worker on the
+host shares, taken WITHOUT WAITING: when none is free the request is answered at once,
+503 with `Retry-After` and code `economics_capacity`, and nothing runs or is recorded.
+The kernel releases a dead worker's flock, so a slot never leaks; every other exit
+(an answer, a refusal, an exception, gunicorn's abort) releases it in a `finally`. The
+caps, each read from the environment by name:
+
+- `ATHENA_ECONOMICS_RUN_CAP`: runs the host makes at once; by default
+  `max(1, WEB_CONCURRENCY - 2)`, where `WEB_CONCURRENCY` is gunicorn's own worker count
+  (1 when unset), so at least two workers stay free for everything else, every stop
+  included, on a host of three workers or more. With `--threads`, set it to
+  `workers x threads - 2`;
+- `ATHENA_ECONOMICS_RUN_CAP_PER_TENANT`: runs one deployment (the tenant) makes at
+  once, default 1;
+- `ATHENA_ECONOMICS_SLOT_DIR`: where the slot files are, a directory local to the host
+  (default `<system temp dir>/athena-economics-slots`).
+
+No stop takes a slot: a scan's Stop and every operator stop are answered within their
+bound while every slot is held (`tests/test_economics_run_cap.py`).
+
 ### The live feeds (step 10, waiting on the owner's keys)
 
 Four official publishers are wired (spec, section 29): the ECB's euro reference rates
@@ -903,6 +928,11 @@ python manage.py check --deploy --fail-level WARNING
 
 CI runs this and it must stay clean. `DJANGO_SECRET_KEY` is required outside
 development, and the process refuses to start without it.
+
+Run at least three workers, and set `WEB_CONCURRENCY` to the worker count (gunicorn
+reads it as its `--workers` default), or `ATHENA_ECONOMICS_RUN_CAP` explicitly: the
+economics run cap is derived from it, so long simulations always leave two workers
+free for a stop ("Economics runs at once: the cap", above). Unset, the cap is 1.
 
 ## Connector dispatch that a stop owes
 

@@ -4526,10 +4526,10 @@ and series.
 - **The live review status** is read when the report is built: a review recorded
   later changes the report's bytes and digest, as it should (the card keeps the
   status at issue).
-- **No cap on simulations at once** (review round 1, LOW-5): one request is bounded
-  by its one deadline, but how many a process runs at once, or a scenario holds, is
-  not. Open for the testing phase: a per-process cap (503 when busy), so a pool of
-  synchronous workers cannot fill with long simulations a stop's request might need.
+- **The cap on simulations at once is done** (review round 1, LOW-5; the section 28
+  threat-model audit, S1): how many runs a host makes at once, and a deployment, is
+  capped across worker processes without waiting, and a run with no slot free is 503
+  `economics_capacity` at once (section 32).
 - **The step-5 events route carries the banner** (`.../scenarios/<uuid>/events/`,
   sections 24.8 and 27.6; review round 1, LOW-6(b), done in the follow-up to #158). It
   still serves step 4's deterministic totals, which are not a result, and says
@@ -5397,3 +5397,108 @@ Decisions this adds, which the owner may change:
 5. **A receipt's bytes are its stored envelope in canonical spelling.** The database's
    own text of the column is not served: a JSON column need not keep the spelling it
    was given (PostgreSQL's `jsonb`, for one, reorders keys). Recommendation: keep.
+
+## 32. Economics runs at once: the cap (SAFETY RULE)
+
+The SAFETY RULE: nothing may block, delay or drop a stop, a pause, a stand-down, a
+terminate, a revoke or a scan's Stop. Every simulate route runs its Monte Carlo
+synchronously, in the worker that serves it, for up to its one 120 s deadline (section
+27.1). Nothing bounded how many ran at once, so one analyst, or a stolen analyst token,
+could fill every worker with long runs, and a scan's Stop then waited for a free worker
+(the section 28 threat-model audit, finding S1, HIGH).
+
+| | |
+|---|---|
+| Code | `assurance/economics/capacity.py`; `@capacity.capped` on `report_api.ScenarioSimulateView.post` and `remediation_api.MitigationSimulateView.post` |
+| Tests | `tests/test_economics_run_cap.py`; the canary harness's records path (a simulate at capacity) |
+
+### 32.1 What takes a slot
+
+Every handler that runs a Monte Carlo, or the sensitivity analysis a Validity Card is:
+the scenario simulate route and the remediation option's simulate route (its two runs
+share one slot). A route registers with ONE line, `@capacity.capped` on its handler; a
+later Monte Carlo route (E5's portfolio simulate) registers the same way, and
+`test_every_handler_that_runs_a_monte_carlo_takes_a_slot` walks the URLconf and fails
+on a handler that calls a run (`simulate_scenario`, `simulate_option`,
+`simulate_portfolio`, `issue_card`, `issue_charts`, `issue_receipt`) and is not
+capped. No management command runs a Monte Carlo.
+
+Before a slot is touched the deployment is looked up as the handler looks it up (404
+for one the caller cannot see: a tenant's runs are never disclosed to another), and a
+caller who may not write goes straight to the handler, which refuses them (403) and
+runs nothing. Then one of the deployment's slots and one of the host's are taken, both
+WITHOUT WAITING. When either is not free the request is answered at once:
+
+```
+503 Service Unavailable
+Retry-After: 30
+{"code": "economics_capacity", "detail": "...: nothing was run or recorded; send the same request again after 30 s", "recorded": false}
+```
+
+Nothing runs and nothing is recorded; nothing queues. The answer carries nothing from
+the request. A request that would only return a stored result is refused the same way
+while every slot is held.
+
+### 32.2 The slots
+
+A slot is an exclusive `flock` (`LOCK_EX | LOCK_NB`) on one small file in the slot
+directory, which every worker on the host shares: `run-<i>.lock` for the host's
+slots, `tenant-<sha256 of the deployment uuid>-<i>.lock` for a deployment's.
+
+- **No slot leaks.** The kernel releases a flock when the last descriptor of its open
+  file closes, so a worker that dies by any means (SIGKILL, the OOM killer, gunicorn's
+  timeout) gives its slots back at once. A database lease with an expiry was the
+  alternative: it leaks a dead worker's slot until it expires, and it would put a
+  database read in front of the cap. The cap reads no database.
+- **Every exit gives the slot back**: the handler's answer, a refusal, an exception,
+  and `SystemExit` (gunicorn's abort of a timed-out worker) release it in a `finally`;
+  a client that disconnects is the same (the handler runs to its end, bounded by its
+  deadline). The descriptors are close-on-exec, and released with `LOCK_UN`, so a child
+  process never keeps one.
+- **Per host.** The cap protects the host's worker pool, so it is per host; a deployment
+  of several machines has a cap on each. The directory must be local to the host.
+- **Fails closed.** Slot files that cannot be opened refuse the run, 503
+  `economics_capacity` ("cannot be read"); a run is never made uncapped.
+
+### 32.3 The caps
+
+Each read from the environment by its literal name; no Django setting is read.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ATHENA_ECONOMICS_RUN_CAP` | `max(1, WEB_CONCURRENCY - 2)` | runs the host makes at once; `0` refuses every run |
+| `WEB_CONCURRENCY` | `1` (gunicorn's own default) | gunicorn's worker count, which gunicorn itself reads |
+| `ATHENA_ECONOMICS_RUN_CAP_PER_TENANT` | `1` | runs one deployment makes at once |
+| `ATHENA_ECONOMICS_SLOT_DIR` | `<system temp dir>/athena-economics-slots` | where the slot files are |
+
+The default global cap leaves at least two workers free for everything else, every
+stop included, wherever the host runs three workers or more. Below three it is 1, the
+least that still lets economics run: one run can then take the only spare worker. A
+server that also runs threads per worker (`gunicorn --threads`) serves
+`workers x threads` requests at once; set `ATHENA_ECONOMICS_RUN_CAP` to that less two.
+This repository holds no Procfile, gunicorn configuration, Dockerfile or Fly
+configuration, so the worker count is taken from the environment, never assumed.
+
+### 32.4 Safety
+
+No stop takes a slot or reads the cap. `test_no_stop_route_takes_a_slot` walks the
+URLconf and fails on a capped handler of any route in `safety.stops.EXEMPT_ROUTES`;
+`test_with_every_slot_held_a_run_is_refused_at_once_and_every_stop_is_answered_in_its_bound`
+holds every slot with slow runs (a test seam holds each open) and drives every stop
+the stop tripwire drives -- a scan's Stop, a pause, a stand-down, a terminate, a revoke,
+a contradiction, the kill switch off, an engagement's authority withdrawn, a demotion, a
+removal, the stop lane's reads, the engine's poll and the refresh -- through
+`config.wsgi.application`, each within the tripwire's `STOP_LATENCY_BOUND` (0.25 s).
+The two simulate routes stay in `safety.stops.NOT_STOPS` and the write-route table's
+routes that cannot move the decision; at capacity they write nothing at all.
+
+### 32.5 Decisions this step takes, which the owner may change
+
+1. **flock slots, per host**, over database leases. Recommendation: keep.
+2. **The per-tenant cap is per deployment**, the tenant boundary (`assurance.models`).
+   An analyst sees every deployment, so one analyst can still hold every host slot
+   through several deployments; the host cap is what keeps the stop's workers free.
+   Alternative: also cap per account.
+3. **`Retry-After: 30`**, a quarter of the 120 s deadline.
+4. **Stop routes on their own worker pool** is an operations change, not code; the cap
+   does not need it.
