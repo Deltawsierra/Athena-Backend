@@ -663,6 +663,10 @@ def test_no_economics_route_is_a_stop():
         # The scenario builder's (spec, section 24).
         "deployment-economics-scenario-build",
         "deployment-economics-scenario-events",
+        # Raising a source's trust tier (spec, section 6.1).
+        "economics-source-trust-raises",
+        "economics-trust-raise-approve",
+        "economics-trust-raise-withdraw",
         # The scenario endpoints and the report (spec, section 27).
         "deployment-economics-scenario",
         "deployment-economics-scenario-simulate",
@@ -673,6 +677,9 @@ def test_no_economics_route_is_a_stop():
         assert name in stops.NOT_STOPS
     assert set(stops.NOT_STOPS["deployment-economics-parameter-set-versions"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-parameter-set"]) == {"GET"}
+    assert set(stops.NOT_STOPS["economics-source-trust-raises"]) == {"GET", "POST"}
+    assert set(stops.NOT_STOPS["economics-trust-raise-approve"]) == {"POST"}
+    assert set(stops.NOT_STOPS["economics-trust-raise-withdraw"]) == {"POST"}
 
 
 # ============================================ review round 1 of #146: L3 to L6

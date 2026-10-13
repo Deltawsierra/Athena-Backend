@@ -1300,6 +1300,85 @@ class World:
             docs, "api.answers", admin, "get", scenarios + f"{scenario_uuid}/events/",
             "deployment-economics-scenario-events",
         ).status_code
+        # Raising a financial source's trust tier (spec, section 6.1): a tenant's source
+        # raised in one step, then to authoritative by request and a second admin's
+        # approval; another source's request withdrawn over the API, and one more
+        # requested and withdrawn by manage.py raise_source_trust. Every reason carries
+        # the tenant's canaries; every raise is read back by read_everything.
+        from assurance.economics.models import FinancialSource, FinancialSourceTrustRaise
+
+        second = self.User.objects.create_user(
+            username="canary-second-admin", password=None, role=self.User.Roles.ADMIN
+        )
+        revenue = FinancialSource.objects.create(
+            deployment=self.deployment, source_key="canary-revenue", provider=f"ledger {CANARY['tenant.evidence']}",
+            dataset="revenue", license_class="customer", retrieved_at=timezone.now(),
+            snapshot_hash="sha256:" + "c" * 64, schema_version="1",
+        )
+        sources, raises = "/api/assurance/economics/sources/", "/api/assurance/economics/trust-raises/"
+        trust = {}
+        one_step = self.call(
+            docs, "api.answers", admin, "post", f"{sources}{revenue.uuid}/trust-raises/",
+            "economics-source-trust-raises",
+            data={"to_tier": "customer", "reason": f"the books {CANARY['request.body']}"}, format="json",
+        )
+        trust["one_step"] = one_step.status_code
+        latest = one_step.json()["to_version"]["uuid"] if one_step.status_code == 201 else revenue.uuid
+        asked = self.call(
+            docs, "api.answers", admin, "post", f"{sources}{latest}/trust-raises/", "economics-source-trust-raises",
+            data={"to_tier": "authoritative", "reason": f"the ledger {CANARY['tenant.evidence']}"}, format="json",
+        )
+        trust["asked"] = asked.status_code
+        if asked.status_code == 201:
+            trust["approved"] = self.call(
+                docs, "api.answers", self.client(second), "post", f"{raises}{asked.json()['uuid']}/approve/",
+                "economics-trust-raise-approve", data={}, format="json",
+            ).status_code
+        survey = FinancialSource.objects.create(
+            source_key="canary-survey", provider="an industry survey", dataset="losses", license_class="licensed",
+            retrieved_at=timezone.now(), snapshot_hash="sha256:" + "d" * 64, schema_version="1",
+        )
+        withdrawable = self.call(
+            docs, "api.answers", admin, "post", f"{sources}{survey.uuid}/trust-raises/",
+            "economics-source-trust-raises",
+            data={"to_tier": "authoritative", "reason": f"the survey {CANARY['request.body']}"}, format="json",
+        )
+        trust["withdrawable"] = withdrawable.status_code
+        if withdrawable.status_code == 201:
+            trust["withdrawn"] = self.call(
+                docs, "api.answers", admin, "post", f"{raises}{withdrawable.json()['uuid']}/withdraw/",
+                "economics-trust-raise-withdraw", data={}, format="json",
+            ).status_code
+        # The command authenticates its --as account with the password typed at a
+        # terminal: the canary admin's own, the sign-in canary, so every sink is
+        # searched for a typed password too. It never approves (refused before any
+        # password is asked); any admin withdraws.
+        import getpass
+
+        class _Terminal:
+            def isatty(self):
+                return True
+
+        with pytest.MonkeyPatch.context() as typing:
+            typing.setattr(sys, "stdin", _Terminal())
+            typing.setattr(getpass, "getpass", lambda prompt="", stream=None: CANARY["request.password"])
+            self.command(
+                docs, "raise_source_trust", "request", str(survey.uuid), "--to", "authoritative",
+                "--reason", f"the survey again {CANARY['tenant.evidence']}", "--as", self.admin.username,
+            )
+            pending = FinancialSourceTrustRaise.objects.filter(from_version=survey, state="pending").first()
+            if pending is not None:
+                refused, _elapsed = self.command(
+                    docs, "raise_source_trust", "approve", str(pending.uuid), "--as", second.username, raises=True,
+                )
+                trust["command_approve_refused"] = bool(refused) and "second_person_required" in refused
+                self.command(docs, "raise_source_trust", "withdraw", str(pending.uuid), "--as", self.admin.username)
+        trust["command"] = list(
+            FinancialSourceTrustRaise.objects.filter(from_version=survey)
+            .order_by("id")
+            .values_list("state", "channel", "withdrawn_via")
+        )
+        signals["trust_raise"] = trust
         # The scenario endpoints and the report (MVP step 6): the scenario simulated
         # (201: a result is recorded, completed or refused) and its report read back
         # (200); read_everything then reads the scenario and its report again. What
@@ -1450,6 +1529,14 @@ ROUTES.update(
         # built, and the events route reads one scenario's causal loss events.
         "deployment-economics-scenario-build": _READ,
         "deployment-economics-scenario-events": _READ,
+        # Raising a source's trust tier (spec, section 6.1): the list and a raise
+        # answer the raise records; an approval and a withdrawal answer the one they
+        # moved, as the list reads it.
+        "economics-source-trust-raises": _READ,
+        "economics-trust-raise-approve": _DOCS + "approves a pending raise; answers the raise, as "
+        "economics-source-trust-raises reads it",
+        "economics-trust-raise-withdraw": _DOCS + "withdraws a pending raise; answers the raise, as "
+        "economics-source-trust-raises reads it",
         # The scenario endpoints (MVP step 6): a scenario version with its parameters'
         # provenance, a simulation's summary, and its report JSON.
         "deployment-economics-scenario": _READ,
@@ -1514,6 +1601,10 @@ def _readable_urls(world):
                 from assurance.packs import _PACKS_BY_KEY
 
                 options = [{**o, "pack": pack} for o in options for pack in sorted(_PACKS_BY_KEY)[:2]]
+        elif name == "economics-source-trust-raises":
+            from assurance.economics.models import FinancialSource
+
+            options = [{"uuid": str(s.uuid)} for s in FinancialSource.objects.all()[:3]]
         elif name.startswith("finding-"):
             options = [{"uuid": str(f.uuid)} for f in findings] if name != "finding-list" else [{}]
         elif name.startswith("claim-") and name != "claim-list":
@@ -1711,6 +1802,7 @@ COMMANDS: dict[str, str] = {
     "recompute_chain_decisions": "commands: re-derives decisions; prints counts",
     "retry_blocking_dispatches": "commands: retries owed dispatches; prints counts and ids",
     "retry_closure_forwards": "commands",
+    "raise_source_trust": "commands",
 }
 
 
@@ -1852,6 +1944,11 @@ def test_every_path_ran(observed):
         s["records"]["scenario_simulate"],
         s["records"]["scenario_results"],
     ) == (400, 201, 200, 201, 200), s["records"]
+    assert s["records"]["trust_raise"] == {
+        "one_step": 201, "asked": 201, "approved": 200, "withdrawable": 201, "withdrawn": 200,
+        "command_approve_refused": True,
+        "command": [("withdrawn", "api", "api"), ("withdrawn", "command", "command")],
+    }, s["records"]
     assert s["read_everything"]["read"] > 50, s["read_everything"]
 
 

@@ -247,6 +247,14 @@ def _require_text(**fields) -> None:
 NON_PRODUCTION_ENVIRONMENTS = ("dev", "staging")
 
 
+#: Set on a :class:`FinancialSource` instance by :meth:`FinancialSourceTrustRaise.approve`
+#: alone (through :func:`_raised_version`), never from anything a caller passes: the
+#: one way an ``authoritative`` version is recorded. ``check_new`` refuses one without
+#: it (``second_person_required``), so a plain save, the snapshot loader and any other
+#: writer through the model never record that tier.
+_SECOND_ADMIN_APPROVED = object()
+
+
 def runs_in_production(deployment) -> bool:
     """Whether a run for ``deployment`` (a deployment, its primary key, or ``None``)
     is a production run, which never relies on a source still at trust tier
@@ -314,8 +322,16 @@ class FinancialSource(_AppendOnly):
     deployment not recorded as ``dev`` or ``staging`` (:func:`runs_in_production`)
     -- never relies on an unverified source either (``source_unverified``; the
     owner's decision of 12 Oct 2026). A version's tier never changes: a higher tier
-    is a new version, and no route, command or admin action records one yet (spec,
-    section 6), so who may raise a tier, and how, is still to be decided.
+    is a new version, recorded by :class:`FinancialSourceTrustRaise` (spec, section
+    6.1) -- an admin raises a tier, only upward and only from the latest version,
+    through the trust-raise routes or ``manage.py raise_source_trust``, and
+    ``authoritative`` needs a second admin's approval through the signed-in route.
+    The new version copies every field but the tier, and names the admin who
+    completed the raise as ``recorded_by``; it reads the observations its snapshot
+    was registered with (``snapshots.fx_book``). No version is recorded at
+    ``authoritative`` without the marker that approval sets
+    (``second_person_required``): not a plain save, and not the snapshot loader,
+    which refuses a file stating it and records any lower tier as stated.
 
     ``synthetic`` marks made-up test data, such as the committed fixture snapshot
     (set by :func:`assurance.economics.snapshots.register_snapshot` from the
@@ -405,6 +421,15 @@ class FinancialSource(_AppendOnly):
             raise EconomicsRefused("customer_source_without_tenant")
         if self.synthetic is not False and self.trust_tier != TrustTier.UNVERIFIED.value:
             raise EconomicsRefused("synthetic_source", "trust_tier")
+        if (
+            governance.needs_second_person(self.trust_tier)
+            and getattr(self, "_second_admin", None) is not _SECOND_ADMIN_APPROVED
+        ):
+            raise EconomicsRefused(
+                "second_person_required",
+                "an authoritative version is recorded only by approving a raise: "
+                "POST /api/assurance/economics/trust-raises/<uuid>/approve/",
+            )
         _refuse(governance.snapshot_hash_refusal(self.snapshot_hash), detail="snapshot_hash")
         if self.version is None:
             earlier = FinancialSource._base_manager.filter(
@@ -464,6 +489,564 @@ class FinancialSource(_AppendOnly):
 
     def __str__(self) -> str:
         return f"{self.source_key} v{self.version} ({self.license_class})"
+
+
+# ---------------------------------------------------------------------------
+# FinancialSourceTrustRaise -- raising a source's trust tier (12 Oct 2026)
+# ---------------------------------------------------------------------------
+
+
+class TrustRaiseState(models.TextChoices):
+    PENDING = "pending", "Pending a second admin's approval"
+    DONE = "done", "Done: the new version is recorded"
+    WITHDRAWN = "withdrawn", "Withdrawn by an admin"
+    EXPIRED = "expired", "Expired: not approved within the time a request waits"
+
+
+class TrustRaiseChannel(models.TextChoices):
+    """How a raise, or its withdrawal, arrived."""
+
+    API = governance.SIGNED_IN_CHANNEL, "The signed-in route"
+    COMMAND = "command", "manage.py raise_source_trust, the account's password typed at a terminal"
+
+
+#: Every (from, to) pair a raise may record: strictly upward in the trust order.
+_RAISE_PAIRS = [
+    (low.value, high.value)
+    for position, low in enumerate(governance.TRUST_ORDER)
+    for high in governance.TRUST_ORDER[position + 1 :]
+]
+
+
+def _upward_pairs() -> Q:
+    (first_low, first_high), *rest = _RAISE_PAIRS
+    condition = Q(from_tier=first_low, to_tier=first_high)
+    for low, high in rest:
+        condition |= Q(from_tier=low, to_tier=high)
+    return condition
+
+
+def _is_admin(account) -> bool:
+    """Whether ``account`` is a stored, active admin account: role admin, or a
+    superuser, as the assurance API's writes read it (``assurance.views._is_admin``),
+    read from the account itself and never from anything the caller says."""
+    if account is None or getattr(account, "pk", None) is None:
+        return False
+    if getattr(account, "is_active", False) is not True:
+        return False
+    return bool(getattr(account, "is_superuser", False) or getattr(account, "is_admin", False))
+
+
+def require_trust_admin(account) -> None:
+    """Refuse (``admin_required``) anyone but an admin: the one check every raise,
+    approval and withdrawal makes first, whichever way it arrives (a route or the
+    command)."""
+    _refuse(governance.trust_raise_admin_refusal(_is_admin(account)))
+
+
+def _channel(channel) -> str:
+    """``channel`` if it is one this record knows (``code_unrecognised`` otherwise)."""
+    _refuse(governance.code_refusal(channel, TrustRaiseChannel.values), detail="channel")
+    return channel
+
+
+def _requester_is_admin(row) -> bool:
+    """Whether the admin who requested ``row`` is still an active admin, read from the
+    account's STORED row now. An account removed since is not; nor is a name."""
+    if row.requested_by_id is None:
+        return False
+    accounts = FinancialSourceTrustRaise._meta.get_field("requested_by").related_model
+    return _is_admin(accounts._base_manager.filter(pk=row.requested_by_id).first())
+
+
+def _stored_source(pk) -> dict | None:
+    """What a raise reads of a source version, from the STORED row (never from an
+    object in hand, whose fields a caller may have changed in memory)."""
+    return (
+        FinancialSource._base_manager.filter(pk=pk)
+        .values(
+            "pk", "deployment_id", "source_key", "version", "provider", "dataset", "url", "license_class",
+            "trust_tier", "retrieved_at", "snapshot_hash", "schema_version", "synthetic",
+        )
+        .first()
+    )
+
+
+def _named(stored: dict) -> str:
+    """A source version as a message names it: its key and version number, never a
+    database key."""
+    return f"source {stored['source_key']} v{stored['version']}"
+
+
+def _superseded(stored: dict) -> bool:
+    """Whether a newer version of ``stored``'s source (the same tenant and key) has
+    been recorded."""
+    return FinancialSource._base_manager.filter(
+        deployment_id=stored["deployment_id"], source_key=stored["source_key"], version__gt=stored["version"]
+    ).exists()
+
+
+def _expire_if_due(row) -> bool:
+    """For a locked, pending ``row``: whether it has expired by the service's clock
+    (``trust_raise_expiry_refusal``), and if so its one transition, to ``expired``,
+    made here -- a single conditional write, only while it is still pending."""
+    if governance.trust_raise_expiry_refusal(row.requested_at, timezone.now()) is None:
+        return False
+    moved = FinancialSourceTrustRaise._base_manager.filter(pk=row.pk, state=TrustRaiseState.PENDING).update(
+        state=TrustRaiseState.EXPIRED
+    )
+    if moved != 1:
+        raise EconomicsRefused("trust_raise_not_pending", "it moved while it was found expired")
+    return True
+
+
+def _expired_detail(row) -> str:
+    expired = row.requested_at + governance.TRUST_RAISE_EXPIRES_AFTER
+    return f"requested {row.requested_at:%Y-%m-%d %H:%M} UTC, expired {expired:%Y-%m-%d %H:%M} UTC; request it again"
+
+
+def _raised_version(stored: dict, to_tier: str, by, *, second_admin: bool = False) -> FinancialSource:
+    """A NEW version of ``stored``'s source: every field as stored but the tier, and
+    ``recorded_by`` the admin who completed the raise. Saved through
+    :class:`FinancialSource`'s own checks, so its invariants hold here too (a
+    synthetic source stays unverified, ``customer`` needs a tenant).
+
+    Its version number is PINNED to the one after the version raised, never the next
+    free one: a version recorded meanwhile -- a snapshot an operator registered
+    between the superseded check and this insert, which PostgreSQL's READ COMMITTED
+    lets happen -- collides with it on the unique constraint (IntegrityError,
+    answered 409, nothing written), rather than being superseded by a copy of the
+    older snapshot. ``second_admin`` (from :meth:`FinancialSourceTrustRaise.approve`
+    only) carries the marker an ``authoritative`` version needs."""
+    raised = FinancialSource(
+        deployment_id=stored["deployment_id"],
+        source_key=stored["source_key"],
+        version=stored["version"] + 1,
+        provider=stored["provider"],
+        dataset=stored["dataset"],
+        url=stored["url"],
+        license_class=stored["license_class"],
+        trust_tier=to_tier,
+        retrieved_at=stored["retrieved_at"],
+        snapshot_hash=stored["snapshot_hash"],
+        schema_version=stored["schema_version"],
+        synthetic=stored["synthetic"],
+        recorded_by=by,
+    )
+    if second_admin:
+        raised._second_admin = _SECOND_ADMIN_APPROVED
+    raised.save()
+    return raised
+
+
+class FinancialSourceTrustRaise(_AppendOnly):
+    """One raise of one source's trust tier (the owner's decisions of 12 Oct 2026, and
+    of review round 1 of #155; spec, section 6.1).
+
+    A version's tier never changes, so a raise records a NEW version of the source
+    (:func:`_raised_version`) and this record of who raised it, why, when and through
+    which channel. Only an admin raises a tier (``admin_required``); only upward
+    (:data:`~assurance.economics.engine.governance.TRUST_ORDER`, ``trust_not_raised``);
+    and only from the latest version of the source (``source_superseded``).
+
+    Below ``authoritative`` one admin raises in one step (:meth:`request`): the new
+    version and this record, ``done``, with the requester as the approver, are
+    written together. ``authoritative`` needs two people: the request is recorded
+    ``pending`` and no version is written; a DIFFERENT admin approves it through the
+    signed-in route (:meth:`approve`; ``second_person_required`` for the same person
+    or for the operator's command), while the requester is still an active admin
+    (``requester_no_longer_admin``), which records the version; or any admin
+    withdraws it (:meth:`withdraw`), and the record names who did. A request not
+    approved within :data:`~assurance.economics.engine.governance.TRUST_RAISE_EXPIRES_AFTER`
+    of its request (30 days) has expired (``trust_raise_expired``): found at approve
+    time, lazily, and moved to ``expired`` in its one transition; a read shows it
+    ``expired`` without writing (:meth:`current_state`), and it is not withdrawn.
+    Nothing else records an ``authoritative`` version: :class:`FinancialSource`
+    refuses one without the marker only :meth:`approve` sets.
+
+    The record is append-only but for its ONE state transition, from ``pending`` to
+    ``done``, ``withdrawn`` or ``expired``, which is a single conditional write (only
+    while it is still pending) made by :meth:`approve` or :meth:`withdraw` and nothing
+    else.
+
+    People are named as every economics record names them: the account, nulled if it
+    is removed, and the account's own username, which outlives it. No check
+    constraint touches an account column, so removing an operator (a stop) is never
+    refused by a raise. It waits only for an approval or withdrawal already in flight,
+    for that transaction's few milliseconds: on the raise row's lock and its foreign
+    keys' on PostgreSQL, on the database's write lock on SQLite, as behind any write.
+    """
+
+    State = TrustRaiseState
+    Channel = TrustRaiseChannel
+
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    from_version = models.ForeignKey(FinancialSource, on_delete=models.CASCADE, related_name="trust_raises")
+    # The version the raise recorded: empty until it is done.
+    to_version = models.OneToOneField(
+        FinancialSource, on_delete=models.CASCADE, null=True, blank=True, related_name="raised_by"
+    )
+    from_tier = models.CharField(max_length=32, choices=[(t, t) for t in _TRUST_CODES])
+    to_tier = models.CharField(max_length=32, choices=[(t, t) for t in _TRUST_CODES])
+    reason = models.TextField()
+    state = models.CharField(max_length=16, choices=State.choices, default=State.PENDING)
+    # How the request arrived (and, below the top tier, the raise it completed).
+    channel = models.CharField(max_length=16, choices=Channel.choices)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_trust_raises_requested",
+    )
+    requested_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    requested_at = models.DateTimeField(default=timezone.now)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_trust_raises_approved",
+    )
+    approved_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="economics_trust_raises_withdrawn",
+    )
+    withdrawn_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_via = models.CharField(max_length=16, choices=Channel.choices, blank=True, default="")
+
+    class Meta:
+        ordering = ["from_version", "id"]
+        # None of these touches an account column, which removing an operator (a
+        # stop) nulls.
+        constraints = [
+            models.CheckConstraint(condition=Q(state__in=TrustRaiseState.values), name="ck_econ_trust_raise_state"),
+            models.CheckConstraint(
+                condition=Q(channel__in=TrustRaiseChannel.values), name="ck_econ_trust_raise_channel"
+            ),
+            models.CheckConstraint(condition=_upward_pairs(), name="ck_econ_trust_raise_upward"),
+            models.CheckConstraint(condition=~Q(requested_by_username=""), name="ck_econ_trust_raise_requester"),
+            models.CheckConstraint(
+                condition=(
+                    (
+                        Q(state=TrustRaiseState.PENDING)
+                        & Q(to_version__isnull=True, approved_at__isnull=True, withdrawn_at__isnull=True)
+                        & Q(approved_by_username="", withdrawn_by_username="", withdrawn_via="")
+                    )
+                    | (
+                        Q(state=TrustRaiseState.DONE)
+                        & Q(to_version__isnull=False, approved_at__isnull=False, withdrawn_at__isnull=True)
+                        & ~Q(approved_by_username="")
+                        & Q(withdrawn_by_username="", withdrawn_via="")
+                    )
+                    | (
+                        Q(state=TrustRaiseState.EXPIRED)
+                        & Q(to_version__isnull=True, approved_at__isnull=True, withdrawn_at__isnull=True)
+                        & Q(approved_by_username="", withdrawn_by_username="", withdrawn_via="")
+                    )
+                    | (
+                        Q(state=TrustRaiseState.WITHDRAWN)
+                        & Q(to_version__isnull=True, approved_at__isnull=True, withdrawn_at__isnull=False)
+                        & Q(approved_by_username="")
+                        & ~Q(withdrawn_by_username="")
+                        & Q(withdrawn_via__in=TrustRaiseChannel.values)
+                    )
+                ),
+                name="ck_econ_trust_raise_state_fields",
+            ),
+        ]
+        indexes = [models.Index(fields=["from_version", "state"], name="assurance_econ_raise_state")]
+
+    # -- writing -------------------------------------------------------------------
+
+    def check_new(self) -> None:
+        """A raise is inserted ``pending`` (a tier that needs a second person) or
+        ``done`` (one that does not, with its new version, the requester its
+        approver), never ``withdrawn``; by an admin; through a channel this record
+        knows; for a reason; upward from the STORED tier of a source version that is
+        the latest of its key. So no write through the ORM records a raise to
+        ``authoritative`` as done without a second admin's :meth:`approve`. A pending
+        request's ``requested_at``, from which it expires, is the service's clock at
+        insert, whatever the row carried."""
+        requester = _signed_in(self.requested_by)
+        self.requested_by_username = requester.username
+        self.withdrawn_by_username = ""
+        require_trust_admin(self.requested_by)
+        _channel(self.channel)
+        _refuse(governance.trust_raise_reason_refusal(self.reason), detail="reason")
+        stored = _stored_source(self.from_version_id)
+        if stored is None:
+            raise EconomicsRefused("cross_tenant_reference", "a source that is not stored")
+        self.from_tier = stored["trust_tier"]
+        _refuse(
+            governance.trust_raise_refusal(
+                self.from_tier,
+                self.to_tier,
+                synthetic=stored["synthetic"],
+                has_tenant=stored["deployment_id"] is not None,
+            ),
+            detail="to_tier",
+        )
+        two_people = governance.needs_second_person(self.to_tier)
+        if two_people and self.state != TrustRaiseState.PENDING:
+            raise EconomicsRefused("second_person_required", "a raise to this tier is requested, then approved")
+        if not two_people and self.state != TrustRaiseState.DONE:
+            raise EconomicsRefused("trust_raise_not_pending", "a raise below authoritative is done in one step")
+        if two_people:
+            if self.to_version_id is not None or self.approved_by_id is not None or self.approved_at is not None:
+                raise EconomicsRefused("second_person_required", "a request names no version or approver")
+            if _superseded(stored):
+                raise EconomicsRefused("source_superseded", _named(stored))
+            self.approved_by_username = ""
+            # Its expiry counts from here, by the service's clock: never a time the
+            # caller put on the row, which could postpone it.
+            self.requested_at = timezone.now()
+            return
+        # One step: the requester is the approver, and the version is the next one
+        # of the same source, at the new tier, with nothing recorded after it.
+        self.approved_by = self.requested_by
+        self.approved_by_username = requester.username
+        raised = (
+            FinancialSource._base_manager.filter(pk=self.to_version_id)
+            .values_list("deployment_id", "source_key", "version", "trust_tier")
+            .first()
+        )
+        expected = (stored["deployment_id"], stored["source_key"], stored["version"] + 1, self.to_tier)
+        if raised != expected or _superseded({**stored, "version": stored["version"] + 1}):
+            raise EconomicsRefused("source_superseded", _named(stored))
+        if self.approved_at is None:
+            self.approved_at = timezone.now()
+
+    @classmethod
+    def request(cls, source, to_tier, reason, *, by, channel) -> FinancialSourceTrustRaise:
+        """Raise ``source`` (a version, or its primary key) to ``to_tier`` for
+        ``reason``, as the admin ``by``, arriving through ``channel`` (``api``: the
+        signed-in route; ``command``: the operator's command, the account's password
+        typed at a terminal).
+
+        Below ``authoritative``: the new version and a ``done`` record, written in
+        one transaction. ``authoritative``: a ``pending`` record and no version, for
+        a different admin to :meth:`approve` through the signed-in route. Refused
+        (:class:`EconomicsRefused`, nothing written) for anyone but an admin, a
+        channel this record does not know, a blank or overlong reason, a tier this
+        platform does not know, one that is not above the version's own, a synthetic
+        source, ``customer`` on a platform-wide source, or a version that is not the
+        latest of its source."""
+        require_trust_admin(by)
+        _channel(channel)
+        _refuse(governance.trust_raise_reason_refusal(reason), detail="reason")
+        _refuse(governance.code_refusal(to_tier, _TRUST_CODES), detail="to_tier")
+        pk = getattr(source, "pk", source)
+        with transaction.atomic():
+            stored = _stored_source(pk)
+            if stored is None:
+                raise EconomicsRefused("cross_tenant_reference", "a source that is not stored")
+            _refuse(
+                governance.trust_raise_refusal(
+                    stored["trust_tier"],
+                    to_tier,
+                    synthetic=stored["synthetic"],
+                    has_tenant=stored["deployment_id"] is not None,
+                ),
+                detail="to_tier",
+            )
+            if _superseded(stored):
+                raise EconomicsRefused("source_superseded", _named(stored))
+            if governance.needs_second_person(to_tier):
+                return cls.objects.create(
+                    from_version_id=pk, to_tier=to_tier, reason=reason, requested_by=by, channel=channel
+                )
+            raised = _raised_version(stored, to_tier, by)
+            return cls.objects.create(
+                from_version_id=pk,
+                to_version=raised,
+                to_tier=to_tier,
+                reason=reason,
+                state=TrustRaiseState.DONE,
+                channel=channel,
+                requested_by=by,
+                requested_at=raised.recorded_at,
+                approved_by=by,
+                approved_at=raised.recorded_at,
+            )
+
+    def approve(self, *, by, channel) -> FinancialSourceTrustRaise:
+        """Approve this pending raise as ``by``: an admin other than its requester,
+        signed in to the route (``channel`` ``api``; the operator's command never
+        approves, ``second_person_required``). Records the new version and moves the
+        record to ``done``, in one transaction.
+
+        Atomic and single-use. The raise's row is locked first and everything after
+        is read under that lock: that it is still pending (``trust_raise_not_pending``
+        -- approved or withdrawn meanwhile), that it has not expired
+        (``trust_raise_expired``: 30 days after its request by the service's clock,
+        never a time a caller sent; found here, lazily, the request moves to
+        ``expired`` in its one transition, which is committed, and nothing else is
+        recorded), that ``by`` is not its requester
+        (``second_person_required``), that the requester is still an active admin
+        (``requester_no_longer_admin``), and that its version is still the latest of
+        its source (``source_superseded``). So two approvals at once give exactly one
+        version: the second waits on the lock and finds the raise done. A version
+        recorded meanwhile by anything else collides with the one this records (its
+        number is pinned, :func:`_raised_version`), and nothing is written.
+
+        The lock is ``select_for_update``, which holds the row on PostgreSQL. SQLite
+        ignores it and serialises the whole transaction instead: it takes the
+        database's write lock at BEGIN IMMEDIATE, so a second approval waits there.
+        The transaction is a few reads and three writes, milliseconds; it reads and
+        writes nothing a stop reads."""
+        _refuse(governance.trust_raise_approval_channel_refusal(channel))
+        require_trust_admin(by)
+        approver = _signed_in(by)
+        with transaction.atomic():
+            row = FinancialSourceTrustRaise.objects.select_for_update().filter(pk=self.pk).first()
+            if row is None:
+                raise EconomicsRefused("trust_raise_not_pending", "a raise that is not stored")
+            if row.state == TrustRaiseState.EXPIRED:
+                raise EconomicsRefused("trust_raise_expired", _expired_detail(row))
+            if row.state != TrustRaiseState.PENDING:
+                raise EconomicsRefused("trust_raise_not_pending", f"it is {row.state}")
+            expired = _expire_if_due(row)
+            if not expired:
+                self._record_approval(row, by, approver)
+        if expired:
+            # The request moved to expired, and that transition is committed; the
+            # approval is refused and nothing else is recorded.
+            raise EconomicsRefused("trust_raise_expired", _expired_detail(row))
+        return FinancialSourceTrustRaise.objects.get(pk=self.pk)
+
+    @staticmethod
+    def _record_approval(row, by, approver) -> None:
+        """The approval of the locked, pending, unexpired ``row``, inside approve()'s
+        transaction: the checks read under the lock, the new version, and the record's
+        one transition to ``done``."""
+        requester = governance.Person(id=row.requested_by_id, username=row.requested_by_username)
+        _refuse(governance.trust_raise_approval_refusal(requester, approver))
+        _refuse(governance.trust_raise_requester_refusal(_requester_is_admin(row)))
+        stored = _stored_source(row.from_version_id)
+        if stored is None:
+            raise EconomicsRefused("source_superseded", "a source version that is not stored")
+        if _superseded(stored):
+            raise EconomicsRefused("source_superseded", _named(stored))
+        _refuse(
+            governance.trust_raise_refusal(
+                stored["trust_tier"],
+                row.to_tier,
+                synthetic=stored["synthetic"],
+                has_tenant=stored["deployment_id"] is not None,
+            ),
+            detail="to_tier",
+        )
+        raised = _raised_version(stored, row.to_tier, by, second_admin=True)
+        # The one transition this record makes, and only from pending.
+        moved = FinancialSourceTrustRaise._base_manager.filter(pk=row.pk, state=TrustRaiseState.PENDING).update(
+            state=TrustRaiseState.DONE,
+            to_version=raised,
+            approved_by=by,
+            approved_by_username=approver.username,
+            approved_at=raised.recorded_at,
+        )
+        if moved != 1:
+            raise EconomicsRefused("trust_raise_not_pending", "it moved while being approved")
+
+    def withdraw(self, *, by, channel) -> FinancialSourceTrustRaise:
+        """Withdraw this pending raise as ``by``, any active admin, through
+        ``channel``. Nothing else changes: no version is written, and the record
+        stays, ``withdrawn``, naming who withdrew it, when and through which channel.
+        Cancelling a request for more trust is never harder than granting it. An
+        expired request (by the service's clock) is not pending
+        (``trust_raise_not_pending``), and the refusal writes nothing: it is never
+        approved either, and only an approval moves it to ``expired``."""
+        require_trust_admin(by)
+        _channel(channel)
+        withdrawer = _signed_in(by)
+        with transaction.atomic():
+            row = FinancialSourceTrustRaise.objects.select_for_update().filter(pk=self.pk).first()
+            if row is None:
+                raise EconomicsRefused("trust_raise_not_pending", "a raise that is not stored")
+            if row.state != TrustRaiseState.PENDING:
+                raise EconomicsRefused("trust_raise_not_pending", f"it is {row.state}")
+            if governance.trust_raise_expiry_refusal(row.requested_at, timezone.now()) is not None:
+                raise EconomicsRefused("trust_raise_not_pending", f"it is expired: {_expired_detail(row)}")
+            moved = FinancialSourceTrustRaise._base_manager.filter(pk=row.pk, state=TrustRaiseState.PENDING).update(
+                state=TrustRaiseState.WITHDRAWN,
+                withdrawn_at=timezone.now(),
+                withdrawn_by=by,
+                withdrawn_by_username=withdrawer.username,
+                withdrawn_via=channel,
+            )
+            if moved != 1:
+                raise EconomicsRefused("trust_raise_not_pending", "it moved while being withdrawn")
+        return FinancialSourceTrustRaise.objects.get(pk=self.pk)
+
+    # -- reading -------------------------------------------------------------------
+
+    @property
+    def expires_at(self):
+        """When this request expires if it is still pending then: a raise that needs a
+        second person only; ``None`` for one done in one step."""
+        if not governance.needs_second_person(self.to_tier):
+            return None
+        return self.requested_at + governance.TRUST_RAISE_EXPIRES_AFTER
+
+    def current_state(self, now=None) -> str:
+        """The state as it stands at ``now`` (the service's clock): ``expired`` for a
+        request still stored pending past its time, which approve() would move there.
+        Computed on read; nothing is written."""
+        if self.state == TrustRaiseState.PENDING and governance.trust_raise_expiry_refusal(
+            self.requested_at, now or timezone.now()
+        ):
+            return TrustRaiseState.EXPIRED.value
+        return self.state
+
+    def as_dict(self) -> dict:
+        """The record as the routes answer it: the source, both versions, the
+        tiers, the reason, the channel, and who did what when, by their recorded
+        usernames."""
+
+        def version(source):
+            if source is None:
+                return None
+            return {
+                "uuid": str(source.uuid),
+                "version": source.version,
+                "trust_tier": source.trust_tier,
+                "recorded_by": source.recorded_by_username or None,
+                "recorded_at": source.recorded_at.isoformat(),
+            }
+
+        source = self.from_version
+        return {
+            "uuid": str(self.uuid),
+            "state": self.current_state(),
+            "channel": self.channel,
+            "source_key": source.source_key,
+            "deployment": str(source.deployment.uuid) if source.deployment_id is not None else None,
+            "from_version": version(source),
+            "to_version": version(self.to_version),
+            "from_tier": self.from_tier,
+            "to_tier": self.to_tier,
+            "needs_second_person": governance.needs_second_person(self.to_tier),
+            "reason": self.reason,
+            "requested_by": self.requested_by_username or None,
+            "requested_at": self.requested_at.isoformat(),
+            "approved_by": self.approved_by_username or None,
+            "approved_at": self.approved_at.isoformat() if self.approved_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "withdrawn_by": self.withdrawn_by_username or None,
+            "withdrawn_at": self.withdrawn_at.isoformat() if self.withdrawn_at else None,
+            "withdrawn_via": self.withdrawn_via or None,
+        }
+
+    def __str__(self) -> str:
+        return f"{self.state} raise to {self.to_tier} ({self.uuid})"
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +1416,20 @@ def _fits(value: Decimal, digits: int, places: int) -> bool:
     return held == value
 
 
+def _read_as(row, read_as):
+    """``(source, named, held_by)`` for an observation ``row``: the version that holds
+    it, the version its provenance names, and that holder's version number when it is
+    not the one named. ``read_as`` is the version of the same source a run asked for
+    (:func:`assurance.economics.snapshots.fx_book`): a raised version holds no rows of
+    its own and reads those the loader registered under the same snapshot hash, so
+    the provenance names the version the gate checked AND the version holding the
+    rows. Without ``read_as``, the row's own version is named, as before."""
+    source = row.source if row.source_id is not None else None
+    if read_as is None or source is None or read_as.pk == source.pk:
+        return source, source, None
+    return source, read_as, source.version
+
+
 def _engine_refusal(build):
     """Build the engine's object for a row, and refuse the row with the engine's
     code if the engine refuses it (a stated distribution's with the probabilistic
@@ -892,9 +1489,11 @@ class FXObservation(_AppendOnly):
             models.Index(fields=["base_currency", "quote_currency", "effective_date"], name="assurance_econ_fx_pair_day")
         ]
 
-    def as_engine(self) -> fx.FXRate:
-        """The row as the engine reads it, with its source version named."""
-        source = self.source if self.source_id is not None else None
+    def as_engine(self, read_as=None) -> fx.FXRate:
+        """The row as the engine reads it, with its source version named: the row's own,
+        or ``read_as``, the version of the same source a run asked for when this row is
+        held by another (:func:`_read_as`)."""
+        source, named, held_by = _read_as(self, read_as)
         return fx.FXRate(
             base=self.base_currency,
             quote=self.quote_currency,
@@ -904,8 +1503,9 @@ class FXObservation(_AppendOnly):
             observed_at=self.observed_at,
             effective_date=self.effective_date,
             source_snapshot_hash=self.source_snapshot_hash,
-            source_key=source.source_key if source else "",
-            source_version=source.version if source else None,
+            source_key=named.source_key if named else "",
+            source_version=named.version if named else None,
+            observations_version=held_by,
         )
 
     def check_new(self) -> None:
@@ -957,9 +1557,10 @@ class CostIndexObservation(_AppendOnly):
             models.CheckConstraint(condition=Q(value__gt=0), name="ck_econ_cost_index_positive"),
         ]
 
-    def as_engine(self) -> cost_index.IndexPoint:
-        """The row as the engine reads it, with its source version and snapshot named."""
-        source = self.source if self.source_id is not None else None
+    def as_engine(self, read_as=None) -> cost_index.IndexPoint:
+        """The row as the engine reads it, with its source version and snapshot named:
+        the row's own version, or ``read_as`` (:func:`_read_as`)."""
+        source, named, held_by = _read_as(self, read_as)
         return cost_index.IndexPoint(
             series_id=self.series_id,
             geography=self.geography,
@@ -969,8 +1570,9 @@ class CostIndexObservation(_AppendOnly):
             value=self.value,
             vintage_date=self.vintage_date,
             source_snapshot_hash=source.snapshot_hash if source else "",
-            source_key=source.source_key if source else "",
-            source_version=source.version if source else None,
+            source_key=named.source_key if named else "",
+            source_version=named.version if named else None,
+            observations_version=held_by,
         )
 
     def check_new(self) -> None:
