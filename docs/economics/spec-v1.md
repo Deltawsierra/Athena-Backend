@@ -6990,8 +6990,9 @@ and is refused a clinical-workflow build until it states its cost of care disrup
 The shared variables of section 19.1 and an effect's attributes keep step 4's rule:
 missing, the component is unknown, never zero (section 15).
 
-**An optional component.** A component a pack marks `optional` (`ComponentSpec.optional`)
-is made only where the set states every pack input it reads, and is absent otherwise
+**An optional component.** A component a template names optional
+(`Template.optional_components`; served with `"optional": true`) is made only where
+the set states every pack input it reads, and is absent otherwise
 -- never zero, never unknown, never refused -- and its input is required by no build
 (`required_by` is empty). It prices a loss only some customers have; the one there is,
 SaaS `usage-revenue` (choice 8), is switched on by `usage_margin_per_hour`. An optional

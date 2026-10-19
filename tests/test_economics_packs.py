@@ -986,7 +986,7 @@ def test_a_set_with_no_inputs_records_and_a_build_that_reads_one_is_refused(pack
         content = pset.parse_document(document)
         assert content.pack == pack.pack_id and content.pack_inputs == {}
         for chosen in pack.templates:
-            reads = {s.name for c in chosen.components if not c.optional for s in c.sources.values()
+            reads = {s.name for c in chosen.components if not chosen.is_optional(c) for s in c.sources.values()
                      if s.kind is tpl.SourceKind.PACK_INPUT}
             if reads:
                 with pytest.raises(ParameterRefused) as refused:
@@ -1003,17 +1003,19 @@ OPTIONAL_INPUTS = {"usage_margin_per_hour"}
 
 
 def test_every_optional_component_is_pinned_and_switched_on_by_a_stated_input():
-    found = {(t.template_id, c.component_key) for t in VERTICAL_TEMPLATES for c in t.components if c.optional}
+    found = {(t.template_id, c.component_key) for t in VERTICAL_TEMPLATES for c in t.components if t.is_optional(c)}
     assert found == OPTIONAL_COMPONENTS
-    switches = {s.name for t in VERTICAL_TEMPLATES for c in t.components if c.optional
+    switches = {s.name for t in VERTICAL_TEMPLATES for c in t.components if t.is_optional(c)
                 for s in c.sources.values() if s.kind is tpl.SourceKind.PACK_INPUT}
     assert switches == OPTIONAL_INPUTS
     # An input that switches an optional component on is read by no other component.
-    assert not {s.name for t in VERTICAL_TEMPLATES for c in t.components if not c.optional
+    assert not {s.name for t in VERTICAL_TEMPLATES for c in t.components if not t.is_optional(c)
                 for s in c.sources.values() if s.kind is tpl.SourceKind.PACK_INPUT} & OPTIONAL_INPUTS
-    assert not any(c.optional for t in tpl.TEMPLATES for c in t.components)
-    with pytest.raises(ValueError, match="reads no pack input"):
-        tpl.ComponentSpec("x", "recovery", "lump_sum", 1, {"amount": tpl.A("rework_cost")}, optional=True)
+    assert not any(t.optional_components for t in tpl.TEMPLATES)
+    banking = tpl.TEMPLATES[0]
+    for key in (banking.components[0].component_key, "no-such-component"):
+        with pytest.raises(ValueError, match="reads no pack input"):
+            dataclasses.replace(banking, optional_components=frozenset({key}))
 
 
 def _gross(chosen, inputs) -> tuple[Decimal, ...]:
@@ -1039,9 +1041,12 @@ def test_a_saas_outage_prices_usage_revenue_only_where_the_set_states_its_usage_
     assert _gross(outage, without) == tuple(Decimal(x) for x in OUTAGE_WITHOUT_USAGE)
     variables, _, attributes = world(saas)
     keys = [p.spec.component_key for p in tpl.plan(outage, variables, attributes, without)]
-    assert "usage-revenue" not in keys and keys == [c.component_key for c in outage.components if not c.optional]
+    assert "usage-revenue" not in keys and keys == [c.component_key for c in outage.components
+                                                    if not outage.is_optional(c)]
     usage = next(c for c in outage.components if c.component_key == "usage-revenue")
-    assert usage.family == "business_interruption" and usage.as_dict()["optional"] is True
+    assert usage.family == "business_interruption" and outage.optional_components == {"usage-revenue"}
+    served = {c["component_key"]: c for c in outage.as_dict()["components"]}
+    assert served["usage-revenue"]["optional"] is True and "optional" not in served["sla-credits"]
     assert closed_form_components(outage)["usage-revenue"] == (Decimal(2000), Decimal(12000), Decimal(72000))
     saas.check_template_inputs(outage, without)  # never required
     assert saas.required_by["usage_margin_per_hour"] == ()
@@ -1567,7 +1572,7 @@ def render_template(chosen) -> str:
             f"`{spec.sources[i.name].name}`"
             for i in formula.inputs
         )
-        key = f"`{spec.component_key}`" + (" (optional)" if spec.optional else "")
+        key = f"`{spec.component_key}`" + (" (optional)" if chosen.is_optional(spec) else "")
         lines.append(f"| {key} | `{spec.family}` | `{spec.formula_id}` v{spec.formula_version} | {inputs} |")
     lines += ["", "Direction notes:", ""] + [f"- {note}" for note in chosen.direction_notes]
     if chosen.cautions:
