@@ -50,6 +50,7 @@ from assurance.economics.models import (
 from assurance.models import Deployment
 from pentest.models import PentestScan
 from safety import stops
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_remediation import proposed
 from tests.test_economics_report import AS_OF, QUICK, stored
 
@@ -129,6 +130,8 @@ def _receipted(deployment, author, monkeypatch, **stored_kwargs):
     """A stored scenario simulated with a receipt asked for, through the route."""
     ring, signed = _signing(monkeypatch)
     scenario = stored(deployment, author, **stored_kwargs)
+    # The human review a signed receipt needs (spec, section 35.4).
+    approve_for_receipt(scenario)
     response = _simulate(_client(author), deployment, scenario, receipt=True)
     assert response.status_code == 201, response.content
     assert response.json()["receipt"]["issued"] is True, response.json()["receipt"]
@@ -226,6 +229,7 @@ def test_a_residual_runs_receipt_is_never_served(deployment, people, monkeypatch
     scenario, _, _ = proposed(deployment, people)
     current = SimulationResult.objects.exposure_runs().get(scenario=scenario)
     residual = SimulationResult.objects.residual_runs().get(scenario=scenario)
+    approve_for_receipt(scenario)
     row = receipt_service.issue_receipt(current, keyring=ring).receipt
     assert row is not None
     owner = _client(people["owner"])
@@ -482,9 +486,11 @@ def test_a_stop_is_answered_while_a_read_is_held_open(read, monkeypatch):
     database's write lock, so a read holding one would have kept the Stop waiting
     until it let go; this bounds no wall clock."""
     analyst = User.objects.create_user(username="ann", password="x", role="analyst")
+    reviewer = User.objects.create_user(username="rex", password="x", role="analyst")
     deployment = Deployment.objects.create(name="probe")
     _signing(monkeypatch)
     scenario = stored(deployment, analyst)
+    approve_for_receipt(scenario, reviewer)
     assert _simulate(_client(analyst), deployment, scenario, receipt=True).status_code == 201
     receipt_id = FinancialExposureReceipt.objects.get().receipt_id
     scan = PentestScan.objects.create(

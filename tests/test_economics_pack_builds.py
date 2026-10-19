@@ -42,6 +42,8 @@ from assurance.economics.models import (
     PACK_STATEMENTS_UNRECORDED,
     CausalEffect,
     CustomerParameterSet,
+    FigureNormalization,
+    FinancialNormalizationPolicy,
     FinancialParameter,
     FinancialScenario,
     FinancialValidityCard,
@@ -51,6 +53,7 @@ from assurance.economics.models import (
 )
 from assurance.models import Asset, Deployment, Finding
 from tests import test_economics_packs as packs
+from tests import test_economics_run_normalization as runs
 from tests.test_economics_scenarios import _entry
 
 pytestmark = pytest.mark.django_db
@@ -719,6 +722,73 @@ def test_a_saas_outage_prices_usage_revenue_only_where_the_set_states_it(deploym
     assert "usage-revenue" in figures["usage"][0] and "usage-revenue" not in figures["subscription"][0]
     assert figures["usage"][1] == [Decimal(x) for x in packs.KNOWN_GROSS["saas_platform_outage"]]
     assert figures["subscription"][1] == [Decimal(x) for x in packs.OUTAGE_WITHOUT_USAGE]
+
+
+def test_an_industry_build_naming_a_policy_normalizes_its_pack_inputs(people):
+    """An industry build reads the figures its OWN pack's templates read, pack inputs
+    among them, on section 36's path (the merge of #170 into E7, F2): a SaaS outage
+    whose set states its SLA credit per hour in EUR, on an earlier date, builds under a
+    named policy, the input normalized into the build's currency at its as-of date
+    (1.1 USD a EUR, the index 100 -> 125) and read in its place -- the same figures as a
+    set stating the USD value outright -- and the build records both its pack and its
+    normalization. Naming no policy, the EUR input is refused (``currency_mismatch``,
+    naming it), and nothing is written."""
+    deployment = Deployment.objects.create(name="saas-staging", environment="staging", owner=people["viewer"])
+    runs.register(runs.REF, "RUN-TEST-REF", fx_rates=runs.REF_RATES, points=runs.REF_POINTS)
+    FinancialNormalizationPolicy.record(runs.KEY, runs.POLICY, by=people["admin"])
+    name = "contract_sla_credit_per_hour"
+    row_name = pack_inputs.PACK_INPUT_PREFIX + name
+    analyst = _client(people["analyst"])
+    eur = set_document(SAAS, drop={"usage_margin_per_hour"})
+    eur["pack_inputs"][name].update(currency="EUR", effective_date=runs.EVENT)
+    assert eur["pack_inputs"][name]["base"] == "8000"
+    usd = set_document(SAAS, drop={"usage_margin_per_hour"})
+    usd["pack_inputs"][name].update(low="6875", base="11000", high="16500")
+    for set_key, document in (("eur", eur), ("usd", usd)):
+        assert record_set(analyst, deployment, document, set_key=set_key).status_code == 201
+    asset, finding = _asset(deployment), _finding(deployment)
+    outage = effect("outage", asset, "platform_outage", "tenant_platform", attributes_of("saas_platform_outage"))
+
+    def body(set_key, policy):
+        found = build_body([outage], finding, pack=SAAS, set_key=set_key)
+        found["as_of"] = runs.VALUATION
+        if policy is not None:
+            found["normalization"] = policy
+        return found
+
+    before = _counts()
+    refused = build(analyst, deployment, body("eur", None))
+    assert refused.status_code == 400 and refused.json()["code"] == "currency_mismatch", refused.content
+    assert row_name in refused.json()["detail"]
+    assert _counts() == before
+
+    response = build(analyst, deployment, body("eur", runs.KEY))
+    assert response.status_code == 201, response.content
+    served = response.json()
+    plain = build(analyst, deployment, body("usd", None))
+    assert plain.status_code == 201, plain.content
+    (event,), (plain_event,) = served["events"], plain.json()["events"]
+    assert _range(event["gross_cash"]) == _range(plain_event["gross_cash"])
+    assert {c["component_id"] for c in event["components"]} == {c["component_id"] for c in plain_event["components"]}
+    reading = next(c for c in event["components"] if name in {s["template"]["name"] for s in c["sources"].values()})
+    read = next(s["read"] for s in reading["sources"].values() if s["template"]["name"] == name)
+    assert read["from"] == "pack_input" and read["name"] == name and read["normalized"]["currency"] == "EUR"
+    assert read["parameter_set"] == {"set_key": "eur", "version": 1}
+
+    scenario = FinancialScenario.objects.get(uuid=served["scenario"]["uuid"])
+    (figure,) = FigureNormalization.objects.filter(scenario=scenario)
+    assert figure.native.name == row_name and figure.native.currency == "EUR"
+    assert figure.normalized.currency == "USD"
+    assert [Decimal(v) for v in (figure.normalized.low, figure.normalized.base, figure.normalized.high)] == [
+        Decimal("6875"), Decimal("11000"), Decimal("16500")]
+    row = ScenarioBuild.objects.get(scenario=scenario)
+    assert row.pack == SAAS and row.inputs["pack_digest"] == pack_registry.RELEASED[SAAS]
+    assert row.inputs["pack_statements"]["excluded"] == [HARM_EXCLUDED]
+    assert row.inputs["normalization"]["policy"]["key"] == runs.KEY
+    assert [s["source_key"] for s in row.inputs["normalization"]["sources"]] == [runs.REF]
+    # The refresh names both again.
+    rebuilt = continuous_service.rebuild_body(scenario, as_of=date(2026, 9, 30))
+    assert rebuilt["pack"] == SAAS and rebuilt["normalization"] == runs.KEY
 
 
 # ======================================================================

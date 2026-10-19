@@ -33,6 +33,16 @@ step, A to B to C to D, never below D), each firing at most once:
   fixed or ranged;
 - ``derived_values``: a material figure is a derived larger-loss value.
 
+A run whose build NORMALIZED a figure (spec, section 36: stated in another currency,
+or at another date than the valuation date) is graded under :data:`VERSION_NORMALIZED`:
+the same rules, and the downgrades each normalized figure's record carries (section
+12.5: an estimated or stale rate, a stale index, ``source_disagreement``,
+``primary_unavailable``) lower each LINE that reads the figure one step per rule, each
+rule at most once per line however many of its figures carry it
+(:data:`NORMALIZATION_DOWNGRADES`). A line that reads no such figure is not lowered
+by them. A run that normalized nothing is graded under :data:`VERSION` exactly as
+before: its version record, and so its digest, is unchanged.
+
 Collapsing a range to one figure at its base never raises the grade: the level
 shares, the sources and the dates are those of the base, which a collapse keeps.
 
@@ -60,9 +70,13 @@ from types import MappingProxyType
 
 from .confidence import ConfidenceGrade, downgraded
 from .money import decimal_text
+from .normalization import DOWNGRADES as _NORMALIZATION_MEANINGS
 from .provenance import SourceType
 
 VERSION = "mythos.economics.confidence-grade/v3"
+#: The grade of a run whose build normalized a figure (spec, section 36): v3 and the
+#: normalization downgrades, per line. A run that normalized nothing stays v3.
+VERSION_NORMALIZED = "mythos.economics.confidence-grade/v4"
 
 #: The class each source type counts in.
 CLASSES: Mapping[SourceType, str] = MappingProxyType(
@@ -119,6 +133,16 @@ DOWNGRADES: Mapping[str, str] = MappingProxyType(
         DERIVED: "a material figure is a derived larger-loss value across several effects' attributes",
     }
 )
+#: The downgrades a normalized figure's record may carry (spec-v1 12.5), in the order
+#: they are applied and named: each lowers every line that reads such a figure one
+#: step, at most once per line (v4 only).
+NORMALIZATION_DOWNGRADES: Mapping[str, str] = MappingProxyType(dict(_NORMALIZATION_MEANINGS))
+NORMALIZATION_RULE = (
+    "each downgrade a normalized figure's record carries (an estimated or stale rate, a stale index, "
+    "source_disagreement, primary_unavailable) lowers every line that reads that figure one step; each fires at "
+    "most once per line however many of its figures carry it, and a line that reads none of them is not lowered"
+)
+
 #: Refusals that mean the inputs conflict (owner's specification, section 27:
 #: surfaced, never resolved by silently taking one).
 CONFLICTS = frozenset(
@@ -138,11 +162,12 @@ _CONTEXT = Context(prec=60, rounding=ROUND_HALF_EVEN)
 _SHARE_QUANTUM = Decimal("0.000001")
 
 
-def version_record() -> dict:
+def version_record(*, normalized: bool = False) -> dict:
     """Everything a grade depends on besides its inputs: the classes, the
     thresholds, the materiality and the downgrades. Its digest is the grade's
-    version digest."""
-    return {
+    version digest. ``normalized``: the record of a run whose build normalized a
+    figure (:data:`VERSION_NORMALIZED`), with the normalization downgrades."""
+    record = {
         "version": VERSION,
         "weighting": (
             "each figure's share of the base-case level: an additive decomposition at base, each cash component's "
@@ -162,10 +187,17 @@ def version_record() -> dict:
         "downgrade_step": "each fires at most once and lowers the grade one step, never below D (spec-v1 12.5)",
         "conflicts": sorted(CONFLICTS),
     }
+    if normalized:
+        record.update(
+            version=VERSION_NORMALIZED,
+            normalization_downgrades=dict(NORMALIZATION_DOWNGRADES),
+            normalization_rule=NORMALIZATION_RULE,
+        )
+    return record
 
 
-def version_digest() -> str:
-    text = json.dumps(version_record(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+def version_digest(*, normalized: bool = False) -> str:
+    text = json.dumps(version_record(normalized=normalized), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return "sha256:" + hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
@@ -202,9 +234,12 @@ class Grade:
     derived: tuple[str, ...] = ()
     unknown_because: str | None = None
     stale_sources: tuple[str, ...] = ()
+    #: ``None`` for a run that normalized nothing (v3); otherwise each normalization
+    #: downgrade that fired on this line, with the figures that carry it (v4).
+    normalization: tuple[tuple[str, tuple[str, ...]], ...] | None = None
 
     def as_dict(self) -> dict:
-        return {
+        record = {
             "grade": self.grade.value,
             "base_grade": None if self.base is None else self.base.value,
             "reason": self.reason,
@@ -219,10 +254,22 @@ class Grade:
             "version": VERSION,
             "version_digest": version_digest(),
         }
+        if self.normalization is not None:
+            record.update(
+                version=VERSION_NORMALIZED,
+                version_digest=version_digest(normalized=True),
+                normalization_downgrades=[
+                    {"rule": rule, "meaning": NORMALIZATION_DOWNGRADES[rule], "figures": list(figures)}
+                    for rule, figures in self.normalization
+                ],
+            )
+        return record
 
 
-def _unknown(why: str, weighting: str | None = None, shares: Mapping[str, str] | None = None) -> Grade:
-    return Grade(ConfidenceGrade.UNKNOWN, None, f"Unknown: {why}", weighting, dict(shares or {}), unknown_because=why)
+def _unknown(why: str, weighting: str | None = None, shares: Mapping[str, str] | None = None,
+             normalized: bool = False) -> Grade:
+    return Grade(ConfidenceGrade.UNKNOWN, None, f"Unknown: {why}", weighting, dict(shares or {}), unknown_because=why,
+                 normalization=() if normalized else None)
 
 
 def _incomplete(unknown: list[str]) -> str:
@@ -257,6 +304,7 @@ def grade(
     per_occurrence: Iterable[str] = (),
     undefined: str | None = None,
     stale_sources: Iterable[str] = (),
+    normalized: Mapping[str, Iterable[str]] | None = None,
 ) -> Grade:
     """The grade of one line of one run. ``refusal`` is the run's refusal code, or
     ``None`` for a completed run; ``unknown_cash_components`` names every cash
@@ -265,26 +313,32 @@ def grade(
     reads that is past its ``fresh_until``; ``stale_sources`` names every figure the
     run reads that rests on a stale, blocked or missing feed source; ``per_occurrence`` names the parameters
     of an annual run drawn per occurrence; ``undefined`` says why the line has no
-    level to weigh, where it has none. See the module's rules."""
+    level to weigh, where it has none. ``normalized`` is ``None`` for a run that
+    normalized nothing (v3); otherwise each normalized figure the run reads, with the
+    downgrades its record carries (v4): those this line reads lower it, each rule
+    once. See the module's rules."""
+    v4 = normalized is not None
     if refusal is not None:
         if refusal in CONFLICTS:
-            return _unknown(f"the inputs conflict ({refusal}): the run was refused, and nothing is quantified")
-        return _unknown(f"the run was refused ({refusal}), and nothing is quantified")
+            return _unknown(f"the inputs conflict ({refusal}): the run was refused, and nothing is quantified",
+                            normalized=v4)
+        return _unknown(f"the run was refused ({refusal}), and nothing is quantified", normalized=v4)
     per_occurrence = sorted(per_occurrence)
     if per_occurrence:
         return _unknown(
             f"{', '.join(per_occurrence)} drawn per occurrence in an annual run: such a parameter is not ranked or "
-            "weighed yet"
+            "weighed yet", normalized=v4,
         )
     unknown = sorted(unknown_cash_components)
     if undefined is not None:
-        return _unknown(undefined + (f"; and {_incomplete(unknown)}" if unknown else ""))
+        return _unknown(undefined + (f"; and {_incomplete(unknown)}" if unknown else ""), normalized=v4)
     items = list(weighted)
     total = sum((Fraction(item.level) for item in items), Fraction(0))
     if not items or total == 0:
         if unknown:
-            return _unknown(_incomplete(unknown))
-        return _unknown("the base-case gross cash is zero, or reads no figure: there is no level to weigh")
+            return _unknown(_incomplete(unknown), normalized=v4)
+        return _unknown("the base-case gross cash is zero, or reads no figure: there is no level to weigh",
+                        normalized=v4)
     by_class = dict.fromkeys(CLASS_ORDER, Fraction(0))
     for item in items:
         share = Fraction(item.level) / total / len(item.sources)
@@ -298,7 +352,7 @@ def grade(
     }
     if unknown:
         # The evidence mix is shown; the grade is not given to an incomplete figure.
-        return _unknown(_incomplete(unknown), LEVEL, shares)
+        return _unknown(_incomplete(unknown), LEVEL, shares, normalized=v4)
     base = base_grade(evidence, assumption)
 
     def material(item: Weighted) -> bool:
@@ -317,7 +371,18 @@ def grade(
         )
         if names
     )
-    final = downgraded(base, len(fired))
+    # v4: the normalization downgrades of the normalized figures THIS line reads, each
+    # rule once however many of them carry it (spec, section 36).
+    read = {item.name for item in items}
+    lowered: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+    if v4:
+        carried = {name: set(rules) for name, rules in dict(normalized).items() if name in read}
+        lowered = tuple(
+            (rule, tuple(sorted(name for name, rules in carried.items() if rule in rules)))
+            for rule in NORMALIZATION_DOWNGRADES
+            if any(rule in rules for rules in carried.values())
+        )
+    final = downgraded(base, len(fired) + len(lowered or ()))
     reason = (
         f"{final.value}: weighed by each figure's share of the base-case level, {_percent(evidence)}% of the result "
         f"rests on customer, observed or authoritative figures, "
@@ -327,9 +392,13 @@ def grade(
     if fired:
         details = {STALE: stale_names, STALE_SOURCE: stale_source_names, EXPERT: expert_names, DERIVED: derived_names}
         reason += "; lowered " + ", ".join(f"one step for {rule} ({', '.join(details[rule])})" for rule in fired)
+    if lowered:
+        reason += ("; lowered " if not fired else "; and ") + ", ".join(
+            f"one step for {rule} (normalized: {', '.join(names)})" for rule, names in lowered
+        )
     return Grade(
         final, base, reason, LEVEL, shares, fired, stale_names, expert_names, derived_names,
-        stale_sources=stale_source_names,
+        stale_sources=stale_source_names, normalization=lowered,
     )
 
 
@@ -354,11 +423,14 @@ __all__ = [
     "EXPERT",
     "HEADLINE_RULE",
     "MATERIAL_SHARE",
+    "NORMALIZATION_DOWNGRADES",
+    "NORMALIZATION_RULE",
     "ORDER",
     "STALE",
     "STALE_SOURCE",
     "THRESHOLDS",
     "VERSION",
+    "VERSION_NORMALIZED",
     "Grade",
     "Weighted",
     "base_grade",
