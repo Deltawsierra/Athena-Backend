@@ -78,6 +78,7 @@ from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine.formulas import MARKET_VALUE
 from .engine.money import Money
+from .engine.pack_inputs import SCHEMAS as INDUSTRY_PACKS
 from .engine.parameters import MONEY_UNITS, POINTS
 from .models import (
     CARD_GRADES,
@@ -1165,11 +1166,39 @@ def build_report(result: SimulationResult) -> dict:
         "sensitivity": _sensitivity(card, shown, units, withheld, restricted),
         "validity_card": _card(card, unverified=card_unverified),
         "receipt": _receipt(receipt),
-        "limitations": list(LIMITATIONS),
+        "limitations": list(LIMITATIONS) + pack_limitations(build, scenario),
         "unknowns": _unknowns(result, events, failed) + stale_unknowns,
     }
     report["digest"] = digest_of(report)
     return report
+
+
+def pack_limitations(build: ScenarioBuild | None, scenario: FinancialScenario) -> list[str]:
+    """What an industry pack's scenario is read with, after the report's own
+    limitations (E7, spec section 37.3): the pack it was built under, with the digest
+    of the content it was built under, the cautions of the templates its effects were
+    assigned to, and what the pack never prices -- each as the BUILD recorded it
+    (:meth:`ScenarioBuild.pack_record`), never as the registry holds it now, so a
+    release that no longer holds the pack still states them, and says so. None for a
+    banking build: its report is the report it was before E7."""
+    record = build.pack_record() if build is not None else None
+    if record is None:
+        return []
+    statements = [
+        (
+            f"built under the industry pack {record['id']} (content {record['digest']}): its templates, its "
+            "customer-input schema and every figure they read are recorded with the build; the pack is not "
+            "calibrated against realised losses"
+        )
+    ]
+    if record["id"] not in INDUSTRY_PACKS:
+        statements.append(
+            f"this release does not hold the industry pack {record['id']}: the cautions and exclusions below are the "
+            "ones recorded with the build"
+        )
+    statements.extend(c for c in record["cautions"] if c not in statements)
+    statements.extend(e for e in record["excluded"] if e not in statements)
+    return statements
 
 
 # ------------------------------------------------------------------ the scenario

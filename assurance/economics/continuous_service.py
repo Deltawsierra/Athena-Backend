@@ -59,6 +59,7 @@ from django.utils import timezone
 from assurance.composition import OFF_ROUTE
 
 from .engine import feeds as feed_rules
+from .engine.pack_inputs import is_industry_pack_id
 from .report import STALE_BANNER
 from .models import (
     DEPENDENCIES_SCHEMA,
@@ -1216,6 +1217,14 @@ def rebuild_body(scenario: FinancialScenario, *, as_of: date, version: int | Non
         "findings": [{"finding": f, "effect": e, "role": r} for f, e, r in document["findings"]],
         "supersedes": str(scenario.uuid),
     }
+    # Rebuilt under the pack it was built under (E7, spec section 37): an industry
+    # pack's build names it -- even one this release no longer holds, which the build
+    # then refuses (pack_unrecognised), never rebuilt as a banking build; a banking
+    # build names none, as it never did. Its set answers that pack in every version
+    # (set_pack_changed), so the rebuild reads the latest version under it.
+    pack = document.get("pack")
+    if is_industry_pack_id(pack):
+        body["pack"] = pack
     named = (document.get("normalization") or {}).get("policy")
     if isinstance(named, dict) and named.get("key"):
         # The stored normalization policy it named (section 36): the rebuild names it

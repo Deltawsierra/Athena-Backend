@@ -438,6 +438,17 @@ def _description(scenario, events, effects, links) -> str:
     return f"{scenario.title}. {count} causal loss event(s): " + "; ".join(parts) + "."
 
 
+def pack_statement(build: ScenarioBuild | None) -> dict | None:
+    """The industry pack a scenario version was built under, for its card: the pack's
+    id and version, the digest of the content it was built under, the cautions of the
+    templates its effects were assigned to, and what the pack never prices -- each as
+    the BUILD recorded it (:meth:`ScenarioBuild.pack_record`), never as the registry
+    holds it now, so the card states them, and reproduces, even when a later release no
+    longer holds the pack; ``None`` for a banking build (or none), whose card names no
+    pack, as no card did before E7 (spec, section 37.3)."""
+    return build.pack_record() if build is not None else None
+
+
 def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: dict) -> dict:
     """The Validity Card of ``result``, from the stored result, the scenario
     version's rows, the stored sensitivity analysis and what was read at issue
@@ -732,6 +743,11 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         "unknown_variables": unknown_variables,
         "reproduction": reproduction,
     }
+    pack = pack_statement(build)
+    if pack is not None:
+        # An industry pack's scenario names its pack, with what its figures are read
+        # with (E7, spec section 37); a banking card is the card it was, byte for byte.
+        fields["scenario"]["pack"] = pack
     card = {
         "schema": CARD_SCHEMA,
         "scenario_id": str(scenario.uuid),

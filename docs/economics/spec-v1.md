@@ -38,6 +38,10 @@ the tail. Section 36 normalizes the figures a run reads when its scenario versio
 built: a parameter-set figure in another currency, or at another date, is normalized
 into the build's currency at its as-of date, and its record is carried into the run's
 inputs, report, card and receipt.
+E7 (section 37) makes the banking pack one pack of a registry of industry
+packs, each with its scenario library and its customer-input schema: a scenario builds
+under exactly one pack, recorded with the version and in its report and card, and a
+banking build is byte for byte what it was.
 
 ## Contents
 
@@ -114,13 +118,17 @@ MVP steps 3 and 12 in runs, on steps 5, 7b, 8 and 6:
 
 36. [Figures normalized into a run's reporting currency](#36-figures-normalized-into-a-runs-reporting-currency-mvp-steps-3-and-12-in-runs)
 
+Industry packs beyond banking (E7), on steps 4, 5 and 6:
+
+37. [Industry packs beyond banking (Economic Exposure E7)](#37-industry-packs-beyond-banking-economic-exposure-e7)
+
 ## 1. Status and scope
 
 | | |
 |---|---|
 | Phase | E0: taxonomy, source registry, model governance, currency rules. E1: money, the one currency table, FX and cost-index observations, normalization; the scenario engine (MVP step 4): parameters, formulas, loss events and components, insurance, the customer parameter set and its API; and the scenario builder (MVP step 5): the causal graph, six banking templates, the builder and its routes |
 | Code | `assurance/economics/`: the pure core in `engine/` (E1: `money.py`, `fx.py`, `cost_index.py`, `normalization.py`, `snapshot.py`; scenarios: `parameters.py`, `formulas.py`, `loss.py`, `parameter_set.py`; the builder: `templates.py`), the Django records in `models.py`, the snapshot loader in `snapshots.py`, the parameter-set and trust-raise routes in `api.py` (and the operator's `manage.py raise_source_trust`, section 6.1), the scenario builder in `builder.py` and its routes in `scenario_api.py`; step 8 (section 26): `engine/sensitivity.py` and `engine/grade.py`, the Validity Card in `validity_service.py`, the receipt in `receipt_service.py`; step 6 (section 27): the scenario endpoints in `report_api.py`, the report in `report.py`, the chart series in `charts_service.py` and `engine/charts.py`; step 10 (section 29): the feed adapters in `engine/feeds.py`, the fetch and freshness in `feeds.py`, the data-health route in `health_api.py`, and the operator's `manage.py fetch_financial_source`; step 12 (section 12.8): the primary and source disagreement in `engine/fx.py`, `engine/cost_index.py` and `engine/normalization.py`, and the normalization from usable sources in `normalization_service.py`; section 36: the figures a run reads normalized at build in `run_normalization.py` and `engine/figure_normalization.py` |
-| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33), `0073_exposure_assurance.py` (E6, section 34), `0074_section_28_hardening.py` (section 35), `0075_section_28_row_macs.py` (section 35.9), `0076_figure_normalizations.py` (section 36) |
+| Migrations | `assurance/migrations/0060_economic_exposure_foundations.py` (E0), `0061_fx_and_cost_index_observations.py` (E1), `0062_scenario_parameters_and_loss_events.py` (scenarios), `0063_causal_graph_and_scenario_builds.py` (the builder), `0064_parameter_distributions_and_simulation_results.py` (step 7b), `0065_financial_validity_cards_and_receipts.py` (step 8), `0066_scenario_fingerprint_unavailable.py` (step 8's follow-up: the fingerprint at build), `0067_simulation_charts.py` (step 6), `0068_financial_source_trust_raises.py` (trust raises, section 6.1), `0069_remediation_options.py` (step 13, section 28), `0070_financial_source_fetches.py` (step 10, section 29), `0071_financial_source_records.py` (step 11, section 31), `0072_portfolio_results.py` (E5, section 33), `0073_exposure_assurance.py` (E6, section 34), `0074_section_28_hardening.py` (section 35), `0075_section_28_row_macs.py` (section 35.9), `0076_figure_normalizations.py` (section 36), `0077_parameter_set_pack.py` (section 37) |
 | Tests | `tests/test_economics_engine.py`, `tests/test_economics_money.py`, `tests/test_economics_scenarios.py`, `tests/test_economics_known_answers.py` and `tests/test_economics_templates.py` (no database), `tests/test_economics_records.py`, `tests/test_economics_scenario_records.py`, `tests/test_economics_builder.py` and `tests/test_economics_trust_raise.py`; step 8: `tests/test_economics_sensitivity_and_grade.py` (no database) and `tests/test_economics_validity_card.py`; step 6: `tests/test_economics_report.py`; step 10: `tests/test_economics_feeds.py`; step 12: `tests/test_economics_disagreement.py`; section 36: `tests/test_economics_run_normalization.py` |
 | mythos-core | `104fdc9` or later: `mythos_core.currency` (Mythos-Core#49) |
 | Data in these phases | committed fixture snapshots only, SYNTHETIC TEST DATA in E1 (section 13); step 10 adds the live feeds' adapters and fetch (section 29), which make no request until the owner adds the keys and turns on `ECONOMICS_LIVE_FEEDS_ENABLED` |
@@ -1456,6 +1464,9 @@ high, or `unknown`, with none.
   as insurance could be the deductible, which the insurance step already keeps, and
   would count it twice (`formula_not_for_family`).
 
+The industry packs (E7) add seven formulas to the catalogue, each a product of inputs
+that increase the loss: section 37.7.
+
 ## 16. Loss events, components and totals
 
 `engine/loss.py`. A loss event (`loss.LossEvent`) is the scenario that creates a
@@ -1641,6 +1652,10 @@ one.
                "effective_date": "2026-09-30",
                "distribution": {"id": "poisson", "version": 1, "params": {"rate": "2"}}}}
 ```
+
+A version may also name the industry pack it answers and state that pack's inputs
+(`pack`, `pack_inputs`: section 37.2); one that names none is the banking pack's, and its
+canonical document is the one it had.
 
 Every entry, a variable, a sublimit or the frequency, may state the distribution it
 draws from in a simulation (`distribution`, section 25.1), and the document may state
@@ -2737,6 +2752,9 @@ The body:
  "supersedes": "<an earlier scenario's uuid, optional>",
  "normalization": "<a stored normalization policy's key, optional: section 36.1>"}
 ```
+
+From E7 the body may also name its industry pack (`"pack"`, section 37.3); a body that
+names none is under the banking pack, as every body was.
 
 - **Authentication, tenancy and roles**, as the parameter-set routes' (section 19.3):
   a signed-in account (401); a deployment the caller cannot see, or a scenario of
@@ -7621,3 +7639,905 @@ recorded when they were registered (NIT-3, 36.2).
   for such a version from its committed snapshot file, where the operator still holds it.
 - **Currency uncertainty** stays outside the figures (section 3, rule 6): one rate per
   date and step, never a distribution of rates.
+
+## 37. Industry packs beyond banking (Economic Exposure E7)
+
+The owner's specification lists, in section 23, the industries beyond banking and, for
+each, its priority scenarios and its special data; its roadmap row 7 asks for
+"validated scenario libraries and customer-input schemas by vertical"; its section 27
+holds the packs to one rule of bias and fairness ("Industry packs must not embed
+unsupported geographic or company-size assumptions as penalties"); and its section 29
+asks the customer report to say what the figures rest on. E7 makes the banking pack of
+section 24 one pack of a registry, and adds three: insurance, healthcare and life
+sciences, and AI-heavy SaaS. This is the step's first half; regulated enterprise,
+government and mission, manufacturing and critical infrastructure, and Hermes and
+mobility are its second (section 37.12).
+
+Modules: `engine/pack_inputs.py` (each pack's customer-input schema, which the
+parameter set reads, and nothing else: no template), `engine/pack_base.py` (what a
+pack is), `engine/pack_registry.py` (the registry, with each pack version's released
+digest), and one module per industry pack:
+`engine/pack_insurance.py`, `engine/pack_healthcare.py`, `engine/pack_saas.py` (module
+names `pack_inputs`, `pack_base`, `pack_registry`, `pack_insurance`, `pack_healthcare`,
+`pack_saas`). The builder (section 24), the parameter set (section 19), the Validity
+Card (section 26.3), the report (section 27.3) and the refresh (section 34.4) read the
+pack. Migration `0077_parameter_set_pack` adds one column. Tests:
+`tests/test_economics_packs.py` (no database) and `tests/test_economics_pack_builds.py`.
+
+### 37.1 The registry
+
+A pack is one vertical's scenario library: its effect types and business processes,
+the attributes an effect of it may state, its templates, the loss families they price,
+its customer-input schema, and what it never prices (`pack_base.Pack`). Each template
+is a template of section 24.3 -- a versioned mapping from an effect's type and process
+to the components of the ONE loss event it causes, each component's family and formula
+and, for every input of the formula, ONE source -- with the same scope and precedence
+model (section 24.4): where two templates of a pack cover one effect, the one of lower
+precedence takes it, and only it. A source may now be of a third kind, `pack_input`:
+an input of the pack's customer-input schema, which the parameter set states beside
+its variables (section 37.2). No banking template reads one.
+
+A pack is versioned in its id, `mythos.economics.<vertical>-pack/v<n>`, and pinned by
+its digest. The registry holds every pack version beside the digest it was released
+with (`pack_registry.RELEASED`: pack id and version -> `sha256:` over the pack's
+canonical document, `Pack.digest`, which is its templates, vocabularies, attributes,
+customer-input schema, cautions and exclusions), and it refuses, when it is built, a
+pack whose content is not that digest: **a released version's content never changes
+under its id**. A changed template, schema or vocabulary is a NEW version of the pack,
+released beside the old one with its own digest; the old version stays in the
+registry, so a recorded build is read exactly, and a scenario records the digest of
+the pack it was built under (section 37.3). `tests/test_economics_packs.py` pins every
+digest again (`PACK_DIGESTS`), so an in-place edit fails a test as well as the
+registry. The registry's other rules, each a `ValueError` when it is built, never a
+defect silently kept:
+
+- a pack's id is `mythos.economics.<vertical>-pack/v<n>`, of its own vertical, and is
+  registered once;
+- every template names the pack version that holds it;
+- a template id is ONE vertical's: the versions of its pack may each hold it, no other
+  pack may;
+- a template id and version that two versions of a pack hold has ONE content in both
+  (all but the pack that holds it): a changed template is a new template version.
+
+A template two versions hold is indexed as the earliest holds it
+(`pack_registry.TEMPLATES`); a build's template is read from the build's own pack
+version (`pack_registry.template(template_id, version, pack_id)`), and
+`pack_registry.packs_of_template` names every version that holds one. The route serves
+each pack with its `digest`.
+
+| Pack | Vertical | Templates | Section |
+|---|---|---|---|
+| `mythos.economics.banking-pack/v1` | `banking` | 6 | 24.3 |
+| `mythos.economics.insurance-pack/v1` | `insurance` | 6 | 37.4 |
+| `mythos.economics.healthcare-pack/v1` | `healthcare` | 5 | 37.5 |
+| `mythos.economics.saas-pack/v1` | `saas` | 5 | 37.6 |
+
+**Banking is unchanged.** The banking pack is `engine/templates.py`, as it was: a
+template's pack and caution default to the banking pack's and none, a banking
+template's `as_dict` gains no key, and the banking pack's selection is
+`templates.select`. A build that names no pack is a banking build, and it is byte for
+byte the build it was before E7: the same build document and digest, and the same
+events, components, figures and sources
+(`test_a_banking_build_is_byte_for_byte_what_it_was`, which pins both digests as
+master computed them before E7). A parameter set that names no pack has the canonical
+document, and so the digest, it had; a banking card and report gain no key.
+
+The compliance lens `assurance/packs.py` (vertical ASSURANCE packs: which control
+frameworks a vertical emphasises) is another thing, and E7 does not merge the two: an
+economics pack is chosen by the parameter set and the build, never inferred from the
+compliance lens (choice 6).
+
+### 37.2 The customer-input schema
+
+`engine/pack_inputs.py` holds each industry pack's schema (`pack_inputs.SCHEMAS`): its
+inputs, each a `PackInput` with its unit, its meaning, and which special data of the
+owner's section 23 it captures. No input is required when a set is recorded (choice 2,
+an interim lead decision): an input is required by a build that reads it, and the
+schema each pack serves names, for each input, the templates whose builds require it
+(`required_by`). The parameter-set
+document (section 19.2) may name the pack it answers and state its inputs:
+
+```json
+{"variables": {"legal_retainer": {"unit": "money", "currency": "USD", "low": "25000", "...": "..."}},
+ "pack": "mythos.economics.insurance-pack/v1",
+ "pack_inputs": {
+   "claims_per_day": {"unit": "count_per_day", "low": "1200", "base": "1200", "high": "1200",
+                      "source_type": "CUSTOMER_PROVIDED", "evidence_ref": "claims system, 2026-Q3",
+                      "effective_date": "2026-09-30"},
+   "loss_ratio": {"unit": "ratio", "low": "0.60", "base": "0.65", "high": "0.70", "...": "..."}}}
+```
+
+Every input is a parameter like any other (section 14) -- a range in its unit, its
+`source_type`, its evidence and its dates, optionally the distribution it draws from
+in a simulation (section 25.1) -- stored as a `FinancialParameter` of the version named
+`pack_input:` and the input (`pack_inputs.PACK_INPUT_PREFIX`), as a sublimit is named
+`insurance_sublimit:` and its family. The version records its pack
+(`CustomerParameterSet.pack`, migration `0077_parameter_set_pack`: blank for the
+banking pack, as every version recorded before E7 is, so nothing is backfilled), and
+its canonical document holds `pack` and `pack_inputs` only where a pack is named: no
+banking version's digest moves. The routes of section 19.3 serve `pack` and
+`pack_inputs` for a version that names a pack, and nothing new for one that does not.
+
+The rules, each refused whole with its code, and nothing recorded:
+
+| Code | Refused |
+|---|---|
+| `pack_unrecognised` | a `pack` that is not one of the registry's industry packs by its id and version, or the banking pack's id: a set or a build that names no pack is the banking pack's, which is never named, so a banking set has one spelling |
+| `field_unrecognised` | `pack_inputs` on a version that names no pack |
+| `field_malformed` | `pack_inputs` that is not an object |
+| `pack_input_unrecognised` | an input the pack's schema does not hold (a variable's name among them) |
+| `unit_mismatch` | an input in another unit than its schema's |
+| `observed_source_not_observable` | a money input stated as `MYTHOS_OBSERVED` (section 19.2's rule for a money variable) |
+| `safety_monetisation_refused` | an input whose name prices harm to a person (section 37.9) |
+| `set_pack_changed` | a new version of a set that names another pack than the set's earlier versions (another industry pack, or none, or a banking set gaining one): **a set answers ONE pack in every version**, so every scenario built on it can be refreshed against its latest version (section 34.4); a set for another pack is recorded under another set key |
+
+**Required at build, never at record (choice 2).** A set may state any of its pack's
+inputs, or none: it is never pushed to state a zero for an input none of its builds
+reads. A build whose effects are assigned to a template that reads an input the set
+does not state is refused (`pack_input_missing`, naming the template and the input) --
+never defaulted, never read as zero and never left unknown
+(`Pack.check_template_inputs`, the one check of a pack's inputs). A hospital that
+states only its patient records and its breach cost per record builds a PHI exposure,
+and is refused a clinical-workflow build until it states its cost of care disruption.
+The shared variables of section 19.1 and an effect's attributes keep step 4's rule:
+missing, the component is unknown, never zero (section 15).
+
+**An optional component.** A component a template names optional
+(`Template.optional_components`; served with `"optional": true`) is made only where
+the set states every pack input it reads, and is absent otherwise
+-- never zero, never unknown, never refused -- and its input is required by no build
+(`required_by` is empty). It prices a loss only some customers have; the one there is,
+SaaS `usage-revenue` (choice 8), is switched on by `usage_margin_per_hour`. An optional
+component reads at least one pack input, no banking component is optional, and every
+optional component is pinned by the pack tests (`OPTIONAL_COMPONENTS`), so a new one is
+reviewed before it is one.
+
+### 37.3 One pack per build, recorded
+
+The build request (section 24.8) may name its pack:
+
+```json
+{"title": "Claims agent overpays", "pack": "mythos.economics.insurance-pack/v1",
+ "parameter_set": {"set_key": "insurer_2026q4", "version": 1}, "currency": "USD", "as_of": "2026-10-06",
+ "effects": [{"key": "overpay", "origin": "hypothetical", "effect_type": "claim_overpaid", "asset": "<uuid>",
+              "business_process": "claims", "attributes": {"overpaid_claim_rate": {"unit": "ratio", "...": "..."}}}],
+ "findings": [{"finding": "<uuid>", "effect": "overpay", "role": "prerequisite"}]}
+```
+
+A body that names no `pack` is under the banking pack, as every build was. A named
+pack is read with `pack_registry.pack_of` (`pack_unrecognised` otherwise); the effects'
+types, processes and attributes are that pack's (`effect_type_unrecognised`,
+`business_process_unrecognised`, `attribute_unrecognised`; `effect_out_of_scope` where
+none of its templates covers an effect); and **a scenario builds under exactly ONE
+pack**: the parameter-set version answers the build's pack (`pack_mismatch` otherwise:
+a banking build reads a version that names no pack, an industry pack's build a version
+that names it), and it states every input a template the build uses reads
+(`pack_input_missing`; choice 2). Each effect is assigned to ONE template of
+the pack, by precedence, and is in ONE loss event: section 24.5's grouping, unchanged,
+with the template in the grouping key.
+
+The pack is recorded with the scenario version, and wherever its figures are shown:
+
+- the version's build: `ScenarioBuild.pack` holds the pack's id and version, and the
+  build document, and so the build digest, holds the pack and every template of it
+  (`"pack"`, `"templates"`); an industry pack's build document also records the
+  digest of the pack it was built under (`pack_digest`, its released digest) and
+  what its figures are read with (`pack_statements`: the `cautions` of the templates
+  its effects are assigned to and what the pack never prices, `excluded`), read back
+  by `ScenarioBuild.pack_record`; a banking build's document gains neither key;
+- the events route (section 24.8): each event's template names its `pack`, and a
+  template with a caution carries its `cautions` (section 37.9); an input read from the
+  pack's schema names its source `pack_input`, with the parameter-set version;
+- the report (section 27.3): its `build.pack`, as before E7; and, for an industry pack,
+  after the report's own `limitations`, the pack it was built under with its digest,
+  the cautions of the templates its effects were assigned to, and what the pack never
+  prices (`report.pack_limitations`; `mythos.economics.report/v2` keeps its keys);
+- the Validity Card (section 26.3), and so the receipt, which signs the card's digest
+  (section 26.5): for an industry pack, `fields.scenario.pack` names the pack's `id`,
+  its `digest`, the `cautions` of the templates its effects were assigned to and what
+  the pack `excluded` (`validity_service.pack_statement`); a banking card names no pack,
+  as no card before E7 did, so every stored card still reproduces (choice 3);
+- the refresh (section 34.4): an industry pack's version is rebuilt under the pack its
+  build recorded (`continuous_service.rebuild_body`) -- even a pack the release no
+  longer holds, which the build then refuses (`pack_unrecognised`), never a banking
+  rebuild; a banking one names none. Its set answers that pack in every version
+  (`set_pack_changed`), so the rebuild, which reads the set's latest version, can
+  always succeed.
+
+**The report and the card read the build's record, never the registry.** What they
+state of an industry pack is what its build recorded (`ScenarioBuild.pack_record`), so
+a later release that no longer holds the pack still states its digest, its cautions
+and its exclusions; the report then adds, after the first statement, that the release
+does not hold the pack and that what follows is as the build recorded it. It is never
+shown as a banking scenario, and its card still reproduces. A record without its
+statements -- none is made -- states that they were not recorded, and the harm
+exclusion, rather than nothing. A build is an industry pack's where its pack has the
+form of an industry pack's id (`mythos.economics.<vertical>-pack/v<n>`, any vertical
+but banking: `pack_inputs.is_industry_pack_id`), held by the release or not; a banking
+build, and a hand-made label from before E7, read as they did before E7.
+
+**An industry build's figures go through section 36 as a banking build's do.** The
+figures a build reads (`builder.read_set_figures`, `builder.read_attributes`) are those
+the templates of its OWN pack read, the effects assigned by that pack: each variable,
+each pack input (by its row's name, `pack_input:<name>`) and each insurance term. So a
+pack input stated in another currency is refused without a policy
+(`currency_mismatch`, naming it), and under a named policy it is normalized into the
+build's currency at its as-of date, read in place of the input as stated, and recorded
+(`FigureNormalization`) as a variable is; the events route names its source
+`pack_input` with its `normalized` provenance. An optional component whose input the
+set does not state is not made (section 37.2), so nothing it would read is read. An
+industry build that names a policy records both its pack (`pack`, `pack_digest`,
+`pack_statements`) and its normalization (`normalization`), and its refresh names both
+again (`test_an_industry_build_naming_a_policy_normalizes_its_pack_inputs`).
+
+The industry packs follow, each with its vocabulary, its customer-input schema, its
+attributes and its templates. In a template's table, `+` is an input that increases
+the loss and `-` one that decreases it; "from the set" is a variable of section 19.1,
+"from the pack's inputs" an input of the pack's schema, and "from the effect" an
+attribute the effect states. A template's formulas are section 15's and section
+37.7's; its direction notes are its assumptions. Every template has a known answer at
+low, base and high in `tests/test_economics_packs.py`, computed three ways that agree:
+by the engine, by an independent closed form of each formula, and as pinned figures,
+some worked by hand beside them. SYNTHETIC / ILLUSTRATIVE.
+
+### 37.4 Insurance: `mythos.economics.insurance-pack/v1`
+
+Vertical `insurance`; module `engine/pack_insurance.py`. Loss families priced: `business_interruption`, `customer_loss`, `customer_restitution`, `direct_financial`, `incident_response`, `legal`, `notification`, `recovery`, `regulatory_compliance`.
+
+| Effect type | Meaning |
+|---|---|
+| `claim_overpaid` | an agent approved or paid claims above what the policies owe |
+| `claim_wrongly_denied` | an agent denied or under-paid claims the policies cover |
+| `policyholder_data_disclosure` | a policyholder's or claimant's personal data reached someone not entitled to it |
+| `pricing_underwriting_error` | an agent priced, rated or underwrote policies on wrong inputs or wrong logic |
+| `provider_outage` | a third-party model or provider a critical operation depends on was unavailable |
+| `approval_bypassed` | an agent's action took effect without the approval it needed |
+
+Business processes: `claims`, `underwriting`, `pricing`, `policy_servicing`, `customer_service`, `operations`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required at build by | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `claims_per_day` | `count_per_day` | `insurance_claims_overpayment`, `insurance_provider_outage` | claims volume | claims the claims workflow decides per day |
+| `policy_count` | `count` | `insurance_policyholder_data_exposure`, `insurance_pricing_underwriting_error` | policy counts | policies in force |
+| `average_annual_premium` | `money_per_unit` | `insurance_pricing_underwriting_error` | loss ratios | average written premium per policy per year (read with the loss ratio: the claims a policy is expected to cost are its premium times the loss ratio) |
+| `loss_ratio` | `ratio` | `insurance_pricing_underwriting_error` | loss ratios | incurred claims as a share of earned premium, the customer's own book |
+| `regulatory_jurisdiction_count` | `count` | `insurance_wrongful_denial`, `insurance_policyholder_data_exposure`, `insurance_pricing_underwriting_error` | regulatory jurisdictions | jurisdictions whose regulator a disclosure or a conduct finding is answered in: a count the customer states, never a weight by place |
+| `manual_claim_handling_cost` | `money_per_unit` | `insurance_provider_outage` | claims volume | the customer's loaded cost of handling one claim by hand while its model is out |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `exploitable_window_hours` | `hours` | how long the condition stays exploitable before detection | yes |
+| `rework_cost` | `money` | reworking and reprocessing the cases, as a range | no |
+| `incident_response_cost` | `money` | incident response, as a range its evidence gives | no |
+| `contact_rate` | `ratio` | the share of affected customers who contact support | no |
+| `handling_hours` | `hours` | average handling time per contact | no |
+| `counsel_hours` | `hours` | hours of external counsel | no |
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation | no |
+| `investigation_hours` | `hours` | hours of forensics or investigation | no |
+| `churn_rate` | `ratio` | the extra share of affected customers who leave, from the customer's own data | no |
+| `churn_recovery_years` | `years` | years until lost margin is won back | no |
+| `outage_hours` | `hours` | how long the provider is unavailable | yes |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service | no |
+| `repeat_count` | `count` | how many times the unauthorized effect repeats | yes |
+| `loss_per_event` | `money_per_unit` | the amount one unauthorized effect moves or loses | no |
+| `overpaid_claim_rate` | `ratio` | the share of the claims decided in the window that were overpaid, as tested | yes |
+| `overpayment_per_claim` | `money_per_unit` | the amount overpaid on one affected claim | no |
+| `wrongly_denied_claims` | `count` | claims the agent denied or under-paid that the policies cover | yes |
+| `interest_and_penalty_per_claim` | `money_per_unit` | interest, late-payment penalties and re-handling owed on one wrongly denied claim under the policies' terms (the claim itself was owed, and is not a loss) | no |
+| `regulatory_response_per_regulator` | `money_per_unit` | answering one regulator, as scenario bounds its evidence grounds (never a predicted penalty) | no |
+| `exposed_policy_share` | `ratio` | the share of the policies in force whose policyholders' or claimants' data the effect reaches | yes |
+| `margin_per_policy_per_year` | `money_per_unit` | recurring margin per policy per year | no |
+| `mispriced_policy_share` | `ratio` | the share of the policies in force the error priced or rated | yes |
+| `premium_shortfall_share` | `ratio` | the share of the correct premium the error left uncharged | no |
+| `wrongly_accepted_policy_share` | `ratio` | the share of the policies in force accepted outside the underwriting rules | yes |
+| `excess_claims_share` | `ratio` | how far the wrongly accepted policies' expected claims exceed the book's, as a share of the book's (at most as much again) | no |
+| `manual_handling_share` | `ratio` | the share of the claims arriving during the outage that are handled by hand | no |
+
+#### `insurance_claims_overpayment`, version 1, precedence 1: Claims-agent overpayment
+
+Covers `claim_overpaid` on any process; `approval_bypassed` on `claims`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `overpaid-claims` | `direct_financial` | `repeat_in_window` v1 | `transactions_per_day` (+) from the pack's inputs: `claims_per_day`; `window_hours` (+) from the effect: `exploitable_window_hours`; `success_rate` (+) from the effect: `overpaid_claim_rate`; `value_per_transaction` (+) from the effect: `overpayment_per_claim`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `claims-rework` | `recovery` | `lump_sum` v1 | `amount` (+) from the effect: `rework_cost` |
+| `incident-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `incident_response_cost` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the claims decided per day are the customer's own volume, never the test's; the overpaid rate is the tested share of them, and the amount per claim the effect's own: a claim's full payment is never read as its overpayment
+- the exploitable window is the largest uncertainty; a longer window never lowers the loss
+- a lump-sum range is read as its evidence gives it, low, base and high (spec, section 22, decision 5)
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `insurance_wrongful_denial`, version 1, precedence 2: Claims-agent wrongful denial
+
+Covers `claim_wrongly_denied` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `claimant-restitution` | `customer_restitution` | `per_affected` v1 | `affected` (+) from the effect: `wrongly_denied_claims`; `amount_per_affected` (+) from the effect: `interest_and_penalty_per_claim` |
+| `complaint-handling` | `notification` | `support_contacts` v1 | `affected` (+) from the effect: `wrongly_denied_claims`; `contact_rate` (+) from the effect: `contact_rate`; `handling_hours` (+) from the effect: `handling_hours`; `loaded_rate` (+) from the set: `support_agent_hourly_rate` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `market-conduct-response` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `regulatory_jurisdiction_count`; `cost_per_unit` (+) from the effect: `regulatory_response_per_regulator` |
+
+Direction notes:
+
+- the claims wrongly denied drive restitution and complaint handling alike: one parameter, read by both in the same direction
+- a wrongly denied claim was owed: paying it is not a loss; the loss is the interest, the penalties and the re-handling its delay costs
+- a regulator's response is scenario bounds its evidence grounds, never a predicted penalty, read once per jurisdiction the customer states it answers in: a count of its own, never a weight by place
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `insurance_policyholder_data_exposure`, version 1, precedence 3: Policyholder PII leakage
+
+Covers `policyholder_data_disclosure` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `notification` | `notification` | `share_of_units` v1 | `units` (+) from the pack's inputs: `policy_count`; `affected_share` (+) from the effect: `exposed_policy_share`; `amount_per_unit` (+) from the set: `notification_unit_cost` |
+| `notification-campaign` | `notification` | `lump_sum` v1 | `amount` (+) from the set: `notification_fixed_cost` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `regulatory` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `regulatory_jurisdiction_count`; `cost_per_unit` (+) from the effect: `regulatory_response_per_regulator` |
+| `policyholder-loss` | `customer_loss` | `churned_share_margin` v1 | `units` (+) from the pack's inputs: `policy_count`; `affected_share` (+) from the effect: `exposed_policy_share`; `churn_rate` (+) from the effect: `churn_rate`; `margin_per_unit_per_year` (+) from the effect: `margin_per_policy_per_year`; `recovery_years` (+) from the effect: `churn_recovery_years` |
+
+Direction notes:
+
+- the exposed share of the customer's own policies in force drives notification and policyholder loss alike: one parameter, read by both in the same direction
+- policyholder loss is computed only from the customer's own churn figure (CUSTOMER_PROVIDED); any other source makes it unknown (specification, section 31)
+- a regulator's response is scenario bounds its evidence grounds, never a predicted penalty, read once per jurisdiction the customer states it answers in: a count of its own, never a weight by place
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `insurance_pricing_underwriting_error`, version 1, precedence 4: Pricing / underwriting error
+
+Covers `pricing_underwriting_error` on any process; `approval_bypassed` on `pricing`, `underwriting`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `premium-shortfall` | `direct_financial` | `share_of_units_value` v1 | `units` (+) from the pack's inputs: `policy_count`; `affected_share` (+) from the effect: `mispriced_policy_share`; `amount_per_unit` (+) from the pack's inputs: `average_annual_premium`; `value_share` (+) from the effect: `premium_shortfall_share` |
+| `excess-claims` | `direct_financial` | `excess_over_expected` v1 | `units` (+) from the pack's inputs: `policy_count`; `affected_share` (+) from the effect: `wrongly_accepted_policy_share`; `amount_per_unit` (+) from the pack's inputs: `average_annual_premium`; `expected_ratio` (+) from the pack's inputs: `loss_ratio`; `excess_share` (+) from the effect: `excess_claims_share` |
+| `repricing-rework` | `recovery` | `lump_sum` v1 | `amount` (+) from the effect: `rework_cost` |
+| `market-conduct-response` | `regulatory_compliance` | `per_unit_response` v1 | `units` (+) from the pack's inputs: `regulatory_jurisdiction_count`; `cost_per_unit` (+) from the effect: `regulatory_response_per_regulator` |
+
+Direction notes:
+
+- the premium shortfall is the share of the correct premium the error left uncharged on the share of policies it priced, for one policy year
+- a policy's expected claims are its premium times the customer's own loss ratio (the loss ratio's definition); a wrongly accepted policy costs the share by which its risk's claims exceed that, for one policy year
+- the excess share is a ratio, so a wrongly accepted policy is priced at most at double the book's expected claims (choice 7, accepted for version 1): a worse risk cannot be stated and is refused (ratio_out_of_range), never capped silently
+- the shares are of the customer's own policies in force, never a benchmark's book
+- a regulator's response is scenario bounds its evidence grounds, never a predicted penalty, read once per jurisdiction the customer states it answers in: a count of its own, never a weight by place
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `insurance_provider_outage`, version 1, precedence 5: Third-party model outage
+
+Covers `provider_outage` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `interruption` | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `outage_hours`; `value_per_hour` (+) from the set: `margin_per_hour` |
+| `claims-backlog` | `recovery` | `throughput_loss` v1 | `units_per_day` (+) from the pack's inputs: `claims_per_day`; `hours` (+) from the effect: `outage_hours`; `affected_share` (+) from the effect: `manual_handling_share`; `amount_per_unit` (+) from the pack's inputs: `manual_claim_handling_cost` |
+| `failover-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+
+Direction notes:
+
+- the outage's length drives the interruption and the claims backlog alike: one parameter, read by both in the same direction
+- the interruption is read at the critical service's MARGIN per hour, not its revenue
+- the backlog is the claims arriving during the outage that are handled by hand, at the customer's own cost of handling one by hand
+
+#### `insurance_agent_approval_bypass`, version 1, precedence 6: Agent approval bypass
+
+Covers `approval_bypassed` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `unauthorized-effect` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `repeat_count`; `loss_per_event` (+) from the effect: `loss_per_event`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `control-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `incident-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `incident_response_cost` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the size of one unauthorized effect is the effect's own, stated with its source; the repeat count is how often it recurs before the approval control is restored
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+### 37.5 Healthcare and life sciences: `mythos.economics.healthcare-pack/v1`
+
+Vertical `healthcare`; module `engine/pack_healthcare.py`. Loss families priced: `business_interruption`, `data_and_ip`, `incident_response`, `legal`, `notification`, `physical_operational`, `recovery`, `regulatory_compliance`.
+
+| Effect type | Meaning |
+|---|---|
+| `phi_disclosure` | protected health information reached someone not entitled to it |
+| `record_access_unauthorised` | an agent read or changed patient records beyond its authority |
+| `clinical_workflow_interrupted` | a clinical workflow (scheduling, triage, orders, documentation) was interrupted or degraded |
+| `research_data_compromised` | research data, models or IP were exfiltrated, corrupted or lost |
+| `gmp_deviation` | a manufacturing or quality step a GMP process requires was skipped, altered or mis-recorded |
+
+Business processes: `clinical_care`, `patient_records`, `scheduling`, `research`, `manufacturing_quality`, `billing`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required at build by | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `patient_record_count` | `count` | `healthcare_phi_exposure`, `healthcare_record_access_misuse` | patients/records | patient records held |
+| `breach_cost_per_record` | `money_per_unit` | `healthcare_phi_exposure` | OCR breach data | breach response per exposed record (notification, identity services, call handling): the customer's own figure, or OCR breach data it states with that source, a prior and never its truth |
+| `care_disruption_cost_per_hour` | `money_per_hour` | `healthcare_clinical_workflow_interruption` | care disruption | the customer's own cost of one hour of disrupted clinical workflow: diversion, deferred procedures, overtime (never harm to a patient) |
+| `research_asset_value` | `money` | `healthcare_research_ip_loss` | research value | the customer's valuation of the research data, models or IP at risk |
+| `batch_value` | `money_per_unit` | `healthcare_gmp_deviation` | GMP-related operational issues | the value of one manufacturing batch (life sciences) |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation | no |
+| `investigation_hours` | `hours` | hours of forensics or investigation | no |
+| `counsel_hours` | `hours` | hours of external counsel | no |
+| `regulatory_response_cost` | `money` | regulatory response, as scenario bounds its evidence grounds (never a predicted penalty) | no |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service | no |
+| `exposed_record_share` | `ratio` | the share of the patient records held that the effect exposed | yes |
+| `disruption_hours` | `hours` | how long the clinical workflow is interrupted or degraded | yes |
+| `clinical_review_cost` | `money` | reviewing the clinical decisions made while the workflow was degraded, as a range its evidence gives (the work of the review, never harm to a patient) | no |
+| `altered_record_share` | `ratio` | the share of the patient records held that the agent read or changed beyond its authority | yes |
+| `correction_cost_per_record` | `money_per_unit` | reviewing and correcting one affected record | no |
+| `compromised_share` | `ratio` | the share of the research asset's value exfiltrated, corrupted or lost | no |
+| `affected_batches` | `count` | manufacturing batches the deviation affects | yes |
+| `quarantine_fixed_cost` | `money` | the fixed part of quarantining and dispositioning the affected batches | no |
+
+#### `healthcare_phi_exposure`, version 1, precedence 1: PHI exposure
+
+Covers `phi_disclosure` on any process; `record_access_unauthorised` on `patient_records`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `breach-response` | `notification` | `share_of_units` v1 | `units` (+) from the pack's inputs: `patient_record_count`; `affected_share` (+) from the effect: `exposed_record_share`; `amount_per_unit` (+) from the pack's inputs: `breach_cost_per_record` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `regulatory` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+
+Direction notes:
+
+- the exposed share is of the customer's own patient records, never a benchmark's
+- breach response per record is the customer's own figure, or OCR breach data it states as an INDUSTRY_BENCHMARK: a prior, never its truth, and graded as one
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `healthcare_clinical_workflow_interruption`, version 1, precedence 2: Clinical workflow interruption
+
+Covers `clinical_workflow_interrupted` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `care-disruption` | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `disruption_hours`; `value_per_hour` (+) from the pack's inputs: `care_disruption_cost_per_hour` |
+| `workflow-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `clinical-review` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `clinical_review_cost` |
+
+Direction notes:
+
+- an hour of disruption is read at the customer's own cost of one: diversion, deferred procedures, overtime
+- harm to a patient is never priced (safety_monetisation_refused): the template prices the work and the disruption, and the harm is excluded
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+#### `healthcare_record_access_misuse`, version 1, precedence 3: Agent access to records
+
+Covers `record_access_unauthorised` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `record-correction` | `recovery` | `share_of_units` v1 | `units` (+) from the pack's inputs: `patient_record_count`; `affected_share` (+) from the effect: `altered_record_share`; `amount_per_unit` (+) from the effect: `correction_cost_per_record` |
+| `access-investigation` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `compliance-review` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+
+Direction notes:
+
+- the affected share is of the customer's own patient records; each affected record is reviewed and, where changed, corrected
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `healthcare_research_ip_loss`, version 1, precedence 4: Research / IP loss
+
+Covers `research_data_compromised` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `research-asset-loss` | `data_and_ip` | `replacement_share` v1 | `replacement_cost` (+) from the pack's inputs: `research_asset_value`; `share_compromised` (+) from the effect: `compromised_share` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+
+Direction notes:
+
+- the research asset is the customer's own valuation of what replacing it would cost, never a market value
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `healthcare_gmp_deviation`, version 1, precedence 5: GMP-related operational issue
+
+Covers `gmp_deviation` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `batch-loss` | `physical_operational` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `affected_batches`; `unit_cost` (+) from the pack's inputs: `batch_value`; `fixed_cost` (+) from the effect: `quarantine_fixed_cost` |
+| `deviation-investigation` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `regulatory-response` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+
+Direction notes:
+
+- an affected batch is read at the customer's own batch value: lost whole, never part-recovered here
+- harm to a patient is never priced (safety_monetisation_refused): the template prices the work and the disruption, and the harm is excluded
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+Caution (`PHYSICAL_WORLD_CAUTION`): a physical-world effect (owner's specification, sections 32 and 37): the evidence shows the effect is technically plausible, not that it happens at the size these figures state; they are ranges for decision support, never a prediction (false precision), and a benchmark among them is a prior, never the customer's truth; physical damage is its own heavy-tail component, never folded into the operational loss; harm to a person is never priced here (safety_monetisation_refused): it is excluded, and listed as such.
+
+### 37.6 AI-heavy SaaS: `mythos.economics.saas-pack/v1`
+
+Vertical `saas`; module `engine/pack_saas.py`. Loss families priced: `business_interruption`, `contractual`, `customer_loss`, `direct_financial`, `incident_response`, `legal`, `notification`, `recovery`, `regulatory_compliance`.
+
+| Effect type | Meaning |
+|---|---|
+| `tenant_isolation_breach` | one tenant's data or actions reached another tenant |
+| `data_exfiltrated` | data left the platform to someone not entitled to it |
+| `agent_tool_misused` | an agent called a tool outside its authority, or for a purpose it was not given |
+| `api_abused` | the API was used beyond its limits or its terms: scraping, credential stuffing, resource exhaustion |
+| `platform_outage` | the platform, or a model or provider it depends on, was unavailable |
+
+Business processes: `tenant_platform`, `agent_tools`, `public_api`, `data_platform`, `billing`, `support`.
+
+Its customer-input schema (`pack_inputs.SCHEMAS`):
+
+| Input | Unit | Required at build by | Special data (section 23) | Meaning |
+|---|---|---|---|---|
+| `tenant_count` | `count` | `saas_tenant_isolation_breach`, `saas_data_exfiltration`, `saas_platform_outage` | customer count, multi-tenant architecture | paying customer tenants of the multi-tenant platform |
+| `recurring_margin_per_tenant` | `money_per_unit` | `saas_tenant_isolation_breach`, `saas_data_exfiltration`, `saas_platform_outage` | ARR | a tenant's recurring revenue a year less its cost to serve (ARR read as margin: revenue lost is not all loss) |
+| `usage_margin_per_hour` | `money_per_hour` | none: an optional component's | ARR (usage-billed) | usage-billed revenue (tokens, API calls, metered seats) the platform earns per hour, less its cost to serve: stated only by a platform that bills by usage; a set that does not state it bills by subscription alone, and an outage loses no usage revenue (choice 8) |
+| `contract_sla_credit_per_hour` | `money_per_hour` | `saas_platform_outage` | SLA | SLA credits the customer's contracts owe per hour of outage, across its tenants |
+| `contract_sla_credit_cap` | `money` | `saas_platform_outage` | SLA | the contracts' cap on those credits |
+| `abuse_spend_cap_per_hour` | `money_per_hour` | `saas_api_abuse` | cloud spend | the API-abuse cap: the most the platform's cloud and inference spend can rise per hour while the API is abused -- its provider's quota, rate limit or billing cap, or, where none binds, the customer's own worst plausible figure, its source saying which; it may be many times the baseline spend (denial of wallet) |
+
+The attributes an effect of the pack may state:
+
+| Attribute | Unit | Meaning | Observable |
+|---|---|---|---|
+| `forensics_fixed_cost` | `money` | the fixed part of forensics or investigation | no |
+| `investigation_hours` | `hours` | hours of forensics or investigation | no |
+| `counsel_hours` | `hours` | hours of external counsel | no |
+| `regulatory_response_cost` | `money` | regulatory response, as scenario bounds its evidence grounds (never a predicted penalty) | no |
+| `churn_rate` | `ratio` | the extra share of affected customers who leave, from the customer's own data | no |
+| `churn_recovery_years` | `years` | years until lost margin is won back | no |
+| `outage_hours` | `hours` | how long the provider is unavailable | yes |
+| `recovery_fixed_cost` | `money` | the fixed part of restoring the control or the service | no |
+| `recovery_hours` | `hours` | engineering hours to restore the control or the service | no |
+| `repeat_count` | `count` | how many times the unauthorized effect repeats | yes |
+| `loss_per_event` | `money_per_unit` | the amount one unauthorized effect moves or loses | no |
+| `incident_response_cost` | `money` | incident response, as a range its evidence gives | no |
+| `affected_tenant_share` | `ratio` | the share of the tenants the effect reached | yes |
+| `notification_cost_per_tenant` | `money_per_unit` | notifying and handling one affected tenant: the notice, account management, its questions | no |
+| `breach_credit_per_tenant` | `money_per_unit` | the credit or concession one affected tenant is owed under its contract for the breach | no |
+| `affected_people` | `count` | people whose data left the platform | yes |
+| `abuse_hours` | `hours` | how long the abuse lasts before it is stopped | yes |
+| `abuse_load_share` | `ratio` | the share of the API-abuse cap (abuse_spend_cap_per_hour, a pack input) the abuse used while it lasted | no |
+
+#### `saas_tenant_isolation_breach`, version 1, precedence 1: Tenant isolation breach
+
+Covers `tenant_isolation_breach` on any process; `data_exfiltrated` on `tenant_platform`.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `tenant-notification` | `notification` | `share_of_units` v1 | `units` (+) from the pack's inputs: `tenant_count`; `affected_share` (+) from the effect: `affected_tenant_share`; `amount_per_unit` (+) from the effect: `notification_cost_per_tenant` |
+| `tenant-credits` | `contractual` | `share_of_units` v1 | `units` (+) from the pack's inputs: `tenant_count`; `affected_share` (+) from the effect: `affected_tenant_share`; `amount_per_unit` (+) from the effect: `breach_credit_per_tenant` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `regulatory` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+| `tenant-churn` | `customer_loss` | `churned_share_margin` v1 | `units` (+) from the pack's inputs: `tenant_count`; `affected_share` (+) from the effect: `affected_tenant_share`; `churn_rate` (+) from the effect: `churn_rate`; `margin_per_unit_per_year` (+) from the pack's inputs: `recurring_margin_per_tenant`; `recovery_years` (+) from the effect: `churn_recovery_years` |
+
+Direction notes:
+
+- the affected share of the customer's own tenants drives notification, credits and tenant loss alike: one parameter, read by each in the same direction
+- a cross-tenant exposure is the owner's worked example B (specification, section 31): legal and regulatory are priced here as saas_data_exfiltration prices them, so taking the effect by precedence drops no family that template prices
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- tenant loss is computed only from the customer's own churn figure (CUSTOMER_PROVIDED), at its own recurring margin per tenant; any other churn source makes it unknown (specification, section 31)
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `saas_data_exfiltration`, version 1, precedence 2: Data exfiltration
+
+Covers `data_exfiltrated` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `notification` | `notification` | `per_affected_plus_fixed` v1 | `affected` (+) from the effect: `affected_people`; `unit_cost` (+) from the set: `notification_unit_cost`; `fixed_cost` (+) from the set: `notification_fixed_cost` |
+| `forensics` | `incident_response` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `forensics_fixed_cost`; `hourly_rate` (+) from the set: `security_responder_hourly_rate`; `hours` (+) from the effect: `investigation_hours` |
+| `legal` | `legal` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the set: `legal_retainer`; `hourly_rate` (+) from the set: `external_counsel_hourly_rate`; `hours` (+) from the effect: `counsel_hours` |
+| `regulatory` | `regulatory_compliance` | `lump_sum` v1 | `amount` (+) from the effect: `regulatory_response_cost` |
+| `tenant-churn` | `customer_loss` | `churned_share_margin` v1 | `units` (+) from the pack's inputs: `tenant_count`; `affected_share` (+) from the effect: `affected_tenant_share`; `churn_rate` (+) from the effect: `churn_rate`; `margin_per_unit_per_year` (+) from the pack's inputs: `recurring_margin_per_tenant`; `recovery_years` (+) from the effect: `churn_recovery_years` |
+
+Direction notes:
+
+- the people whose data left drive notification; the tenants it reached drive tenant loss
+- regulatory response is scenario bounds its evidence grounds, never a predicted penalty
+- tenant loss is computed only from the customer's own churn figure (CUSTOMER_PROVIDED), at its own recurring margin per tenant; any other churn source makes it unknown (specification, section 31)
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `saas_agent_tool_misuse`, version 1, precedence 3: Agent tool misuse
+
+Covers `agent_tool_misused` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `unauthorized-effect` | `direct_financial` | `repeat_loss` v1 | `repeat_count` (+) from the effect: `repeat_count`; `loss_per_event` (+) from the effect: `loss_per_event`; `recovery_rate` (-) from the set: `recovery_rate` |
+| `control-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `incident-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `incident_response_cost` |
+
+Direction notes:
+
+- recovery_rate decreases the loss: the LOW result reads the HIGHEST recovery, the HIGH the lowest
+- the size of one misuse is the effect's own, stated with its source; the repeat count is how often it recurs before the tool's authority is restored
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `saas_api_abuse`, version 1, precedence 4: API abuse
+
+Covers `api_abused` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `abuse-compute` | `direct_financial` | `share_of_spend` v1 | `hours` (+) from the effect: `abuse_hours`; `spend_per_hour` (+) from the pack's inputs: `abuse_spend_cap_per_hour`; `added_share` (+) from the effect: `abuse_load_share` |
+| `abuse-mitigation` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `incident-response` | `incident_response` | `lump_sum` v1 | `amount` (+) from the effect: `incident_response_cost` |
+
+Direction notes:
+
+- the abuse costs the share of the API-abuse cap it used, for as long as it lasts: the cap (abuse_spend_cap_per_hour) is the customer's stated figure for the most abuse can add to its spend per hour, never a constant, and may be many times its baseline spend (denial of wallet)
+- remediation of the finding is a mitigation's price, never a component of this event (spec, section 22, decision 2)
+
+#### `saas_platform_outage`, version 1, precedence 5: Platform outage
+
+Covers `platform_outage` on any process.
+
+| Component | Family | Formula | Inputs: direction, source |
+|---|---|---|---|
+| `sla-credits` | `contractual` | `capped_credit` v1 | `credit_per_hour` (+) from the pack's inputs: `contract_sla_credit_per_hour`; `breach_hours` (+) from the effect: `outage_hours`; `contract_cap` (+) from the pack's inputs: `contract_sla_credit_cap` |
+| `failover-recovery` | `recovery` | `fixed_plus_hours` v1 | `fixed_cost` (+) from the effect: `recovery_fixed_cost`; `hourly_rate` (+) from the set: `engineering_hourly_rate`; `hours` (+) from the effect: `recovery_hours` |
+| `tenant-churn` | `customer_loss` | `churned_share_margin` v1 | `units` (+) from the pack's inputs: `tenant_count`; `affected_share` (+) from the effect: `affected_tenant_share`; `churn_rate` (+) from the effect: `churn_rate`; `margin_per_unit_per_year` (+) from the pack's inputs: `recurring_margin_per_tenant`; `recovery_years` (+) from the effect: `churn_recovery_years` |
+| `usage-revenue` (optional) | `business_interruption` | `interruption` v1 | `interruption_hours` (+) from the effect: `outage_hours`; `value_per_hour` (+) from the pack's inputs: `usage_margin_per_hour` |
+
+Direction notes:
+
+- a subscription is paid ahead: an outage's loss is the SLA credits the contracts owe, the recovery and the tenants who leave, never the subscription revenue of its hours
+- usage-billed revenue (tokens, API calls, metered seats) is lost while the platform is down: usage-revenue prices it at the customer's own usage margin per hour, and is made only where the set states that margin (an optional component, choice 8); a platform that bills by subscription alone states none, and the component is absent, never zero
+- SLA credits are capped by the customer's own contracts' cap; a higher cap never lowers the loss
+- tenant loss is computed only from the customer's own churn figure (CUSTOMER_PROVIDED), at its own recurring margin per tenant; any other churn source makes it unknown (specification, section 31)
+
+### 37.7 The formulas the packs add
+
+Seven formulas join the catalogue of section 15 (`formulas.CATALOGUE`), each version 1. In the table, `+` is `increases`.
+
+| Formula | Version | Expression | Inputs (unit, direction) | Families |
+|---|---|---|---|---|
+| `throughput_loss` | 1 | `units_per_day / 24 x hours x affected_share x amount_per_unit` | `units_per_day` (count_per_day, +); `hours` (hours, +); `affected_share` (ratio, +); `amount_per_unit` (money_per_unit, +) | `business_interruption`, `customer_restitution`, `physical_operational`, `recovery` |
+| `share_of_units` | 1 | `units x affected_share x amount_per_unit` | `units` (count, +); `affected_share` (ratio, +); `amount_per_unit` (money_per_unit, +) | `contractual`, `customer_restitution`, `incident_response`, `notification`, `physical_operational`, `recovery`, `regulatory_compliance`, `third_party_downstream` |
+| `share_of_units_value` | 1 | `units x affected_share x amount_per_unit x value_share` | `units` (count, +); `affected_share` (ratio, +); `amount_per_unit` (money_per_unit, +); `value_share` (ratio, +) | `customer_restitution`, `direct_financial`, `physical_operational` |
+| `excess_over_expected` | 1 | `units x affected_share x amount_per_unit x expected_ratio x excess_share` | `units` (count, +); `affected_share` (ratio, +); `amount_per_unit` (money_per_unit, +); `expected_ratio` (ratio, +); `excess_share` (ratio, +) | `direct_financial` |
+| `per_unit_response` | 1 | `units x cost_per_unit` | `units` (count, +); `cost_per_unit` (money_per_unit, +) | `incident_response`, `legal`, `regulatory_compliance` |
+| `churned_share_margin` | 1 | `units x affected_share x churn_rate x margin_per_unit_per_year x recovery_years` | `units` (count, +); `affected_share` (ratio, +); `churn_rate` (ratio, +), from `CUSTOMER_PROVIDED` data only; `margin_per_unit_per_year` (money_per_unit, +); `recovery_years` (years, +) | `customer_loss` |
+| `share_of_spend` | 1 | `hours x spend_per_hour x added_share` | `hours` (hours, +); `spend_per_hour` (money_per_hour, +); `added_share` (ratio, +) | `business_interruption`, `direct_financial` |
+
+Each is a product of non-negative inputs, every one of which increases the loss, so
+each is ONE term (section 26.1's level attribution reads it whole), monotone in every
+input, and `0 <= low <= base <= high`. None holds a figure of its own: the `24` in
+`throughput_loss` is the hours in a day, stated in its expression as
+`repeat_in_window`'s is. `churned_share_margin` reads its `churn_rate` only from the
+customer's own data (`CUSTOMER_PROVIDED`; any other source makes the component
+unknown, section 15's rule for customer loss). Each has its vectorised twin
+(`engine/twins.py`, section 25.3), proven equal to it at its known answer and at random
+points; a twin added for a new formula changes no earlier twin, so `TWINS_VERSION`
+stays 1 and no recorded run reads another twin. Each formula's known answer is in
+`tests/test_economics_scenarios.py`, every figure worked by hand, and each one's level
+record is pinned in `tests/test_economics_sensitivity_and_grade.py`.
+
+### 37.8 Bias and fairness
+
+The owner's section 27: "Industry packs must not embed unsupported geographic or
+company-size assumptions as penalties." Held by construction, and by four static tests:
+
+- **No figure of its own.** A template's source is a kind and a name; a pack holds no
+  number but versions and precedences; every value a component reads is a recorded
+  parameter with its `source_type` and evidence (section 37.1).
+- **A place or a size only as the customer states it.** A name keyed to a place or a
+  size (`region`, `country`, `jurisdiction`, `size`, `small`, `large`, `tier`,
+  `headcount` and the rest of the test's list) is read ONLY as a customer input of a
+  pack's schema, which the customer states with its provenance; anywhere else -- an
+  attribute, a source of another kind, an effect type, a process, a template, a
+  component, or a variable, constant or name written in a pack module -- it is refused.
+  The insurance pack's `regulatory_jurisdiction_count` is such an input: the customer's
+  own count of the regulators it answers, read once per jurisdiction at the effect's
+  stated cost of answering one regulator, never a weight by place.
+- `test_a_pack_module_holds_no_figure_and_no_place_or_size_weight` reads every pack
+  module's source: no float, no number written as text, no `Decimal`, `Money` or
+  `Fraction` made, no integer but a version or a precedence, and no name keyed to a
+  place or a size but a customer input's. `test_a_pack_reads_a_place_or_a_size_only_as_the_customers_stated_input`
+  reads every pack's data. A pack given a hidden company-size penalty -- a constant, or
+  an attribute read as a multiplier -- fails both.
+- `test_the_pack_formulas_hold_no_figure_and_no_place_or_size_weight` reads the
+  formulas the packs add (section 37.7) with the same rules, in `engine/formulas.py`
+  and in their twins in `engine/twins.py`, and follows every module-level helper or
+  constant those blocks reach by name: the only figures allowed are units -- one (a
+  complement, an empty product) and `24`, the hours in a day -- and a `Decimal` is made
+  only of one of them. A hidden constant there would pass the known answers, which its
+  twin and its fixture would be written to match; this scan does not.
+- **Every spelling.** A name is split into words at camelCase humps and at every
+  character that is not a letter (`smallTenantPenalty` is `small`, `tenant`,
+  `penalty`), so a place or a size word is read however it is written.
+- **An allow-list beside the deny-list (choice 5, tightened).** Every name a pack uses
+  -- an effect type, a process, an attribute, an input, a template id, a component key,
+  a source's name -- is on the pack tests' reviewed list (`REVIEWED_NAMES`), each
+  reviewed as naming no place and no size weight;
+  `test_every_name_a_pack_uses_is_on_the_reviewed_allow_list` fails on a name that is
+  not, until it is reviewed and added, so a name the word list does not hold is caught
+  as well.
+
+### 37.9 Safety: harm to a person, the physical-world caution, and the stop path
+
+**Harm to a person is never priced.** No owner-approved model of injury, death, or a
+patient's or the public's safety exists, so no pack prices it: an effect type, an
+attribute or an input whose name holds a word of harm (`pack_inputs.HARM_WORDS`:
+injury, fatality, death, killed, wounded, casualty, bodily, harm, illness, disability,
+suffering, morbidity, mortality, VSL, QALY and DALY among them) or a phrase of harm
+(`pack_inputs.HARM_PHRASES`, a run of words wherever it stands: the value or the loss of
+a life, lives lost, an adverse event, a patient's or a health outcome, and a patient's,
+the public's, a passenger's, a worker's, an occupant's, a pedestrian's or a person's
+safety) is refused, `safety_monetisation_refused`, in every industry pack, and each
+states that it excludes it (`HARM_EXCLUDED`: served with the pack, in its report's
+limitations and on its card). A name is read in every spelling (`pack_inputs.words_of`:
+split at camelCase humps and at every character that is not a letter), so
+`PassengerInjured`, `patientSafetyCost`, `loss_of_life` and `qaly2` are each refused.
+"safety" alone is not harm: a manufacturer's safety system is a control, priced by what
+restoring it costs. The banking pack refuses such a
+type as it always did (`effect_type_unrecognised`). Choice 1 asks the owner whether a
+model is to be approved.
+
+**The physical-world caution.** A template whose effect is in the physical world
+carries `PHYSICAL_WORLD_CAUTION` wherever its figures are shown (the events route, the
+report's limitations, the card): the evidence shows the effect is technically
+plausible, not that it happens at the size the figures state; they are ranges for
+decision support, never a prediction (the owner's section 37, false precision); a
+benchmark among them is a prior, never the customer's truth (section 37, benchmark
+misuse); physical damage is its own heavy-tail component, never folded into the
+operational loss (the owner's section 32); harm to a person is excluded. In this half:
+`healthcare_clinical_workflow_interruption` and `healthcare_gmp_deviation`.
+
+**Nothing on a stop path.** The packs are pure data, read only by the builder, the
+registry's route, the report, the card and the refresh, none of them a stop. The
+parameter set, which is on Django's load path, reads the schema module alone
+(`pack_inputs`), which imports no template; a pack or registry module that will not
+import leaves the builder's routes unserved and nothing else
+(`tests/economics_broken_builder.py` breaks the registry too, and
+`test_a_builder_fault_never_takes_down_a_stop` holds). No route E7 adds runs a Monte
+Carlo: the registry's route reads static data, and the build route runs none; the
+simulate and refresh routes, which do, are unchanged and take a run slot (section 32).
+
+### 37.10 The route
+
+Mounted under `/api/assurance/` from `assurance/economics/scenario_api.py`, in the
+builder's guard:
+
+| Route | Name | Does |
+|---|---|---|
+| `GET economics/packs/` | `economics-packs` | the registry: every pack, banking first, with its templates (as the events route shows them), loss families, attributes, vocabularies, customer-input schema, cautions and what it never prices; static data, the same for every signed-in caller (401 otherwise); it reads no row and writes none |
+
+It is in `safety.stops.NOT_STOPS` (`GET`, a read), and `test_no_builder_route_is_a_stop`
+walks it. It runs no Monte Carlo, so it takes no run slot.
+
+### 37.11 Codes
+
+The scenario engine's (`parameters.REFUSALS`, raised as `ParameterRefused`):
+
+| Code | Refused |
+|---|---|
+| `pack_unrecognised` | a pack is one of the registry's industry packs, named by its id and version; a parameter set or a build that names no pack is the banking pack's, which is never named |
+| `pack_input_unrecognised` | a parameter set states only its pack's inputs, each in its unit |
+| `pack_input_missing` | every input a template the build uses reads is stated in the parameter set: a missing input is refused at build, never defaulted and never read as zero (no input is required at record time) |
+| `pack_mismatch` | a scenario builds under exactly one pack: the build's pack is the pack its parameter-set version answers |
+| `set_pack_changed` | a parameter set answers one pack in every version: a new version names the pack its earlier versions name (no pack for the banking pack's), so every scenario built on the set can be refreshed against its latest version; a set for another pack is recorded under another set key |
+| `safety_monetisation_refused` | harm to a person -- an injury, a death, a patient's or the public's safety -- is never priced: no owner-approved model of it exists; the physical and operational effects are priced, and the harm is listed as excluded |
+
+The builder's codes of section 24.8 are read against the build's pack: an effect type,
+a business process or an attribute is that pack's.
+
+### 37.12 What is not done yet
+
+- **The second half**: regulated enterprise, government and mission, manufacturing and
+  critical infrastructure, and Hermes and mobility (the owner's section 23) follow on
+  this framework; until they are merged a build or a set naming them is
+  `pack_unrecognised`.
+- **Not calibrated.** "Validated" here is every template's known answer, three ways,
+  the schemas' refusals and the precedence; no pack is calibrated against realised
+  losses (section 10), and a benchmark a customer states (OCR breach data among them)
+  is graded as one (section 26.2).
+- **A pack template rests on every claim type**: no pack template is in
+  `TEMPLATE_CLAIMS` (section 34.1), so a pack scenario reads stale on any bound claim
+  type's change, the conservative reading (choice 4).
+- **One period**: a pricing error's premium shortfall and excess claims are for one
+  policy year; a multi-year book is the owner's roadmap row 8.
+- **A ratio is at most 1**: an excess of more than double the book's expected claims
+  (`excess_claims_share`) cannot be stated; the unit bounds the figure and refuses one
+  above it (`ratio_out_of_range`), never caps it silently. Accepted for version 1
+  (choice 7), and stated in the template's direction notes.
+- **The API-abuse cap is a named parameter, not a constant.** An AI-heavy SaaS
+  platform's API abuse adds `abuse_load_share` (a ratio) of **the API-abuse cap**,
+  `abuse_spend_cap_per_hour`: a pack input in money per hour, the most the platform's
+  cloud and inference spend can rise per hour while the API is abused -- its
+  provider's quota, rate limit or billing cap, or, where none binds, the customer's own
+  worst plausible figure, its source saying which. The cap is what bounds the abuse,
+  and the customer states it with its provenance; it may be any multiple of the
+  baseline spend (a denial of wallet ten times the baseline is a cap of ten times it),
+  so nothing holds the abuse at the platform's baseline spend. It is the special data
+  "cloud spend" of the owner's section 23, read as that cap.
+- **Precedence drops a family in some overlaps.** Where two templates of a pack cover
+  one effect, the one of lower precedence takes it (section 24.4), and a family only
+  the other prices is not priced for that effect. Each such gap is pinned
+  (`ACCEPTED_GAPS` in `tests/test_economics_packs.py`), so a new one fails until it is
+  reviewed: insurance `approval_bypassed` on `underwriting` or `pricing`
+  (`incident_response`); healthcare `record_access_unauthorised` on `patient_records`
+  (`recovery`). A SaaS cross-tenant exposure drops none: its isolation-breach template
+  prices legal and regulatory, as worked example B does.
+- **Migration order**: `0077_parameter_set_pack` depends on #170's
+  `0076_figure_normalizations`, which depends on #169's `0075_section_28_row_macs`.
+
+### Choices for the owner (E7)
+
+Where the specification leaves a choice open this step takes the conservative one.
+Each choice below is an **interim lead decision**: the owner may change any of them,
+and each is reversible.
+
+1. **Harm to a person is never priced** (`safety_monetisation_refused`), in every
+   industry pack (interim: kept as built). Alternative: an owner-approved model (a
+   value of a statistical life, a liability benchmark), stated as a parameter with its
+   provenance and reviewed under section 7, behind a new pack version. Recommendation:
+   keep until legal review.
+2. **Inputs are required only at build** (interim: changed in the review round). No
+   input is required when a set is recorded; a build requires every input a template it
+   uses reads (`pack_input_missing`), so a customer is never pushed to state a zero for
+   an input that does not apply to it, and a zero stated to pass a check never prices a
+   component at nothing in its place. Alternatives: require each pack's core inputs at
+   record time, as built first (a life-sciences manufacturer then had to state patient
+   records, and a SaaS with no SLA cap a cap); or require every input at record time.
+3. **A banking card and report name no pack**; an industry pack's do (interim: kept as
+   built). Alternative: name the pack on every card, with a card version bump: every
+   stored card would then read as made under an older release (section 26.6,
+   `card_not_rebuilt`).
+4. **A pack template rests on every claim type** (section 34.1's conservative
+   default; interim: kept as built). Alternative: list each template's claim types in
+   `TEMPLATE_CLAIMS`, as banking's are; recommended before production, or the refresh's
+   noise hides real staleness.
+5. **Place and size words: a deny-list and an allow-list** (interim: tightened in the
+   review round). The word list is read in every spelling (camelCase split), it scans
+   the formulas the packs add as well as the pack modules (section 37.8), and every
+   name a pack uses is on a reviewed allow-list (`REVIEWED_NAMES`), so a name the word
+   list does not hold fails until it is reviewed. Alternative: the word list alone, as
+   built first.
+6. **The pack is the parameter set's and the build's**, never inferred from the
+   deployment's compliance lens (`assurance/packs.py`), and a set answers one pack in
+   every version (`set_pack_changed`) (interim: kept as built). Alternative: refuse a
+   build whose pack's vertical differs from one recorded for the deployment (no such
+   record exists today).
+7. **The insurance excess-claims model**: a wrongly accepted policy costs its premium,
+   times the customer's loss ratio, times the excess share the effect states, a ratio,
+   so **at most double** the book's expected claims (interim: accepted for version 1,
+   and documented in the template's direction notes and section 37.12). A worse risk is
+   refused (`ratio_out_of_range`), never capped silently. Alternatives, for a later
+   version: the customer's own loss experience on the segment, stated as a lump sum, or
+   a relativity that is not bounded at 1.
+8. **An AI-heavy SaaS outage**: a subscription is paid ahead, so its subscription
+   revenue is not lost in the outage's hours; its loss is the SLA credits, the recovery
+   and the tenants who leave, **and, for a platform that bills by usage, the usage
+   revenue lost while it is down** (interim: added in the review round). The optional
+   component `usage-revenue` (`interruption`: the outage's hours times the customer's
+   own usage margin per hour, `usage_margin_per_hour`) is made only where the set
+   states that margin; a platform that bills by subscription alone states none, and the
+   component is absent, never zero and never refused (section 37.2). Alternative: no
+   usage component, as built first.

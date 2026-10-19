@@ -200,6 +200,78 @@ KNOWN_ANSWERS = {
         {"market_capitalisation": (1000000, 1000000, 1000000), "price_decline": ("0.01", "0.02", "0.05")},
         ("10000", "20000", "50000"),
     ),
+    # The industry packs' formulas (E7, spec section 37).
+    # 2,400 a day is 100 an hour.
+    # low:  100 x 1 h x 0.1 x 10 =   100
+    # base: 100 x 2 h x 0.2 x 20 =   800
+    # high: 100 x 4 h x 0.5 x 30 = 6,000
+    "throughput_loss": (
+        "business_interruption",
+        {
+            "units_per_day": (2400, 2400, 2400),
+            "hours": (1, 2, 4),
+            "affected_share": ("0.1", "0.2", "0.5"),
+            "amount_per_unit": (10, 20, 30),
+        },
+        ("100", "800", "6000"),
+    ),
+    # 1,000 x 0.1 x 2 = 200; 2,000 x 0.25 x 4 = 2,000; 4,000 x 0.5 x 5 = 10,000
+    "share_of_units": (
+        "notification",
+        {"units": (1000, 2000, 4000), "affected_share": ("0.1", "0.25", "0.5"), "amount_per_unit": (2, 4, 5)},
+        ("200", "2000", "10000"),
+    ),
+    # 1,000 x 0.1 x 500 x 0.05 = 2,500; 1,000 x 0.2 x 500 x 0.1 = 10,000; 1,000 x 0.4 x 500 x 0.2 = 40,000
+    "share_of_units_value": (
+        "direct_financial",
+        {
+            "units": (1000, 1000, 1000),
+            "affected_share": ("0.1", "0.2", "0.4"),
+            "amount_per_unit": (500, 500, 500),
+            "value_share": ("0.05", "0.1", "0.2"),
+        },
+        ("2500", "10000", "40000"),
+    ),
+    # low:  1,000 x 0.01 x 1,000 x 0.6 x 0.2   =  1,200
+    # base: 1,000 x 0.02 x 1,000 x 0.65 x 0.3  =  3,900
+    # high: 1,000 x 0.05 x 1,000 x 0.7 x 0.5   = 17,500
+    "excess_over_expected": (
+        "direct_financial",
+        {
+            "units": (1000, 1000, 1000),
+            "affected_share": ("0.01", "0.02", "0.05"),
+            "amount_per_unit": (1000, 1000, 1000),
+            "expected_ratio": ("0.6", "0.65", "0.7"),
+            "excess_share": ("0.2", "0.3", "0.5"),
+        },
+        ("1200", "3900", "17500"),
+    ),
+    # 2 x 10,000 = 20,000; 3 x 15,000 = 45,000; 5 x 20,000 = 100,000
+    "per_unit_response": (
+        "regulatory_compliance",
+        {"units": (2, 3, 5), "cost_per_unit": (10000, 15000, 20000)},
+        ("20000", "45000", "100000"),
+    ),
+    # low:  1,000 x 0.1 x 0.05 x 100 x 1 y =    500
+    # base: 1,000 x 0.2 x 0.1 x 150 x 2 y  =  6,000
+    # high: 1,000 x 0.5 x 0.2 x 200 x 3 y  = 60,000
+    "churned_share_margin": (
+        "customer_loss",
+        {
+            "units": (1000, 1000, 1000),
+            "affected_share": ("0.1", "0.2", "0.5"),
+            "churn_rate": ("0.05", "0.1", "0.2"),
+            "margin_per_unit_per_year": (100, 150, 200),
+            "recovery_years": (1, 2, 3),
+        },
+        ("500", "6000", "60000"),
+    ),
+    # 2 h x 500 x 0.1 = 100; 4 h x 500 x 0.2 = 400; 8 h x 500 x 0.5 = 2,000
+    "share_of_spend": (
+        "direct_financial",
+        {"hours": (2, 4, 8), "spend_per_hour": (500, 500, 500), "added_share": ("0.1", "0.2", "0.5")},
+        ("100", "400", "2000"),
+    ),
 }
 
 

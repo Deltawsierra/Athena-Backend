@@ -52,6 +52,7 @@ from django.utils import timezone
 
 from . import row_mac as _row_mac
 from .engine import cost_index, figure_normalization, formulas, fx, governance, money, parameters
+from .engine import pack_inputs as pack_schemas
 from .engine import parameter_set as pset
 from .engine import loss as engine_loss
 from .engine.provenance import LicenseClass, SourceType, TrustTier
@@ -2433,6 +2434,10 @@ class CustomerParameterSet(_AppendOnly):
     set_key = models.SlugField(max_length=_KEY_MAX)
     version = models.PositiveIntegerField()
     schema_version = models.CharField(max_length=64, default=pset.SCHEMA_VERSION)
+    # The industry pack the version answers (E7, spec section 37): blank for the
+    # banking pack, as every version recorded before E7 is; its inputs are rows named
+    # "pack_input:" and the input.
+    pack = models.CharField(max_length=100, blank=True, default="")
     # The excluded families, sorted: the one part of a version that is not a parameter.
     insurance_exclusions = models.JSONField(default=list, blank=True)
     variable_count = models.PositiveIntegerField()
@@ -2477,6 +2482,7 @@ class CustomerParameterSet(_AppendOnly):
         version = cls(
             deployment=deployment,
             set_key=set_key,
+            pack=content.pack,
             insurance_exclusions=list(content.exclusions),
             variable_count=len(parameters_),
             content_digest=content.digest(),
@@ -2511,7 +2517,7 @@ class CustomerParameterSet(_AppendOnly):
             if row.parameter_set is not version or row.scenario_id is not None:
                 raise EconomicsRefused("parent_required")
             engine = row._check_form()
-            expected = _engine_refusal(lambda row=row: pset.variable_unit(row.name))
+            expected = _engine_refusal(lambda row=row: pset.variable_unit(row.name, version.pack))
             if engine.unit is not expected:
                 raise EconomicsRefused("unit_mismatch", f"the parameter set's {row.name} is {expected}")
             if row.name in names:
@@ -2537,6 +2543,8 @@ class CustomerParameterSet(_AppendOnly):
         _engine_refusal(lambda: pset.check_set_key(self.set_key))
         if self.schema_version != pset.SCHEMA_VERSION:
             raise EconomicsRefused("code_unrecognised", "schema_version")
+        if not isinstance(self.pack, str) or (self.pack and self.pack not in pack_schemas.SCHEMAS):
+            raise EconomicsRefused("pack_unrecognised", f"pack {self.pack!r}")
         exclusions = self.insurance_exclusions
         if not isinstance(exclusions, list):
             raise EconomicsRefused("field_malformed", "insurance_exclusions is not a list")
@@ -2554,6 +2562,24 @@ class CustomerParameterSet(_AppendOnly):
                 deployment_id=self.deployment_id, set_key=self.set_key
             ).aggregate(latest=Max("version"))["latest"]
             self.version = (earlier or 0) + 1
+        # A set answers ONE pack in every version (E7, spec section 37.2): a version
+        # that names another pack than the set's first would leave every scenario built
+        # on an earlier one unable to refresh (its rebuild reads the latest version, of
+        # another pack), so it is refused; another pack's set has its own key.
+        first = (
+            CustomerParameterSet._base_manager.filter(
+                deployment_id=self.deployment_id, set_key=self.set_key, version__lt=self.version
+            )
+            .order_by("version")
+            .values_list("pack", flat=True)
+            .first()
+        )
+        if first is not None and first != self.pack:
+            raise EconomicsRefused(
+                "set_pack_changed",
+                f"{self.set_key} answers {first or 'no pack (the banking pack)'}; this version names "
+                f"{self.pack or 'no pack (the banking pack)'}",
+            )
         self.author_username = _signed_in(self.author).username
 
     def parameter_rows(self) -> list[FinancialParameter]:
@@ -2569,6 +2595,7 @@ class CustomerParameterSet(_AppendOnly):
                 [row.as_engine() for row in rows],
                 self.insurance_exclusions,
                 {row.name: row.distribution for row in rows if row.distribution is not None},
+                pack=self.pack,
             )
         )
 
@@ -2588,7 +2615,7 @@ class CustomerParameterSet(_AppendOnly):
             del row["name"]
             return {**schema, **row, "distribution": content.distributions.get(parameter.name)}
 
-        return {
+        served = {
             "set_key": self.set_key,
             "version": self.version,
             "current": current_version is not None and self.version == current_version,
@@ -2608,6 +2635,15 @@ class CustomerParameterSet(_AppendOnly):
             if content.frequency is None
             else entry(content.frequency, {"unit": parameters.Unit.COUNT.value, "meaning": "events a year"}),
         }
+        # Only for a version that names an industry pack: a banking version is served
+        # as it was before a pack could be named (spec, section 37).
+        if self.pack:
+            schema = pack_schemas.schema(self.pack)
+            served["pack"] = self.pack
+            served["pack_inputs"] = {
+                name: entry(p, schema.inputs[name].as_dict()) for name, p in content.pack_inputs.items()
+            }
+        return served
 
     def __str__(self) -> str:
         return f"parameter set {self.set_key} v{self.version}"
@@ -2821,7 +2857,11 @@ class FinancialParameter(_AppendOnly):
             raise EconomicsRefused("parent_required")
         engine = self._check_form()
         if self.parameter_set_id is not None:
-            expected = _engine_refusal(lambda: pset.variable_unit(self.name))
+            pack = (
+                CustomerParameterSet._base_manager.filter(pk=self.parameter_set_id).values_list("pack", flat=True).first()
+                or ""
+            )
+            expected = _engine_refusal(lambda: pset.variable_unit(self.name, pack))
             if engine.unit is not expected:
                 raise EconomicsRefused("unit_mismatch", f"the parameter set's {self.name} is {expected}")
             if _rests_on_prefill(self.evidence_ref) and not CustomerParameterSet._base_manager.filter(
@@ -3098,8 +3138,46 @@ class ScenarioBuild(_AppendOnly):
         # the one recorded and returns it, and two builds racing past that read are
         # refused by the unique constraint, which no check made before it can be.
 
+    def pack_record(self) -> dict | None:
+        """The industry pack this build was built under, as the BUILD recorded it (E7,
+        spec section 37.3): its ``id``, its ``digest``, the ``cautions`` of the
+        templates its effects were assigned to and what it ``excluded``; ``None`` for a
+        build whose pack is not an industry pack's id -- a banking build, which records
+        none, or a hand-made label from before E7 -- as before E7. Read from the
+        build's own document, never
+        from the registry, so a report and a card keep the pack's statements even when
+        a later release no longer holds the pack. A record without them -- none is
+        made, but one would be read so -- states that, and never reads as a banking
+        build."""
+        if not pack_schemas.is_industry_pack_id(self.pack):
+            return None
+        document = self.inputs if isinstance(self.inputs, dict) else {}
+        statements = document.get("pack_statements")
+        if not isinstance(statements, dict):
+            return {
+                "id": self.pack,
+                "digest": document.get("pack_digest"),
+                "cautions": [PACK_STATEMENTS_UNRECORDED],
+                "excluded": [],
+            }
+        return {
+            "id": self.pack,
+            "digest": document.get("pack_digest"),
+            "cautions": list(statements.get("cautions", [])),
+            "excluded": list(statements.get("excluded", [])),
+        }
+
     def __str__(self) -> str:
         return f"build {self.build_digest} of scenario {self.scenario_id}"
+
+
+#: What a report and a card state for an industry build that recorded no statements of
+#: its pack (none is made so: every industry build records them).
+PACK_STATEMENTS_UNRECORDED = (
+    "built under an industry pack whose cautions and exclusions were not recorded with the build: read every "
+    "figure as a range for decision support, never a prediction; harm to a person is never priced "
+    "(safety_monetisation_refused)"
+)
 
 
 class CausalEffect(_AppendOnly):
