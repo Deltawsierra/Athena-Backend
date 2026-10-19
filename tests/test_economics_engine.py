@@ -120,9 +120,10 @@ def test_the_engine_imports_with_django_poisoned():
     # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
     # (numpy too), step 13's remediation (no numpy), step 10's feed adapters, step 11's
     # catalogs and context rules, E5's portfolio (numpy too), section 36's figure
-    # normalization record (no numpy); and E7's six (the industry packs: their input
-    # schemas, base, registry and the insurance, healthcare and SaaS packs; no numpy).
-    assert result.stdout.strip() == "imported 35", result.stdout
+    # normalization record (no numpy); and E7's ten (the industry packs: their input
+    # schemas, base, registry and the insurance, healthcare, SaaS, regulated-enterprise,
+    # government, manufacturing and mobility packs; no numpy).
+    assert result.stdout.strip() == "imported 39", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -195,6 +196,10 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "pack_insurance.py",
         "pack_healthcare.py",
         "pack_saas.py",
+        "pack_regulated_enterprise.py",
+        "pack_government.py",
+        "pack_manufacturing.py",
+        "pack_mobility.py",
     }
     core_importers = set()
     for path in files:

@@ -60,7 +60,8 @@ PACKS = pack_registry.PACKS
 VERTICAL = tuple(p for p in PACKS.values() if not p.banking)
 VERTICAL_TEMPLATES = tuple(t for p in VERTICAL for t in p.templates)
 PACK_MODULES = ("pack_inputs.py", "pack_base.py", "pack_registry.py", "pack_insurance.py", "pack_healthcare.py",
-                "pack_saas.py")
+                "pack_saas.py", "pack_regulated_enterprise.py", "pack_government.py", "pack_manufacturing.py",
+                "pack_mobility.py")
 
 
 # ======================================================================
@@ -74,6 +75,10 @@ def test_the_registry_holds_banking_and_each_industry_pack_versioned():
         "mythos.economics.insurance-pack/v1",
         "mythos.economics.healthcare-pack/v1",
         "mythos.economics.saas-pack/v1",
+        "mythos.economics.regulated-enterprise-pack/v1",
+        "mythos.economics.government-pack/v1",
+        "mythos.economics.manufacturing-pack/v1",
+        "mythos.economics.mobility-pack/v1",
     ]
     for pack in PACKS.values():
         assert re.fullmatch(r"mythos\.economics\.[a-z][a-z-]*-pack/v[1-9][0-9]*", pack.pack_id), pack.pack_id
@@ -118,7 +123,7 @@ def test_a_template_id_is_the_registrys():
             assert chosen.pack == pack.pack_id
             assert pack_registry.packs_of_template(chosen.template_id, chosen.version) == (pack,)
             assert pack_registry.template(chosen.template_id, chosen.version, pack.pack_id) is chosen
-            assert chosen.template_id.startswith(pack.vertical + "_") or pack.banking
+            assert chosen.template_id.startswith(pack.vertical.replace("-", "_") + "_") or pack.banking
     assert pack_registry.template("no_such_template", 1) is None
     assert pack_registry.packs_of_template("no_such_template", 1) == ()
 
@@ -135,6 +140,10 @@ PACK_DIGESTS = {
     "mythos.economics.insurance-pack/v1": "sha256:4e1700e81775337c1c21474d582daad8a8730a87805def937ea7ee481c7ba19a",
     "mythos.economics.healthcare-pack/v1": "sha256:9ebc335e1c902db504afa4cbcad4c45c9a3c64584fcf02804156ea55054667d9",
     "mythos.economics.saas-pack/v1": "sha256:a7e9242a22206623f3bce6b7b567998544109985a5c70c80e8303c8956b6d6eb",
+    "mythos.economics.regulated-enterprise-pack/v1": "sha256:c0b35e526d26a9f9c04e9e34d7f6297f797570d5316e18e7dbe08096e35d4903",
+    "mythos.economics.government-pack/v1": "sha256:8b6247641ce46caf8c4d8922ce7543d83b902017c5f5a5addc07f4a26f957915",
+    "mythos.economics.manufacturing-pack/v1": "sha256:64530894de42cbcfe75119c38ae600840638f7e6deae290b616a1adcd8aa533f",
+    "mythos.economics.mobility-pack/v1": "sha256:ef790093d9d98c778496b2813fee1fc7605e3223f9c737a843edf00405e61198",
 }
 
 
@@ -353,6 +362,7 @@ VARIABLES = {
     "margin_per_hour": ("money_per_hour", "5000", "8000", "12000"),
     "notification_unit_cost": ("money_per_unit", "1.50", "2.00", "3.00"),
     "notification_fixed_cost": ("money", "25000", "40000", "60000"),
+    "vendor_exit_cost": ("money_per_unit", "50000", "100000", "250000"),
 }
 
 #: Every pack's inputs and every attribute any pack states: SYNTHETIC.
@@ -377,6 +387,27 @@ INPUTS = {
     "contract_sla_credit_per_hour": ("5000", "8000", "12000"),
     "contract_sla_credit_cap": ("100000", "150000", "250000"),
     "abuse_spend_cap_per_hour": ("3000", "4000", "6000"),
+    # regulated enterprise
+    "control_obligation_count": ("400",),
+    "contract_count": ("1500",),
+    "process_margin_per_hour": ("2000", "4000", "8000"),
+    # government
+    "mission_cost_per_hour": ("10000", "25000", "60000"),
+    "response_team_hourly_rate": ("120", "160", "220"),
+    "oversight_body_count": ("2", "3", "4"),
+    # manufacturing
+    "units_per_day": ("4800",),
+    "margin_per_unit": ("30", "40", "55"),
+    "downtime_cost_per_hour": ("5000", "8000", "15000"),
+    "equipment_count": ("120",),
+    "equipment_value": ("250000", "400000", "600000"),
+    "safety_response_cost": ("50000", "120000", "300000"),
+    # mobility: the owner's worked example C (section 32) where it gives a figure
+    "fleet_size": ("2500",),
+    "trips_per_day": ("30000",),
+    "contribution_margin_per_trip": ("18",),
+    "vehicle_asset_cost": ("40000", "55000", "70000"),
+    "recall_cost_per_vehicle": ("150", "300", "600"),
 }
 ATTRIBUTES = {
     # shared with banking
@@ -425,6 +456,32 @@ ATTRIBUTES = {
     "affected_people": ("10000", "50000", "200000"),
     "abuse_hours": ("2", "12", "48"),
     "abuse_load_share": ("0.10", "0.30", "0.80"),
+    # regulated enterprise
+    "affected_contract_share": ("0.005", "0.02", "0.05"),
+    "response_cost_per_contract": ("2000", "5000", "15000"),
+    "affected_obligation_share": ("0.01", "0.03", "0.10"),
+    "compliance_response_per_obligation": ("5000", "15000", "40000"),
+    "interruption_hours": ("2", "8", "24"),
+    "vendors_to_replace": ("0", "1", "2"),
+    # government
+    "reporting_cost_per_body": ("10000", "25000", "60000"),
+    "affected_components": ("1", "3", "10"),
+    "replacement_cost_per_component": ("20000", "50000", "150000"),
+    # manufacturing
+    "affected_line_share": ("0.1", "0.25", "0.5"),
+    "damaged_equipment_share": ("0.01", "0.02", "0.05"),
+    "damage_ratio": ("0.1", "0.3", "1"),
+    "shutdown_hours": ("8", "24", "72"),
+    "expedite_cost": ("20000", "60000", "150000"),
+    "contract_penalty_cost": ("0", "50000", "250000"),
+    # mobility: the owner's worked example C (section 32) where it gives a figure
+    "affected_fleet_share": ("0.01", "0.03", "0.08"),
+    "field_recovery_cost_per_vehicle": ("75", "200", "450"),
+    "operations_response_cost": ("120000", "300000", "600000"),
+    "disrupted_trip_share": ("0.05", "0.15", "0.4"),
+    "compensation_per_trip": ("2", "5", "10"),
+    "damaged_fleet_share": ("0.0004", "0.002", "0.01"),
+    "recall_share": ("0", "0.1", "0.4"),
 }
 
 
@@ -550,6 +607,20 @@ def closed_form_components(chosen) -> dict[str, tuple[Decimal, Decimal, Decimal]
 #:   repricing-rework 20,000 / 50,000 / 120,000; market-conduct-response 3 x 20,000 = 60,000;
 #:                     3 x 50,000 = 150,000; 5 x 150,000 = 750,000
 #:   gross 161,400 / 992,000 / 5,576,000
+#: manufacturing_equipment_impact (4,800 units a day is 200 an hour):
+#:   equipment-damage 120 x 0.01 x 250,000 x 0.1 = 30,000; 120 x 0.02 x 400,000 x 0.3 = 288,000;
+#:                    120 x 0.05 x 600,000 x 1 = 3,600,000
+#:   production-loss  200 x 2 h x 0.1 x 30 = 1,200; 200 x 8 h x 0.25 x 40 = 16,000; 200 x 24 h x 0.5 x 55 = 132,000
+#:   idle-cost        2 h x 5,000 = 10,000; 8 h x 8,000 = 64,000; 24 h x 15,000 = 360,000
+#:   gross 41,200 / 368,000 / 4,092,000
+#: regulated_enterprise_document_exposure gains the control obligations (the lead's decision on F3):
+#:   control-obligations 400 x 0.01 x 5,000 = 20,000; 400 x 0.03 x 15,000 = 180,000;
+#:                       400 x 0.10 x 40,000 = 1,600,000
+#:   gross 162,500 + 20,000 = 182,500; 610,000 + 180,000 = 790,000; 2,605,000 + 1,600,000 = 4,205,000
+#: manufacturing_safety_system_compromise gains the equipment damage (the lead's decision on F3):
+#:   equipment-damage 30,000 / 288,000 / 3,600,000, as manufacturing_equipment_impact's above
+#:   gross 54,800 + 30,000 = 84,800; 268,000 + 288,000 = 556,000; 1,096,000 + 3,600,000 = 4,696,000
+#: mobility_fleet_downtime is the owner's worked example C (section 32; see its own test below).
 KNOWN_GROSS = {
     "insurance_claims_overpayment": ("70960", "172500", "644000"),
     "insurance_wrongful_denial": ("122550", "411100", "2391000"),
@@ -567,6 +638,22 @@ KNOWN_GROSS = {
     "saas_agent_tool_misuse": ("78000", "242750", "973000"),
     "saas_api_abuse": ("66600", "163400", "555400"),
     "saas_platform_outage": ("32000", "169000", "1613000"),
+    "regulated_enterprise_document_exposure": ("182500", "790000", "4205000"),
+    "regulated_enterprise_workflow_manipulation": ("36000", "305750", "2440000"),
+    "regulated_enterprise_agent_permissions": ("92000", "453750", "2648000"),
+    "regulated_enterprise_vendor_ai_failure": ("29000", "299000", "1819000"),
+    "government_sensitive_data_exposure": ("102000", "323000", "1132000"),
+    "government_mission_interruption": ("54800", "319200", "1796000"),
+    "government_supply_chain_compromise": ("92000", "358000", "2022000"),
+    "government_autonomous_agent_effect": ("46800", "212950", "1004000"),
+    "manufacturing_safety_system_compromise": ("84800", "556000", "4696000"),
+    "manufacturing_equipment_impact": ("41200", "368000", "4092000"),
+    "manufacturing_production_interruption": ("27200", "129000", "617000"),
+    "manufacturing_supply_chain_disruption": ("21200", "126000", "532000"),
+    "mobility_vehicle_asset_damage": ("64000", "337500", "2750000"),
+    "mobility_fleet_downtime": ("122325", "319050", "722400"),
+    "mobility_route_disruption": ("125000", "351750", "1272000"),
+    "mobility_service_interruption": ("18500", "74875", "377000"),
 }
 #: The SaaS outage of a platform that bills by subscription alone: its set states no
 #: usage margin, and the optional usage-revenue component is absent (choice 8).
@@ -594,6 +681,32 @@ def test_known_answer_of_every_template(chosen):
 
 def test_every_industry_template_has_a_pinned_known_answer():
     assert set(KNOWN_GROSS) == {t.template_id for t in VERTICAL_TEMPLATES}
+
+
+def test_fleet_downtime_is_the_specifications_worked_example_c():
+    """The owner's worked example C (section 32), Hermes fleet disruption: a fleet of
+    2,500 vehicles making 12 trips each a day (30,000 a day, 1,250 an hour), 1 to 8 per
+    cent of it affected, a contribution margin of USD 18 a trip, an outage of 2 to 18
+    hours, a field recovery of USD 75 to 450 a vehicle and an operations response of USD
+    120,000 to 600,000; the base figures (3 per cent, 6 hours, USD 200, USD 300,000) are
+    this test's, SYNTHETIC. Physical damage is the separate template; safety is not
+    priced.
+
+      lost-trips      1,250 x 2 h x 0.01 x 18 =    450;  1,250 x 6 h x 0.03 x 18 =  4,050;
+                      1,250 x 18 h x 0.08 x 18 = 32,400
+      field-recovery  2,500 x 0.01 x 75 = 1,875;  2,500 x 0.03 x 200 = 15,000;  2,500 x 0.08 x 450 = 90,000
+      operations      120,000 / 300,000 / 600,000
+      gross           122,325 / 319,050 / 722,400
+    """
+    chosen = pack_registry.template("mobility_fleet_downtime", 1)
+    components = {c.component_id: tuple(c.at(p).amount for p in POINTS) for c in engine_components(chosen)}
+    assert components == {
+        "lost-trips": (Decimal(450), Decimal(4050), Decimal(32400)),
+        "field-recovery": (Decimal(1875), Decimal(15000), Decimal(90000)),
+        "operations-response": (Decimal(120000), Decimal(300000), Decimal(600000)),
+    }
+    assert chosen.cautions == (PHYSICAL_WORLD_CAUTION,)
+    assert "mobility_vehicle_asset_damage" in " ".join(chosen.direction_notes)
 
 
 @pytest.mark.parametrize("chosen", VERTICAL_TEMPLATES, ids=lambda t: t.template_id)
@@ -630,6 +743,22 @@ PRECEDENCE = {
         "saas_tenant_isolation_breach", "saas_data_exfiltration", "saas_agent_tool_misuse", "saas_api_abuse",
         "saas_platform_outage",
     ],
+    "mythos.economics.regulated-enterprise-pack/v1": [
+        "regulated_enterprise_document_exposure", "regulated_enterprise_workflow_manipulation",
+        "regulated_enterprise_agent_permissions", "regulated_enterprise_vendor_ai_failure",
+    ],
+    "mythos.economics.government-pack/v1": [
+        "government_sensitive_data_exposure", "government_mission_interruption", "government_supply_chain_compromise",
+        "government_autonomous_agent_effect",
+    ],
+    "mythos.economics.manufacturing-pack/v1": [
+        "manufacturing_safety_system_compromise", "manufacturing_equipment_impact",
+        "manufacturing_production_interruption", "manufacturing_supply_chain_disruption",
+    ],
+    "mythos.economics.mobility-pack/v1": [
+        "mobility_vehicle_asset_damage", "mobility_fleet_downtime", "mobility_route_disruption",
+        "mobility_service_interruption",
+    ],
 }
 
 #: (pack, effect type, process) -> the templates that cover it, in precedence order; the
@@ -651,6 +780,28 @@ OVERLAPS = {
         ["saas_tenant_isolation_breach", "saas_data_exfiltration"],
     ("mythos.economics.saas-pack/v1", "data_exfiltrated", "data_platform"):
         ["saas_data_exfiltration"],
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "legal"):
+        ["regulated_enterprise_document_exposure", "regulated_enterprise_agent_permissions"],
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "hr"):
+        ["regulated_enterprise_document_exposure", "regulated_enterprise_agent_permissions"],
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "finance"):
+        ["regulated_enterprise_workflow_manipulation", "regulated_enterprise_agent_permissions"],
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "procurement"):
+        ["regulated_enterprise_workflow_manipulation", "regulated_enterprise_agent_permissions"],
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "it"):
+        ["regulated_enterprise_agent_permissions"],
+    ("mythos.economics.government-pack/v1", "autonomous_action_unapproved", "mission_operations"):
+        ["government_mission_interruption", "government_autonomous_agent_effect"],
+    ("mythos.economics.government-pack/v1", "autonomous_action_unapproved", "logistics"):
+        ["government_autonomous_agent_effect"],
+    ("mythos.economics.manufacturing-pack/v1", "equipment_damaged", "safety_systems"):
+        ["manufacturing_safety_system_compromise", "manufacturing_equipment_impact"],
+    ("mythos.economics.manufacturing-pack/v1", "equipment_damaged", "production"):
+        ["manufacturing_equipment_impact"],
+    ("mythos.economics.mobility-pack/v1", "rider_service_interrupted", "dispatch"):
+        ["mobility_fleet_downtime", "mobility_service_interruption"],
+    ("mythos.economics.mobility-pack/v1", "rider_service_interrupted", "rider_service"):
+        ["mobility_service_interruption"],
 }
 
 
@@ -683,6 +834,17 @@ ACCEPTED_GAPS = {
     ("mythos.economics.insurance-pack/v1", "approval_bypassed", "underwriting"): {"incident_response"},
     ("mythos.economics.insurance-pack/v1", "approval_bypassed", "pricing"): {"incident_response"},
     ("mythos.economics.healthcare-pack/v1", "record_access_unauthorised", "patient_records"): {"recovery"},
+    # The second half's packs, as built (#172): pinned and listed in spec 37.12 for review.
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "finance"): {"incident_response"},
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "procurement"):
+        {"incident_response"},
+    # The lead's decision on F3: an exposure on hr or legal prices the control obligations
+    # (regulatory_compliance) as the permissions template does; direct_financial stays.
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "hr"): {"direct_financial"},
+    ("mythos.economics.regulated-enterprise-pack/v1", "agent_permission_exceeded", "legal"): {"direct_financial"},
+    ("mythos.economics.government-pack/v1", "autonomous_action_unapproved", "mission_operations"):
+        {"direct_financial"},
+    ("mythos.economics.mobility-pack/v1", "rider_service_interrupted", "dispatch"): {"customer_restitution"},
 }
 
 
@@ -711,6 +873,39 @@ def test_a_saas_cross_tenant_exposure_prices_legal_and_regulatory():
     legal, regulatory = (closed_form_components(chosen)[k] for k in ("legal", "regulatory"))
     assert legal == (Decimal(47500), Decimal(140000), Decimal(420000))
     assert regulatory == (Decimal(0), Decimal(100000), Decimal(400000))
+
+
+@pytest.mark.parametrize("process", ["hr", "legal"])
+def test_a_regulated_enterprise_exposure_on_hr_or_legal_prices_the_control_obligations(process):
+    """The lead's decision on F3: an agent beyond its permissions on the HR or legal
+    process is taken by the document-exposure template, which prices the control
+    obligations it breaches (regulatory_compliance) as the permissions template does,
+    from the same sources. Only direct_financial stays an accepted gap."""
+    pack = PACKS["mythos.economics.regulated-enterprise-pack/v1"]
+    chosen = pack.select("agent_permission_exceeded", process).template
+    assert chosen.template_id == "regulated_enterprise_document_exposure"
+    permissions = pack.catalogue[("regulated_enterprise_agent_permissions", 1)]
+    mine = next(c for c in chosen.components if c.component_key == "control-obligations")
+    theirs = next(c for c in permissions.components if c.component_key == "control-obligations")
+    assert mine == theirs and mine.family == "regulatory_compliance"
+    lost = {c.family for c in permissions.components} - {c.family for c in chosen.components}
+    assert lost == {"direct_financial"}
+    assert closed_form_components(chosen)["control-obligations"] == (Decimal(20000), Decimal(180000), Decimal(1600000))
+
+
+def test_equipment_damaged_on_the_safety_systems_prices_the_damage():
+    """The lead's decision on F3: equipment damaged on the safety systems is taken by the
+    safety-system template, which prices the damage itself (physical_operational) as the
+    equipment-impact template does, from the same sources: no family is dropped."""
+    pack = PACKS["mythos.economics.manufacturing-pack/v1"]
+    chosen = pack.select("equipment_damaged", "safety_systems").template
+    assert chosen.template_id == "manufacturing_safety_system_compromise"
+    impact = pack.catalogue[("manufacturing_equipment_impact", 1)]
+    mine = next(c for c in chosen.components if c.component_key == "equipment-damage")
+    theirs = next(c for c in impact.components if c.component_key == "equipment-damage")
+    assert mine == theirs and mine.family == "physical_operational"
+    assert {c.family for c in impact.components} <= {c.family for c in chosen.components}
+    assert closed_form_components(chosen)["equipment-damage"] == (Decimal(30000), Decimal(288000), Decimal(3600000))
 
 
 @pytest.mark.parametrize("case", sorted(c for c, found in OVERLAPS.items() if len(found) > 1),
@@ -932,7 +1127,8 @@ def test_every_schema_refusal_has_its_code(pack):
         ],
         "field_malformed": [pack_document(pack, pack_inputs=["x"])],
         "pack_input_unrecognised": [
-            pack_document(pack, pack_inputs={**pack_document(pack)["pack_inputs"], "fleet_size": _entry("count", "9")}),
+            pack_document(pack, pack_inputs={**pack_document(pack)["pack_inputs"],
+                                             "units_shipped_per_week": _entry("count", "9")}),
             pack_document(pack, pack_inputs={**pack_document(pack)["pack_inputs"], "legal_retainer": _entry("money", "1")}),
         ],
         "unit_mismatch": [
@@ -1183,41 +1379,69 @@ def test_the_pack_formulas_hold_no_figure_and_no_place_or_size_weight(module):
 REVIEWED_NAMES = frozenset(
     {
         "abuse-compute", "abuse-mitigation", "abuse_hours", "abuse_load_share", "abuse_spend_cap_per_hour",
-        "access-investigation", "affected_batches", "affected_people", "affected_tenant_share",
-        "agent_tool_misused", "agent_tools", "altered_record_share", "api_abused", "approval_bypassed",
-        "average_annual_premium", "batch-loss", "batch_value", "billing", "breach-response",
-        "breach_cost_per_record", "breach_credit_per_tenant", "care-disruption", "care_disruption_cost_per_hour",
-        "churn_rate", "churn_recovery_years", "claim_overpaid", "claim_wrongly_denied", "claimant-restitution",
-        "claims", "claims-backlog", "claims-rework", "claims_per_day", "clinical-review", "clinical_care",
-        "clinical_review_cost", "clinical_workflow_interrupted", "complaint-handling", "compliance-review",
-        "compromised_share", "contact_rate", "contract_sla_credit_cap", "contract_sla_credit_per_hour",
-        "control-recovery", "correction_cost_per_record", "counsel_hours", "customer_service", "data_exfiltrated",
-        "data_platform", "deviation-investigation", "disruption_hours", "engineering_hourly_rate", "excess-claims",
-        "excess_claims_share", "exploitable_window_hours", "exposed_policy_share", "exposed_record_share",
-        "external_counsel_hourly_rate", "failover-recovery", "forensics", "forensics_fixed_cost", "gmp_deviation",
-        "handling_hours", "healthcare_clinical_workflow_interruption", "healthcare_gmp_deviation",
-        "healthcare_phi_exposure", "healthcare_record_access_misuse", "healthcare_research_ip_loss",
-        "incident-response", "incident_response_cost", "insurance_agent_approval_bypass",
-        "insurance_claims_overpayment", "insurance_policyholder_data_exposure",
-        "insurance_pricing_underwriting_error", "insurance_provider_outage", "insurance_wrongful_denial",
-        "interest_and_penalty_per_claim", "interruption", "investigation_hours", "legal", "legal_retainer",
-        "loss_per_event", "loss_ratio", "manual_claim_handling_cost", "manual_handling_share",
-        "manufacturing_quality", "margin_per_hour", "margin_per_policy_per_year", "market-conduct-response",
-        "mispriced_policy_share", "notification", "notification-campaign", "notification_cost_per_tenant",
-        "notification_fixed_cost", "notification_unit_cost", "operations", "outage_hours", "overpaid-claims",
-        "overpaid_claim_rate", "overpayment_per_claim", "patient_record_count", "patient_records", "phi_disclosure",
-        "platform_outage", "policy_count", "policy_servicing", "policyholder-loss", "policyholder_data_disclosure",
-        "premium-shortfall", "premium_shortfall_share", "pricing", "pricing_underwriting_error", "provider_outage",
-        "public_api", "quarantine_fixed_cost", "record-correction", "record_access_unauthorised",
-        "recovery_fixed_cost", "recovery_hours", "recovery_rate", "recurring_margin_per_tenant", "regulatory",
-        "regulatory-response", "regulatory_jurisdiction_count", "regulatory_response_cost",
-        "regulatory_response_per_regulator", "repeat_count", "repricing-rework", "research", "research-asset-loss",
-        "research_asset_value", "research_data_compromised", "rework_cost", "saas_agent_tool_misuse",
-        "saas_api_abuse", "saas_data_exfiltration", "saas_platform_outage", "saas_tenant_isolation_breach",
-        "scheduling", "security_responder_hourly_rate", "sla-credits", "support", "support_agent_hourly_rate",
+        "access-investigation", "access-review", "affected_batches", "affected_components",
+        "affected_contract_share", "affected_fleet_share", "affected_line_share", "affected_obligation_share",
+        "affected_people", "affected_tenant_share", "agent_permission_exceeded", "agent_tool_misused",
+        "agent_tools", "altered_record_share", "api_abused", "approval_bypassed", "asset-damage",
+        "autonomous_action_unapproved", "average_annual_premium", "batch-loss", "batch_value", "billing",
+        "breach-response", "breach_cost_per_record", "breach_credit_per_tenant", "care-disruption",
+        "care_disruption_cost_per_hour", "churn_rate", "churn_recovery_years", "citizen_services", "claim_overpaid",
+        "claim_wrongly_denied", "claimant-restitution", "claims", "claims-backlog", "claims-rework",
+        "claims_per_day", "clinical-review", "clinical_care", "clinical_review_cost",
+        "clinical_workflow_interrupted", "compensation_per_trip", "complaint-handling", "compliance-review",
+        "compliance_response_per_obligation", "component-replacement", "compromised_share", "contact_rate",
+        "contract-obligations", "contract-penalties", "contract_count", "contract_penalty_cost",
+        "contract_sla_credit_cap", "contract_sla_credit_per_hour", "contribution_margin_per_trip",
+        "control-obligations", "control-recovery", "control_obligation_count", "correction_cost_per_record",
+        "counsel_hours", "customer_service", "damage-assessment", "damage_ratio", "damaged_equipment_share",
+        "damaged_fleet_share", "data_exfiltrated", "data_platform", "deviation-investigation", "dispatch",
+        "disrupted_trip_share", "disruption_hours", "document_exposure", "downtime_cost_per_hour",
+        "engineering_hourly_rate", "equipment-damage", "equipment_count", "equipment_damaged", "equipment_value",
+        "excess-claims", "excess_claims_share", "expedite", "expedite_cost", "exploitable_window_hours",
+        "exposed_policy_share", "exposed_record_share", "external_counsel_hourly_rate", "failover-recovery",
+        "field-recovery", "field_recovery_cost_per_vehicle", "finance", "fleet_immobilised", "fleet_operations",
+        "fleet_size", "forensics", "forensics_fixed_cost", "gmp_deviation", "government_autonomous_agent_effect",
+        "government_mission_interruption", "government_sensitive_data_exposure",
+        "government_supply_chain_compromise", "handling_hours", "healthcare_clinical_workflow_interruption",
+        "healthcare_gmp_deviation", "healthcare_phi_exposure", "healthcare_record_access_misuse",
+        "healthcare_research_ip_loss", "hr", "idle-cost", "incident-investigation", "incident-response",
+        "incident_response_cost", "insurance_agent_approval_bypass", "insurance_claims_overpayment",
+        "insurance_policyholder_data_exposure", "insurance_pricing_underwriting_error", "insurance_provider_outage",
+        "insurance_wrongful_denial", "interest_and_penalty_per_claim", "interruption", "interruption_hours",
+        "investigation", "investigation_hours", "it", "it_ot", "legal", "legal_retainer", "logistics",
+        "loss_per_event", "loss_ratio", "lost-trips", "maintenance", "manual_claim_handling_cost",
+        "manual_handling_share", "manufacturing_equipment_impact", "manufacturing_production_interruption",
+        "manufacturing_quality", "manufacturing_safety_system_compromise", "manufacturing_supply_chain_disruption",
+        "margin_per_hour", "margin_per_policy_per_year", "margin_per_unit", "market-conduct-response",
+        "mispriced_policy_share", "mission-interruption", "mission-recovery", "mission_cost_per_hour",
+        "mission_interrupted", "mission_operations", "mobility_fleet_downtime", "mobility_route_disruption",
+        "mobility_service_interruption", "mobility_vehicle_asset_damage", "notification", "notification-campaign",
+        "notification_cost_per_tenant", "notification_fixed_cost", "notification_unit_cost", "operations",
+        "operations-response", "operations_response_cost", "outage_hours", "overpaid-claims", "overpaid_claim_rate",
+        "overpayment_per_claim", "oversight-reporting", "oversight_body_count", "patient_record_count",
+        "patient_records", "phi_disclosure", "platform_outage", "policy_count", "policy_servicing",
+        "policyholder-loss", "policyholder_data_disclosure", "premium-shortfall", "premium_shortfall_share",
+        "pricing", "pricing_underwriting_error", "process-interruption", "process_margin_per_hour", "procurement",
+        "production", "production-loss", "production_interrupted", "provider_outage", "public_api", "quality",
+        "quarantine_fixed_cost", "recall", "recall_cost_per_vehicle", "recall_share", "recertification",
+        "record-correction", "record_access_unauthorised", "records", "recovery_fixed_cost", "recovery_hours",
+        "recovery_rate", "recurring_margin_per_tenant", "regulated_enterprise_agent_permissions",
+        "regulated_enterprise_document_exposure", "regulated_enterprise_vendor_ai_failure",
+        "regulated_enterprise_workflow_manipulation", "regulatory", "regulatory-response",
+        "regulatory_jurisdiction_count", "regulatory_response_cost", "regulatory_response_per_regulator",
+        "repeat_count", "replacement_cost_per_component", "reporting_cost_per_body", "repricing-rework", "research",
+        "research-asset-loss", "research_asset_value", "research_data_compromised", "response_cost_per_contract",
+        "response_team_hourly_rate", "restart-recovery", "rework_cost", "rider-compensation", "rider_service",
+        "rider_service_interrupted", "route_disrupted", "routing", "saas_agent_tool_misuse", "saas_api_abuse",
+        "saas_data_exfiltration", "saas_platform_outage", "saas_tenant_isolation_breach", "safety-response",
+        "safety_response_cost", "safety_system_compromised", "safety_systems", "scheduling",
+        "security_responder_hourly_rate", "sensitive_data_disclosure", "shutdown_hours", "sla-credits",
+        "supply_chain_compromised", "supply_chain_disrupted", "support", "support_agent_hourly_rate",
         "tenant-churn", "tenant-credits", "tenant-notification", "tenant_count", "tenant_isolation_breach",
-        "tenant_platform", "unauthorized-effect", "underwriting", "usage-revenue", "usage_margin_per_hour",
-        "workflow-recovery", "wrongly_accepted_policy_share", "wrongly_denied_claims",
+        "tenant_platform", "trips_per_day", "unauthorized-effect", "underwriting", "units_per_day", "usage-revenue",
+        "usage_margin_per_hour", "vehicle_asset_cost", "vehicle_or_asset_damaged", "vehicle_systems",
+        "vendor-replacement", "vendor_ai_failure", "vendor_exit_cost", "vendors_to_replace", "workflow-recovery",
+        "workflow_manipulated", "wrongly_accepted_policy_share", "wrongly_denied_claims",
     }
 )
 
@@ -1319,6 +1543,10 @@ def test_a_physical_world_template_carries_the_caution():
     physical = {
         "healthcare_clinical_workflow_interruption",
         "healthcare_gmp_deviation",
+        "government_mission_interruption",
+        "government_autonomous_agent_effect",
+        *PRECEDENCE["mythos.economics.manufacturing-pack/v1"],
+        *PRECEDENCE["mythos.economics.mobility-pack/v1"],
     }
     for chosen in VERTICAL_TEMPLATES:
         if chosen.template_id in physical:

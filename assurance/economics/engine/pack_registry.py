@@ -51,7 +51,15 @@ import re
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from . import pack_healthcare, pack_insurance, pack_saas
+from . import (
+    pack_government,
+    pack_healthcare,
+    pack_insurance,
+    pack_manufacturing,
+    pack_mobility,
+    pack_regulated_enterprise,
+    pack_saas,
+)
 from . import pack_inputs as schemas
 from . import templates as tpl
 from .pack_base import HARM_EXCLUDED, PHYSICAL_WORLD_CAUTION, Pack
@@ -72,7 +80,16 @@ def _banking() -> Pack:
 
 
 def _packs() -> tuple[Pack, ...]:
-    return (_banking(), pack_insurance.PACK, pack_healthcare.PACK, pack_saas.PACK)
+    return (
+        _banking(),
+        pack_insurance.PACK,
+        pack_healthcare.PACK,
+        pack_saas.PACK,
+        pack_regulated_enterprise.PACK,
+        pack_government.PACK,
+        pack_manufacturing.PACK,
+        pack_mobility.PACK,
+    )
 
 
 #: Every pack version the registry holds, by id, with the digest of its content
@@ -87,6 +104,10 @@ RELEASED: Mapping[str, str] = MappingProxyType(
         "mythos.economics.insurance-pack/v1": "sha256:4e1700e81775337c1c21474d582daad8a8730a87805def937ea7ee481c7ba19a",
         "mythos.economics.healthcare-pack/v1": "sha256:9ebc335e1c902db504afa4cbcad4c45c9a3c64584fcf02804156ea55054667d9",
         "mythos.economics.saas-pack/v1": "sha256:a7e9242a22206623f3bce6b7b567998544109985a5c70c80e8303c8956b6d6eb",
+        "mythos.economics.regulated-enterprise-pack/v1": "sha256:c0b35e526d26a9f9c04e9e34d7f6297f797570d5316e18e7dbe08096e35d4903",
+        "mythos.economics.government-pack/v1": "sha256:8b6247641ce46caf8c4d8922ce7543d83b902017c5f5a5addc07f4a26f957915",
+        "mythos.economics.manufacturing-pack/v1": "sha256:64530894de42cbcfe75119c38ae600840638f7e6deae290b616a1adcd8aa533f",
+        "mythos.economics.mobility-pack/v1": "sha256:ef790093d9d98c778496b2813fee1fc7605e3223f9c737a843edf00405e61198",
     }
 )
 
