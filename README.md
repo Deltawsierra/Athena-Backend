@@ -21,10 +21,12 @@ npm install
 npm run dev                              # http://localhost:3000, proxying to :8000
 ```
 
-`requirements.txt` is the full runtime set. It pulls torch, transformers, spaCy
-and datasets, none of which this repository imports, plus a model wheel served
-from a GitHub URL, so it will not install behind a proxy or in an air-gapped
-build. `requirements-dev.txt` is what the tests and CI actually need.
+`requirements.txt` is the full runtime set. It no longer pulls torch,
+transformers, spaCy or datasets, nor the spaCy model wheel that was served from
+a GitHub URL: nothing in this repository imports them, and they made a fresh
+install several gigabytes (torch alone brings the CUDA wheels) that would not
+install behind a proxy or in an air-gapped build. `requirements-dev.txt` is
+what the tests and CI actually need.
 
 ## The engine
 
