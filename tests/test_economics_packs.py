@@ -1626,7 +1626,7 @@ def test_the_spec_names_every_pack_code():
         *(f"{f}" for f in ("pack_unrecognised", "pack_input_unrecognised", "pack_input_missing", "pack_mismatch",
                            "safety_monetisation_refused", "set_pack_changed")),
         "pack_input", "pack_inputs", pack_inputs.PACK_INPUT_PREFIX, "economics-packs", "PHYSICAL_WORLD_CAUTION",
-        "HARM_EXCLUDED", "0076_parameter_set_pack", "pack_registry.RELEASED", "pack_digest", "pack_statements",
+        "HARM_EXCLUDED", "0077_parameter_set_pack", "pack_registry.RELEASED", "pack_digest", "pack_statements",
         "required_by", "pack_inputs.HARM_PHRASES", "abuse_spend_cap_per_hour", "usage_margin_per_hour", "ScenarioBuild.pack_record",
         *(module.removesuffix(".py") for module in PACK_MODULES),
     ]

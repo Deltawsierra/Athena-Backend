@@ -75,6 +75,7 @@ from assurance.economics.models import (
     ScenarioBuild,
 )
 from assurance.models import Asset, Deployment, Finding
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_feeds import guard  # noqa: F401 - the socket guard, autouse here too
 from tests.test_economics_scenarios import _entry
 from tests.test_economics_validity_card import _raw, _signer, simulated
@@ -1253,7 +1254,7 @@ LOSS_PATH = (
     "engine/sensitivity.py", "engine/remediation.py", "engine/parameters.py", "engine/parameter_set.py",
     "engine/templates.py", "engine/grade.py", "engine/charts.py", "builder.py", "simulation_service.py", "report.py",
     "remediation_service.py", "charts_service.py", "validity_service.py", "receipt_service.py", "scenario_api.py",
-    "report_api.py", "remediation_api.py", "api.py",
+    "report_api.py", "remediation_api.py", "api.py", "run_normalization.py", "engine/figure_normalization.py",
 )
 #: Names only the context path may use.
 CONTEXT_NAMES = ("EnforcementRecord", "civil_money_penalty", "stated_amounts", "precedent", "FinancialSourceRecords",
@@ -1330,6 +1331,9 @@ def test_a_figure_written_past_the_model_that_rests_on_enforcement_never_gets_a_
 
 
 def _issue(result):
+    # The human review a signed receipt needs (spec, section 35.4), by a colleague the
+    # fixtures made before the version was recorded.
+    approve_for_receipt(result)
     key = Ed25519PrivateKey.generate()
     ring = core.receipt_keyring([_raw(key)], other_roles={})
     return receipt_service.issue_receipt(result, signer=_signer(key), keyring=ring)

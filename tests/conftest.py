@@ -216,6 +216,26 @@ def _economics_run_slots(tmp_path_factory):
         os.environ["ATHENA_ECONOMICS_SLOT_DIR"] = before
 
 
+#: The row key every test runs with (review round 1 of #169, M1; spec, section 35.9):
+#: SYNTHETIC, for tests only, as the tests' receipt keys are. A test of the key-less
+#: behaviour unsets it with monkeypatch.
+TEST_ECONOMICS_ROW_KEY = "synthetic-test-row-key-for-ci-only-0000"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _economics_row_key():
+    """The economics row key (``ATHENA_ECONOMICS_ROW_KEY``) set for the whole run, as
+    a deployment that signs receipts sets it: result and card rows are bound by their
+    MAC under it, and a receipt is signed only with it. A nested pytest inherits it."""
+    before = os.environ.get("ATHENA_ECONOMICS_ROW_KEY")
+    os.environ["ATHENA_ECONOMICS_ROW_KEY"] = TEST_ECONOMICS_ROW_KEY
+    yield TEST_ECONOMICS_ROW_KEY
+    if before is None:
+        os.environ.pop("ATHENA_ECONOMICS_ROW_KEY", None)
+    else:
+        os.environ["ATHENA_ECONOMICS_ROW_KEY"] = before
+
+
 @pytest.fixture
 def engine_keyring(tmp_path, monkeypatch):
     """Configure an outcome keyring that trusts :data:`tests.signed_chains.ENGINE_KEYS`,
