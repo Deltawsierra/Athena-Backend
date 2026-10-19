@@ -311,29 +311,54 @@ guarded, so a fault in it leaves these routes unserved and every stop served:
   `note`; what it leaves out is the previous version's. The jurisdiction and source
   stay the same: a different instrument is a new obligation. The previous version is
   never edited. Only its link to its successor is written. The same request again
-  returns the version it recorded (200) and flags nothing. Another change to a
-  version already superseded is 409 (`obligation_superseded`, naming the current
-  version). A version is never edited or deleted over the API, so `PUT`, `PATCH` and
-  `DELETE` are 405.
+  returns the version it recorded (200) and flags nothing new. It does settle any
+  review its first answer left owed. Another change to a version already superseded
+  is 409 (`obligation_superseded`, naming the current version). A version is never
+  edited or deleted over the API, so `PUT`, `PATCH` and `DELETE` are 405.
 
-Recording an obligation flags the deployment's current claims for review
-(`assurance.legal.flag_for_materiality_review`). Superseding one goes through
-`assurance.legal.supersede_obligation`, which carries the previous version's bindings
-forward and flags every deployment the new version binds, not only the one in the
-path. Either way each affected current claim moves to `legal_review_pending` in the
-same transaction as the record, with the claim event the carry replays, naming who
-recorded the change. A claim a person ruled legally stale stays stale, and a revoked
-claim is left alone. Neither route ever sets a claim legally current or legally
-stale. No body field reaches the legal axis, and nothing here records a materiality
-decision.
+Recording an obligation binds one deployment. Its current claims are flagged for
+review (`assurance.legal.flag_for_materiality_review`), and its stored decision is
+refreshed, both in the record's own transaction.
 
-The flagged claims are a decision input. Each change therefore refreshes the stored
-decision of every deployment it flagged, in the same transaction, as every write of
-a decision input does. A pending review caps nothing. But the carry can read a flagged
-version legally stale again when the only ruling on record says so (for example, a
-later ruling whose obligation has since been deleted), and that moves the decision.
-A supersession refreshes each deployment the new version binds, one after another,
-inside its one transaction.
+A supersession reaches every deployment the previous version bound, not only the one
+in the path: two hundred deployments as easily as one. So nothing in its own
+transaction grows with how many there are. That transaction does three things, each
+in a fixed number of statements:
+
+- records the new version;
+- links it and carries the bindings forward (`assurance.legal.link_supersession`);
+- owes each bound deployment its review flag (`LegalReviewOwed`, migration
+  `assurance.0075`).
+
+Once it commits, the flags are written one deployment per short transaction
+(`assurance.legal.settle_reviews_owed`). Each flags that deployment's claims,
+refreshes its stored decision and deletes its owed row, so the claims and the decision
+always commit together. Between two deployments it holds nothing and waits 25 ms.
+SQLite's write lock is not queued, and without that wait a stop could be kept out for
+the whole run. The answer reports the claims flagged (`review.flagged`) and what is
+still owed (`review.owed`), which is 0 unless settling failed. What a process that died
+midway left owed is flagged by `manage.py settle_legal_reviews`. Run it on a schedule:
+it exits non-zero while anything is still owed. Measured over 200 deployments of three
+claims each, a supersession answered in 11 to 13 s.
+
+Either way, each affected current claim moves to `legal_review_pending` with the claim
+event the carry replays, naming who recorded the change. A claim a person ruled legally
+stale stays stale, and a revoked claim is left alone. Neither route ever sets a claim
+legally current or legally stale. No body field reaches the legal axis, and nothing
+here records a materiality decision.
+
+The flagged claims are a decision input, which is why a deployment's decision is
+refreshed in the transaction that flags it. A pending review caps nothing. But the
+carry can read a flagged version legally stale again when the only ruling on record
+says so (for example, a later ruling whose obligation has since been deleted), and that
+moves the decision.
+
+A stop made while a supersession settles waits at most for about one deployment's
+work. Before this design, a supersession over 200 deployments flagged and refreshed
+them all inside one transaction. Measured then, each write stop of the stop suite, made
+during one, took 2.4 to 4.9 s, against the suite's bound of 0.25 s. Measured now, the
+slowest took 0.20 s (0.11 s over 50 deployments).
+`tests/test_a_supersede_never_holds_back_a_stop.py` times the stops during one.
 
 Any signed-in role reads. Only an admin records or supersedes: an analyst or a
 viewer gets 403, even the deployment's owner. A deployment the caller cannot see is

@@ -449,11 +449,11 @@ def _supersede_a_legal_obligation():
 
 MOVES = {
     ("ClaimViewSet", "withdraw_latent_condition", "post"): _withdraw_a_condition_nobody_can_read,
-    # The legal-obligations routes (assurance.legal_api): a change flags the bound
-    # deployments' current claims for review, which the carry can read as a ruling of
-    # legally stale again; each refreshes the stored decision in its own transaction.
+    # Recording a legal obligation (assurance.legal_api) flags the one deployment it
+    # binds: its current claims go to review, which the carry can read as a ruling of
+    # legally stale again; the stored decision is refreshed in the same transaction.
+    # Its supersession is in MOVES_AFTER_COMMIT.
     ("LegalObligationsView", "post", "post"): _record_a_legal_obligation,
-    ("LegalObligationSupersedeView", "post", "post"): _supersede_a_legal_obligation,
     ("DeploymentViewSet", "recompute", "post"): _pause,
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
@@ -1029,7 +1029,17 @@ _BOUNDARY = (
     "which a stop of any other deployment waits on"
 )
 
+_SUPERSESSION = (
+    "a legal obligation binds every deployment its previous version bound, two hundred of them as easily as "
+    "one, and flagging each one's claims and refreshing each one's decision inside the supersession held the "
+    "write lock a stop waits on for all of them (seconds, measured). Its own transaction records the version, "
+    "its link and its bindings and owes each bound deployment its review, none of them a decision input; once "
+    "it commits, each deployment's claims are flagged and its decision refreshed in one short transaction of "
+    "its own (assurance.legal.settle_reviews_owed), so the claims and the decision move together"
+)
+
 MOVES_AFTER_COMMIT = {
+    ("LegalObligationSupersedeView", "post", "post"): (_SUPERSESSION, _supersede_a_legal_obligation),
     ("DeploymentViewSet", "data_boundary", "put"): (_BOUNDARY, _allow_training_a_condition_watches("put")),
     ("DeploymentViewSet", "data_boundary", "patch"): (_BOUNDARY, _allow_training_a_condition_watches("patch")),
     ("ProviderAssertionViewSet", "partial_update", "patch"): (_PROFILE, _change_a_posture_a_condition_watches),

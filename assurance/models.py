@@ -1288,6 +1288,38 @@ class LegalObligation(models.Model):
         return f"{self.jurisdiction} {self.source} v{self.source_version}"
 
 
+class LegalReviewOwed(models.Model):
+    """One deployment owed the review flag an obligation's move calls for, not yet
+    written (:func:`assurance.legal.owe_reviews`).
+
+    A supersession records the move and one of these per bound deployment in its own
+    short transaction, and the flags are written after it commits, one deployment per
+    transaction (:func:`assurance.legal.settle_reviews_owed`): the write lock a stop
+    waits on is never held for every bound deployment's claims and decision at once
+    (the SAFETY RULE; the lead's decision of 19 Oct). Settling a row flags that
+    deployment's claims, refreshes its decision and deletes the row in one
+    transaction, so a row still here is a review not flagged yet -- what a process
+    that died midway left, for ``manage.py settle_legal_reviews``. The decision does
+    not read it: the claims and the decision move together when it settles.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    obligation = models.ForeignKey(LegalObligation, on_delete=models.CASCADE, related_name="reviews_owed")
+    deployment = models.ForeignKey("Deployment", on_delete=models.CASCADE, related_name="legal_reviews_owed")
+    # The note the flag writes on each claim event: what moved and who recorded it.
+    note = models.TextField(blank=True)
+    owed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["pk"]
+        constraints = [
+            models.UniqueConstraint(fields=["obligation", "deployment"], name="uq_legal_review_owed"),
+        ]
+
+    def __str__(self) -> str:
+        return f"review owed: {self.obligation_id} on deployment {self.deployment_id}"
+
+
 class MaterialityDecision(models.Model):
     """A human's recorded judgment that an obligation does, or does not, make a
     claim legally stale.

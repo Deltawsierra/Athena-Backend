@@ -2094,6 +2094,7 @@ COMMANDS: dict[str, str] = {
     "raise_source_trust": "commands",
     "fetch_financial_source": "commands",
     "check_financial_assurance": "commands",
+    "settle_legal_reviews": "commands: flags the legal reviews a supersession still owes; prints counts",
 }
 
 

@@ -24,21 +24,29 @@ not the URLconf, not a stop (``tests/test_legal_obligation_routes.py``,
 - ``POST deployments/<uuid>/legal-obligations/<obligation uuid>/supersede/``: record
   the next version of that obligation, attributed to the signed-in admin, which
   supersedes it (201). The previous version is never edited: only its link to the
-  version that replaced it is written (:func:`assurance.legal.supersede_obligation`).
+  version that replaced it is written (:func:`assurance.legal.link_supersession`).
   The same request again returns the version it recorded (200); another version of
   one already superseded is 409 (``obligation_superseded``, naming its successor).
 
 What a change does to claims, and what it never does. Recording an obligation calls
-:func:`assurance.legal.flag_for_materiality_review` on it; superseding one calls
-:func:`assurance.legal.supersede_obligation`, which carries the previous version's
-bindings forward and flags every deployment the new version binds -- the one path a
-rule moving takes to the claims, writing the same events the carry in
-:mod:`assurance.legal` replays. Each affected current claim moves to review pending, in
-the same transaction as the record. Neither route ever moves a claim to legally
-current or legally stale: only a person's materiality decision with a written
-rationale does (the gate in :mod:`assurance.legal`), and no body field here reaches
-the legal axis -- a field the route does not read is refused. This module names no
-claim and no legal status at all (``tests/test_legal_obligation_routes.py``).
+:func:`assurance.legal.flag_for_materiality_review` on it, in the record's own
+transaction, with the one deployment it binds. A supersession binds every deployment
+the previous version bound, and nothing it does inside its own transaction grows with
+how many (the SAFETY RULE; the lead's decision of 19 Oct): it records the new version,
+links it and carries the bindings (:func:`assurance.legal.link_supersession`), and
+owes each bound deployment its review flag in one statement
+(:func:`assurance.legal.owe_reviews`). Once it commits, the flags are written one
+deployment per short transaction (:func:`assurance.legal.settle_reviews_owed`), each
+with that deployment's decision refreshed in it -- the same flag, narrowed to one
+deployment, writing the same events the carry in :mod:`assurance.legal` replays. A
+stop waits at most for one deployment's flag and refresh, never for the whole fan-out
+(``tests/test_a_supersede_never_holds_back_a_stop.py`` times them). What a process that
+died midway left owed, ``manage.py settle_legal_reviews`` settles. Neither route ever
+moves a claim to legally current or legally stale: only a person's materiality
+decision with a written rationale does (the gate in :mod:`assurance.legal`), and no
+body field here reaches the legal axis -- a field the route does not read is refused.
+This module names no claim and no legal status at all
+(``tests/test_legal_obligation_routes.py``).
 
 Access is the assurance API's: a signed-in account; a deployment the caller cannot
 see is 404 whether or not it exists (admins and analysts see every deployment, anyone
@@ -50,15 +58,16 @@ length; the parser never reads past it; a duplicated key, ``NaN`` or ``Infinity`
 ``regulation``, ``binding_guidance``, ``case_law`` or ``advisory``. Every answer,
 refusals included, carries ``Cache-Control: no-store``.
 
-The claims a change flags are a decision input, so each change also brings the stored
-decision of every deployment it flagged current, in the same transaction
+The claims a change flags are a decision input, so wherever a deployment's claims are
+flagged, its stored decision is brought current in that same transaction
 (:func:`assurance.views._refresh_stored_decision`, as every write of a decision input
-does): the claims and the decision commit together or neither does. A review merely
+does): the claims and the decision commit together or neither does, so no committed
+state pairs flagged claims with a decision computed before them. A review merely
 pending caps nothing, but the carry can read a flagged version stale again where the
 only ruling on record says so -- a later ruling's obligation since deleted -- and that
-moves the decision (``tests/test_every_write_route_keeps_the_decision_current.py``). A
-supersession refreshes each deployment the new version binds, one after another in its
-transaction.
+moves the decision (``tests/test_every_write_route_keeps_the_decision_current.py``:
+recording is in MOVES, a supersession in MOVES_AFTER_COMMIT, which writes no decision
+input until it commits).
 
 None of these routes is a stop, and none sits on a stop's path: each is classified in
 ``safety.stops.NOT_STOPS``. The account that recorded a version is kept as a name
@@ -69,6 +78,7 @@ This module does nothing at import but define its views.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date
 
@@ -84,8 +94,10 @@ from rest_framework.views import APIView
 from config.parsers import SafeJSONParser
 
 from . import legal
-from .models import Deployment, LegalObligation, MaterialityDecision
+from .models import Deployment, LegalObligation, LegalReviewOwed, MaterialityDecision
 from .views import _is_admin, _is_privileged, _refresh_stored_decision
+
+logger = logging.getLogger(__name__)
 
 #: The largest body an obligation is posted in. A version with its thresholds and
 #: exemptions is a few KiB; a body over this is refused (413) on its declared
@@ -339,10 +351,6 @@ def _review(flagged: dict) -> dict:
     }
 
 
-#: What an answer that recorded nothing sent for review.
-_NOTHING_FLAGGED = {"flagged": [], "flagged_count": 0, "judged": False}
-
-
 def _history(obligation: LegalObligation, deployment) -> dict:
     """The versions linked to ``obligation`` by supersession, oldest first: back
     through what each superseded, forward through what superseded each."""
@@ -558,64 +566,125 @@ class LegalObligationSupersedeView(_NoStoreView):
             if locked.superseded_by_id is not None:
                 successor = LegalObligation.objects.select_related("superseded_by").get(pk=locked.superseded_by_id)
                 if _states(successor, wanted):
-                    # The same request again: the version it recorded, recorded nothing new.
+                    # The same request again: the version it recorded, recorded nothing
+                    # new. A review its first answer left owed -- a process that died
+                    # before settling it -- is settled once this commits.
+                    settle = _SettleAfterCommit(successor.pk)
+                    transaction.on_commit(settle)
                     locked.superseded_by = successor
-                    return Response(
-                        {
-                            "deployment": str(deployment.uuid),
-                            "created": False,
-                            "previous": _served(locked, deployment),
-                            "obligation": _served(successor, deployment),
-                            "review": {**_NOTHING_FLAGGED, "bindings_carried_forward": []},
-                        },
-                        status=status.HTTP_200_OK,
+                    answer = {
+                        "deployment": str(deployment.uuid),
+                        "created": False,
+                        "previous": _served(locked, deployment),
+                        "obligation": _served(successor, deployment),
+                    }
+                    carried, created = [], False
+                else:
+                    return _conflict(
+                        "obligation_superseded",
+                        f"{locked} is already superseded by v{successor.source_version}: a version has one "
+                        "successor, so a change now supersedes the current version",
+                        current=str(successor.uuid),
                     )
-                return _conflict(
-                    "obligation_superseded",
-                    f"{locked} is already superseded by v{successor.source_version}: a version has one "
-                    "successor, so a change now supersedes the current version",
-                    current=str(successor.uuid),
+            else:
+                answer, carried, settle = self._record(request, deployment, locked, wanted, note)
+                if not isinstance(answer, dict):
+                    return answer  # refused: nothing recorded
+                created = True
+        # Committed. The reviews this owed were settled by the commit hook as it
+        # committed, one deployment per short transaction; what it could not settle
+        # stays owed, and says so.
+        answer["review"] = _owed_review(settle, carried)
+        return Response(answer, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    @staticmethod
+    def _record(request, deployment, locked, wanted, note):
+        """In the supersession's own transaction: the new version, its link and the
+        bindings it carries, and the review each bound deployment is owed -- a fixed
+        number of statements, however many deployments the rule binds. The flags are
+        written once it commits (:class:`_SettleAfterCommit`). Returns ``(answer,
+        carried, settle)``, or a refusal in place of the answer."""
+        if LegalObligation.objects.filter(
+            jurisdiction=locked.jurisdiction, source=locked.source, source_version=wanted["source_version"]
+        ).exists():
+            return _conflict(
+                "obligation_version_taken",
+                f"{locked.jurisdiction} {locked.source} v{wanted['source_version']} is already recorded: a new "
+                "version names a source_version not recorded before",
+            ), [], None
+        try:
+            with transaction.atomic():
+                replacement = LegalObligation.objects.create(
+                    jurisdiction=locked.jurisdiction,
+                    source=locked.source,
+                    recorded_by=request.user,
+                    recorded_by_username=request.user.get_username(),
+                    **wanted,
                 )
-            if LegalObligation.objects.filter(
-                jurisdiction=locked.jurisdiction, source=locked.source, source_version=wanted["source_version"]
-            ).exists():
-                return _conflict(
-                    "obligation_version_taken",
-                    f"{locked.jurisdiction} {locked.source} v{wanted['source_version']} is already recorded: a new "
-                    "version names a source_version not recorded before",
-                )
-            try:
-                with transaction.atomic():
-                    replacement = LegalObligation.objects.create(
-                        jurisdiction=locked.jurisdiction,
-                        source=locked.source,
-                        recorded_by=request.user,
-                        recorded_by_username=request.user.get_username(),
-                        **wanted,
-                    )
-            except IntegrityError:
-                return _conflict(
-                    "obligation_version_taken",
-                    "the version was recorded by another request meanwhile; read it and supersede the current one",
-                )
-            # Links the versions, carries the bindings forward and flags every bound
-            # deployment's current claims for review: what a rule moving is. It judges
-            # none of them.
-            flagged = legal.supersede_obligation(locked, replacement, note=_attribution(request.user, note))
-            # Every deployment the new version binds had its claims flagged: each stored
-            # decision is brought current in this transaction.
-            for bound in replacement.deployments.order_by("pk"):
-                _refresh_stored_decision(bound)
-        return Response(
-            {
-                "deployment": str(deployment.uuid),
-                "created": True,
-                "previous": _served(locked, deployment),
-                "obligation": _served(replacement, deployment),
-                "review": _review(flagged),
-            },
-            status=status.HTTP_201_CREATED,
+        except IntegrityError:
+            return _conflict(
+                "obligation_version_taken",
+                "the version was recorded by another request meanwhile; read it and supersede the current one",
+            ), [], None
+        # What a rule moving is: the versions linked, the bindings carried forward,
+        # and every bound deployment owed its review flag -- written once this
+        # commits, one deployment per transaction, judging none of them.
+        carried = legal.link_supersession(locked, replacement)
+        legal.owe_reviews(
+            replacement,
+            note=f"Supersedes {locked} (v{locked.source_version}). {_attribution(request.user, note)}",
         )
+        settle = _SettleAfterCommit(replacement.pk)
+        transaction.on_commit(settle)
+        answer = {
+            "deployment": str(deployment.uuid),
+            "created": True,
+            "previous": _served(locked, deployment),
+            "obligation": _served(replacement, deployment),
+        }
+        return answer, carried, settle
+
+
+class _SettleAfterCommit:
+    """The reviews a supersession owes, flagged once it commits: one deployment per
+    short transaction, each with its decision refreshed in it
+    (:func:`assurance.legal.settle_reviews_owed`). A class so a test can find it among
+    the commit hooks.
+
+    It runs after the commit, so it never raises: the supersession stands, and an
+    answer of 500 would have its client send it again. What it could not settle stays
+    owed -- the answer says how many -- and ``manage.py settle_legal_reviews`` settles
+    it."""
+
+    __slots__ = ("obligation_pk", "result")
+
+    def __init__(self, obligation_pk):
+        self.obligation_pk = obligation_pk
+        self.result = None
+
+    def __call__(self):
+        try:
+            self.result = legal.settle_reviews_owed(_refresh_stored_decision, obligation=self.obligation_pk)
+        except Exception:  # the supersession has committed; its reviews stay owed and are settled later
+            logger.exception(
+                "legal obligation %s: the review flags its supersession owes were not all written; "
+                "what is left stays owed for manage.py settle_legal_reviews",
+                self.obligation_pk,
+            )
+
+
+def _owed_review(settle: _SettleAfterCommit, carried) -> dict:
+    """What a supersession sent for review, as it stands when it answers: the claims
+    its settled reviews flagged, and the deployments still owed one -- none, once its
+    commit hook has run, unless that failed."""
+    done = settle.result
+    return {
+        "flagged": [] if done is None else done["flagged"],
+        "flagged_count": 0 if done is None else done["flagged_count"],
+        "judged": False,
+        "bindings_carried_forward": [str(d.uuid) for d in carried],
+        "owed": LegalReviewOwed.objects.filter(obligation_id=settle.obligation_pk).count(),
+    }
 
 
 urlpatterns = [

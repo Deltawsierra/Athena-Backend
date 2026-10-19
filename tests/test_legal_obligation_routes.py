@@ -35,7 +35,15 @@ from django.urls import resolve
 from rest_framework.test import APIClient
 
 from assurance.legal import record_materiality_decision
-from assurance.models import AssuranceClaim, ClaimEvent, Deployment, LegalObligation, LegalStatus, MaterialityDecision
+from assurance.models import (
+    AssuranceClaim,
+    ClaimEvent,
+    Deployment,
+    LegalObligation,
+    LegalReviewOwed,
+    LegalStatus,
+    MaterialityDecision,
+)
 from safety import stops
 
 pytestmark = pytest.mark.django_db
@@ -236,13 +244,16 @@ def test_recording_an_obligation_flags_the_deployments_current_claims_for_review
     assert not MaterialityDecision.objects.exists()
 
 
-def test_superseding_flags_every_bound_deployment_and_carries_its_bindings(people, deployment, elsewhere):
+def test_superseding_flags_every_bound_deployment_and_carries_its_bindings(
+    people, deployment, elsewhere, django_capture_on_commit_callbacks
+):
     v1 = _recorded(people, deployment, thresholds={"data_subjects": 5000}, exemptions=["research"])
     v1.deployments.add(elsewhere)
     mine = _claim(deployment, "fp-1", legal_status=LegalStatus.CURRENT)
     theirs = _claim(elsewhere, "fp-2", legal_status=LegalStatus.CURRENT)
 
-    response = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
+    with django_capture_on_commit_callbacks(execute=True):
+        response = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
 
     assert response.status_code == 201, response.content
     served = response.json()
@@ -252,7 +263,8 @@ def test_superseding_flags_every_bound_deployment_and_carries_its_bindings(peopl
     assert set(v2.deployments.all()) == {deployment, elsewhere}
     assert sorted(served["review"]["bindings_carried_forward"]) == sorted([str(deployment.uuid), str(elsewhere.uuid)])
     assert _legal(mine) == _legal(theirs) == LegalStatus.REVIEW_PENDING
-    assert served["review"]["judged"] is False and served["review"]["flagged_count"] == 2
+    assert served["review"]["judged"] is False
+    assert not LegalReviewOwed.objects.exists()
     # A new version of the same obligation: what the body left out is the previous one's.
     assert (v2.jurisdiction, v2.source, v2.authority_tier, v2.thresholds, v2.exemptions) == (
         "EU", "GDPR", "regulation", {"data_subjects": 5000}, ["research"],
@@ -265,7 +277,7 @@ def test_superseding_flags_every_bound_deployment_and_carries_its_bindings(peopl
     assert "Supersedes EU GDPR v2016/679" in event.note and "Recorded by admin" in event.note
 
 
-def test_no_change_ever_makes_a_claim_legally_current_or_stale(people, deployment):
+def test_no_change_ever_makes_a_claim_legally_current_or_stale(people, deployment, django_capture_on_commit_callbacks):
     """Only a person's materiality decision with a written rationale moves the legal
     axis to current or stale. A change sends a person's ruling back to the queue and
     never re-makes it; nothing here records a decision."""
@@ -276,7 +288,8 @@ def test_no_change_ever_makes_a_claim_legally_current_or_stale(people, deploymen
     )
     assert _legal(claim) == LegalStatus.CURRENT
 
-    response = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
+    with django_capture_on_commit_callbacks(execute=True):
+        response = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
 
     assert response.status_code == 201, response.content
     assert _legal(claim) == LegalStatus.REVIEW_PENDING
@@ -311,8 +324,9 @@ def test_no_body_field_reaches_the_legal_axis(people, deployment):
 
 def test_the_route_module_reaches_the_claims_only_through_assurance_legal():
     """The routes never write the legal axis or a decision themselves: the only calls
-    into :mod:`assurance.legal` are the trigger and the supersession, and the module
-    names no claim, no claim event and no legal status at all."""
+    into :mod:`assurance.legal` are the trigger, the supersession's link, and the
+    reviews it owes and settles through that same trigger; and the module names no
+    claim, no claim event and no legal status at all."""
     source = (REPO / "assurance" / "legal_api.py").read_text(encoding="utf-8")
     for word in ("legal_status", "LegalStatus", "legally_current", "legally_stale", "record_materiality_decision",
                  "AssuranceClaim", "ClaimEvent"):
@@ -322,13 +336,154 @@ def test_the_route_module_reaches_the_claims_only_through_assurance_legal():
         node.attr for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "legal"
     }
-    assert into_legal == {"flag_for_materiality_review", "supersede_obligation"}
+    assert into_legal == {"flag_for_materiality_review", "link_supersession", "owe_reviews", "settle_reviews_owed"}
     on_decisions = {
         node.attr for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute)
         and isinstance(node.value.value, ast.Name) and node.value.value.id == "MaterialityDecision"
     }
     assert on_decisions == {"filter"}
+
+
+# ---------------------------------------------------------------------------
+# A supersession owes its reviews, and flags them once it commits
+# ---------------------------------------------------------------------------
+
+
+def _fan(people, deployment, elsewhere):
+    """v1 binding both deployments, with a current claim on each."""
+    v1 = _recorded(people, deployment)
+    v1.deployments.add(elsewhere)
+    return v1, _claim(deployment, "fp-1"), _claim(elsewhere, "fp-2")
+
+
+def test_a_supersession_flags_nothing_until_it_commits_then_one_deployment_at_a_time(
+    people, deployment, elsewhere, django_capture_on_commit_callbacks
+):
+    """Inside its own transaction a supersession records the version and owes each
+    bound deployment its review, and moves no claim; once it commits, each
+    deployment's claims are flagged, its decision refreshed and its review settled."""
+    from assurance import legal_api
+
+    v1, mine, theirs = _fan(people, deployment, elsewhere)
+    assert _legal(mine) == _legal(theirs) == LegalStatus.NOT_ASSESSED
+
+    with django_capture_on_commit_callbacks(execute=True) as hooks:
+        response = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
+        assert response.status_code == 201, response.content
+        # Answered, not yet committed: owed, and no claim moved.
+        v2 = LegalObligation.objects.get(uuid=response.json()["obligation"]["uuid"])
+        assert set(LegalReviewOwed.objects.values_list("deployment_id", flat=True)) == {deployment.pk, elsewhere.pk}
+        assert response.json()["review"]["owed"] == 2
+        assert _legal(mine) == _legal(theirs) == LegalStatus.NOT_ASSESSED
+    settles = [hook for hook in hooks if isinstance(hook, legal_api._SettleAfterCommit)]
+    assert len(settles) == 1 and settles[0].obligation_pk == v2.pk
+    assert settles[0].result["settled"] == 2 and settles[0].result["owed_left"] == 0
+    assert sorted(settles[0].result["flagged"]) == sorted([str(mine.uuid), str(theirs.uuid)])
+    assert not LegalReviewOwed.objects.exists()
+    assert _legal(mine) == _legal(theirs) == LegalStatus.REVIEW_PENDING
+    event = _last_event(theirs)
+    assert event.note.startswith("Legal axis legally_not_assessed -> legal_review_pending: "), event.note
+    assert "Supersedes EU GDPR v2016/679" in event.note and "Recorded by admin" in event.note
+
+
+def test_what_a_failed_settle_leaves_owed_the_command_settles(
+    people, deployment, elsewhere, django_capture_on_commit_callbacks, monkeypatch
+):
+    """The supersession stands whatever its commit hook meets; what the hook could not
+    flag stays owed, and ``manage.py settle_legal_reviews`` flags it -- the settled one
+    never twice."""
+    from django.core.management import CommandError, call_command
+
+    from assurance import legal
+
+    v1, mine, theirs = _fan(people, deployment, elsewhere)
+    real = legal.flag_for_materiality_review
+    calls = []
+
+    def fails_after_the_first(*args, **kwargs):
+        calls.append(kwargs.get("deployments"))
+        if len(calls) > 1:
+            raise RuntimeError("the database went away")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(legal, "flag_for_materiality_review", fails_after_the_first)
+    with django_capture_on_commit_callbacks(execute=True):
+        response = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
+    assert response.status_code == 201, response.content
+    assert LegalReviewOwed.objects.count() == 1
+    settled, owed = (mine, theirs) if _legal(mine) == LegalStatus.REVIEW_PENDING else (theirs, mine)
+    assert _legal(settled) == LegalStatus.REVIEW_PENDING
+    events = ClaimEvent.objects.filter(claim=settled).count()
+
+    with pytest.raises(CommandError, match="1 legal review"):
+        call_command("settle_legal_reviews")  # still failing: still owed, and it says so
+    monkeypatch.setattr(legal, "flag_for_materiality_review", real)
+    call_command("settle_legal_reviews")
+    assert not LegalReviewOwed.objects.exists()
+    assert _legal(owed) == LegalStatus.REVIEW_PENDING
+    assert ClaimEvent.objects.filter(claim=settled).count() == events  # flagged once
+
+
+def test_settling_refreshes_each_decision_in_the_transaction_that_flags_its_claims():
+    """No committed state pairs flagged claims with a decision computed before them: the
+    stored decision moves with the flag, not later. Here no commit hook runs at all, so
+    only the refresh inside the settle's own transaction can move it -- on the claim
+    whose flag lets a stale ruling on record stand again."""
+    from assurance import legal
+    from assurance.views import _refresh_stored_decision
+    from tests.test_every_write_route_keeps_the_decision_current import _a_ruling_only_the_carry_holds
+
+    dep = _a_ruling_only_the_carry_holds()
+    assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.READY
+    obligation = LegalObligation.objects.create(
+        jurisdiction="EU", authority_tier="regulation", source="GDPR", source_version="2016/679",
+        operative_date=date(2018, 5, 25),
+    )
+    obligation.deployments.add(dep)
+    legal.owe_reviews(obligation, note="owed")
+    assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.READY
+
+    done = legal.settle_reviews_owed(_refresh_stored_decision, obligation=obligation)
+
+    assert done["settled"] == 1 and done["owed_left"] == 0
+    assert Deployment.objects.get(pk=dep.pk).decision == Deployment.Decision.NEEDS_MORE_EVIDENCE
+
+
+def test_a_deployment_unbound_before_its_review_settles_is_not_flagged(people, deployment, elsewhere):
+    from assurance import legal
+    from assurance.views import _refresh_stored_decision
+
+    v1, mine, theirs = _fan(people, deployment, elsewhere)
+    legal.owe_reviews(v1, note="owed by hand")
+    v1.deployments.remove(elsewhere)
+    done = legal.settle_reviews_owed(_refresh_stored_decision, obligation=v1)
+    assert done["settled"] == 2 and done["owed_left"] == 0 and done["flagged"] == [str(mine.uuid)]
+    assert _legal(mine) == LegalStatus.REVIEW_PENDING
+    assert _legal(theirs) == LegalStatus.NOT_ASSESSED
+
+
+def test_the_same_supersession_again_settles_what_its_first_answer_left_owed(
+    people, deployment, elsewhere, django_capture_on_commit_callbacks, monkeypatch
+):
+    from assurance import legal
+
+    v1, mine, theirs = _fan(people, deployment, elsewhere)
+    real = legal.settle_reviews_owed
+
+    def down(*args, **kwargs):
+        raise RuntimeError("the process died before settling")
+
+    monkeypatch.setattr(legal, "settle_reviews_owed", down)
+    with django_capture_on_commit_callbacks(execute=True):
+        first = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
+    assert first.status_code == 201 and LegalReviewOwed.objects.count() == 2
+    monkeypatch.setattr(legal, "settle_reviews_owed", real)
+    with django_capture_on_commit_callbacks(execute=True):
+        again = _client(people["admin"]).post(_supersede(deployment, v1), CHANGE, format="json")
+    assert again.status_code == 200 and again.json()["created"] is False
+    assert not LegalReviewOwed.objects.exists()
+    assert _legal(mine) == _legal(theirs) == LegalStatus.REVIEW_PENDING
 
 
 # ---------------------------------------------------------------------------
@@ -453,12 +608,15 @@ def _as_stored(obligation):
     return LegalObligation.objects.filter(pk=obligation.pk).values(*_FIELDS).get()
 
 
-def test_a_change_supersedes_and_never_rewrites(people, deployment):
+def test_a_change_supersedes_and_never_rewrites(people, deployment, django_capture_on_commit_callbacks):
     admin = _client(people["admin"])
     v1 = _recorded(people, deployment, thresholds={"data_subjects": 5000}, exemptions=["research"])
     before = _as_stored(v1)
 
-    first = admin.post(_supersede(deployment, v1), {**CHANGE, "thresholds": {"data_subjects": 10000}}, format="json")
+    with django_capture_on_commit_callbacks(execute=True):
+        first = admin.post(
+            _supersede(deployment, v1), {**CHANGE, "thresholds": {"data_subjects": 10000}}, format="json"
+        )
 
     assert first.status_code == 201, first.content
     v2 = LegalObligation.objects.get(uuid=first.json()["obligation"]["uuid"])
@@ -474,7 +632,10 @@ def test_a_change_supersedes_and_never_rewrites(people, deployment):
     # review: a ruling made since stands.
     claim = _claim(deployment)
     record_materiality_decision(claim, v2, decided_by=people["admin"], material=False, rationale="unchanged for us")
-    again = admin.post(_supersede(deployment, v1), {**CHANGE, "thresholds": {"data_subjects": 10000}}, format="json")
+    with django_capture_on_commit_callbacks(execute=True):
+        again = admin.post(
+            _supersede(deployment, v1), {**CHANGE, "thresholds": {"data_subjects": 10000}}, format="json"
+        )
     assert again.status_code == 200, again.content
     assert again.json()["created"] is False and again.json()["obligation"]["uuid"] == str(v2.uuid)
     assert again.json()["review"]["flagged_count"] == 0

@@ -606,9 +606,9 @@ NOT_STOPS = {
     },
     "deployment-legal-obligation": _get(),
     "deployment-legal-obligation-supersede": {
-        "POST": "records the next version of a legal obligation, which supersedes it, and flags every bound "
-        "deployment's current claims for a materiality review, judging none: legal records, append-only; it starts "
-        "and stops nothing",
+        "POST": "records the next version of a legal obligation, which supersedes it, and once it commits flags "
+        "every bound deployment's current claims for a materiality review, one deployment per short transaction, "
+        "judging none: legal records, append-only; it starts and stops nothing",
     },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
