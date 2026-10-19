@@ -375,8 +375,85 @@ def _withdraw_a_condition_nobody_can_read():
     )
 
 
+def _a_ruling_only_the_carry_holds():
+    """A claim whose earlier version a person ruled legally stale, and whose current
+    version reads legally current with no ruling on record: the obligation that ruling
+    was made against has since been deleted, and its decisions with it. The decision
+    reads the current row, and nothing caps it. Once an obligation change flags that
+    version for review, the carry replays the rulings on record (assurance.legal) --
+    the stale one stands -- and the decision is held at needs_more_evidence."""
+    from datetime import date
+
+    from assurance.legal import record_materiality_decision
+    from assurance.models import LegalObligation, MaterialityDecision
+
+    dep = _scanned()
+    person = _admin()
+    start = timezone.now() - timedelta(days=1)
+    minute = timedelta(minutes=1)
+    versions = [
+        AssuranceClaim.objects.create(
+            deployment=dep, claim_type=AssuranceClaim.ClaimType.DATA_BOUNDARY, statement="s", fingerprint="fp-legal",
+            system_fingerprint=f"s{i}", policy_version="p", environment=dep.environment,
+            status=AssuranceClaim.ClaimStatus.VERIFIED, valid_from=start + i * minute,
+            valid_to=start + minute if i == 0 else None, effective_from=start + i * minute,
+        )
+        for i in (0, 1)
+    ]
+    AssuranceClaim.objects.filter(pk=versions[0].pk).update(superseded_by=versions[1])
+    earlier, current = (AssuranceClaim.objects.get(pk=v.pk) for v in versions)
+    ruled = LegalObligation.objects.create(
+        jurisdiction="EU", authority_tier="regulation", source="AI Act", source_version="2024/1689",
+        operative_date=date(2026, 8, 2),
+    )
+    stale = record_materiality_decision(earlier, ruled, decided_by=person, material=True, rationale="the rules reach it")
+    # Ruled while that version was current, before the re-derive closed it.
+    MaterialityDecision.objects.filter(pk=stale.pk).update(decided_at=start + minute / 2)
+    deleted = LegalObligation.objects.create(
+        jurisdiction="EU", authority_tier="advisory", source="Withdrawn guidance", source_version="1",
+        operative_date=date(2026, 1, 1),
+    )
+    record_materiality_decision(current, deleted, decided_by=person, material=False, rationale="not material")
+    deleted.delete()
+    recompute_decision(dep)
+    return dep
+
+
+def _record_a_legal_obligation():
+    dep = _a_ruling_only_the_carry_holds()
+    return dep, lambda c: c.post(
+        _base(dep) + "legal-obligations/",
+        {"jurisdiction": "EU", "authority_tier": "regulation", "source": "GDPR", "source_version": "2016/679",
+         "operative_date": "2018-05-25"},
+        format="json",
+    )
+
+
+def _supersede_a_legal_obligation():
+    from datetime import date
+
+    from assurance.models import LegalObligation
+
+    dep = _a_ruling_only_the_carry_holds()
+    bound = LegalObligation.objects.create(
+        jurisdiction="EU", authority_tier="regulation", source="GDPR", source_version="2016/679",
+        operative_date=date(2018, 5, 25),
+    )
+    bound.deployments.add(dep)
+    return dep, lambda c: c.post(
+        _base(dep) + f"legal-obligations/{bound.uuid}/supersede/",
+        {"source_version": "2016/679 as amended", "operative_date": "2027-01-01"},
+        format="json",
+    )
+
+
 MOVES = {
     ("ClaimViewSet", "withdraw_latent_condition", "post"): _withdraw_a_condition_nobody_can_read,
+    # Recording a legal obligation (assurance.legal_api) flags the one deployment it
+    # binds: its current claims go to review, which the carry can read as a ruling of
+    # legally stale again; the stored decision is refreshed in the same transaction.
+    # Its supersession is in MOVES_AFTER_COMMIT.
+    ("LegalObligationsView", "post", "post"): _record_a_legal_obligation,
     ("DeploymentViewSet", "recompute", "post"): _pause,
     ("DeploymentViewSet", "approved_workflows", "put"): _approve_a_workflow_nobody_ran,
     ("DeploymentViewSet", "chain_outcomes", "post"): _type_in_a_violation,
@@ -1041,7 +1118,17 @@ _BOUNDARY = (
     "which a stop of any other deployment waits on"
 )
 
+_SUPERSESSION = (
+    "a legal obligation binds every deployment its previous version bound, two hundred of them as easily as "
+    "one, and flagging each one's claims and refreshing each one's decision inside the supersession held the "
+    "write lock a stop waits on for all of them (seconds, measured). Its own transaction records the version, "
+    "its link and its bindings and owes each bound deployment its review, none of them a decision input; once "
+    "it commits, each deployment's claims are flagged and its decision refreshed in one short transaction of "
+    "its own (assurance.legal.settle_reviews_owed), so the claims and the decision move together"
+)
+
 MOVES_AFTER_COMMIT = {
+    ("LegalObligationSupersedeView", "post", "post"): (_SUPERSESSION, _supersede_a_legal_obligation),
     ("DeploymentViewSet", "data_boundary", "put"): (_BOUNDARY, _allow_training_a_condition_watches("put")),
     ("DeploymentViewSet", "data_boundary", "patch"): (_BOUNDARY, _allow_training_a_condition_watches("patch")),
     ("ProviderAssertionViewSet", "partial_update", "patch"): (_PROFILE, _change_a_posture_a_condition_watches),

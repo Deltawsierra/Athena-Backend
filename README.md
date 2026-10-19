@@ -271,6 +271,114 @@ assurance policy pins the table's order of the classes, so a change to that orde
 moves the policy pin. The order is the one this service kept before, so the pin
 did not move.
 
+## Legal staleness and the legal-obligations routes
+
+A claim carries two axes: its technical `status`, and its `legal_status` against
+the obligations its deployment is bound by (`assurance.legal`, Phase 2 item 6).
+When an obligation moves, every current claim on every deployment it binds goes to
+`legal_review_pending`: the trigger flags and never judges. Only a person's
+materiality decision, with a written rationale, moves a claim to `legally_current`
+or `legally_stale`, and only a ruling of legally stale caps the decision (at
+`needs_more_evidence`); a review merely pending caps nothing.
+
+The owner's freeze exception 22 (14 Oct) adds the routes an obligation is recorded
+through. Before them a rule moving reached the claims only from code. They live in
+their own module (`assurance/legal_api.py`), which `assurance/urls.py` imports
+guarded, so a fault in it leaves these routes unserved and every stop served:
+
+- `GET /api/assurance/deployments/<uuid>/legal-obligations/`: the obligations the
+  deployment is bound by, newest rule first. At most 200 are listed, and the answer
+  says when there are more. Each says who recorded it (`recorded_by`, `null` for one
+  recorded before these routes) and whether a later version supersedes it (`current`,
+  `superseded_by`).
+- `POST` on the same route records an obligation binding the deployment, attributed
+  to the signed-in admin (201). The body is `jurisdiction`, `source`,
+  `source_version`, `authority_tier`, `operative_date` (`YYYY-MM-DD`, when the rule
+  bites), an optional `thresholds` object, an optional `exemptions` list and an
+  optional `note`. Any other field is refused. `authority_tier` is the source type:
+  `statute`, `regulation`, `binding_guidance`, `case_law` or `advisory`. Two
+  refusals are 409. A version already recorded is `obligation_version_taken`. A
+  second record of an instrument the deployment is already bound by, at a current
+  version, is `obligation_recorded_here`, and the answer names that version's
+  supersede route.
+- `GET /api/assurance/deployments/<uuid>/legal-obligations/<obligation uuid>/`: one
+  obligation the deployment is bound by. It comes with its versions, oldest first,
+  linked by supersession and each attributed, and the materiality decisions people
+  recorded against it on this deployment's claims.
+- `POST .../legal-obligations/<obligation uuid>/supersede/`: records the next
+  version, attributed to the signed-in admin (201). The body is `source_version`,
+  `operative_date`, and optionally `authority_tier`, `thresholds`, `exemptions` and
+  `note`; what it leaves out is the previous version's. The jurisdiction and source
+  stay the same: a different instrument is a new obligation. The previous version is
+  never edited. Only its link to its successor is written. The same request again
+  returns the version it recorded (200) and flags nothing new. It does settle any
+  review its first answer left owed. Another change to a version already superseded
+  is 409 (`obligation_superseded`, naming the current version). A version is never
+  edited or deleted over the API, so `PUT`, `PATCH` and `DELETE` are 405.
+
+Recording an obligation binds one deployment. Its current claims are flagged for
+review (`assurance.legal.flag_for_materiality_review`), and its stored decision is
+refreshed, both in the record's own transaction.
+
+A supersession reaches every deployment the previous version bound, not only the one
+in the path: two hundred deployments as easily as one. So nothing in its own
+transaction grows with how many there are. That transaction does three things, each
+in a fixed number of statements:
+
+- records the new version;
+- links it and carries the bindings forward (`assurance.legal.link_supersession`);
+- owes each bound deployment its review flag (`LegalReviewOwed`, migration
+  `assurance.0079_legal_review_owed`).
+
+Once it commits, the flags are written one deployment per short transaction
+(`assurance.legal.settle_reviews_owed`). Each flags that deployment's claims,
+refreshes its stored decision and deletes its owed row, so the claims and the decision
+always commit together. Between two deployments it holds nothing and waits 25 ms.
+SQLite's write lock is not queued, and without that wait a stop could be kept out for
+the whole run. The answer reports the claims flagged (`review.flagged`) and what is
+still owed (`review.owed`), which is 0 unless settling failed. What a process that died
+midway left owed is flagged by `manage.py settle_legal_reviews`. Run it on a schedule:
+it exits non-zero while anything is still owed. Measured over 200 deployments of three
+claims each, a supersession answered in 11 to 13 s.
+
+Either way, each affected current claim moves to `legal_review_pending` with the claim
+event the carry replays, naming who recorded the change. A claim a person ruled legally
+stale stays stale, and a revoked claim is left alone. Neither route ever sets a claim
+legally current or legally stale. No body field reaches the legal axis, and nothing
+here records a materiality decision.
+
+The flagged claims are a decision input, which is why a deployment's decision is
+refreshed in the transaction that flags it. A pending review caps nothing. But the
+carry can read a flagged version legally stale again when the only ruling on record
+says so (for example, a later ruling whose obligation has since been deleted), and that
+moves the decision.
+
+A stop made while a supersession settles waits at most for about one deployment's
+work. Before this design, a supersession over 200 deployments flagged and refreshed
+them all inside one transaction. Measured then, each write stop of the stop suite, made
+during one, took 2.4 to 4.9 s, against the suite's bound of 0.25 s. Measured now, the
+slowest took 0.20 s (0.11 s over 50 deployments).
+`tests/test_a_supersede_never_holds_back_a_stop.py` times the stops during one.
+
+Any signed-in role reads. Only an admin records or supersedes: an analyst or a
+viewer gets 403, even the deployment's owner. A deployment the caller cannot see is
+404 whether or not it exists. So is an obligation the deployment is not bound by. A
+body is strict JSON of at most 64 KiB:
+
+- over that is 413, on the declared length, and the parser never reads past it;
+- a duplicated key, `NaN` or `Infinity` is 400;
+- a form is 415.
+
+Every answer, refusals included, is `Cache-Control: no-store`. Each version keeps
+the recorder's name beside a nullable link (migration `assurance.0078_legal_obligation_recorded_by`), so removing
+the operator who recorded one (a stop) is never held back by it.
+
+None of the three routes is a stop. Each is in `safety.stops.NOT_STOPS` with its
+reason, and the URLconf-walking test (`tests/test_no_control_holds_back_a_stop.py`)
+classifies them. Not covered: binding a version already recorded to a second
+deployment (it is 409 here), and changing an obligation's own `legal_review_status`.
+A new version starts `unreviewed`. Tests: `tests/test_legal_obligation_routes.py`.
+
 ## Retest-gated closure
 
 A finding with `retest_required` set owes a retest before it can be called fixed.

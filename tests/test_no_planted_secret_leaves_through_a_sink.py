@@ -304,7 +304,8 @@ PATHS: dict[str, str] = {
     "it (a scan launched and stopped; a Stop refused by the proxy's page quoting the request back, owed, "
     "and delivered by manage.py deliver_owed_stops), every other call not",
     "route_raises": "a route that raises with a message, and a route that does not exist",
-    "records": "claims derived, a provider and its assertion written, a retest opened",
+    "records": "claims derived, a provider and its assertion written, a legal obligation recorded and superseded, "
+    "a retest opened",
     "feeds": "manage.py fetch_financial_source reads FRED with its key in the query, and is refused by a BLS that "
     "quotes the request back, its key in the body; one with no key set; the deployment's data health read",
     "read_everything": "every route that reads, over every object the paths made",
@@ -1279,6 +1280,23 @@ class World:
                       "notes": f"per the DPA {CANARY['tenant.evidence']}"},
                 format="json",
             ).status_code
+        # The legal-obligations routes (freeze exception 22): an obligation recorded
+        # binding the deployment, then its next version, both through the API; each
+        # answer is searched, and read_everything reads the list and each version.
+        legal = f"/api/assurance/deployments/{self.deployment.uuid}/legal-obligations/"
+        recorded = self.call(
+            docs, "api.answers", admin, "post", legal, "deployment-legal-obligations",
+            data={"jurisdiction": "EU", "authority_tier": "regulation", "source": "GDPR",
+                  "source_version": "2016/679", "operative_date": "2018-05-25"},
+            format="json",
+        )
+        signals["legal_obligation"] = recorded.status_code
+        if recorded.status_code == 201:
+            signals["legal_supersede"] = self.call(
+                docs, "api.answers", admin, "post", f"{legal}{recorded.json()['obligation']['uuid']}/supersede/",
+                "deployment-legal-obligation-supersede",
+                data={"source_version": "2016/679 as amended", "operative_date": "2027-01-01"}, format="json",
+            ).status_code
         claim = AssuranceClaim.objects.filter(deployment=self.deployment).first()
         if claim is not None:
             now = timezone.now()
@@ -1806,6 +1824,12 @@ ROUTES.update(
         "deployment-economics-scenario-freshness": _READ,
         "deployment-economics-assurance": _READ,
         "deployment-economics-scenario-refresh": _READ,
+        # The legal-obligations routes (freeze exception 22): a deployment's obligations
+        # listed and recorded, one read with its versions and the decisions on it, and
+        # its next version recorded. The records path records and supersedes one.
+        "deployment-legal-obligations": _READ,
+        "deployment-legal-obligation": _READ,
+        "deployment-legal-obligation-supersede": _READ,
         # The review and override routes a signed receipt needs (spec, section 35): a
         # scenario version's reviews and its overrides read; an approval and a
         # revocation answer the override they moved, as the overrides route reads it.
@@ -1883,6 +1907,12 @@ def _readable_urls(world):
 
                 keys = sorted(set(CustomerParameterSet.objects.values_list("set_key", flat=True))) or ["canary-set"]
                 options = [{**o, "set_key": key} for o in options for key in keys[:2]]
+            if name == "deployment-legal-obligation":
+                options = [
+                    {**o, "obligation": str(obligation.uuid)}
+                    for o in options
+                    for obligation in am.LegalObligation.objects.filter(deployments__uuid=o["uuid"]).order_by("pk")[:2]
+                ]
             if name == "deployment-assurance-pack":
                 from assurance.packs import _PACKS_BY_KEY
 
@@ -2091,6 +2121,7 @@ COMMANDS: dict[str, str] = {
     "raise_source_trust": "commands",
     "fetch_financial_source": "commands",
     "check_financial_assurance": "commands",
+    "settle_legal_reviews": "commands: flags the legal reviews a supersession still owes; prints counts",
     # Review round 1 of #169 (spec, section 35.9): binds rows recorded before the row
     # key; prints counts only.
     "bind_economics_rows": "commands",
@@ -2234,6 +2265,7 @@ def test_every_path_ran(observed):
     assert s["proxy"]["others_through_proxy"] == [], "a call off the engine's lane went through the environment's proxy"
     assert s["route_raises"]["raised"] == 500 and s["route_raises"]["missing"] == 404, s["route_raises"]
     assert s["records"]["claims"] > 0 and s["records"]["provider"] == 201, s["records"]
+    assert (s["records"]["legal_obligation"], s["records"]["legal_supersede"]) == (201, 201), s["records"]
     assert (
         s["records"]["scenario_build_refused"],
         s["records"]["scenario_build"],

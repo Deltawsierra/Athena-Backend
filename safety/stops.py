@@ -647,6 +647,23 @@ NOT_STOPS = {
         "POST": "records an authored version of a deployment's correlation group, or returns the one recorded the "
         "same: economics records, append-only; it starts and stops nothing",
     },
+    # A deployment's legal obligations (assurance.legal_api; the owner's freeze exception
+    # 22, 14 Oct): read by any role, recorded and superseded by an admin. A change flags
+    # the bound deployments' current claims for a materiality review through
+    # assurance.legal and judges none; a review merely pending caps no decision. Nothing
+    # a stop reads, and a recorder is a nullable link, so removing an operator is never
+    # held back by one.
+    "deployment-legal-obligations": {
+        "GET": _READ,
+        "POST": "records a legal obligation binding the deployment and flags its current claims for a materiality "
+        "review, judging none: legal records, append-only; it starts and stops nothing",
+    },
+    "deployment-legal-obligation": _get(),
+    "deployment-legal-obligation-supersede": {
+        "POST": "records the next version of a legal obligation, which supersedes it, and once it commits flags "
+        "every bound deployment's current claims for a materiality review, one deployment per short transaction, "
+        "judging none: legal records, append-only; it starts and stops nothing",
+    },
     "deployment-ai-bom": _get(),
     "deployment-declared-architecture": {"GET": _READ, "PUT": _CONFIG},
     "deployment-bom-drift": _get(),

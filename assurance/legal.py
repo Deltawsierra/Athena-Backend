@@ -20,7 +20,12 @@ something changed; it has not established that the change matters here, and thos
 are different facts. :func:`supersede_obligation` is what a rule moving *is*, and
 it is the trigger's call site: it links the versions, carries the previous
 version's bindings forward so a replacement never silently binds nothing, and
-flags. A trigger with no caller would be decoration.
+flags. A trigger with no caller would be decoration. The legal-obligations route
+(:mod:`assurance.legal_api`) makes the same move in two steps, so a rule binding many
+deployments never holds the write lock a stop waits on for all of them: it records
+the link and the bindings (:func:`link_supersession`) with each bound deployment owed
+its review (:func:`owe_reviews`), and once that commits flags them one deployment
+per short transaction (:func:`settle_reviews_owed`).
 
 **A gate that requires a person.** Only
 :func:`record_materiality_decision` may set ``CURRENT`` or ``STALE``, and it
@@ -51,6 +56,7 @@ would be making exactly the call the materiality gate exists to keep with a huma
 from __future__ import annotations
 
 import re
+import time
 
 from django.db import transaction
 
@@ -88,7 +94,9 @@ def obligations_for(deployment) -> list[LegalObligation]:
 
 
 @transaction.atomic
-def flag_for_materiality_review(obligation: LegalObligation, *, note: str = "") -> dict:
+def flag_for_materiality_review(
+    obligation: LegalObligation, *, note: str = "", deployments=None
+) -> dict:
     """An obligation moved: flag every current claim on every bound deployment for
     review. Returns what was flagged.
 
@@ -102,15 +110,25 @@ def flag_for_materiality_review(obligation: LegalObligation, *, note: str = "") 
     obligation moved, and re-flagging it would lose the decision that put it
     there. Claims already ``REVIEW_PENDING`` are left alone for the same reason —
     they are already in the queue.
+
+    ``deployments`` narrows the flag to those of the obligation's bound deployments:
+    :func:`settle_reviews_owed` flags one deployment per short transaction, so a move
+    over many deployments never holds the write lock for all of them at once. ``None``,
+    the default, flags every bound deployment. A deployment the obligation does not
+    bind is never flagged.
     """
     pending = _legal("REVIEW_PENDING")
     stale = _legal("STALE")
+
+    bound = obligation.deployments.all()
+    if deployments is not None:
+        bound = bound.filter(pk__in=[deployment.pk for deployment in deployments])
 
     flagged: list[str] = []
     with obs.span(
         obs.PLAN, component="flag_for_materiality_review", subject=str(obligation.pk)
     ):
-        for deployment in obligation.deployments.all():
+        for deployment in bound:
             claims = (
                 AssuranceClaim.objects.filter(deployment=deployment)
                 .current()
@@ -145,6 +163,31 @@ def flag_for_materiality_review(obligation: LegalObligation, *, note: str = "") 
 
 
 @transaction.atomic
+def link_supersession(previous: LegalObligation, replacement: LegalObligation) -> list:
+    """The record half of a supersession: link the versions and carry the previous
+    version's bindings forward. Flags nothing. Returns the deployments carried.
+
+    A fixed number of statements however many deployments the rule binds -- the
+    bindings are compared and carried as sets, never one query per deployment -- so
+    the transaction it runs in stays short. :func:`supersede_obligation` is this
+    and the flag in one transaction; the legal-obligations route records this, owes
+    each bound deployment its review (:func:`owe_reviews`) and flags them after it
+    commits, one deployment per transaction (:func:`settle_reviews_owed`).
+    """
+    if previous.pk == replacement.pk:
+        raise ValueError("an obligation cannot supersede itself")
+
+    previous.superseded_by = replacement
+    previous.save(update_fields=["superseded_by", "updated_at"])
+
+    already = set(replacement.deployments.values_list("pk", flat=True))
+    carried = list(previous.deployments.exclude(pk__in=already).order_by("pk"))
+    if carried:
+        replacement.deployments.add(*carried)
+    return carried
+
+
+@transaction.atomic
 def supersede_obligation(
     previous: LegalObligation,
     replacement: LegalObligation,
@@ -171,19 +214,7 @@ def supersede_obligation(
     that quietly bound fewer deployments than the rule it replaced would move
     claims out of scope with nobody deciding to.
     """
-    if previous.pk == replacement.pk:
-        raise ValueError("an obligation cannot supersede itself")
-
-    previous.superseded_by = replacement
-    previous.save(update_fields=["superseded_by", "updated_at"])
-
-    carried = [
-        deployment
-        for deployment in previous.deployments.all()
-        if not replacement.deployments.filter(pk=deployment.pk).exists()
-    ]
-    if carried:
-        replacement.deployments.add(*carried)
+    carried = link_supersession(previous, replacement)
 
     flagged = flag_for_materiality_review(
         replacement,
@@ -197,6 +228,90 @@ def supersede_obligation(
         "replacement": str(replacement.uuid),
         "bindings_carried_forward": [str(d.uuid) for d in carried],
         **flagged,
+    }
+
+
+def owe_reviews(obligation: LegalObligation, *, note: str = "") -> int:
+    """Record, in the caller's transaction, that every deployment ``obligation`` binds
+    is owed the review flag its move calls for: one row each, in ONE statement, and
+    none twice. Returns how many deployments are owed.
+
+    Durable on purpose. The flags themselves are written after the caller commits,
+    one deployment per short transaction (:func:`settle_reviews_owed`), so a move over
+    two hundred deployments never holds the write lock a stop waits on for two
+    hundred deployments' work. A process that dies between the commit and the last
+    flag leaves the rest owed, and ``manage.py settle_legal_reviews`` flags them --
+    never one twice, because a settled review's row is gone.
+    """
+    from .models import LegalReviewOwed
+
+    bound = list(obligation.deployments.values_list("pk", flat=True))
+    LegalReviewOwed.objects.bulk_create(
+        [LegalReviewOwed(obligation=obligation, deployment_id=pk, note=note) for pk in bound],
+        ignore_conflicts=True,
+    )
+    return len(bound)
+
+
+#: How long settling waits between two deployments, holding nothing. The write lock a
+#: stop takes (``BEGIN IMMEDIATE``; on SQLite the whole database's) is not queued: a
+#: writer that finds it held backs off and retries -- after 1, 3, 8, 18, 33 ms, then
+#: further apart -- so a loop that takes it again the moment it lets go can keep a stop
+#: out for as long as the loop runs. Measured with no gap, over two hundred deployments:
+#: a failsafe draft waited 2.5 s. With it, a stop waits for at most about one
+#: deployment's flag and refresh (``tests/test_a_supersede_never_holds_back_a_stop.py``).
+SETTLE_YIELD_SECONDS = 0.025
+
+
+def settle_reviews_owed(refresh, *, obligation=None) -> dict:
+    """Flag each owed review, one deployment per short transaction: its current claims
+    moved to review pending (:func:`flag_for_materiality_review`, narrowed to it), its
+    stored decision brought current by ``refresh`` (called inside that transaction,
+    so the claims and the decision commit together or neither does), and its owed row
+    removed. ``obligation`` narrows it to one obligation's reviews (a pk or an
+    instance); ``None`` settles every review owed.
+
+    Call it outside any transaction (after the write that owed the reviews commits,
+    or from the command): between two deployments it holds no lock and waits
+    :data:`SETTLE_YIELD_SECONDS`, so a stop waits at most for about one deployment's
+    flag and refresh. The rows are read before any
+    transaction opens, and each is read again under its own: one another runner
+    settled meanwhile is skipped, never flagged twice. A failure stops the run where
+    it is, with the deployment it failed on still owed, and raises.
+
+    Returns what was flagged, as :func:`flag_for_materiality_review` reports it, with
+    ``settled`` (deployments) and ``owed_left`` (what is still owed in its scope).
+    """
+    from .models import LegalReviewOwed
+
+    scope = LegalReviewOwed.objects.all()
+    if obligation is not None:
+        scope = scope.filter(obligation=obligation)
+    flagged: list[str] = []
+    settled = 0
+    for index, pk in enumerate(list(scope.order_by("pk").values_list("pk", flat=True))):
+        if index:
+            time.sleep(SETTLE_YIELD_SECONDS)  # holding nothing: a waiting stop goes first
+        with transaction.atomic():
+            row = (
+                LegalReviewOwed.objects.select_for_update()
+                .select_related("obligation", "deployment")
+                .filter(pk=pk)
+                .first()
+            )
+            if row is None:
+                continue  # another runner settled it
+            done = flag_for_materiality_review(row.obligation, note=row.note, deployments=[row.deployment])
+            refresh(row.deployment)
+            row.delete()
+        flagged.extend(done["flagged"])
+        settled += 1
+    return {
+        "flagged": flagged,
+        "flagged_count": len(flagged),
+        "judged": False,
+        "settled": settled,
+        "owed_left": scope.count(),
     }
 
 
