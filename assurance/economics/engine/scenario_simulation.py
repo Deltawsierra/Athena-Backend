@@ -76,6 +76,7 @@ from types import MappingProxyType
 import numpy as np
 
 from . import distributions as dist
+from . import figure_normalization
 from . import simulation as sim
 from . import twins as tw
 from .formulas import COMPONENT_FAMILIES, ESTIMATED, MARKET_VALUE, Direction, LossComponent
@@ -127,6 +128,10 @@ VARIATION_VERSION = "mythos.economics.variation/v2"
 STREAM_DOMAIN = "mythos.economics.parameter-stream/v1"
 #: The name of a scenario's frequency parameter: events a year.
 FREQUENCY_PARAMETER = "frequency"
+#: The rule a build normalizes a figure by (spec, section 36): in the versions of a
+#: run that reads a normalized figure, and only of such a run, so a run that reads
+#: none keeps the inputs, and the input digest, it had before figures were normalized.
+NORMALIZATION_VERSION = figure_normalization.VERSION
 
 #: A residual run (MVP step 13; spec, section 28): the scenario run again with ONE
 #: remediation option's control effect, on the SAME seed and the SAME parameter
@@ -883,6 +888,9 @@ class ScenarioInput:
     frequency: Parameter | None = None
     derived: Mapping[str, tuple[Parameter, ...]] = field(default_factory=dict)
     remediation: Remediation | None = None
+    #: The normalization record of each figure the run reads that its build normalized
+    #: (spec, section 36), as stored, in figure order; empty for a run that reads none.
+    normalizations: tuple[Mapping, ...] = ()
 
 
 def _policy_terms(policy: InsurancePolicy | None) -> list[tuple[str, Parameter]]:
@@ -987,7 +995,7 @@ def versions(si: ScenarioInput) -> dict:
     formulas = sorted(
         {f"{c.formula.formula_id}/{c.formula.version}" for event in si.events for c in event.components}
     )
-    return {
+    found = {
         "scenario_simulation": ENGINE_VERSION,
         "schema": SCHEMA,
         "parameter_distribution_rule": RULE_VERSION,
@@ -1003,6 +1011,44 @@ def versions(si: ScenarioInput) -> dict:
         "numpy": np.__version__,
         "limits": limits(),
     }
+    if si.normalizations:
+        # Only a run that reads a normalized figure: every other keeps its versions.
+        found["normalization"] = NORMALIZATION_VERSION
+    return found
+
+
+def _normalizations(si: ScenarioInput, named: Mapping[str, Parameter]) -> list[dict]:
+    """The normalization records of ``si`` in canonical form, each as stored: one per
+    figure, in figure order, each naming a parameter the run reads, in the run's
+    currency (``parameter_not_found`` and ``currency_mismatch`` otherwise), an object
+    holding no float (``field_malformed``)."""
+    records = []
+    for record in si.normalizations:
+        if not isinstance(record, Mapping):
+            raise ParameterRefused("field_malformed", f"a normalization record is a {type(record).__name__}")
+        record = json.loads(json.dumps(dict(record), allow_nan=False))
+        if _has_float(record):
+            raise ParameterRefused("field_malformed", "a normalization record holds a float")
+        figure = record.get("figure")
+        if figure not in named:
+            raise ParameterRefused("parameter_not_found", f"a normalization record of {figure!r}, which the run reads not")
+        if (record.get("normalized") or {}).get("currency") != si.currency:
+            raise MoneyRefused("currency_mismatch", f"{figure} is normalized into another currency than the run's")
+        records.append(record)
+    figures = [record["figure"] for record in records]
+    if figures != sorted(set(figures)):
+        raise ParameterRefused("duplicate_id", "the normalization records are one per figure, in figure order")
+    return records
+
+
+def _has_float(value) -> bool:
+    if isinstance(value, float):
+        return True
+    if isinstance(value, dict):
+        return any(_has_float(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_float(v) for v in value)
+    return False
 
 
 def canonical_inputs(si: ScenarioInput, *, severe_percentile=sim.DEFAULT_SEVERE_PERCENTILE) -> dict:
@@ -1071,6 +1117,10 @@ def canonical_inputs(si: ScenarioInput, *, severe_percentile=sim.DEFAULT_SEVERE_
         "rules": {"parameter_distribution": RULE_VERSION, "rule": RULE, "variation": VARIATION_VERSION},
         "versions": versions(si),
     }
+    if si.normalizations:
+        # Only a run that reads a figure its build normalized (spec, section 36): every
+        # other keeps the inputs, and so the input digest, it had before.
+        document["normalizations"] = _normalizations(si, named)
     if si.remediation is not None:
         # Only a residual run has this key: the scenario as it is keeps the inputs,
         # and so the input digest, it had before remediation existed, and a residual

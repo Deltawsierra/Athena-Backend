@@ -607,9 +607,10 @@ dashboard needs (section 30):
   "not reported" reason, the exceedance curve and histogram, the sensitivity
   tornado, the grade, the Validity Card and the receipt's reference, limitations and
   unknowns, and `currency_bridge`: the run's valuation date (the build's as-of date,
-  as the receipt signs it) and the normalization record of each figure it converted,
-  which is none, since a run converts nothing. v2 is v1 and that key; a v1 report
-  stays readable, and `may_be_totalled` reads both;
+  as the receipt signs it) and the normalization record of each figure its build
+  normalized (spec, section 36), as the run's inputs hold it -- none where the build
+  normalized nothing. v2 is v1 and that key; a v1 report stays readable, and
+  `may_be_totalled` reads both;
 - `GET .../economics/scenarios/?page=<n>&page_size=<n>`: the deployment's scenario
   versions in record order, 25 a page (at most 100; a larger page is refused), each
   with its title, its templates, its latest exposure run's status (a residual run is
@@ -797,14 +798,50 @@ date (or the same index series and month) more than the tolerance away from the 
 used, relative to it (FX 0.5%, cost index 1.0%), is listed in the record's `conflicts`
 with both sources, both values and the relative difference, and the record carries
 `source_disagreement`; at or under the tolerance nothing is flagged. Each of the two
-lowers the line one grade step however many steps carry it. Runs state their figures in
-one currency and do not normalize yet, so the report and the data-health route read no
-normalization; when runs do, the card inherits the record. `GET
+lowers the line one grade step however many steps carry it. A build that states a
+normalization policy normalizes the figures its run reads (spec, section 36, below), so a
+run's report and card carry each figure's record; the data-health route reads none. `GET
 /api/assurance/deployments/<uuid>/economics/normalization/?amount=&currency=&event_date=&valuation_date=&base_currency=&reporting_currency=&providers=&index_series_id=&index_geography=&index_category=&index_base=`
 answers one such normalization for a deployment, its record with its conflicts,
 fallbacks and downgrades, over the sources a run of it may use and never another
 deployment's: its query read strictly, tenant-scoped, `no-store`, no stop (spec, section
 12.9).
+
+### Figures normalized into a run's reporting currency (spec, section 36)
+
+An admin records a stored normalization policy (`FinancialNormalizationPolicy`,
+platform-wide or a deployment's own, versioned: the base currency, the FX providers IN
+ORDER, the rules and the base currency's cost index). A scenario build
+(`POST .../economics/scenarios/build/`) may NAME one, `"normalization": "<key>"`; it never
+states a policy, so it never chooses which provider is the primary. Each money figure of
+the parameter-set version the build reads -- a variable its templates read, or a term of
+the version's insurance policy -- that is stated in another currency than the build's, or
+at another date than its as-of date, and each money attribute of its effects stated at
+another date, is then normalized through `normalization_service.normalize_for` (FX at the
+figure's effective date, the cost index to the valuation date, FX at the valuation date;
+the source versions a run of the deployment may use), each of its low, base and high,
+BEFORE the build's transaction, which still only inserts. The build reads the normalized
+figure (`normalized:<figure>`, in its currency) and stores the per-figure record
+(`FigureNormalization`, migration `0076_figure_normalizations.py`): the native and
+normalized figures, each point's chain with every rate and index value, its source and
+version, the downgrades, the conflicts and the fallbacks; every record is checked again
+whenever it is read, and one that no longer holds is never used or served; and the FX
+and cost-index rows a normalization reads are checked against the digests the loader
+recorded with their source version (`source_observations_changed` otherwise). A
+normalization the stored books cannot make refuses the build (`rate_missing`,
+`index_missing`, `index_primary_unset`); a figure stating a distribution is refused
+(`distribution_not_normalizable`); without a policy a figure in another currency is
+`currency_mismatch` as before, and an effect's attribute in another currency always is.
+Every run holds the records in its canonical inputs, so its input digest covers them;
+the report's `currency_bridge` lists them (a source whose licence does not allow
+redistribution shown by its provenance only, and its normalized figure withheld wherever
+it would give the rate away); the card, issued only from inputs that give their digest,
+grades under `mythos.economics.confidence-grade/v4`, lowering each line that reads a
+figure one step per normalization downgrade it carries; the receipt names the records as
+`scenario-normalizations:<scenario>`; and E6 records the source versions read: a newer
+usable version stales the run (`source_superseded`), and a refresh rebuilds a new
+version that reads it. A build that normalizes nothing is exactly as before, digests
+included.
 
 ### Cloud prices, SEC EDGAR and enforcement (step 11, context only)
 

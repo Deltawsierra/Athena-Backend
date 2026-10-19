@@ -113,14 +113,15 @@ def test_the_engine_imports_with_django_poisoned():
         [sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    # The package and its twenty-seven modules: E1's ten, the scenario engine's four
+    # The package and its twenty-eight modules: E1's ten, the scenario engine's four
     # (parameters, formulas, loss and parameter_set), the probabilistic engine's
     # two (distributions and simulation, which import numpy as well), the scenario
     # builder's templates, step 7b's two (twins and scenario_simulation, numpy
     # too), step 8's two (sensitivity, numpy too, and grade), step 6's charts
     # (numpy too), step 13's remediation (no numpy), step 10's feed adapters, step 11's
-    # catalogs and context rules, and E5's portfolio (numpy too).
-    assert result.stdout.strip() == "imported 28", result.stdout
+    # catalogs and context rules, E5's portfolio (numpy too), and section 36's figure
+    # normalization record (no numpy).
+    assert result.stdout.strip() == "imported 29", result.stdout
 
 
 def _imports(path: Path, package: str):
@@ -184,6 +185,8 @@ def test_no_engine_module_names_django_or_the_rest_of_the_app():
         "context.py",
         # E5's portfolio aggregation (spec, section 33).
         "portfolio.py",
+        # A figure normalized into a run's reporting currency, and its record (spec, section 36).
+        "figure_normalization.py",
     }
     core_importers = set()
     for path in files:
@@ -696,7 +699,8 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
     models.REMEDIATION_RECORD_REFUSALS, or (a figure resting on a step-11 source, or a
     catalog's records row, step 11) models.CONTEXT_RECORD_REFUSALS, or (a portfolio row or
     a correlation group version, E5) models.PORTFOLIO_RECORD_REFUSALS, or (a dependency
-    map, staleness or refresh row, E6) models.ASSURANCE_RECORD_REFUSALS; every code the
+    map, staleness or refresh row, E6) models.ASSURANCE_RECORD_REFUSALS, or (a figure's
+    normalization record, section 36) models.NORMALIZATION_RECORD_REFUSALS; every code the
     money engine raises is in
     money.REFUSALS, and every code the scenario engine raises as its own is in
     parameters.REFUSALS; and every published code is one something gives. A code
@@ -707,6 +711,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
         CARD_RECORD_REFUSALS,
         CHARTS_RECORD_REFUSALS,
         CONTEXT_RECORD_REFUSALS,
+        NORMALIZATION_RECORD_REFUSALS,
         PORTFOLIO_RECORD_REFUSALS,
         REMEDIATION_RECORD_REFUSALS,
         SIMULATION_RECORD_REFUSALS,
@@ -727,6 +732,7 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
         | set(CONTEXT_RECORD_REFUSALS) | set(PORTFOLIO_RECORD_REFUSALS) | set(ASSURANCE_RECORD_REFUSALS)
+        | set(NORMALIZATION_RECORD_REFUSALS)
     )
     assert not set(SIMULATION_RECORD_REFUSALS) & (
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS)
@@ -755,6 +761,11 @@ def test_every_refusal_a_rule_gives_is_a_published_code():
         set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
         | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
         | set(CONTEXT_RECORD_REFUSALS) | set(PORTFOLIO_RECORD_REFUSALS)
+    )
+    assert not set(NORMALIZATION_RECORD_REFUSALS) & (
+        set(governance.REFUSALS) | set(money.REFUSALS) | set(parameters.REFUSALS) | set(SIMULATION_RECORD_REFUSALS)
+        | set(CARD_RECORD_REFUSALS) | set(CHARTS_RECORD_REFUSALS) | set(REMEDIATION_RECORD_REFUSALS)
+        | set(CONTEXT_RECORD_REFUSALS) | set(PORTFOLIO_RECORD_REFUSALS) | set(ASSURANCE_RECORD_REFUSALS)
     )
     assert returned | raised | engine_raised | scenario_raised == published
     for code in set(governance.REFUSALS) & set(money.REFUSALS):
