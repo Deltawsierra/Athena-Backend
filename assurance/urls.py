@@ -73,6 +73,15 @@ except Exception:
         "Economic Exposure's portfolio routes could not be loaded; they are not served, and nothing else is"
     )
     economics_portfolio_urlpatterns = []
+# The legal-obligations routes (the owner's freeze exception 22): a deployment's legal
+# obligations read, recorded and superseded. Not a stop, and GUARDED like the economics
+# modules, in a guard of its own: a fault there leaves those routes unserved and every
+# stop, and every other route, served.
+try:
+    from .legal_api import urlpatterns as legal_obligation_urlpatterns
+except Exception:
+    logger.exception("The legal-obligations routes could not be loaded; they are not served, and nothing else is")
+    legal_obligation_urlpatterns = []
 
 router = DefaultRouter()
 router.register(r"deployments", DeploymentViewSet, basename="deployment")
@@ -92,4 +101,5 @@ urlpatterns = (
     + economics_remediation_urlpatterns
     + economics_health_urlpatterns
     + economics_portfolio_urlpatterns
+    + legal_obligation_urlpatterns
 )

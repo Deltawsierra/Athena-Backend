@@ -1256,6 +1256,21 @@ class LegalObligation(models.Model):
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="supersedes"
     )
 
+    # Who recorded this version (the legal-obligations route, :mod:`assurance.legal_api`).
+    # SET_NULL with the name kept beside it, as an economics author is: removing an
+    # operator is a stop and is never held back by a record they made, and the version
+    # still says who recorded it. Both empty on a version recorded before this field
+    # existed, or by code with nobody behind it -- read as "not recorded", never as a
+    # person.
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="legal_obligations_recorded",
+    )
+    recorded_by_username = models.CharField(max_length=150, blank=True, default="", editable=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
