@@ -327,6 +327,14 @@ claim is left alone. Neither route ever sets a claim legally current or legally
 stale. No body field reaches the legal axis, and nothing here records a materiality
 decision.
 
+The flagged claims are a decision input. Each change therefore refreshes the stored
+decision of every deployment it flagged, in the same transaction, as every write of
+a decision input does. A pending review caps nothing. But the carry can read a flagged
+version legally stale again when the only ruling on record says so (for example, a
+later ruling whose obligation has since been deleted), and that moves the decision.
+A supersession refreshes each deployment the new version binds, one after another,
+inside its one transaction.
+
 Any signed-in role reads. Only an admin records or supersedes: an analyst or a
 viewer gets 403, even the deployment's owner. A deployment the caller cannot see is
 404 whether or not it exists. So is an obligation the deployment is not bound by. A

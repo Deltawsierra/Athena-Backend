@@ -50,11 +50,20 @@ length; the parser never reads past it; a duplicated key, ``NaN`` or ``Infinity`
 ``regulation``, ``binding_guidance``, ``case_law`` or ``advisory``. Every answer,
 refusals included, carries ``Cache-Control: no-store``.
 
+The claims a change flags are a decision input, so each change also brings the stored
+decision of every deployment it flagged current, in the same transaction
+(:func:`assurance.views._refresh_stored_decision`, as every write of a decision input
+does): the claims and the decision commit together or neither does. A review merely
+pending caps nothing, but the carry can read a flagged version stale again where the
+only ruling on record says so -- a later ruling's obligation since deleted -- and that
+moves the decision (``tests/test_every_write_route_keeps_the_decision_current.py``). A
+supersession refreshes each deployment the new version binds, one after another in its
+transaction.
+
 None of these routes is a stop, and none sits on a stop's path: each is classified in
-``safety.stops.NOT_STOPS``. A review merely pending caps no decision
-(:mod:`assurance.decision`), so a change refreshes nothing; the account that recorded a
-version is kept as a name beside a nullable link, so removing an operator (a stop) is
-never held back by one. This module does nothing at import but define its views.
+``safety.stops.NOT_STOPS``. The account that recorded a version is kept as a name
+beside a nullable link, so removing an operator (a stop) is never held back by one.
+This module does nothing at import but define its views.
 """
 
 from __future__ import annotations
@@ -76,7 +85,7 @@ from config.parsers import SafeJSONParser
 
 from . import legal
 from .models import Deployment, LegalObligation, MaterialityDecision
-from .views import _is_admin, _is_privileged
+from .views import _is_admin, _is_privileged, _refresh_stored_decision
 
 #: The largest body an obligation is posted in. A version with its thresholds and
 #: exemptions is a few KiB; a body over this is refused (413) on its declared
@@ -493,6 +502,9 @@ class LegalObligationsView(_NoStoreView):
             # The one path a rule moving takes to the claims: each current claim of the
             # deployment goes to review pending. Nothing here judges one.
             flagged = legal.flag_for_materiality_review(obligation, note=_attribution(request.user, note))
+            # The claims are a decision input: the stored decision is brought current in
+            # this transaction, so the two commit together or neither does.
+            _refresh_stored_decision(deployment)
         return Response(
             {
                 "deployment": str(deployment.uuid),
@@ -590,6 +602,10 @@ class LegalObligationSupersedeView(_NoStoreView):
             # deployment's current claims for review: what a rule moving is. It judges
             # none of them.
             flagged = legal.supersede_obligation(locked, replacement, note=_attribution(request.user, note))
+            # Every deployment the new version binds had its claims flagged: each stored
+            # decision is brought current in this transaction.
+            for bound in replacement.deployments.order_by("pk"):
+                _refresh_stored_decision(bound)
         return Response(
             {
                 "deployment": str(deployment.uuid),
