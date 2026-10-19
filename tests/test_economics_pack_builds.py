@@ -564,6 +564,7 @@ def test_a_report_and_card_keep_the_packs_statements_when_the_registry_no_longer
     monkeypatch.setattr(pack_registry, "TEMPLATES",
                         {k: t for k, t in pack_registry.TEMPLATES.items() if t.pack != HEALTHCARE})
     schemas = {k: v for k, v in pack_inputs.SCHEMAS.items() if k != HEALTHCARE}
+    monkeypatch.setattr(pack_inputs, "SCHEMAS", schemas)
     for module in (report, validity_service, continuous_service):
         monkeypatch.setattr(module, "INDUSTRY_PACKS", schemas, raising=False)
     limitations = report.pack_limitations(row, scenario)
