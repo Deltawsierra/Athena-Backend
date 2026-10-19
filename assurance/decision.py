@@ -444,15 +444,16 @@ def conditions_the_decision_reads(deployment, identities) -> list:
             # closed version, so it is not watched -- counted as watched, the decision
             # published READY over a watch whose subject had come true.
             #
-            # "Closed" is read on the condition's own claim, the row this query joins
-            # (AssuranceClaimQuerySet.closed is valid_to IS NOT NULL). It was
-            # `claim__in=AssuranceClaim.objects.closed()`: a list SQLite built by
-            # scanning every claim version of every deployment, in the decision a
-            # revoke or a contradiction recomputes before it answers -- a stop whose
-            # work grew with the whole database rather than its own deployment.
+            # The closed versions are this deployment's (a condition's deployment is
+            # its claim's: assurance.latent.declare_condition), read through its
+            # index. It was `claim__in=AssuranceClaim.objects.closed()`: a list
+            # SQLite built by scanning every claim version of every deployment, in
+            # the decision a revoke or a contradiction recomputes before it answers
+            # -- a stop whose work grew with the whole database rather than with
+            # its own deployment.
             | Q(
                 claim__fingerprint__in=identities,
-                claim__valid_to__isnull=False,
+                claim__in=AssuranceClaim.objects.filter(deployment=deployment).closed(),
                 state=LatentCondition.State.PENDING,
             )
             | Q(state__in=LATENT_HOLDING_STATES)
