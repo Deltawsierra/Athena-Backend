@@ -39,6 +39,7 @@ suggestion route, and the EDGAR segment fetch, which reads a stored filing watch
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Mapping
 from datetime import date
 from pathlib import Path
@@ -50,7 +51,15 @@ from .engine import governance, money
 from .engine import snapshot as _snapshot
 from .engine.cost_index import IndexBook
 from .engine.fx import FXBook
-from .models import CostIndexObservation, EconomicsRefused, FinancialSource, FinancialSourceRecords, FXObservation
+from .models import (
+    CostIndexObservation,
+    EconomicsRefused,
+    FinancialSource,
+    FinancialSourceRecords,
+    FXObservation,
+    observation_rows_digest,
+    observation_rows_refusal,
+)
 
 #: The committed synthetic snapshot. Its hash is pinned by the tests and the spec.
 SYNTHETIC_SNAPSHOT = Path(__file__).resolve().parent / "snapshots" / "synthetic-fx-and-cost-index-v1.json"
@@ -68,9 +77,40 @@ def read_snapshot(path: Path = SYNTHETIC_SNAPSHOT) -> _snapshot.Snapshot:
 def register_snapshot(path: Path = SYNTHETIC_SNAPSHOT, *, deployment=None, recorded_by=None) -> FinancialSource:
     """Register the snapshot at ``path`` as a source version of ``deployment``
     (``None``: platform-wide), with every observation it holds. Returns the source
-    version; one already registered with the file's hash is returned as it is."""
-    version, _created = register(read_snapshot(path), deployment=deployment, recorded_by=recorded_by)
+    version; one already registered with the file's hash is returned as it is.
+
+    A file is not signed, so it earns no trust by saying so (section 28 hardening,
+    T2a; spec, section 35): a file that is not synthetic is registered at the
+    licence class the reviewed feed registry gives its source key (step 10's and
+    step 11's registries, :func:`registered_terms`; ``unreviewed`` for a key they do
+    not hold) and at trust tier ``unverified``, whatever it states, as a live feed's
+    fetched versions are. Licence and trust then come only from the registry and
+    from an admin's raise. A synthetic file is made-up data that no production run
+    ever uses (``synthetic_source``), and keeps the licence it states."""
+    version, _created = register(registered_terms(read_snapshot(path)), deployment=deployment, recorded_by=recorded_by)
     return version
+
+
+def registered_terms(snapshot: _snapshot.Snapshot) -> _snapshot.Snapshot:
+    """``snapshot`` as the file loader registers it (spec, section 35): a file
+    stating ``authoritative`` is still refused at registration
+    (``second_person_required``); any other non-synthetic file takes the licence
+    class of its source key's line in the feed registry (``unreviewed`` for a key
+    the registry does not hold) and trust tier ``unverified``, whatever the file
+    says. A synthetic snapshot is returned as it is."""
+    stated = snapshot.source
+    if snapshot.synthetic or governance.needs_second_person(stated["trust_tier"]):
+        return snapshot
+    from .engine import catalogs
+    from .engine import feeds as feed_rules
+    from .engine.provenance import LicenseClass, TrustTier
+
+    key = stated["source_key"]
+    line = feed_rules.REGISTRY.get(key) or catalogs.known(key)
+    licence = line.license_class if line is not None else LicenseClass.UNREVIEWED.value
+    return dataclasses.replace(
+        snapshot, source={**stated, "license_class": licence, "trust_tier": TrustTier.UNVERIFIED.value}
+    )
 
 
 def register(
@@ -96,6 +136,35 @@ def register(
     # transaction (the caller's, when it passes the row): inside it, two inserts and
     # no loop over the records, no serialising and no digest.
     held = records if records is not None else records_row(snapshot)
+    # Every observation row, and the digest the version records over them (spec,
+    # section 35), made and checked before the transaction, which then only reads
+    # whether the snapshot is held already and inserts.
+    fx_rows = [
+        FXObservation(
+            base_currency=rate.base,
+            quote_currency=rate.quote,
+            rate=rate.rate,
+            rate_type=rate.rate_type,
+            provider=rate.provider,
+            observed_at=rate.observed_at,
+            effective_date=rate.effective_date,
+            source_snapshot_hash=rate.source_snapshot_hash,
+        )
+        for rate in snapshot.fx_rates
+    ]
+    index_rows = [
+        CostIndexObservation(
+            series_id=point.series_id,
+            geography=point.geography,
+            category=point.category,
+            base=point.base,
+            period=point.period,
+            value=point.value,
+            vintage_date=point.vintage_date,
+        )
+        for point in snapshot.index_points
+    ]
+    rows_digest = observation_rows_digest(row.computed_digest() for row in (*fx_rows, *index_rows))
     with transaction.atomic():
         existing = (
             FinancialSource._base_manager.filter(
@@ -118,31 +187,12 @@ def register(
             snapshot_hash=snapshot.snapshot_hash,
             schema_version=source["schema_version"],
             synthetic=snapshot.synthetic,
+            observations_digest=rows_digest,
             recorded_by=recorded_by,
         )
-        for rate in snapshot.fx_rates:
-            FXObservation.objects.create(
-                source=registered,
-                base_currency=rate.base,
-                quote_currency=rate.quote,
-                rate=rate.rate,
-                rate_type=rate.rate_type,
-                provider=rate.provider,
-                observed_at=rate.observed_at,
-                effective_date=rate.effective_date,
-                source_snapshot_hash=rate.source_snapshot_hash,
-            )
-        for point in snapshot.index_points:
-            CostIndexObservation.objects.create(
-                source=registered,
-                series_id=point.series_id,
-                geography=point.geography,
-                category=point.category,
-                base=point.base,
-                period=point.period,
-                value=point.value,
-                vintage_date=point.vintage_date,
-            )
+        for row in (*fx_rows, *index_rows):
+            row.source = registered
+            row.save()
         if held is not None:
             held.source = registered
             held.save()
@@ -242,7 +292,9 @@ def fx_book(
     hash (:func:`_observation_holders`), and each rate names the version handed in
     as ``source_version`` and the version holding the row as
     ``observations_version``."""
-    read_as = _observation_holders(_tenant_sources(sources, deployment))
+    ids = _tenant_sources(sources, deployment)
+    _check_rows(ids)
+    read_as = _observation_holders(ids)
     rows = FXObservation.objects.filter(source_id__in=read_as).select_related("source")
     return FXBook((row.as_engine(read_as[row.source_id]) for row in rows), holidays)
 
@@ -251,6 +303,17 @@ def index_book(sources: Iterable[FinancialSource], *, deployment) -> IndexBook:
     """The stored cost-index observations of ``sources`` as the engine reads them,
     for a run of ``deployment``: every source platform-wide or that deployment's own,
     a raised version's read as :func:`fx_book` reads them."""
-    read_as = _observation_holders(_tenant_sources(sources, deployment))
+    ids = _tenant_sources(sources, deployment)
+    _check_rows(ids)
+    read_as = _observation_holders(ids)
     rows = CostIndexObservation.objects.filter(source_id__in=read_as).select_related("source")
     return IndexBook(row.as_engine(read_as[row.source_id]) for row in rows)
+
+
+def _check_rows(ids: list[int]) -> None:
+    """Refuse (``snapshot_rows_mismatch``) a book over a source version whose stored
+    observation rows no longer give the digests recorded when it was registered
+    (spec, section 35): a rewritten row is never read as a rate or an index value."""
+    refused = observation_rows_refusal(ids)
+    if refused is not None:
+        raise EconomicsRefused(*refused)

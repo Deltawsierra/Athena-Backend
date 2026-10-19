@@ -129,6 +129,9 @@ EXPECTED_STOPS = {
     "pentest:stop_pentest_scan": {"POST"},
     "accounts:user-set-role": {"PATCH"},
     "accounts:user-detail": {"DELETE"},
+    # Review round 1 of #169, H1: an economics override revoked takes away the
+    # approval a receipt would be signed on, as a claim's revoke takes a claim down.
+    "deployment-economics-override-revoke": {"POST"},
 }
 
 #: Not stops, exempt the same way: how an operator stays able to make one.
@@ -162,6 +165,7 @@ DISPATCH = f"/api/assurance/deployments/{U}/dispatch-policy/"
 ENGAGEMENT = "/api/pentest/engagements/7/"
 SCAN_STOP = f"/api/pentest/scans/{U}/stop/"
 SET_ROLE = "/api/accounts/users/7/set_role/"
+OVERRIDE_REVOKE = f"/api/assurance/deployments/{U}/economics/overrides/{U}/revoke/"
 PAST = "2000-01-01T00:00:00Z"
 FUTURE = "2999-01-01T00:00:00Z"
 
@@ -211,6 +215,7 @@ STOP_REQUESTS = [
     ("pentest:stop_pentest_scan", "POST", SCAN_STOP, {}, {}),
     ("accounts:user-set-role", "PATCH", SET_ROLE, {"role": "viewer"}, {}),
     ("accounts:user-detail", "DELETE", "/api/accounts/users/7/", None, {}),
+    ("deployment-economics-override-revoke", "POST", OVERRIDE_REVOKE, {"reason": "approved in error"}, {}),
     ("token_refresh", "POST", "/api/token/refresh/", _fresh_refresh, {}),
 ]
 
@@ -255,6 +260,11 @@ NOT_STOP_REQUESTS = [
     ("refresh with a token that does not verify", "POST", "/api/token/refresh/", {"refresh": "x.y.z"}, "application/json", {}),
     ("audit read", "GET", "/api/failsafe/audit/", None, "application/json", {}),
     ("a scan launched", "POST", "/api/pentest/scan/", {"url": "https://x.test"}, "application/json", {}),
+    ("override revoke with a field beside its remark", "POST", OVERRIDE_REVOKE, {"reason": "r", "subject": "s"}, "application/json", {}),
+    ("override revoke with a reason that is not text", "POST", OVERRIDE_REVOKE, {"reason": 5}, "application/json", {}),
+    ("override revoke, multipart", "POST", OVERRIDE_REVOKE, _multipart("reason", "x"), MULTIPART, {}),
+    ("override revoke, text/plain", "POST", OVERRIDE_REVOKE, b"revoke it", "text/plain", {}),
+    ("override revoke padded past 64 KiB", "POST", OVERRIDE_REVOKE, {"reason": "a" * 70_000}, "application/json", {}),
 ]
 
 
@@ -590,6 +600,7 @@ EXPECTED_STOP_PERMISSIONS = {
     "failsafe:submit-signature": {"accounts.permissions.IsAdminOrAnalyst"},
     "pentest:engagement_detail": {"accounts.permissions.IsAdminOrAnalyst"},
     "pentest:stop_pentest_scan": {"accounts.permissions.IsAdminOrAnalyst"},
+    "deployment-economics-override-revoke": {"rest_framework.permissions.IsAuthenticated"},
     "token_refresh": set(),
 }
 #: SHA-256 of the WSGI and ASGI entry points, as reviewed: each wraps Django's
@@ -794,6 +805,12 @@ DIRECTION = [
     ("PATCH", SET_ROLE, {"role": "admin"}, False),
     ("PATCH", SET_ROLE, {"role": "root"}, False),
     ("PATCH", SET_ROLE, {"role": "viewer", "is_superuser": True}, False),
+    ("POST", OVERRIDE_REVOKE, {}, True),
+    ("POST", OVERRIDE_REVOKE, {"reason": "approved in error"}, True),
+    ("POST", OVERRIDE_REVOKE, {"note": "x", "reason": ""}, True),
+    ("POST", OVERRIDE_REVOKE, {"reason": None}, False),
+    ("POST", OVERRIDE_REVOKE, {"reason": "r", "in_force": True}, False),
+    ("POST", OVERRIDE_REVOKE, {"approve": True}, False),
 ]
 
 
@@ -862,6 +879,7 @@ def test_no_predicate_raises_on_any_json_value():
         ("deployment-dispatch-policy", "PUT"): ["enabled", "reason"],
         ("pentest:engagement_detail", "PATCH"): ["status", "scope_hosts", "testing_window_end", "note"],
         ("accounts:user-set-role", "PATCH"): ["role"],
+        ("deployment-economics-override-revoke", "POST"): ["note", "reason"],
         ("token_refresh", "POST"): ["refresh"],
     }
     paths = {name: path for name, _m, path, *_ in STOP_REQUESTS}
@@ -1028,6 +1046,11 @@ REAL_CLIENTS = [
     # read a second operator finds the command awaiting their signature in.
     ("dashboard state", "GET", "/api/failsafe/state/?engine_id=athena-1", None, {}),
     ("dashboard state, no engine", "GET", "/api/failsafe/state/", None, {}),
+    # An economics override revoked (spec, section 35.5): a drive's requests json=
+    # (json.dumps, spaced), and a fetch with no body.
+    ("drive override revoke with a reason", "POST", OVERRIDE_REVOKE, json.dumps({"reason": "approved in error"}).encode(), {}),
+    ("override revoke with no body", "POST", OVERRIDE_REVOKE, None, {}),
+    ("override revoke as a form", "POST", OVERRIDE_REVOKE, b"reason=approved+in+error", {"content_type": "application/x-www-form-urlencoded"}),
 ]
 
 
@@ -1592,6 +1615,15 @@ def _every_stop(client, operator, operator_key, anonymous=APIClient):
     ]
     colleague, deputy, leaver = _admin(), _admin(), _admin()
     past = (timezone.now() - timedelta(minutes=1)).isoformat()
+    # An economics override to revoke (spec, section 35.5), on a deployment of its own.
+    from assurance.economics.models import FinancialScenario, SensitiveOverride
+    from assurance.models import Deployment
+
+    held = Deployment.objects.create(name=f"stop321-econ-{uuid.uuid4()}")
+    override = SensitiveOverride.objects.create(
+        scenario=FinancialScenario.objects.create(deployment=held, title="stop321", author=operator),
+        subject="parameter-set:stop321:v2:transactions_per_day", reason="stop321", requested_by=operator,
+    )
 
     base = "/api/assurance"
     return {
@@ -1613,6 +1645,7 @@ def _every_stop(client, operator, operator_key, anonymous=APIClient):
         "operator demoted": client.patch(f"/api/accounts/users/{colleague.pk}/set_role/", {"role": "viewer"}, format="json").status_code,
         "admin demoted to analyst": client.patch(f"/api/accounts/users/{deputy.pk}/set_role/", {"role": "analyst"}, format="json").status_code,
         "operator removed": client.delete(f"/api/accounts/users/{leaver.pk}/").status_code,
+        "override revoked": client.post(f"{base}/deployments/{held.uuid}/economics/overrides/{override.uuid}/revoke/", {"reason": "approved in error"}, format="json").status_code,
         "poll": _poll(anonymous()).status_code,
         "refresh": anonymous().post("/api/token/refresh/", {"refresh": str(RefreshToken.for_user(operator))}, format="json").status_code,
     }
@@ -1638,6 +1671,7 @@ EVERY_STOP = {
     "operator demoted": ("accounts:user-set-role", "PATCH", 200),
     "admin demoted to analyst": ("accounts:user-set-role", "PATCH", 200),
     "operator removed": ("accounts:user-detail", "DELETE", 204),
+    "override revoked": ("deployment-economics-override-revoke", "POST", 200),
     "poll": ("failsafe:pending", "GET", 200),
     "refresh": ("token_refresh", "POST", 200),
 }

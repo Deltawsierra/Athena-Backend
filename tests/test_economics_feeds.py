@@ -63,6 +63,7 @@ from assurance.economics.models import (
     ScenarioBuild,
 )
 from assurance.models import Asset, Deployment, Finding
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_scenarios import _entry
 from tests.test_economics_validity_card import _raw, _signer, simulated
 
@@ -938,6 +939,8 @@ def _carded(deployment, people, *, as_of, evidence):
     result = simulated(_scenario(deployment, people["analyst"], as_of=as_of, evidence=evidence), draws=5_000)
     outcome = validity_service.issue_card(result)
     assert outcome.card is not None, (outcome.code, outcome.detail)
+    # The human review a signed receipt needs (spec, section 35.4).
+    approve_for_receipt(result, people["second"])
     return result, outcome.card
 
 
@@ -1230,7 +1233,7 @@ def test_a_feed_fault_never_takes_down_a_stop():
         cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
     )
     assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
-    assert "4 passed" in result.stdout, result.stdout[-2000:]
+    assert "5 passed" in result.stdout, result.stdout[-2000:]
 
 
 # ====================================================================

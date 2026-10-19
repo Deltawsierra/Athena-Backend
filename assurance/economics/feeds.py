@@ -98,6 +98,7 @@ from .models import (
     FinancialSourceFetch,
     FXObservation,
     fetch_codes,
+    observation_rows_refusal,
     runs_in_production,
 )
 
@@ -481,6 +482,10 @@ def used_version(key: str, deployment, as_of: date, *, own: bool = False) -> Fin
     feed = known_source(key)
     for version in usable:
         if newest.get(version.snapshot_hash) != version.version:
+            continue
+        if observation_rows_refusal([version.pk]) is not None:
+            # Demoted (spec, section 35): its stored rows no longer give the digests
+            # recorded when it was registered. Never used; read, never written.
             continue
         if feed is not None and feed.age_basis == catalogs.RETRIEVAL:
             # A catalog covers a date once it was retrieved (spec, section 31.6).

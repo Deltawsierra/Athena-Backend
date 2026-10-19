@@ -1486,13 +1486,19 @@ class World:
         from mythos_core import exposure_receipt as receipt_core
 
         from assurance.economics import receipt_service, simulation_service
+        from tests.economics_review import approve_for_receipt
         from tests.test_economics_report import stored as stored_scenario
 
         signals["scenario_list"] = self.call(
             docs, "api.answers", admin, "get", scenarios, "deployment-economics-scenarios",
         ).status_code
+        # A colleague who held the role before the version was recorded approves it:
+        # a signed receipt needs that review (spec, section 35.4).
+        reviewer = self.User.objects.create_user(username="canary-reviewer", password=None,
+                                                 role=self.User.Roles.ANALYST)
         receipted = stored_scenario(self.deployment, self.admin, set_key="canary_receipted")
         run = simulation_service.simulate_scenario(receipted, seed=7, draws=10_000).result
+        approve_for_receipt(receipted, reviewer)
         keyring = receipt_core.receipt_keyring(
             [self.signing_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)], other_roles={}
         )
@@ -1538,6 +1544,7 @@ class World:
             data={"seed": 9, "policy": "quick_10k", "as_of": "2026-10-06"}, format="json",
         ).status_code
         self.command(docs, "check_financial_assurance", "--deployment", str(self.deployment.uuid))
+        self.command(docs, "bind_economics_rows", "--dry-run")
 
     def feeds(self, docs, signals):
         """MVP step 10: the operator's fetch, with the providers' key planted. FRED
@@ -1790,6 +1797,15 @@ ROUTES.update(
         "deployment-economics-scenario-freshness": _READ,
         "deployment-economics-assurance": _READ,
         "deployment-economics-scenario-refresh": _READ,
+        # The review and override routes a signed receipt needs (spec, section 35): a
+        # scenario version's reviews and its overrides read; an approval and a
+        # revocation answer the override they moved, as the overrides route reads it.
+        "deployment-economics-scenario-reviews": _READ,
+        "deployment-economics-scenario-overrides": _READ,
+        "deployment-economics-override-approve": _DOCS + "approves a sensitive override; answers it, as "
+        "deployment-economics-scenario-overrides reads it",
+        "deployment-economics-override-revoke": _DOCS + "revokes a sensitive override (a stop); answers the "
+        "override's uuid and the revocation it recorded, from what is in hand",
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -1835,6 +1851,8 @@ def _readable_urls(world):
                 "deployment-economics-scenario-roi",
                 "deployment-economics-scenario-precedents",
                 "deployment-economics-scenario-freshness",
+                "deployment-economics-scenario-reviews",
+                "deployment-economics-scenario-overrides",
             ):
                 from assurance.economics.models import FinancialScenario
 
@@ -2064,6 +2082,9 @@ COMMANDS: dict[str, str] = {
     "raise_source_trust": "commands",
     "fetch_financial_source": "commands",
     "check_financial_assurance": "commands",
+    # Review round 1 of #169 (spec, section 35.9): binds rows recorded before the row
+    # key; prints counts only.
+    "bind_economics_rows": "commands",
 }
 
 

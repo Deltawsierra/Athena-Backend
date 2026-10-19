@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import io
 import json
+import os
 import threading
 import time
 import uuid
@@ -43,6 +45,7 @@ from types import MappingProxyType
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
@@ -79,6 +82,7 @@ from assurance.models import Asset, AssuranceClaim, Deployment, Finding
 from pentest.models import PentestScan
 from safety import stops
 from tests import test_no_control_holds_back_a_stop as tripwire
+from tests.economics_review import approve_for_receipt
 from tests.test_economics_read_routes import _economics_writes, _signing
 from tests.test_economics_report import stored
 from tests.test_economics_scenarios import _entry
@@ -503,6 +507,8 @@ def _stale_outage(world, people, monkeypatch):
     analyst = _client(people["analyst"])
     receipts = {}
     for scenario in (world.payment, world.outage):
+        # The human review a signed receipt needs (spec, section 35.4).
+        approve_for_receipt(scenario, people["admin"])
         response = _post(analyst, _base(world.deployment) + f"scenarios/{scenario.uuid}/simulate/",
                          {"seed": 7, "policy": QUICK, "receipt": True})
         assert response.status_code == 201, response.content
@@ -738,9 +744,21 @@ def test_a_refresh_reruns_only_the_obligations_scenario_and_its_receipt_supersed
     payment_runs = SimulationResult.objects.filter(scenario=world.payment).count()
     response = _refresh(analyst, world.deployment, world.outage, receipt=True)
     assert response.status_code == 201, response.content
+    first = response.json()
+    rebuilt = FinancialScenario.objects.get(uuid=first["rebuilt"]["scenario"])
+    assert first["rebuilt"]["created"] is True and rebuilt.supersedes_id == world.outage.pk
+    # The rebuilt version is new: its receipt waits for a person's review (spec,
+    # section 35.4), and the obligation stays open for the receipt that will close it.
+    assert first["receipt"]["issued"] is False and first["receipt"]["code"] == "scenario_not_reviewed"
+    assert first["obligations"]["closed"] == [] and len(first["obligations"]["open"]) == 1
+    assert "scenario_not_reviewed" in first["obligations"]["why_open"]
+    approve_for_receipt(rebuilt, people["admin"])
+    # The same refresh of the rebuilt version issues the receipt and closes the
+    # obligation, running nothing again.
+    response = _refresh(analyst, world.deployment, rebuilt, receipt=True)
+    assert response.status_code == 200, response.content
     body = response.json()
-    rebuilt = FinancialScenario.objects.get(uuid=body["rebuilt"]["scenario"])
-    assert body["rebuilt"]["created"] is True and rebuilt.supersedes_id == world.outage.pk
+    assert body["mode"] == "close" and body["simulation"]["uuid"] == first["simulation"]["uuid"]
     assert body["receipt"]["issued"] is True
     (closed,) = body["obligations"]["closed"]
     assert closed["spine_outcome"] == "superseded" and body["obligations"]["open"] == []
@@ -772,6 +790,35 @@ def test_a_refresh_reruns_only_the_obligations_scenario_and_its_receipt_supersed
     # Nothing left to refresh on the new version; the old one is superseded.
     assert _refresh(analyst, world.deployment, rebuilt, seed=12).json()["code"] == "exposure_current"
     assert _refresh(analyst, world.deployment, world.outage, seed=12).json()["code"] == "scenario_superseded"
+
+
+def test_a_refresh_whose_receipt_waits_on_the_row_key_stays_open_until_it_is_provisioned(world, people, monkeypatch):
+    """Review round 1 of #169, M1 (spec, sections 35.4 and 35.9): with no row key no
+    receipt is signed, so a refresh that asks for one leaves the obligation open and
+    says what it waits on. Once the key is set and the rows recorded without it are
+    bound, the refresh of the rebuilt version issues the receipt and closes it."""
+    _stale_outage(world, people, monkeypatch)
+    analyst = _client(people["analyst"])
+    assert _post(analyst, _base(world.deployment) + "assurance/").json()["obligations_recorded"] == 1
+    held = "ATHENA_ECONOMICS_ROW_KEY"
+    key = os.environ[held]
+    monkeypatch.delenv(held)
+    response = _refresh(analyst, world.deployment, world.outage, receipt=True)
+    assert response.status_code == 201, response.content
+    first = response.json()
+    rebuilt = FinancialScenario.objects.get(uuid=first["rebuilt"]["scenario"])
+    assert first["receipt"]["issued"] is False and first["receipt"]["code"] == "row_key_unavailable", first["receipt"]
+    assert first["obligations"]["closed"] == [] and len(first["obligations"]["open"]) == 1
+    assert "row_key_unavailable" in first["obligations"]["why_open"]
+    assert "bind_economics_rows" in first["obligations"]["why_open"]
+    monkeypatch.setenv(held, key)
+    call_command("bind_economics_rows", stdout=io.StringIO())
+    approve_for_receipt(rebuilt, people["admin"])
+    response = _refresh(analyst, world.deployment, rebuilt, receipt=True)
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert body["mode"] == "close" and body["receipt"]["issued"] is True, body["receipt"]
+    assert len(body["obligations"]["closed"]) == 1 and body["obligations"]["open"] == []
 
 
 def test_an_obligation_closes_only_when_the_new_run_stands_and_spine_has_answered(world, people):
