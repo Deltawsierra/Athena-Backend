@@ -3980,11 +3980,168 @@ def test_with_every_limit_saturated_every_stop_is_answered_within_its_bound(
         assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
     assert len(clock.requests) >= 2 * len(EVERY_STOP)
     slow = [clock.said(request) for request in clock.requests if request["wall"] > STOP_LATENCY_BOUND]
-    assert slow == [], slow
+    # As text: pytest shortens a message that is not a string, and the part it
+    # drops is what the stop waited on.
+    assert slow == [], "\n".join(repr(request) for request in slow)
     with capsys.disabled():
         print(f"\n[stop latency, gateway {gateway_answer}] {len(clock.requests)} stops; slowest "
               f"{clock.said(max(clock.requests, key=lambda request: request['wall']))} "
               f"(bound {STOP_LATENCY_BOUND * 1000:.0f} ms)")
+
+
+@pytest.fixture()
+def collector():
+    """The garbage collector as it was, put back after the test: switched on,
+    its thresholds, and no hold of safety.collection's left in flight."""
+    from safety import collection
+
+    thresholds, enabled = gc.get_threshold(), gc.isenabled()
+    yield collection
+    gc.set_threshold(*thresholds)
+    with collection._LOCK:
+        collection._STATE["epoch"] += 1
+        collection._STATE["holds"] = 0
+        collection._STATE["switched_off"] = False
+    if enabled:
+        gc.enable()
+
+
+@pytest.mark.django_db
+def test_no_collection_runs_while_a_stop_is_served(saturated, operator_key, monkeypatch):
+    """The stops over STOP_LATENCY_BOUND were full garbage collections: on
+    19 Oct the tripwire's _StopClock named 0.311 s of a 0.327 s operator
+    removal, 0.303 s of a 0.307 s engagement pause and 0.234 s of a 0.249 s
+    revoke as one generation-2 collection each, in the stop's own thread, with
+    its SQL under 3 ms and nothing else waited on. A full collection passes over
+    the whole process heap, so what it costs is the process's, not the stop's.
+
+    With a collection due at every allocation (the lowest thresholds there
+    are, set for each request through the entry point), none runs while any
+    stop's view runs -- every stop, by both clients -- and one still runs
+    inside a request that is not a stop: the hold is the stops' alone."""
+    from rest_framework.views import APIView
+
+    saturated(GATEWAY_ANSWERS["allow"][0])
+    inside, collections, dispatched = [], {True: [], False: []}, {True: 0, False: 0}
+    real_dispatch, real_call = APIView.dispatch, _WsgiHandler.__call__
+
+    def dispatch(view, request, *args, **kwargs):
+        judged = stops.is_stop(request)
+        dispatched[judged] += 1
+        inside.append(judged)
+        try:
+            return real_dispatch(view, request, *args, **kwargs)
+        finally:
+            inside.pop()
+
+    def due_at_every_allocation(handler, environ):
+        thresholds = gc.get_threshold()
+        gc.set_threshold(1, 1, 1)
+        try:
+            return real_call(handler, environ)
+        finally:
+            gc.set_threshold(*thresholds)
+
+    def collecting(phase, info):
+        if phase == "start" and inside:
+            collections[inside[-1]].append(info["generation"])
+
+    monkeypatch.setattr(APIView, "dispatch", dispatch)
+    monkeypatch.setattr(_WsgiHandler, "__call__", due_at_every_allocation)
+    gc.callbacks.append(collecting)
+    try:
+        operator = _admin()
+        bearer = _wsgi_bearer_client(operator)
+        assert _every_stop(bearer, operator, operator_key, anonymous=_WsgiClient) == SERVED
+        service = _service_account()
+        with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
+            assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
+        assert bearer.get("/api/failsafe/audit/").status_code == 429  # not a stop
+    finally:
+        gc.callbacks.remove(collecting)
+    assert dispatched[True] >= 2 * len(EVERY_STOP), dispatched
+    assert collections[True] == [], f"{len(collections[True])} collection(s) ran inside stops: {collections[True][:20]}"
+    assert collections[False], "no collection ran inside a request that is not a stop"
+    assert gc.isenabled()
+
+
+def test_a_stop_hands_the_collector_back_with_no_full_collection_due(collector):
+    """Letting go collects the young generations, so the collector comes back
+    on with generation 1 at zero: a full collection is not due again until a
+    generation-1 collection has run eleven times, and none starts in what is
+    left of the stop's request."""
+    gc.collect(0)  # generation 1 now counts one young collection
+    assert gc.get_count()[1] >= 1
+    hold = collector.hold_for_a_stop()
+    assert not gc.isenabled()
+    hold()
+    assert gc.isenabled()
+    assert gc.get_count()[1] == 0
+
+
+def test_overlapping_stops_hold_the_collector_until_the_last_lets_go(collector):
+    first, second = collector.hold_for_a_stop(), collector.hold_for_a_stop()
+    first()
+    first()  # only the first call of a hold counts
+    assert not gc.isenabled()
+    second()
+    assert gc.isenabled()
+
+
+def test_a_stop_never_switches_on_a_collector_something_else_switched_off(collector):
+    gc.disable()
+    hold = collector.hold_for_a_stop()
+    hold()
+    assert not gc.isenabled()
+
+
+def test_a_hold_nobody_lets_go_is_withdrawn_at_its_limit(collector, monkeypatch):
+    """A hold is bounded: past HOLD_LIMIT without a break -- stops overlapping
+    with no gap, or a response nobody closes or drops -- the collector runs
+    again, on the next request of any kind; the withdrawn hold lets go of
+    nothing, and the next stop holds it afresh."""
+    clock = [1000.0]
+    monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+    stuck = collector.hold_for_a_stop()
+    collector.withdraw_if_held_too_long()
+    assert not gc.isenabled()
+    clock[0] += collector.HOLD_LIMIT
+    collector.withdraw_if_held_too_long()
+    assert gc.isenabled()
+    fresh = collector.hold_for_a_stop()
+    assert not gc.isenabled()
+    stuck()
+    assert not gc.isenabled(), "a withdrawn hold let go of a later one"
+    fresh()
+    assert gc.isenabled()
+
+
+@pytest.mark.django_db  # closing a response sends request_finished, which checks the connection
+def test_the_gateway_holds_the_collector_until_a_stops_response_is_closed_or_dropped(collector, monkeypatch):
+    """Through the gateway: a stop's response holds the collector off until a
+    server closes it, or, never closed, until it is dropped; a request that is
+    not a stop holds nothing; and a stop whose view raises lets go."""
+    monkeypatch.setattr("audit.middleware.outbound.post", _engine_answers({"allow": True, "action": "allow"}))
+    seen = []
+    gateway = DefenderMiddleware(lambda request: seen.append(gc.isenabled()) or HttpResponse("the view ran"))
+    response = gateway(_request("POST", RECOMPUTE, {"paused": True}, {}))
+    assert seen == [False] and not gc.isenabled()
+    response.close()
+    assert gc.isenabled()
+    response = gateway(_request("POST", RECOMPUTE, {"paused": True}, {}))
+    assert not gc.isenabled()
+    del response
+    assert gc.isenabled()
+    seen.clear()
+    gateway(_request("GET", "/api/failsafe/audit/", None, {}))
+    assert seen == [True]
+
+    def broken(request):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        DefenderMiddleware(broken)(_request("POST", RECOMPUTE, {"paused": True}, {}))
+    assert gc.isenabled()
 
 
 #: A step of a query plan that reads a whole table, or the whole of an index,

@@ -16,7 +16,7 @@ from django.core.exceptions import RequestDataTooBig
 from django.http import JsonResponse, UnreadablePostError
 from urllib3.exceptions import HTTPError as Urllib3Error
 
-from safety import outbound
+from safety import collection, outbound
 from safety.stops import is_stop
 
 logger = logging.getLogger(__name__)
@@ -1170,6 +1170,7 @@ class DefenderMiddleware:
 
     def __call__(self, request):
         if request.path.startswith(SKIP_PREFIXES):
+            collection.withdraw_if_held_too_long()
             return self.get_response(request)
 
         # A stop is never put to the engine, so no engine -- slow, trickling,
@@ -1177,9 +1178,22 @@ class DefenderMiddleware:
         # Judging it is cheap and bounded: it runs before authentication, reads
         # at most 64 KiB of a UTF-8 or ASCII body, and anything else on a stop
         # route is not a stop and comes on here (safety.stops).
+        #
+        # Nor does a stop wait on the garbage collector: a full collection
+        # passes over the whole process heap, and one that started inside a
+        # stop held it 0.23 to 0.31 s (safety.collection). The collector is
+        # held off from here until the stop's response is closed or dropped.
         if is_stop(request):
-            return self.get_response(request)
+            hold = collection.hold_for_a_stop()
+            try:
+                response = self.get_response(request)
+            except BaseException:
+                hold()
+                raise
+            collection.let_go_when_answered(response, hold)
+            return response
 
+        collection.withdraw_if_held_too_long()
         meta = getattr(request, "audit_metadata", {})
         body, body_problem = self._get_body(request)
         # The query string was copied through with no redaction at all, so
