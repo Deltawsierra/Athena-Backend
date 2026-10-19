@@ -520,24 +520,33 @@ and mission, manufacturing and critical-infrastructure, and Hermes and mobility 
 each with its scenario templates (the same precedence model), the loss families they
 price and its customer-input schema: the special data of the owner's section 23 (claims
 volume, loss ratio and policy count; patient records, care disruption and OCR breach
-data; tenants, recurring margin, SLA terms and cloud spend; control obligations,
-contracts and process margin; mission cost, response rates and oversight bodies; units,
-downtime cost and equipment value; fleet size, trips, margin per trip, asset and recall
-cost), each a parameter the customer states with its provenance. The Hermes fleet's
+data; tenants, recurring and usage margin, SLA terms and the API-abuse cap, read from
+cloud spend; control obligations, contracts and process margin; mission cost, response
+rates and oversight bodies; units, downtime cost and equipment value; fleet size, trips,
+margin per trip, asset and recall cost), each a parameter the customer states with its
+provenance. The Hermes fleet's
 downtime is the owner's worked example C, at its known answer.
 
-- A parameter set may name its pack (`"pack"`) and state its inputs (`"pack_inputs"`); a
-  missing required input is refused (`pack_input_missing`), never defaulted. A set that
-  names no pack is the banking pack's, unchanged.
+- Each pack version is held with the digest it was released with
+  (`pack_registry.RELEASED`): a released version never changes under its id, and a
+  change is a new version (`.../v2`) beside it.
+- A parameter set may name its pack (`"pack"`) and state its inputs (`"pack_inputs"`);
+  nothing is required when it is recorded, and a build that reads an input the set does
+  not state is refused (`pack_input_missing`), never defaulted. A set answers one pack in
+  every version (`set_pack_changed`). A set that names no pack is the banking pack's,
+  unchanged.
 - A build may name its pack (`"pack"`); it builds under exactly that ONE pack, which its
-  parameter set must answer (`pack_mismatch`), and records it on the version, the events
-  route, the report and the Validity Card. A build that names no pack is a banking build,
-  byte for byte what it was.
-- No pack holds a figure, or a geographic or company-size weight (a static test scans
-  every pack); harm to a person is never priced (`safety_monetisation_refused`); a
-  physical-world template carries its caution wherever its figures are shown.
-- `GET /api/assurance/economics/packs/`: every pack's library and schema, for any
-  signed-in caller. It reads no row and is not a stop.
+  parameter set must answer (`pack_mismatch`), and records it -- with the pack's digest
+  and its cautions -- on the version, the events route, the report and the Validity
+  Card, which state what the build recorded even if a later release no longer holds the
+  pack. A build that names no pack is a banking build, byte for byte what it was.
+- No pack holds a figure, or a geographic or company-size weight (static tests scan
+  every pack and the formulas the packs add, and every name a pack uses is on a
+  reviewed allow-list); harm to a person is never priced (`safety_monetisation_refused`,
+  in any spelling); a physical-world template carries its caution wherever its figures
+  are shown.
+- `GET /api/assurance/economics/packs/`: every pack's library, schema and digest, for
+  any signed-in caller. It reads no row and is not a stop.
 
 ### The simulation
 

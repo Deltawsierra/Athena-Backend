@@ -9,9 +9,12 @@ Pure: no Django, no database, no clock and no randomness.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import cached_property
 from types import MappingProxyType
 
 from . import pack_inputs as schemas
@@ -41,7 +44,10 @@ class Pack:
     """One pack: its id (with its version), vertical and name; its vocabularies --
     effect types (an enum, each code with its meaning) and business processes (an
     enum) -- the attributes an effect may state, its templates in precedence order,
-    its customer-input schema (none for banking), and what it never prices."""
+    its customer-input schema (none for banking), and what it never prices. Its
+    :attr:`digest` is taken over all of that (:meth:`as_dict`): the registry holds
+    each pack version with the digest it was released with, and a version's content
+    never changes under its id (:mod:`.pack_registry`)."""
 
     pack_id: str
     vertical: str
@@ -86,6 +92,47 @@ class Pack:
         for chosen in self.templates:
             found.extend(c for c in chosen.cautions if c not in found)
         return tuple(found)
+
+    @property
+    def required_by(self) -> Mapping[str, tuple[str, ...]]:
+        """Each input of the schema, with the templates whose builds require it -- the
+        templates that read it -- in precedence order (choice 2: an input is required
+        only by a build that reads it). An input only an optional component reads is
+        required by none: stated, the component is made; not stated, it is absent."""
+        return MappingProxyType(
+            {
+                name: tuple(
+                    t.template_id
+                    for t in self.templates
+                    if any(
+                        not c.optional and s.kind is tpl.SourceKind.PACK_INPUT and s.name == name
+                        for c in t.components
+                        for s in c.sources.values()
+                    )
+                )
+                for name in self.inputs
+            }
+        )
+
+    @cached_property
+    def digest(self) -> str:
+        """``sha256:`` + hex over the pack's canonical document (:meth:`as_dict`): its
+        templates, vocabularies, attributes, schema, cautions and exclusions. The
+        registry refuses a pack whose digest is not the one its version was released
+        with (:data:`.pack_registry.RELEASED`)."""
+        canonical = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def statements(self, chosen: Iterable[tpl.Template]) -> dict:
+        """What a build of this pack whose effects were assigned to the templates
+        ``chosen`` is read with, as the build records it (spec, section 37.3): the
+        cautions those templates carry, once each, in order, and what the pack never
+        prices. Recorded, so a report and a card state them even when a later release
+        no longer holds the pack."""
+        cautions: list[str] = []
+        for template in chosen:
+            cautions.extend(c for c in template.cautions if c not in cautions)
+        return {"cautions": cautions, "excluded": list(self.excluded)}
 
     # ------------------------------------------------------------ the checks
 
@@ -142,19 +189,18 @@ class Pack:
             named = set_pack or "no pack (the banking pack's)"
             raise ParameterRefused("pack_mismatch", f"the build is under {self.pack_id}; the parameter set answers {named}")
 
-    def check_inputs(self, inputs: Mapping[str, Parameter]) -> None:
-        """``pack_input_missing`` unless every input the pack requires is held."""
-        missing = sorted(name for name, entry in self.inputs.items() if entry.required and name not in inputs)
-        if missing:
-            raise ParameterRefused("pack_input_missing", f"{self.pack_id} requires {missing}")
-
     def check_template_inputs(self, chosen: tpl.Template, inputs: Mapping[str, Parameter]) -> None:
         """``pack_input_missing`` unless the parameter set holds every pack input
-        ``chosen`` reads: never defaulted, never read as zero, never left unknown."""
+        ``chosen`` reads: never defaulted, never read as zero, never left unknown. This
+        is the ONE check of a pack's inputs, at build (choice 2): a set is never pushed
+        to state an input none of its builds reads. An optional component's input is not
+        required: without it the component is not made
+        (:meth:`.templates.ComponentSpec.switched_off`)."""
         missing = sorted(
             {
                 source.name
                 for spec in chosen.components
+                if not spec.optional
                 for source in spec.sources.values()
                 if source.kind is tpl.SourceKind.PACK_INPUT and source.name not in inputs
             }
@@ -175,7 +221,10 @@ class Pack:
             "attributes": {name: a.as_dict() for name, a in sorted(self.attributes.items())},
             "effect_types": dict(self.effect_types),
             "business_processes": list(self.business_processes),
-            "customer_inputs": {name: entry.as_dict() for name, entry in sorted(self.inputs.items())},
+            "customer_inputs": {
+                name: {**entry.as_dict(), "required_by": list(self.required_by[name])}
+                for name, entry in sorted(self.inputs.items())
+            },
             "parameter_set_variables": "the thirty shared variables (spec, section 19.1)",
             "cautions": list(self.cautions),
             "excluded": list(self.excluded),

@@ -4,12 +4,15 @@
 - BANKING UNCHANGED: a banking build is byte for byte the build master made before E7
   (its build digest and its events, components, figures and sources, both pinned as
   master computed them), and a banking card names no pack;
-- a parameter set names its pack and states its inputs through the route; a missing
-  required input is refused with its code and nothing is recorded;
+- a parameter set names its pack and states its inputs through the route; nothing is
+  required at record time (choice 2), and a set answers ONE pack in every version
+  (``set_pack_changed``), so every scenario built on it can refresh;
 - a scenario builds under exactly ONE pack through the build route, recorded on the
-  version (its build row and document), shown on the events route (each template's
-  pack, an input read from the pack's schema), in the report (its build and its
-  limitations) and on the Validity Card; the refresh rebuilds it under its pack;
+  version (its build row and document, with the pack's digest and statements), shown
+  on the events route (each template's pack, an input read from the pack's schema), in
+  the report (its build and its limitations) and on the Validity Card, which state what
+  the BUILD recorded even when the registry no longer holds the pack; the refresh
+  rebuilds it under its pack;
 - refused with its code, nothing written: a build under one pack on a set of another
   (``pack_mismatch``), a template whose input the set lacks (``pack_input_missing``),
   harm to a person (``safety_monetisation_refused``);
@@ -31,7 +34,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
-from assurance.economics import builder, continuous_service, report
+from assurance.economics import builder, continuous_service, report, validity_service
 from assurance.economics.engine import pack_inputs, pack_registry
 from assurance.economics.engine.pack_base import HARM_EXCLUDED, PHYSICAL_WORLD_CAUTION
 from assurance.economics.engine.parameters import MONEY_UNITS, ParameterRefused, Unit
@@ -310,7 +313,8 @@ def test_a_set_names_its_pack_and_states_its_inputs_through_the_route(deployment
     schema = pack_inputs.SCHEMAS[pack_id]
     assert set(served["pack_inputs"]) == set(schema.inputs)
     for name, entry in served["pack_inputs"].items():
-        assert entry["unit"] == schema.inputs[name].unit.value and entry["required"] is schema.inputs[name].required
+        assert entry["unit"] == schema.inputs[name].unit.value and entry["meaning"] == schema.inputs[name].meaning
+        assert "required" not in entry  # required only by a build that reads it (choice 2)
         assert entry["source_type"] == "CUSTOMER_PROVIDED" and entry["evidence_ref"]
     version = CustomerParameterSet.objects.get(deployment=deployment)
     assert version.pack == pack_id and version.intact()
@@ -328,12 +332,15 @@ def test_a_banking_set_is_served_as_it_was(deployment, people):
 
 
 @pytest.mark.parametrize("pack_id", VERTICAL)
-def test_a_missing_required_input_is_refused_and_nothing_recorded(deployment, people, pack_id):
+def test_a_set_records_without_inputs_and_what_it_names_wrongly_is_refused(deployment, people, pack_id):
+    """Choice 2 (interim): a set is never pushed to state an input -- with none it
+    records -- and a set that names a pack wrongly is refused with its code, nothing
+    recorded."""
+    response = record_set(_client(people["analyst"]), deployment,
+                          set_document(pack_id, drop=set(pack_inputs.SCHEMAS[pack_id].inputs)), set_key="bare")
+    assert response.status_code == 201, response.content
+    assert response.json()["pack"] == pack_id and response.json()["pack_inputs"] == {}
     before = _counts()
-    for name in pack_inputs.SCHEMAS[pack_id].required:
-        response = record_set(_client(people["analyst"]), deployment, set_document(pack_id, drop={name}))
-        assert response.status_code == 400, response.content
-        assert response.json()["code"] == "pack_input_missing" and name in response.json()["detail"]
     for document, code in (
         ({**set_document(pack_id), "pack": "mythos.economics.no-such-pack/v1"}, "pack_unrecognised"),
         ({**set_document(pack_id), "pack": "mythos.economics.banking-pack/v1"}, "pack_unrecognised"),
@@ -384,6 +391,12 @@ def test_an_insurance_scenario_builds_under_its_pack_and_says_so(deployment, peo
     row = ScenarioBuild.objects.get(scenario=scenario)
     assert row.pack == INSURANCE and row.inputs["pack"] == INSURANCE
     assert row.inputs["templates"] == [[t.template_id, 1] for t in pack_registry.PACKS[INSURANCE].templates]
+    # The build records the digest of the pack it was built under, and what its figures
+    # are read with (F1, F5).
+    assert row.inputs["pack_digest"] == pack_registry.PACKS[INSURANCE].digest == pack_registry.RELEASED[INSURANCE]
+    assert row.inputs["pack_statements"] == {"cautions": [], "excluded": [HARM_EXCLUDED]}
+    assert row.pack_record() == {"id": INSURANCE, "digest": row.inputs["pack_digest"], "cautions": [],
+                                 "excluded": [HARM_EXCLUDED]}
     # The events route says the same; the refresh rebuilds under the same pack, and the
     # same inputs return the same scenario, never a second.
     events = analyst.get(f"/api/assurance/deployments/{deployment.uuid}/economics/scenarios/{scenario.uuid}/events/")
@@ -554,11 +567,54 @@ def test_an_industry_packs_report_and_card_name_the_pack_and_its_caution(deploym
     assert added[1:] == [PHYSICAL_WORLD_CAUTION, HARM_EXCLUDED]
     card = FinancialValidityCard.objects.get(simulation=result)
     assert card.card["fields"]["scenario"]["pack"] == {
-        "id": HEALTHCARE, "cautions": [PHYSICAL_WORLD_CAUTION], "excluded": [HARM_EXCLUDED],
+        "id": HEALTHCARE, "digest": pack_registry.RELEASED[HEALTHCARE], "cautions": [PHYSICAL_WORLD_CAUTION],
+        "excluded": [HARM_EXCLUDED],
     }
-    from assurance.economics import validity_service
-
     assert validity_service.reproduces(card)
+
+
+def test_a_report_and_card_keep_the_packs_statements_when_the_registry_no_longer_holds_it(
+    deployment, people, monkeypatch
+):
+    """F5: a report and a card state what the BUILD recorded of its pack -- its digest,
+    the cautions of its templates, what it never prices -- never what the registry holds
+    now. A release that no longer holds the pack still states them, says it does not
+    hold the pack, and never shows the scenario as a banking one; its card still
+    reproduces; and its refresh names the pack, which the build then refuses, never a
+    banking rebuild."""
+    variables = {"engineering_hourly_rate": ("money_per_hour", "200")}
+    inputs = {name: (figures[1] if len(figures) == 3 else figures[0],) for name, figures in packs.INPUTS.items()}
+    built, served, result = _simulated(
+        deployment, people, HEALTHCARE, "healthcare_clinical_workflow_interruption", "clinical_workflow_interrupted",
+        "clinical_care", variables, inputs,
+    )
+    scenario = FinancialScenario.objects.get(uuid=built["scenario"]["uuid"])
+    row = ScenarioBuild.objects.get(scenario=scenario)
+    card = FinancialValidityCard.objects.get(simulation=result)
+    held = served["limitations"][len(report.LIMITATIONS):]
+    # A later release that no longer holds the healthcare pack.
+    monkeypatch.setattr(pack_registry, "PACKS", {k: v for k, v in pack_registry.PACKS.items() if k != HEALTHCARE})
+    monkeypatch.setattr(pack_registry, "TEMPLATES",
+                        {k: t for k, t in pack_registry.TEMPLATES.items() if t.pack != HEALTHCARE})
+    schemas = {k: v for k, v in pack_inputs.SCHEMAS.items() if k != HEALTHCARE}
+    monkeypatch.setattr(pack_inputs, "SCHEMAS", schemas)
+    for module in (report, validity_service, continuous_service):
+        monkeypatch.setattr(module, "INDUSTRY_PACKS", schemas, raising=False)
+    limitations = report.pack_limitations(row, scenario)
+    assert limitations[0] == held[0] and limitations[0].startswith(f"built under the industry pack {HEALTHCARE}")
+    assert pack_registry.RELEASED[HEALTHCARE] in limitations[0]
+    assert limitations[1] == (
+        f"this release does not hold the industry pack {HEALTHCARE}: the cautions and exclusions below are the ones "
+        "recorded with the build"
+    )
+    assert limitations[2:] == [PHYSICAL_WORLD_CAUTION, HARM_EXCLUDED] == held[1:]
+    assert validity_service.pack_statement(row) == card.card["fields"]["scenario"]["pack"]
+    assert validity_service.reproduces(card)
+    body = continuous_service.rebuild_body(scenario, as_of=date(2026, 10, 6))
+    assert body["pack"] == HEALTHCARE
+    with pytest.raises(ParameterRefused) as refused:
+        builder.parse_request(body)
+    assert refused.value.code == "pack_unrecognised"
 
 
 def test_a_banking_card_and_report_name_no_pack(people):
@@ -596,6 +652,84 @@ def test_a_banking_card_and_report_name_no_pack(people):
     assert served["limitations"] == list(report.LIMITATIONS)
     card = FinancialValidityCard.objects.get(simulation=SimulationResult.objects.get(scenario=scenario))
     assert "pack" not in card.card["fields"]["scenario"]
+
+
+# ======================================================================
+# A set answers one pack; a build requires only what it reads; usage revenue
+# ======================================================================
+
+
+def test_a_set_answers_one_pack_in_every_version_so_its_scenarios_refresh(deployment, people):
+    """F6: a new version of a set that names another pack -- another industry pack, or
+    none (banking), or a banking set gaining one -- is refused (``set_pack_changed``),
+    nothing recorded; a new version under the same pack records, and a scenario built on
+    an earlier version refreshes against it."""
+    analyst = _client(people["analyst"])
+    assert record_set(analyst, deployment, set_document(INSURANCE)).status_code == 201
+    assert record_set(analyst, deployment, {"variables": {"legal_retainer": _entry("money", "1")}},
+                      set_key="bank_set").status_code == 201
+    asset, finding = _asset(deployment), _finding(deployment)
+    overpay = effect("overpay", asset, "claim_overpaid", "claims", attributes_of("insurance_claims_overpayment"))
+    built = build(analyst, deployment, build_body([overpay], finding, pack=INSURANCE))
+    assert built.status_code == 201, built.content
+    before = _counts()
+    for document, set_key in (
+        (set_document(SAAS), "pack_set"),
+        ({"variables": {"legal_retainer": _entry("money", "1")}}, "pack_set"),
+        (set_document(INSURANCE), "bank_set"),
+    ):
+        response = record_set(analyst, deployment, document, set_key=set_key)
+        assert response.status_code == 400, response.content
+        assert response.json()["code"] == "set_pack_changed", response.content
+    assert _counts() == before
+    changed = set_document(INSURANCE, inputs={**packs.INPUTS, "claims_per_day": ("1500",)})
+    assert record_set(analyst, deployment, changed).status_code == 201
+    scenario = FinancialScenario.objects.get(uuid=built.json()["scenario"]["uuid"])
+    body = continuous_service.rebuild_body(scenario, as_of=date(2026, 10, 6))
+    assert body["parameter_set"] == {"set_key": "pack_set", "version": 2} and body["pack"] == INSURANCE
+    refreshed = build(analyst, deployment, body)
+    assert refreshed.status_code == 201, refreshed.content
+    assert refreshed.json()["build"]["pack"] == INSURANCE
+
+
+def test_a_build_requires_only_the_inputs_its_templates_read(deployment, people):
+    """Choice 2 (interim): a hospital that states only what a PHI exposure reads -- its
+    records and its breach cost per record -- records its set and builds that scenario;
+    it is never pushed to state a care-disruption cost; a build that reads one it does
+    not state is refused, naming it, and nothing is written."""
+    analyst = _client(people["analyst"])
+    kept = {"patient_record_count", "breach_cost_per_record"}
+    document = set_document(HEALTHCARE, drop=set(pack_inputs.SCHEMAS[HEALTHCARE].inputs) - kept)
+    assert record_set(analyst, deployment, document).status_code == 201
+    asset, finding = _asset(deployment), _finding(deployment)
+    phi = effect("phi", asset, "phi_disclosure", "patient_records", attributes_of("healthcare_phi_exposure"))
+    assert build(analyst, deployment, build_body([phi], finding, pack=HEALTHCARE)).status_code == 201
+    clinical = effect("care", asset, "clinical_workflow_interrupted", "clinical_care",
+                      attributes_of("healthcare_clinical_workflow_interruption"))
+    before = _counts()
+    response = build(analyst, deployment, build_body([clinical], finding, pack=HEALTHCARE))
+    assert response.status_code == 400 and response.json()["code"] == "pack_input_missing", response.content
+    assert "care_disruption_cost_per_hour" in response.json()["detail"]
+    assert _counts() == before
+
+
+def test_a_saas_outage_prices_usage_revenue_only_where_the_set_states_it(deployment, people):
+    """Choice 8 (interim), through the route: a platform that bills by usage states its
+    usage margin and its outage prices usage revenue; one that bills by subscription
+    alone states none, and builds the outage without it, never a zero, never refused."""
+    analyst = _client(people["analyst"])
+    asset, finding = _asset(deployment), _finding(deployment)
+    outage = effect("outage", asset, "platform_outage", "tenant_platform", attributes_of("saas_platform_outage"))
+    figures = {}
+    for set_key, drop in (("usage", ()), ("subscription", {"usage_margin_per_hour"})):
+        assert record_set(analyst, deployment, set_document(SAAS, drop=drop), set_key=set_key).status_code == 201
+        response = build(analyst, deployment, build_body([outage], finding, pack=SAAS, set_key=set_key))
+        assert response.status_code == 201, response.content
+        (event,) = response.json()["events"]
+        figures[set_key] = ({c["component_id"] for c in event["components"]}, _range(event["gross_cash"]))
+    assert "usage-revenue" in figures["usage"][0] and "usage-revenue" not in figures["subscription"][0]
+    assert figures["usage"][1] == [Decimal(x) for x in packs.KNOWN_GROSS["saas_platform_outage"]]
+    assert figures["subscription"][1] == [Decimal(x) for x in packs.OUTAGE_WITHOUT_USAGE]
 
 
 # ======================================================================

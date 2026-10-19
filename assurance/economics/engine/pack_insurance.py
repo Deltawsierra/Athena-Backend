@@ -373,6 +373,9 @@ def _templates() -> tuple[Template, ...]:
                 "a policy's expected claims are its premium times the customer's own loss ratio (the loss ratio's "
                 "definition); a wrongly accepted policy costs the share by which its risk's claims exceed that, for "
                 "one policy year",
+                "the excess share is a ratio, so a wrongly accepted policy is priced at most at double the book's "
+                "expected claims (choice 7, accepted for version 1): a worse risk cannot be stated and is refused "
+                "(ratio_out_of_range), never capped silently",
                 "the shares are of the customer's own policies in force, never a benchmark's book",
                 _REGULATORS,
                 _REMEDIATION,

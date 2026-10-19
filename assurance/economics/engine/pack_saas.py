@@ -3,9 +3,11 @@ API abuse and platform outage (Economic Exposure E7; the owner's specification,
 section 23; ``docs/economics/spec-v1.md``, section 37.6).
 
 Its customer inputs are the special data of section 23 -- ARR (read as recurring
-margin per tenant: revenue lost is not all loss), customer count and the
-multi-tenant architecture (the tenants), SLA terms and cloud spend -- each a
-parameter the customer states with its source. No template holds a figure.
+margin per tenant: revenue lost is not all loss; and, for a platform that bills by
+usage, its usage margin per hour), customer count and the multi-tenant architecture
+(the tenants), SLA terms and cloud spend (read as the API-abuse cap: the most abuse
+can add to the platform's spend per hour) -- each a parameter the customer states
+with its source. No template holds a figure, and no cap is a constant.
 
 Pure: no Django, no database.
 """
@@ -93,7 +95,7 @@ def _attributes() -> dict[str, Attribute]:
         Attribute(
             "abuse_load_share",
             U.RATIO,
-            "the share of the platform's cloud spend the abuse added while it lasted",
+            "the share of the API-abuse cap (abuse_spend_cap_per_hour, a pack input) the abuse used while it lasted",
         ),
     )
 
@@ -110,6 +112,7 @@ _CHURN = (
     "tenant loss is computed only from the customer's own churn figure (CUSTOMER_PROVIDED), at its own recurring "
     "margin per tenant; any other churn source makes it unknown (specification, section 31)"
 )
+_REGULATORY = "regulatory response is scenario bounds its evidence grounds, never a predicted penalty"
 
 
 def _templates() -> tuple[Template, ...]:
@@ -150,6 +153,9 @@ def _templates() -> tuple[Template, ...]:
         "hours": A("recovery_hours"),
     }
     incident = ComponentSpec("incident-response", F.INCIDENT_RESPONSE, "lump_sum", 1, {"amount": A("incident_response_cost")})
+    regulatory = ComponentSpec(
+        "regulatory", F.REGULATORY_COMPLIANCE, "lump_sum", 1, {"amount": A("regulatory_response_cost")}
+    )
     return (
         Template(
             "saas_tenant_isolation_breach",
@@ -187,11 +193,17 @@ def _templates() -> tuple[Template, ...]:
                     },
                 ),
                 forensics,
+                legal,
+                regulatory,
                 churn,
             ),
             (
                 "the affected share of the customer's own tenants drives notification, credits and tenant loss "
                 "alike: one parameter, read by each in the same direction",
+                "a cross-tenant exposure is the owner's worked example B (specification, section 31): legal and "
+                "regulatory are priced here as saas_data_exfiltration prices them, so taking the effect by "
+                "precedence drops no family that template prices",
+                _REGULATORY,
                 _CHURN,
                 _REMEDIATION,
             ),
@@ -217,14 +229,12 @@ def _templates() -> tuple[Template, ...]:
                 ),
                 forensics,
                 legal,
-                ComponentSpec(
-                    "regulatory", F.REGULATORY_COMPLIANCE, "lump_sum", 1, {"amount": A("regulatory_response_cost")}
-                ),
+                regulatory,
                 churn,
             ),
             (
                 "the people whose data left drive notification; the tenants it reached drive tenant loss",
-                "regulatory response is scenario bounds its evidence grounds, never a predicted penalty",
+                _REGULATORY,
                 _CHURN,
                 _REMEDIATION,
             ),
@@ -273,7 +283,7 @@ def _templates() -> tuple[Template, ...]:
                     1,
                     {
                         "hours": A("abuse_hours"),
-                        "spend_per_hour": I("cloud_spend_per_hour"),
+                        "spend_per_hour": I("abuse_spend_cap_per_hour"),
                         "added_share": A("abuse_load_share"),
                     },
                 ),
@@ -281,7 +291,9 @@ def _templates() -> tuple[Template, ...]:
                 incident,
             ),
             (
-                "the abuse costs the share of the customer's own cloud spend it added, for as long as it lasts",
+                "the abuse costs the share of the API-abuse cap it used, for as long as it lasts: the cap "
+                "(abuse_spend_cap_per_hour) is the customer's stated figure for the most abuse can add to its spend "
+                "per hour, never a constant, and may be many times its baseline spend (denial of wallet)",
                 _REMEDIATION,
             ),
             pack=PACK_ID,
@@ -306,10 +318,22 @@ def _templates() -> tuple[Template, ...]:
                 ),
                 ComponentSpec("failover-recovery", F.RECOVERY, "fixed_plus_hours", 1, recovery),
                 churn,
+                ComponentSpec(
+                    "usage-revenue",
+                    F.BUSINESS_INTERRUPTION,
+                    "interruption",
+                    1,
+                    {"interruption_hours": A("outage_hours"), "value_per_hour": I("usage_margin_per_hour")},
+                    optional=True,
+                ),
             ),
             (
                 "a subscription is paid ahead: an outage's loss is the SLA credits the contracts owe, the recovery "
-                "and the tenants who leave, never the recurring revenue of its hours",
+                "and the tenants who leave, never the subscription revenue of its hours",
+                "usage-billed revenue (tokens, API calls, metered seats) is lost while the platform is down: "
+                "usage-revenue prices it at the customer's own usage margin per hour, and is made only where the set "
+                "states that margin (an optional component, choice 8); a platform that bills by subscription alone "
+                "states none, and the component is absent, never zero",
                 "SLA credits are capped by the customer's own contracts' cap; a higher cap never lowers the loss",
                 _CHURN,
             ),

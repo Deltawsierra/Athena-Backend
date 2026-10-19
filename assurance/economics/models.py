@@ -2090,6 +2090,24 @@ class CustomerParameterSet(_AppendOnly):
                 deployment_id=self.deployment_id, set_key=self.set_key
             ).aggregate(latest=Max("version"))["latest"]
             self.version = (earlier or 0) + 1
+        # A set answers ONE pack in every version (E7, spec section 37.2): a version
+        # that names another pack than the set's first would leave every scenario built
+        # on an earlier one unable to refresh (its rebuild reads the latest version, of
+        # another pack), so it is refused; another pack's set has its own key.
+        first = (
+            CustomerParameterSet._base_manager.filter(
+                deployment_id=self.deployment_id, set_key=self.set_key, version__lt=self.version
+            )
+            .order_by("version")
+            .values_list("pack", flat=True)
+            .first()
+        )
+        if first is not None and first != self.pack:
+            raise EconomicsRefused(
+                "set_pack_changed",
+                f"{self.set_key} answers {first or 'no pack (the banking pack)'}; this version names "
+                f"{self.pack or 'no pack (the banking pack)'}",
+            )
         self.author_username = _signed_in(self.author).username
 
     def parameter_rows(self) -> list[FinancialParameter]:
@@ -2648,8 +2666,44 @@ class ScenarioBuild(_AppendOnly):
         # the one recorded and returns it, and two builds racing past that read are
         # refused by the unique constraint, which no check made before it can be.
 
+    def pack_record(self) -> dict | None:
+        """The industry pack this build was built under, as the BUILD recorded it (E7,
+        spec section 37.3): its ``id``, its ``digest``, the ``cautions`` of the
+        templates its effects were assigned to and what it ``excluded``; ``None`` for a
+        banking build, which records none. Read from the build's own document, never
+        from the registry, so a report and a card keep the pack's statements even when
+        a later release no longer holds the pack. A record without them -- none is
+        made, but one would be read so -- states that, and never reads as a banking
+        build."""
+        if self.pack == pack_schemas.BANKING_PACK:
+            return None
+        document = self.inputs if isinstance(self.inputs, dict) else {}
+        statements = document.get("pack_statements")
+        if not isinstance(statements, dict):
+            return {
+                "id": self.pack,
+                "digest": document.get("pack_digest"),
+                "cautions": [PACK_STATEMENTS_UNRECORDED],
+                "excluded": [],
+            }
+        return {
+            "id": self.pack,
+            "digest": document.get("pack_digest"),
+            "cautions": list(statements.get("cautions", [])),
+            "excluded": list(statements.get("excluded", [])),
+        }
+
     def __str__(self) -> str:
         return f"build {self.build_digest} of scenario {self.scenario_id}"
+
+
+#: What a report and a card state for an industry build that recorded no statements of
+#: its pack (none is made so: every industry build records them).
+PACK_STATEMENTS_UNRECORDED = (
+    "built under an industry pack whose cautions and exclusions were not recorded with the build: read every "
+    "figure as a range for decision support, never a prediction; harm to a person is never priced "
+    "(safety_monetisation_refused)"
+)
 
 
 class CausalEffect(_AppendOnly):

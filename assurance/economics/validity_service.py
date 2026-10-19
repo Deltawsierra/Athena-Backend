@@ -51,7 +51,6 @@ from django.utils import timezone
 from . import simulation_service
 from .engine import feeds as feed_rules
 from .engine.formulas import ESTIMATED, MARKET_VALUE
-from .engine.pack_inputs import SCHEMAS as INDUSTRY_PACKS
 from .models import (
     SIMULATION_COMPLETED,
     CausalEffect,
@@ -399,22 +398,15 @@ def _description(scenario, events, effects, links) -> str:
     return f"{scenario.title}. {count} causal loss event(s): " + "; ".join(parts) + "."
 
 
-def pack_statement(build: ScenarioBuild | None, effects) -> dict | None:
+def pack_statement(build: ScenarioBuild | None) -> dict | None:
     """The industry pack a scenario version was built under, for its card: the pack's
-    id and version, the cautions of the templates its effects were assigned to, and
-    what the pack never prices; ``None`` for a banking build (or none, or a pack the
-    registry does not hold), whose card names no pack, as no card did before E7 (spec,
-    section 37)."""
-    if build is None or build.pack not in INDUSTRY_PACKS:
-        return None
-    from .engine import pack_registry  # an industry pack's card only: never at load
-
-    pack = pack_registry.PACKS[build.pack]
-    cautions: list[str] = []
-    for effect in effects:
-        chosen = pack_registry.template(effect.template_id, effect.template_version)
-        cautions.extend(c for c in (chosen.cautions if chosen else ()) if c not in cautions)
-    return {"id": build.pack, "cautions": cautions, "excluded": list(pack.excluded)}
+    id and version, the digest of the content it was built under, the cautions of the
+    templates its effects were assigned to, and what the pack never prices -- each as
+    the BUILD recorded it (:meth:`ScenarioBuild.pack_record`), never as the registry
+    holds it now, so the card states them, and reproduces, even when a later release no
+    longer holds the pack; ``None`` for a banking build (or none), whose card names no
+    pack, as no card did before E7 (spec, section 37.3)."""
+    return build.pack_record() if build is not None else None
 
 
 def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: dict) -> dict:
@@ -697,7 +689,7 @@ def build_card(result: SimulationResult, *, sensitivity: dict | None, issued: di
         "unknown_variables": unknown_variables,
         "reproduction": reproduction,
     }
-    pack = pack_statement(build, effects)
+    pack = pack_statement(build)
     if pack is not None:
         # An industry pack's scenario names its pack, with what its figures are read
         # with (E7, spec section 37); a banking card is the card it was, byte for byte.

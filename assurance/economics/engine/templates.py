@@ -280,21 +280,38 @@ def I(name: str) -> Source:
 @dataclass(frozen=True)
 class ComponentSpec:
     """One component a template makes: its key within the event, its family, the
-    formula and version that compute it, and each formula input's source."""
+    formula and version that compute it, and each formula input's source.
+
+    ``optional`` (an industry pack's component only, E7, spec section 37.2): the
+    component is made only where the parameter set states every pack input it reads,
+    and is absent otherwise -- never zero, never unknown, never refused. It is how a
+    pack prices a loss only some customers have (choice 8: usage-billed revenue), and
+    an optional component reads at least one pack input (``ValueError`` otherwise).
+    No banking component is optional."""
 
     component_key: str
     family: str
     formula_id: str
     formula_version: int
     sources: Mapping[str, Source]
+    optional: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "family", str(self.family))
         object.__setattr__(self, "sources", MappingProxyType(dict(self.sources)))
+        if self.optional and not any(s.kind is SourceKind.PACK_INPUT for s in self.sources.values()):
+            raise ValueError(f"the optional component {self.component_key} reads no pack input to be stated")
+
+    def switched_off(self, inputs: Mapping[str, object]) -> bool:
+        """Whether this component is optional and the parameter set does not state
+        every pack input it reads (``inputs``, by input name): then it is not made."""
+        return self.optional and any(
+            s.kind is SourceKind.PACK_INPUT and s.name not in inputs for s in self.sources.values()
+        )
 
     def as_dict(self) -> dict:
         chosen = formula(self.formula_id, self.formula_version)
-        return {
+        document = {
             "component_key": self.component_key,
             "family": self.family,
             "formula_id": self.formula_id,
@@ -305,6 +322,10 @@ class ComponentSpec:
                 for spec in chosen.inputs
             },
         }
+        # Only where it is one: a banking component is served as it was.
+        if self.optional:
+            document["optional"] = True
+        return document
 
 
 @dataclass(frozen=True)
@@ -875,7 +896,9 @@ def plan(
     parameter set states, by input name -- or left unbound when that source holds
     none. Nothing is bound that a recorded parameter does not hold: no default, no
     zero. (A build refuses a pack input a template it uses reads and the set does not
-    state before it plans: :func:`.pack_registry.Pack.check_template_inputs`.)"""
+    state before it plans: :func:`.pack_registry.Pack.check_template_inputs`.) An
+    optional component whose pack inputs the set does not state is not made
+    (:meth:`ComponentSpec.switched_off`)."""
     held_by = {
         SourceKind.PARAMETER_SET: variables,
         SourceKind.EFFECT_ATTRIBUTE: attributes,
@@ -883,6 +906,8 @@ def plan(
     }
     planned = []
     for spec in chosen.components:
+        if spec.switched_off(held_by[SourceKind.PACK_INPUT]):
+            continue
         bound: dict[str, tuple[Source, Parameter]] = {}
         missing: dict[str, Source] = {}
         for name, source in spec.sources.items():
