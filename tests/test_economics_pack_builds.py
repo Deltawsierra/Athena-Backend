@@ -62,6 +62,8 @@ User = get_user_model()
 INSURANCE = "mythos.economics.insurance-pack/v1"
 HEALTHCARE = "mythos.economics.healthcare-pack/v1"
 SAAS = "mythos.economics.saas-pack/v1"
+MOBILITY = "mythos.economics.mobility-pack/v1"
+VERTICAL = [p.pack_id for p in pack_registry.PACKS.values() if not p.banking]
 POISSON = {"id": "poisson", "version": 1, "params": {"rate": "2"}}
 QUICK = "quick_10k"
 
@@ -305,7 +307,7 @@ def test_a_banking_build_is_byte_for_byte_what_it_was():
 # ======================================================================
 
 
-@pytest.mark.parametrize("pack_id", [INSURANCE, HEALTHCARE, SAAS])
+@pytest.mark.parametrize("pack_id", VERTICAL)
 def test_a_set_names_its_pack_and_states_its_inputs_through_the_route(deployment, people, pack_id):
     client = _client(people["analyst"])
     response = record_set(client, deployment, set_document(pack_id))
@@ -333,7 +335,7 @@ def test_a_banking_set_is_served_as_it_was(deployment, people):
     assert "pack" not in response.json() and "pack_inputs" not in response.json()
 
 
-@pytest.mark.parametrize("pack_id", [INSURANCE, HEALTHCARE, SAAS])
+@pytest.mark.parametrize("pack_id", VERTICAL)
 def test_a_set_records_without_inputs_and_what_it_names_wrongly_is_refused(deployment, people, pack_id):
     """Choice 2 (interim): a set is never pushed to state an input -- with none it
     records -- and a set that names a pack wrongly is refused with its code, nothing
@@ -483,6 +485,37 @@ def test_an_unknown_pack_or_another_packs_vocabulary_is_refused(deployment, peop
     for body, code in cases:
         response = build(analyst, deployment, body)
         assert response.status_code == 400 and response.json()["code"] == code, (code, response.content)
+
+
+def test_hermes_fleet_downtime_builds_as_the_specifications_worked_example_c(deployment, people):
+    """The owner's worked example C (section 32) built through the route under the
+    mobility pack: the fleet's lost trips, the field recovery and the operations
+    response, at its known answer, with the physical-world caution; the asset damage
+    is another template, and a safety variable that prices harm is refused, in the set
+    and in the build."""
+    analyst = _client(people["analyst"])
+    assert record_set(analyst, deployment, set_document(MOBILITY)).status_code == 201
+    asset, finding = _asset(deployment, "fleet-dispatcher"), _finding(deployment)
+    downtime = effect("immobilised", asset, "fleet_immobilised", "fleet_operations",
+                      attributes_of("mobility_fleet_downtime"))
+    response = build(analyst, deployment, build_body([downtime], finding, pack=MOBILITY))
+    assert response.status_code == 201, response.content
+    (event,) = response.json()["events"]
+    assert event["template"]["template_id"] == "mobility_fleet_downtime"
+    assert event["template"]["cautions"] == [PHYSICAL_WORLD_CAUTION]
+    assert _range(event["gross_cash"]) == [Decimal(122325), Decimal(319050), Decimal(722400)]
+    before = _counts()
+    harmed = effect("crash", asset, "passenger_injured", "fleet_operations", {})
+    priced = {**downtime, "attributes": {**downtime["attributes"],
+                                         "injury_cost_per_passenger": _attr("money_per_unit", "1000")}}
+    for body in (build_body([harmed], finding, pack=MOBILITY), build_body([priced], finding, pack=MOBILITY)):
+        refused = build(analyst, deployment, body)
+        assert refused.status_code == 400 and refused.json()["code"] == "safety_monetisation_refused"
+    document = set_document(MOBILITY)
+    document["pack_inputs"]["value_of_statistical_life"] = _entry("money", "1")
+    refused = record_set(analyst, deployment, document)
+    assert refused.status_code == 400 and refused.json()["code"] == "safety_monetisation_refused"
+    assert _counts() == before
 
 
 # ======================================================================

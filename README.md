@@ -623,12 +623,17 @@ else; neither is a stop.
 ### Industry packs (E7)
 
 The banking templates are one pack of a registry (spec, section 37); E7 adds the
-insurance, healthcare and life-sciences, and AI-heavy SaaS packs, each with its scenario
-templates (the same precedence model), the loss families they price and its
-customer-input schema: the special data of the owner's section 23 (claims volume, loss
-ratio and policy count; patient records, care disruption and OCR breach data; tenants,
-recurring and usage margin, SLA terms and the API-abuse cap, read from cloud spend), each
-a parameter the customer states with its provenance.
+insurance, healthcare and life-sciences, AI-heavy SaaS, regulated-enterprise, government
+and mission, manufacturing and critical-infrastructure, and Hermes and mobility packs,
+each with its scenario templates (the same precedence model), the loss families they
+price and its customer-input schema: the special data of the owner's section 23 (claims
+volume, loss ratio and policy count; patient records, care disruption and OCR breach
+data; tenants, recurring and usage margin, SLA terms and the API-abuse cap, read from
+cloud spend; control obligations, contracts and process margin; mission cost, response
+rates and oversight bodies; units, downtime cost and equipment value; fleet size, trips,
+margin per trip, asset and recall cost), each a parameter the customer states with its
+provenance. The Hermes fleet's
+downtime is the owner's worked example C, at its known answer.
 
 - Each pack version is held with the digest it was released with
   (`pack_registry.RELEASED`): a released version never changes under its id, and a
