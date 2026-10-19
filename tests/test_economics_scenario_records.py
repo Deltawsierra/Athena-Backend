@@ -644,7 +644,9 @@ def test_the_api_reads_json_strictly(deployment, people):
 
 def test_no_economics_route_is_a_stop():
     """Every route the economics module serves is classified as not a stop, and
-    none is in the stop set or rides its exemption."""
+    none is in the stop set or rides its exemption -- but ONE: an override revoked
+    takes away the approval a receipt would be signed on, and is a stop (review
+    round 1 of #169, H1; spec, section 35.5), in the stop set and in no other."""
     found = {}
 
     def walk(patterns):
@@ -699,9 +701,12 @@ def test_no_economics_route_is_a_stop():
         "deployment-economics-assurance",
         "deployment-economics-scenario-refresh",
     }
-    for name in found:
+    revoke = "deployment-economics-override-revoke"
+    for name in set(found) - {revoke}:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
         assert name in stops.NOT_STOPS
+    assert set(stops.STOP_ROUTES[revoke]) == {"POST"} and revoke not in stops.NOT_STOPS
+    assert found[revoke].__module__ == "assurance.economics.revoke_api"
     assert set(stops.NOT_STOPS["deployment-economics-parameter-set-versions"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-parameter-set"]) == {"GET"}
     assert set(stops.NOT_STOPS["economics-source-trust-raises"]) == {"GET", "POST"}
@@ -720,7 +725,6 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["deployment-economics-scenario-reviews"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenario-overrides"]) == {"GET", "POST"}
     assert set(stops.NOT_STOPS["deployment-economics-override-approve"]) == {"POST"}
-    assert set(stops.NOT_STOPS["deployment-economics-override-revoke"]) == {"POST"}
 
 
 # ============================================ review round 1 of #146: L3 to L6

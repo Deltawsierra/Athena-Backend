@@ -74,7 +74,7 @@ from datetime import date
 
 from django.db import IntegrityError, transaction
 
-from . import review_service, validity_service
+from . import review_service, row_mac, validity_service
 from .engine.money import Money
 from .models import (
     SIMULATION_COMPLETED,
@@ -168,8 +168,14 @@ REFUSALS = {
     ),
     # Section 28 hardening (spec, section 35).
     "stored_row_unverified": (
-        "the result's stored rows no longer give their digests (its inputs, its record, its card): a row rewritten "
-        "past the records' rules is never signed"
+        "the result's stored rows no longer give their digests or their MACs (its inputs, its record, its card): a "
+        "row rewritten past the records' rules is never signed"
+    ),
+    # Review round 1 of #169, M1 (spec, section 35.9).
+    "row_key_unavailable": (
+        "no receipt is signed without the row key (ATHENA_ECONOMICS_ROW_KEY, read in code, never stored): the "
+        "result and card rows a receipt delivers are bound by a MAC under it, and without it that binding cannot "
+        "be checked"
     ),
     **review_service.REFUSALS,
 }
@@ -471,6 +477,13 @@ def _issue(result: SimulationResult, signer, keyring) -> ReceiptOutcome:
         return ReceiptOutcome(found, False)
     if result.status != SIMULATION_COMPLETED:
         return ReceiptOutcome(None, False, "result_not_completed", f"refused: {result.refusal_code}")
+    # Without the row key nothing binds the rows a receipt would deliver (M1): no
+    # receipt is signed. Read before anything else is read, run or signed.
+    if row_mac.row_key() is None:
+        return ReceiptOutcome(
+            None, False, "row_key_unavailable",
+            f"{row_mac.ROW_KEY_ENV} is not set, or shorter than {row_mac.ROW_KEY_MIN_CHARS} characters",
+        )
     from . import report
 
     # The stored result is as recorded (T5): a record or inputs rewritten past the

@@ -50,6 +50,7 @@ from django.db import models, transaction
 from django.db.models import F, Max, Q
 from django.utils import timezone
 
+from . import row_mac as _row_mac
 from .engine import cost_index, formulas, fx, governance, money, parameters
 from .engine import parameter_set as pset
 from .engine import loss as engine_loss
@@ -309,18 +310,43 @@ def _require_text(**fields) -> None:
         _refuse(governance.required_text_refusal(value), detail=name)
 
 
-def _role_grant(account_id) -> governance.RoleGrant | None:
+def _role_grant(account_id, at=None) -> governance.RoleGrant | None:
     """Who granted the account ``account_id`` the role it holds, and when: its latest
-    recorded promotion (``accounts.RoleGrant``; spec, section 35.6), read from the
-    stored rows, never from an object in hand. ``None`` for no account, or one given
-    its role before grants were recorded."""
+    recorded promotion (``accounts.RoleGrant``; spec, section 35.6) -- where ``at`` is
+    given, its latest at or before ``at`` -- read from the stored rows, never from an
+    object in hand. ``None`` for no account, or one given its role before grants were
+    recorded."""
     from accounts.models import RoleGrant
 
-    grant = RoleGrant.latest_for(account_id)
+    grant = RoleGrant.latest_for(account_id, at=at)
     if grant is None:
         return None
     by = governance.Person(id=grant.granted_by_pk, username=grant.granted_by_username or "")
     return governance.RoleGrant(at=grant.granted_at, by=by)
+
+
+def _role_grant_refusal(account_id, *, asked_by, approver, asked_at) -> str | None:
+    """The T9b rule (:func:`~assurance.economics.engine.governance.role_grant_refusal`)
+    for the account ``account_id`` with its WHOLE promotion chain (review round 1 of
+    #169, M2): its latest grant, then the grant its granter held when they granted it,
+    and so on up, each read from the stored rows; the walk ends at a granter with no
+    recorded grant or none named, never visits an account twice, and is cut past
+    :data:`~assurance.economics.engine.governance.ROLE_GRANT_CHAIN_MAX` grants."""
+    grant = _role_grant(account_id)
+    upstream: list[governance.RoleGrant] = []
+    seen = {account_id}
+    step, cut = grant, False
+    while step is not None and step.by is not None and step.by.id is not None and step.by.id not in seen:
+        if len(upstream) >= governance.ROLE_GRANT_CHAIN_MAX:
+            cut = True
+            break
+        seen.add(step.by.id)
+        step = _role_grant(step.by.id, at=step.at)
+        if step is not None:
+            upstream.append(step)
+    return governance.role_grant_refusal(
+        grant, asked_by=asked_by, approver=approver, asked_at=asked_at, upstream=upstream, chain_cut=cut
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1044,9 +1070,8 @@ class FinancialSourceTrustRaise(_AppendOnly):
         # The second admin is someone who held the role independently: not promoted by
         # the requester or by themselves, nor after the request (T9b; spec, section 35).
         _refuse(
-            governance.role_grant_refusal(
-                _role_grant(getattr(by, "pk", None)), asked_by=[requester], approver=approver,
-                asked_at=row.requested_at,
+            _role_grant_refusal(
+                getattr(by, "pk", None), asked_by=[requester], approver=approver, asked_at=row.requested_at
             )
         )
         _refuse(governance.trust_raise_requester_refusal(_requester_is_admin(row)))
@@ -1396,18 +1421,22 @@ class ScenarioReview(_AppendOnly):
         reviewer = _signed_in(self.reviewer)
         self.reviewer_username = reviewer.username
         authors = FinancialScenario.authors_of(self.scenario_id)
-        _refuse(governance.review_refusal(authors, reviewer), SeparationOfDutiesRefused)
+        # Whoever recorded the parameter-set versions the run rests on is an author
+        # too (review round 1 of #169, M3; spec, section 35.4).
+        inputs = input_authors(self.scenario_id)
+        _refuse(
+            governance.review_refusal(authors, reviewer) or governance.input_author_refusal(inputs, reviewer),
+            SeparationOfDutiesRefused,
+        )
         if self.verdict == ReviewVerdict.APPROVED:
-            # An APPROVAL is refused from someone an author promoted, who promoted
-            # themselves, or who was promoted after the version was recorded (T9b;
-            # spec, section 35). Returning a scenario takes approval away and is
-            # never refused by it.
+            # An APPROVAL is refused from someone an author promoted -- anywhere up
+            # the chain of grants (M2) -- who promoted themselves, or who was promoted
+            # after the version was recorded (T9b; spec, section 35). Returning a
+            # scenario takes approval away and is never refused by it.
             versions = FinancialScenario._base_manager.filter(pk=self.scenario_id)
             recorded = versions.values_list("recorded_at", flat=True).first()
             _refuse(
-                governance.role_grant_refusal(
-                    _role_grant(self.reviewer_id), asked_by=authors, approver=reviewer, asked_at=recorded
-                ),
+                _role_grant_refusal(self.reviewer_id, asked_by=[*authors, *inputs], approver=reviewer, asked_at=recorded),
                 SeparationOfDutiesRefused,
             )
         # When it was written is the service's clock, never a time the caller put on
@@ -1416,6 +1445,114 @@ class ScenarioReview(_AppendOnly):
 
     def __str__(self) -> str:
         return f"{self.verdict} review of scenario {self.scenario_id}"
+
+
+# ---------------------------------------------------------------------------
+# Who authored what a receipt delivers, whether an approval still counts, and the
+# version a parameter set's figures are measured against (review round 1 of #169,
+# M3, L1 and M4; spec, section 35)
+# ---------------------------------------------------------------------------
+
+
+def latest_review(scenario_id) -> ScenarioReview | None:
+    """The scenario version's latest review, the one that stands (as
+    :func:`assurance.economics.builder.review_status` orders them)."""
+    return ScenarioReview._base_manager.filter(scenario_id=scenario_id).order_by("-reviewed_at", "-id").first()
+
+
+def _still_writes(account_id) -> bool:
+    """Whether the account ``account_id`` still exists, is active, and writes
+    economics records (an admin, an analyst or a superuser), read from its row now."""
+    if account_id is None:
+        return False
+    from django.contrib.auth import get_user_model
+
+    model = get_user_model()
+    row = model._base_manager.filter(pk=account_id).values_list("is_active", "role", "is_superuser").first()
+    if row is None:
+        return False
+    active, role, superuser = row
+    return active is True and (superuser is True or role in (model.Roles.ADMIN, model.Roles.ANALYST))
+
+
+def approval_standing(review: ScenarioReview | None, authors, inputs=()) -> str | None:
+    """``None`` where ``review`` is an approval that counts NOW; otherwise why not, in
+    words: no review, a verdict that is not ``approved``, a reviewer who is one of
+    ``authors`` (the scenario's) or ``inputs`` (the parameter-set versions'; M3), or
+    -- read from the account's row now (review round 1 of #169, L1) -- a reviewer
+    whose account is removed, deactivated, or no longer an admin or an analyst. A
+    read, never a write; it is on no stop path."""
+    if review is None:
+        return "no review is recorded for this scenario version"
+    who = review.reviewer_username or "nobody"
+    if review.verdict != ReviewVerdict.APPROVED:
+        return f"its latest review, by {who}, is {review.verdict}"
+    reviewer = governance.Person(id=review.reviewer_id, username=review.reviewer_username)
+    refused = governance.review_refusal(authors, reviewer) or governance.input_author_refusal(inputs, reviewer)
+    if refused is not None:
+        return f"its approving review is not a second person's ({refused})"
+    if not _still_writes(review.reviewer_id):
+        return (
+            f"its approving reviewer, {who}, no longer holds an admin or analyst role on an active account: the "
+            "approval no longer counts"
+        )
+    return None
+
+
+def parameter_set_anchor(version, *, same_set: bool = True) -> CustomerParameterSet | None:
+    """The version ``version`` is measured against (review round 1 of #169, M4: the
+    lead's INTERIM default, which the owner may change; spec, section 35.5): the most
+    recently recorded customer parameter-set version recorded before ``version``, that
+    PASSED an approved non-author review -- a scenario version built on it whose
+    latest review is an approval that counts (:func:`approval_standing`) by a person
+    who authored neither that scenario nor that parameter-set version. ``same_set``:
+    one of ``version``'s own set (its anchor); otherwise one of the deployment's, of
+    any set (what a set with no anchor of its own, a new one, is measured against).
+    ``None`` where none has passed. Stepwise cuts accumulate against it until a
+    review passes one of them."""
+    builds = ScenarioBuild._base_manager.filter(deployment_id=version.deployment_id, parameter_set_id__lt=version.pk)
+    if same_set:
+        builds = builds.filter(parameter_set__set_key=version.set_key)
+    builds = builds.order_by("-parameter_set_id", "-id").values_list("scenario_id", "parameter_set_id")
+    for scenario_id, parameter_set_id in builds:
+        review = latest_review(scenario_id)
+        if review is None or review.verdict != ReviewVerdict.APPROVED:
+            continue
+        author = (
+            CustomerParameterSet._base_manager.filter(pk=parameter_set_id)
+            .values_list("author_id", "author_username")
+            .first()
+        )
+        recorded = [governance.Person(id=author[0], username=author[1])] if author else []
+        if approval_standing(review, FinancialScenario.authors_of(scenario_id), recorded) is None:
+            return CustomerParameterSet._base_manager.filter(pk=parameter_set_id).first()
+    return None
+
+
+def input_authors(scenario_id) -> list[governance.Person]:
+    """Who recorded the customer parameter-set versions the scenario version
+    ``scenario_id``'s figures rest on (review round 1 of #169, M3): the version its
+    build reads, and every earlier version of the same set recorded after that
+    version's anchor (:func:`parameter_set_anchor`; every earlier one of the set where
+    it has none) -- the versions whose figures the build carries and no independent
+    review has passed. Each is an author of everything built on them. Empty for a
+    version with no build."""
+    parameter_set_id = (
+        ScenarioBuild._base_manager.filter(scenario_id=scenario_id).values_list("parameter_set_id", flat=True).first()
+    )
+    version = CustomerParameterSet._base_manager.filter(pk=parameter_set_id).first() if parameter_set_id else None
+    if version is None:
+        return []
+    anchor = parameter_set_anchor(version)
+    versions = CustomerParameterSet._base_manager.filter(
+        deployment_id=version.deployment_id, set_key=version.set_key, pk__lte=version.pk
+    )
+    if anchor is not None:
+        versions = versions.filter(pk__gt=anchor.pk)
+    return [
+        governance.Person(id=author_id, username=username)
+        for author_id, username in versions.order_by("pk").values_list("author_id", "author_username")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1482,14 +1619,28 @@ class SensitiveOverride(_AppendOnly):
         return self.approvers_of(self.pk)
 
     @classmethod
+    def input_authors_of(cls, override_id) -> list[governance.Person]:
+        """Who recorded the parameter-set versions the override's scenario version
+        rests on (:func:`input_authors`; review round 1 of #169, M3)."""
+        scenario_id = cls._base_manager.filter(pk=override_id).values_list("scenario_id", flat=True).first()
+        return input_authors(scenario_id) if scenario_id is not None else []
+
+    @classmethod
     def standing_refusal(cls, override_id, now=None) -> str | None:
         """``None`` when the override ``override_id`` is in force at ``now`` (the
         service's clock); otherwise why not: revoked, expired, or short of its two
-        approvers. Read from the stored rows."""
+        approvers. Read from the stored rows. An approval by an author of the change
+        (:meth:`input_authors_of`; M3) does not count, whenever it was recorded."""
         requested_at = cls._base_manager.filter(pk=override_id).values_list("requested_at", flat=True).first()
+        inputs = [author for author in cls.input_authors_of(override_id) if author.named]
+        approvers = [
+            person
+            for person in cls.approvers_of(override_id)
+            if not any(governance.same_person(person, author) for author in inputs)
+        ]
         return governance.override_in_force_refusal(
             cls.requester_of(override_id),
-            cls.approvers_of(override_id),
+            approvers,
             requested_at=requested_at,
             revoked=OverrideRevocation._base_manager.filter(override_id=override_id).exists(),
             now=now or timezone.now(),
@@ -1571,19 +1722,25 @@ class OverrideApproval(_AppendOnly):
             governance.approval_refusal(requester, SensitiveOverride.approvers_of(self.override_id), approver),
             SeparationOfDutiesRefused,
         )
+        # Whoever recorded the parameter-set versions behind the change is its author,
+        # never its second person (review round 1 of #169, M3).
+        inputs = SensitiveOverride.input_authors_of(self.override_id)
+        _refuse(
+            governance.change_author_refusal(inputs, approver),
+            SeparationOfDutiesRefused,
+        )
         # A revoked or expired override is approved no more (spec, section 35).
         standing = SensitiveOverride.standing_refusal(self.override_id)
         if standing in ("override_revoked", "override_expired"):
             raise SeparationOfDutiesRefused(standing)
-        # An approver promoted by the requester, by themselves, or after the request,
-        # is not a second person (T9b).
+        # An approver promoted by the requester or an author of the change -- anywhere
+        # up the chain of grants (M2) -- by themselves, or after the request, is not a
+        # second person (T9b).
         requested_at = (
             SensitiveOverride._base_manager.filter(pk=self.override_id).values_list("requested_at", flat=True).first()
         )
         _refuse(
-            governance.role_grant_refusal(
-                _role_grant(self.approver_id), asked_by=[requester], approver=approver, asked_at=requested_at
-            ),
+            _role_grant_refusal(self.approver_id, asked_by=[requester, *inputs], approver=approver, asked_at=requested_at),
             SeparationOfDutiesRefused,
         )
         self.approved_at = timezone.now()
@@ -1942,7 +2099,8 @@ def observation_rows_refusal(version_ids) -> tuple[str, str] | None:
         holder = holders[(version["deployment_id"], version["source_key"], version["snapshot_hash"])]
         found = observation_rows_digest(digests[holder["pk"]])
         refused = governance.observation_rows_refusal(
-            True, found, (holder["observations_digest"], version["observations_digest"])
+            True, found, (holder["observations_digest"], version["observations_digest"]),
+            holds_rows=bool(digests[holder["pk"]]),
         )
         if refused is not None:
             return refused, (
@@ -3147,6 +3305,10 @@ class SimulationResult(_AppendOnly):
     remediation = models.ForeignKey(
         "RemediationOption", on_delete=models.CASCADE, null=True, blank=True, related_name="+"
     )
+    # The row's MAC under the row key, which the database never holds (review round 1
+    # of #169, M1; spec, section 35.9; :mod:`.row_mac`): set at insert, empty where
+    # there was no key. Checked on every read, card and receipt (``result_mac``).
+    row_mac = models.CharField(max_length=80, blank=True, default="")
 
     class Meta:
         ordering = ["scenario", "id"]
@@ -3223,6 +3385,9 @@ class SimulationResult(_AppendOnly):
             scenario_id=self.scenario_id, input_digest=self.input_digest, seed=self.seed, draws=self.draws
         ).exists():
             raise EconomicsRefused("duplicate_id", "a result of the same inputs, seed and draws is recorded")
+        # Bound by the row key, where there is one (M1): never anything the caller set.
+        key = _row_mac.row_key()
+        self.row_mac = "" if key is None else _row_mac.result_mac(self, key)
         self._result_checked = _checked_state(self)
 
     def insert_checked(self) -> None:
@@ -3290,6 +3455,8 @@ class FinancialValidityCard(_AppendOnly):
     sensitivity_digest = models.CharField(max_length=71, blank=True)
     issued_at = models.DateTimeField()
     recorded_at = models.DateTimeField(default=timezone.now)
+    # The row's MAC under the row key (M1; as SimulationResult.row_mac): ``card_mac``.
+    row_mac = models.CharField(max_length=80, blank=True, default="")
 
     class Meta:
         ordering = ["scenario", "id"]
@@ -3329,6 +3496,8 @@ class FinancialValidityCard(_AppendOnly):
             raise EconomicsRefused("card_record_malformed", "the card says when it was issued")
         if FinancialValidityCard._base_manager.filter(simulation_id=self.simulation_id).exists():
             raise EconomicsRefused("duplicate_id", "a card of this simulation result is recorded")
+        key = _row_mac.row_key()
+        self.row_mac = "" if key is None else _row_mac.card_mac(self, key)
         self._card_checked = _checked_state(self)
 
     def insert_checked(self) -> None:

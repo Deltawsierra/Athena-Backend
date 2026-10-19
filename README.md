@@ -558,22 +558,31 @@ either; step 6's simulate route (below) calls both.
 
 Section 28's hardening (spec-v1, section 35). A receipt is signed only once the
 scenario version's latest review is approved by a person who authored no version of
-it (`scenario_not_reviewed`; `POST .../scenarios/<uuid>/reviews/`), ON unless the
-environment variable `ATHENA_ECONOMICS_RECEIPT_REVIEW` is exactly `off`; and only once
-every material change of its customer parameter-set version against the version
-before it (a figure moved 2x or more, added, removed, a distribution changed) is named
-by a sensitive override in force: two approvers other than the requester, not expired
-(30 days), not revoked (`material_change_unapproved`; `.../overrides/`, and
-`.../economics/overrides/<uuid>/approve/` and `revoke/`, a revoke that is never
-refused). An approver an author or requester promoted, who promoted themselves, or who
+it and recorded none of the parameter-set versions it rests on, and who still holds
+an admin or analyst role on an active account (`scenario_not_reviewed`;
+`POST .../scenarios/<uuid>/reviews/`), ON unless the environment variable
+`ATHENA_ECONOMICS_RECEIPT_REVIEW` is exactly `off`; and only once every material
+change of its customer parameter-set version against its anchor -- the latest version
+of the deployment that passed an approved non-author review, else the version before
+it (a figure moved 2x or more, added, removed, a distribution changed) -- is named by
+a sensitive override in force: two approvers other than the requester and the
+change's authors, not expired (30 days), not revoked (`material_change_unapproved`;
+`.../overrides/`, `.../economics/overrides/<uuid>/approve/`). An approver an author or
+requester promoted, anywhere up the chain of grants, who promoted themselves, or who
 was promoted after the request, is refused (`approver_role_not_independent`), and a
-demotion is never refused. Where a receipt is recorded, every served path checks that
-its signed document still binds the stored rows (`receipt_binding`), and a snapshot
-file registers `unverified` at the feed registry's licence whatever it states; a
-rewritten observation row demotes its version (`snapshot_rows_mismatch`). A refresh
-(E6) rebuilds into a new, unreviewed version: its receipt waits for that version's
-review, the obligations stay open meanwhile, and the refresh of the rebuilt version
-then issues the receipt and closes them.
+demotion is never refused. `.../economics/overrides/<uuid>/revoke/` is a STOP
+(`safety.stops`; its own module, `assurance/economics/revoke_api.py`): no body,
+gateway, throttle, rule or lock holds it back, and it is one insert. A result and its
+card are bound by a MAC under `ATHENA_ECONOMICS_ROW_KEY` (read in code, never stored;
+without it no receipt is signed, `row_key_unavailable`, and rows recorded meanwhile
+are bound later by `manage.py bind_economics_rows`), and where a receipt is recorded,
+every served path checks that its signed document still binds the stored rows
+(`receipt_binding`). A snapshot file registers `unverified` at the feed registry's
+licence whatever it states; a rewritten observation row, or a blanked digest,
+demotes its version (`snapshot_rows_mismatch`). A refresh (E6) rebuilds into a new,
+unreviewed version: its receipt waits for that version's review, the obligations stay
+open meanwhile, and the refresh of the rebuilt version then issues the receipt and
+closes them.
 
 ### The scenario endpoints and the report
 
@@ -625,8 +634,8 @@ bounds a simulate request, shared by the run, the analysis and the series.
 Access, tenancy (404), strict JSON, 64 KiB and the 503 while the currency table
 cannot be read are the parameter set's; a run the engine cannot make now is 503 and
 records nothing. None of its routes (the review and override routes above
-included) is a stop, and a fault in this module leaves only
-these routes unserved. A residual run under a remediation option (below) is never the
+included) is a stop -- the override revoke, which is, is served from a module of its
+own -- and a fault in this module leaves only these routes unserved. A residual run under a remediation option (below) is never the
 scenario's exposure: `results/`, the scenario list and the scenario document serve only
 its own runs. The list and the receipt read their query strictly (an unknown key is
 400), answer `Cache-Control: no-store` (as `results/` and the ROI route now do too),

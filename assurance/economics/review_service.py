@@ -5,8 +5,11 @@ and T1/T4; ``docs/economics/spec-v1.md``, section 35).
 delivery". A Financial Exposure Receipt is the delivered figure, so
 :func:`review_refusal` refuses one (``scenario_not_reviewed``) unless the LATEST
 review of the run's scenario version is ``approved``, by a person who authored no
-version of the scenario (matched on the account and the username, as every
-separation rule here). The review itself is written through
+version of the scenario and recorded none of the customer parameter-set versions its
+figures rest on (review round 1 of #169, M3; matched on the account and the
+username, as every separation rule here), and whose account, read now, still exists,
+is active and is an admin or an analyst (L1): an approval by someone since demoted,
+deactivated or removed no longer counts. The review itself is written through
 ``POST .../economics/scenarios/<uuid>/reviews/`` (:mod:`.report_api`), whose model
 refuses an author, and refuses an approval from someone an author promoted, who
 promoted themselves, or who was promoted after the version was recorded (T9b,
@@ -17,9 +20,15 @@ value keeps it on. It applies to every receipt: a receipt of a ``dev`` or
 ``staging`` deployment carries the same signature and states no environment, so it
 is gated the same way.
 
-**The override gate (T1/T4).** :func:`sensitive_changes` lists what moved between the
-customer parameter-set version the run's build names and the version before it of
-the same set: a variable added or removed, its unit or currency changed, its low,
+**The override gate (T1/T4).** :func:`sensitive_changes` lists what moved in the
+customer parameter-set version the run's build names against its ANCHOR (review
+round 1 of #169, M4; the lead's interim default, which the owner may change): the
+most recently recorded version of the same set, recorded before it, that passed an
+approved non-author review (:func:`~assurance.economics.models.parameter_set_anchor`),
+so stepwise cuts accumulate against it. A set with no anchor of its own -- a new one
+-- is measured against the version before it of the same set and, on the variables
+both state, against the deployment's anchor of any set, so a new set is measured
+too. What counts: a variable added or removed, its unit or currency changed, its low,
 base or high moved by a factor of :data:`MATERIAL_FACTOR` or more either way (or to
 or from zero, or across zero), its stated distribution changed in kind or a
 parameter of it moved by that factor, or the set's insurance exclusions changed.
@@ -30,7 +39,7 @@ naming its subject exactly: approved by two people, neither its requester; not
 expired (:data:`~assurance.economics.engine.governance.OVERRIDE_EXPIRES_AFTER`); and
 not revoked. Otherwise the receipt is refused (``material_change_unapproved``). An
 override counts only while it is in force, read at the moment the receipt is asked
-for, never stored. A first version has no version before it, and nothing to compare.
+for, never stored. A first version with no anchor has nothing to compare.
 
 Both gates read rows and nothing else: no lock, no transaction, no engine. Nothing
 here is on a stop path; nothing Django loads at start imports it.
@@ -41,16 +50,18 @@ from __future__ import annotations
 import os
 from decimal import Decimal, InvalidOperation
 
-from .engine import governance
 from .models import (
     CustomerParameterSet,
     FinancialParameter,
     FinancialScenario,
-    ReviewVerdict,
     ScenarioBuild,
     ScenarioReview,
     SensitiveOverride,
+    approval_standing,
+    input_authors,
+    parameter_set_anchor,
 )
+from .models import latest_review as _latest_review
 
 #: The environment variable that switches the review gate, read in code only.
 REVIEW_GATE_ENV = "ATHENA_ECONOMICS_RECEIPT_REVIEW"
@@ -66,7 +77,8 @@ REFUSALS = {
         "is approved by a person who authored no version of it (POST .../reviews/ with verdict approved)"
     ),
     "material_change_unapproved": (
-        "a figure of the run's customer parameter-set version moved materially against the version before it (by a "
+        "a figure of the run's customer parameter-set version moved materially against its anchor -- the latest "
+        "version that passed an approved non-author review, else the version before it (by a "
         "factor of 2 or more, added, removed, or its distribution changed): each such change needs a sensitive "
         "override naming it that is IN FORCE -- approved by two people other than its requester, not expired and "
         "not revoked -- before a receipt is signed"
@@ -83,25 +95,23 @@ def review_gate() -> str:
 def latest_review(scenario_id) -> ScenarioReview | None:
     """The scenario version's latest review, the one that stands (as
     :func:`assurance.economics.builder.review_status` orders them)."""
-    return ScenarioReview._base_manager.filter(scenario_id=scenario_id).order_by("-reviewed_at", "-id").first()
+    return _latest_review(scenario_id)
 
 
 def review_refusal(scenario_id) -> tuple[str, str] | None:
     """``("scenario_not_reviewed", detail)`` unless the gate is off or the latest
-    review of the scenario version ``scenario_id`` is ``approved`` by someone who
-    authored no version of it, read from the rows now; ``None`` otherwise."""
+    review of the scenario version ``scenario_id`` is an approval that counts now
+    (:func:`~assurance.economics.models.approval_standing`): ``approved``, by someone
+    who authored no version of it and recorded none of the parameter-set versions it
+    rests on, whose account is still an active admin or analyst -- read from the rows
+    now; ``None`` otherwise."""
     if review_gate() == REVIEW_OFF:
         return None
-    latest = latest_review(scenario_id)
-    if latest is None:
-        return "scenario_not_reviewed", "no review is recorded for this scenario version"
-    if latest.verdict != ReviewVerdict.APPROVED:
-        who = latest.reviewer_username or "nobody"
-        return "scenario_not_reviewed", f"its latest review, by {who}, is {latest.verdict}"
-    reviewer = governance.Person(id=latest.reviewer_id, username=latest.reviewer_username)
-    refused = governance.review_refusal(FinancialScenario.authors_of(scenario_id), reviewer)
+    refused = approval_standing(
+        latest_review(scenario_id), FinancialScenario.authors_of(scenario_id), input_authors(scenario_id)
+    )
     if refused is not None:
-        return "scenario_not_reviewed", f"its approving review is not a second person's ({refused})"
+        return "scenario_not_reviewed", refused
     return None
 
 
@@ -155,17 +165,54 @@ def subject(version: CustomerParameterSet, name: str) -> str:
     return f"parameter-set:{version.set_key}:v{version.version}:{name}"
 
 
+def _compare(version: CustomerParameterSet, against: CustomerParameterSet, *, shared_only: bool) -> list[dict]:
+    """What moved in ``version`` against ``against``, each as ``{"subject", "change"}``.
+    ``shared_only``: ``against`` is another set's version, so only the variables both
+    state are compared (a set's other variables and its exclusions are its own)."""
+    named = f"against {against.set_key} v{against.version}"
+    before = {row.name: row for row in against.parameter_rows()}
+    after = {row.name: row for row in version.parameter_rows()}
+    names = set(before) & set(after) if shared_only else set(before) | set(after)
+    changes = []
+    for name in sorted(names):
+        if name not in after:
+            what = f"removed ({against.set_key} v{against.version} stated it)"
+        elif name not in before:
+            what = f"added ({against.set_key} v{against.version} did not state it)"
+        else:
+            what = _change(before[name], after[name])
+            what = None if what is None else f"{what} ({named})"
+        if what is not None:
+            changes.append({"subject": subject(version, name), "change": what})
+    if not shared_only and sorted(against.insurance_exclusions or []) != sorted(version.insurance_exclusions or []):
+        changes.append(
+            {
+                "subject": subject(version, "insurance_exclusions"),
+                "change": f"the insurance exclusions changed from {against.insurance_exclusions} to "
+                f"{version.insurance_exclusions} ({named})",
+            }
+        )
+    return changes
+
+
 def sensitive_changes(scenario_id) -> list[dict]:
-    """What moved between the parameter-set version the scenario version's build
-    names and the version before it of the same set, each as ``{"subject", "change"}``,
-    sorted by subject (see the module's rules). Empty for a version with no build,
-    or a first version."""
+    """What moved in the parameter-set version the scenario version's build names,
+    each as ``{"subject", "change"}``, sorted by subject (see the module's rules):
+    against its own set's ANCHOR (:func:`~assurance.economics.models.parameter_set_anchor`)
+    where it has one; otherwise against the version before it of the same set and --
+    on the variables both state -- against the deployment's anchor, of any set, so a
+    new set is measured too. Empty for a version with no build, or a first version
+    with no anchor anywhere."""
     build = ScenarioBuild._base_manager.filter(scenario_id=scenario_id).first()
     if build is None:
         return []
     version = CustomerParameterSet._base_manager.filter(pk=build.parameter_set_id).first()
     if version is None:
         return []
+    own = parameter_set_anchor(version)
+    if own is not None:
+        return sorted(_compare(version, own, shared_only=False), key=lambda change: change["subject"])
+    changes: dict[str, dict] = {}
     previous = (
         CustomerParameterSet._base_manager.filter(
             deployment_id=version.deployment_id, set_key=version.set_key, version__lt=version.version
@@ -173,29 +220,14 @@ def sensitive_changes(scenario_id) -> list[dict]:
         .order_by("-version")
         .first()
     )
-    if previous is None:
-        return []
-    before = {row.name: row for row in previous.parameter_rows()}
-    after = {row.name: row for row in version.parameter_rows()}
-    changes = []
-    for name in sorted(set(before) | set(after)):
-        if name not in after:
-            what = f"removed (v{previous.version} stated it)"
-        elif name not in before:
-            what = f"added (v{previous.version} did not state it)"
-        else:
-            what = _change(before[name], after[name])
-        if what is not None:
-            changes.append({"subject": subject(version, name), "change": what})
-    if sorted(previous.insurance_exclusions or []) != sorted(version.insurance_exclusions or []):
-        changes.append(
-            {
-                "subject": subject(version, "insurance_exclusions"),
-                "change": f"the insurance exclusions changed from {previous.insurance_exclusions} to "
-                f"{version.insurance_exclusions}",
-            }
-        )
-    return sorted(changes, key=lambda change: change["subject"])
+    if previous is not None:
+        for change in _compare(version, previous, shared_only=False):
+            changes.setdefault(change["subject"], change)
+    other = parameter_set_anchor(version, same_set=False)
+    if other is not None:
+        for change in _compare(version, other, shared_only=True):
+            changes.setdefault(change["subject"], change)
+    return sorted(changes.values(), key=lambda change: change["subject"])
 
 
 def in_force_subjects(scenario_id) -> set[str]:

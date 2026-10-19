@@ -1544,6 +1544,7 @@ class World:
             data={"seed": 9, "policy": "quick_10k", "as_of": "2026-10-06"}, format="json",
         ).status_code
         self.command(docs, "check_financial_assurance", "--deployment", str(self.deployment.uuid))
+        self.command(docs, "bind_economics_rows", "--dry-run")
 
     def feeds(self, docs, signals):
         """MVP step 10: the operator's fetch, with the providers' key planted. FRED
@@ -1803,8 +1804,8 @@ ROUTES.update(
         "deployment-economics-scenario-overrides": _READ,
         "deployment-economics-override-approve": _DOCS + "approves a sensitive override; answers it, as "
         "deployment-economics-scenario-overrides reads it",
-        "deployment-economics-override-revoke": _DOCS + "revokes a sensitive override; answers it, as "
-        "deployment-economics-scenario-overrides reads it",
+        "deployment-economics-override-revoke": _DOCS + "revokes a sensitive override (a stop); answers the "
+        "override's uuid and the revocation it recorded, from what is in hand",
     }
 )
 _ADMIN = "not an export: the admin site, staff only; every page renders rows searched whole as db"
@@ -2081,6 +2082,9 @@ COMMANDS: dict[str, str] = {
     "raise_source_trust": "commands",
     "fetch_financial_source": "commands",
     "check_financial_assurance": "commands",
+    # Review round 1 of #169 (spec, section 35.9): binds rows recorded before the row
+    # key; prints counts only.
+    "bind_economics_rows": "commands",
 }
 
 

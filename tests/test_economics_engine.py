@@ -810,7 +810,7 @@ def test_an_economics_fault_never_takes_down_a_stop(fault, plugin):
         cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
     )
     assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
-    assert "4 passed" in result.stdout, result.stdout[-2000:]
+    assert "5 passed" in result.stdout, result.stdout[-2000:]
 
 
 def test_the_economics_routes_are_imported_guarded():
@@ -835,7 +835,7 @@ def test_the_economics_routes_are_imported_guarded():
     )
     assert modules == [
         "economics.api", "economics.health_api", "economics.portfolio_api", "economics.remediation_api",
-        "economics.report_api",
+        "economics.report_api", "economics.revoke_api",
         "economics.scenario_api",
     ], (
         "an economics route module is imported unguarded"
@@ -875,13 +875,22 @@ def test_nothing_but_the_models_registration_imports_economics():
 
     E6 (section 34) adds the operator's ``manage.py check_financial_assurance`` on the
     same terms (no first-party module imports it, checked below); its routes are in
-    ``assurance.economics.report_api``, already mounted guarded."""
+    ``assurance.economics.report_api``, already mounted guarded.
+
+    Review round 1 of #169 (section 35) adds the operator's ``manage.py
+    bind_economics_rows`` on the same terms, and ``assurance.economics.revoke_api``,
+    mounted guarded: the override revoke, which IS a stop (section 35.7). It imports
+    the economics models (which assurance/models.py loads already) and
+    ``safety.stops``, and no economics route module, service, report or engine
+    (checked below), so a fault in any of those leaves it served
+    (``tests/economics_fault_cases.py``)."""
     importers = set()
     command_importers = set()
     commands = (
         "assurance.management.commands.raise_source_trust",
         "assurance.management.commands.fetch_financial_source",
         "assurance.management.commands.check_financial_assurance",
+        "assurance.management.commands.bind_economics_rows",
     )
     skip = {".git", "node_modules", "tests", "__pycache__"}
     for directory, subdirectories, files in os.walk(REPO):
@@ -908,8 +917,14 @@ def test_nothing_but_the_models_registration_imports_economics():
         "assurance/management/commands/raise_source_trust.py",
         "assurance/management/commands/fetch_financial_source.py",
         "assurance/management/commands/check_financial_assurance.py",
+        "assurance/management/commands/bind_economics_rows.py",
     }
     assert command_importers == set()
+    revoke = _imports(REPO / "assurance" / "economics" / "revoke_api.py", "assurance.economics")
+    assert {m for m in revoke if m.startswith(("assurance", "safety"))} == {
+        "assurance.economics.models", "assurance.economics.models.OverrideRevocation",
+        "assurance.economics.models.SensitiveOverride", "safety.stops", "safety.stops.canonical_body",
+    }
     mounted = _imports(REPO / "assurance" / "urls.py", "assurance")
     # The scenario step's route module, (section 24) the scenario builder's,
     # (section 27, step 6) the scenario endpoints with the report, (section 28, step
@@ -922,6 +937,8 @@ def test_nothing_but_the_models_registration_imports_economics():
         "assurance.economics.scenario_api.urlpatterns",
         "assurance.economics.report_api",
         "assurance.economics.report_api.urlpatterns",
+        "assurance.economics.revoke_api",
+        "assurance.economics.revoke_api.urlpatterns",
         "assurance.economics.remediation_api",
         "assurance.economics.remediation_api.urlpatterns",
         "assurance.economics.health_api",

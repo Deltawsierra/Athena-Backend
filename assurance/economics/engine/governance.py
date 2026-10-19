@@ -154,6 +154,10 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
             "request it again"
         ),
         "override_revoked": "the override was revoked: it is not in force, and a revocation is never undone",
+        "author_approves_own_change": (
+            "an override of a scenario version's input is approved by people who recorded none of the customer "
+            "parameter-set versions the run rests on: the author of a change is not its second person"
+        ),
         "snapshot_rows_mismatch": (
             "a source version's stored observation rows no longer give the digests recorded when it was "
             "registered (a row rewritten, added or removed past the records' rules): the version is demoted, and "
@@ -244,6 +248,30 @@ def review_refusal(authors: Iterable[Person], reviewer: Person) -> str | None:
     return None
 
 
+def _recorded_by(input_authors: Iterable[Person], person: Person) -> bool:
+    return any(author.named and same_person(author, person) for author in input_authors)
+
+
+def input_author_refusal(input_authors: Iterable[Person], reviewer: Person) -> str | None:
+    """Whether ``reviewer`` recorded one of the customer parameter-set versions a
+    scenario version's figures rest on (``input_authors``; review round 1 of #169,
+    M3): whoever wrote the inputs is an author of everything built on them, and does
+    not review it (``author_reviews_own_scenario``). Matched on the account and the
+    username."""
+    if _recorded_by(input_authors, reviewer):
+        return "author_reviews_own_scenario"
+    return None
+
+
+def change_author_refusal(input_authors: Iterable[Person], approver: Person) -> str | None:
+    """Whether ``approver`` recorded one of the customer parameter-set versions behind
+    an override's change (``input_authors``; M3): the author of a change does not
+    approve an override of it (``author_approves_own_change``)."""
+    if _recorded_by(input_authors, approver):
+        return "author_approves_own_change"
+    return None
+
+
 def override_request_refusal(requester: Person, subject: str, reason: str) -> str | None:
     """Whether an override may be recorded: a named person asks for it, and it says
     what it overrides and why. Recording it puts nothing in force."""
@@ -307,8 +335,20 @@ class RoleGrant:
     by: Person | None = None
 
 
+#: How many grants up an approver's promotion chain are walked (review round 1 of
+#: #169, M2). A chain longer than this, not yet ended, is refused: it cannot be shown
+#: that nobody who asked stands in it.
+ROLE_GRANT_CHAIN_MAX = 32
+
+
 def role_grant_refusal(
-    grant: RoleGrant | None, *, asked_by: Iterable[Person], approver: Person, asked_at
+    grant: RoleGrant | None,
+    *,
+    asked_by: Iterable[Person],
+    approver: Person,
+    asked_at,
+    upstream: Iterable[RoleGrant] = (),
+    chain_cut: bool = False,
 ) -> str | None:
     """Whether an approver whose role was granted as ``grant`` records may approve
     something ``asked_by`` asked for at ``asked_at`` (the T9b rule, spec section 35).
@@ -316,16 +356,33 @@ def role_grant_refusal(
     Refused (``approver_role_not_independent``) where the grant was made by one of
     ``asked_by`` or by the approver themselves (matched on the account and the
     username, as every separation rule here), or at or after ``asked_at``: a second
-    person held the role independently before the request. An account whose grant
-    is not recorded (``grant`` is ``None``, or records no instant) held its role
-    before grants were recorded, and is not refused by this rule. It reads only who
-    APPROVES: a demotion, a deactivation or a removal is never refused by it."""
+    person held the role independently before the request. And the WHOLE chain is
+    read (review round 1 of #169, M2): ``upstream`` is the grant each granter held
+    when they granted, walked up from ``grant`` -- the granter's, then that
+    granter's granter's, and so on -- and a grant in it made by one of ``asked_by``
+    or by the approver is refused the same way, so a two-hop promotion (the
+    requester promotes an account, which promotes the approver) is not a second
+    person. A chain the walk cut short (``chain_cut``, past
+    :data:`ROLE_GRANT_CHAIN_MAX`) is refused. An account whose grant is not recorded
+    (``grant`` is ``None``, or records no instant) held its role before grants were
+    recorded, and is not refused by this rule; a chain ends at a granter with no
+    recorded grant. It reads only who APPROVES: a demotion, a deactivation or a
+    removal is never refused by it."""
     if grant is None or grant.at is None:
         return None
-    by = grant.by or Person()
-    if by.named and (same_person(by, approver) or any(same_person(by, person) for person in asked_by)):
+    asked_by = list(asked_by)
+
+    def asked_or_approver(person: Person | None) -> bool:
+        person = person or Person()
+        return person.named and (same_person(person, approver) or any(same_person(person, p) for p in asked_by))
+
+    if asked_or_approver(grant.by):
         return "approver_role_not_independent"
     if asked_at is not None and grant.at >= asked_at:
+        return "approver_role_not_independent"
+    if chain_cut is not False:
+        return "approver_role_not_independent"
+    if any(asked_or_approver(earlier.by) for earlier in upstream):
         return "approver_role_not_independent"
     return None
 
@@ -471,13 +528,22 @@ def trust_raise_requester_refusal(requester_is_admin: bool) -> str | None:
 _SNAPSHOT_HASH = re.compile(r"sha256:[0-9a-f]{64}")
 
 
-def observation_rows_refusal(rows_hold_their_digests: bool, found: str, recorded: Iterable[str]) -> str | None:
+def observation_rows_refusal(
+    rows_hold_their_digests: bool, found: str, recorded: Iterable[str], *, holds_rows: bool = False
+) -> str | None:
     """Whether a source version's stored observation rows are as it was registered
     with (section 28 hardening, T2c; spec, section 35.3): each row gives its own
     digest (``rows_hold_their_digests``), and ``found``, the digest of the rows read
-    now, is every digest the version and its holder ``recorded`` (an empty one
-    records nothing). Otherwise ``snapshot_rows_mismatch``: the version is demoted."""
+    now, is every digest the version and its holder ``recorded``. An empty digest
+    records nothing only for a version that holds no rows: every version that holds
+    rows was registered with its digest (and migration 0074 gave each one stored
+    before it its own), so a version that ``holds_rows`` with a digest blanked is
+    refused too (review round 1 of #169, M5). Otherwise ``snapshot_rows_mismatch``:
+    the version is demoted."""
     if rows_hold_their_digests is not True:
+        return "snapshot_rows_mismatch"
+    recorded = list(recorded)
+    if holds_rows is not False and not all(recorded):
         return "snapshot_rows_mismatch"
     if any(digest and digest != found for digest in recorded):
         return "snapshot_rows_mismatch"

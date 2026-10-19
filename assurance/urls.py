@@ -51,6 +51,15 @@ except Exception:
         "Economic Exposure's scenario and report routes could not be loaded; they are not served, and nothing else is"
     )
     economics_report_urlpatterns = []
+# The override revoke is a STOP (spec, section 35.5): a module of its own that imports
+# only the economics models and safety.stops, so a fault in the report, the services
+# or the engine leaves it served. Guarded like the rest: a defect in it takes down
+# that one route, never the URLconf.
+try:
+    from .economics.revoke_api import urlpatterns as economics_revoke_urlpatterns
+except Exception:
+    logger.exception("Economic Exposure's override revoke route could not be loaded; it is not served")
+    economics_revoke_urlpatterns = []
 try:
     from .economics.remediation_api import urlpatterns as economics_remediation_urlpatterns
 except Exception:
@@ -89,6 +98,7 @@ urlpatterns = (
     + economics_urlpatterns
     + economics_scenario_urlpatterns
     + economics_report_urlpatterns
+    + economics_revoke_urlpatterns
     + economics_remediation_urlpatterns
     + economics_health_urlpatterns
     + economics_portfolio_urlpatterns

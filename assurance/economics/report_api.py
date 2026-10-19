@@ -97,11 +97,10 @@ T1/T4; spec, section 35), each answered ``no-store``:
   earlier approver (403 with the rule's code), whose role was not granted by the
   requester, by themselves, or after the request; a revoked or expired override is
   approved no more (409).
-- ``POST deployments/<uuid>/economics/overrides/<override uuid>/revoke/`` (no body,
-  ``{}``, or ``{"reason": "..."}``): a revocation, by any admin or analyst who may see
-  the deployment. It is a REVOKE and is NEVER refused by any rule -- not for the
-  override's state, not by a second person, an expiry or a lock -- and the override
-  is not in force from then on.
+- ``POST deployments/<uuid>/economics/overrides/<override uuid>/revoke/`` is NOT served
+  here: it is a STOP (review round 1 of #169, H1), in a module of its own
+  (:mod:`.revoke_api`) that imports none of this module's dependencies, so a fault in
+  the report, the services or the engine never takes it down.
 
 Access is the parameter-set routes' (:mod:`assurance.economics.api`): a signed-in
 account; a deployment the caller cannot see, or a scenario or result of another
@@ -559,9 +558,10 @@ class ReceiptView(APIView):
 # ------------------------------------------------------------------ continuous financial assurance (E6)
 
 #: The receipt refusals that wait on a person (spec, section 35: the review gate and
-#: the override gate). A refresh whose receipt one of them holds back leaves the
-#: obligations open, for the receipt that will close them.
-_RECEIPT_GATES = frozenset({"scenario_not_reviewed", "material_change_unapproved"})
+#: the override gate) or on the owner (the row key, section 35.9). A refresh whose
+#: receipt one of them holds back leaves the obligations open, for the receipt that
+#: will close them.
+_RECEIPT_GATES = frozenset({"scenario_not_reviewed", "material_change_unapproved", "row_key_unavailable"})
 
 
 class ScenarioFreshnessView(APIView):
@@ -770,10 +770,16 @@ class ScenarioRefreshView(APIView):
             # obligations stay open so the receipt that supersedes the old one is the
             # one they close with; the same refresh of the rebuilt version then issues
             # it and closes them, running nothing again.
+            waits_on = (
+                "the service's row key (ATHENA_ECONOMICS_ROW_KEY; once it is set, bind the rows recorded without it: "
+                "manage.py bind_economics_rows)"
+                if receipt_part["code"] == "row_key_unavailable"
+                else f"approval of scenario version {rebuilt.uuid} (POST its reviews/, and an override in force for "
+                "each material change)"
+            )
             closures, why_open = [], (
-                f"the receipt waits on {receipt_part['code']}: approve scenario version {rebuilt.uuid} (POST its "
-                "reviews/, and an override in force for each material change), then send the refresh of that version "
-                "again: it issues the receipt and closes the obligations, and nothing is run again"
+                f"the receipt waits on {receipt_part['code']}: {waits_on}; then send the refresh of scenario version "
+                f"{rebuilt.uuid} again: it issues the receipt and closes the obligations, and nothing is run again"
             )
         else:
             closures, why_open = continuous_service.close_obligations(
@@ -1059,24 +1065,6 @@ class OverrideApproveView(APIView):
         return _no_store(Response({"override": _override(SensitiveOverride.objects.get(pk=found.pk))}))
 
 
-class OverrideRevokeView(APIView):
-    """A revocation of a sensitive override: a revoke, never refused by any rule."""
-
-    permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [StrictJSONParser]
-
-    def post(self, request, uuid, override):
-        deployment = _deployment(request, uuid)
-        _writer(request)
-        found = _visible_override(deployment, override)
-        body = _fields(_body(request), frozenset(), frozenset({"reason"}))
-        try:
-            found.revoke(by=request.user, reason=body.get("reason", ""))
-        except OperationalError:
-            return _busy()
-        return _no_store(Response({"override": _override(SensitiveOverride.objects.get(pk=found.pk))}))
-
-
 urlpatterns = [
     path(
         "deployments/<uuid:uuid>/economics/scenarios/",
@@ -1133,10 +1121,5 @@ urlpatterns = [
         "deployments/<uuid:uuid>/economics/overrides/<uuid:override>/approve/",
         OverrideApproveView.as_view(),
         name="deployment-economics-override-approve",
-    ),
-    path(
-        "deployments/<uuid:uuid>/economics/overrides/<uuid:override>/revoke/",
-        OverrideRevokeView.as_view(),
-        name="deployment-economics-override-revoke",
     ),
 ]

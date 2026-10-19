@@ -2,9 +2,10 @@
 T9a; ``docs/economics/spec-v1.md``, section 35.4), for the tests that sign one.
 
 A receipt is refused (``scenario_not_reviewed``) unless the latest review of the
-run's scenario version is approved by a person who authored no version of it, and
-whose role was not granted by an author, by themselves, or after the version was
-recorded. The tests that sign receipts record that review here, as a client records
+run's scenario version is approved by a person who authored no version of it and
+recorded none of the parameter-set versions it rests on (review round 1 of #169, M3),
+and whose role was not granted by an author (anywhere up the chain, M2), by
+themselves, or after the version was recorded. The tests that sign receipts record that review here, as a client records
 it through ``POST .../scenarios/<uuid>/reviews/``: the gate stays ON, as it is by
 default, and every receipt they sign has passed it.
 """
@@ -16,7 +17,7 @@ from django.db.models import Q
 
 from accounts.models import RoleGrant
 from assurance.economics.engine import governance
-from assurance.economics.models import FinancialScenario, ScenarioReview
+from assurance.economics.models import FinancialScenario, ScenarioReview, input_authors
 
 
 def _scenario_of(scenario) -> FinancialScenario:
@@ -27,10 +28,11 @@ def _scenario_of(scenario) -> FinancialScenario:
 
 def colleague_of(scenario):
     """The first admin or analyst account (by id) that authored no version of
-    ``scenario`` and held its role before the version was recorded: the colleague a
-    route's review would come from. Fails the test if the fixtures made none."""
+    ``scenario``, recorded none of the parameter-set versions it rests on, and held its
+    role before the version was recorded: the colleague a route's review would come
+    from. Fails the test if the fixtures made none."""
     version = _scenario_of(scenario)
-    authors = FinancialScenario.authors_of(version.pk)
+    authors = FinancialScenario.authors_of(version.pk) + input_authors(version.pk)
     for account in get_user_model().objects.filter(
         Q(role__in=("admin", "analyst")) | Q(is_superuser=True), is_active=True
     ).order_by("pk"):

@@ -1451,7 +1451,7 @@ def test_a_portfolio_fault_never_takes_down_a_stop():
         cwd=REPO, env=env, capture_output=True, text=True, timeout=600, check=False,
     )
     assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-2000:])
-    assert "4 passed" in result.stdout, result.stdout[-2000:]
+    assert "5 passed" in result.stdout, result.stdout[-2000:]
 
 
 def test_removing_an_operator_never_writes_a_portfolio(deployment, people):

@@ -115,11 +115,15 @@ class RoleGrant(models.Model):
         )
 
     @classmethod
-    def latest_for(cls, account_id) -> "RoleGrant | None":
-        """The account's latest recorded promotion, or ``None``."""
+    def latest_for(cls, account_id, at=None) -> "RoleGrant | None":
+        """The account's latest recorded promotion -- where ``at`` is given, its latest
+        at or before ``at`` (the role it held then) -- or ``None``."""
         if account_id is None:
             return None
-        return cls.objects.filter(account_pk=account_id).order_by("-granted_at", "-id").first()
+        grants = cls.objects.filter(account_pk=account_id)
+        if at is not None:
+            grants = grants.filter(granted_at__lte=at)
+        return grants.order_by("-granted_at", "-id").first()
 
     def save(self, *args, **kwargs):
         if not self._state.adding:

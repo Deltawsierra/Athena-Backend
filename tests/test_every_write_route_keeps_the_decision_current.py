@@ -960,8 +960,8 @@ CANNOT_MOVE = {
         _economics_override_approval,
     ),
     ("OverrideRevokeView", "post", "post"): (
-        "revokes a sensitive override, an economics record, never refused; the decision reads no economics "
-        "record",
+        "revokes a sensitive override, an economics record (a stop, refused by no control); the decision reads "
+        "no economics record",
         _economics_override_revocation,
     ),
 }

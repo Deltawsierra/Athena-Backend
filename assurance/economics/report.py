@@ -70,6 +70,7 @@ from decimal import Decimal
 
 from assurance.models import Deployment
 
+from . import row_mac
 from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine.formulas import MARKET_VALUE
@@ -134,12 +135,17 @@ UNKNOWN = "Unknown"
 GRADES_FOR_TOTALS = frozenset({"A", "B", "C", "D"})
 #: The reason a result whose stored rows fail a check is served as a refusal.
 STORED_ROW_UNVERIFIED = "stored_row_unverified"
-#: The checks :func:`stored_row_failures` runs, in order: the result's (its inputs
-#: and its record), the card's (its digest, its grade column against its document,
-#: its reproduction against the result, its analysis against the digest it signs),
-#: and the series' (its digest, its identity against the result).
-RESULT_CHECKS = ("input_digest", "result_digest")
-CARD_CHECKS = ("card_digest", "card_grade", "card_result", "sensitivity_digest")
+#: The checks :func:`stored_row_failures` runs, in order: the result's (its inputs,
+#: its record, and its MAC under the row key), the card's (its digest, its grade
+#: column against its document, its reproduction against the result, its analysis
+#: against the digest it signs, and its MAC), and the series' (its digest, its
+#: identity against the result). The two MAC checks (review round 1 of #169, M1;
+#: spec, section 35.9; :mod:`.row_mac`) run only where the row key is set: a report
+#: lists the checks it ran (:func:`integrity_checks`).
+RESULT_CHECKS = ("input_digest", "result_digest", "result_mac")
+CARD_CHECKS = ("card_digest", "card_grade", "card_result", "sensitivity_digest", "card_mac")
+#: The checks that need the row key.
+MAC_CHECKS = ("result_mac", "card_mac")
 CHARTS_CHECKS = ("charts_digest", "charts_result")
 #: Where a receipt is recorded for the result (section 28 hardening, T5; spec,
 #: section 35): the signed document binds the stored rows (:func:`receipt_binds`).
@@ -237,7 +243,16 @@ def _digest(function, document) -> str | None:
         return None
 
 
-def _result_failures(result: SimulationResult) -> list[str]:
+def integrity_checks() -> tuple[str, ...]:
+    """The checks :func:`stored_row_failures` runs now: every one of
+    :data:`INTEGRITY_CHECKS`, but the MAC checks only where the row key is set."""
+    if row_mac.row_key() is not None:
+        return INTEGRITY_CHECKS
+    return tuple(check for check in INTEGRITY_CHECKS if check not in MAC_CHECKS)
+
+
+def result_digest_failures(result: SimulationResult) -> list[str]:
+    """The result's plain-hash checks it fails: its inputs and its record."""
     failed = []
     if _digest(canonical_digest, result.inputs) != result.input_digest:
         failed.append("input_digest")
@@ -249,9 +264,26 @@ def _result_failures(result: SimulationResult) -> list[str]:
     return failed
 
 
+def _result_failures(result: SimulationResult) -> list[str]:
+    failed = result_digest_failures(result)
+    key = row_mac.row_key()
+    if key is not None and not row_mac.macs_equal(result.row_mac, row_mac.result_mac(result, key)):
+        failed.append("result_mac")
+    return failed
+
+
 def _card_failures(card: FinancialValidityCard | None, result: SimulationResult) -> list[str]:
     if card is None:
         return []
+    failed = card_digest_failures(card, result)
+    key = row_mac.row_key()
+    if key is not None and not row_mac.macs_equal(card.row_mac, row_mac.card_mac(card, key)):
+        failed.append("card_mac")
+    return failed
+
+
+def card_digest_failures(card: FinancialValidityCard, result: SimulationResult) -> list[str]:
+    """The card's plain-hash and identity checks it fails against ``result``."""
     failed = []
     document = card.card if isinstance(card.card, dict) else {}
     if _digest(card_digest, card.card) != card.card_digest:
@@ -951,7 +983,7 @@ def build_report(result: SimulationResult) -> dict:
     # A stale run (E6, section 34) is excluded and says why, where nothing else does.
     stale, stale_unknowns, _freshness = stale_reason(result)
     events = _loss_events(scenario, build, shown, figures=figures)
-    record = result.record if completed and "result_digest" not in failed else None
+    record = result.record if completed and "result_digest" not in failed and "result_mac" not in failed else None
     if not completed:
         refusal = {"code": result.refusal_code, "detail": result.refusal_detail}
     elif failed:
@@ -965,7 +997,7 @@ def build_report(result: SimulationResult) -> dict:
     else:
         summary = {"not_reported": f"refused: {result.refusal_code}"}
     units = {name: (entry or {}).get("unit") for name, entry in (result.inputs.get("parameters") or {}).items()} \
-        if "input_digest" not in failed else {}
+        if "input_digest" not in failed and "result_mac" not in failed else {}
     # A residual run under a remediation option (section 28) is marked at the top
     # level, and is excluded from every total whatever its grade: it is the scenario
     # as the option would leave it, never its exposure.
@@ -1003,7 +1035,7 @@ def build_report(result: SimulationResult) -> dict:
         "currency_bridge": _currency_bridge(result, build, code, failed),
         "status": result.status,
         "refusal": refusal,
-        "integrity": {"verified": not failed, "checks": list(INTEGRITY_CHECKS), "failed": list(failed)},
+        "integrity": {"verified": not failed, "checks": list(integrity_checks()), "failed": list(failed)},
         "grade": grade,
         "banner": UNKNOWN_BANNER if why is not None else STALE_BANNER if stale is not None else None,
         "excluded_from_totals": why is not None or stale is not None or residual_of is not None,
@@ -1199,6 +1231,7 @@ __all__ = [
     "FIGURES",
     "GRADES_FOR_TOTALS",
     "INTEGRITY_CHECKS",
+    "MAC_CHECKS",
     "LIMITATIONS",
     "LINES",
     "NO_CONVERSION",
@@ -1217,6 +1250,9 @@ __all__ = [
     "banner_reason",
     "build_report",
     "canonical_bytes",
+    "card_digest_failures",
+    "integrity_checks",
+    "result_digest_failures",
     "digest_of",
     "latest_exposure_run",
     "may_be_totalled",
