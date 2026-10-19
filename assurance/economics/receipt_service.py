@@ -234,7 +234,12 @@ def source_snapshots(scenario: FinancialScenario) -> list[dict]:
     """The source snapshots the scenario version's run read, each with its content
     hash recomputed from its stored rows (``source_snapshot_mismatch`` where a
     recorded digest no longer reproduces): the customer parameter-set version its
-    build names, the build itself, and the scenario version's own parameters."""
+    build names, the build itself, and the scenario version's own parameters; and,
+    for a version whose build normalized figures (spec, section 36), their records --
+    the currency bridge -- each giving its own digest again
+    (``scenario-normalizations:<scenario>``, the SHA-256 of the records in figure
+    order). A version that normalized nothing names exactly the three it did."""
+    from . import run_normalization
     from .builder import build_digest
 
     snapshots = []
@@ -270,6 +275,16 @@ def source_snapshots(scenario: FinancialScenario) -> list[dict]:
     snapshots.append(
         {"snapshot_id": f"scenario-parameters:{scenario.uuid}", "content_hash": canonical_digest(parameters)}
     )
+    try:
+        # Each record checked as it is read: its digest, both figures, every chain.
+        normalized = run_normalization.stored(scenario)
+    except EconomicsRefused as refused:
+        raise ReceiptRefused("source_snapshot_mismatch", f"a normalization record: {refused.detail}") from None
+    if normalized:
+        snapshots.append({
+            "snapshot_id": f"scenario-normalizations:{scenario.uuid}",
+            "content_hash": canonical_digest([row.record for row in normalized]),
+        })
     return sorted(snapshots, key=lambda s: s["snapshot_id"])
 
 

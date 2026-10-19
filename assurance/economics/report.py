@@ -51,8 +51,11 @@ receipt, where recorded. It runs no simulation, reads no clock and asks no engin
   read writes nothing, and the run, its card and its receipt are never altered.
 - **The valuation date and the currency bridge** (``currency_bridge``, schema v2,
   section 30): the run's valuation date, read from the stored rows the receipt
-  reads it from, and the normalization record of each figure the run converted --
-  none, because a run converts nothing and no such record is stored
+  reads it from, and the normalization record of each figure the run converted:
+  each figure its build normalized (section 36), as the run's stored inputs hold it,
+  so the input digest the integrity checks hold covers it (:data:`CONVERTED`), a
+  source whose licence does not allow redistributing its raw data shown by its
+  provenance only; none for a run whose build normalized nothing
   (:data:`NO_CONVERSION`). Nothing is converted or recomputed here.
 
 Nothing here is on a stop path. This module imports nothing probabilistic: the step-8
@@ -70,11 +73,12 @@ from decimal import Decimal
 
 from assurance.models import Deployment
 
-from . import row_mac
+from . import row_mac, run_normalization
 from .engine import currency as _currency
 from .engine import loss as engine_loss
 from .engine.formulas import MARKET_VALUE
 from .engine.money import Money
+from .engine.pack_inputs import SCHEMAS as INDUSTRY_PACKS
 from .engine.parameters import MONEY_UNITS, POINTS
 from .models import (
     CARD_GRADES,
@@ -119,6 +123,14 @@ NO_CONVERSION = (
     "component's inputs in another currency are refused, currency_mismatch), so no figure has a normalization "
     "record to serve, and none is computed here"
 )
+#: What the currency bridge says of a run whose build normalized figures (section 36).
+CONVERTED = (
+    "each figure the scenario build normalized into the reporting currency at the valuation date (section 36): the "
+    "parameter-set figure as stated, the figure the run read in its place, and each point's normalization record "
+    "with its chain, downgrades, conflicts and fallbacks, as the run's stored inputs hold them, so the input digest "
+    "covers them; a source whose licence does not allow redistributing its raw data is shown by its provenance only, "
+    "and the figures derived from it stand. Nothing is converted or recomputed here"
+)
 #: The scenario document's schema.
 SCENARIO_SCHEMA = "mythos.economics.scenario/v1"
 #: What a result graded Unknown, refused or not graded shows (the owner-adopted default).
@@ -151,6 +163,11 @@ CHARTS_CHECKS = ("charts_digest", "charts_result")
 #: section 35): the signed document binds the stored rows (:func:`receipt_binds`).
 RECEIPT_CHECKS = ("receipt_binding",)
 INTEGRITY_CHECKS = RESULT_CHECKS + CARD_CHECKS + CHARTS_CHECKS + RECEIPT_CHECKS
+#: The check a scenario version whose build normalized figures adds (section 36): each
+#: stored record and the two figures it names still hold (its digest, both figures,
+#: every chain replayed). Listed only in such a version's reports, so every other
+#: report's ``integrity.checks`` is as it was.
+NORMALIZATION_CHECKS = ("normalizations",)
 #: A line's figures, as the report names them (the run's record names the expected
 #: annual loss ``expected_annual_exposure``).
 FIGURES = ("p10", "p50", "p90", "mean", "expected_annual_loss", "severe_plausible")
@@ -388,10 +405,11 @@ def stored_row_failures(
     scenario: FinancialScenario,
     receipt=_READ_IT,
 ) -> list[str]:
-    """The checks of :data:`INTEGRITY_CHECKS` that the stored rows of ``result`` fail,
-    in order (none: every row is as recorded). Plain hashing: no engine, no numpy.
-    ``receipt``: the result's recorded receipt, or ``None`` for none; read here when
-    not passed."""
+    """The checks of :data:`INTEGRITY_CHECKS` (and, for a version whose build
+    normalized figures, :data:`NORMALIZATION_CHECKS`) that the stored rows of
+    ``result`` fail, in order (none: every row is as recorded). Plain hashing and
+    decimal arithmetic: no engine, no numpy. ``receipt``: the result's recorded
+    receipt, or ``None`` for none; read here when not passed."""
     if receipt is _READ_IT:
         receipt = FinancialExposureReceipt.objects.filter(simulation=result).first()
     return (
@@ -399,7 +417,22 @@ def stored_row_failures(
         + _card_failures(card, result)
         + _charts_failures(charts, result, scenario)
         + _receipt_failures(receipt, card, result, scenario)
+        + _normalization_failures(scenario)
     )
+
+
+def _normalized(scenario: FinancialScenario) -> bool:
+    from .models import FigureNormalization
+
+    return FigureNormalization.objects.filter(scenario=scenario).exists()
+
+
+def _normalization_failures(scenario: FinancialScenario) -> list[str]:
+    """``["normalizations"]`` where a figure the version's build normalized no longer
+    holds its record (``run_normalization.verified``), else none."""
+    if not _normalized(scenario):
+        return []
+    return ["normalizations"] if run_normalization.verified(scenario) is not None else []
 
 
 def verified_grade(card: FinancialValidityCard | None, result: SimulationResult) -> str | None:
@@ -577,18 +610,18 @@ def _build_part(build: ScenarioBuild | None) -> dict | None:
 
 
 def _policy(build: ScenarioBuild | None):
-    if build is None:
-        return None
-    return CustomerParameterSet.objects.get(pk=build.parameter_set_id).content().insurance_policy()
+    # The version's policy, each term the build normalized read as its normalized figure.
+    return run_normalization.policy_of(build)
 
 
-def _loss_events(scenario: FinancialScenario, build: ScenarioBuild | None, shown: _Shown, *, figures: bool
-                 ) -> list[dict]:
+def _loss_events(scenario: FinancialScenario, build: ScenarioBuild | None, shown: _Shown, *, figures: bool,
+                 normalizations_hold: bool = True) -> list[dict]:
     """Each loss event's components and totals at low, base and high, step 4's
     Decimal figures shown at the minor unit, with the parameter each input reads.
     Without ``figures`` (a refused run) every amount is null: a refusal is served
-    as the refusal, never as figures."""
-    policy = _policy(build)
+    as the refusal, never as figures. Where the version's normalizations no longer
+    hold (section 36) nothing reads them: no policy is applied, and no amount is shown."""
+    policy = _policy(build) if normalizations_hold else None
     events = []
     for row in LossEvent.objects.filter(scenario=scenario).order_by("event_key", "id"):
         event = row.as_engine()
@@ -637,10 +670,35 @@ def _loss_events(scenario: FinancialScenario, build: ScenarioBuild | None, shown
     return events
 
 
-def _parameters(inputs: Mapping) -> dict:
+def withheld_figures(inputs: Mapping) -> dict[str, str]:
+    """The figures of a run (by name) whose values are withheld from a reader, and
+    why: each normalized figure whose record is served provenance-only
+    (:func:`served_conversion`: a source it read, or a conflict names, may not be
+    redistributed), and each derived value taken across one. None for a run that
+    normalized nothing."""
+    held = (inputs or {}).get("normalizations") or []
+    found = {}
+    for record in held:
+        reason = served_conversion(record).get("withheld")
+        if reason is not None:
+            found[record["figure"]] = reason
+    for derived, contributors in sorted(((inputs or {}).get("derived") or {}).items()):
+        taken = [found[name] for name in contributors if name in found]
+        if taken:
+            found[derived] = taken[0]
+    return found
+
+
+def _withhold(entry: dict, reason: str) -> dict:
+    """``entry`` (a parameter as the inputs hold it) with its figures withheld."""
+    return {**entry, **{point.value: None for point in POINTS}, "withheld": reason}
+
+
+def _parameters(inputs: Mapping, restricted: Mapping[str, str] | None = None) -> dict:
     """Every parameter the run read, as its canonical inputs hold it, with what reads
     it (``read_by``): a component's input, a term of the policy, the frequency, or
-    the derived value it was taken across into."""
+    the derived value it was taken across into. A figure ``restricted`` names is
+    served without its values (section 36.4): its provenance stands."""
     read_by: dict[str, list[str]] = {}
     for event in inputs.get("events", []):
         for component in event.get("components", []):
@@ -654,8 +712,10 @@ def _parameters(inputs: Mapping) -> dict:
     for derived, contributors in sorted((inputs.get("derived") or {}).items()):
         for contributor in contributors:
             read_by.setdefault(contributor, []).append(f"derived:{derived}")
+    restricted = restricted or {}
     return {
-        name: {**parameter, "read_by": sorted(read_by.get(name, []))}
+        name: (_withhold(parameter, restricted[name]) if name in restricted else parameter)
+        | {"read_by": sorted(read_by.get(name, []))}
         for name, parameter in sorted(inputs.get("parameters", {}).items())
     }
 
@@ -784,8 +844,12 @@ def _charts(row: SimulationCharts | None, result: SimulationResult, shown: _Show
 _MONEY_UNITS = frozenset(unit.value for unit in MONEY_UNITS)
 
 
+def _none(value) -> None:
+    return None
+
+
 def _sensitivity(card: FinancialValidityCard | None, shown: _Shown, units: Mapping[str, str] | None = None,
-                 withheld: str | None = None) -> dict:
+                 withheld: str | None = None, restricted: Mapping[str, str] | None = None) -> dict:
     if withheld is not None:
         return {"not_reported": withheld}
     if card is None or card.sensitivity is None:
@@ -799,6 +863,9 @@ def _sensitivity(card: FinancialValidityCard | None, shown: _Shown, units: Mappi
         # A money parameter's quantiles are money: at the minor unit, as every amount
         # the report states (review round 1, LOW-3); any other's as the analysis has them.
         quantile = shown if units.get(entry.get("name")) in _MONEY_UNITS else (lambda value: value)
+        if entry.get("name") in (restricted or {}):
+            # A restricted normalized figure's own quantiles are withheld; the outcomes stand.
+            quantile = _none
         tornado.append(
             {
                 **{k: v for k, v in entry.items() if k != "swing"},
@@ -819,7 +886,11 @@ def _sensitivity(card: FinancialValidityCard | None, shown: _Shown, units: Mappi
         "output_varies": analysis.get("output_varies"),
         "baseline": {"outcome": shown(baseline.get("outcome")), "frequency_at": baseline.get("frequency_at")},
         "tornado": tornado,
-        "fixed": analysis.get("fixed"),
+        "fixed": [
+            {**fixed, "value": None, "withheld": restricted[fixed.get("name")]}
+            if isinstance(fixed, dict) and fixed.get("name") in (restricted or {}) else fixed
+            for fixed in analysis.get("fixed") or []
+        ] if restricted else analysis.get("fixed"),
         "not_in_gross_cash": analysis.get("not_in_gross_cash"),
         "per_occurrence": analysis.get("per_occurrence"),
         "statements": analysis.get("statements"),
@@ -901,8 +972,10 @@ def _currency_bridge(result: SimulationResult, build: ScenarioBuild | None, code
     converted (section 30), from stored values only, never recomputed: the date is
     the build's as-of date, or for a version with no build the latest as-of date of
     the components its stored inputs hold, read only where they still give their
-    digest; ``conversions`` is empty, because a run converts nothing and no
-    normalization record is stored (:data:`NO_CONVERSION`)."""
+    digest; ``conversions`` is the record of each figure the build normalized as the
+    stored inputs hold it, each served by :func:`served_conversion` (:data:`CONVERTED`),
+    never from inputs that no longer give their digest; empty for a run whose build
+    normalized nothing (:data:`NO_CONVERSION`)."""
     valuation: dict = {"valuation_date": None, "valuation_date_from": None}
     if build is not None:
         valuation = {"valuation_date": build.as_of.isoformat(), "valuation_date_from": VALUATION_FROM_BUILD}
@@ -922,7 +995,43 @@ def _currency_bridge(result: SimulationResult, build: ScenarioBuild | None, code
             valuation = {"valuation_date": dates[-1], "valuation_date_from": VALUATION_FROM_INPUTS}
         else:
             valuation["not_reported"] = "the version has no build, and its stored inputs hold no component's as-of date"
+    held = None if "input_digest" in failed else (result.inputs or {}).get("normalizations")
+    if held:
+        return {**valuation, "reporting_currency": code, "conversions": [served_conversion(r) for r in held],
+                "statement": CONVERTED}
+    if "input_digest" in failed and (result.inputs or {}).get("normalizations"):
+        # Never served from inputs that no longer give their digest.
+        return {**valuation, "reporting_currency": code, "conversions": [], "statement": CONVERTED,
+                "conversions_not_reported": (
+                    f"{STORED_ROW_UNVERIFIED}: the stored inputs no longer give the run's input digest")}
     return {**valuation, "reporting_currency": code, "conversions": [], "statement": NO_CONVERSION}
+
+
+def served_conversion(record: Mapping) -> dict:
+    """One figure's normalization record as the bridge serves it (the section-28
+    audit's T7, as a portfolio serves a member's normalisation): as stored where every
+    source it read, and every source a conflict names, may be redistributed (``open``,
+    ``customer``); otherwise each point's record with every raw rate and index value,
+    and every number made from them, withheld (provenance only), and so the
+    normalized figures. The stored inputs keep the whole record; the figures stand."""
+    from .portfolio import served_normalization
+
+    policy = {"sources": list(record.get("sources") or [])}
+    points, withheld = {}, None
+    for name, point in sorted((record.get("points") or {}).items()):
+        served = served_normalization({"record": point}, policy)
+        points[name] = served["record"]
+        withheld = withheld or served.get("withheld")
+    entry = {**record, "points": points}
+    if withheld is not None:
+        normalized = dict(record.get("normalized") or {})
+        normalized.update({point: None for point in ("low", "base", "high")})
+        entry.update(
+            normalized=normalized,
+            conflicts=[c for c in (points.get("base") or {}).get("conflicts") or []],
+            withheld=withheld,
+        )
+    return entry
 
 
 def _unknowns(result: SimulationResult, events: list[dict], failed: list[str]) -> list[dict]:
@@ -982,7 +1091,7 @@ def build_report(result: SimulationResult) -> dict:
     why = banner_reason(result, grade, failed)
     # A stale run (E6, section 34) is excluded and says why, where nothing else does.
     stale, stale_unknowns, _freshness = stale_reason(result)
-    events = _loss_events(scenario, build, shown, figures=figures)
+    events = _loss_events(scenario, build, shown, figures=figures, normalizations_hold="normalizations" not in failed)
     record = result.record if completed and "result_digest" not in failed and "result_mac" not in failed else None
     if not completed:
         refusal = {"code": result.refusal_code, "detail": result.refusal_detail}
@@ -998,6 +1107,9 @@ def build_report(result: SimulationResult) -> dict:
         summary = {"not_reported": f"refused: {result.refusal_code}"}
     units = {name: (entry or {}).get("unit") for name, entry in (result.inputs.get("parameters") or {}).items()} \
         if "input_digest" not in failed and "result_mac" not in failed else {}
+    # A normalized figure read from a source whose licence does not allow redistributing
+    # its raw data is withheld wherever the report would show it (section 36.4).
+    restricted = {} if "input_digest" in failed else withheld_figures(result.inputs)
     # A residual run under a remediation option (section 28) is marked at the top
     # level, and is excluded from every total whatever its grade: it is the scenario
     # as the option would leave it, never its exposure.
@@ -1035,26 +1147,58 @@ def build_report(result: SimulationResult) -> dict:
         "currency_bridge": _currency_bridge(result, build, code, failed),
         "status": result.status,
         "refusal": refusal,
-        "integrity": {"verified": not failed, "checks": list(integrity_checks()), "failed": list(failed)},
+        "integrity": {
+            "verified": not failed,
+            "checks": list(integrity_checks()) + (list(NORMALIZATION_CHECKS) if _normalized(scenario) else []),
+            "failed": list(failed),
+        },
         "grade": grade,
         "banner": UNKNOWN_BANNER if why is not None else STALE_BANNER if stale is not None else None,
         "excluded_from_totals": why is not None or stale is not None or residual_of is not None,
         "banner_reason": _with_stale(why, stale),
         "residual_of": residual_of,
         "loss_events": events,
-        "parameters": _parameters(result.inputs) if "input_digest" not in failed else {
+        "parameters": _parameters(result.inputs, restricted) if "input_digest" not in failed else {
             "not_reported": f"{STORED_ROW_UNVERIFIED}: the stored inputs no longer give the run's input digest"
         },
         "summary": summary,
         "charts": _charts(charts, result, shown, withheld),
-        "sensitivity": _sensitivity(card, shown, units, withheld),
+        "sensitivity": _sensitivity(card, shown, units, withheld, restricted),
         "validity_card": _card(card, unverified=card_unverified),
         "receipt": _receipt(receipt),
-        "limitations": list(LIMITATIONS),
+        "limitations": list(LIMITATIONS) + pack_limitations(build, scenario),
         "unknowns": _unknowns(result, events, failed) + stale_unknowns,
     }
     report["digest"] = digest_of(report)
     return report
+
+
+def pack_limitations(build: ScenarioBuild | None, scenario: FinancialScenario) -> list[str]:
+    """What an industry pack's scenario is read with, after the report's own
+    limitations (E7, spec section 37.3): the pack it was built under, with the digest
+    of the content it was built under, the cautions of the templates its effects were
+    assigned to, and what the pack never prices -- each as the BUILD recorded it
+    (:meth:`ScenarioBuild.pack_record`), never as the registry holds it now, so a
+    release that no longer holds the pack still states them, and says so. None for a
+    banking build: its report is the report it was before E7."""
+    record = build.pack_record() if build is not None else None
+    if record is None:
+        return []
+    statements = [
+        (
+            f"built under the industry pack {record['id']} (content {record['digest']}): its templates, its "
+            "customer-input schema and every figure they read are recorded with the build; the pack is not "
+            "calibrated against realised losses"
+        )
+    ]
+    if record["id"] not in INDUSTRY_PACKS:
+        statements.append(
+            f"this release does not hold the industry pack {record['id']}: the cautions and exclusions below are the "
+            "ones recorded with the build"
+        )
+    statements.extend(c for c in record["cautions"] if c not in statements)
+    statements.extend(e for e in record["excluded"] if e not in statements)
+    return statements
 
 
 # ------------------------------------------------------------------ the scenario
@@ -1085,7 +1229,15 @@ def scenario_document(scenario: FinancialScenario) -> dict:
             read_by.setdefault(contributor, []).append(f"derived:{row.name}")
         if row.scenario_id is not None and row.name == "frequency":
             read_by.setdefault(str(row.uuid), []).append("frequency")
-    policy = None if version is None else version.content().insurance_policy()
+    policy = None if version is None else run_normalization.policy_of(build)
+    figures = run_normalization.stored(scenario)
+    for figure in figures:
+        read_by.setdefault(str(figure.native.uuid), []).append(f"normalized:{figure.normalized.name}")
+    restricted = withheld_figures({"normalizations": [figure.record for figure in figures]})
+    for row in rows:
+        taken = [restricted[by_uuid[u].name] for u in row.derived_from if u in by_uuid and by_uuid[u].name in restricted]
+        if taken:
+            restricted.setdefault(row.name, taken[0])
     if policy is not None:
         terms = [("deductible", policy.deductible), ("limit", policy.limit)]
         terms += [(f"sublimit:{family}", term) for family, term in sorted(policy.sublimits.items())]
@@ -1106,9 +1258,8 @@ def scenario_document(scenario: FinancialScenario) -> dict:
             "parent": parent,
             "unit": row.unit,
             "currency": row.currency or None,
-            "low": row.low,
-            "base": row.base,
-            "high": row.high,
+            **({"low": None, "base": None, "high": None, "withheld": restricted[row.name]}
+               if row.name in restricted else {"low": row.low, "base": row.base, "high": row.high}),
             "source_type": row.source_type,
             "evidence_ref": row.evidence_ref,
             "effective_date": row.effective_date.isoformat(),

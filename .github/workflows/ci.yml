@@ -1,8 +1,14 @@
 name: CI
 
+# One run per commit. A pull request's commits run on pull_request; the same
+# commits no longer run a second time on push. master still runs on every push
+# (a merge, a direct push), as secret-scan.yml does. The pull_request event has
+# no branch filter, so a pull request into any branch (the release branch
+# included) still gets both jobs. A branch with no pull request runs nothing
+# until one is opened.
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
 
 jobs:

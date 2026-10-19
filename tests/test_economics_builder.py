@@ -1759,11 +1759,15 @@ def test_no_builder_route_is_a_stop():
                 found[pattern.name] = view
 
     walk(get_resolver().url_patterns)
-    assert set(found) == {"deployment-economics-scenario-build", "deployment-economics-scenario-events"}
+    # E7 (spec, section 37) adds the industry-pack registry's read route.
+    assert set(found) == {
+        "deployment-economics-scenario-build", "deployment-economics-scenario-events", "economics-packs"
+    }
     for name in found:
         assert name not in stops.STOP_ROUTES and name not in stops.EXEMPT_ROUTES
     assert set(stops.NOT_STOPS["deployment-economics-scenario-build"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-scenario-events"]) == {"GET"}
+    assert set(stops.NOT_STOPS["economics-packs"]) == {"GET"}
 
 
 def test_a_builder_fault_never_takes_down_a_stop():

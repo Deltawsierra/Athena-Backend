@@ -1,9 +1,10 @@
 # The light set needed to run the test suite and the Django checks.
 #
-# requirements.txt pulls torch, transformers, spacy and datasets, none of which
-# any code in this repository imports, plus a spaCy model wheel served from a
-# GitHub URL that no air-gapped or proxied build can reach. Installing that to
-# run a unit test is not reasonable.
+# requirements.txt is the full runtime set; this is the lighter one CI installs.
+# requirements.txt used to pull torch, transformers, spacy and datasets, none of
+# which any code in this repository imports, plus a spaCy model wheel served from
+# a GitHub URL that no air-gapped or proxied build could reach. They are gone from
+# it, and this file stays the quick path to run a unit test.
 Django==5.2.5
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1

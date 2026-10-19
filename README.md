@@ -21,10 +21,12 @@ npm install
 npm run dev                              # http://localhost:3000, proxying to :8000
 ```
 
-`requirements.txt` is the full runtime set. It pulls torch, transformers, spaCy
-and datasets, none of which this repository imports, plus a model wheel served
-from a GitHub URL, so it will not install behind a proxy or in an air-gapped
-build. `requirements-dev.txt` is what the tests and CI actually need.
+`requirements.txt` is the full runtime set. It no longer pulls torch,
+transformers, spaCy or datasets, nor the spaCy model wheel that was served from
+a GitHub URL: nothing in this repository imports them, and they made a fresh
+install several gigabytes (torch alone brings the CUDA wheels) that would not
+install behind a proxy or in an air-gapped build. `requirements-dev.txt` is
+what the tests and CI actually need.
 
 ## The engine
 
@@ -279,6 +281,114 @@ assurance policy pins the table's order of the classes, so a change to that orde
 moves the policy pin. The order is the one this service kept before, so the pin
 did not move.
 
+## Legal staleness and the legal-obligations routes
+
+A claim carries two axes: its technical `status`, and its `legal_status` against
+the obligations its deployment is bound by (`assurance.legal`, Phase 2 item 6).
+When an obligation moves, every current claim on every deployment it binds goes to
+`legal_review_pending`: the trigger flags and never judges. Only a person's
+materiality decision, with a written rationale, moves a claim to `legally_current`
+or `legally_stale`, and only a ruling of legally stale caps the decision (at
+`needs_more_evidence`); a review merely pending caps nothing.
+
+The owner's freeze exception 22 (14 Oct) adds the routes an obligation is recorded
+through. Before them a rule moving reached the claims only from code. They live in
+their own module (`assurance/legal_api.py`), which `assurance/urls.py` imports
+guarded, so a fault in it leaves these routes unserved and every stop served:
+
+- `GET /api/assurance/deployments/<uuid>/legal-obligations/`: the obligations the
+  deployment is bound by, newest rule first. At most 200 are listed, and the answer
+  says when there are more. Each says who recorded it (`recorded_by`, `null` for one
+  recorded before these routes) and whether a later version supersedes it (`current`,
+  `superseded_by`).
+- `POST` on the same route records an obligation binding the deployment, attributed
+  to the signed-in admin (201). The body is `jurisdiction`, `source`,
+  `source_version`, `authority_tier`, `operative_date` (`YYYY-MM-DD`, when the rule
+  bites), an optional `thresholds` object, an optional `exemptions` list and an
+  optional `note`. Any other field is refused. `authority_tier` is the source type:
+  `statute`, `regulation`, `binding_guidance`, `case_law` or `advisory`. Two
+  refusals are 409. A version already recorded is `obligation_version_taken`. A
+  second record of an instrument the deployment is already bound by, at a current
+  version, is `obligation_recorded_here`, and the answer names that version's
+  supersede route.
+- `GET /api/assurance/deployments/<uuid>/legal-obligations/<obligation uuid>/`: one
+  obligation the deployment is bound by. It comes with its versions, oldest first,
+  linked by supersession and each attributed, and the materiality decisions people
+  recorded against it on this deployment's claims.
+- `POST .../legal-obligations/<obligation uuid>/supersede/`: records the next
+  version, attributed to the signed-in admin (201). The body is `source_version`,
+  `operative_date`, and optionally `authority_tier`, `thresholds`, `exemptions` and
+  `note`; what it leaves out is the previous version's. The jurisdiction and source
+  stay the same: a different instrument is a new obligation. The previous version is
+  never edited. Only its link to its successor is written. The same request again
+  returns the version it recorded (200) and flags nothing new. It does settle any
+  review its first answer left owed. Another change to a version already superseded
+  is 409 (`obligation_superseded`, naming the current version). A version is never
+  edited or deleted over the API, so `PUT`, `PATCH` and `DELETE` are 405.
+
+Recording an obligation binds one deployment. Its current claims are flagged for
+review (`assurance.legal.flag_for_materiality_review`), and its stored decision is
+refreshed, both in the record's own transaction.
+
+A supersession reaches every deployment the previous version bound, not only the one
+in the path: two hundred deployments as easily as one. So nothing in its own
+transaction grows with how many there are. That transaction does three things, each
+in a fixed number of statements:
+
+- records the new version;
+- links it and carries the bindings forward (`assurance.legal.link_supersession`);
+- owes each bound deployment its review flag (`LegalReviewOwed`, migration
+  `assurance.0079_legal_review_owed`).
+
+Once it commits, the flags are written one deployment per short transaction
+(`assurance.legal.settle_reviews_owed`). Each flags that deployment's claims,
+refreshes its stored decision and deletes its owed row, so the claims and the decision
+always commit together. Between two deployments it holds nothing and waits 25 ms.
+SQLite's write lock is not queued, and without that wait a stop could be kept out for
+the whole run. The answer reports the claims flagged (`review.flagged`) and what is
+still owed (`review.owed`), which is 0 unless settling failed. What a process that died
+midway left owed is flagged by `manage.py settle_legal_reviews`. Run it on a schedule:
+it exits non-zero while anything is still owed. Measured over 200 deployments of three
+claims each, a supersession answered in 11 to 13 s.
+
+Either way, each affected current claim moves to `legal_review_pending` with the claim
+event the carry replays, naming who recorded the change. A claim a person ruled legally
+stale stays stale, and a revoked claim is left alone. Neither route ever sets a claim
+legally current or legally stale. No body field reaches the legal axis, and nothing
+here records a materiality decision.
+
+The flagged claims are a decision input, which is why a deployment's decision is
+refreshed in the transaction that flags it. A pending review caps nothing. But the
+carry can read a flagged version legally stale again when the only ruling on record
+says so (for example, a later ruling whose obligation has since been deleted), and that
+moves the decision.
+
+A stop made while a supersession settles waits at most for about one deployment's
+work. Before this design, a supersession over 200 deployments flagged and refreshed
+them all inside one transaction. Measured then, each write stop of the stop suite, made
+during one, took 2.4 to 4.9 s, against the suite's bound of 0.25 s. Measured now, the
+slowest took 0.20 s (0.11 s over 50 deployments).
+`tests/test_a_supersede_never_holds_back_a_stop.py` times the stops during one.
+
+Any signed-in role reads. Only an admin records or supersedes: an analyst or a
+viewer gets 403, even the deployment's owner. A deployment the caller cannot see is
+404 whether or not it exists. So is an obligation the deployment is not bound by. A
+body is strict JSON of at most 64 KiB:
+
+- over that is 413, on the declared length, and the parser never reads past it;
+- a duplicated key, `NaN` or `Infinity` is 400;
+- a form is 415.
+
+Every answer, refusals included, is `Cache-Control: no-store`. Each version keeps
+the recorder's name beside a nullable link (migration `assurance.0078_legal_obligation_recorded_by`), so removing
+the operator who recorded one (a stop) is never held back by it.
+
+None of the three routes is a stop. Each is in `safety.stops.NOT_STOPS` with its
+reason, and the URLconf-walking test (`tests/test_no_control_holds_back_a_stop.py`)
+classifies them. Not covered: binding a version already recorded to a second
+deployment (it is 409 here), and changing an obligation's own `legal_review_status`.
+A new version starts `unreviewed`. Tests: `tests/test_legal_obligation_routes.py`.
+
 ## Retest-gated closure
 
 A finding with `retest_required` set owes a retest before it can be called fixed.
@@ -520,6 +630,42 @@ check runs before the build's transaction, which only inserts. Every reference i
 looked up in the path's deployment only. A fault in the builder leaves these two routes unserved and nothing
 else; neither is a stop.
 
+### Industry packs (E7)
+
+The banking templates are one pack of a registry (spec, section 37); E7 adds the
+insurance, healthcare and life-sciences, AI-heavy SaaS, regulated-enterprise, government
+and mission, manufacturing and critical-infrastructure, and Hermes and mobility packs,
+each with its scenario templates (the same precedence model), the loss families they
+price and its customer-input schema: the special data of the owner's section 23 (claims
+volume, loss ratio and policy count; patient records, care disruption and OCR breach
+data; tenants, recurring and usage margin, SLA terms and the API-abuse cap, read from
+cloud spend; control obligations, contracts and process margin; mission cost, response
+rates and oversight bodies; units, downtime cost and equipment value; fleet size, trips,
+margin per trip, asset and recall cost), each a parameter the customer states with its
+provenance. The Hermes fleet's
+downtime is the owner's worked example C, at its known answer.
+
+- Each pack version is held with the digest it was released with
+  (`pack_registry.RELEASED`): a released version never changes under its id, and a
+  change is a new version (`.../v2`) beside it.
+- A parameter set may name its pack (`"pack"`) and state its inputs (`"pack_inputs"`);
+  nothing is required when it is recorded, and a build that reads an input the set does
+  not state is refused (`pack_input_missing`), never defaulted. A set answers one pack in
+  every version (`set_pack_changed`). A set that names no pack is the banking pack's,
+  unchanged.
+- A build may name its pack (`"pack"`); it builds under exactly that ONE pack, which its
+  parameter set must answer (`pack_mismatch`), and records it -- with the pack's digest
+  and its cautions -- on the version, the events route, the report and the Validity
+  Card, which state what the build recorded even if a later release no longer holds the
+  pack. A build that names no pack is a banking build, byte for byte what it was.
+- No pack holds a figure, or a geographic or company-size weight (static tests scan
+  every pack and the formulas the packs add, and every name a pack uses is on a
+  reviewed allow-list); harm to a person is never priced (`safety_monetisation_refused`,
+  in any spelling); a physical-world template carries its caution wherever its figures
+  are shown.
+- `GET /api/assurance/economics/packs/`: every pack's library, schema and digest, for
+  any signed-in caller. It reads no row and is not a stop.
+
 ### The simulation
 
 `assurance/economics/simulation_service.py` simulates a stored scenario version
@@ -615,9 +761,10 @@ dashboard needs (section 30):
   "not reported" reason, the exceedance curve and histogram, the sensitivity
   tornado, the grade, the Validity Card and the receipt's reference, limitations and
   unknowns, and `currency_bridge`: the run's valuation date (the build's as-of date,
-  as the receipt signs it) and the normalization record of each figure it converted,
-  which is none, since a run converts nothing. v2 is v1 and that key; a v1 report
-  stays readable, and `may_be_totalled` reads both;
+  as the receipt signs it) and the normalization record of each figure its build
+  normalized (spec, section 36), as the run's inputs hold it -- none where the build
+  normalized nothing. v2 is v1 and that key; a v1 report stays readable, and
+  `may_be_totalled` reads both;
 - `GET .../economics/scenarios/?page=<n>&page_size=<n>`: the deployment's scenario
   versions in record order, 25 a page (at most 100; a larger page is refused), each
   with its title, its templates, its latest exposure run's status (a residual run is
@@ -805,14 +952,50 @@ date (or the same index series and month) more than the tolerance away from the 
 used, relative to it (FX 0.5%, cost index 1.0%), is listed in the record's `conflicts`
 with both sources, both values and the relative difference, and the record carries
 `source_disagreement`; at or under the tolerance nothing is flagged. Each of the two
-lowers the line one grade step however many steps carry it. Runs state their figures in
-one currency and do not normalize yet, so the report and the data-health route read no
-normalization; when runs do, the card inherits the record. `GET
+lowers the line one grade step however many steps carry it. A build that states a
+normalization policy normalizes the figures its run reads (spec, section 36, below), so a
+run's report and card carry each figure's record; the data-health route reads none. `GET
 /api/assurance/deployments/<uuid>/economics/normalization/?amount=&currency=&event_date=&valuation_date=&base_currency=&reporting_currency=&providers=&index_series_id=&index_geography=&index_category=&index_base=`
 answers one such normalization for a deployment, its record with its conflicts,
 fallbacks and downgrades, over the sources a run of it may use and never another
 deployment's: its query read strictly, tenant-scoped, `no-store`, no stop (spec, section
 12.9).
+
+### Figures normalized into a run's reporting currency (spec, section 36)
+
+An admin records a stored normalization policy (`FinancialNormalizationPolicy`,
+platform-wide or a deployment's own, versioned: the base currency, the FX providers IN
+ORDER, the rules and the base currency's cost index). A scenario build
+(`POST .../economics/scenarios/build/`) may NAME one, `"normalization": "<key>"`; it never
+states a policy, so it never chooses which provider is the primary. Each money figure of
+the parameter-set version the build reads -- a variable its templates read, or a term of
+the version's insurance policy -- that is stated in another currency than the build's, or
+at another date than its as-of date, and each money attribute of its effects stated at
+another date, is then normalized through `normalization_service.normalize_for` (FX at the
+figure's effective date, the cost index to the valuation date, FX at the valuation date;
+the source versions a run of the deployment may use), each of its low, base and high,
+BEFORE the build's transaction, which still only inserts. The build reads the normalized
+figure (`normalized:<figure>`, in its currency) and stores the per-figure record
+(`FigureNormalization`, migration `0076_figure_normalizations.py`): the native and
+normalized figures, each point's chain with every rate and index value, its source and
+version, the downgrades, the conflicts and the fallbacks; every record is checked again
+whenever it is read, and one that no longer holds is never used or served; and the FX
+and cost-index rows a normalization reads are checked against the digests the loader
+recorded with their source version (`source_observations_changed` otherwise). A
+normalization the stored books cannot make refuses the build (`rate_missing`,
+`index_missing`, `index_primary_unset`); a figure stating a distribution is refused
+(`distribution_not_normalizable`); without a policy a figure in another currency is
+`currency_mismatch` as before, and an effect's attribute in another currency always is.
+Every run holds the records in its canonical inputs, so its input digest covers them;
+the report's `currency_bridge` lists them (a source whose licence does not allow
+redistribution shown by its provenance only, and its normalized figure withheld wherever
+it would give the rate away); the card, issued only from inputs that give their digest,
+grades under `mythos.economics.confidence-grade/v4`, lowering each line that reads a
+figure one step per normalization downgrade it carries; the receipt names the records as
+`scenario-normalizations:<scenario>`; and E6 records the source versions read: a newer
+usable version stales the run (`source_superseded`), and a refresh rebuilds a new
+version that reads it. A build that normalizes nothing is exactly as before, digests
+included.
 
 ### Cloud prices, SEC EDGAR and enforcement (step 11, context only)
 

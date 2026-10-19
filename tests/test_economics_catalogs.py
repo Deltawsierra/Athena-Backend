@@ -1254,7 +1254,7 @@ LOSS_PATH = (
     "engine/sensitivity.py", "engine/remediation.py", "engine/parameters.py", "engine/parameter_set.py",
     "engine/templates.py", "engine/grade.py", "engine/charts.py", "builder.py", "simulation_service.py", "report.py",
     "remediation_service.py", "charts_service.py", "validity_service.py", "receipt_service.py", "scenario_api.py",
-    "report_api.py", "remediation_api.py", "api.py",
+    "report_api.py", "remediation_api.py", "api.py", "run_normalization.py", "engine/figure_normalization.py",
 )
 #: Names only the context path may use.
 CONTEXT_NAMES = ("EnforcementRecord", "civil_money_penalty", "stated_amounts", "precedent", "FinancialSourceRecords",

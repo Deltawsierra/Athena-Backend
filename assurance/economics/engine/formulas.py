@@ -397,6 +397,131 @@ def _formulas() -> tuple[Formula, ...]:
             ),
             lambda v: v["market_capitalisation"].times(v["price_decline"]),
         ),
+        # The industry packs' formulas (Economic Exposure E7, spec section 37). Each is a
+        # product of non-negative inputs, each of which increases the loss; none holds a
+        # figure of its own: the 24 in throughput_loss is hours in a day, a unit
+        # conversion stated in its expression, as repeat_in_window's is.
+        Formula(
+            "throughput_loss",
+            1,
+            "units_per_day / 24 x hours x affected_share x amount_per_unit",
+            frozenset(
+                {
+                    LossFamily.BUSINESS_INTERRUPTION,
+                    LossFamily.PHYSICAL_OPERATIONAL,
+                    LossFamily.RECOVERY,
+                    LossFamily.CUSTOMER_RESTITUTION,
+                }
+            ),
+            (
+                Input("units_per_day", Unit.COUNT_PER_DAY, INC, "claims, trips or units the operation handles per day"),
+                Input("hours", Unit.HOURS, INC, "how long the operation is interrupted or degraded"),
+                Input("affected_share", Unit.RATIO, INC, "the share of the volume the interruption reaches"),
+                Input("amount_per_unit", Unit.MONEY_PER_UNIT, INC, "the margin, cost or compensation per unit"),
+            ),
+            lambda v: v["amount_per_unit"].times(
+                _product(_per_hour(v["units_per_day"]), v["hours"], v["affected_share"])
+            ),
+        ),
+        Formula(
+            "share_of_units",
+            1,
+            "units x affected_share x amount_per_unit",
+            frozenset(
+                {
+                    LossFamily.NOTIFICATION,
+                    LossFamily.CUSTOMER_RESTITUTION,
+                    LossFamily.RECOVERY,
+                    LossFamily.REGULATORY_COMPLIANCE,
+                    LossFamily.CONTRACTUAL,
+                    LossFamily.INCIDENT_RESPONSE,
+                    LossFamily.PHYSICAL_OPERATIONAL,
+                    LossFamily.THIRD_PARTY_DOWNSTREAM,
+                }
+            ),
+            (
+                Input("units", Unit.COUNT, INC, "the population: records, tenants, policies, vehicles, contracts"),
+                Input("affected_share", Unit.RATIO, INC, "the share of the population the effect reaches"),
+                Input("amount_per_unit", Unit.MONEY_PER_UNIT, INC, "the cost per affected one"),
+            ),
+            lambda v: v["amount_per_unit"].times(_product(v["units"], v["affected_share"])),
+        ),
+        Formula(
+            "share_of_units_value",
+            1,
+            "units x affected_share x amount_per_unit x value_share",
+            frozenset(
+                {LossFamily.DIRECT_FINANCIAL, LossFamily.PHYSICAL_OPERATIONAL, LossFamily.CUSTOMER_RESTITUTION}
+            ),
+            (
+                Input("units", Unit.COUNT, INC, "the population: policies, vehicles, equipment"),
+                Input("affected_share", Unit.RATIO, INC, "the share of the population the effect reaches"),
+                Input("amount_per_unit", Unit.MONEY_PER_UNIT, INC, "the value of one: a premium, an asset's cost"),
+                Input("value_share", Unit.RATIO, INC, "the share of that value lost: a shortfall, a damage ratio"),
+            ),
+            lambda v: v["amount_per_unit"].times(_product(v["units"], v["affected_share"], v["value_share"])),
+        ),
+        Formula(
+            "excess_over_expected",
+            1,
+            "units x affected_share x amount_per_unit x expected_ratio x excess_share",
+            frozenset({LossFamily.DIRECT_FINANCIAL}),
+            (
+                Input("units", Unit.COUNT, INC, "the population: policies in force"),
+                Input("affected_share", Unit.RATIO, INC, "the share of the population the error reaches"),
+                Input("amount_per_unit", Unit.MONEY_PER_UNIT, INC, "the value of one: an annual premium"),
+                Input("expected_ratio", Unit.RATIO, INC, "the expected cost as a share of that value: a loss ratio"),
+                Input("excess_share", Unit.RATIO, INC, "how far the affected ones' expected cost exceeds it"),
+            ),
+            lambda v: v["amount_per_unit"].times(
+                _product(v["units"], v["affected_share"], v["expected_ratio"], v["excess_share"])
+            ),
+        ),
+        Formula(
+            "per_unit_response",
+            1,
+            "units x cost_per_unit",
+            frozenset({LossFamily.REGULATORY_COMPLIANCE, LossFamily.LEGAL, LossFamily.INCIDENT_RESPONSE}),
+            (
+                Input("units", Unit.COUNT, INC, "the bodies answered: regulators, jurisdictions, oversight bodies"),
+                Input("cost_per_unit", Unit.MONEY_PER_UNIT, INC, "the cost of answering one"),
+            ),
+            lambda v: v["cost_per_unit"].times(v["units"]),
+        ),
+        Formula(
+            "churned_share_margin",
+            1,
+            "units x affected_share x churn_rate x margin_per_unit_per_year x recovery_years",
+            frozenset({LossFamily.CUSTOMER_LOSS}),
+            (
+                Input("units", Unit.COUNT, INC, "the customers, tenants or policies in force"),
+                Input("affected_share", Unit.RATIO, INC, "the share of them the event reaches"),
+                Input(
+                    "churn_rate",
+                    Unit.RATIO,
+                    INC,
+                    "the extra share of those reached who leave because of it, from the customer's own retention data",
+                    frozenset({SourceType.CUSTOMER_PROVIDED}),
+                ),
+                Input("margin_per_unit_per_year", Unit.MONEY_PER_UNIT, INC, "recurring margin per one per year"),
+                Input("recovery_years", Unit.YEARS, INC, "years until the lost margin is won back"),
+            ),
+            lambda v: v["margin_per_unit_per_year"].times(
+                _product(v["units"], v["affected_share"], v["churn_rate"], v["recovery_years"])
+            ),
+        ),
+        Formula(
+            "share_of_spend",
+            1,
+            "hours x spend_per_hour x added_share",
+            frozenset({LossFamily.DIRECT_FINANCIAL, LossFamily.BUSINESS_INTERRUPTION}),
+            (
+                Input("hours", Unit.HOURS, INC, "how long the abuse or the load lasts"),
+                Input("spend_per_hour", Unit.MONEY_PER_HOUR, INC, "the platform's spend per hour"),
+                Input("added_share", Unit.RATIO, INC, "the share of that spend the abuse added"),
+            ),
+            lambda v: v["spend_per_hour"].times(_product(v["hours"], v["added_share"])),
+        ),
     )
 
 

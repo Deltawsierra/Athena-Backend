@@ -665,6 +665,8 @@ def test_no_economics_route_is_a_stop():
         # The scenario builder's (spec, section 24).
         "deployment-economics-scenario-build",
         "deployment-economics-scenario-events",
+        # The industry-pack registry, in the builder's module (spec, section 37.10).
+        "economics-packs",
         # Raising a source's trust tier (spec, section 6.1).
         "economics-source-trust-raises",
         "economics-trust-raise-approve",
@@ -713,6 +715,7 @@ def test_no_economics_route_is_a_stop():
     assert set(stops.NOT_STOPS["economics-trust-raise-approve"]) == {"POST"}
     assert set(stops.NOT_STOPS["economics-trust-raise-withdraw"]) == {"POST"}
     assert set(stops.NOT_STOPS["deployment-economics-data-health"]) == {"GET"}
+    assert set(stops.NOT_STOPS["economics-packs"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-normalization"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio"]) == {"GET"}
     assert set(stops.NOT_STOPS["deployment-economics-portfolio-simulate"]) == {"POST"}

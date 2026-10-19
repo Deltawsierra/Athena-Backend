@@ -40,7 +40,7 @@ from types import MappingProxyType
 
 from . import parameter_set as pset
 from .formulas import MARKET_VALUE, Direction, formula
-from .money import Money, MoneyRefused
+from .money import UNAVAILABLE_REASONS, Money, MoneyRefused
 from .parameters import POINTS, Parameter, Point, Unit
 from .provenance import SourceType
 from .taxonomy import LossFamily
@@ -94,6 +94,20 @@ REFUSALS: Mapping[str, str] = MappingProxyType(
         "asset_not_found": "the asset is not one of this deployment's assets",
         "parameter_set_not_found": "the customer parameter-set version is not one of this deployment's",
         "scenario_not_found": "the scenario superseded is not one of this deployment's",
+        # A figure a build normalizes (spec, section 36): never a number the policy does
+        # not allow, so a normalization the books cannot make refuses the build.
+        "rate_missing": UNAVAILABLE_REASONS["rate_missing"],
+        "index_missing": UNAVAILABLE_REASONS["index_missing"],
+        "index_primary_unset": UNAVAILABLE_REASONS["index_primary_unset"],
+        "normalization_policy_not_found": (
+            "the normalization policy a build names is not a stored policy of its deployment or of the platform: a "
+            "build names a stored policy by its key, and never states one"
+        ),
+        "distribution_not_normalizable": (
+            "a figure the build normalizes into its currency states a distribution in its own currency: a "
+            "distribution is not rescaled by a conversion, so state the figure in the build's currency at its as-of "
+            "date, or state it without a distribution"
+        ),
     }
 )
 
@@ -242,10 +256,14 @@ ATTRIBUTES: Mapping[str, Attribute] = MappingProxyType({a.name: a for a in _attr
 
 
 class SourceKind(StrEnum):
-    """Where one formula input's value comes from."""
+    """Where one formula input's value comes from: a variable of the parameter set,
+    an attribute of the effect, or (an industry pack's template, E7) an input of the
+    pack's customer-input schema, which the parameter set states beside its
+    variables (spec, section 37). No banking template reads a pack input."""
 
     PARAMETER_SET = "parameter_set"
     EFFECT_ATTRIBUTE = "effect_attribute"
+    PACK_INPUT = "pack_input"
 
 
 @dataclass(frozen=True)
@@ -268,10 +286,17 @@ def A(name: str) -> Source:
     return Source(SourceKind.EFFECT_ATTRIBUTE, name)
 
 
+def I(name: str) -> Source:
+    # The pack-input counterpart of P and A.
+    return Source(SourceKind.PACK_INPUT, name)
+
+
 @dataclass(frozen=True)
 class ComponentSpec:
     """One component a template makes: its key within the event, its family, the
-    formula and version that compute it, and each formula input's source."""
+    formula and version that compute it, and each formula input's source. (A
+    component an industry template makes only where its pack inputs are stated is
+    named by the template: :attr:`Template.optional_components`.)"""
 
     component_key: str
     family: str
@@ -329,25 +354,64 @@ class Template:
     scope: tuple[Scope, ...]
     components: tuple[ComponentSpec, ...]
     direction_notes: tuple[str, ...]
+    #: The pack the template belongs to (an industry pack's, E7); the banking pack's
+    #: unless one is named.
+    pack: str = PACK
+    #: What the template's figures must be read with (an industry pack's physical-world
+    #: caution, spec section 37); none for a banking template.
+    cautions: tuple[str, ...] = ()
+    #: The components, by key, the template makes only where the parameter set states
+    #: every pack input they read (an industry pack's, E7, spec section 37.2): absent
+    #: otherwise -- never zero, never unknown, never refused. It is how a pack prices a
+    #: loss only some customers have (choice 8: usage-billed revenue). Each names a
+    #: component of the template that reads a pack input (``ValueError`` otherwise);
+    #: no banking template has one.
+    optional_components: frozenset[str] = frozenset()
+
+    def __post_init__(self):
+        object.__setattr__(self, "optional_components", frozenset(self.optional_components))
+        for key in self.optional_components:
+            spec = next((c for c in self.components if c.component_key == key), None)
+            if spec is None or not any(s.kind is SourceKind.PACK_INPUT for s in spec.sources.values()):
+                raise ValueError(f"the optional component {key} of {self.template_id} reads no pack input to be stated")
 
     @property
     def key(self) -> tuple[str, int]:
         return (self.template_id, self.version)
 
+    def is_optional(self, spec: ComponentSpec) -> bool:
+        return spec.component_key in self.optional_components
+
+    def switched_off(self, spec: ComponentSpec, inputs: Mapping[str, object]) -> bool:
+        """Whether ``spec`` is optional here and the parameter set does not state every
+        pack input it reads (``inputs``, by input name): then it is not made."""
+        return self.is_optional(spec) and any(
+            s.kind is SourceKind.PACK_INPUT and s.name not in inputs for s in spec.sources.values()
+        )
+
     def covers(self, effect_type: str, business_process: str) -> bool:
         return any(s.covers(effect_type, business_process) for s in self.scope)
 
     def as_dict(self) -> dict:
-        return {
+        document = {
             "template_id": self.template_id,
             "version": self.version,
             "name": self.name,
-            "pack": PACK,
+            "pack": self.pack,
             "precedence": self.precedence,
             "scope": [s.as_dict() for s in self.scope],
-            "components": [c.as_dict() for c in self.components],
+            # An optional component says so (an industry pack's only): a banking template
+            # is served as it was.
+            "components": [
+                {**c.as_dict(), "optional": True} if self.is_optional(c) else c.as_dict() for c in self.components
+            ],
             "direction_notes": list(self.direction_notes),
         }
+        # Only where there is one: a banking template is served as it was before a
+        # caution could be stated.
+        if self.cautions:
+            document["cautions"] = list(self.cautions)
+        return document
 
 
 F = LossFamily
@@ -731,7 +795,9 @@ def check_role(value, what: str = "role") -> FindingRole:
     return _code(FindingRole, value, "finding_role_unrecognised", what)
 
 
-def parse_attributes(effect_key: str, raw, path: str, *, origin: Origin) -> dict[str, Parameter]:
+def parse_attributes(
+    effect_key: str, raw, path: str, *, origin: Origin, attributes: Mapping[str, Attribute] | None = None
+) -> dict[str, Parameter]:
     """An effect's attributes read from ``raw`` (``{name: entry}``, each entry in the
     parameter-set document's form: unit, low, base, high, currency for money,
     source_type, evidence_ref, effective_date, and optionally fresh_until and the
@@ -744,12 +810,15 @@ def parse_attributes(effect_key: str, raw, path: str, *, origin: Origin) -> dict
     (``observed_source_on_hypothetical``), and on an observed effect's only where the
     attribute is :attr:`Attribute.observable` (``observed_source_not_observable``);
     that its evidence names the observed effect is checked once the effect is
-    resolved (:func:`check_observed_evidence`)."""
+    resolved (:func:`check_observed_evidence`). ``attributes`` is the pack's table
+    of attributes: this pack's (:data:`ATTRIBUTES`) unless an industry pack's is
+    given."""
+    table = ATTRIBUTES if attributes is None else attributes
     if not isinstance(raw, dict):
         raise BuildRefused("attribute_unrecognised", f"{path} is not an object of attributes")
     found: dict[str, Parameter] = {}
     for name in sorted(raw):
-        attribute = ATTRIBUTES.get(name) if isinstance(name, str) else None
+        attribute = table.get(name) if isinstance(name, str) else None
         if attribute is None:
             raise BuildRefused("attribute_unrecognised", f"{path}: [{str(name)!r}]")
         parameter = pset._parameter(f"{effect_key}.{name}", attribute.unit, raw[name], f"{path}.{name}")
@@ -838,19 +907,34 @@ class PlannedComponent:
         return {name: parameter for name, (_source, parameter) in self.bound.items()}
 
 
-def plan(chosen: Template, variables: Mapping[str, Parameter], attributes: Mapping[str, Parameter]) -> tuple[
-    PlannedComponent, ...
-]:
+def plan(
+    chosen: Template,
+    variables: Mapping[str, Parameter],
+    attributes: Mapping[str, Parameter],
+    inputs: Mapping[str, Parameter] | None = None,
+) -> tuple[PlannedComponent, ...]:
     """Every component ``chosen`` makes, each input bound to the parameter its
-    source names -- the parameter set's ``variables`` or the effect's
-    ``attributes`` -- or left unbound when that source holds none. Nothing is
-    bound that a recorded parameter does not hold: no default, no zero."""
+    source names -- the parameter set's ``variables``, the effect's
+    ``attributes``, or (an industry pack's template) the pack's ``inputs`` the
+    parameter set states, by input name -- or left unbound when that source holds
+    none. Nothing is bound that a recorded parameter does not hold: no default, no
+    zero. (A build refuses a pack input a template it uses reads and the set does not
+    state before it plans: :func:`.pack_registry.Pack.check_template_inputs`.) An
+    optional component whose pack inputs the set does not state is not made
+    (:meth:`Template.switched_off`)."""
+    held_by = {
+        SourceKind.PARAMETER_SET: variables,
+        SourceKind.EFFECT_ATTRIBUTE: attributes,
+        SourceKind.PACK_INPUT: {} if inputs is None else inputs,
+    }
     planned = []
     for spec in chosen.components:
+        if chosen.switched_off(spec, held_by[SourceKind.PACK_INPUT]):
+            continue
         bound: dict[str, tuple[Source, Parameter]] = {}
         missing: dict[str, Source] = {}
         for name, source in spec.sources.items():
-            held = variables if source.kind is SourceKind.PARAMETER_SET else attributes
+            held = held_by[source.kind]
             parameter = held.get(source.name)
             if parameter is None:
                 missing[name] = source

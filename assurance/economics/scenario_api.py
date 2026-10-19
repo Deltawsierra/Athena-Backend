@@ -23,6 +23,11 @@ URLconf, not a stop (``tests/test_economics_builder.py``,
   every total. The figures stay: they are step 4's deterministic low, base and high,
   not a result.
 
+- ``GET economics/packs/``: the industry-pack registry (E7, spec section 37): every
+  pack, banking first, with its templates, loss families, attributes, vocabularies,
+  customer-input schema, cautions and what it never prices. Static data, the same for
+  every caller and every deployment: it reads no row and writes none.
+
 Access is the parameter-set routes' (:mod:`assurance.economics.api`): a signed-in
 account; a deployment the caller cannot see, or a scenario of another deployment,
 is 404; only an admin or an analyst builds (the roles that author a scenario), and
@@ -55,6 +60,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import builder
+from .engine import pack_registry
 from .api import (
     MAX_BODY_BYTES,
     BodyTooLarge,
@@ -129,11 +135,25 @@ class ScenarioEventsView(APIView):
             served = builder.describe(found)
         except _currency.CurrencyTableInvalid:
             return _table_unavailable()
+        except EconomicsRefused as refused:
+            # A stored row that no longer holds (a figure's normalization record, section
+            # 36) is refused, never served.
+            return Response({"code": refused.code, "detail": refused.detail}, status=status.HTTP_409_CONFLICT)
         # The figures are step 4's, not a result: they stay. Only the banner rule is added.
         return Response({"deployment": str(deployment.uuid), **served, **report.standing(found)})
 
 
+class PacksView(APIView):
+    """The industry-pack registry: every pack's library and customer-input schema."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        return Response(pack_registry.registry_document())
+
+
 urlpatterns = [
+    path("economics/packs/", PacksView.as_view(), name="economics-packs"),
     path(
         "deployments/<uuid:uuid>/economics/scenarios/build/",
         ScenarioBuildView.as_view(),
