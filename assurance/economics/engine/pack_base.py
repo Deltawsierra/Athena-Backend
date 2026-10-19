@@ -105,7 +105,7 @@ class Pack:
                     t.template_id
                     for t in self.templates
                     if any(
-                        not c.optional and s.kind is tpl.SourceKind.PACK_INPUT and s.name == name
+                        not t.is_optional(c) and s.kind is tpl.SourceKind.PACK_INPUT and s.name == name
                         for c in t.components
                         for s in c.sources.values()
                     )
@@ -195,12 +195,12 @@ class Pack:
         is the ONE check of a pack's inputs, at build (choice 2): a set is never pushed
         to state an input none of its builds reads. An optional component's input is not
         required: without it the component is not made
-        (:meth:`.templates.ComponentSpec.switched_off`)."""
+        (:meth:`.templates.Template.switched_off`)."""
         missing = sorted(
             {
                 source.name
                 for spec in chosen.components
-                if not spec.optional
+                if not chosen.is_optional(spec)
                 for source in spec.sources.values()
                 if source.kind is tpl.SourceKind.PACK_INPUT and source.name not in inputs
             }

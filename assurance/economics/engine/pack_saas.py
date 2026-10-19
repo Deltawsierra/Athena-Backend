@@ -324,7 +324,6 @@ def _templates() -> tuple[Template, ...]:
                     "interruption",
                     1,
                     {"interruption_hours": A("outage_hours"), "value_per_hour": I("usage_margin_per_hour")},
-                    optional=True,
                 ),
             ),
             (
@@ -338,6 +337,7 @@ def _templates() -> tuple[Template, ...]:
                 _CHURN,
             ),
             pack=PACK_ID,
+            optional_components=frozenset({"usage-revenue"}),
         ),
     )
 
