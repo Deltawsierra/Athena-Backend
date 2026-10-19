@@ -79,6 +79,7 @@ account's stand-down from any read (F5).
 from __future__ import annotations
 
 import base64
+import gc
 import http.server
 import io
 import json
@@ -1931,24 +1932,43 @@ def saturated(rates, configure, monkeypatch):
     return apply
 
 
-def _wsgi_application():
-    """config.wsgi.application, imported without configuring Django again."""
+def _wsgi_module():
+    """config.wsgi, imported without configuring Django again."""
     import django
 
     with mock.patch.object(django, "setup"):
         from config import wsgi
-    return wsgi.application
+    return wsgi
 
 
 class _WsgiHandler:
     """Sends a test client's request through config.wsgi.application, as a
-    server does, and turns what it answers back into a response."""
+    server does, and turns what it answers back into a response.
+
+    config.wsgi builds Django's handler when it is first imported, and every
+    middleware in it reads its settings then -- the gateway its mode among them
+    -- as a server's does once, at start. In one test process that fixed the
+    gateway, for every later test, as it stood when some earlier test first
+    imported the module: imported in monitor mode (as the sweeper test in
+    test_no_dispatch_holds_back_a_stop.py imports it), the gateway only logged
+    the block the saturation's [block] case answers, and the read that case
+    expects refused with 403 came back 429 from the throttle behind it. So each
+    client builds its own handler, under the settings in force where the test
+    makes it, and serves every request through the entry point's own wrapper
+    with that handler behind it: whatever config.wsgi.application puts in front
+    of Django is still in front of every stop."""
+
+    def __init__(self):
+        from django.core.handlers.wsgi import WSGIHandler
+
+        self.django_handler = WSGIHandler()
 
     def __call__(self, environ):
         from django.core import signals
         from django.db import close_old_connections
 
-        application = _wsgi_application()
+        wsgi = _wsgi_module()
+        application = wsgi.application
         answer = {}
 
         def start_response(status_line, headers, exc_info=None):
@@ -1959,12 +1979,13 @@ class _WsgiHandler:
         signals.request_started.disconnect(close_old_connections)
         signals.request_finished.disconnect(close_old_connections)
         try:
-            result = application(environ, start_response)
-            try:
-                body = b"".join(result)
-            finally:
-                if hasattr(result, "close"):
-                    result.close()
+            with mock.patch.object(wsgi, "_application", self.django_handler):
+                result = application(environ, start_response)
+                try:
+                    body = b"".join(result)
+                finally:
+                    if hasattr(result, "close"):
+                        result.close()
         finally:
             signals.request_started.connect(close_old_connections)
             signals.request_finished.connect(close_old_connections)
@@ -2029,6 +2050,34 @@ def test_with_every_limit_saturated_every_stop_is_served(saturated, operator_key
     service = _service_account()
     with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
         assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
+
+
+@pytest.mark.django_db
+def test_the_entry_point_serves_each_test_under_its_own_settings(saturated, monkeypatch):
+    """The [block] case above failed on unchanged master whenever another test
+    had imported config.wsgi first in monitor mode (the sweeper test in
+    test_no_dispatch_holds_back_a_stop.py does): the module's handler, and the
+    gateway in it, were built once, at that import, and kept that mode for the
+    rest of the process, so the read the saturation expects the gateway to
+    refuse with 403 was only logged and came back 429. Here the module's own
+    handler is the one an earlier test built in monitor mode, and the
+    saturation's enforcing gateway still answers -- while every stop is still
+    served through config.wsgi.application, the entry point's wrapper in front."""
+    import django
+    from django.core.handlers.wsgi import WSGIHandler
+
+    with mock.patch.object(django, "setup"):
+        from config import wsgi
+    with override_settings(DEFENDER_MONITOR_ONLY=True):
+        built_elsewhere = WSGIHandler()
+    monkeypatch.setattr(wsgi, "_application", built_elsewhere)
+    saturated(GATEWAY_ANSWERS["block"][0])
+    wrapped = []
+    monkeypatch.setattr("assurance.dispatch.ensure_owed_sweeper", lambda: wrapped.append(1))
+    bearer = _wsgi_bearer_client(_admin())
+    assert bearer.get("/api/failsafe/audit/").status_code == 403
+    assert bearer.post("/api/failsafe/commands/", {"action": "pause", "engine_id": "e-321"}, format="json").status_code == 201
+    assert wrapped == [1, 1], "a request went around config.wsgi.application"
 
 
 @pytest.mark.django_db
@@ -3803,35 +3852,194 @@ def test_removing_an_operator_a_protected_record_depends_on_deactivates_and_revo
 STOP_LATENCY_BOUND = 0.25
 
 
+def _other_threads_cpu():
+    """The CPU every other thread of this process has used so far, in clock
+    ticks, by name: read from /proc, so {} where there is none."""
+    ticks = {}
+    for thread in threading.enumerate():
+        if thread is threading.current_thread() or thread.native_id is None:
+            continue
+        try:
+            with open(f"/proc/self/task/{thread.native_id}/stat") as stat:
+                fields = stat.read().rsplit(")", 1)[1].split()
+            ticks[f"{thread.name}#{thread.native_id}"] = int(fields[11]) + int(fields[12])
+        except (OSError, IndexError, ValueError):
+            continue
+    return ticks
+
+
+class _StopClock:
+    """Times each request through the entry point, and keeps what it spent the
+    time on, so a stop over its bound says what it waited on instead of only
+    that it was slow: its wall time against the CPU its own thread used, each
+    garbage collection that ran in it (generation, seconds, objects freed), the
+    SQL it ran (statements, seconds, the slowest), and the CPU every other
+    thread of the process used meanwhile."""
+
+    def __init__(self):
+        self.requests = []
+
+    def timed(self, real):
+        from django.db import connection
+
+        def timed(handler, environ):
+            sql, collections = [], []
+
+            def execute(run, statement, params, many, context):
+                began = time.perf_counter()
+                try:
+                    return run(statement, params, many, context)
+                finally:
+                    sql.append((time.perf_counter() - began, statement))
+
+            def collecting(phase, info):
+                collections.append((phase, info["generation"], time.perf_counter(), info.get("collected", 0)))
+
+            others = _other_threads_cpu()
+            gc.callbacks.append(collecting)
+            began, cpu = time.perf_counter(), time.thread_time()
+            try:
+                with connection.execute_wrapper(execute):
+                    return real(handler, environ)
+            finally:
+                wall, cpu = time.perf_counter() - began, time.thread_time() - cpu
+                gc.callbacks.remove(collecting)
+                after = _other_threads_cpu()
+                started, pauses = {}, []
+                for phase, generation, at, freed in collections:
+                    if phase == "start":
+                        started[generation] = at
+                    elif generation in started:
+                        pauses.append((generation, round(at - started.pop(generation), 4), freed))
+                slowest = max(sql, default=(0.0, ""), key=lambda q: q[0])
+                self.requests.append({
+                    "wall": wall, "method": environ["REQUEST_METHOD"], "path": environ["PATH_INFO"],
+                    "cpu": round(cpu, 4), "gc": pauses,
+                    "sql": (len(sql), round(sum(q[0] for q in sql), 4), round(slowest[0], 4), slowest[1][:120]),
+                    "other threads (ticks)": {
+                        name: used - others.get(name, 0) for name, used in after.items() if used > others.get(name, 0)
+                    },
+                })
+
+        return timed
+
+    @staticmethod
+    def said(request):
+        return {"wall": round(request["wall"], 4), **{k: v for k, v in request.items() if k != "wall"}}
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("gateway_answer", list(GATEWAY_ANSWERS))
-def test_with_every_limit_saturated_every_stop_is_answered_within_its_bound(saturated, operator_key, gateway_answer, monkeypatch):
+def test_with_every_limit_saturated_every_stop_is_answered_within_its_bound(
+    saturated, operator_key, gateway_answer, monkeypatch, capsys
+):
     """L2 (round 4): the saturation checked status codes only, so a control
     that DELAYS a stop without refusing it -- T4, a 0.3 s sleep in StopsPass
     for every stop -- passed it. Each stop through config.wsgi.application and
     the whole stack, with every limit saturated, is answered within
-    STOP_LATENCY_BOUND, by an operator's JWT and by the service token."""
+    STOP_LATENCY_BOUND, by an operator's JWT and by the service token. A stop
+    over it is named with what it spent the time on (_StopClock)."""
     payload, _refused = GATEWAY_ANSWERS[gateway_answer]
     saturated(payload)
-    timings = []
-    real = _WsgiHandler.__call__
-
-    def timed(self, environ):
-        began = time.perf_counter()
-        try:
-            return real(self, environ)
-        finally:
-            timings.append((time.perf_counter() - began, environ["REQUEST_METHOD"], environ["PATH_INFO"]))
-
-    monkeypatch.setattr(_WsgiHandler, "__call__", timed)
+    clock = _StopClock()
+    monkeypatch.setattr(_WsgiHandler, "__call__", clock.timed(_WsgiHandler.__call__))
     operator = _admin()
     bearer = _wsgi_bearer_client(operator)
     bearer.get("/api/failsafe/audit/")  # the first request through the entry point imports what it needs
-    timings.clear()
+    clock.requests.clear()
     assert _every_stop(bearer, operator, operator_key, anonymous=_WsgiClient) == SERVED
     service = _service_account()
     with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
         assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
-    assert len(timings) >= 2 * len(EVERY_STOP)
-    slow = [(round(t, 3), method, path) for t, method, path in timings if t > STOP_LATENCY_BOUND]
+    assert len(clock.requests) >= 2 * len(EVERY_STOP)
+    slow = [clock.said(request) for request in clock.requests if request["wall"] > STOP_LATENCY_BOUND]
     assert slow == [], slow
+    with capsys.disabled():
+        print(f"\n[stop latency, gateway {gateway_answer}] {len(clock.requests)} stops; slowest "
+              f"{clock.said(max(clock.requests, key=lambda request: request['wall']))} "
+              f"(bound {STOP_LATENCY_BOUND * 1000:.0f} ms)")
+
+
+#: A step of a query plan that reads a whole table, or the whole of an index,
+#: rather than searching one: SQLite's "SCAN <table>", with or without "USING
+#: ... INDEX". A SEARCH, and the one constant row a subquery may yield, are not.
+_WHOLE_TABLE = re.compile(r"^SCAN (?!CONSTANT ROW)")
+
+
+def _whole_table_reads(statements):
+    """Each statement, of those given, whose plan reads a whole table or index: as
+    (statement, plan). Only reads and writes are planned; a savepoint or a
+    batch (executemany) has no plan of its own here."""
+    from django.db import connection
+
+    found = []
+    for statement, params, many in statements:
+        if many or statement.lstrip().split(None, 1)[0].upper() not in {"SELECT", "INSERT", "UPDATE", "DELETE", "WITH"}:
+            continue
+        with connection.cursor() as cursor:
+            cursor.execute("EXPLAIN QUERY PLAN " + statement, params)
+            plan = [row[-1] for row in cursor.fetchall()]
+        if any(_WHOLE_TABLE.match(step) for step in plan):
+            found.append((statement[:240], plan))
+    return found
+
+
+@pytest.mark.django_db
+def test_no_stop_reads_a_whole_table(saturated, operator_key, monkeypatch):
+    """What a stop does must not grow with the database: a stop whose time grows
+    with every row of every deployment answers within its bound on a test's few
+    rows and over it in a database that has lived. Every statement each stop
+    runs, sent through the whole stack as the latency test sends it, is planned
+    by searching an index or the primary key: none reads a whole table or a
+    whole index. The revoke and the contradiction recompute the decision before
+    they answer, and that read the deployment's latent conditions with
+    `claim__in=AssuranceClaim.objects.closed()`, a list SQLite builds by
+    scanning every claim version of every deployment."""
+    from django.db import connection
+
+    saturated(GATEWAY_ANSWERS["allow"][0])
+    found = {}
+    real = _WsgiHandler.__call__
+
+    def planned(handler, environ):
+        statements = []
+
+        def execute(run, statement, params, many, context):
+            statements.append((statement, params, many))
+            return run(statement, params, many, context)
+
+        with connection.execute_wrapper(execute):
+            answer = real(handler, environ)
+        scans = _whole_table_reads(statements)
+        if scans:
+            found[f"{environ['REQUEST_METHOD']} {environ['PATH_INFO']}"] = scans
+        return answer
+
+    monkeypatch.setattr(_WsgiHandler, "__call__", planned)
+    operator = _admin()
+    assert _every_stop(_wsgi_bearer_client(operator), operator, operator_key, anonymous=_WsgiClient) == SERVED
+    service = _service_account()
+    with override_settings(FAILSAFE_SERVICE_TOKEN=SERVICE_TOKEN, FAILSAFE_SERVICE_USER=service.username):
+        assert _every_stop(_wsgi_service_client(), service, operator_key, anonymous=_WsgiClient) == SERVICE_SERVED
+    assert found == {}, found
+
+
+def test_the_whole_table_check_sees_a_scan():
+    """The check above reads a plan as SQLite writes it: a scan of a table, of
+    a subquery's table, or of a whole index is found; a search through an
+    index, a covering index or the primary key is not."""
+    for step in (
+        "SCAN U0",
+        "SCAN assurance_assuranceclaim",
+        "SCAN assurance_finding USING COVERING INDEX assurance_finding_owner_id_1035825d",
+    ):
+        assert _WHOLE_TABLE.match(step), step
+    for step in (
+        "SEARCH assurance_assuranceclaim USING INDEX assurance_assuranceclaim_uuid_6e4de3d6 (uuid=?)",
+        "SEARCH accounts_customuser USING INTEGER PRIMARY KEY (rowid=?)",
+        "SEARCH assurance_finding USING COVERING INDEX assurance_finding_owner_id_1035825d (owner_id=?)",
+        "SCAN CONSTANT ROW",
+        "LIST SUBQUERY 1",
+        "USE TEMP B-TREE FOR ORDER BY",
+    ):
+        assert not _WHOLE_TABLE.match(step), step
