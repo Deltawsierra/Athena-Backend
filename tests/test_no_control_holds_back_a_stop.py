@@ -3868,13 +3868,37 @@ def _other_threads_cpu():
     return ticks
 
 
+def _this_thread_and_host():
+    """This thread's context switches -- voluntary (it blocked: a lock, the
+    GIL, I/O, a sleep) and involuntary (the scheduler took the CPU away) -- and
+    page faults (major: it waited on the disk), and the host's stolen and
+    I/O-wait clock ticks: read from /proc, so {} where there is none."""
+    found = {}
+    try:
+        with open("/proc/thread-self/status") as status:
+            for line in status:
+                name, _, value = line.partition(":")
+                if name in ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches"):
+                    found[name.split("_")[0]] = int(value)
+        with open("/proc/thread-self/stat") as stat:
+            fields = stat.read().rsplit(")", 1)[1].split()
+        found["minor faults"], found["major faults"] = int(fields[7]), int(fields[9])
+        with open("/proc/stat") as host:
+            cpu = host.readline().split()
+        found["host iowait"], found["host steal"] = int(cpu[5]), int(cpu[8])
+    except (OSError, IndexError, ValueError):
+        pass
+    return found
+
+
 class _StopClock:
     """Times each request through the entry point, and keeps what it spent the
     time on, so a stop over its bound says what it waited on instead of only
     that it was slow: its wall time against the CPU its own thread used, each
     garbage collection that ran in it (generation, seconds, objects freed), the
-    SQL it ran (statements, seconds, the slowest), and the CPU every other
-    thread of the process used meanwhile."""
+    SQL it ran (statements, seconds, the slowest), the CPU every other thread
+    of the process used meanwhile, and how often its thread blocked, was
+    preempted or faulted, with the host's stolen and I/O-wait time."""
 
     def __init__(self):
         self.requests = []
@@ -3895,7 +3919,7 @@ class _StopClock:
             def collecting(phase, info):
                 collections.append((phase, info["generation"], time.perf_counter(), info.get("collected", 0)))
 
-            others = _other_threads_cpu()
+            others, counters = _other_threads_cpu(), _this_thread_and_host()
             gc.callbacks.append(collecting)
             began, cpu = time.perf_counter(), time.thread_time()
             try:
@@ -3904,7 +3928,7 @@ class _StopClock:
             finally:
                 wall, cpu = time.perf_counter() - began, time.thread_time() - cpu
                 gc.callbacks.remove(collecting)
-                after = _other_threads_cpu()
+                after, counted = _other_threads_cpu(), _this_thread_and_host()
                 started, pauses = {}, []
                 for phase, generation, at, freed in collections:
                     if phase == "start":
@@ -3918,6 +3942,9 @@ class _StopClock:
                     "sql": (len(sql), round(sum(q[0] for q in sql), 4), round(slowest[0], 4), slowest[1][:120]),
                     "other threads (ticks)": {
                         name: used - others.get(name, 0) for name, used in after.items() if used > others.get(name, 0)
+                    },
+                    "switches, faults, host": {
+                        name: counted[name] - counters[name] for name in counted if name in counters
                     },
                 })
 
