@@ -50,6 +50,20 @@ from .parameters import ParameterRefused, Unit
 #: before E7 is; naming it is refused, so a banking set has one spelling.
 BANKING_PACK = "mythos.economics.banking-pack/v1"
 
+#: The form of an industry pack's id: ``mythos.economics.<vertical>-pack/v<n>``, of any
+#: vertical but banking. A recorded build whose pack has this form was built under an
+#: industry pack, whether or not a release still holds it; any other label (a banking
+#: build's, or a hand-made fixture's from before E7) names no industry pack.
+_INDUSTRY_PACK_ID = re.compile(r"mythos\.economics\.(?P<vertical>[a-z][a-z-]*)-pack/v[1-9][0-9]*")
+
+
+def is_industry_pack_id(value) -> bool:
+    """Whether ``value`` has the form of an industry pack's id (never the banking
+    pack's), held by this release or not."""
+    found = _INDUSTRY_PACK_ID.fullmatch(value) if isinstance(value, str) else None
+    return found is not None and found["vertical"] != "banking"
+
+
 #: A pack input is stored as a parameter of its set named this prefix and its name,
 #: as an insurance sublimit is named ``insurance_sublimit:`` and its family.
 PACK_INPUT_PREFIX = "pack_input:"
@@ -398,6 +412,7 @@ __all__ = [
     "PackInput",
     "PackSchema",
     "input_unit",
+    "is_industry_pack_id",
     "names_harm",
     "refuse_harm",
     "schema",
